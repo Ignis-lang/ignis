@@ -15,6 +15,12 @@ its wording retyped into a fixture here — must no longer carry the old
 "(informational)" framing for G7 anywhere, while still noting how many
 timeouts a run retried.
 
+A second group covers what replaced the host oracle in G7: the committed
+drop-schedule baselines under `test_cases/e2e/ok/__drop_schedules__`. A
+fixture with no baseline and a baseline with no fixture both have to be gate
+failures with a message that says what to do, since either one silently
+removes a case from the gate otherwise.
+
 Each `bootstrap_report.py` test runs the real script as a subprocess against
 a throwaway `build/bootstrap`-shaped temp directory, the same black-box
 style scripts/tests/test_stage0_fallback.sh uses for scripts/bootstrap.sh, so
@@ -42,12 +48,16 @@ sys.path.insert(0, str(SCRIPT_DIR))
 # formatting, not prose retyped into this file, so a wording change to
 # build_gate is what these tests see change, not a copy of it.
 from selfhost_drop_schedule_parity import (  # noqa: E402
+  CLASS_BASELINE_MISSING,
   CLASS_DIFFERS,
   CLASS_PASS,
   CLASS_TIMEOUT,
   DropCase,
   DropResult,
+  Settings,
   build_gate,
+  run_case,
+  stale_baselines,
 )
 
 # Every gate promotion.json's `candidate` verdict is computed over. Kept as a
@@ -57,18 +67,45 @@ from selfhost_drop_schedule_parity import (  # noqa: E402
 PROMOTION_GATE_IDS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7")
 
 
-def real_g7_gate(status: str, retried_timeouts: int = 0) -> dict:
+CLASSIFICATION_FOR = {
+  "pass": CLASS_PASS,
+  "differs": CLASS_DIFFERS,
+  "timeout": CLASS_TIMEOUT,
+  "baseline-missing": CLASS_BASELINE_MISSING,
+}
+
+
+def synthetic_settings(baseline_dir: Path) -> Settings:
+  return Settings(
+    compiler=Path("compiler"),
+    std_path=REPO_ROOT / "std",
+    repository_root=REPO_ROOT,
+    baseline_dir=baseline_dir,
+  )
+
+
+def real_g7_gate(
+  status: str,
+  retried_timeouts: int = 0,
+  stale: list[str] | None = None,
+) -> dict:
   """The gate `selfhost_drop_schedule_parity.py`'s own `build_gate` would
   write for one synthetic case, so a fixture below asserts against the real
   gate-summary formatting code instead of a copy of its wording."""
-  classification = CLASS_PASS if status == "pass" else (CLASS_TIMEOUT if status == "timeout" else CLASS_DIFFERS)
+  classification = CLASSIFICATION_FOR[status]
   case = DropCase(name="synthetic", path=Path("synthetic.ign"))
   result = DropResult(case=case, classification=classification)
   counts = {classification: 1}
 
-  gate = build_gate([result], counts, compare_everything=False, retried_timeouts=retried_timeouts)
+  gate = build_gate(
+    [result],
+    counts,
+    synthetic_settings(REPO_ROOT / "test_cases" / "e2e" / "ok" / "__drop_schedules__"),
+    stale or [],
+    retried_timeouts=retried_timeouts,
+  )
 
-  assert gate["status"] == ("pass" if status == "pass" else "fail"), gate
+  assert gate["status"] == ("pass" if status == "pass" and not stale else "fail"), gate
 
   return gate
 
@@ -184,6 +221,70 @@ class BootstrapReportG7PromotionTests(unittest.TestCase):
     # The real gate summary (not a fixture's prose) is what ends up in the
     # rendered report.
     self.assertIn(real_g7_gate("pass")["summary"], report_md)
+
+
+class DropScheduleBaselineTests(unittest.TestCase):
+  """The three ways the committed baselines can be wrong, without a compiler.
+
+  A missing baseline and a stale one are the two mistakes a fixture change
+  makes, and both have to be gate failures rather than quiet passes: a fixture
+  with no baseline would otherwise be checked against nothing, and a baseline
+  with no fixture can never fail. The mismatch case (a compiler that really
+  does schedule a drop somewhere else) needs a compiler and is covered by the
+  gate itself.
+  """
+
+  def setUp(self) -> None:
+    self._tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self._tmp.cleanup)
+    self.baseline_dir = Path(self._tmp.name) / "__drop_schedules__"
+    self.baseline_dir.mkdir(parents=True)
+    self.settings = synthetic_settings(self.baseline_dir)
+
+  def test_a_fixture_without_a_baseline_fails_with_a_usable_message(self) -> None:
+    case = DropCase(name="new_case", path=REPO_ROOT / "scripts" / "bootstrap.sh")
+
+    result = run_case(case, self.settings)
+
+    self.assertEqual(result.classification, CLASS_BASELINE_MISSING)
+    self.assertIn("new_case.txt", result.reason)
+    self.assertIn("--write-baselines", result.reason)
+
+  def test_a_missing_baseline_fails_the_gate(self) -> None:
+    gate = real_g7_gate("baseline-missing")
+
+    self.assertEqual(gate["status"], "fail")
+    self.assertEqual(gate["details"]["counts"][CLASS_BASELINE_MISSING], 1)
+
+  def test_a_baseline_without_a_fixture_is_stale(self) -> None:
+    (self.baseline_dir / "retired.txt").write_text("drop-schedule v1\n", encoding="utf-8")
+    kept = DropCase(name="kept", path=REPO_ROOT / "scripts" / "bootstrap.sh")
+    (self.baseline_dir / "kept.txt").write_text("drop-schedule v1\n", encoding="utf-8")
+
+    stale = stale_baselines(self.settings, [kept])
+
+    self.assertEqual(len(stale), 1)
+    self.assertTrue(stale[0].endswith("retired.txt"), stale)
+
+  def test_a_stale_baseline_fails_the_gate_even_when_every_case_passes(self) -> None:
+    gate = real_g7_gate("pass", stale=["test_cases/e2e/ok/__drop_schedules__/retired.txt"])
+
+    self.assertEqual(gate["status"], "fail")
+    self.assertIn("1 stale baseline", gate["summary"])
+    self.assertEqual(len(gate["details"]["stale_baselines"]), 1)
+
+  def test_cases_without_a_baseline_need_a_reference_compiler(self) -> None:
+    project = DropCase(
+      name="project:.",
+      path=REPO_ROOT / "ignis.toml",
+      project_root=REPO_ROOT,
+      has_baseline=False,
+    )
+
+    result = run_case(project, self.settings)
+
+    self.assertNotEqual(result.classification, CLASS_PASS)
+    self.assertIn("--reference", result.reason)
 
 
 if __name__ == "__main__":

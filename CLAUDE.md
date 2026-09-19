@@ -73,7 +73,9 @@ scripts/bootstrap.sh status                    # which build/bootstrap/<stage>/i
 scripts/bootstrap.sh parity                    # host e2e corpus through stage2 -> build/bootstrap/parity.md
 scripts/bootstrap.sh gate-g5                   # host error corpus through stage2 -> build/bootstrap/gates/G5.json
 scripts/bootstrap.sh gate-g6                   # host vs stage2 parse verdicts -> build/bootstrap/gates/G6.json
-scripts/bootstrap.sh gate-g7                   # host vs stage2 drop-schedule parity -> build/bootstrap/gates/G7.json
+scripts/bootstrap.sh gate-g7                   # stage2 drop schedules vs committed baselines -> build/bootstrap/gates/G7.json
+scripts/bootstrap.sh gate-g7-stage1            # same, against stage1 (what PR CI runs) -> gates/G7-STAGE1.json
+scripts/bootstrap.sh gate-g7-baselines [bin]   # regenerate test_cases/e2e/ok/__drop_schedules__ (review the diff)
 scripts/bootstrap.sh gate-g4                   # stage2 vs stage1 RSS/wall budget -> build/bootstrap/gates/G4.json
 scripts/bootstrap.sh stages                    # stage1 -> stage2 -> gate-g4 -> stage3 (what the nightly's ladder job runs)
 scripts/bootstrap.sh gates                     # every stage and gate (G1..G7) -> build/bootstrap/gates/, then report
@@ -82,6 +84,8 @@ scripts/bootstrap.sh report                    # gates/*.json -> build/bootstrap
 scripts/selfhost_e2e_parity.py --compiler <bin> --report parity.md  # same harness, any selfhost binary
 scripts/selfhost_e2e_parity.py --compiler <bin> --corpus err --report parity-err.md  # diagnostics parity
 scripts/selfhost_syntax_parity.py --compiler <bin> --report parity-syntax.md  # parse-verdict parity, any selfhost binary
+scripts/selfhost_drop_schedule_parity.py --check-coverage  # every ok fixture has a drop-schedule baseline (no compiler)
+scripts/selfhost_drop_schedule_parity.py --compiler <bin> --write-baselines  # regenerate the G7 baselines
 
 # Language-level tests
 ignis test                                     # Run project tests (tests and C units run through a job pool sized to the CPU count)

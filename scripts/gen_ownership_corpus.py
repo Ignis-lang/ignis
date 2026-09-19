@@ -784,6 +784,32 @@ def prune_stale(
   return removed
 
 
+def prune_stale_drop_schedules(keep: set[str]) -> list[str]:
+  """Removes the G7 baselines of ownership fixtures this run did not produce.
+
+  The baselines themselves cannot be generated here — they need a compiler —
+  but a renamed or retired case must not leave one behind: `--check-coverage`
+  would then fail on a tree whose only sin is that the generator ran. Adding a
+  case still requires a deliberate `--write-baselines` run; that gap is the
+  point, since a new fixture's drop schedule is something a reviewer reads.
+  """
+
+  removed: list[str] = []
+  directory = OK_DIR.parent / "__drop_schedules__" / OK_DIR.name
+
+  if not directory.exists():
+    return removed
+
+  for baseline_path in sorted(directory.glob("*.txt")):
+    if baseline_path.stem in keep:
+      continue
+
+    baseline_path.unlink()
+    removed.append(f"__drop_schedules__/{OK_DIR.name}/{baseline_path.name}")
+
+  return removed
+
+
 def generate() -> tuple[list[str], list[str]]:
   cases = enumerate_cases()
 
@@ -813,6 +839,8 @@ def generate() -> tuple[list[str], list[str]]:
 
   # A skipped case never compares a baseline, so a leftover one is noise.
   removed.extend(prune_skipped_snapshots())
+
+  removed.extend(prune_stale_drop_schedules(ok_names))
 
   return written, removed
 
@@ -844,7 +872,7 @@ def main() -> int:
   arguments = parser.parse_args()
 
   if arguments.clean:
-    for directory in (OK_DIR, ERR_DIR):
+    for directory in (OK_DIR, ERR_DIR, OK_DIR.parent / "__drop_schedules__" / OK_DIR.name):
       shutil.rmtree(directory, ignore_errors=True)
 
     print("removed the generated ownership corpus")

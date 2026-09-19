@@ -44,7 +44,7 @@ GATE_TITLES = {
   "G4": "Resource budget within 1.25x of the host",
   "G5": "Diagnostics equal or better than the host",
   "G6": "Syntax parity with the host parser",
-  "G7": "Drop-schedule parity with the host",
+  "G7": "Drop schedules match the committed baselines",
 }
 
 STATUS_PASS = "pass"
