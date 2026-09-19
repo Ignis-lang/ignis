@@ -58,6 +58,15 @@ function skipReasonForPath(path: &String): Option<str> {
   return Option::NONE;
 }
 
+/// Whether a clean parse of `path` legitimately produces no roots.
+///
+/// `@configFlag` is folded at parse time, so a module whose every declaration
+/// sits behind a feature the corpus does not enable parses to nothing. That is
+/// the zero-cost guarantee working, not a parser failure.
+function isFullyFeatureGatedModule(path: &String): boolean {
+  return pathEquals(path, "std/memory/alloc_trace.ign");
+}
+
 function parseText(path: str, sourceText: str): ParseResult {
   let source: SourceFile = SourceFile::create(path, sourceText);
   let mut module: Ast::Module = Ast::Module::init();
@@ -275,7 +284,9 @@ function assertParsesWithoutDiagnostics(path: str): void {
     Test::fail();
   }
 
-  if (result.module.roots.length() == 0) {
+  let ownedPath: String = String::create(path);
+
+  if (result.module.roots.length() == 0 && !isFullyFeatureGatedModule(&ownedPath)) {
     let mut message: String = String::create("expected parser corpus file to produce roots: ");
     message.pushStr(path);
     Io::eprintln(message);
