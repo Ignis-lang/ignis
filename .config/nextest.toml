@@ -3,9 +3,18 @@
 # construction: concurrent tests would build over the same tree and race on
 # the emitted objects. This group keeps those tests sequential; the first one
 # pays the build and the rest reuse the module stamps.
+#
+# The filter matches every test in the binary whose name starts with
+# `selfhost_`, not one named family. A test that calls `selfhost_compiler()`
+# from outside the group does not only race on the emitted objects: it sees the
+# shared binary relinked underneath it, and since the compiler's identity is
+# part of the build cache key, the cache reports `compiler changed` for a
+# compiler the test never touched. Listing families one by one is a rule
+# someone has to remember when adding the next one; the prefix is a rule the
+# test name already carries.
 [test-groups]
 selfhost-build = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary_id(ignis::test_command) and test(/^selfhost_adapter_/)'
+filter = 'binary_id(ignis::test_command) and test(/^selfhost_/)'
 test-group = 'selfhost-build'

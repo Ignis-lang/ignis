@@ -2370,13 +2370,14 @@ fn run_selfhost_build(
   project_dir: &Path,
   extra_arguments: &[&str],
 ) -> String {
-  let output = Command::new(compiler)
+  let mut command = Command::new(compiler);
+  command
     .current_dir(project_dir)
     .arg("build")
     .arg(project_dir)
-    .args(extra_arguments)
-    .output()
-    .expect("run selfhost build");
+    .args(extra_arguments);
+
+  let output = output_waiting_for_executable(&mut command);
 
   let reported = format!(
     "{}{}",
@@ -2387,6 +2388,72 @@ fn run_selfhost_build(
   assert!(output.status.success(), "expected the selfhost build to succeed\n{reported}");
 
   reported
+}
+
+/// Copy `source` to `destination` and make it executable.
+fn copy_executable(
+  source: &Path,
+  destination: &Path,
+) {
+  fs::copy(source, destination).expect("copy the executable");
+
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(destination)
+      .expect("read the copy's metadata")
+      .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(destination, permissions).expect("make the copy executable");
+  }
+}
+
+/// A copy of the selfhost compiler that nothing rewrites for this process's
+/// lifetime.
+///
+/// The running compiler's identity — its path, size and mtime — is part of the
+/// build cache key, so a cache test needs a compiler that cannot move while it
+/// runs. `build/selfhost/bin/ignis` can: any other test calling
+/// `selfhost_compiler()` relinks it, and every build after that point reports
+/// `compiler changed` instead of the reason the test set up. The nextest group
+/// serializes those tests, but this copy makes them independent of whether that
+/// configuration is still right.
+///
+/// One copy per process, not one per test: two threads copying executables
+/// while a third forks let that child inherit the open write descriptor, and
+/// the exec that follows fails with `ETXTBSY`.
+fn stable_compiler() -> &'static Path {
+  static COMPILER: OnceLock<PathBuf> = OnceLock::new();
+
+  COMPILER.get_or_init(|| {
+    let source = selfhost_compiler();
+    let directory = std::env::temp_dir().join(format!("ignis-test-compiler-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("create the compiler copy directory");
+
+    let destination = directory.join("ignis");
+    copy_executable(source, &destination);
+    destination
+  })
+}
+
+/// Run a command, retrying while the executable is still held open for writing.
+///
+/// A copy of an executable can be spawned before every descriptor that wrote it
+/// is closed, most often because an unrelated thread forked while the copy was
+/// in flight and the child inherited it. The condition clears on its own.
+fn output_waiting_for_executable(command: &mut Command) -> std::process::Output {
+  for _ in 0..50 {
+    match command.output() {
+      Ok(output) => return output,
+      Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+      },
+      Err(error) => panic!("run the selfhost compiler: {error}"),
+    }
+  }
+
+  panic!("the selfhost compiler stayed busy for five seconds");
 }
 
 fn assert_cache_line(
@@ -2419,7 +2486,7 @@ fn selfhost_build_cache_reuses_warm_builds_and_invalidates_on_every_input() {
     "import Io from \"std::io\";\n\nfunction main(): void {\n  Io::println(\"cached\");\n}\n",
   );
 
-  let compiler = selfhost_compiler();
+  let compiler = stable_compiler();
   let binary = project_dir.join("build/bin/build_cache_fixture");
 
   assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: rebuilding, no stamp");
@@ -2454,16 +2521,7 @@ fn selfhost_build_cache_reuses_warm_builds_and_invalidates_on_every_input() {
   );
 
   let other_compiler = project_dir.join("other-ignis");
-  fs::copy(compiler, &other_compiler).expect("copy the compiler binary");
-
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(&other_compiler).expect("read copy metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&other_compiler, permissions).expect("make the copy executable");
-  }
+  copy_executable(compiler, &other_compiler);
 
   assert_cache_line(
     &run_selfhost_build(&other_compiler, &project_dir, &["--feature", "demo"]),
@@ -2485,13 +2543,14 @@ fn run_selfhost_build_reporting(
   project_dir: &Path,
   extra_arguments: &[&str],
 ) -> String {
-  let output = Command::new(compiler)
+  let mut command = Command::new(compiler);
+  command
     .current_dir(project_dir)
     .arg("build")
     .arg(project_dir)
-    .args(extra_arguments)
-    .output()
-    .expect("run selfhost build");
+    .args(extra_arguments);
+
+  let output = output_waiting_for_executable(&mut command);
 
   format!(
     "{}{}",
@@ -2517,7 +2576,7 @@ fn selfhost_build_cache_relinks_when_the_requested_output_is_not_the_recorded_on
   let std_root = copy_workspace_std(&project_dir);
   write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_ONE);
 
-  let compiler = selfhost_compiler();
+  let compiler = stable_compiler();
   let elsewhere = project_dir.join("dist/app");
 
   run_selfhost_build(compiler, &project_dir, &["-o", elsewhere.to_str().expect("output path")]);
@@ -2549,7 +2608,7 @@ fn selfhost_build_cache_replays_the_warnings_of_the_build_it_reuses() {
   let std_root = copy_workspace_std(&project_dir);
   write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_WARNS);
 
-  let compiler = selfhost_compiler();
+  let compiler = stable_compiler();
 
   let cold = run_selfhost_build(compiler, &project_dir, &[]);
   assert!(cold.contains("unusedValue"), "the cold build must warn\n{cold}");
@@ -2578,7 +2637,7 @@ fn selfhost_build_cache_runs_the_pipeline_for_flags_it_cannot_serve() {
   let std_root = copy_workspace_std(&project_dir);
   write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_ONE);
 
-  let compiler = selfhost_compiler();
+  let compiler = stable_compiler();
 
   run_selfhost_build(compiler, &project_dir, &[]);
   assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: reused");
@@ -2609,7 +2668,7 @@ fn selfhost_build_cache_rebuilds_when_the_c_compiler_changes_in_place() {
   fs::write(project_dir.join("src/main.ign"), CACHE_PROGRAM_ONE).expect("write main module");
   write_build_cache_project_with_cc(&project_dir, &std_root, wrapper.to_str().expect("wrapper path"));
 
-  let compiler = selfhost_compiler();
+  let compiler = stable_compiler();
 
   run_selfhost_build(compiler, &project_dir, &[]);
   assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: reused");
@@ -2671,19 +2730,16 @@ fn selfhost_single_file_build_cache_relinks_for_a_different_output_path() {
   let std_root = copy_workspace_std(&project_dir);
   write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_ONE);
 
-  let compiler = selfhost_compiler();
+  let compiler = stable_compiler();
   let entry = project_dir.join("src/main.ign");
   let first = project_dir.join("first-out");
   let second = project_dir.join("second-out");
 
   let build = |output: &Path| -> String {
-    let result = Command::new(compiler)
-      .current_dir(&project_dir)
-      .arg(&entry)
-      .arg("-o")
-      .arg(output)
-      .output()
-      .expect("run the single-file build");
+    let mut command = Command::new(compiler);
+    command.current_dir(&project_dir).arg(&entry).arg("-o").arg(output);
+
+    let result = output_waiting_for_executable(&mut command);
 
     let reported = format!(
       "{}{}",
