@@ -451,10 +451,24 @@ export record StampVerdict {
 
 /// Decide what a build can reuse, naming the input that moved when it cannot.
 ///
-/// The stamp is read first: on a cold build every artifact is missing too, and
-/// "no stamp" says more about that run than the name of one file that was
-/// never written. `missing <path>` is left for the case worth naming a path
-/// for, where the stamp matches and an artifact is gone.
+/// Several inputs can move between two builds, and only one reason is
+/// reported, so the order is a contract rather than an accident of the
+/// control flow. From widest cause to narrowest:
+///
+///   1. `no stamp` / `unreadable stamp` — nothing to compare against
+///   2. `compiler changed` — a different compiler binary produced the stamp
+///   3. `C compiler changed` — a different toolchain driver would be invoked
+///   4. `feature set changed`
+///   5. `sources changed`
+///   6. `build configuration changed` — any remaining fingerprint field
+///   7. `missing <path>` — an artifact the stamp stands for is gone
+///   8. `output changed` — the requested binary is not the recorded one
+///
+/// Earlier reasons subsume later ones: a different compiler would also emit
+/// different sources into a different output, so naming the compiler is both
+/// true and the most useful thing to say. The last two are checked after the
+/// fingerprint because they are about artifacts on disk rather than inputs,
+/// and only they can be repaired without re-running the pipeline.
 ///
 /// `outputPath` is the binary this run was asked to produce. It is compared
 /// against the one the stamp recorded, and against that binary's size and
@@ -601,8 +615,16 @@ export function stampWriteReport(reportPath: &Path::PathBuf, report: &String): v
     Result::ERROR(_) -> {},
   };
 }
+
+/// A directory of this test process's own.
+///
+/// The runner gives every test its own process and runs several at once, so a
+/// path shared by the tests in this file is a path two of them create, write
+/// and delete concurrently. `${Process::id()}` is how the rest of the build
+/// tests keep out of each other's way.
 function stampTestDir(): Path::PathBuf {
-  return Path::PathBuf::create("/tmp/ignis_selfhost_stamp_test");
+  let directory: String = `/tmp/ignis_selfhost_stamp_test_${Process::id()}`;
+  return Path::PathBuf::fromString(&directory);
 }
 
 function stampTestWriteSource(path: &Path::PathBuf, body: str): void {
@@ -687,6 +709,66 @@ function stampSourceHashesAreOrderIndependent(): void {
   let backwardHash: String = fingerprintTransitiveHash(&reversed);
 
   Test::assertEq<str>(forwardHash.toStr(), backwardHash.toStr());
+}
+
+/// Only one reason is reported when several inputs moved at once, so which one
+/// wins is part of the contract: the feature set outranks the sources, the
+/// sources outrank the rest of the fingerprint, and every fingerprint field
+/// outranks a missing artifact.
+@test
+function stampStaleReasonFollowsAFixedPrecedence(): void {
+  let dir: Path::PathBuf = stampTestDir();
+
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let source: Path::PathBuf = dir.join("precedence.ign");
+  let object: Path::PathBuf = dir.join("precedence.o");
+  stampTestWriteSource(&source, "function main(): void {}\n");
+  stampTestWriteSource(&object, "object\n");
+
+  let mut sources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  sources.push(source.clone());
+
+  let mut artifacts: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  artifacts.push(object.clone());
+
+  let noFeatures: Vector<String> = Vector::new<String>();
+  let stamp: Path::PathBuf = stampPathForObject(&object);
+  stampInvalidate(&stamp);
+
+  let recorded: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  stampTestWrite(&stamp, &recorded, 0);
+
+  // Move the source, the feature set and the artifact all at once.
+  stampTestWriteSource(&source, "function main(): i32 { return 1; }\n");
+
+  let mut features: Vector<String> = Vector::new<String>();
+  features.push(String::create("tracing"));
+
+  match (Fs::removeFile(&object)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {},
+  };
+
+  let moved: BuildFingerprint = stampTestFingerprint(&sources, &features);
+  Test::assertEq<str>(stampTestReason(&stamp, &moved, &artifacts).toStr(), "feature set changed");
+
+  // With the feature set put back, the sources outrank the missing artifact.
+  let sourcesOnly: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  Test::assertEq<str>(stampTestReason(&stamp, &sourcesOnly, &artifacts).toStr(), "sources changed");
+
+  // With every input matching again, the missing artifact is what is left.
+  stampTestWriteSource(&source, "function main(): void {}\n");
+  let unchanged: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  Test::assertEq<boolean>(
+    stampTestReason(&stamp, &unchanged, &artifacts).startsWith("missing "),
+    true
+  );
+
+  stampInvalidate(&stamp);
 }
 
 /// A stamp written from one fingerprint is reused for the same inputs, and a
