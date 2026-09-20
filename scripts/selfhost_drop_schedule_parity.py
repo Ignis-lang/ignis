@@ -1,27 +1,42 @@
 #!/usr/bin/env python3
-"""Compare the two compilers' `--dump-drop-schedule` output, case by case (gate G7).
+"""Check a compiler's `--dump-drop-schedule` output against committed baselines (gate G7).
 
 Ownership bugs this quarter have all had the same shape: a binding that was or
 was not dropped depending on the scrutinee, the construct, the pattern and the
 arm. `--dump-drop-schedule` prints, per function, every owned value with its
 declaration site and every scheduled drop site with its reason, in a fixed
-order. Two compilers that agree on ownership therefore print the same bytes,
-and this harness turns that into a gate: it runs the host and the selfhost over
-the `ok` end-to-end corpus plus the selfhost compiler's own entry point, diffs
-the two dumps per case, and reports the first differing lines.
+order. A compiler whose ownership analysis is right therefore prints the same
+bytes as the one that produced the baselines, and this harness turns that into
+a gate: it runs the compiler under test over the `ok` end-to-end corpus and
+diffs each case's dump against `test_cases/e2e/ok/__drop_schedules__/<case>.txt`.
 
-By default only the code under test is compared: every function the two
-compilers place in the **standard library** is dropped from both dumps first.
-The two monomorphizers keep a different set of std functions alive, which
-desynchronises the whole-program listings on the very first std entry and
-buries the ownership answer the dump exists to give. That difference is real
-but it is not a drop question, so it is reported as a count of its own instead
-of failing every case. `--all` compares the whole dump, std included.
+The baselines are the reason this gate survives the host freeze. It used to
+run the Rust host compiler as a live oracle on every case; the baselines were
+generated from that host while it still existed, verified byte-identical
+against the selfhost compiler, and committed. From now on they change only
+when a developer regenerates them deliberately, and a baseline diff in a pull
+request is a semantic change a reviewer has to read.
 
-The gate feeds the promotion `candidate` verdict: since the selfhost's
-ownership analysis reached 623/623 own-code parity with the host
-(nightly-34803378772), a drop-schedule divergence is a real ownership bug, not
-the expected state, so it blocks promotion like every other gate.
+Only the code under test is compared: every function the compiler places in
+the **standard library** is dropped from the dump first. Which std functions a
+monomorphizer keeps alive is a mono question rather than a drop question, and
+including them would make every baseline churn on an unrelated mono change.
+The count of dropped std functions is reported, not gated.
+
+Two kinds of case never get a baseline: `--project` roots (the selfhost
+compiler compiling itself) and `--extra` entry points. A project baseline
+would change with nearly every compiler commit, which makes it noise rather
+than evidence. Those cases are compared against a second compiler given with
+`--reference` instead — in the gate, stage2's dump of `ignis/` against
+stage1's, a self-consistency check on the same sources.
+
+`--host` stays available as a cross-check (does the host still agree with the
+baselines?) and `--host-compare` still performs the original direct
+host-vs-selfhost diff, so the move to baselines is reversible for as long as
+the host exists.
+
+The gate feeds the promotion `candidate` verdict: a differing case is a real
+ownership bug, not just a lead to follow.
 
 Case discovery is reused verbatim from `selfhost_e2e_parity.py`, so G7 and G2
 always run over the same corpus.
@@ -44,6 +59,14 @@ GATE_ID = "G7"
 
 DUMP_HEADER = "drop-schedule v1"
 
+# Where the committed per-case dumps live, relative to the repository root, and
+# what one is called. Deliberately next to the `__snapshots__` the same corpus
+# already carries, so a fixture and everything recorded about it sit together.
+BASELINE_DIR = "test_cases/e2e/ok/__drop_schedules__"
+BASELINE_SUFFIX = ".txt"
+
+REGENERATE_HINT = "regenerate with `scripts/selfhost_drop_schedule_parity.py --compiler <bin> --write-baselines`"
+
 # Every line shape the renderer can emit after its header. A line that starts
 # with none of these ends the dump.
 DUMP_LINE_PREFIXES = (
@@ -55,8 +78,7 @@ DUMP_LINE_PREFIXES = (
   "  <no owned values>",
 )
 
-HOST_TIMEOUT_SECONDS = 180
-SELFHOST_TIMEOUT_SECONDS = 300
+COMPILER_TIMEOUT_SECONDS = 300
 
 # A project-root case (`--project`) compiles the whole project from its own
 # root rather than one fixture file — G7's own `project:.` case is the
@@ -66,22 +88,31 @@ SELFHOST_TIMEOUT_SECONDS = 300
 # observed at 220s wall against the 300s selfhost budget, close enough to
 # time out on a slower or busier runner. Project cases get their own, much
 # larger budget instead of raising the fixture budget for every other case.
-HOST_PROJECT_TIMEOUT_SECONDS = 600
-SELFHOST_PROJECT_TIMEOUT_SECONDS = 900
+PROJECT_TIMEOUT_SECONDS = 900
 
 CLASS_PASS = "pass"
 CLASS_DIFFERS = "differs"
-CLASS_HOST_NO_DUMP = "host-no-dump"
-CLASS_SELFHOST_NO_DUMP = "selfhost-no-dump"
+CLASS_BASELINE_MISSING = "baseline-missing"
+CLASS_FIXTURE_MISSING = "fixture-missing"
+CLASS_NO_DUMP = "no-dump"
+CLASS_REFERENCE_NO_DUMP = "reference-no-dump"
 CLASS_TIMEOUT = "timeout"
 
 CLASS_ORDER = (
   CLASS_PASS,
   CLASS_DIFFERS,
-  CLASS_SELFHOST_NO_DUMP,
-  CLASS_HOST_NO_DUMP,
+  CLASS_BASELINE_MISSING,
+  CLASS_FIXTURE_MISSING,
+  CLASS_NO_DUMP,
+  CLASS_REFERENCE_NO_DUMP,
   CLASS_TIMEOUT,
 )
+
+# A case whose dump is missing may have lost a race for the shared `build/std`
+# directory, so rerunning it can change the answer. A case with no baseline, no
+# fixture file, or no `--reference` is the same on every attempt: retrying it
+# only costs a second compile to reach the same verdict.
+RETRYABLE_CLASSES = (CLASS_NO_DUMP, CLASS_REFERENCE_NO_DUMP, CLASS_TIMEOUT)
 
 # How much of a divergence the report shows per case. The point is to name the
 # first place the two disagree, not to paste two whole dumps.
@@ -92,6 +123,22 @@ REPORTED_CASES = 25
 
 
 @dataclass
+class DumpFailure:
+  """Why one compiler produced no dump.
+
+  `timed_out` is carried as a field rather than recovered by looking for
+  "timed out" in the message: a compiler that prints those words in its own
+  error output would otherwise be classified as a timeout it never had.
+  """
+
+  message: str
+  timed_out: bool = False
+
+  def __str__(self) -> str:
+    return self.message
+
+
+@dataclass
 class DropCase:
   name: str
   path: Path
@@ -99,6 +146,25 @@ class DropCase:
   # `ignis check` compiles a project. `ignis/main.ign` only resolves its
   # `@compiler::*` imports that way, so the selfhost compiler itself is one.
   project_root: Path | None = None
+  # A corpus fixture is checked against its committed baseline; anything else
+  # is checked against the `--reference` compiler.
+  has_baseline: bool = True
+
+
+@dataclass
+class Settings:
+  compiler: Path
+  std_path: Path
+  repository_root: Path
+  baseline_dir: Path
+  reference: Path | None = None
+  host: Path | None = None
+  host_compare: bool = False
+  compare_everything: bool = False
+  # What the gate file calls itself. The pull-request run against stage1
+  # writes `G7-STAGE1`, which the promotion report lists as an unscored row
+  # instead of confusing it with the ladder's own G7.
+  gate_id: str = GATE_ID
 
 
 @dataclass
@@ -106,14 +172,17 @@ class DropResult:
   case: DropCase
   classification: str
   reason: str = ""
-  host_lines: int = 0
-  selfhost_lines: int = 0
+  expected_lines: int = 0
+  actual_lines: int = 0
   first_difference: int | None = None
   diff_lines: list[str] = field(default_factory=list)
-  # Observed on the whole dump even when the comparison is scoped, so the
-  # report can say how far apart the two standard-library sets are.
-  host_std_functions: int = 0
-  selfhost_std_functions: int = 0
+  # Observed on the whole dump even though the comparison is scoped, so the
+  # report can say how much of it the scoping removed.
+  std_functions: int = 0
+  reference_std_functions: int = 0
+  # Only set when `--host` asked for the cross-check: "pass", "differs", or a
+  # reason the host produced nothing.
+  host_cross_check: str | None = None
 
 
 def collect_cases(
@@ -130,13 +199,13 @@ def collect_cases(
 
   for path in extra_paths:
     resolved = path if path.is_absolute() else repository_root / path
-    cases.append(DropCase(path.as_posix(), resolved))
+    cases.append(DropCase(path.as_posix(), resolved, has_baseline=False))
 
   for root in project_roots:
     resolved = (root if root.is_absolute() else repository_root / root).resolve()
     manifest = resolved / "ignis.toml"
     name = resolved.relative_to(repository_root).as_posix() if resolved != repository_root else "."
-    cases.append(DropCase(f"project:{name}", manifest, project_root=resolved))
+    cases.append(DropCase(f"project:{name}", manifest, project_root=resolved, has_baseline=False))
 
   if name_filter:
     cases = [case for case in cases if name_filter in case.name]
@@ -144,12 +213,19 @@ def collect_cases(
   return cases
 
 
-def timeouts_for(case: DropCase) -> tuple[int, int]:
-  """(host timeout, selfhost timeout) in seconds for one case."""
+def timeout_for(case: DropCase) -> int:
+  """How long one compiler gets on one case, in seconds."""
   if case.project_root is not None:
-    return HOST_PROJECT_TIMEOUT_SECONDS, SELFHOST_PROJECT_TIMEOUT_SECONDS
+    return PROJECT_TIMEOUT_SECONDS
 
-  return HOST_TIMEOUT_SECONDS, SELFHOST_TIMEOUT_SECONDS
+  return COMPILER_TIMEOUT_SECONDS
+
+
+def baseline_path(
+  baseline_dir: Path,
+  case: DropCase,
+) -> Path:
+  return baseline_dir / f"{case.name}{BASELINE_SUFFIX}"
 
 
 def relative_to(
@@ -168,14 +244,14 @@ def run_dump(
   std_path: Path,
   repository_root: Path,
   timeout: int,
-) -> tuple[list[str] | None, str]:
+) -> tuple[list[str] | None, DumpFailure | None]:
   """Run one compiler over one case and return the dump's lines.
 
   The dump starts at the last `drop-schedule v1` header on stdout and ends at
-  the first line that is not part of the dump grammar, so whatever either
-  compiler logs around it — the host's `- Scanning & parsing`, the selfhost's
-  phase lines, a trailing `No errors found` — stays out of the comparison.
-  `--quiet` is deliberately not passed: the selfhost CLI has no such flag.
+  the first line that is not part of the dump grammar, so whatever the
+  compiler logs around it — `- Scanning & parsing`, phase lines, a trailing
+  `No errors found` — stays out of the comparison. `--quiet` is deliberately
+  not passed: the selfhost CLI has no such flag.
   """
   command = [
     str(compiler),
@@ -200,15 +276,15 @@ def run_dump(
       timeout=timeout,
     )
   except subprocess.TimeoutExpired:
-    return None, f"timed out after {timeout}s"
+    return None, DumpFailure(f"timed out after {timeout}s", timed_out=True)
   except OSError as error:
-    return None, f"could not run {compiler}: {error}"
+    return None, DumpFailure(f"could not run {compiler}: {error}")
 
   lines = completed.stdout.splitlines()
 
   if DUMP_HEADER not in lines:
     tail = "\n".join((completed.stderr or completed.stdout).splitlines()[-3:])
-    return None, f"no dump on stdout (exit {completed.returncode}){': ' + tail if tail else ''}"
+    return None, DumpFailure(f"no dump on stdout (exit {completed.returncode}){': ' + tail if tail else ''}")
 
   start = len(lines) - 1 - lines[::-1].index(DUMP_HEADER)
   dump = [DUMP_HEADER]
@@ -218,32 +294,58 @@ def run_dump(
       break
     dump.append(line)
 
-  return dump, ""
+  return dump, None
+
+
+def scoped_dump(
+  compiler: Path,
+  case: DropCase,
+  settings: Settings,
+) -> tuple[list[str] | None, int, DumpFailure | None]:
+  """One compiler's dump for one case, narrowed to the code under test."""
+  lines, failure = run_dump(
+    compiler,
+    case,
+    settings.std_path,
+    settings.repository_root,
+    timeout_for(case),
+  )
+
+  if lines is None:
+    return None, 0, failure
+
+  std_prefix = f"{relative_to(settings.std_path, settings.repository_root)}/"
+  scoped, std_functions = scope_to_own_code(lines, std_prefix)
+
+  if settings.compare_everything:
+    scoped = lines
+
+  return scoped, std_functions, None
 
 
 def compare(
-  host_lines: list[str],
-  selfhost_lines: list[str],
+  expected_lines: list[str],
+  actual_lines: list[str],
 ) -> tuple[int | None, list[str]]:
   """First differing line number (1-based) and a short excerpt around it."""
-  for index in range(max(len(host_lines), len(selfhost_lines))):
-    host_line = host_lines[index] if index < len(host_lines) else "<end of dump>"
-    selfhost_line = selfhost_lines[index] if index < len(selfhost_lines) else "<end of dump>"
+  for index in range(max(len(expected_lines), len(actual_lines))):
+    expected_line = expected_lines[index] if index < len(expected_lines) else "<end of dump>"
+    actual_line = actual_lines[index] if index < len(actual_lines) else "<end of dump>"
 
-    if host_line == selfhost_line:
+    if expected_line == actual_line:
       continue
 
     excerpt = []
-    for offset in range(min(REPORTED_DIFF_LINES, max(len(host_lines), len(selfhost_lines)) - index)):
+    for offset in range(min(REPORTED_DIFF_LINES, max(len(expected_lines), len(actual_lines)) - index)):
       position = index + offset
-      host_at = host_lines[position] if position < len(host_lines) else "<end of dump>"
-      selfhost_at = selfhost_lines[position] if position < len(selfhost_lines) else "<end of dump>"
+      expected_at = expected_lines[position] if position < len(expected_lines) else "<end of dump>"
+      actual_at = actual_lines[position] if position < len(actual_lines) else "<end of dump>"
 
-      if host_at == selfhost_at:
-        excerpt.append(f"  {position + 1}   {host_at}")
+      if expected_at == actual_at:
+        excerpt.append(f"  {position + 1}   {expected_at}")
       else:
-        excerpt.append(f"  {position + 1} - {host_at}")
-        excerpt.append(f"  {position + 1} + {selfhost_at}")
+        excerpt.append(f"  {position + 1} - {expected_at}")
+        excerpt.append(f"  {position + 1} + {actual_at}")
 
     return index + 1, excerpt
 
@@ -293,88 +395,264 @@ def scope_to_own_code(
   return scoped, dropped
 
 
+def expected_for(
+  case: DropCase,
+  settings: Settings,
+) -> tuple[list[str] | None, int, str, DumpFailure | None]:
+  """What this case's dump is compared against: (lines, std count, source, failure).
+
+  `source` names where the expectation came from, for the report.
+  """
+  if settings.host_compare:
+    assert settings.host is not None
+    lines, std_functions, failure = scoped_dump(settings.host, case, settings)
+
+    return lines, std_functions, "host", failure
+
+  if not case.has_baseline:
+    if settings.reference is None:
+      return None, 0, "reference", DumpFailure("no --reference compiler was given for a --project/--extra case")
+
+    lines, std_functions, failure = scoped_dump(settings.reference, case, settings)
+
+    return lines, std_functions, "reference", failure
+
+  path = baseline_path(settings.baseline_dir, case)
+
+  if not path.is_file():
+    return None, 0, "baseline", None
+
+  return path.read_text(encoding="utf-8").splitlines(), 0, "baseline", None
+
+
 def run_case(
   case: DropCase,
-  host: Path,
-  compiler: Path,
-  std_path: Path,
-  repository_root: Path,
-  compare_everything: bool,
+  settings: Settings,
 ) -> DropResult:
   if not case.path.is_file():
-    return DropResult(case, CLASS_HOST_NO_DUMP, reason=f"{case.path} does not exist")
-
-  host_timeout, selfhost_timeout = timeouts_for(case)
-
-  host_lines, host_error = run_dump(host, case, std_path, repository_root, host_timeout)
-
-  if host_lines is None:
-    classification = CLASS_TIMEOUT if "timed out" in host_error else CLASS_HOST_NO_DUMP
-    return DropResult(case, classification, reason=host_error)
-
-  selfhost_lines, selfhost_error = run_dump(
-    compiler,
-    case,
-    std_path,
-    repository_root,
-    selfhost_timeout,
-  )
-
-  if selfhost_lines is None:
-    classification = CLASS_TIMEOUT if "timed out" in selfhost_error else CLASS_SELFHOST_NO_DUMP
     return DropResult(
       case,
-      classification,
-      reason=selfhost_error,
-      host_lines=len(host_lines),
+      CLASS_FIXTURE_MISSING,
+      reason=f"{relative_to(case.path, settings.repository_root)} does not exist",
     )
 
-  std_prefix = f"{relative_to(std_path, repository_root)}/"
-  host_scoped, host_std = scope_to_own_code(host_lines, std_prefix)
-  selfhost_scoped, selfhost_std = scope_to_own_code(selfhost_lines, std_prefix)
+  expected, reference_std, source, expected_failure = expected_for(case, settings)
 
-  if compare_everything:
-    host_scoped, selfhost_scoped = host_lines, selfhost_lines
+  if expected is None and expected_failure is None:
+    return DropResult(
+      case,
+      CLASS_BASELINE_MISSING,
+      reason=f"no baseline at {relative_to(baseline_path(settings.baseline_dir, case), settings.repository_root)}; "
+      f"a new fixture must come with its baseline — {REGENERATE_HINT}",
+    )
 
-  first_difference, diff_lines = compare(host_scoped, selfhost_scoped)
+  if expected is None:
+    assert expected_failure is not None
+    classification = CLASS_TIMEOUT if expected_failure.timed_out else CLASS_REFERENCE_NO_DUMP
+    return DropResult(case, classification, reason=f"{source}: {expected_failure}")
 
-  return DropResult(
+  actual, std_functions, actual_failure = scoped_dump(settings.compiler, case, settings)
+
+  if actual is None:
+    assert actual_failure is not None
+    classification = CLASS_TIMEOUT if actual_failure.timed_out else CLASS_NO_DUMP
+    return DropResult(case, classification, reason=str(actual_failure), expected_lines=len(expected))
+
+  first_difference, diff_lines = compare(expected, actual)
+
+  result = DropResult(
     case,
     CLASS_PASS if first_difference is None else CLASS_DIFFERS,
-    host_lines=len(host_scoped),
-    selfhost_lines=len(selfhost_scoped),
+    expected_lines=len(expected),
+    actual_lines=len(actual),
     first_difference=first_difference,
     diff_lines=diff_lines,
-    host_std_functions=host_std,
-    selfhost_std_functions=selfhost_std,
+    std_functions=std_functions,
+    reference_std_functions=reference_std,
   )
+
+  if settings.host is not None and not settings.host_compare:
+    result.host_cross_check = cross_check_host(case, expected, settings)
+
+  return result
+
+
+def cross_check_host(
+  case: DropCase,
+  expected: list[str],
+  settings: Settings,
+) -> str:
+  """Does the host still agree with what this case is checked against?
+
+  For a fixture that is the committed baseline. For a `--project`/`--extra`
+  case it is the `--reference` compiler's dump, which the primary comparison
+  has just held the compiler under test to — so agreement here means all three
+  produce the same schedule. Without it a `--project` case would only ever be
+  compared against another selfhost stage, and a bug in `ignis/` itself would
+  sit identically in both and never show.
+  """
+  assert settings.host is not None
+  host_lines, _, failure = scoped_dump(settings.host, case, settings)
+
+  if host_lines is None:
+    return str(failure) if failure else "the host produced no dump"
+
+  first_difference, _ = compare(expected, host_lines)
+
+  return CLASS_PASS if first_difference is None else CLASS_DIFFERS
+
+
+def stale_baselines(
+  settings: Settings,
+  cases: list[DropCase],
+) -> list[str]:
+  """Committed baselines with no corresponding fixture, repo-relative."""
+  if not settings.baseline_dir.is_dir():
+    return []
+
+  expected = {baseline_path(settings.baseline_dir, case).resolve() for case in cases if case.has_baseline}
+
+  return sorted(
+    relative_to(path, settings.repository_root)
+    for path in settings.baseline_dir.rglob(f"*{BASELINE_SUFFIX}")
+    if path.resolve() not in expected
+  )
+
+
+def missing_baselines(
+  settings: Settings,
+  cases: list[DropCase],
+) -> list[str]:
+  """Fixtures with no committed baseline, repo-relative baseline paths."""
+  return sorted(
+    relative_to(baseline_path(settings.baseline_dir, case), settings.repository_root)
+    for case in cases
+    if case.has_baseline and not baseline_path(settings.baseline_dir, case).is_file()
+  )
+
+
+def write_baselines(
+  settings: Settings,
+  cases: list[DropCase],
+  jobs: int,
+  filtered: bool,
+) -> int:
+  """(Re)generate the fixture baselines from `--compiler`.
+
+  Two rules keep a regeneration from quietly destroying the corpus it is
+  supposed to record:
+
+  - Nothing is written unless every case produced a dump. A compiler that
+    cannot run, or that fails on half the corpus, would otherwise leave a
+    directory that is part old and part new, and the gate would read it as a
+    set of real ownership changes.
+  - Pruning only happens over the whole corpus. Under `--filter` the cases
+    this run did not ask about are not stale, they are simply out of scope,
+    and deleting them would take the corpus down to whatever the filter
+    matched.
+  """
+  fixtures = [case for case in cases if case.has_baseline]
+
+  if not fixtures:
+    print("no fixture cases were discovered", file=sys.stderr)
+    return 1
+
+  warm_up(settings, fixtures[0])
+
+  with ThreadPoolExecutor(max_workers=jobs) as executor:
+    dumps = list(executor.map(lambda case: (case, *scoped_dump(settings.compiler, case, settings)), fixtures))
+
+  failed = [(case, failure) for case, lines, _, failure in dumps if lines is None]
+
+  if failed:
+    print(
+      f"{len(failed)} of {len(dumps)} cases produced no dump; no baseline was written or removed",
+      file=sys.stderr,
+    )
+
+    for case, failure in failed[:REPORTED_CASES]:
+      print(f"  {case.name}: {failure}", file=sys.stderr)
+
+    return 1
+
+  total_bytes = 0
+
+  for case, lines, _, _ in dumps:
+    path = baseline_path(settings.baseline_dir, case)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(lines) + "\n"
+    path.write_text(content, encoding="utf-8")
+    total_bytes += len(content.encode("utf-8"))
+
+  removed: list[str] = []
+
+  if not filtered:
+    removed = stale_baselines(settings, cases)
+
+    for name in removed:
+      (settings.repository_root / name).unlink()
+
+  pruning = f"removed {len(removed)} stale" if not filtered else "kept every other baseline (--filter)"
+
+  print(
+    f"wrote {len(dumps)} baselines ({total_bytes / 1024:.0f} KiB) under "
+    f"{relative_to(settings.baseline_dir, settings.repository_root)}, {pruning}"
+  )
+
+  return 0
+
+
+def warm_up(
+  settings: Settings,
+  case: DropCase,
+) -> None:
+  """Build `build/std` once per compiler before the pool starts.
+
+  Both compilers build the standard library into the same `build/std` on first
+  use; a cold pool would have every worker racing to write the same archive.
+  """
+  for compiler in (settings.compiler, settings.reference, settings.host):
+    if compiler is None:
+      continue
+
+    run_dump(compiler, case, settings.std_path, settings.repository_root, timeout_for(case))
 
 
 def build_report(
   results: list[DropResult],
   counts: dict[str, int],
-  compiler: Path,
-  host: Path,
-  compare_everything: bool,
+  settings: Settings,
+  stale: list[str],
 ) -> str:
   total = len(results)
   scope = (
     "the whole dump, standard library included (`--all`)"
-    if compare_everything
-    else "the code under test; standard-library functions are dropped from both dumps first"
+    if settings.compare_everything
+    else "the code under test; standard-library functions are dropped from the dump first"
+  )
+  against = (
+    f"the host (`{settings.host}`), directly"
+    if settings.host_compare
+    else f"committed baselines under `{relative_to(settings.baseline_dir, settings.repository_root)}`"
   )
   lines = [
     "# Drop-schedule parity (gate G7)",
     "",
     "`--dump-drop-schedule` renders, per function, every owned value with its",
-    "declaration site and every scheduled drop site with its reason. Both",
-    "compilers print the same format, so their dumps are compared byte for byte.",
+    "declaration site and every scheduled drop site with its reason. The dump",
+    "is compared byte for byte against what was recorded for that case.",
     "",
     "**This gate feeds the promotion `candidate` verdict**: a differing case",
     "is a real ownership bug, not just a lead to follow.",
     "",
-    f"- host: `{host}`",
-    f"- selfhost: `{compiler}`",
+    f"- compiler under test: `{settings.compiler}`",
+    f"- compared against: {against}",
+  ]
+
+  if settings.reference is not None:
+    lines.append(f"- reference for `--project`/`--extra` cases: `{settings.reference}`")
+
+  lines += [
     f"- cases: {total}",
     f"- compared: {scope}",
     "",
@@ -387,12 +665,17 @@ def build_report(
   for classification in CLASS_ORDER:
     lines.append(f"| {classification} | {counts.get(classification, 0)} |")
 
-  lines.extend(build_std_section(results, compare_everything))
+  lines.extend(build_cross_check_section(results, settings))
+  lines.extend(build_stale_section(stale))
+  lines.extend(build_std_section(results, settings))
 
   diverging = [result for result in results if result.classification != CLASS_PASS]
 
+  if not diverging and not stale:
+    lines += ["", "Every case renders the drop schedule that was recorded for it."]
+    return "\n".join(lines) + "\n"
+
   if not diverging:
-    lines += ["", "Every case renders an identical drop schedule in both compilers."]
     return "\n".join(lines) + "\n"
 
   lines += ["", "## Diverging cases", "", "| case | result | first differing line |", "| --- | --- | --- |"]
@@ -408,8 +691,8 @@ def build_report(
 
     if result.diff_lines:
       lines += [
-        f"host {result.host_lines} lines, selfhost {result.selfhost_lines} lines; "
-        f"first difference at line {result.first_difference} (`-` host, `+` selfhost):",
+        f"recorded {result.expected_lines} lines, produced {result.actual_lines} lines; "
+        f"first difference at line {result.first_difference} (`-` recorded, `+` produced):",
         "",
         "```diff",
         *result.diff_lines,
@@ -425,49 +708,108 @@ def build_report(
   return "\n".join(lines) + "\n"
 
 
-def build_std_section(
-  results: list[DropResult],
-  compare_everything: bool,
-) -> list[str]:
-  """How far apart the two standard-library sets are — reported, not gated."""
-  if compare_everything:
+def build_stale_section(stale: list[str]) -> list[str]:
+  if not stale:
     return []
 
-  comparable = [result for result in results if result.host_std_functions or result.selfhost_std_functions]
+  return [
+    "",
+    "## Stale baselines",
+    "",
+    "These files record a case the corpus no longer has. A baseline with no",
+    f"fixture is dead weight that can never fail, so it fails the gate instead — {REGENERATE_HINT}.",
+    "",
+    *[f"- `{name}`" for name in stale],
+    "",
+  ]
+
+
+def build_cross_check_section(
+  results: list[DropResult],
+  settings: Settings,
+) -> list[str]:
+  """`--host`: does the host the baselines came from still agree with them?"""
+  checked = [result for result in results if result.host_cross_check is not None]
+
+  if not checked:
+    return []
+
+  disagreeing = [result for result in checked if result.host_cross_check != CLASS_PASS]
+
+  lines = [
+    "",
+    "## Host cross-check",
+    "",
+    f"`{settings.host}` was run over the same cases and its dump compared with the",
+    "committed baselines. This is not what the gate needs — the baselines are the",
+    "reference now — but while the host exists it shows they still describe it.",
+    "",
+    f"- cases cross-checked: {len(checked)}",
+    f"- cases where the host disagrees with its baseline: {len(disagreeing)}",
+    "",
+  ]
+
+  for result in disagreeing[:REPORTED_CASES]:
+    lines.append(f"- `{result.case.name}`: {result.host_cross_check}")
+
+  return lines
+
+
+def build_std_section(
+  results: list[DropResult],
+  settings: Settings,
+) -> list[str]:
+  """How much of each dump the scoping removed — reported, not gated."""
+  if settings.compare_everything:
+    return []
+
+  comparable = [result for result in results if result.std_functions]
 
   if not comparable:
     return []
 
-  disagreeing = [
-    result for result in comparable if result.host_std_functions != result.selfhost_std_functions
-  ]
-  widest = max(comparable, key=lambda result: abs(result.selfhost_std_functions - result.host_std_functions))
+  widest = max(comparable, key=lambda result: result.std_functions)
 
-  return [
+  lines = [
     "",
     "## Standard-library functions (informational, not compared)",
     "",
-    "The two monomorphizers keep a different set of standard-library functions",
-    "alive, which is a mono question rather than a drop question. Those",
-    "functions are dropped from both dumps before comparing; the size of the",
-    "disagreement is recorded here instead.",
+    "Which standard-library functions the monomorphizer keeps alive is a mono",
+    "question rather than a drop question, and it would make every baseline",
+    "churn on an unrelated mono change. Those functions are dropped from the",
+    "dump before comparing; how many there were is recorded here instead.",
     "",
-    f"- cases where the two counts differ: {len(disagreeing)}/{len(comparable)}",
-    f"- widest gap: `{widest.case.name}`, host {widest.host_std_functions} vs "
-    f"selfhost {widest.selfhost_std_functions}",
+    f"- cases with standard-library functions in their dump: {len(comparable)}/{len(results)}",
+    f"- most: `{widest.case.name}`, {widest.std_functions} functions",
     "",
   ]
+
+  disagreeing = [
+    result
+    for result in results
+    if result.reference_std_functions and result.reference_std_functions != result.std_functions
+  ]
+
+  if disagreeing:
+    lines += [
+      f"- cases where the reference kept a different number alive: {len(disagreeing)}",
+      "",
+    ]
+
+  return lines
 
 
 def build_gate(
   results: list[DropResult],
   counts: dict[str, int],
-  compare_everything: bool,
+  settings: Settings,
+  stale: list[str],
   retried_timeouts: int = 0,
 ) -> dict:
   total = len(results)
   passed = counts.get(CLASS_PASS, 0)
-  scope = "whole-dump" if compare_everything else "own-code"
+  scope = "whole-dump" if settings.compare_everything else "own-code"
+  source = "host" if settings.host_compare else "baseline"
   # A timeout still fails the gate (it is real evidence something took too
   # long, not proof of a divergence), but a night where every timeout cleared
   # on retry looks identical in the counts to one where a case is
@@ -475,22 +817,27 @@ def build_gate(
   # is the only place a maintainer sees this run without digging into logs.
   retry_plural = "s" if retried_timeouts != 1 else ""
   retry_note = f" ({retried_timeouts} timeout{retry_plural} retried)" if retried_timeouts else ""
+  stale_plural = "s" if len(stale) != 1 else ""
+  stale_note = f", {len(stale)} stale baseline{stale_plural}" if stale else ""
 
-  return {
-    "gate": GATE_ID,
-    "status": "pass" if total > 0 and passed == total else "fail",
-    "summary": f"drop-schedule parity {passed}/{total} {scope}{retry_note}",
+  cross_checked = [result for result in results if result.host_cross_check is not None]
+  cross_check_failures = [result for result in cross_checked if result.host_cross_check != CLASS_PASS]
+
+  cross_note = ""
+  if cross_checked:
+    cross_note = f", host cross-check {len(cross_checked) - len(cross_check_failures)}/{len(cross_checked)}"
+
+  healthy = total > 0 and passed == total and not stale and not cross_check_failures
+
+  gate = {
+    "gate": settings.gate_id,
+    "status": "pass" if healthy else "fail",
+    "summary": f"drop-schedule parity {passed}/{total} {scope} vs {source}{stale_note}{cross_note}{retry_note}",
     "details": {
       "scope": scope,
+      "compared_against": source,
       "timeouts_retried": retried_timeouts,
-      "std_function_counts": {
-        result.case.name: {
-          "host": result.host_std_functions,
-          "selfhost": result.selfhost_std_functions,
-        }
-        for result in results
-        if result.host_std_functions != result.selfhost_std_functions
-      },
+      "stale_baselines": stale,
       "total": total,
       "counts": {classification: counts.get(classification, 0) for classification in CLASS_ORDER},
       "diverging": [
@@ -506,34 +853,103 @@ def build_gate(
     },
   }
 
+  if cross_checked:
+    gate["details"]["host_cross_check"] = {
+      "checked": len(cross_checked),
+      "disagreeing": [
+        {"case": result.case.name, "detail": result.host_cross_check} for result in cross_check_failures
+      ],
+    }
 
-def main() -> int:
-  repository_root = Path(__file__).resolve().parent.parent
+  return gate
 
+
+def run_coverage_check(
+  settings: Settings,
+  cases: list[DropCase],
+) -> int:
+  """Does every fixture have a baseline, and every baseline a fixture?
+
+  Runs no compiler, so pull-request CI can reject a fixture added without its
+  baseline in under a second instead of waiting for the full harness.
+  """
+  missing = missing_baselines(settings, cases)
+  stale = stale_baselines(settings, cases)
+  fixtures = sum(1 for case in cases if case.has_baseline)
+
+  for name in missing:
+    print(f"missing baseline: {name}", file=sys.stderr)
+
+  for name in stale:
+    print(f"stale baseline: {name}", file=sys.stderr)
+
+  if missing or stale:
+    print(
+      f"{len(missing)} missing and {len(stale)} stale baselines; {REGENERATE_HINT}",
+      file=sys.stderr,
+    )
+    return 1
+
+  print(f"drop-schedule baselines: {fixtures} fixtures, {fixtures} baselines, none stale")
+
+  return 0
+
+
+def parse_arguments(repository_root: Path) -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  parser.add_argument("--compiler", required=True, type=Path, help="selfhost-built compiler binary")
-  parser.add_argument("--host", default="ignis", type=Path, help="host compiler binary")
+  parser.add_argument("--compiler", type=Path, help="the compiler under test")
+  parser.add_argument(
+    "--reference",
+    type=Path,
+    help="compiler the --project/--extra cases are compared against (they have no baseline)",
+  )
+  parser.add_argument(
+    "--host",
+    type=Path,
+    help="also run this compiler and cross-check it against the baselines; with --host-compare, compare against it",
+  )
+  parser.add_argument(
+    "--host-compare",
+    action="store_true",
+    help="compare the compiler under test against --host directly, ignoring the baselines (the pre-freeze mode)",
+  )
   parser.add_argument("--std", type=Path, default=repository_root / "std", help="standard library directory")
+  parser.add_argument(
+    "--baselines",
+    type=Path,
+    default=repository_root / BASELINE_DIR,
+    help=f"committed per-case dumps (default: {BASELINE_DIR})",
+  )
+  parser.add_argument(
+    "--write-baselines",
+    action="store_true",
+    help="regenerate the baselines from --compiler and exit; review the diff, it is a semantic change",
+  )
+  parser.add_argument(
+    "--check-coverage",
+    action="store_true",
+    help="only check that fixtures and baselines correspond, running no compiler",
+  )
   parser.add_argument(
     "--extra",
     type=Path,
     action="append",
     default=[],
-    help="additional single-file entry point to dump, repeatable",
+    help="additional single-file entry point to dump, repeatable (needs --reference)",
   )
   parser.add_argument(
     "--project",
     type=Path,
     action="append",
     default=[],
-    help="project root to check as a whole, repeatable (e.g. `.` for the selfhost compiler)",
+    help="project root to check as a whole, repeatable (e.g. `.` for the selfhost compiler; needs --reference)",
   )
   parser.add_argument("--filter", help="only run cases whose name contains this substring")
   parser.add_argument(
     "--all",
     dest="compare_everything",
     action="store_true",
-    help="compare the whole dump, standard library included, instead of just the code under test",
+    help="compare the whole dump, standard library included; only valid with --host-compare",
   )
   parser.add_argument(
     "--jobs",
@@ -544,8 +960,58 @@ def main() -> int:
   parser.add_argument("--report", type=Path, help="markdown report path")
   parser.add_argument("--counts-json", type=Path, help="per-class counts JSON path")
   parser.add_argument("--gate-json", type=Path, help="bootstrap gate result path")
+  parser.add_argument(
+    "--gate-id",
+    default=GATE_ID,
+    help=f"what the gate file calls itself (default: {GATE_ID}; the stage1 PR run uses {GATE_ID}-STAGE1)",
+  )
 
   arguments = parser.parse_args()
+
+  if not arguments.check_coverage and arguments.compiler is None:
+    parser.error("--compiler is required unless --check-coverage is given")
+
+  if arguments.write_baselines and arguments.check_coverage:
+    parser.error("--write-baselines and --check-coverage are separate runs; pick one")
+
+  # Baselines record the own-code section of the compiler's own dump. Written
+  # under either of these the files would be whole-dump or host-shaped, and
+  # every later own-code comparison against them would fail.
+  if arguments.write_baselines and arguments.compare_everything:
+    parser.error("--write-baselines records the own-code dump; --all would write baselines nothing can match")
+
+  if arguments.write_baselines and arguments.host_compare:
+    parser.error("--write-baselines records --compiler's dump; --host-compare has no baselines to write")
+
+  if arguments.host_compare and arguments.host is None:
+    parser.error("--host-compare needs a --host compiler to compare against")
+
+  if arguments.compare_everything and not arguments.host_compare:
+    # The baselines record the own-code section only, so a whole-dump run has
+    # nothing to compare against.
+    parser.error("--all compares the whole dump, which the baselines do not record; it needs --host-compare")
+
+  if (arguments.project or arguments.extra) and not (arguments.reference or arguments.host_compare):
+    parser.error("--project/--extra cases have no baseline; give a --reference compiler to compare them against")
+
+  return arguments
+
+
+def main() -> int:
+  repository_root = Path(__file__).resolve().parent.parent
+  arguments = parse_arguments(repository_root)
+
+  settings = Settings(
+    compiler=arguments.compiler,
+    std_path=arguments.std,
+    repository_root=repository_root,
+    baseline_dir=arguments.baselines,
+    reference=arguments.reference,
+    host=arguments.host,
+    host_compare=arguments.host_compare,
+    compare_everything=arguments.compare_everything,
+    gate_id=arguments.gate_id,
+  )
 
   cases = collect_cases(repository_root, arguments.extra, arguments.project, arguments.filter)
 
@@ -553,12 +1019,12 @@ def main() -> int:
     print("no cases were discovered", file=sys.stderr)
     return 1
 
-  # Both compilers build the standard library into the same `build/std` on
-  # first use; a cold pool would have every worker racing to write the same
-  # archive. One warm-up compile per compiler makes that build already done.
-  warmup_host_timeout, warmup_selfhost_timeout = timeouts_for(cases[0])
-  for compiler, timeout in ((arguments.host, warmup_host_timeout), (arguments.compiler, warmup_selfhost_timeout)):
-    run_dump(compiler, cases[0], arguments.std, repository_root, timeout)
+  if arguments.check_coverage:
+    if arguments.filter:
+      print("--check-coverage looks at the whole corpus; --filter would hide real gaps", file=sys.stderr)
+      return 1
+
+    return run_coverage_check(settings, cases)
 
   # `ThreadPoolExecutor`'s own default (`min(32, cpu_count + 4)`) oversubscribes
   # a small runner: every worker's compiler subprocess wants a core of its own,
@@ -568,44 +1034,26 @@ def main() -> int:
   cpu_count = os.cpu_count() or 1
   jobs = min(arguments.jobs, cpu_count) if arguments.jobs else cpu_count
 
+  if arguments.write_baselines:
+    return write_baselines(settings, cases, jobs, filtered=bool(arguments.filter))
+
+  warm_up(settings, cases[0])
+
   with ThreadPoolExecutor(max_workers=jobs) as executor:
-    results = list(
-      executor.map(
-        lambda case: run_case(
-          case,
-          arguments.host,
-          arguments.compiler,
-          arguments.std,
-          repository_root,
-          arguments.compare_everything,
-        ),
-        cases,
-      )
-    )
+    results = list(executor.map(lambda case: run_case(case, settings), cases))
 
   # A case that produced no dump usually lost a race for the shared `build/std`
   # directory against another worker, so it is retried once with the pool idle
-  # rather than reported as a divergence it is not.
-  retryable = [
-    result
-    for result in results
-    if result.classification in (CLASS_HOST_NO_DUMP, CLASS_SELFHOST_NO_DUMP, CLASS_TIMEOUT)
-  ]
+  # rather than reported as a divergence it is not. A missing baseline is not
+  # retried: no amount of rerunning will conjure the file.
+  retryable = [result for result in results if result.classification in RETRYABLE_CLASSES]
   # Counted before the retry loop overwrites `results`: a case that timed out
   # and then passed on retry is still worth surfacing, since a slow-but-not-
   # hung machine is the kind of thing that turns into a real timeout later.
   retried_timeouts = sum(1 for result in retryable if result.classification == CLASS_TIMEOUT)
 
-  for stale in retryable:
-    retried = run_case(
-      stale.case,
-      arguments.host,
-      arguments.compiler,
-      arguments.std,
-      repository_root,
-      arguments.compare_everything,
-    )
-    results[results.index(stale)] = retried
+  for stale_result in retryable:
+    results[results.index(stale_result)] = run_case(stale_result.case, settings)
 
   results.sort(key=lambda result: result.case.name)
 
@@ -613,14 +1061,15 @@ def main() -> int:
   for result in results:
     counts[result.classification] = counts.get(result.classification, 0) + 1
 
-  gate = build_gate(results, counts, arguments.compare_everything, retried_timeouts)
+  # A filtered run only ever sees part of the corpus, so a baseline it did not
+  # ask about is not evidence of staleness.
+  stale = [] if arguments.filter else stale_baselines(settings, cases)
+
+  gate = build_gate(results, counts, settings, stale, retried_timeouts)
 
   if arguments.report:
     arguments.report.parent.mkdir(parents=True, exist_ok=True)
-    arguments.report.write_text(
-      build_report(results, counts, arguments.compiler, arguments.host, arguments.compare_everything),
-      encoding="utf-8",
-    )
+    arguments.report.write_text(build_report(results, counts, settings, stale), encoding="utf-8")
 
   if arguments.counts_json:
     arguments.counts_json.parent.mkdir(parents=True, exist_ok=True)
@@ -636,6 +1085,7 @@ def main() -> int:
   print(
     "drop-schedule parity: "
     + ", ".join(f"{classification} {counts.get(classification, 0)}" for classification in CLASS_ORDER)
+    + (f", stale baselines {len(stale)}" if stale else "")
   )
 
   # scripts/bootstrap.sh's gate-g7 runs this with `|| true` and reads the gate

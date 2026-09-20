@@ -117,8 +117,13 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      # Full history: the baseline churn report below diffs against the merge
+      # base with the pull request's base branch, and the default shallow
+      # checkout has neither that branch nor a common ancestor to find.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Pure bash/python against fake compiler binaries, so it needs neither
       # Rust nor a built `ignis` — runs before either is set up. Covers
@@ -134,6 +139,7 @@ jobs:
         run: |
           scripts/tests/test_stage0_fallback.sh
           scripts/tests/test_stage_stamps.sh
+          scripts/tests/test_baseline_churn_report.sh
           python3 scripts/tests/test_bootstrap_report.py
 
       - name: Install Rust toolchain
@@ -181,15 +187,37 @@ jobs:
       # `git diff` alone would miss a fixture the generator newly *creates*,
       # since an untracked file is not a diff. `git status --porcelain` with
       # untracked files listed catches added, removed and modified alike.
+      # The generator also prunes the G7 drop-schedule baselines of ownership
+      # fixtures it no longer produces, so the dirty-tree check covers that
+      # directory too: a retired case must not leave a baseline behind.
       - name: Check the ownership corpus generator is idempotent
         run: |
           python3 scripts/gen_ownership_corpus.py
-          dirty="$(git status --porcelain --untracked-files=all -- test_cases/e2e/ok/ownership test_cases/e2e/err/ownership)"
+          dirty="$(git status --porcelain --untracked-files=all -- test_cases/e2e/ok/ownership test_cases/e2e/err/ownership test_cases/e2e/ok/__drop_schedules__)"
           if [ -n "$dirty" ]; then
             echo "The ownership corpus is out of date; re-run scripts/gen_ownership_corpus.py and commit the result." >&2
             echo "$dirty" >&2
             exit 1
           fi
+
+      # A fixture added without its drop-schedule baseline, or a baseline left
+      # behind by a retired fixture, fails G7 — but G7 needs a selfhost binary
+      # and several minutes. This runs no compiler and takes under a second,
+      # so the common mistake is reported here rather than 40 minutes later.
+      - name: Check every e2e fixture has a drop-schedule baseline
+        run: python3 scripts/selfhost_drop_schedule_parity.py --check-coverage
+
+      # Regenerating the baselines is one command, which makes it the easy way
+      # to turn a red gate green, and nobody reads 700 generated files in a
+      # diff. This puts the churn in the job summary, where the reviewer sees
+      # it. `.github/CODEOWNERS` is the other half, once branch protection
+      # requires code-owner review.
+      - name: Report baseline churn
+        if: github.event_name == 'pull_request'
+        run: |
+          scripts/baseline_churn_report.sh \
+            "origin/${{ github.base_ref }}" \
+            test_cases/e2e/ok/__drop_schedules__
 
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -230,7 +258,9 @@ jobs:
       # until the nightly ran hours later. stage1 (this binary compiling
       # `ignis/main.ign` once) is the cheapest selfhost binary that exercises
       # the same code paths, so PRs get it instead of stage2/stage3 or the
-      # rest of the ladder (G1/G2/G4/G6/G7), which stay nightly-only.
+      # rest of the ladder (G1/G2/G4/G6), which stay nightly-only. G7 joined
+      # the PR set once its baselines were committed: it needs no host oracle
+      # and no stage2, so stage1 answers it in about two minutes.
       - name: Build stage1 with the host compiler
         env:
           IGNIS_STAGE0: ${{ github.workspace }}/target/ci/ignis
@@ -287,6 +317,32 @@ jobs:
             exit 1
           fi
 
+      # The nightly's gate-g7, run against stage1 instead of stage2 and
+      # without the `--project .` case (stage1 is that case's reference, and a
+      # second self-compilation is not worth a PR's runner minutes). Writes
+      # gates/G7-STAGE1.json. Measured at ~2 minutes on this runner.
+      - name: Check stage1's drop schedules against the baselines (G7, stage1)
+        run: scripts/bootstrap.sh gate-g7-stage1
+
+      - name: Check G7 (stage1)
+        run: |
+          set -euo pipefail
+
+          gate_file="build/bootstrap/gates/G7-STAGE1.json"
+          if [ ! -f "$gate_file" ]; then
+            echo "no G7-STAGE1 gate result was produced" >&2
+            exit 1
+          fi
+
+          status="$(jq -r '.status' "$gate_file")"
+          summary="$(jq -r '.summary' "$gate_file")"
+          echo "G7 (stage1): ${status} — ${summary}"
+
+          if [ "$status" != "pass" ]; then
+            echo "stage1's drop schedules differ from the committed baselines; see ${gate_file}" >&2
+            exit 1
+          fi
+
       # `failure()` alone misses a run cancelled by `timeout-minutes` expiring
       # (the job is cancelled, not failed), which is exactly the case these
       # artifacts would be most useful for diagnosing.
@@ -299,6 +355,9 @@ jobs:
             build/bootstrap/stage1/log.txt
             build/bootstrap/gates/G3-STAGE1.json
             build/bootstrap/gates/G5-STAGE1.json
+            build/bootstrap/gates/G7-STAGE1.json
+            build/bootstrap/parity-drops-stage1.md
+            build/bootstrap/parity-drops-stage1.json
             build/bootstrap/stage1-tests/log*.txt
             build/bootstrap/stage1-tests/status-*.json
             build/bootstrap/parity-err-stage1.md
