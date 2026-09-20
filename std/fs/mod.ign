@@ -437,7 +437,15 @@ export namespace Fs {
           current.push(&segment);
 
           if (!Fs::exists(current.toStr())) {
-            Fs::Sys::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE)!;
+            // Another process can create this same segment between the check
+            // above and the call below. `mkdir -p` treats a directory that is
+            // already there as success, so the only failure worth reporting is
+            // one that left nothing behind.
+            if (let Result::ERROR(error) = Fs::Sys::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE)) {
+              if (!Fs::exists(current.toStr())) {
+                return Result::ERROR(error);
+              }
+            }
           }
         }
 
