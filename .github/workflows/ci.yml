@@ -139,6 +139,7 @@ jobs:
         run: |
           scripts/tests/test_stage0_fallback.sh
           scripts/tests/test_stage_stamps.sh
+          scripts/tests/test_build_from_seed.sh
           scripts/tests/test_baseline_churn_report.sh
           python3 scripts/tests/test_bootstrap_report.py
           python3 scripts/tests/test_selfhost_syntax_parity.py
@@ -206,6 +207,13 @@ jobs:
       # behind by a retired fixture, fails G7 — but G7 needs a selfhost binary
       # and several minutes. This runs no compiler and takes under a second,
       # so the common mistake is reported here rather than 40 minutes later.
+      # The committed C seed (bootstrap/seed) is what rebuilds the compiler
+      # once the Rust host is gone, so a seed whose archive no longer matches
+      # its manifest is caught here rather than on the night it is needed.
+      # Checks the manifest's shape and both checksums; compiles nothing.
+      - name: Check the C seed matches its manifest
+        run: scripts/build_from_seed.sh --verify-only
+
       - name: Check every e2e fixture has a drop-schedule baseline
         run: python3 scripts/selfhost_drop_schedule_parity.py --check-coverage
 

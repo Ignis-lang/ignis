@@ -808,3 +808,56 @@ jobs:
           fi
 
           echo "Promotion candidate."
+
+  # The committed C seed (bootstrap/seed, see BOOTSTRAP.md "C seed (A3)") is
+  # how the compiler gets rebuilt once the Rust host is gone. This job proves
+  # it still can: no Rust toolchain is installed and nothing from `stages` is
+  # used. gcc builds stage0 from the seed, that stage0 builds stage1 of this
+  # commit, and the ladder has to reach the fixed point (G1).
+  #
+  # It stays out of the promotion flow on purpose: `report` does not wait for
+  # it and its verdict never touches the streak. A failure means ignis/ or
+  # std/ now uses something the seed's compiler cannot build, and the seed
+  # needs a deliberate refresh (`scripts/bootstrap.sh seed`).
+  seed:
+    name: Rebuild from the C seed (no Rust)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # A runner image that ever ships an `ignis`, or a `cargo` this job then
+      # uses, would make the run prove nothing about the seed.
+      - name: Check that no Ignis compiler is on PATH
+        run: |
+          if command -v ignis >/dev/null 2>&1; then
+            echo "::error::an ignis binary is on PATH ($(command -v ignis)); this job must start from the C seed alone."
+            exit 1
+          fi
+
+      - name: Build stage1, stage2 and stage3 from the C seed
+        run: scripts/bootstrap.sh all-from-seed
+
+      - name: Require the fixed point (G1)
+        run: |
+          set -euo pipefail
+          jq -r '"G1: \(.status) — \(.summary)"' build/bootstrap/gates/G1.json
+          jq -e '.status == "pass"' build/bootstrap/gates/G1.json >/dev/null
+
+      - name: Upload the seed ladder logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-ladder
+          path: |
+            build/bootstrap/stage0.json
+            build/bootstrap/*/log.txt
+            build/bootstrap/gates/G1.json
+          if-no-files-found: ignore
