@@ -86,6 +86,17 @@ Commands:
   stage2   Build stage2 with stage1 (builds stage1 first when missing).
   stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point, G1).
   all      stage1, stage2, stage3 in order.
+  seed     Regenerate bootstrap/seed (the C seed) from stage2's fixed-point
+           output: builds stage3 and requires G1 first. Deliberately manual;
+           commit the result. ignis/ and std/ must be committed.
+  stage1-from-seed
+           Build stage0 from bootstrap/seed with gcc alone
+           (scripts/build_from_seed.sh -> build/bootstrap/stage0-seed/ignis),
+           record it in stage0.json as kind "seed", and build stage1 with it.
+           Never falls back to the host. Later commands keep using that
+           stage0 until \`clean\` or an explicit IGNIS_STAGE0.
+  all-from-seed
+           stage1-from-seed, stage2, stage3: the ladder with no Rust at all.
   stages   stage1, stage2, stage3, where only a stage3 failure is left to G1.
   parity   Run the host e2e corpus through stage2 (builds stage2 first when missing, G2).
   gate-g3  Run the selfhost test suite under stage2 and under the host and compare them (G3).
@@ -635,6 +646,19 @@ fail_two_step_rule() {
   fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- two-step rule violated: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote to official, then use the feature in a follow-up), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label to override this gate."
 }
 
+# stage0's kind: IGNIS_STAGE0_KIND when set, else what stage0.json records
+# (host, official, selfhost, or seed for a compiler built from the C seed),
+# else empty.
+stage0_recorded_kind() {
+  local recorded_kind=""
+
+  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
+    recorded_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
+  fi
+
+  echo "${IGNIS_STAGE0_KIND:-$recorded_kind}"
+}
+
 # stage0 is either the Rust host or a previously promoted selfhost binary
 # (`IGNIS_STAGE0` pointed at the nightly's official asset). The two take
 # different command forms: the host reads ignis.toml through `ignis build`,
@@ -654,7 +678,7 @@ stage0_is_selfhost() {
   fi
 
   case "${IGNIS_STAGE0_KIND:-$recorded_kind}" in
-    selfhost|official) return 0 ;;
+    selfhost|official|seed) return 0 ;;
     host) return 1 ;;
   esac
 
@@ -698,7 +722,7 @@ stage0_rebuild_guard_reason() {
   recorded_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
 
   case "$recorded_kind" in
-    official | selfhost) : ;;
+    official | selfhost | seed) : ;;
     *)
       echo ""
       return 0
@@ -873,6 +897,12 @@ build_stage1() {
     # enforce.
     if [[ "${IGNIS_STAGE0_NO_FALLBACK:-}" == "1" ]]; then
       fail_two_step_rule "$first_error"
+    fi
+
+    # A seed-built stage0 exists to prove the ladder needs no Rust at all, so
+    # falling back to the host would defeat the only thing it checks.
+    if [[ "$(stage0_recorded_kind)" == "seed" ]]; then
+      fail "stage1: the compiler built from the C seed reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- ignis/ or std/ uses something the seed's compiler cannot build yet; refresh the seed (scripts/bootstrap.sh seed, see BOOTSTRAP.md)"
     fi
 
     if stage0_explicit_official; then
@@ -1677,6 +1707,260 @@ sys.exit(0 if within_budget else 1)
 PY
 }
 
+# =============================================================================
+# C seed (A3)
+# =============================================================================
+#
+# bootstrap/seed/ holds the whole compiler, std included, as the single C file
+# a fixed-point stage2 emits, xz-compressed, plus manifest.json. It rebuilds
+# the compiler with gcc alone (scripts/build_from_seed.sh), so the ladder can
+# start without Rust once the host is gone. See BOOTSTRAP.md, "C seed (A3)".
+
+SEED_DIR="${PROJECT_ROOT}/bootstrap/seed"
+SEED_STAGE0_BIN="${BOOTSTRAP_ROOT}/stage0-seed/ignis"
+SEED_FORMAT="ignis-c-seed v1"
+
+# The toolchain recipe recorded in the manifest, which is the only place
+# scripts/build_from_seed.sh reads it from. It is what the selfhost driver
+# runs for ignis.toml's [build] profile (opt_level = 2, debug = false,
+# cflags = []): CCompiler::profileFlags for both steps, `-I <std>/runtime`
+# when compiling, and `-lm` when linking (ignis/main.ign,
+# compileAndLinkUnits). The std/runtime headers the C includes are copied
+# into the seed, so build_from_seed.sh compiles with `-I <seed dir>` instead.
+SEED_CC="gcc"
+SEED_COMPILE_FLAGS="-O2"
+SEED_HEADER_SOURCE_DIR="${PROJECT_ROOT}/std/runtime"
+SEED_LINK_FLAGS="-O2"
+SEED_LIBS="m"
+
+# The quoted `#include "..."` names in the files given, one per line. Angle
+# includes are system headers and are not bundled.
+quoted_includes() {
+  sed -n -E 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*"([^"]+)".*/\1/p' "$@" | LC_ALL=C sort -u
+}
+
+# Copy every std/runtime header the seed C reaches through quoted includes,
+# following includes between headers too, into the seed directory, and print
+# the manifest's `headers` value: space-separated `<name>:<sha256>` pairs.
+# Headers left over from a previous seed are removed first.
+bundle_seed_headers() {
+  local seed_c="$1"
+  local pending=() seen=() name
+
+  rm -f "${SEED_DIR}"/*.h
+
+  mapfile -t pending < <(quoted_includes "$seed_c")
+
+  while [[ ${#pending[@]} -gt 0 ]]; do
+    name="${pending[0]}"
+    pending=("${pending[@]:1}")
+
+    [[ " ${seen[*]-} " == *" ${name} "* ]] && continue
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] ||
+      fail "seed: the C includes \"${name}\", which is not a plain header name in ${SEED_HEADER_SOURCE_DIR}"
+    [[ -f "${SEED_HEADER_SOURCE_DIR}/${name}" ]] ||
+      fail "seed: the C includes \"${name}\", which is not in ${SEED_HEADER_SOURCE_DIR}"
+
+    seen+=("$name")
+    cp "${SEED_HEADER_SOURCE_DIR}/${name}" "${SEED_DIR}/${name}"
+    chmod 644 "${SEED_DIR}/${name}"
+
+    local nested
+    mapfile -t nested < <(quoted_includes "${SEED_DIR}/${name}")
+    pending+=("${nested[@]}")
+  done
+
+  [[ ${#seen[@]} -gt 0 ]] || fail "seed: the C includes no std/runtime header; expected at least ignis_rt.h"
+
+  local entries=()
+  while IFS= read -r name; do
+    entries+=("${name}:$(sha256sum "${SEED_DIR}/${name}" | cut -d' ' -f1)")
+  done < <(printf '%s\n' "${seen[@]}" | LC_ALL=C sort)
+
+  echo "${entries[*]}"
+}
+
+seed_manifest_field() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "${SEED_DIR}/manifest.json" "$1"
+}
+
+# Regenerate bootstrap/seed from the current sources. Deliberately manual: the
+# new seed is a large binary diff a maintainer commits on purpose.
+#
+# The C comes from stage3's directory, i.e. emitted by stage2, and only after
+# G1 has shown it is byte-identical to the C stage1 emitted: a seed that is
+# not a fixed point would rebuild a compiler that differs from its own output.
+write_seed() {
+  local dirty
+  dirty="$(git -C "$PROJECT_ROOT" status --porcelain -- ignis std 2>/dev/null)" ||
+    fail "seed: could not read the git status of ${PROJECT_ROOT}"
+  [[ -z "$dirty" ]] ||
+    fail "seed: ignis/ or std/ has uncommitted changes, so the manifest's source commit would not describe the seed; commit them first"
+
+  local source_commit sources
+  source_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)" || fail "seed: could not resolve HEAD"
+  sources="$(sources_hash)"
+
+  build_stage3
+
+  local seed_c
+  seed_c="$(stage_dir stage3)/selfhost_emit.c"
+  [[ -f "$seed_c" ]] || fail "seed: ${seed_c} was not produced"
+
+  # A path of this machine inside the C would make the seed build differently,
+  # or not at all, anywhere else.
+  if grep -qF "$PROJECT_ROOT" "$seed_c"; then
+    fail "seed: ${seed_c} contains the absolute path ${PROJECT_ROOT}; the seed must not depend on where it was generated"
+  fi
+
+  mkdir -p "$SEED_DIR"
+
+  local xz_name="selfhost_emit.c.xz"
+  local xz_temp="${SEED_DIR}/.${xz_name}.tmp"
+
+  info "seed: compressing ${seed_c} (xz -9)"
+  xz -9 -T1 -c "$seed_c" >"$xz_temp" || { rm -f "$xz_temp"; fail "seed: xz failed"; }
+  mv "$xz_temp" "${SEED_DIR}/${xz_name}"
+
+  local headers
+  headers="$(bundle_seed_headers "$seed_c")"
+
+  FORMAT="$SEED_FORMAT" \
+  SOURCE_COMMIT="$source_commit" \
+  SOURCES_HASH="$sources" \
+  PRODUCER_IDENTITY="$(compiler_identity_of "$(stage_bin stage2)")" \
+  C_SHA256="$(sha256sum "$seed_c" | cut -d' ' -f1)" \
+  C_SIZE="$(stat -c '%s' "$seed_c")" \
+  XZ_NAME="$xz_name" \
+  XZ_SHA256="$(sha256sum "${SEED_DIR}/${xz_name}" | cut -d' ' -f1)" \
+  XZ_SIZE="$(stat -c '%s' "${SEED_DIR}/${xz_name}")" \
+  CC_NAME="$SEED_CC" \
+  CC_VERSION="$("$SEED_CC" --version | head -n1)" \
+  COMPILE_FLAGS="$SEED_COMPILE_FLAGS" \
+  HEADERS="$headers" \
+  LINK_FLAGS="$SEED_LINK_FLAGS" \
+  LIBS="$SEED_LIBS" \
+  CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    python3 -c '
+import json
+import os
+import sys
+import tempfile
+
+environment = os.environ
+payload = {
+  "format": environment["FORMAT"],
+  "source_commit": environment["SOURCE_COMMIT"],
+  "sources_hash": environment["SOURCES_HASH"],
+  "produced_by": "stage2 built from source_commit; byte-identical to the C stage1 emitted (gate G1)",
+  "producer_identity": environment["PRODUCER_IDENTITY"],
+  "c_file": "selfhost_emit.c",
+  "c_sha256": environment["C_SHA256"],
+  "c_size": environment["C_SIZE"],
+  "xz_file": environment["XZ_NAME"],
+  "xz_sha256": environment["XZ_SHA256"],
+  "xz_size": environment["XZ_SIZE"],
+  "cc": environment["CC_NAME"],
+  "cc_version": environment["CC_VERSION"],
+  "compile_flags": environment["COMPILE_FLAGS"],
+  "headers": environment["HEADERS"],
+  "link_flags": environment["LINK_FLAGS"],
+  "libs": environment["LIBS"],
+  "created": environment["CREATED"],
+}
+
+path = sys.argv[1]
+fd, temp_path = tempfile.mkstemp(prefix=".manifest.", suffix=".json.tmp", dir=os.path.dirname(path))
+try:
+  with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, indent=2) + "\n")
+  os.chmod(temp_path, 0o644)
+  os.replace(temp_path, path)
+except BaseException:
+  os.unlink(temp_path)
+  raise
+' "${SEED_DIR}/manifest.json" || fail "seed: could not write ${SEED_DIR}/manifest.json"
+
+  "${SCRIPT_DIR}/build_from_seed.sh" --seed "$SEED_DIR" --verify-only
+  info "seed: ok -> ${SEED_DIR} (source ${source_commit})"
+}
+
+# Build stage0 from the committed seed with gcc alone, record it in
+# stage0.json as kind "seed", then build stage1 with it. The seed-built binary
+# is reused while the seed it came from is unchanged. A seed-built stage0
+# never falls back to the host (see build_stage1).
+build_stage1_from_seed() {
+  [[ -f "${SEED_DIR}/manifest.json" ]] ||
+    fail "stage1-from-seed: no seed at ${SEED_DIR}; generate one with \`scripts/bootstrap.sh seed\`"
+
+  "${SCRIPT_DIR}/build_from_seed.sh" --seed "$SEED_DIR" --verify-only
+
+  local seed_xz_sha256 marker
+  seed_xz_sha256="$(seed_manifest_field xz_sha256)"
+  marker="$(dirname "$SEED_STAGE0_BIN")/seed_xz_sha256"
+
+  if [[ -x "$SEED_STAGE0_BIN" && -f "$marker" && "$(cat "$marker")" == "$seed_xz_sha256" ]]; then
+    info "stage0: reusing ${SEED_STAGE0_BIN}, built from the current seed"
+  else
+    rm -f "$marker"
+    info "stage0: building ${SEED_STAGE0_BIN} from the C seed"
+    "${SCRIPT_DIR}/build_from_seed.sh" --seed "$SEED_DIR" -o "$SEED_STAGE0_BIN" >/dev/null
+    echo "$seed_xz_sha256" >"$marker"
+  fi
+
+  mkdir -p "$BOOTSTRAP_ROOT"
+
+  SOURCE="$SEED_STAGE0_BIN" \
+  SHA256="$(sha256sum "$SEED_STAGE0_BIN" | cut -d' ' -f1)" \
+  IDENTITY="$(compiler_identity_of "$SEED_STAGE0_BIN")" \
+  SEED_XZ_SHA256="$seed_xz_sha256" \
+    python3 -c '
+import json
+import os
+import sys
+import tempfile
+
+payload = {
+  "kind": "seed",
+  "source": os.environ["SOURCE"],
+  "sha256": os.environ["SHA256"],
+  "mode": "seed",
+  "identity": os.environ["IDENTITY"],
+  "seed_xz_sha256": os.environ["SEED_XZ_SHA256"],
+}
+
+path = sys.argv[1]
+fd, temp_path = tempfile.mkstemp(prefix=".stage0.", suffix=".json.tmp", dir=os.path.dirname(path))
+try:
+  with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, indent=2) + "\n")
+  os.replace(temp_path, path)
+except BaseException:
+  os.unlink(temp_path)
+  raise
+' "${BOOTSTRAP_ROOT}/stage0.json" || fail "stage1-from-seed: could not write ${BOOTSTRAP_ROOT}/stage0.json"
+
+  STAGE0="$SEED_STAGE0_BIN"
+  build_stage1
+}
+
+# Once stage0.json records a seed-built stage0, later invocations keep using
+# it unless IGNIS_STAGE0 says otherwise, so `stage2` or `stage3` run after
+# `stage1-from-seed` stay on the seed lineage, until an explicit IGNIS_STAGE0
+# overrides it or `clean` removes build/bootstrap, stage0.json included.
+adopt_seed_stage0() {
+  [[ -z "${IGNIS_STAGE0:-}" ]] || return 0
+  [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]] || return 0
+
+  local recorded_kind recorded_source
+  recorded_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
+  recorded_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
+
+  if [[ "$recorded_kind" == "seed" && -n "$recorded_source" && -x "$recorded_source" ]]; then
+    STAGE0="$recorded_source"
+  fi
+}
+
 show_status() {
   local stage
   for stage in stage1 stage2 stage3; do
@@ -1691,12 +1975,21 @@ show_status() {
 main() {
   local command="${1:-}"
 
+  adopt_seed_stage0
+
   case "$command" in
     stage1) build_stage1 ;;
     stage2) build_stage2 ;;
     stage3) build_stage3 ;;
     all)
       build_stage1
+      build_stage2
+      build_stage3
+      ;;
+    seed) write_seed ;;
+    stage1-from-seed) build_stage1_from_seed ;;
+    all-from-seed)
+      build_stage1_from_seed
       build_stage2
       build_stage3
       ;;

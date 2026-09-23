@@ -808,3 +808,70 @@ jobs:
           fi
 
           echo "Promotion candidate."
+
+  # The committed C seed (bootstrap/seed, see BOOTSTRAP.md "C seed (A3)") is
+  # how the compiler gets rebuilt once the Rust host is gone. This job proves
+  # it still can. It installs no Rust toolchain and uses nothing from
+  # `stages`. The runner image may still ship rustup and cargo, so the ladder step
+  # removes every cargo and rustup directory from PATH, unsets CARGO_HOME and
+  # RUSTUP_HOME, and fails unless cargo, rustc, rustup and ignis are all
+  # unresolvable. gcc then builds stage0 from the seed, that stage0 builds
+  # stage1 of this commit, and the ladder has to reach the fixed point (G1).
+  #
+  # It stays out of the promotion flow on purpose: `report` does not wait for
+  # it and its verdict never touches the streak. A failure means ignis/ or
+  # std/ now uses something the seed's compiler cannot build, and the seed
+  # needs a deliberate refresh (`scripts/bootstrap.sh seed`).
+  seed:
+    name: Rebuild from the C seed (no Rust)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # PATH is filtered in the same step that runs the ladder, so no later
+      # step or environment file can put the toolchain back before it runs.
+      # Every PATH entry containing `cargo`, `rustup` or `/rust/` is dropped,
+      # e.g. ~/.cargo/bin.
+      - name: Build stage1, stage2 and stage3 from the C seed, with Rust removed from PATH
+        run: |
+          set -euo pipefail
+
+          PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vE '(cargo|rustup|/rust/)' | paste -sd: -)"
+          export PATH
+          unset CARGO_HOME RUSTUP_HOME
+          echo "PATH=${PATH}"
+
+          for tool in cargo rustc rustup ignis; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::${tool} is still resolvable ($(command -v "$tool")); this job must start from the C seed alone."
+              exit 1
+            fi
+            echo "${tool}: not on PATH"
+          done
+
+          scripts/bootstrap.sh all-from-seed
+
+      - name: Require the fixed point (G1)
+        run: |
+          set -euo pipefail
+          jq -r '"G1: \(.status) — \(.summary)"' build/bootstrap/gates/G1.json
+          jq -e '.status == "pass"' build/bootstrap/gates/G1.json >/dev/null
+
+      - name: Upload the seed ladder logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-ladder
+          path: |
+            build/bootstrap/stage0.json
+            build/bootstrap/*/log.txt
+            build/bootstrap/gates/G1.json
+          if-no-files-found: ignore
