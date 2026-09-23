@@ -1525,8 +1525,8 @@ run_gate_g6_baselines() {
 }
 
 # G7: every `ok` fixture's drop schedule must match the dump committed under
-# test_cases/e2e/ok/__drop_schedules__. No host compiler is involved: the
-# baselines were generated from it before the freeze and are the reference now.
+# test_cases/e2e/ok/__drop_schedules__. The baselines were generated from the
+# host before the freeze and are the reference now; the host only cross-checks.
 #
 # The selfhost compiler compiling itself (`--project .`) deliberately has no
 # baseline — it would change with nearly every commit to `ignis/` — so it is
