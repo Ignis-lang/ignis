@@ -76,13 +76,22 @@ HELPER_WRAPPERS = {
   "parse_type": "function test(): {} {{ }}",
 }
 
-# The `I0xxx` codes either compiler's lexer or parser emits, taken from
+# The codes either compiler's lexer or parser emits, taken from
 # `crates/ignis_diagnostics/src/message.rs` and `ignis/diagnostics/codes.ign`
 # and restricted to the codes their `lexer`/`parser` modules actually raise.
-# The analyzer-only codes (I0031, I0033, I0041..I0043) are deliberately absent:
-# they belong to a later phase and must not decide a parse verdict.
+# Besides the `I0xxx` family the host parser raises a few `A`/`M` codes of its
+# own (A0067, A0143, A0145, A0203, M0005, M0006), which only it raises.
+# Deliberately absent: the analyzer-only codes (I0031, I0033, I0041..I0043),
+# and A0111, which the parser shares with the analyzer's `@compileError`, so
+# it cannot tell a parse rejection from a later phase's.
 PARSE_DIAGNOSTIC_CODES = frozenset(
   {
+    "A0067",
+    "A0143",
+    "A0145",
+    "A0203",
+    "M0005",
+    "M0006",
     "I0001",
     "I0002",
     "I0003",

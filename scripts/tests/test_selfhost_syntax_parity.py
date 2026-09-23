@@ -20,6 +20,7 @@ Usage: python3 scripts/tests/test_selfhost_syntax_parity.py
 import contextlib
 import io
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -42,6 +43,7 @@ from selfhost_syntax_parity import (  # noqa: E402
   CLASS_SELFHOST_REJECTS,
   ORIGIN_PARSER_TEST,
   ORIGIN_REPOSITORY,
+  PARSE_DIAGNOSTIC_CODES,
   PARSER_TEST_DIR,
   Case,
   Settings,
@@ -358,6 +360,31 @@ class RepositorySnippetTests(unittest.TestCase):
     )
 
     self.assertEqual(completed.returncode, 0, completed.stderr)
+
+  def test_every_code_the_host_parser_raises_decides_a_parse_verdict(self) -> None:
+    """A parser code missing from PARSE_DIAGNOSTIC_CODES reads as "accepted" on the host side.
+
+    That is how the selfhost accepting `export _ from` (host M0006) went
+    unnoticed. A0111 is the one exception: the analyzer raises it too.
+    """
+    repository_root = SCRIPT_DIR.parent
+    parser_sources = repository_root / "crates/ignis_parser/src"
+
+    if not parser_sources.is_dir():
+      self.skipTest("the host parser sources are gone")
+
+    messages = (repository_root / "crates/ignis_diagnostics/src/message.rs").read_text(encoding="utf-8")
+    code_of = dict(
+      re.findall(r"DiagnosticMessage::(\w+)\s*(?:\{[^}]*\}|\([^)]*\))?\s*=>\s*\"([A-Z]\d{4})\"", messages)
+    )
+
+    raised: set[str] = set()
+
+    for path in parser_sources.rglob("*.rs"):
+      production = path.read_text(encoding="utf-8").split("#[cfg(test)]")[0]
+      raised |= {code_of[name] for name in re.findall(r"DiagnosticMessage::(\w+)", production) if name in code_of}
+
+    self.assertEqual(sorted(raised - PARSE_DIAGNOSTIC_CODES - {"A0111"}), [])
 
 
 # A fake selfhost: it prints the phase report the harness reads, rejecting a
