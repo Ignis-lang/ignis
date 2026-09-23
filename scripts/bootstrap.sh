@@ -21,7 +21,9 @@
 #   G3  the selfhost test suite under stage2 matches the host's result
 #   G4  resource budget: stage2 within 1.25x of the host
 #   G5  diagnostics: stage2's messages equal or better than the host's
-#   G6  syntax: stage2 accepts and rejects exactly what the host parser does
+#   G6  syntax: stage2's parse verdicts match the committed baselines under
+#       test_cases/__parse_verdicts__, and until the host is removed the
+#       host is cross-checked against the same baselines
 #   G7  drop schedules: stage2's --dump-drop-schedule matches the committed
 #       baselines under test_cases/e2e/ok/__drop_schedules__, and until the
 #       host is removed stage0 is cross-checked against the same baselines
@@ -105,7 +107,16 @@ Commands:
   gate-g5-stage1   G5 run against stage1 instead of stage2 -> gates/G5-STAGE1.json
                    (ci.yml's PR-only check; the promotion ladder still covers
                    stage2). Same unscored-row note as gate-g3-stage1 above.
-  gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
+  gate-g6  Check stage2's parse verdicts against the committed baselines
+           (test_cases/__parse_verdicts__) -> gates/G6.json. Until the cut
+           this run also cross-checks the Rust host
+           (\$IGNIS_STAGE0_HOST_FALLBACK, default \`ignis\` on PATH) against
+           the same baselines; a host that cannot be found fails the gate.
+  gate-g6-baselines [compiler]
+           Regenerate the parse-verdict baselines from <compiler> (default:
+           stage2's binary; the compiler is run with the selfhost CLI). When
+           the host resolves it must agree on every case, or nothing is
+           written. Review the diff: it is a parser change.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gate-g7  Check stage2's drop schedules against the committed baselines
            (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. The
@@ -1434,8 +1445,16 @@ PYTHON
 
 run_gate_g5() { run_gate_g5_for stage2 G5; }
 
-# G6: every source the host parser accepts must parse under stage2, and every
-# source it rejects must be rejected there too.
+# G6: every case's parse verdict under stage2 (accepted or rejected) must match
+# the one committed for it under test_cases/__parse_verdicts__. The baselines
+# were generated while the host still existed and are the reference now.
+#
+# Like gate-g7, the run also cross-checks the Rust host against the same
+# baselines until the cut, so regenerating them cannot turn a red gate green on
+# its own; host drift fails the gate. $HOST_STAGE0_FALLBACK rather than $STAGE0
+# for the reason run_gate_g7_for gives. A host that cannot be found fails the
+# gate as well, the way an unrunnable host fails G7's cross-check, instead of
+# quietly turning this into a host-free run.
 run_gate_g6() {
   ensure_stage stage2
 
@@ -1446,12 +1465,18 @@ run_gate_g6() {
   mkdir -p "$GATES_DIR"
   rm -f "$gate_file"
 
-  info "gate-g6: comparing the parse verdicts of $(stage_bin stage2) with ${STAGE0}'s"
+  if ! command -v "$HOST_STAGE0_FALLBACK" >/dev/null 2>&1; then
+    write_gate G6 fail "the host cross-check compiler (${HOST_STAGE0_FALLBACK}) was not found; set IGNIS_STAGE0_HOST_FALLBACK" \
+      "$(json_object host "$HOST_STAGE0_FALLBACK")"
+    return 0
+  fi
+
+  info "gate-g6: checking the parse verdicts of $(stage_bin stage2) against the committed baselines"
 
   # A non-zero exit only means some cases diverge; the gate file is the product.
   python3 "${SCRIPT_DIR}/selfhost_syntax_parity.py" \
     --compiler "$(stage_bin stage2)" \
-    --host "$STAGE0" \
+    --host "$HOST_STAGE0_FALLBACK" \
     --std "${PROJECT_ROOT}/std" \
     --work-dir "${BOOTSTRAP_ROOT}/parity-syntax" \
     --counts-json "$counts" \
@@ -1467,9 +1492,41 @@ run_gate_g6() {
   info "gate-g6: result -> ${gate_file} (report ${report})"
 }
 
+# Regenerate every parse-verdict baseline from one compiler. Deliberately a
+# manual step: the new verdicts land in the pull request's diff and a reviewer
+# reads them. The default is stage2's binary rather than $STAGE0 because the
+# compiler under test is invoked with the selfhost CLI, which the Rust host does
+# not accept. When the host resolves it guards the write: any case where it
+# disagrees with the compiler leaves every baseline untouched.
+run_gate_g6_baselines() {
+  local compiler="${1-}"
+
+  if [[ -z "$compiler" ]]; then
+    ensure_stage stage2
+    compiler="$(stage_bin stage2)"
+  fi
+
+  local -a host_arguments=()
+
+  if command -v "$HOST_STAGE0_FALLBACK" >/dev/null 2>&1; then
+    host_arguments=(--host "$HOST_STAGE0_FALLBACK")
+  else
+    info "gate-g6-baselines: the host (${HOST_STAGE0_FALLBACK}) was not found; writing without its agreement check"
+  fi
+
+  info "gate-g6-baselines: regenerating the parse-verdict baselines from ${compiler}"
+
+  python3 "${SCRIPT_DIR}/selfhost_syntax_parity.py" \
+    --compiler "$compiler" \
+    --std "${PROJECT_ROOT}/std" \
+    --work-dir "${BOOTSTRAP_ROOT}/parity-syntax" \
+    "${host_arguments[@]}" \
+    --write-baselines
+}
+
 # G7: every `ok` fixture's drop schedule must match the dump committed under
-# test_cases/e2e/ok/__drop_schedules__. No host compiler is involved: the
-# baselines were generated from it before the freeze and are the reference now.
+# test_cases/e2e/ok/__drop_schedules__. The baselines were generated from the
+# host before the freeze and are the reference now; the host only cross-checks.
 #
 # The selfhost compiler compiling itself (`--project .`) deliberately has no
 # baseline — it would change with nearly every commit to `ignis/` — so it is
@@ -1648,6 +1705,7 @@ main() {
     gate-g5) run_gate_g5 ;;
     gate-g5-stage1) run_gate_g5_for stage1 G5-STAGE1 ;;
     gate-g6) run_gate_g6 ;;
+    gate-g6-baselines) run_gate_g6_baselines "${2-}" ;;
     gate-g4) run_gate_g4 ;;
     gate-g7) run_gate_g7 ;;
     gate-g7-stage1) run_gate_g7_for stage1 G7-STAGE1 ;;

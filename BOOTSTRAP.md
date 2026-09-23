@@ -47,7 +47,7 @@ G2 | `parity` | the host e2e corpus, run through stage2
 G3 | `gate-g3` | the selfhost test suite, run under stage2 vs. under the host
 G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x
 G5 | `gate-g5` | diagnostics: stage2's error corpus output against the host's
-G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against the host's parser
+G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against committed baselines (and, until the cut, the host against the same baselines)
 G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines (and, until the cut, stage0 against the same baselines)
 
 G7 is the first gate whose verdict does not depend on the host. Its baselines
@@ -69,6 +69,57 @@ A run where every gate passes is a *promotion candidate*. Three consecutive
 candidate nightly runs promote that run's stage2 binary to
 `ignis-selfhost-linux-amd64` on the `nightly` release — the new official
 stage0 for every following build.
+
+## Parse-verdict baselines (G6)
+
+G6 follows the G7 model below; this section only covers what differs. Its
+corpus is every `.ign` file under `test_cases/`, `example/` and `std/`, and
+each case has a committed verdict at `test_cases/__parse_verdicts__/<case>.txt`:
+`parse-verdict v1` followed by `accepted` or `rejected`. The case name is the
+repo-relative path with every run of non-alphanumeric characters flattened to
+`_`. Only lexer and parser diagnostics against the case file decide a verdict.
+
+A new `.ign` file anywhere in that corpus needs its baseline in the same
+commit, or pull-request CI fails its `--check-coverage` step (no compiler, a
+few seconds). A missing, malformed or orphaned baseline, and two sources that
+flatten to the same case name, all fail it. To record or refresh them:
+
+```bash
+scripts/bootstrap.sh gate-g6-baselines               # from stage2
+# or, with any selfhost binary:
+python3 scripts/selfhost_syntax_parity.py --compiler <bin> --write-baselines [--host ignis]
+```
+
+The compiler is run with the selfhost CLI, which is why the default is stage2
+and not `$IGNIS_STAGE0`. The write rules are G7's (all or nothing, no pruning
+under `--filter`), plus one: with `--host`, which `gate-g6-baselines` passes
+whenever the host resolves, nothing is written if the host disagrees with the
+compiler on any case. Read a verdict diff as a parser change.
+
+### Parser unit-test snippets
+
+About two hundred cases are the source strings the host parser's unit tests
+parse, wrapped the way each test helper wraps them. Their Rust sources go away
+at the cut, so they are committed byte for byte under
+`test_cases/parser/host_unit_tests/`. After adding or changing a parser unit
+test, re-materialize them and commit the result with its baselines:
+
+```bash
+python3 scripts/selfhost_syntax_parity.py --materialize-parser-tests
+```
+
+Pull-request CI runs `--check-parser-tests`, which reports any drift between
+the committed snippets and the Rust sources without running a compiler.
+
+### Host cross-check
+
+The nightly's `gate-g6` passes `--host` the Rust host
+(`$IGNIS_STAGE0_HOST_FALLBACK`) for the reasons given for G7 below. The host's
+verdict on each case is compared with the baseline, and `host-drift` or
+`host-error` is reported apart from the selfhost's result and fails the gate.
+A host that cannot be found fails the gate too. `--host-compare` still runs the
+original direct host-vs-selfhost comparison, and the baseline churn report and
+`.github/CODEOWNERS` cover both directories.
 
 ## Drop-schedule baselines (G7)
 

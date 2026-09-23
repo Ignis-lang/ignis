@@ -141,6 +141,7 @@ jobs:
           scripts/tests/test_stage_stamps.sh
           scripts/tests/test_baseline_churn_report.sh
           python3 scripts/tests/test_bootstrap_report.py
+          python3 scripts/tests/test_selfhost_syntax_parity.py
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -187,13 +188,14 @@ jobs:
       # `git diff` alone would miss a fixture the generator newly *creates*,
       # since an untracked file is not a diff. `git status --porcelain` with
       # untracked files listed catches added, removed and modified alike.
-      # The generator also prunes the G7 drop-schedule baselines of ownership
-      # fixtures it no longer produces, so the dirty-tree check covers that
-      # directory too: a retired case must not leave a baseline behind.
+      # The generator also prunes the G7 drop-schedule and G6 parse-verdict
+      # baselines of ownership fixtures it no longer produces, so the dirty-tree
+      # check covers those directories too: a retired case must not leave a
+      # baseline behind.
       - name: Check the ownership corpus generator is idempotent
         run: |
           python3 scripts/gen_ownership_corpus.py
-          dirty="$(git status --porcelain --untracked-files=all -- test_cases/e2e/ok/ownership test_cases/e2e/err/ownership test_cases/e2e/ok/__drop_schedules__)"
+          dirty="$(git status --porcelain --untracked-files=all -- test_cases/e2e/ok/ownership test_cases/e2e/err/ownership test_cases/e2e/ok/__drop_schedules__ test_cases/__parse_verdicts__)"
           if [ -n "$dirty" ]; then
             echo "The ownership corpus is out of date; re-run scripts/gen_ownership_corpus.py and commit the result." >&2
             echo "$dirty" >&2
@@ -207,6 +209,22 @@ jobs:
       - name: Check every e2e fixture has a drop-schedule baseline
         run: python3 scripts/selfhost_drop_schedule_parity.py --check-coverage
 
+      # The same check for G6, whose corpus is every `.ign` file under
+      # test_cases/, example/ and std/: each needs a well-formed parse-verdict
+      # baseline, no baseline may outlive its case, and no two sources may
+      # flatten to one case name. G6 itself stays nightly-only (every case is a
+      # full compile and link), so without this a new case would first fail
+      # there.
+      - name: Check every G6 case has a parse-verdict baseline
+        run: python3 scripts/selfhost_syntax_parity.py --check-coverage
+
+      # The host parser unit-test snippets are committed under
+      # test_cases/parser/host_unit_tests because their Rust sources go away at
+      # the cut. Until then a parser test added or changed without
+      # re-materializing them would leave G6 checking stale sources.
+      - name: Check the committed parser unit-test snippets match the Rust sources
+        run: python3 scripts/selfhost_syntax_parity.py --check-parser-tests
+
       # Regenerating the baselines is one command, which makes it the easy way
       # to turn a red gate green, and nobody reads 700 generated files in a
       # diff. This puts the churn in the job summary, where the reviewer sees
@@ -217,7 +235,9 @@ jobs:
         run: |
           scripts/baseline_churn_report.sh \
             "origin/${{ github.base_ref }}" \
-            test_cases/e2e/ok/__drop_schedules__
+            test_cases/e2e/ok/__drop_schedules__ \
+            test_cases/__parse_verdicts__ \
+            test_cases/parser/host_unit_tests
 
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -260,7 +280,10 @@ jobs:
       # the same code paths, so PRs get it instead of stage2/stage3 or the
       # rest of the ladder (G1/G2/G4/G6), which stay nightly-only. G7 joined
       # the PR set once its baselines were committed: it needs no host oracle
-      # and no stage2, so stage1 answers it in about two minutes.
+      # and no stage2, so stage1 answers it in about two minutes. G6 has
+      # committed baselines too, but every one of its cases is a full compile
+      # and link, so only its compiler-free coverage and snippet checks run on
+      # PRs (above).
       - name: Build stage1 with the host compiler
         env:
           IGNIS_STAGE0: ${{ github.workspace }}/target/ci/ignis
