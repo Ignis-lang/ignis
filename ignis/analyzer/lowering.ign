@@ -1301,6 +1301,18 @@ export namespace Lowering {
         });
       },
       Ast::Expression::Node::Unary(unary) -> {
+        if (let Option::SOME(negatedValue) = Analyzer::Typecheck::negativeIntegerLiteralValue(module, &unary)) {
+          let literalType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+          let kind: Hir::LiteralValue = Lowering::intLiteralKind(typeStore, negatedValue, literalType);
+
+          let mut hirRef: &mut Hir::HirStore = hir;
+          return hirRef.alloc(Hir::HirNode {
+            kind: Hir::HirKind::Literal(kind),
+            span: unary.span,
+            typeId: literalType,
+          });
+        }
+
         let Option::SOME(operation) = Lowering::mapUnaryOperator(unary.operator) else {
           return Lowering::errorNode(hir, typeStore, unary.span);
         };

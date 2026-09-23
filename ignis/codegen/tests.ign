@@ -516,6 +516,22 @@ function codegenLeavesNonDroppableAccessUnguarded(): void {
   Test::assert(!codegenContains(&emission.source, "panic: use of dropped value"));
 }
 
+/// A signed minimum reaches C as one constant, not as the negation of a
+/// magnitude that already wrapped: `--2147483648` does not compile and the
+/// `i64` magnitude wraps to zero.
+@test
+function codegenEmitsSignedMinimumsAsSingleConstants(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let a: i32 = -2147483648 as i32;\n  let b: i64 = -9223372036854775808 as i64;\n  let c: i64 = -9223372036854775808;\n\n  return a + (b - c) as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "(i32)-2147483648;"));
+  Test::assert(codegenContains(&emission.source, "(i64)INT64_MIN;"));
+  Test::assert(codegenContains(&emission.source, "= INT64_MIN;"));
+  Test::assert(!codegenContains(&emission.source, "--2147483648"));
+  Test::assert(!codegenContains(&emission.source, "-0U"));
+}
+
 /// The reserved-name table is the contract both compilers share, so it is
 /// asserted directly rather than through an emission: a divergence here is a
 /// bootstrap fixed-point failure, not a wrong-looking function body.

@@ -4532,6 +4532,58 @@ export namespace Analyzer {
       return Option::SOME(0 - operand);
     }
 
+    /// The value of a minus sign written directly against a decimal integer
+    /// literal, as in `-2147483648`.
+    ///
+    /// The reference lexer reads that spelling as one negative literal token,
+    /// so the range check, the default type and the emitted constant all apply
+    /// to the negated value. Negating the magnitude instead would reject
+    /// every signed minimum and wrap its magnitude before the negation.
+    /// A spaced `- 5`, a parenthesised operand and a hex or binary literal stay
+    /// ordinary negations, as they are there.
+    function negativeIntegerLiteralValue(
+      module: &Ast::Module,
+      unary: &Ast::Expression::Unary
+    ): Option<i64> {
+      if (unary.operator != Ast::Expression::UnaryOperator::Negate) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(Ast::Expression::Node::Literal(literal)) = module.expressions.get(unary.operand) else {
+        return Option::NONE;
+      };
+
+      if (literal.span.start != unary.span.start + 1) {
+        return Option::NONE;
+      }
+
+      return Analyzer::Typecheck::negatedDecimalLiteralValue(&literal.value);
+    }
+
+    /// The parser keeps a decimal literal as `Int` up to `i64` max and as
+    /// `UInt` past it, so the only `UInt` whose negation is an `i64` is the
+    /// magnitude of the `i64` minimum. Every other `UInt` is a hex or binary
+    /// literal, or out of range.
+    function negatedDecimalLiteralValue(value: &Ast::Expression::LiteralValue): Option<i64> {
+      match (value) {
+        Ast::Expression::LiteralValue::Int(magnitude) -> {
+          return Option::SOME(0 - magnitude);
+        },
+        Ast::Expression::LiteralValue::UInt(magnitude) -> {
+          if (magnitude == 9223372036854775808) {
+            return Option::SOME(minOf<i64>());
+          }
+
+          return Option::NONE;
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
     /// Reject a constant index that cannot address `size` elements, the way
     /// the host does at typecheck time for `T[N]`.
     function checkFixedArrayIndexBounds(
@@ -5945,6 +5997,10 @@ export namespace Analyzer {
       value: &Ast::Expression::Unary,
       expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
+      if (let Option::SOME(negatedValue) = Analyzer::Typecheck::negativeIntegerLiteralValue(module, value)) {
+        return Analyzer::Typecheck::checkNegativeIntegerLiteral(state, defStore, typeStore, symbols, exprId, value, negatedValue, expected);
+      }
+
       // The reference analyzer checks the operand under the same infer
       // context, so `-1` expected as `i64` types its literal as `i64`.
       let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand, expected);
@@ -6003,6 +6059,53 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: checkUnaryExpr match did not return");
+    }
+
+    /// Types a negative integer literal the way the reference analyzer's
+    /// `coerce_signed_literal` types its single negative token: it adopts an
+    /// expected integer type when the negated value fits, reports an overflow
+    /// of the negated value when it does not, and otherwise defaults to `i32`,
+    /// or `i64` past the `i32` range. The operand records the same type, since
+    /// lowering folds the pair into one literal.
+    function checkNegativeIntegerLiteral(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Unary,
+      negatedValue: i64,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      if (let Option::SOME(expectedType) = expected) {
+        let resolvedExpected: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+
+        if (resolvedExpected.cycleAlias.isNone()) {
+          if (let Option::SOME(expectedNode) = typeStore.get(resolvedExpected.typeId)) {
+            if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
+              if (!Analyzer::Typecheck::signedLiteralFits(expectedNode, negatedValue)) {
+                let literalText: String = String::create(negatedValue);
+                Analyzer::Typecheck::emitIntegerOverflow(state, defStore, typeStore, symbols, value.span, literalText.toStr(), expectedType);
+                return Option::NONE;
+              }
+
+              Analyzer::Typecheck::recordExprType(state, value.operand, expectedType);
+              Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
+              return Option::SOME(expectedType);
+            }
+          }
+        }
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let mut literalType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::I64);
+      if (negatedValue >= -2147483648) {
+        literalType = typeStoreRef.intern(Analyzer::Type::I32);
+      }
+
+      Analyzer::Typecheck::recordExprType(state, value.operand, literalType);
+      Analyzer::Typecheck::recordExprType(state, exprId, literalType);
+      return Option::SOME(literalType);
     }
 
     /// Whether a `let ... else` is written in the shorthand form: a plain
