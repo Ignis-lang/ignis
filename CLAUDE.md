@@ -72,7 +72,8 @@ scripts/bootstrap.sh all                       # stage1 -> stage2 -> stage3 fixe
 scripts/bootstrap.sh status                    # which build/bootstrap/<stage>/ignis exist
 scripts/bootstrap.sh parity                    # host e2e corpus through stage2 -> build/bootstrap/parity.md
 scripts/bootstrap.sh gate-g5                   # host error corpus through stage2 -> build/bootstrap/gates/G5.json
-scripts/bootstrap.sh gate-g6                   # host vs stage2 parse verdicts -> build/bootstrap/gates/G6.json
+scripts/bootstrap.sh gate-g6                   # stage2 parse verdicts vs committed baselines (host cross-check) -> build/bootstrap/gates/G6.json
+scripts/bootstrap.sh gate-g6-baselines [bin]   # regenerate test_cases/__parse_verdicts__ from stage2 (review the diff)
 scripts/bootstrap.sh gate-g7                   # stage2 drop schedules vs committed baselines -> build/bootstrap/gates/G7.json
 scripts/bootstrap.sh gate-g7-stage1            # same, against stage1 (what PR CI runs) -> gates/G7-STAGE1.json
 scripts/bootstrap.sh gate-g7-baselines [bin]   # regenerate test_cases/e2e/ok/__drop_schedules__ (review the diff)

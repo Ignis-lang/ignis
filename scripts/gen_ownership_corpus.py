@@ -96,8 +96,18 @@ CI checks with `git diff --exit-code`.
 
 import argparse
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from selfhost_syntax_parity import (  # noqa: E402
+  BASELINE_DIR as PARSE_VERDICT_DIR,
+  BASELINE_SUFFIX as PARSE_VERDICT_SUFFIX,
+  CORPUS_DIRECTORIES as PARSE_VERDICT_CORPUS,
+  case_name_from_path,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
@@ -810,6 +820,41 @@ def prune_stale_drop_schedules(keep: set[str]) -> list[str]:
   return removed
 
 
+def prune_stale_parse_verdicts() -> list[str]:
+  """Removes the G6 baselines of ownership fixtures that no longer exist.
+
+  Same reasoning as `prune_stale_drop_schedules`, except that G6 records a
+  verdict for the `err` fixtures too. A G6 case name flattens the fixture's
+  path, so the ownership baselines are found by the prefix of their directory.
+  That prefix is shared with unrelated fixtures such as
+  `test_cases/e2e/ok/ownership_discard_call.ign`, so a baseline is only removed
+  when no source in the G6 corpus maps to it any more, and this has to run
+  after the fixtures themselves were pruned.
+  """
+
+  removed: list[str] = []
+  directory = REPOSITORY_ROOT / PARSE_VERDICT_DIR
+
+  if not directory.exists():
+    return removed
+
+  prefixes = tuple(f"{case_name_from_path(path.relative_to(REPOSITORY_ROOT))}_" for path in (OK_DIR, ERR_DIR))
+  live = {
+    case_name_from_path(path.relative_to(REPOSITORY_ROOT))
+    for corpus in PARSE_VERDICT_CORPUS
+    for path in (REPOSITORY_ROOT / corpus).rglob("*.ign")
+  }
+
+  for baseline_path in sorted(directory.glob(f"*{PARSE_VERDICT_SUFFIX}")):
+    if not baseline_path.stem.startswith(prefixes) or baseline_path.stem in live:
+      continue
+
+    baseline_path.unlink()
+    removed.append(f"{directory.name}/{baseline_path.name}")
+
+  return removed
+
+
 def generate() -> tuple[list[str], list[str]]:
   cases = enumerate_cases()
 
@@ -841,6 +886,7 @@ def generate() -> tuple[list[str], list[str]]:
   removed.extend(prune_skipped_snapshots())
 
   removed.extend(prune_stale_drop_schedules(ok_names))
+  removed.extend(prune_stale_parse_verdicts())
 
   return written, removed
 
@@ -874,6 +920,8 @@ def main() -> int:
   if arguments.clean:
     for directory in (OK_DIR, ERR_DIR, OK_DIR.parent / "__drop_schedules__" / OK_DIR.name):
       shutil.rmtree(directory, ignore_errors=True)
+
+    prune_stale_parse_verdicts()
 
     print("removed the generated ownership corpus")
 
