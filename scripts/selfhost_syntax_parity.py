@@ -31,12 +31,15 @@ standalone file is still comparable.
 
 Part of that corpus comes from the host parser unit tests: every inline source
 string they pass to their `parse`, `parse_expr`, `parse_stmt` and `parse_type`
-helpers, wrapped the way each helper wraps it, is committed byte for byte
-under `test_cases/parser/host_unit_tests/`. The Rust sources go away when the
-host is frozen, so the snippets have to outlive them as files.
-`--materialize-parser-tests` (re)writes that directory from the Rust sources
-and `--check-parser-tests` reports any drift between the two; neither runs a
-compiler.
+helpers, wrapped the way each helper wraps it, and every whole program a test
+registers itself with `add_file`, is committed byte for byte under
+`test_cases/parser/host_unit_tests/`. A source is read from a string literal
+argument, from a `let` of one in the same test, or from the first column of a
+table of tuples a `for` in the same test walks, one case per row. The Rust
+sources go away when the host is frozen, so the snippets have to outlive them
+as files. `--materialize-parser-tests` (re)writes that directory from the Rust
+sources and `--check-parser-tests` reports any drift between the two, and any
+call in a `#[test]` fn whose source cannot be rebuilt; neither runs a compiler.
 
 Each case is materialised as a one-file Ignis project, because the selfhost
 driver resolves its module graph from an `ignis.toml`.
@@ -73,13 +76,22 @@ HELPER_WRAPPERS = {
   "parse_type": "function test(): {} {{ }}",
 }
 
-# The `I0xxx` codes either compiler's lexer or parser emits, taken from
+# The codes either compiler's lexer or parser emits, taken from
 # `crates/ignis_diagnostics/src/message.rs` and `ignis/diagnostics/codes.ign`
 # and restricted to the codes their `lexer`/`parser` modules actually raise.
-# The analyzer-only codes (I0031, I0033, I0041..I0043) are deliberately absent:
-# they belong to a later phase and must not decide a parse verdict.
+# Besides the `I0xxx` family the host parser raises a few `A`/`M` codes of its
+# own (A0067, A0143, A0145, A0203, M0005, M0006), which only it raises.
+# Deliberately absent: the analyzer-only codes (I0031, I0033, I0041..I0043),
+# and A0111, which the parser shares with the analyzer's `@compileError`, so
+# it cannot tell a parse rejection from a later phase's.
 PARSE_DIAGNOSTIC_CODES = frozenset(
   {
+    "A0067",
+    "A0143",
+    "A0145",
+    "A0203",
+    "M0005",
+    "M0006",
     "I0001",
     "I0002",
     "I0003",
@@ -379,13 +391,22 @@ def unescape_rust_string(value: str) -> str:
   return "".join(characters)
 
 
-HELPER_CALL_PATTERN = re.compile(
-  r"(?<![A-Za-z0-9_])(" + "|".join(HELPER_WRAPPERS) + r")\s*\("
+# `sm.add_file("test.ign", source)` is how a direct-parse test hands its whole
+# program to the lexer without going through one of the helpers.
+SOURCE_MAP_CALL = "add_file"
+SOURCE_MAP_WRAPPER = "{}"
+
+PARSER_TEST_CALL_PATTERN = re.compile(
+  r"(?<![A-Za-z0-9_])(" + "|".join([*HELPER_WRAPPERS, SOURCE_MAP_CALL]) + r")\s*\("
 )
 TEST_FUNCTION_PATTERN = re.compile(r"(?<![A-Za-z0-9_])fn\s+([A-Za-z0-9_]+)\s*\(")
 
 
 IDENTIFIER_ARGUMENT_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\)")
+SOURCE_ARGUMENT_PATTERN = re.compile(r"&?\s*([A-Za-z_][A-Za-z0-9_]*)")
+ARGUMENT_CONVERSION_PATTERN = re.compile(r"\s*\.\s*(?:to_string|to_owned|clone|into)\s*\(\s*\)")
+TABLE_NAME_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)")
+CHARACTER_LITERAL_PATTERN = re.compile(r"'(?:\\[^'\n]+|[^\\'\n])'")
 
 
 def enclosing_test_name(text: str, position: int) -> str:
@@ -440,8 +461,332 @@ def resolve_binding(text: str, name: str, position: int) -> str | None:
   return found
 
 
-def collect_parser_test_cases(repository_root: Path) -> list[Case]:
+def enclosing_function(text: str, position: int) -> re.Match | None:
+  """The `fn` header the call at `position` sits in, or None when there is none."""
+  last = None
+
+  for match in TEST_FUNCTION_PATTERN.finditer(text, 0, position):
+    last = match
+
+  return last
+
+
+def is_test_function(text: str, function_start: int) -> bool:
+  """Whether the `fn` at `function_start` carries `#[test]`.
+
+  Other attributes, comments and blank lines may sit between `#[test]` and the
+  `fn`, so the walk goes up line by line over those and stops at anything else.
+  """
+  line_start = text.rfind("\n", 0, function_start) + 1
+
+  if "#[test]" in text[line_start:function_start]:
+    return True
+
+  while line_start > 0:
+    previous_start = text.rfind("\n", 0, line_start - 1) + 1
+    line = text[previous_start:line_start - 1].strip()
+    line_start = previous_start
+
+    if line.startswith("#[test]"):
+      return True
+
+    if line == "" or line.startswith("//") or line.startswith("#["):
+      continue
+
+    return False
+
+  return False
+
+
+def skip_past_tuple_end(scanner: SourceScanner) -> bool:
+  """Move past the `)` closing the tuple the scanner is inside.
+
+  Nested groups and string or character literals are skipped whole, so a `)`
+  inside them never closes the tuple early.
+  """
+  text = scanner.text
+  depth = 0
+
+  while True:
+    scanner.skip_trivia()
+
+    if scanner.position >= len(text):
+      return False
+
+    character = text[scanner.position]
+
+    if character in "([{":
+      depth += 1
+      scanner.position += 1
+      continue
+
+    if character in ")]}":
+      if depth == 0:
+        scanner.position += 1
+        return character == ")"
+
+      depth -= 1
+      scanner.position += 1
+      continue
+
+    if character == '"':
+      if scanner.read_plain_string() is None:
+        return False
+
+      continue
+
+    if character == "r" and scanner.read_raw_string() is not None:
+      continue
+
+    if character == "'":
+      literal = CHARACTER_LITERAL_PATTERN.match(text, scanner.position)
+      scanner.position = literal.end() if literal else scanner.position + 1
+      continue
+
+    scanner.position += 1
+
+
+def read_table_rows(text: str, start: int) -> list[str] | None:
+  """The leading string literal of each tuple in the array literal opening at `start`.
+
+  None as soon as one row is not a tuple opening with a string literal: a
+  table read only in part would silently lose the rows it skipped.
+  """
+  scanner = SourceScanner(text)
+  scanner.position = start + 1
+  rows = []
+
+  while True:
+    scanner.skip_trivia()
+
+    if scanner.position >= len(text):
+      return None
+
+    if text[scanner.position] == "]":
+      return rows
+
+    if text[scanner.position] != "(":
+      return None
+
+    scanner.position += 1
+    scanner.skip_trivia()
+    value = read_literal(scanner)
+
+    if value is None or not skip_past_tuple_end(scanner):
+      return None
+
+    rows.append(value)
+
+    scanner.skip_trivia()
+
+    if text.startswith(",", scanner.position):
+      scanner.position += 1
+
+
+def resolve_table_rows(text: str, name: str, position: int) -> list[str] | None:
+  """The first-column literals of the table a `for (<name>, ...) in <table>` walks.
+
+  The loop has to sit in the call's own `fn`, before the call. The table is
+  either written inline after `in`, or bound by the last `let <table> = [...]`
+  (or `vec![...]`) before the loop in that same `fn`.
+  """
+  function_start = enclosing_function_start(text, position)
+  loop_pattern = re.compile(
+    r"(?<![A-Za-z0-9_])for\s*\(\s*" + re.escape(name) + r"\s*,[^)]*\)\s*in\s+(?:&\s*)?"
+  )
+  loop = None
+
+  for match in loop_pattern.finditer(text, function_start, position):
+    loop = match
+
+  if loop is None:
+    return None
+
+  if text.startswith("[", loop.end()):
+    return read_table_rows(text, loop.end())
+
+  table = TABLE_NAME_PATTERN.match(text, loop.end())
+
+  if table is None:
+    return None
+
+  binding_pattern = re.compile(
+    r"(?<![A-Za-z0-9_])let\s+(?:mut\s+)?" + re.escape(table.group(1)) + r"\s*(?::[^=]+)?=\s*(?:vec!\s*)?(?=\[)"
+  )
+  rows = None
+
+  for match in binding_pattern.finditer(text, function_start, loop.start()):
+    rows = read_table_rows(text, match.end())
+
+  return rows
+
+
+def resolve_identifier(text: str, name: str, position: int) -> tuple[list[str] | None, str | None]:
+  """The sources an identifier argument stands for, or None and why it stands for none."""
+  source = resolve_binding(text, name, position)
+
+  if source is not None:
+    return [source], None
+
+  rows = resolve_table_rows(text, name, position)
+
+  if rows:
+    return rows, None
+
+  return None, f"`{name}` is bound neither by a `let` of a string literal nor by a `for` over a table of them"
+
+
+def read_helper_call(text: str, arguments_start: int, call_start: int) -> tuple[list[str] | None, str | None]:
+  """The sources a `parse`/`parse_expr`/`parse_stmt`/`parse_type` call parses."""
+  scanner = SourceScanner(text)
+  scanner.position = arguments_start
+  scanner.skip_trivia()
+
+  source = read_literal(scanner)
+
+  if source is not None:
+    scanner.skip_trivia()
+
+    if scanner.position < len(text) and text[scanner.position] not in (")", ","):
+      return None, "the string literal argument continues into a larger expression"
+
+    return [source], None
+
+  # A `format!` or any other computed argument carries no literal to
+  # reconstruct the source from.
+  argument = IDENTIFIER_ARGUMENT_PATTERN.match(text, scanner.position)
+
+  if argument is None:
+    return None, "the argument is neither a string literal nor a plain identifier"
+
+  return resolve_identifier(text, argument.group(1), call_start)
+
+
+def read_source_map_call(text: str, arguments_start: int, call_start: int) -> tuple[list[str] | None, str | None]:
+  """The program an `add_file("<name>", <source>)` call registers."""
+  scanner = SourceScanner(text)
+  scanner.position = arguments_start
+  scanner.skip_trivia()
+
+  if read_literal(scanner) is None:
+    return None, "the file name argument is not a string literal"
+
+  scanner.skip_trivia()
+
+  if not text.startswith(",", scanner.position):
+    return None, "the call has no source argument"
+
+  scanner.position += 1
+  scanner.skip_trivia()
+
+  source = read_literal(scanner)
+  name = None
+
+  if source is None:
+    argument = SOURCE_ARGUMENT_PATTERN.match(text, scanner.position)
+
+    if argument is None:
+      return None, "the source argument is neither a string literal nor an identifier"
+
+    name = argument.group(1)
+    scanner.position = argument.end()
+
+  conversion = ARGUMENT_CONVERSION_PATTERN.match(text, scanner.position)
+
+  if conversion is not None:
+    scanner.position = conversion.end()
+
+  scanner.skip_trivia()
+
+  if text.startswith(",", scanner.position):
+    scanner.position += 1
+    scanner.skip_trivia()
+
+  if not text.startswith(")", scanner.position):
+    return None, "the source argument continues into a larger expression"
+
+  if source is not None:
+    return [source], None
+
+  return resolve_identifier(text, name, call_start)
+
+
+@dataclass
+class UncapturedCall:
+  """A call in a `#[test]` fn whose parsed source the scraper could not rebuild."""
+
+  location: str
+  reason: str
+
+
+def scrape_parser_test_file(
+  relative_path: str,
+  text: str,
+  used_names: dict[str, int],
+  cases: list[Case],
+  uncaptured: list[UncapturedCall],
+) -> None:
+  """Append one file's snippets to `cases` and its unreadable test calls to `uncaptured`.
+
+  Calls are visited in text order, helper and `add_file` alike, because the
+  `__N` suffix numbers the snippets of one test in the order they appear.
+  """
+  file_stem = Path(relative_path).stem
+
+  for match in PARSER_TEST_CALL_PATTERN.finditer(text):
+    callee = match.group(1)
+    line_start = text.rfind("\n", 0, match.start())
+
+    # `fn parse(` declares the helper instead of calling it.
+    if text[line_start + 1:match.start()].rstrip().endswith("fn"):
+      continue
+
+    function = enclosing_function(text, match.start())
+    in_test = function is not None and is_test_function(text, function.start())
+    line = text.count("\n", 0, match.start()) + 1
+    location = f"{relative_path}:{line} ({callee})"
+
+    if callee == SOURCE_MAP_CALL:
+      # A helper registers its own parameter; only a test's call names a source.
+      if not in_test:
+        continue
+
+      sources, reason = read_source_map_call(text, match.end(), match.start())
+      wrapper = SOURCE_MAP_WRAPPER
+    else:
+      sources, reason = read_helper_call(text, match.end(), match.start())
+      wrapper = HELPER_WRAPPERS[callee]
+
+    if sources is None:
+      # `parser.parse()` is the parser's own method, not the test helper.
+      is_method_call = callee != SOURCE_MAP_CALL and text[line_start + 1:match.start()].rstrip().endswith(".")
+
+      if in_test and not is_method_call:
+        uncaptured.append(UncapturedCall(location=location, reason=reason or "no source"))
+
+      continue
+
+    base_name = f"{file_stem}__{enclosing_test_name(text, match.start())}"
+
+    for source in sources:
+      occurrence = used_names.get(base_name, 0)
+      used_names[base_name] = occurrence + 1
+      name = base_name if occurrence == 0 else f"{base_name}__{occurrence + 1}"
+
+      cases.append(
+        Case(
+          name=name,
+          origin=ORIGIN_PARSER_TEST,
+          source=wrapper.format(source),
+          location=location,
+        )
+      )
+
+
+def scrape_parser_tests(repository_root: Path) -> tuple[list[Case], list[UncapturedCall]]:
+  """Every snippet the host parser unit tests parse, and every test call that yielded none."""
   cases: list[Case] = []
+  uncaptured: list[UncapturedCall] = []
   used_names: dict[str, int] = {}
 
   for relative_path in HELPER_FILES:
@@ -450,59 +795,18 @@ def collect_parser_test_cases(repository_root: Path) -> list[Case]:
     if not path.is_file():
       continue
 
-    text = path.read_text(encoding="utf-8")
-    file_stem = path.stem
+    scrape_parser_test_file(relative_path, path.read_text(encoding="utf-8"), used_names, cases, uncaptured)
 
-    for match in HELPER_CALL_PATTERN.finditer(text):
-      helper = match.group(1)
-      line_start = text.rfind("\n", 0, match.start())
+  return cases, uncaptured
 
-      # `fn parse(` declares the helper instead of calling it.
-      if text[line_start + 1:match.start()].rstrip().endswith("fn"):
-        continue
 
-      scanner = SourceScanner(text)
-      scanner.position = match.end()
-      scanner.skip_trivia()
+def collect_parser_test_cases(repository_root: Path) -> list[Case]:
+  return scrape_parser_tests(repository_root)[0]
 
-      source = read_literal(scanner)
 
-      if source is not None:
-        scanner.skip_trivia()
-
-        if scanner.position < len(text) and text[scanner.position] not in (")", ","):
-          continue
-      else:
-        # `let source = "..."; parse(source);` is the other shape these tests
-        # use. A call over a table of tuples or a `format!` carries no single
-        # literal, and there is nothing to reconstruct from it.
-        argument = IDENTIFIER_ARGUMENT_PATTERN.match(text, scanner.position)
-
-        if argument is None:
-          continue
-
-        source = resolve_binding(text, argument.group(1), match.start())
-
-        if source is None:
-          continue
-
-      base_name = f"{file_stem}__{enclosing_test_name(text, match.start())}"
-      occurrence = used_names.get(base_name, 0)
-      used_names[base_name] = occurrence + 1
-      name = base_name if occurrence == 0 else f"{base_name}__{occurrence + 1}"
-
-      line = text.count("\n", 0, match.start()) + 1
-
-      cases.append(
-        Case(
-          name=name,
-          origin=ORIGIN_PARSER_TEST,
-          source=HELPER_WRAPPERS[helper].format(source),
-          location=f"{relative_path}:{line} ({helper})",
-        )
-      )
-
-  return cases
+def uncaptured_parser_test_calls(repository_root: Path) -> list[UncapturedCall]:
+  """The `#[test]` calls whose source would be lost with the Rust files; calls in helpers never count."""
+  return scrape_parser_tests(repository_root)[1]
 
 
 def parser_test_files(repository_root: Path) -> dict[str, bytes]:
@@ -599,6 +903,9 @@ def run_materialize_parser_tests(repository_root: Path) -> int:
     f"{len(drift.missing)} added, {len(drift.differing)} updated, {len(drift.extra)} removed"
   )
 
+  for call in uncaptured_parser_test_calls(repository_root):
+    print(f"warning: uncaptured parser test call at {call.location}: {call.reason}", file=sys.stderr)
+
   return 0
 
 
@@ -620,12 +927,26 @@ def run_parser_test_check(repository_root: Path) -> int:
   for name in drift.differing:
     print(f"differing snippet: {PARSER_TEST_DIR}/{name}", file=sys.stderr)
 
+  uncaptured = uncaptured_parser_test_calls(repository_root)
+
+  for call in uncaptured:
+    print(f"uncaptured parser test call at {call.location}: {call.reason}", file=sys.stderr)
+
   if not drift.is_empty():
     print(
       f"{len(drift.missing)} missing, {len(drift.extra)} extra and {len(drift.differing)} differing "
       f"snippets; {MATERIALIZE_HINT}",
       file=sys.stderr,
     )
+
+  if uncaptured:
+    print(
+      f"{len(uncaptured)} parser test calls parse a source the scraper cannot rebuild, and it would be lost "
+      "with the Rust sources; pass the source as a string literal, a `let` of one, or a table row",
+      file=sys.stderr,
+    )
+
+  if not drift.is_empty() or uncaptured:
     return 1
 
   print(f"parser unit-test snippets: {total} scraped, {total} committed, no drift")
@@ -1572,7 +1893,10 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
   modes.add_argument(
     "--check-parser-tests",
     action="store_true",
-    help=f"only check that {PARSER_TEST_DIR} matches the host parser unit tests, running no compiler",
+    help=(
+      f"only check that {PARSER_TEST_DIR} matches the host parser unit tests and that every test call "
+      "was scraped, running no compiler"
+    ),
   )
 
   arguments = parser.parse_args()

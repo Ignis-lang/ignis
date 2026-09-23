@@ -20,6 +20,7 @@ Usage: python3 scripts/tests/test_selfhost_syntax_parity.py
 import contextlib
 import io
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -42,6 +43,7 @@ from selfhost_syntax_parity import (  # noqa: E402
   CLASS_SELFHOST_REJECTS,
   ORIGIN_PARSER_TEST,
   ORIGIN_REPOSITORY,
+  PARSE_DIAGNOSTIC_CODES,
   PARSER_TEST_DIR,
   Case,
   Settings,
@@ -52,6 +54,8 @@ from selfhost_syntax_parity import (  # noqa: E402
   parser_test_drift,
   run_case,
   run_coverage_check,
+  run_parser_test_check,
+  uncaptured_parser_test_calls,
   write_baselines,
 )
 
@@ -168,7 +172,8 @@ fn parses_a_table_of_sources() {
     files = self.committed_files()
 
     self.assertEqual(files["expression__parses_let_bound_source.ign"], b"function test(): void { a < b; }")
-    self.assertNotIn("expression__parses_a_table_of_sources.ign", files)
+    self.assertEqual(files["expression__parses_a_table_of_sources.ign"], b"function test(): void { a > b; }")
+    self.assertEqual(files["expression__parses_a_table_of_sources__2.ign"], b"function test(): void { a == b; }")
 
   def test_an_empty_scrape_deletes_nothing(self) -> None:
     materialize_parser_tests(self.repository_root, self.target_dir)
@@ -192,6 +197,157 @@ fn parses_a_table_of_sources() {
     self.assertEqual(len(origins), len(EXPECTED_FILES) + 1)
 
 
+SYNTHETIC_DIRECT_PARSE_TESTS = r'''
+fn parse(source: &str) -> Node {
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("test.ign", source.to_string());
+  todo()
+}
+
+#[test]
+fn rejects_an_inline_program() {
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file(
+    "test.ign",
+    "function bad<T>(): void { return; }".to_string(),
+  );
+}
+
+#[test]
+#[should_panic]
+/// A doc comment and another attribute sit between `#[test]` and the `fn`.
+fn registers_a_let_bound_program() {
+  let source = r#"record Counter {
+    mut total: i32;
+  }"#;
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("test.ign", source.to_string());
+  parser.parse().expect_err("rejected");
+}
+'''
+
+SYNTHETIC_TABLE_TESTS = r'''
+#[test]
+fn parses_a_table_of_three_rows() {
+  let cases: [(&str, Operator); 3] = [
+    ("a < b", Operator::Less),
+    (r#"a == "(b)""#, Operator::Equal),
+    ("c\td", Operator::Other(')')),
+  ];
+
+  for (source, expected) in cases {
+    parse_expr(source);
+  }
+}
+
+#[test]
+fn parses_an_inline_table() {
+  for (source, _) in [("x + 1", 1), ("y - 2", 2)] {
+    parse_stmt(source);
+  }
+}
+'''
+
+
+class DirectParseAndTableTests(unittest.TestCase):
+  """Sources a test registers with `add_file` itself, or walks as rows of a table."""
+
+  def setUp(self) -> None:
+    self._tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self._tmp.cleanup)
+    self.repository_root = Path(self._tmp.name)
+    self.parser_dir = self.repository_root / "crates/ignis_parser/src/parser"
+    self.parser_dir.mkdir(parents=True)
+    self.target_dir = self.repository_root / PARSER_TEST_DIR
+
+  def write_rust(
+    self,
+    stem: str,
+    source: str,
+  ) -> None:
+    (self.parser_dir / f"{stem}.rs").write_text(source, encoding="utf-8")
+
+  def materialized(self) -> dict[str, bytes]:
+    materialize_parser_tests(self.repository_root, self.target_dir)
+
+    return {path.name: path.read_bytes() for path in self.target_dir.iterdir()}
+
+  def test_captures_an_inline_add_file_program(self) -> None:
+    self.write_rust("declarations", SYNTHETIC_DIRECT_PARSE_TESTS)
+
+    files = self.materialized()
+
+    self.assertEqual(
+      files["declarations__rejects_an_inline_program.ign"],
+      b"function bad<T>(): void { return; }",
+    )
+
+  def test_captures_an_add_file_program_bound_by_let(self) -> None:
+    self.write_rust("declarations", SYNTHETIC_DIRECT_PARSE_TESTS)
+
+    files = self.materialized()
+
+    self.assertEqual(
+      files["declarations__registers_a_let_bound_program.ign"],
+      b"record Counter {\n    mut total: i32;\n  }",
+    )
+
+  def test_an_add_file_inside_a_helper_is_neither_captured_nor_reported(self) -> None:
+    self.write_rust("declarations", SYNTHETIC_DIRECT_PARSE_TESTS)
+
+    files = self.materialized()
+
+    self.assertEqual(
+      sorted(files),
+      ["declarations__registers_a_let_bound_program.ign", "declarations__rejects_an_inline_program.ign"],
+    )
+    self.assertEqual(uncaptured_parser_test_calls(self.repository_root), [])
+
+  def test_captures_one_byte_exact_case_per_table_row_in_row_order(self) -> None:
+    self.write_rust("expression", SYNTHETIC_TABLE_TESTS)
+
+    files = self.materialized()
+
+    self.assertEqual(
+      files,
+      {
+        "expression__parses_a_table_of_three_rows.ign": b"function test(): void { a < b; }",
+        "expression__parses_a_table_of_three_rows__2.ign": b'function test(): void { a == "(b)"; }',
+        "expression__parses_a_table_of_three_rows__3.ign": b"function test(): void { c\td; }",
+        "expression__parses_an_inline_table.ign": b"function test(): void { x + 1 }",
+        "expression__parses_an_inline_table__2.ign": b"function test(): void { y - 2 }",
+      },
+    )
+    self.assertEqual(uncaptured_parser_test_calls(self.repository_root), [])
+
+  def test_an_unreadable_test_call_is_reported_and_fails_the_check(self) -> None:
+    source = (
+      SYNTHETIC_TABLE_TESTS
+      + r'''
+#[test]
+fn parses_a_formatted_source() {
+  let result = parse_expr(&format!("{} + 1", value));
+}
+'''
+    )
+    self.write_rust("expression", source)
+    materialize_parser_tests(self.repository_root, self.target_dir)
+    line = source.split("\n").index('  let result = parse_expr(&format!("{} + 1", value));') + 1
+    location = f"crates/ignis_parser/src/parser/expression.rs:{line} (parse_expr)"
+
+    uncaptured = uncaptured_parser_test_calls(self.repository_root)
+
+    self.assertEqual([call.location for call in uncaptured], [location])
+
+    stderr = io.StringIO()
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+      exit_code = run_parser_test_check(self.repository_root)
+
+    self.assertEqual(exit_code, 1)
+    self.assertIn(f"uncaptured parser test call at {location}", stderr.getvalue())
+
+
 class RepositorySnippetTests(unittest.TestCase):
   """The committed snippets in this repository, checked the way CI checks them."""
 
@@ -204,6 +360,36 @@ class RepositorySnippetTests(unittest.TestCase):
     )
 
     self.assertEqual(completed.returncode, 0, completed.stderr)
+
+  def test_every_code_the_host_parser_raises_decides_a_parse_verdict(self) -> None:
+    """A parser code missing from PARSE_DIAGNOSTIC_CODES reads as "accepted" on the host side.
+
+    That is how the selfhost accepting `export _ from` (host M0006) went
+    unnoticed. A0111 is the one exception: the analyzer raises it too.
+    """
+    repository_root = SCRIPT_DIR.parent
+    parser_sources = repository_root / "crates/ignis_parser/src"
+
+    message_file = repository_root / "crates/ignis_diagnostics/src/message.rs"
+
+    if not parser_sources.is_dir() or not message_file.is_file():
+      self.skipTest("the host parser sources are gone")
+
+    messages = message_file.read_text(encoding="utf-8")
+    code_of = dict(
+      re.findall(r"DiagnosticMessage::(\w+)\s*(?:\{[^}]*\}|\([^)]*\))?\s*=>\s*\"([A-Z]\d{4})\"", messages)
+    )
+
+    self.assertTrue(code_of, "no diagnostic code mapping was read from message.rs")
+
+    raised: set[str] = set()
+
+    for path in parser_sources.rglob("*.rs"):
+      production = path.read_text(encoding="utf-8").split("#[cfg(test)]")[0]
+      raised |= {code_of[name] for name in re.findall(r"DiagnosticMessage::(\w+)", production) if name in code_of}
+
+    self.assertTrue(raised, "no diagnostic raised by the host parser was found")
+    self.assertEqual(sorted(raised - PARSE_DIAGNOSTIC_CODES - {"A0111"}), [])
 
 
 # A fake selfhost: it prints the phase report the harness reads, rejecting a
