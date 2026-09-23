@@ -38,6 +38,86 @@ instead, so a maintainer can force and inspect that path.
 Once the Rust host is frozen, this fallback goes away: stage0 will always be
 the official binary, and a build failure there is terminal, not a fallback.
 
+## C seed (A3)
+
+`bootstrap/seed/` holds the whole compiler, standard library included, as the
+single C file a fixed-point stage2 emits (`selfhost_emit.c`, xz-compressed),
+plus `manifest.json`. It rebuilds the compiler with gcc alone, so the ladder
+can start without Rust, and without any release asset, once the host is
+frozen and deleted.
+
+| File | Size |
+| --- | --- |
+| `selfhost_emit.c.xz` | 1,685,680 bytes (1.6 MiB) |
+| `selfhost_emit.c`, uncompressed | 29,046,207 bytes (28 MiB) |
+
+The manifest records the source commit, the sha256 of both the archive and
+the uncompressed C, the compiler that emitted it (stage2 of that commit), the
+gcc recipe, the gcc it was generated next to, and the date. The recipe is the
+one the selfhost driver runs on itself for `ignis.toml`'s `[build]` profile,
+and the manifest is the only place it is written down:
+
+```bash
+gcc -c selfhost_emit.c -o selfhost_emit.o -O2 -I std/runtime
+gcc -O2 selfhost_emit.o -o ignis -lm
+```
+
+Besides `std/runtime/ignis_rt.h`, the C includes only standard C and POSIX
+headers (libc, libm, `unistd.h`, `sys/*.h`), and holds no absolute path, so
+it does not depend on the machine that generated it. `scripts/bootstrap.sh
+seed` refuses to write a seed whose C contains the repository's own path.
+
+### Rebuilding from it
+
+```bash
+scripts/build_from_seed.sh [--seed bootstrap/seed] [-o build/bootstrap/stage0-seed/ignis]
+scripts/bootstrap.sh all-from-seed      # the ladder with no Rust at all
+```
+
+`build_from_seed.sh` needs bash, xz, sha256sum and gcc, and nothing else. It
+checks the archive's sha256 against the manifest, decompresses it, checks the
+C's sha256, compiles and links, and prints the binary's path. A mismatch or a
+malformed manifest stops it with a non-zero exit. `--verify-only` runs the
+checks and compiles nothing; pull-request CI runs that on every change.
+
+`stage1-from-seed` builds that binary (reused while the seed is unchanged),
+records it in `build/bootstrap/stage0.json` as kind `seed`, and builds
+stage1 with it. A seed-built stage0 never falls back to the host: the point is
+to prove the ladder needs no Rust. Later subcommands (`stage2`, `stage3`, the
+gates) keep using that stage0 until `clean` or an explicit `IGNIS_STAGE0`.
+`all-from-seed` continues through stage3, so it ends with G1.
+
+The nightly job "Rebuild from the C seed (no Rust)" runs `all-from-seed` on a
+runner with no Rust toolchain and requires G1. It is independent of the
+promotion flow: its verdict never touches the streak.
+
+### Refreshing it
+
+```bash
+scripts/bootstrap.sh seed
+```
+
+It builds stage3, requires G1, and writes the C stage2 emitted, which G1 has
+just shown equal to stage1's. ignis/ and std/ must be committed first, so
+the recorded source commit describes the seed. Commit the new
+`bootstrap/seed/` on its own.
+
+Refreshing is deliberate, never automatic. The seed only has to build the
+current sources' stage1, the same contract the official binary has under the
+two-step rule below. Refresh it:
+
+- before the host is frozen, so the cut starts from a current seed;
+- after any change to ignis/ or std/ that must stay bootstrappable without
+  the host, typically when the nightly seed job fails because the sources
+  use something the seed's compiler cannot build.
+
+### Why it is committed
+
+The official selfhost binary lives only as a release asset. A deleted
+release, a lost account or an expired artifact would leave no way back to a
+working compiler once the host is gone. The seed travels with every clone,
+is verified by checksum, and needs only a C compiler to come back to life.
+
 ## Gates
 
 Gate | Command | What it compares
