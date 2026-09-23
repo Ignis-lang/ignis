@@ -142,6 +142,43 @@ class ParserTestMaterializationTests(unittest.TestCase):
     self.assertEqual(drift.missing, [])
     self.assertEqual(drift.extra, [])
 
+  def test_a_binding_resolves_only_inside_its_own_test(self) -> None:
+    self.rust_file.write_text(
+      SYNTHETIC_EXPRESSION_TESTS
+      + r'''
+#[test]
+fn parses_let_bound_source() {
+  let source = "a < b";
+  parse_expr(source);
+}
+
+#[test]
+fn parses_a_table_of_sources() {
+  let cases = [("a > b", 1), ("a == b", 2)];
+
+  for (source, _) in cases {
+    parse_expr(source);
+  }
+}
+''',
+      encoding="utf-8",
+    )
+
+    materialize_parser_tests(self.repository_root, self.target_dir)
+    files = self.committed_files()
+
+    self.assertEqual(files["expression__parses_let_bound_source.ign"], b"function test(): void { a < b; }")
+    self.assertNotIn("expression__parses_a_table_of_sources.ign", files)
+
+  def test_an_empty_scrape_deletes_nothing(self) -> None:
+    materialize_parser_tests(self.repository_root, self.target_dir)
+    self.rust_file.unlink()
+
+    drift = materialize_parser_tests(self.repository_root, self.target_dir)
+
+    self.assertTrue(drift.is_empty(), drift)
+    self.assertEqual(self.committed_files(), EXPECTED_FILES)
+
   def test_materialized_snippets_join_the_corpus_as_parser_test_cases(self) -> None:
     materialize_parser_tests(self.repository_root, self.target_dir)
     ordinary = self.repository_root / "test_cases/e2e/ok/plain.ign"

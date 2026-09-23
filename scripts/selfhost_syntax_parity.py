@@ -409,12 +409,27 @@ def read_literal(scanner: SourceScanner) -> str | None:
   return unescape_rust_string(value) if value is not None else None
 
 
+def enclosing_function_start(text: str, position: int) -> int:
+  """Offset of the `fn` the call at `position` sits in, or 0 when there is none."""
+  start = 0
+
+  for match in TEST_FUNCTION_PATTERN.finditer(text, 0, position):
+    start = match.start()
+
+  return start
+
+
 def resolve_binding(text: str, name: str, position: int) -> str | None:
-  """The literal the last `let <name> = "..."` before `position` binds."""
+  """The literal the last `let <name> = "..."` before `position` binds.
+
+  The search stops at the enclosing `fn`: a name bound some other way inside
+  the test (a `for` pattern over a table, a parameter) must resolve to nothing,
+  not to a `let` of the same name in an earlier test.
+  """
   pattern = re.compile(r"(?<![A-Za-z0-9_])let\s+" + re.escape(name) + r"\s*(?::[^=;]+)?=\s*")
   found = None
 
-  for match in pattern.finditer(text, 0, position):
+  for match in pattern.finditer(text, enclosing_function_start(text, position), position):
     scanner = SourceScanner(text)
     scanner.position = match.end()
     value = read_literal(scanner)
@@ -539,9 +554,16 @@ def materialize_parser_tests(
 
   The files are written as bytes so nothing (newline translation, a trailing
   newline added for style) separates them from the string the host test parses.
+
+  Scraping nothing changes nothing: once the Rust sources are gone the
+  committed files are the only copy, and an empty scrape must not delete them.
   """
-  drift = parser_test_drift(repository_root, target_dir)
   expected = parser_test_files(repository_root)
+
+  if not expected:
+    return ParserTestDrift()
+
+  drift = parser_test_drift(repository_root, target_dir)
   target_dir.mkdir(parents=True, exist_ok=True)
 
   for name in drift.missing + drift.differing:
@@ -555,12 +577,13 @@ def materialize_parser_tests(
 
 def run_materialize_parser_tests(repository_root: Path) -> int:
   target_dir = repository_root / PARSER_TEST_DIR
-  drift = materialize_parser_tests(repository_root, target_dir)
   total = len(parser_test_files(repository_root))
 
   if total == 0:
-    print("error: no parser unit-test snippets were found in the Rust sources", file=sys.stderr)
+    print("error: no parser unit-test snippets were found in the Rust sources; nothing was changed", file=sys.stderr)
     return 1
+
+  drift = materialize_parser_tests(repository_root, target_dir)
 
   for name in drift.missing:
     print(f"added:   {PARSER_TEST_DIR}/{name}")
