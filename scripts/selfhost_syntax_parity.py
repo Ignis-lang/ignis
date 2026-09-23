@@ -7,15 +7,19 @@ Diagnostics from later phases (analysis, ownership, codegen, linking) never
 decide a case, so a program the host rejects for a type error still counts as
 "parse accepted" on both sides.
 
-The corpus has two halves:
+The corpus is every `.ign` file under `test_cases/`, `example/` and `std/`,
+parsed standalone. Parsing needs no import to resolve, and both compilers
+report a parse verdict for a file whose imports do not resolve, so a
+standalone file is still comparable.
 
-  * every `.ign` file under `test_cases/`, `example/` and `std/`, parsed
-    standalone. Parsing needs no import to resolve, and both compilers report a
-    parse verdict for a file whose imports do not resolve, so a standalone file
-    is still comparable.
-  * every inline source string the host parser unit tests pass to their
-    `parse`, `parse_expr`, `parse_stmt` and `parse_type` helpers, wrapped the
-    way each helper wraps it.
+Part of that corpus comes from the host parser unit tests: every inline source
+string they pass to their `parse`, `parse_expr`, `parse_stmt` and `parse_type`
+helpers, wrapped the way each helper wraps it, is committed byte for byte
+under `test_cases/parser/host_unit_tests/`. The Rust sources go away when the
+host is frozen, so the snippets have to outlive them as files.
+`--materialize-parser-tests` (re)writes that directory from the Rust sources
+and `--check-parser-tests` reports any drift between the two; neither runs a
+compiler.
 
 Each case is materialised as a one-file Ignis project, because the selfhost
 driver resolves its module graph from an `ignis.toml`.
@@ -116,6 +120,14 @@ CLASS_DESCRIPTIONS = {
 ORIGIN_REPOSITORY = "repository"
 ORIGIN_PARSER_TEST = "parser-test"
 
+# Where the host parser unit-test snippets are committed, relative to the
+# repository root. It sits under `test_cases/`, so the repository walk picks the
+# files up as ordinary cases.
+PARSER_TEST_DIR = "test_cases/parser/host_unit_tests"
+PARSER_TEST_SUFFIX = ".ign"
+
+MATERIALIZE_HINT = "regenerate with `scripts/selfhost_syntax_parity.py --materialize-parser-tests`"
+
 
 @dataclass
 class Case:
@@ -161,6 +173,7 @@ class CaseResult:
 
 
 def collect_repository_cases(repository_root: Path) -> list[Case]:
+  parser_test_root = repository_root / PARSER_TEST_DIR
   cases = []
 
   for directory in CORPUS_DIRECTORIES:
@@ -174,7 +187,7 @@ def collect_repository_cases(repository_root: Path) -> list[Case]:
       cases.append(
         Case(
           name=case_name_from_path(relative),
-          origin=ORIGIN_REPOSITORY,
+          origin=ORIGIN_PARSER_TEST if path.is_relative_to(parser_test_root) else ORIGIN_REPOSITORY,
           source=path.read_text(encoding="utf-8", errors="replace"),
           location=str(relative),
         )
@@ -395,6 +408,126 @@ def collect_parser_test_cases(repository_root: Path) -> list[Case]:
       )
 
   return cases
+
+
+def parser_test_files(repository_root: Path) -> dict[str, bytes]:
+  """File name -> exact bytes of every snippet the host parser unit tests parse."""
+  return {
+    f"{case.name}{PARSER_TEST_SUFFIX}": case.source.encode("utf-8")
+    for case in collect_parser_test_cases(repository_root)
+  }
+
+
+@dataclass
+class ParserTestDrift:
+  """How the committed snippet files differ from what the Rust sources scrape to."""
+
+  missing: list[str] = field(default_factory=list)
+  extra: list[str] = field(default_factory=list)
+  differing: list[str] = field(default_factory=list)
+
+  def is_empty(self) -> bool:
+    return not (self.missing or self.extra or self.differing)
+
+
+def parser_test_drift(
+  repository_root: Path,
+  target_dir: Path,
+) -> ParserTestDrift:
+  """Compare `target_dir` with the snippets scraped from `repository_root`, by name and bytes."""
+  expected = parser_test_files(repository_root)
+  present = (
+    {path.name: path for path in target_dir.glob(f"*{PARSER_TEST_SUFFIX}") if path.is_file()}
+    if target_dir.is_dir()
+    else {}
+  )
+
+  return ParserTestDrift(
+    missing=sorted(name for name in expected if name not in present),
+    extra=sorted(name for name in present if name not in expected),
+    differing=sorted(
+      name for name, content in expected.items() if name in present and present[name].read_bytes() != content
+    ),
+  )
+
+
+def materialize_parser_tests(
+  repository_root: Path,
+  target_dir: Path,
+) -> ParserTestDrift:
+  """Make `target_dir` hold exactly the scraped snippets, and return what that changed.
+
+  The files are written as bytes so nothing (newline translation, a trailing
+  newline added for style) separates them from the string the host test parses.
+  """
+  drift = parser_test_drift(repository_root, target_dir)
+  expected = parser_test_files(repository_root)
+  target_dir.mkdir(parents=True, exist_ok=True)
+
+  for name in drift.missing + drift.differing:
+    (target_dir / name).write_bytes(expected[name])
+
+  for name in drift.extra:
+    (target_dir / name).unlink()
+
+  return drift
+
+
+def run_materialize_parser_tests(repository_root: Path) -> int:
+  target_dir = repository_root / PARSER_TEST_DIR
+  drift = materialize_parser_tests(repository_root, target_dir)
+  total = len(parser_test_files(repository_root))
+
+  if total == 0:
+    print("error: no parser unit-test snippets were found in the Rust sources", file=sys.stderr)
+    return 1
+
+  for name in drift.missing:
+    print(f"added:   {PARSER_TEST_DIR}/{name}")
+
+  for name in drift.differing:
+    print(f"updated: {PARSER_TEST_DIR}/{name}")
+
+  for name in drift.extra:
+    print(f"removed: {PARSER_TEST_DIR}/{name}")
+
+  print(
+    f"[syntax] {total} parser unit-test snippets under {PARSER_TEST_DIR}: "
+    f"{len(drift.missing)} added, {len(drift.differing)} updated, {len(drift.extra)} removed"
+  )
+
+  return 0
+
+
+def run_parser_test_check(repository_root: Path) -> int:
+  """Do the committed snippets still match the Rust sources? Runs no compiler."""
+  drift = parser_test_drift(repository_root, repository_root / PARSER_TEST_DIR)
+  total = len(parser_test_files(repository_root))
+
+  if total == 0:
+    print("error: no parser unit-test snippets were found in the Rust sources", file=sys.stderr)
+    return 1
+
+  for name in drift.missing:
+    print(f"missing snippet: {PARSER_TEST_DIR}/{name}", file=sys.stderr)
+
+  for name in drift.extra:
+    print(f"extra snippet: {PARSER_TEST_DIR}/{name}", file=sys.stderr)
+
+  for name in drift.differing:
+    print(f"differing snippet: {PARSER_TEST_DIR}/{name}", file=sys.stderr)
+
+  if not drift.is_empty():
+    print(
+      f"{len(drift.missing)} missing, {len(drift.extra)} extra and {len(drift.differing)} differing "
+      f"snippets; {MATERIALIZE_HINT}",
+      file=sys.stderr,
+    )
+    return 1
+
+  print(f"parser unit-test snippets: {total} scraped, {total} committed, no drift")
+
+  return 0
 
 
 # =============================================================================
@@ -734,9 +867,9 @@ def build_gate(results: list[CaseResult], counts: dict[str, int]) -> dict:
   }
 
 
-def main() -> int:
+def parse_arguments() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  parser.add_argument("--compiler", required=True, help="selfhost-built compiler binary")
+  parser.add_argument("--compiler", help="selfhost-built compiler binary")
   parser.add_argument("--host", default="ignis", help="host compiler binary (default: ignis on PATH)")
   parser.add_argument("--std", help="std directory (default: <repo>/std)")
   parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="parallel cases")
@@ -745,9 +878,44 @@ def main() -> int:
   parser.add_argument("--counts-json", help="write the per-class counts to this path as JSON")
   parser.add_argument("--work-dir", help="directory for the generated projects")
   parser.add_argument("--gate-json", help="write the G6 bootstrap gate result to this path")
-  arguments = parser.parse_args()
 
+  compiler_free = parser.add_mutually_exclusive_group()
+  compiler_free.add_argument(
+    "--materialize-parser-tests",
+    action="store_true",
+    help=f"(re)write {PARSER_TEST_DIR} from the host parser unit tests and exit, running no compiler",
+  )
+  compiler_free.add_argument(
+    "--check-parser-tests",
+    action="store_true",
+    help=f"only check that {PARSER_TEST_DIR} matches the host parser unit tests, running no compiler",
+  )
+
+  arguments = parser.parse_args()
+  compiler_free_mode = arguments.materialize_parser_tests or arguments.check_parser_tests
+
+  if not compiler_free_mode and arguments.compiler is None:
+    parser.error("--compiler is required unless --materialize-parser-tests or --check-parser-tests is given")
+
+  # Both modes act on the whole snippet directory: a filtered materialization
+  # would delete every snippet the filter did not match, and a filtered check
+  # would hide real drift.
+  if compiler_free_mode and arguments.filter:
+    parser.error("--materialize-parser-tests and --check-parser-tests cover every snippet; --filter does not apply")
+
+  return arguments
+
+
+def main() -> int:
+  arguments = parse_arguments()
   repository_root = Path(__file__).resolve().parent.parent
+
+  if arguments.materialize_parser_tests:
+    return run_materialize_parser_tests(repository_root)
+
+  if arguments.check_parser_tests:
+    return run_parser_test_check(repository_root)
+
   compiler = Path(arguments.compiler).resolve()
 
   if not compiler.is_file():
@@ -777,7 +945,9 @@ def main() -> int:
     print(f"error: std directory not found: {std_path}", file=sys.stderr)
     return 2
 
-  cases = collect_repository_cases(repository_root) + collect_parser_test_cases(repository_root)
+  # The parser unit-test snippets are part of this walk as committed files under
+  # PARSER_TEST_DIR; scraping the Rust sources here as well would run them twice.
+  cases = collect_repository_cases(repository_root)
 
   if arguments.filter:
     cases = [case for case in cases if arguments.filter in case.name]
