@@ -12444,6 +12444,51 @@ function typecheckUnexpectedNegativeLiteralPastI32DefaultsToI64(): void {
   assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::I64));
 }
 
+/// With nothing expected, as the operand of `as`, a decimal literal past the
+/// `i32` range takes `i64`, and one past the `i64` range takes `u64`, like the
+/// reference literal ladder, instead of losing its high bits.
+@test
+function typecheckUnexpectedLiteralPastI32DefaultsToI64(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function f(): void {\n  let _a: u64 = 4294967296 as u64;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+
+  let Option::SOME(literalExpr) = typecheckFindFirstLiteralExpr(&parsed.module) else {
+    @panic("typecheckUnexpectedLiteralPastI32DefaultsToI64: no literal parsed");
+  };
+
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::I64));
+}
+
+@test
+function typecheckUnexpectedLiteralPastI64DefaultsToU64(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function f(): void {\n  let _a: u64 = 18446744073709551615 as u64;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+
+  let Option::SOME(literalExpr) = typecheckFindFirstLiteralExpr(&parsed.module) else {
+    @panic("typecheckUnexpectedLiteralPastI64DefaultsToU64: no literal parsed");
+  };
+
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::U64));
+}
+
 /// A binary right operand is checked expecting the left operand's type, so an
 /// unsuffixed literal adopts it.
 /// Spec: IGN-132 — expected-type propagation.

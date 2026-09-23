@@ -4821,16 +4821,32 @@ export namespace Analyzer {
       @panic("unreachable: resolveLocalAnnotation match did not return");
     }
 
+    /// The type a literal takes when nothing is expected of it.
+    ///
+    /// A decimal integer takes the narrowest of `i32`, `i64` and `u64` that
+    /// holds its value, like the reference lexer's `parse_int_literal`, so a
+    /// literal past `i32` keeps every bit as the operand of `as`. The parser
+    /// keeps a decimal literal as `Int` up to `i64` max and as `UInt` past it.
+    /// Hex and binary literals are also `UInt` and default to `u32` like the
+    /// reference, unless their value is past `i64` max.
     function literalType(
       typeStore: &mut Analyzer::TypeStore,
       literal: &Ast::Expression::Literal,
     ): Analyzer::TypeId {
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       match (&literal.value) {
-        Ast::Expression::LiteralValue::Int(_) -> {
+        Ast::Expression::LiteralValue::Int(value) -> {
+          if (value > 2147483647) {
+            return typeStoreRef.intern(Analyzer::Type::I64);
+          }
+
           return typeStoreRef.intern(Analyzer::Type::I32);
         },
-        Ast::Expression::LiteralValue::UInt(_) -> {
+        Ast::Expression::LiteralValue::UInt(value) -> {
+          if (value > 9223372036854775807) {
+            return typeStoreRef.intern(Analyzer::Type::U64);
+          }
+
           return typeStoreRef.intern(Analyzer::Type::U32);
         },
         Ast::Expression::LiteralValue::Float(_) -> {
