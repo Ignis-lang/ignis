@@ -791,6 +791,18 @@ export namespace ParserDeclarations {
     return ParserDeclarations::parseMethodLikeItemDetailed(parserRef, metadata, true);
   }
 
+  function atDiscardIdentifier(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+    parserRef.skipTrivia();
+    let token: Token = parserRef.current();
+
+    if (token.kindValue() != TokenKind::IDENTIFIER) {
+      return false;
+    }
+
+    return token.lexemeString().equals("_");
+  }
+
   function parseImportBinding(parser: &mut ParserShared::State): Option<Ast::ImportBinding> {
     let mut parserRef: &mut ParserShared::State = parser;
     let nameToken = parserRef.expectIdentifier("expected imported name")!;
@@ -851,7 +863,25 @@ export namespace ParserDeclarations {
     let mut parserRef: &mut ParserShared::State = parser;
 
     let keyword = parserRef.expectKeyword(Keyword::IMPORT, "expected 'import'")!;
-    let items = ParserDeclarations::parseImportBindings(parserRef, "expected imported name")!;
+    let mut items: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+
+    if (ParserDeclarations::atDiscardIdentifier(parserRef)) {
+      let discard = ParserDeclarations::parseImportBinding(parserRef)!;
+      let discardSpan: SourceSpan = discard.span;
+      items.push(discard);
+
+      if (parserRef.consumePunctuation(Punctuation::COMMA).isSome() && !parserRef.atKeyword(Keyword::FROM)) {
+        parserRef.emitDiagnostic(
+          discardSpan,
+          DiagnosticCode::DISCARD_IMPORT_MUST_BE_SOLE_ITEM,
+          "Discard import '_' must be the only item in an import statement",
+          "'_' cannot be combined with other imported names",
+        );
+      }
+    } else {
+      let parsedItems = ParserDeclarations::parseImportBindings(parserRef, "expected imported name")!;
+      items = Ast::copyImportBindings(&parsedItems);
+    }
 
     let Option::SOME(_) = parserRef.expectKeyword(Keyword::FROM, "expected 'from' after import list") else {
       return Option::NONE;
@@ -1316,6 +1346,25 @@ export namespace ParserDeclarations {
     })));
   }
 
+  function metadataHasStatic(metadata: &Ast::Metadata): boolean {
+    let mut index: u64 = 0;
+
+    while (index < metadata.modifiers.length()) {
+      if (let Option::SOME(modifier) = metadata.modifiers.get(index)) {
+        match (modifier) {
+          Ast::Modifier::Static -> {
+            return true;
+          },
+          _ -> {},
+        };
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   function parseEnumItem(
     parser: &mut ParserShared::State,
     metadata: Ast::Metadata
@@ -1396,6 +1445,7 @@ export namespace ParserDeclarations {
         );
         return Option::NONE;
       };
+      let variantLexeme: String = variantName.lexemeString();
       let variantId = ParserDeclarations::createEnumVariantPattern(parserRef, variantName)!;
       variants.push(variantId);
 
@@ -1403,6 +1453,11 @@ export namespace ParserDeclarations {
         Option::SOME(node) -> ParserDeclarations::patternSpan(node),
         Option::NONE -> endSpan,
       };
+
+      if (ParserDeclarations::metadataHasStatic(&memberMetadata)) {
+        let message: String = `Enum variant '${variantLexeme.toStr()}' cannot be declared static`;
+        parserRef.emitDiagnostic(endSpan, DiagnosticCode::STATIC_ON_ENUM_VARIANT, message.toStr(), "enum variants cannot be static");
+      }
 
       // The comma between variants is optional, exactly as in the host parser:
       // a variant may be followed by the next variant, by a method, or by the
@@ -1621,6 +1676,17 @@ export namespace ParserDeclarations {
       };
       declaration = Option::SOME(itemId);
     } else {
+      if (ParserDeclarations::atDiscardIdentifier(parserRef)) {
+        let discard: Token = parserRef.bump();
+        parserRef.emitDiagnostic(
+          discard.span,
+          DiagnosticCode::DISCARD_EXPORT_FROM_NOT_ALLOWED,
+          "Cannot use discard '_' in export-from; use 'import _ from ...' instead",
+          "'_' cannot be exported",
+        );
+        return Option::NONE;
+      }
+
       let parsedItems = ParserDeclarations::parseImportBindings(parserRef, "expected exported name")!;
       items = Ast::copyImportBindings(&parsedItems);
 

@@ -25,6 +25,33 @@ function isIdentifierContinue(value: char): boolean {
   return value.isAlphanumeric() || value == '_';
 }
 
+/// Whether a decimal literal's digits, separators already removed, fit in
+/// `u64`, the widest type the reference lexer's `i32`/`i64`/`u64` ladder tries.
+function decimalDigitsFitU64(digits: &String): boolean {
+  let mut firstSignificant: u64 = 0;
+
+  while (firstSignificant < digits.length()) {
+    let Option::SOME(byte) = digits.byteAt(firstSignificant) else {
+      break;
+    };
+
+    if (byte != '0' as u8) {
+      break;
+    }
+
+    firstSignificant += 1;
+  }
+
+  let significant: String = digits.substringBytes(firstSignificant, digits.length());
+  let maxDigits: String = String::create("18446744073709551615");
+
+  if (significant.length() != maxDigits.length()) {
+    return significant.length() < maxDigits.length();
+  }
+
+  return significant.compare(&maxDigits) <= 0;
+}
+
 export record LexResult {
   public tokens: TokenStream;
   public diagnostics: DiagnosticBag;
@@ -96,6 +123,32 @@ record LexerScanner {
   private emitLiteral(&mut self, start: SourceMark, kind: LiteralKind): void {
     let lexeme: String = self.cursor.lexemeFrom(start);
     self.emitToken(Token::literalOwned(kind, self.cursor.spanFrom(start), &lexeme));
+  }
+
+  private emitDecimalIntegerLiteral(&mut self, start: SourceMark): void {
+    let lexeme: String = self.cursor.lexemeFrom(start);
+    let mut digits: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < lexeme.length()) {
+      let Option::SOME(byte) = lexeme.byteAt(index) else {
+        break;
+      };
+
+      if (byte != '_' as u8) {
+        digits.pushByte(byte);
+      }
+
+      index += 1;
+    }
+
+    if (decimalDigitsFitU64(&digits)) {
+      self.emitLiteral(start, LiteralKind::INTEGER);
+      return;
+    }
+
+    let message: String = `Integer literal ${digits.toStr()} is too large for any integer type`;
+    self.emitBadLiteral(start, DiagnosticCode::INTEGER_LITERAL_OUT_OF_RANGE, message.toStr(), "integer literal does not fit in u64");
   }
 
   private emitDiagnostic(&mut self, start: SourceMark, code: str, message: str, label: str): void {
@@ -198,22 +251,22 @@ record LexerScanner {
     }
 
     let Option::SOME(dot) = self.cursor.peekChar() else {
-      self.emitLiteral(start, LiteralKind::INTEGER);
+      self.emitDecimalIntegerLiteral(start);
       return;
     };
 
     if (dot != '.') {
-      self.emitLiteral(start, LiteralKind::INTEGER);
+      self.emitDecimalIntegerLiteral(start);
       return;
     }
 
     let Option::SOME(second) = self.cursor.peekNextChar() else {
-      self.emitLiteral(start, LiteralKind::INTEGER);
+      self.emitDecimalIntegerLiteral(start);
       return;
     };
 
     if (!second.isAsciiNumeric()) {
-      self.emitLiteral(start, LiteralKind::INTEGER);
+      self.emitDecimalIntegerLiteral(start);
       return;
     }
 

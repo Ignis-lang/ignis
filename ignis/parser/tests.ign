@@ -4,7 +4,7 @@ import Test from "std::test";
 
 import Diagnostic, DiagnosticBag, SourceFile, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
-import CompileFlags, Parser from "@compiler::parser";
+import CompileFlags, ParseOutput, Parser from "@compiler::parser";
 
 function readFixture(path: str): String {
   return match (Fs::readToString(path)) {
@@ -5428,4 +5428,132 @@ function parserParsesEnumStaticFields(): void {
     },
     _ -> @panic("root is not an enum"),
   };
+}
+
+function parseSourceDiagnostics(path: str, text: str): DiagnosticBag {
+  let source: SourceFile = SourceFile::create(path, text);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  return diagnostics;
+}
+
+function assertDiagnosticAt(
+  diagnostics: &DiagnosticBag,
+  index: u64,
+  code: str,
+  message: str
+): void {
+  let diagnostic: &Diagnostic = match (diagnostics.get(index)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing expected diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+  Test::assertEq<str>(diagnostic.messageText(), message);
+}
+
+/// The reference parser reports a `static` variant and keeps the variant.
+@test
+function parserRejectsStaticEnumVariant(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    "fixtures/parser_static_enum_variant.ign",
+    "enum Color {\n  static RED,\n  GREEN,\n}"
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  assertDiagnosticAt(&diagnostics, 0, "A0067", "Enum variant 'RED' cannot be declared static");
+}
+
+@test
+function parserAcceptsEnumVariantsWithoutStatic(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    "fixtures/parser_plain_enum_variant.ign",
+    "enum Color {\n  RED,\n  GREEN(i32),\n}"
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// The reference front end reports this from its lexer and stops there, so
+/// only the lexer's bag is compared.
+@test
+function parserRejectsIntegerLiteralOutOfRange(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_integer_out_of_range.ign",
+    "function main(): void {\n  let value: u64 = 999999999999999999999999999999;\n}"
+  );
+  let output: ParseOutput = Parser::parseFile(&source);
+
+  Test::assertEq<u64>(output.lexDiagnostics.length(), 1);
+  assertDiagnosticAt(
+    &output.lexDiagnostics,
+    0,
+    "A0203",
+    "Integer literal 999999999999999999999999999999 is too large for any integer type",
+  );
+}
+
+@test
+function parserAcceptsMaxU64IntegerLiteral(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    "fixtures/parser_integer_max_u64.ign",
+    "function main(): void {\n  let value: u64 = 18446744073709551615;\n}"
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// The reference parser keeps going after the discard error, so the name that
+/// follows the comma is then reported where it expected `from`.
+@test
+function parserRejectsDiscardImportWithOtherNames(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    "fixtures/parser_discard_import_not_sole.ign",
+    "import _, Io from \"std::io\";"
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 2);
+  assertDiagnosticAt(
+    &diagnostics,
+    0,
+    "M0005",
+    "Discard import '_' must be the only item in an import statement",
+  );
+  assertDiagnosticAt(&diagnostics, 1, "I0001", "Expected From");
+}
+
+@test
+function parserAcceptsSoleDiscardImport(): void {
+  let plain: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_discard_import.ign", "import _ from \"std::io\";");
+  Test::assertEq<u64>(plain.length(), 0);
+
+  let trailingComma: DiagnosticBag = parseSourceDiagnostics(
+    "fixtures/parser_discard_import_trailing_comma.ign",
+    "import _, from \"std::io\";"
+  );
+  Test::assertEq<u64>(trailingComma.length(), 0);
+}
+
+@test
+function parserRejectsDiscardExportFrom(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    "fixtures/parser_discard_export_from.ign",
+    "export _ from \"./lib\";"
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  assertDiagnosticAt(
+    &diagnostics,
+    0,
+    "M0006",
+    "Cannot use discard '_' in export-from; use 'import _ from ...' instead",
+  );
+}
+
+@test
+function parserAcceptsNamedExportFrom(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_named_export_from.ign", "export Foo from \"./lib\";");
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
 }

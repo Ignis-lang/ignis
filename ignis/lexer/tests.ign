@@ -798,3 +798,53 @@ function lexerReportsUnterminatedTemplateLiteral(): void {
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
 }
+
+function firstDiagnosticCode(result: &LexResult): str {
+  return match (result.diagnostics.get(0)) {
+    Option::SOME(value) -> value.code,
+    Option::NONE -> "",
+  };
+}
+
+function firstDiagnosticMessage(result: &LexResult): str {
+  return match (result.diagnostics.get(0)) {
+    Option::SOME(value) -> value.messageText(),
+    Option::NONE -> "",
+  };
+}
+
+/// The reference lexer names the literal without its `_` separators.
+@test
+function lexerRejectsDecimalIntegerLiteralsWiderThanU64(): void {
+  let result: LexResult = lexText("fixtures/integer_out_of_range.ign", "let value = 18_446_744_073_709_551_616;");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+  Test::assertEq<str>(firstDiagnosticCode(&result), "A0203");
+  Test::assertEq<str>(
+    firstDiagnosticMessage(&result),
+    "Integer literal 18446744073709551616 is too large for any integer type",
+  );
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+}
+
+/// Leading zeros do not count against the range, and hex and binary literals
+/// are not range-checked by the reference lexer at all.
+@test
+function lexerAcceptsIntegerLiteralsUpToU64Max(): void {
+  let result: LexResult = lexText(
+    "fixtures/integer_in_range.ign",
+    "18446744073709551615 000018446744073709551615 0xFFFFFFFFFFFFFFFFFFFF 1.5",
+  );
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::HEX);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::FLOAT);
+}
