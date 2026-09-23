@@ -12386,6 +12386,64 @@ function typecheckAssignmentRightSideOverflowIsRejected(): void {
   Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INTEGER_OVERFLOW);
 }
 
+/// A minus sign written against a decimal literal is range-checked as one
+/// negative literal, the way the reference lexer reads it, so every signed
+/// minimum is accepted whether it is expected or cast.
+@test
+function typecheckNegativeLiteralReachesTheSignedMinimum(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function f(): void {\n  let _a: i8 = -128;\n  let _b: i16 = -32768;\n  let _c: i32 = -2147483648;\n  let _d: i64 = -9223372036854775808;\n  let _e: i32 = -2147483648 as i32;\n  let _f: i64 = -9223372036854775808 as i64;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// One past the minimum still overflows, and the diagnostic names the
+/// negative value the way the reference analyzer does.
+@test
+function typecheckNegativeLiteralBelowTheMinimumOverflows(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function f(): void {\n  let _a: i8 = -129;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INTEGER_OVERFLOW, "Integer literal -129 overflows type 'i8'");
+}
+
+/// With nothing expected, a negative literal past the `i32` range takes
+/// `i64`, like the reference literal ladder, instead of wrapping as `i32`.
+@test
+function typecheckUnexpectedNegativeLiteralPastI32DefaultsToI64(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function f(): void {\n  let _a = -2147483649;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+
+  let Option::SOME(literalExpr) = typecheckFindFirstLiteralExpr(&parsed.module) else {
+    @panic("typecheckUnexpectedNegativeLiteralPastI32DefaultsToI64: no literal parsed");
+  };
+
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::I64));
+}
+
 /// A binary right operand is checked expecting the left operand's type, so an
 /// unsuffixed literal adopts it.
 /// Spec: IGN-132 — expected-type propagation.
