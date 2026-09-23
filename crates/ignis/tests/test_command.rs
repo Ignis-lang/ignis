@@ -1033,7 +1033,6 @@ fn run_selfhost_test_std(
 }
 
 #[test]
-#[ignore = "the selfhost analyzer still rejects std/string/tests.ign and std/toml/tests.ign"]
 fn selfhost_test_std_executes_a_named_std_test_from_outside_project_root() {
   let project_dir = make_temp_project_dir("selfhost-test-std-outside-project");
   let output_dir = project_dir.join("std-build");
@@ -1065,7 +1064,6 @@ fn selfhost_test_std_executes_a_named_std_test_from_outside_project_root() {
 }
 
 #[test]
-#[ignore = "the selfhost analyzer still rejects std/string/tests.ign and std/toml/tests.ign"]
 fn selfhost_test_std_selects_only_time_tests_by_filter() {
   let project_dir = make_temp_project_dir("selfhost-test-std-time-module");
   let output_dir = project_dir.join("std-build");
@@ -1095,7 +1093,6 @@ fn selfhost_test_std_selects_only_time_tests_by_filter() {
 }
 
 #[test]
-#[ignore = "the selfhost analyzer still rejects std/string/tests.ign and std/toml/tests.ign"]
 fn selfhost_test_std_updates_std_snapshots() {
   let project_dir = make_temp_project_dir("selfhost-test-std-update-snapshots");
   let output_dir = project_dir.join("std-build");
