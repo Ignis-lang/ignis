@@ -837,11 +837,21 @@ export namespace Lowering {
     return Hir::LiteralValue::Int32(value as i32);
   }
 
+  /// A hex or binary literal with nothing expected of it keeps its narrow
+  /// default type even when its value is wider, and the reference still emits
+  /// its full value with that type, so `0x100000000 as u64` keeps the high
+  /// bits. Such a value stays `UnsignedInt64` here instead of being narrowed.
   function uintLiteralKind(
     typeStore: &mut Analyzer::TypeStore,
     value: u64,
     typeId: Analyzer::TypeId,
   ): Hir::LiteralValue {
+    if (value > 4294967295) {
+      if (let Option::SOME(Analyzer::Type::U32) = typeStore.get(typeId)) {
+        return Hir::LiteralValue::UnsignedInt64(value);
+      }
+    }
+
     if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
       return match (typeNode) {
         Analyzer::Type::U8 -> Hir::LiteralValue::UnsignedInt8(value as u8),
