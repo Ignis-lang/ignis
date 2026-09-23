@@ -1,0 +1,170 @@
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Lir from "./mod";
+import LirVerify from "./verify";
+
+function verifyTestFunctionDef(): Analyzer::DefinitionId {
+  return Id::fromRaw<Analyzer::DefinitionTag>(7);
+}
+
+function verifyTestLocal(ty: Analyzer::TypeId): Lir::LocalData {
+  return Lir::LocalData {
+    defId: Option::NONE,
+    ty: ty,
+    mutable: true,
+    name: Option::NONE,
+    borrowedAlias: false,
+  };
+}
+
+function verifyJoined(lines: &Vector<String>): String {
+  let mut joined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    if (let Option::SOME(line) = lines.get(index)) {
+      if (index > 0) {
+        joined.pushChar('\n');
+      }
+
+      joined.push(line);
+    }
+
+    index += 1;
+  }
+
+  return joined;
+}
+
+/// Verifies a program holding `function_` alone and returns its findings joined
+/// one per line.
+function verifyFindingsOf(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  function_: Lir::FunctionLir,
+): String {
+  let mut program: Lir::LirProgram = Lir::LirProgram::init();
+  let defId: Analyzer::DefinitionId = function_.defId;
+  program.functions.set(defId, function_);
+
+  let findings: Vector<String> = LirVerify::verifyProgram(defStore, typeStore, &program);
+
+  return verifyJoined(&findings);
+}
+
+function verifyDropClosureOf(local: Lir::LocalId, closureType: Analyzer::TypeId): Lir::Instr {
+  return Lir::Instr::DropClosure(Lir::InstrDropClosure {
+    closure: Lir::Operand::Local(local),
+    closureType: closureType,
+  });
+}
+
+@test
+function lirVerifyReportsALocalDroppedTwiceInOneBlock(): void {
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let voidType: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  let mut function_: Lir::FunctionLir = Lir::FunctionLir::create(verifyTestFunctionDef(), voidType);
+  let local: Lir::LocalId = function_.allocLocal(verifyTestLocal(voidType));
+
+  let mut block: Lir::Block = Lir::Block::create(String::create("bb0"));
+  block.instructions.push(verifyDropClosureOf(local, voidType));
+  block.instructions.push(verifyDropClosureOf(local, voidType));
+  block.terminator = Lir::Terminator::Return(Option::NONE);
+  let _ = function_.allocBlock(block);
+
+  let findings: String = verifyFindingsOf(&mut defStore, &mut typeStore, function_);
+
+  Test::assertEq<str>(findings.toStr(), "fn_7 bb0: double drop of local l0 without an intervening store");
+}
+
+@test
+function lirVerifyAcceptsADropAfterAStoreReinitializesTheLocal(): void {
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let voidType: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+  let i32Type: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+
+  let mut function_: Lir::FunctionLir = Lir::FunctionLir::create(verifyTestFunctionDef(), voidType);
+  let local: Lir::LocalId = function_.allocLocal(verifyTestLocal(i32Type));
+
+  let mut block: Lir::Block = Lir::Block::create(String::create("bb0"));
+  block.instructions.push(verifyDropClosureOf(local, voidType));
+  block.instructions.push(Lir::Instr::Store(Lir::InstrStore {
+    dest: local,
+    value: Lir::Operand::Const(Lir::ConstValue::Int(1, i32Type)),
+  }));
+  block.instructions.push(verifyDropClosureOf(local, voidType));
+  block.terminator = Lir::Terminator::Return(Option::NONE);
+  let _ = function_.allocBlock(block);
+
+  let findings: String = verifyFindingsOf(&mut defStore, &mut typeStore, function_);
+
+  Test::assertEq<str>(findings.toStr(), "");
+}
+
+@test
+function lirVerifyReportsADropOfANonDroppableLocal(): void {
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let voidType: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+  let i32Type: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+
+  let mut function_: Lir::FunctionLir = Lir::FunctionLir::create(verifyTestFunctionDef(), voidType);
+  let _ = function_.allocLocal(verifyTestLocal(i32Type));
+  let local: Lir::LocalId = function_.allocLocal(verifyTestLocal(i32Type));
+
+  let mut block: Lir::Block = Lir::Block::create(String::create("bb0"));
+  block.instructions.push(Lir::Instr::Drop(Lir::InstrDrop { local: local }));
+  block.terminator = Lir::Terminator::Return(Option::NONE);
+  let _ = function_.allocBlock(block);
+
+  let findings: String = verifyFindingsOf(&mut defStore, &mut typeStore, function_);
+
+  Test::assertEq<str>(findings.toStr(), "fn_7 bb0: drop of a non-droppable local l1");
+}
+
+@test
+function lirVerifyReportsAMissingReturnValue(): void {
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let i32Type: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+
+  let mut function_: Lir::FunctionLir = Lir::FunctionLir::create(verifyTestFunctionDef(), i32Type);
+
+  let mut block: Lir::Block = Lir::Block::create(String::create("entry"));
+  block.terminator = Lir::Terminator::Return(Option::NONE);
+  let _ = function_.allocBlock(block);
+
+  let findings: String = verifyFindingsOf(&mut defStore, &mut typeStore, function_);
+
+  Test::assertEq<str>(findings.toStr(), "fn_7 entry: missing return value");
+}
+
+@test
+function lirVerifyTurnsEveryFindingIntoOneErrorMessage(): void {
+  let mut findings: Vector<String> = Vector::new<String>();
+  findings.push(String::create("fn_7 bb0: double drop of local l0 without an intervening store"));
+  findings.push(String::create("fn_9 bb2: missing return value"));
+
+  let messages: Vector<String> = LirVerify::findingMessages(&findings);
+  let joined: String = verifyJoined(&messages);
+
+  Test::assertEq<u64>(messages.length(), 2);
+  Test::assertEq<str>(
+    joined.toStr(),
+    "LIR verification: fn_7 bb0: double drop of local l0 without an intervening store\nLIR verification: fn_9 bb2: missing return value",
+  );
+}
+
+@test
+function lirVerifyTurnsNoFindingsIntoNoErrors(): void {
+  let findings: Vector<String> = Vector::new<String>();
+  let messages: Vector<String> = LirVerify::findingMessages(&findings);
+
+  Test::assertEq<u64>(messages.length(), 0);
+}
