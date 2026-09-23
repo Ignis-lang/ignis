@@ -532,6 +532,18 @@ function codegenEmitsSignedMinimumsAsSingleConstants(): void {
   Test::assert(!codegenContains(&emission.source, "-0U"));
 }
 
+/// A hex or binary literal with nothing expected of it keeps its narrow
+/// default type but reaches C with its full value, as the reference emits it,
+/// so a cast to a wider type keeps the high bits.
+@test
+function codegenKeepsFullValueOfWideRadixLiteral(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let a: u64 = 0x100000000 as u64;\n  let b: u64 = 0b100000000000000000000000000000000 as u64;\n\n  return (a >> 32) as i32 + (b >> 32) as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "4294967296U"));
+}
+
 /// A record with no fields is an empty GNU C struct, sized zero like the
 /// reference lays it out, not one padded with a dummy byte.
 @test
