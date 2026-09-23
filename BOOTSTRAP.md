@@ -285,6 +285,30 @@ itself sits identically in both stages and is invisible without a third
 opinion. `--host-compare` still performs the original direct
 host-vs-selfhost diff, so the move to baselines is reversible.
 
+## Which compiler defines the language
+
+**The selfhost does.** When the Rust host and the selfhost disagree on what a
+program means, the selfhost's behavior is the language and the host's is the
+divergence.
+
+The reason is recovery: if the official binary and the host were both lost,
+the compiler would be rebuilt from the C seed, which is selfhost output. A
+rule the host enforces and the selfhost does not would not survive that.
+
+In practice:
+
+| Situation | What to do |
+|-----------|------------|
+| The selfhost is wrong by its own rules (a crash, a miscompile, a check it forgot) | Fix the selfhost. |
+| The two differ and the selfhost's behavior is intended | Keep it. Close the host issue as a known divergence; the host is not changed to match. |
+| A bug both compilers share | Fix it in both while the host is still built, so the gates keep comparing like with like. |
+| A fixture that exercises a known divergence | It fails the nightly host cross-check (G6, G7), so it lands with the cut, not before. |
+
+Known divergences where the selfhost wins: #215 (a generic function used as a
+bare function value is rejected), #235 (unreferenced `@externName` exports are
+kept), #257 (`-0x80` is a negation, `- N` reports A0046) and #253 (the
+mutability check also covers overloaded `&mut self` methods).
+
 ## The two-step rule
 
 A language feature is not safe to use in the compiler's own sources
