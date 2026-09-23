@@ -1,7 +1,15 @@
 import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
-import Json, JsonValueKind, readString, scanNumber, skipValue from "./mod";
+import
+  Json,
+  JsonObjectEntry,
+  JsonValue,
+  JsonValueKind,
+  readString,
+  scanNumber,
+  skipValue,
+from "./mod";
 
 /// `kind` is a reference, so a matched payload binds as `&String`: cloning
 /// is a genuine move-out-of-a-borrow requirement, not a workaround for a
@@ -408,4 +416,390 @@ function jsonParseRejectsThe128thNestedObjectAtItsOwnColumn(): void {
   };
 
   Test::assertEq<str>(message.toStr(), "recursion limit exceeded at line 1 column 636");
+}
+
+/// Structural equality that ignores `endOffset`, which a parsed tree sets and
+/// a constructed one leaves at `0`.
+function sameJson(left: &JsonValue, right: &JsonValue): boolean {
+  return match (&left.kind) {
+    JsonValueKind::NULL -> isNullKind(&right.kind),
+    JsonValueKind::BOOL(flag) -> sameBool(flag, &right.kind),
+    JsonValueKind::NUMBER(text) -> sameOptionalText(&text, numberTextOf(&right.kind)),
+    JsonValueKind::STRING(text) -> sameOptionalText(&text, stringTextOf(&right.kind)),
+    JsonValueKind::ARRAY(items) -> sameArray(&items, &right.kind),
+    JsonValueKind::OBJECT(entries) -> sameObject(&entries, &right.kind),
+  };
+}
+
+function isNullKind(kind: &JsonValueKind): boolean {
+  return match (kind) {
+    JsonValueKind::NULL -> true,
+    _ -> false,
+  };
+}
+
+function sameBool(flag: boolean, kind: &JsonValueKind): boolean {
+  return match (kind) {
+    JsonValueKind::BOOL(other) -> flag == other,
+    _ -> false,
+  };
+}
+
+function sameOptionalText(text: &String, other: Option<String>): boolean {
+  let Option::SOME(otherText) = other else {
+    return false;
+  };
+
+  return text.equals(&otherText);
+}
+
+function sameArray(items: &Vector<JsonValue>, kind: &JsonValueKind): boolean {
+  return match (kind) {
+    JsonValueKind::ARRAY(otherItems) -> sameItems(items, &otherItems),
+    _ -> false,
+  };
+}
+
+function sameItems(left: &Vector<JsonValue>, right: &Vector<JsonValue>): boolean {
+  if (left.length() != right.length()) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < left.length()) {
+    let Option::SOME(leftItem) = left.get(index) else {
+      return false;
+    };
+
+    let Option::SOME(rightItem) = right.get(index) else {
+      return false;
+    };
+
+    if (!sameJson(leftItem, rightItem)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+function sameObject(entries: &Vector<JsonObjectEntry>, kind: &JsonValueKind): boolean {
+  return match (kind) {
+    JsonValueKind::OBJECT(otherEntries) -> sameEntries(entries, &otherEntries),
+    _ -> false,
+  };
+}
+
+function sameEntries(left: &Vector<JsonObjectEntry>, right: &Vector<JsonObjectEntry>): boolean {
+  if (left.length() != right.length()) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < left.length()) {
+    let Option::SOME(leftEntry) = left.get(index) else {
+      return false;
+    };
+
+    let Option::SOME(rightEntry) = right.get(index) else {
+      return false;
+    };
+
+    if (!leftEntry.key.equals(&rightEntry.key)) {
+      return false;
+    }
+
+    if (!sameJson(&leftEntry.value, &rightEntry.value)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// `{"name":"ignis","tags":["a","b"],"meta":{...},"empty":[],"blank":{},...}`,
+/// built in code so key order and every scalar constructor are exercised.
+function buildNestedDocument(): JsonValue {
+  let mut tags: Vector<JsonValue> = Vector::new<JsonValue>();
+  tags.push(JsonValue::stringValue("a"));
+  tags.push(JsonValue::stringValue("b"));
+
+  let mut metadata: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  metadata.push(JsonObjectEntry::create("stable", JsonValue::boolValue(true)));
+  metadata.push(JsonObjectEntry::create("count", JsonValue::integerValue(3)));
+  metadata.push(JsonObjectEntry::create("none", JsonValue::nullValue()));
+
+  let mut root: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  root.push(JsonObjectEntry::create("name", JsonValue::stringValue("ignis")));
+  root.push(JsonObjectEntry::create("tags", JsonValue::array(tags)));
+  root.push(JsonObjectEntry::create("meta", JsonValue::object(metadata)));
+  root.push(JsonObjectEntry::create("empty", JsonValue::array(Vector::new<JsonValue>())));
+  root.push(JsonObjectEntry::create("blank", JsonValue::object(Vector::new<JsonObjectEntry>())));
+  root.push(JsonObjectEntry::create("neg", JsonValue::integerValue(-42)));
+  root.push(JsonObjectEntry::create("big", JsonValue::unsignedValue(18446744073709551615)));
+
+  return JsonValue::object(root);
+}
+
+/// `[[],{},[1,[2]],{"k":[]}]`: containers nested inside an array, empty and not.
+function buildArrayOfContainers(): JsonValue {
+  let mut inner: Vector<JsonValue> = Vector::new<JsonValue>();
+  inner.push(JsonValue::integerValue(2));
+
+  let mut numbers: Vector<JsonValue> = Vector::new<JsonValue>();
+  numbers.push(JsonValue::integerValue(1));
+  numbers.push(JsonValue::array(inner));
+
+  let mut keyed: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  keyed.push(JsonObjectEntry::create("k", JsonValue::array(Vector::new<JsonValue>())));
+
+  let mut items: Vector<JsonValue> = Vector::new<JsonValue>();
+  items.push(JsonValue::array(Vector::new<JsonValue>()));
+  items.push(JsonValue::object(Vector::new<JsonObjectEntry>()));
+  items.push(JsonValue::array(numbers));
+  items.push(JsonValue::object(keyed));
+
+  return JsonValue::array(items);
+}
+
+/// Every byte `serde_json` escapes, a byte it leaves alone (`0x7f`), `/`, and
+/// non-ASCII text, including a NUL that only `fromString` can carry.
+function buildEscapeText(): String {
+  let mut text: String = String::create("q\"b\\s/n\nr\rt\tb");
+  text.pushByte(8);
+  text.pushStr("f");
+  text.pushByte(12);
+  text.pushStr("z");
+  text.pushByte(0);
+  text.pushStr("u");
+  text.pushByte(31);
+  text.pushStr("d");
+  text.pushByte(127);
+  text.pushStr("é😀");
+
+  return text;
+}
+
+/// The `serde_json::to_string` output for `buildEscapeText()`.
+function expectedEscapeJson(): String {
+  let mut expected: String = String::create("\"q\\\"b\\\\s/n\\nr\\rt\\tb\\bf\\fz\\u0000u\\u001fd");
+  expected.pushByte(127);
+  expected.pushStr("é😀\"");
+
+  return expected;
+}
+
+@test
+function toJsonStringWritesANestedDocumentCompactly(): void {
+  let value: JsonValue = buildNestedDocument();
+  let text: String = Json::toJsonString(&value);
+
+  Test::assertEq<str>(
+    text.toStr(),
+    "{\"name\":\"ignis\",\"tags\":[\"a\",\"b\"],\"meta\":{\"stable\":true,\"count\":3,\"none\":null},\"empty\":[],\"blank\":{},\"neg\":-42,\"big\":18446744073709551615}"
+  );
+}
+
+@test
+function toJsonStringPrettyMatchesSerdeJsonForANestedDocument(): void {
+  let value: JsonValue = buildNestedDocument();
+  let text: String = Json::toJsonStringPretty(&value);
+
+  let mut expected: String = String::new();
+  expected.pushStr("{\n");
+  expected.pushStr("  \"name\": \"ignis\",\n");
+  expected.pushStr("  \"tags\": [\n");
+  expected.pushStr("    \"a\",\n");
+  expected.pushStr("    \"b\"\n");
+  expected.pushStr("  ],\n");
+  expected.pushStr("  \"meta\": {\n");
+  expected.pushStr("    \"stable\": true,\n");
+  expected.pushStr("    \"count\": 3,\n");
+  expected.pushStr("    \"none\": null\n");
+  expected.pushStr("  },\n");
+  expected.pushStr("  \"empty\": [],\n");
+  expected.pushStr("  \"blank\": {},\n");
+  expected.pushStr("  \"neg\": -42,\n");
+  expected.pushStr("  \"big\": 18446744073709551615\n");
+  expected.pushStr("}");
+
+  Test::assertEq<str>(text.toStr(), expected.toStr());
+}
+
+@test
+function toJsonStringWritesContainersNestedInAnArray(): void {
+  let value: JsonValue = buildArrayOfContainers();
+  let text: String = Json::toJsonString(&value);
+
+  Test::assertEq<str>(text.toStr(), "[[],{},[1,[2]],{\"k\":[]}]");
+}
+
+@test
+function toJsonStringPrettyMatchesSerdeJsonForContainersNestedInAnArray(): void {
+  let value: JsonValue = buildArrayOfContainers();
+  let text: String = Json::toJsonStringPretty(&value);
+
+  let mut expected: String = String::new();
+  expected.pushStr("[\n");
+  expected.pushStr("  [],\n");
+  expected.pushStr("  {},\n");
+  expected.pushStr("  [\n");
+  expected.pushStr("    1,\n");
+  expected.pushStr("    [\n");
+  expected.pushStr("      2\n");
+  expected.pushStr("    ]\n");
+  expected.pushStr("  ],\n");
+  expected.pushStr("  {\n");
+  expected.pushStr("    \"k\": []\n");
+  expected.pushStr("  }\n");
+  expected.pushStr("]");
+
+  Test::assertEq<str>(text.toStr(), expected.toStr());
+}
+
+@test
+function emptyRootContainersWriteWithoutWhitespace(): void {
+  let emptyArray: JsonValue = JsonValue::array(Vector::new<JsonValue>());
+  let emptyObject: JsonValue = JsonValue::object(Vector::new<JsonObjectEntry>());
+
+  let compactArray: String = Json::toJsonString(&emptyArray);
+  let prettyArray: String = Json::toJsonStringPretty(&emptyArray);
+  let compactObject: String = Json::toJsonString(&emptyObject);
+  let prettyObject: String = Json::toJsonStringPretty(&emptyObject);
+
+  Test::assertEq<str>(compactArray.toStr(), "[]");
+  Test::assertEq<str>(prettyArray.toStr(), "[]");
+  Test::assertEq<str>(compactObject.toStr(), "{}");
+  Test::assertEq<str>(prettyObject.toStr(), "{}");
+}
+
+@test
+function scalarRootsWriteTheSameCompactAndPretty(): void {
+  let nullValue: JsonValue = JsonValue::nullValue();
+  let falseValue: JsonValue = JsonValue::boolValue(false);
+  let numberValue: JsonValue = JsonValue::integerValue(0);
+
+  let nullText: String = Json::toJsonStringPretty(&nullValue);
+  let falseText: String = Json::toJsonStringPretty(&falseValue);
+  let numberText: String = Json::toJsonString(&numberValue);
+
+  Test::assertEq<str>(nullText.toStr(), "null");
+  Test::assertEq<str>(falseText.toStr(), "false");
+  Test::assertEq<str>(numberText.toStr(), "0");
+}
+
+@test
+function writeValueEscapesStringsLikeSerdeJson(): void {
+  let value: JsonValue = JsonValue::fromString(buildEscapeText());
+  let compact: String = Json::toJsonString(&value);
+  let pretty: String = Json::toJsonStringPretty(&value);
+  let expected: String = expectedEscapeJson();
+
+  Test::assertEq<str>(compact.toStr(), expected.toStr());
+  Test::assertEq<str>(pretty.toStr(), expected.toStr());
+}
+
+@test
+function writeValueEscapesObjectKeys(): void {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("a\"b\n", JsonValue::nullValue()));
+
+  let value: JsonValue = JsonValue::object(entries);
+  let text: String = Json::toJsonString(&value);
+
+  Test::assertEq<str>(text.toStr(), "{\"a\\\"b\\n\":null}");
+}
+
+@test
+function writeValueAppendsWithoutClearingOutput(): void {
+  let value: JsonValue = JsonValue::stringValue("x");
+  let mut output: String = String::create("prefix:");
+
+  Json::writeValue(&mut output, &value);
+  Json::writeValuePretty(&mut output, &value);
+
+  Test::assertEq<str>(output.toStr(), "prefix:\"x\"\"x\"");
+}
+
+@test
+function objectKeysKeepInsertionOrder(): void {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("zeta", JsonValue::integerValue(1)));
+  entries.push(JsonObjectEntry::create("alpha", JsonValue::integerValue(2)));
+  entries.push(JsonObjectEntry::create("mid", JsonValue::integerValue(3)));
+
+  let value: JsonValue = JsonValue::object(entries);
+  let compact: String = Json::toJsonString(&value);
+  let pretty: String = Json::toJsonStringPretty(&value);
+
+  Test::assertEq<str>(compact.toStr(), "{\"zeta\":1,\"alpha\":2,\"mid\":3}");
+  Test::assertEq<str>(pretty.toStr(), "{\n  \"zeta\": 1,\n  \"alpha\": 2,\n  \"mid\": 3\n}");
+}
+
+@test
+function parsedTextWritesBackUnchanged(): void {
+  let source: String = String::create("{\"b\":[1.5e-3,-0,true,null],\"a\":{\"x\":\"\\u00e9\\/\"}}");
+
+  let Result::OK(value) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  let text: String = Json::toJsonString(&value);
+
+  Test::assertEq<str>(text.toStr(), "{\"b\":[1.5e-3,-0,true,null],\"a\":{\"x\":\"é/\"}}");
+}
+
+@test
+function compactOutputRoundTripsThroughParse(): void {
+  let value: JsonValue = buildNestedDocument();
+  let text: String = Json::toJsonString(&value);
+
+  let Result::OK(parsed) = Json::parse(&text) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(sameJson(&value, &parsed));
+  Test::assertEq<u64>(parsed.endOffset, text.length());
+}
+
+@test
+function prettyOutputRoundTripsThroughParse(): void {
+  let value: JsonValue = buildArrayOfContainers();
+  let text: String = Json::toJsonStringPretty(&value);
+
+  let Result::OK(parsed) = Json::parse(&text) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(sameJson(&value, &parsed));
+}
+
+@test
+function escapedStringRoundTripsThroughParse(): void {
+  let value: JsonValue = JsonValue::fromString(buildEscapeText());
+  let text: String = Json::toJsonString(&value);
+
+  let Result::OK(parsed) = Json::parse(&text) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(sameJson(&value, &parsed));
+}
+
+@test
+function sameJsonTellsDifferentTreesApart(): void {
+  let left: JsonValue = buildNestedDocument();
+  let right: JsonValue = buildArrayOfContainers();
+
+  Test::assert(!sameJson(&left, &right));
 }

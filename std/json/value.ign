@@ -7,9 +7,54 @@
 /// `endOffset` is 0-based and points at the first byte *after* this value:
 /// for `"a"` at the start of the source it is `3`, for `[]` it is `2`. A
 /// caller reporting a `serde_json`-shaped column adds one to it.
+///
+/// Values built with the static constructors below have no source text, so
+/// their `endOffset` is always `0`.
 export record JsonValue {
   public kind: JsonValueKind;
   public endOffset: u64;
+
+  /// Builds a JSON `null`.
+  public static nullValue(): JsonValue {
+    return JsonValue { kind: JsonValueKind::NULL, endOffset: 0 };
+  }
+
+  /// Builds a JSON `true` or `false`.
+  public static boolValue(value: boolean): JsonValue {
+    return JsonValue { kind: JsonValueKind::BOOL(value), endOffset: 0 };
+  }
+
+  /// Builds a JSON string holding a copy of `value`.
+  public static stringValue(value: str): JsonValue {
+    return JsonValue { kind: JsonValueKind::STRING(String::create(value)), endOffset: 0 };
+  }
+
+  /// Builds a JSON string that takes ownership of `value`. Unlike
+  /// `stringValue`, this keeps interior NUL bytes, which a `str` cannot hold.
+  public static fromString(value: String): JsonValue {
+    return JsonValue { kind: JsonValueKind::STRING(value), endOffset: 0 };
+  }
+
+  /// Builds a JSON number from a signed integer, written in decimal.
+  public static integerValue(value: i64): JsonValue {
+    return JsonValue { kind: JsonValueKind::NUMBER(value.toString()), endOffset: 0 };
+  }
+
+  /// Builds a JSON number from an unsigned integer, written in decimal.
+  public static unsignedValue(value: u64): JsonValue {
+    return JsonValue { kind: JsonValueKind::NUMBER(value.toString()), endOffset: 0 };
+  }
+
+  /// Builds a JSON array whose elements are `items`, in order.
+  public static array(items: Vector<JsonValue>): JsonValue {
+    return JsonValue { kind: JsonValueKind::ARRAY(items), endOffset: 0 };
+  }
+
+  /// Builds a JSON object whose members are `entries`, in order. Keys are
+  /// written as given: duplicates are neither merged nor rejected.
+  public static object(entries: Vector<JsonObjectEntry>): JsonValue {
+    return JsonValue { kind: JsonValueKind::OBJECT(entries), endOffset: 0 };
+  }
 }
 
 export enum JsonValueKind {
@@ -31,4 +76,9 @@ export enum JsonValueKind {
 export record JsonObjectEntry {
   public key: String;
   public value: JsonValue;
+
+  /// Builds one object member with a copy of `key`.
+  public static create(key: str, value: JsonValue): JsonObjectEntry {
+    return JsonObjectEntry { key: String::create(key), value: value };
+  }
 }
