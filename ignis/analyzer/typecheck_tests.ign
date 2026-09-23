@@ -8661,6 +8661,57 @@ function typecheckAllDivergingMatchSatisfiesExpectedType(): void {
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
 
+/// Scenario: `let _x: i32 = match (1) { _ -> 1, _ -> { @unreachable(); } }`. The
+/// second arm is a block with no tail whose last statement is a diverging expression
+/// statement, so it types as `never` and joins with the `i32` arm instead of `void`.
+@test
+function typecheckMatchArmBlockEndingInDivergingStatementTypesAsNever(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "_x");
+
+  let unreachableCall: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "unreachable",
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::ExpressionId>(),
+  );
+  let mut armStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  armStmts.push(typecheckAddExprStmt(&mut module, unreachableCall));
+  let divergingArm: Ast::ExpressionId = typecheckAddBlockExpr(&mut module, armStmts, Option::NONE);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: divergingArm,
+  });
+
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddIntLiteral(&mut module, 1), arms);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32TypeId, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, divergingArm, typeStore.intern(Analyzer::Type::NEVER));
+  assertExprType(&output, matchExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
 /// Add a `_` placeholder expression.
 function typecheckAddPipePlaceholder(module: &mut Ast::Module): Ast::ExpressionId {
   let mut moduleRef: &mut Ast::Module = module;

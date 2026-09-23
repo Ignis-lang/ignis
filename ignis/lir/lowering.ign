@@ -343,6 +343,16 @@ export namespace LirLowering {
     return false;
   }
 
+  function isValuelessUndef(typeStore: &mut Analyzer::TypeStore, operand: &Lir::Operand): boolean {
+    if (let Lir::Operand::Const(value) = operand) {
+      if (let Lir::ConstValue::Undef(ty) = value) {
+        return LirLowering::producesNoValue(typeStore, ty);
+      }
+    }
+
+    return false;
+  }
+
   function isVoidType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     if (let Option::SOME(typeNode) = typeStore.get(ty)) {
       if (let Analyzer::Type::VOID = typeNode) {
@@ -3672,7 +3682,7 @@ export namespace LirLowering {
     let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, rightId);
     let rightLive: boolean = !state.terminated;
 
-    LirLowering::storeResult(function_, state, rightLive, resultSlot, right);
+    LirLowering::storeResult(typeStore, function_, state, rightLive, resultSlot, right);
 
     // A `&&` chain of `let` conditions hands its bindings to the branch it
     // guards, so a false right operand leaves whatever the left side bound with
@@ -4047,7 +4057,7 @@ export namespace LirLowering {
       let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, arm.body);
 
       let bodyLive: boolean = !state.terminated;
-      LirLowering::storeResult(function_, state, hasResult && bodyLive, resultSlot, bodyValue);
+      LirLowering::storeResult(typeStore, function_, state, hasResult && bodyLive, resultSlot, bodyValue);
 
       if (bodyLive) {
         // After the store: an arm whose value is its own binding has already
@@ -4287,6 +4297,7 @@ export namespace LirLowering {
   /// so the operand is moved on every path, which the ownership checker
   /// requires of branch-dependent stores.
   function storeResult(
+    typeStore: &mut Analyzer::TypeStore,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     wanted: boolean,
@@ -4294,6 +4305,12 @@ export namespace LirLowering {
     value: Lir::Operand,
   ): void {
     if (!wanted) {
+      return;
+    }
+
+    // The oracle stores only a value that exists: a block with no tail yields none,
+    // even where its branches all diverge and leave an unreachable merge behind.
+    if (LirLowering::isValuelessUndef(typeStore, &value)) {
       return;
     }
 
@@ -4340,7 +4357,7 @@ export namespace LirLowering {
     let thenValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.thenBranch);
 
     let thenLive: boolean = !state.terminated;
-    LirLowering::storeResult(function_, state, hasResult && thenLive, resultSlot, thenValue);
+    LirLowering::storeResult(typeStore, function_, state, hasResult && thenLive, resultSlot, thenValue);
 
     if (thenLive) {
       LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
@@ -4352,7 +4369,7 @@ export namespace LirLowering {
       let elseValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, elseId);
 
       let elseLive: boolean = !state.terminated;
-      LirLowering::storeResult(function_, state, hasResult && elseLive, resultSlot, elseValue);
+      LirLowering::storeResult(typeStore, function_, state, hasResult && elseLive, resultSlot, elseValue);
 
       if (elseLive) {
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));

@@ -45,26 +45,14 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::popScope(state);
 
-      // A tailless block that cannot fall through — its last statement
-      // returns — contributes NEVER, so a match arm ending in `return`
-      // joins with the other arms instead of forcing void.
+      // A tailless block types as its last statement, mirroring the reference
+      // analyzer: when that statement cannot fall through the block is NEVER,
+      // so a match arm ending in `return` or `@unreachable();` joins with the
+      // other arms instead of forcing void.
       let mut lastDiverges: boolean = false;
       if (statements.length() > 0) {
         if (let Option::SOME(lastStmtId) = statements.get(statements.length() - 1)) {
-          if (let Option::SOME(lastStmt) = module.statements.get(*lastStmtId)) {
-            match (lastStmt) {
-              Ast::Statement::Node::Return(_) -> {
-                lastDiverges = true;
-              },
-              Ast::Statement::Node::Continue(_) -> {
-                lastDiverges = true;
-              },
-              Ast::Statement::Node::Break(_) -> {
-                lastDiverges = true;
-              },
-              _ -> {},
-            };
-          }
+          lastDiverges = Analyzer::Typecheck::statementDiverges(state, defStore, typeStore, module, *lastStmtId);
         }
       }
 
@@ -75,6 +63,83 @@ export namespace Analyzer {
       }
 
       return Option::SOME(typeStoreRef.intern(Analyzer::Type::VOID));
+    }
+
+    /// Whether an already-checked statement types as NEVER under the reference
+    /// analyzer's statement typing: `return`, `break` and `continue`; an
+    /// expression statement whose expression is NEVER; a block whose value
+    /// position diverges; and an `if` with an `else` whose branches both
+    /// diverge. A statement-position `match` types as void there, and its
+    /// expression is never recorded here, so it does not count.
+    function statementDiverges(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      stmtId: Ast::StatementId,
+    ): boolean {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return false;
+      };
+
+      match (stmt) {
+        Ast::Statement::Node::Return(_) -> {
+          return true;
+        },
+        Ast::Statement::Node::Continue(_) -> {
+          return true;
+        },
+        Ast::Statement::Node::Break(_) -> {
+          return true;
+        },
+        Ast::Statement::Node::Expression(expressionStmt) -> {
+          return Analyzer::Typecheck::recordedExprIsNever(state, defStore, typeStore, expressionStmt.expression);
+        },
+        Ast::Statement::Node::Block(blockStmt) -> {
+          if (let Option::SOME(tailId) = blockStmt.tail) {
+            return Analyzer::Typecheck::recordedExprIsNever(state, defStore, typeStore, tailId);
+          }
+
+          if (blockStmt.statements.length() == 0) {
+            return false;
+          }
+
+          let Option::SOME(lastStmtId) = blockStmt.statements.get(blockStmt.statements.length() - 1) else {
+            return false;
+          };
+
+          return Analyzer::Typecheck::statementDiverges(state, defStore, typeStore, module, *lastStmtId);
+        },
+        Ast::Statement::Node::If(ifStmt) -> {
+          let Option::SOME(elseId) = ifStmt.elseBranch else {
+            return false;
+          };
+
+          if (!Analyzer::Typecheck::statementDiverges(state, defStore, typeStore, module, ifStmt.thenBranch)) {
+            return false;
+          }
+
+          return Analyzer::Typecheck::statementDiverges(state, defStore, typeStore, module, elseId);
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      return false;
+    }
+
+    function recordedExprIsNever(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(exprType) = Analyzer::Typecheck::lookupRecordedExprType(state, exprId) else {
+        return false;
+      };
+
+      return Analyzer::Typecheck::isNeverType(state, defStore, typeStore, exprType);
     }
 
     function checkBinaryExpr(
