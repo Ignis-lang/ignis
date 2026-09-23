@@ -148,3 +148,63 @@ function run(): i32 {
     result.verify_errors
   );
 }
+
+#[test]
+fn a_binding_from_a_reference_scrutinee_matched_again_is_never_freed() {
+  // `inner` names a place inside the referent the caller owns. Matching it again used to
+  // copy it into a drop-tracked scrutinee slot and free that copy, releasing the
+  // caller's payload on every call.
+  let result = common::lower_to_lir(
+    "@implements(Drop)
+record Owned {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+enum Inner {
+  Held(Owned),
+  Empty(i32),
+}
+
+enum Outer {
+  Wrap(Inner),
+  Nothing,
+}
+
+function probe(outer: &Outer): boolean {
+  if (let Outer::Wrap(inner) = outer) {
+    if (let Inner::Empty(_) = inner) {
+      return true;
+    }
+
+    return match (inner) {
+      Inner::Held(held) -> held.id == 0,
+      _ -> false,
+    };
+  }
+
+  return false;
+}
+",
+  );
+
+  assert!(
+    result.verify_errors.is_empty(),
+    "expected no verification errors, got: {:?}",
+    result.verify_errors
+  );
+
+  let drops = result
+    .program
+    .functions
+    .values()
+    .flat_map(|function| function.blocks.iter().map(|(_, block)| block))
+    .flat_map(|block| block.instructions.iter())
+    .filter(|instr| matches!(instr, Instr::Drop { .. }))
+    .count();
+
+  assert_eq!(drops, 0, "expected no drop of the borrowed binding, got {drops}");
+}

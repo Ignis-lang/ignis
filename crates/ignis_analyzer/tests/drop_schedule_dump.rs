@@ -692,6 +692,51 @@ function peek at test.ign:15:33
 }
 
 #[test]
+fn a_binding_from_a_reference_scrutinee_matched_again_is_not_consumed() {
+  let source = format!(
+    "{RESOURCE}
+enum Inner {{
+  Held(Resource),
+  Empty(i32),
+}}
+
+enum Outer {{
+  Wrap(Inner),
+  Nothing,
+}}
+
+function probe(outer: &Outer): i32 {{
+  if (let Outer::Wrap(inner) = outer) {{
+    if (let Inner::Held(held) = inner) {{
+      return held.value;
+    }}
+
+    return match (inner) {{
+      Inner::Empty(code) -> code,
+      _ -> 0,
+    }};
+  }}
+
+  return -1;
+}}
+"
+  );
+
+  // `inner` names a place inside the referent. Matching it again binds `held` into the
+  // same storage and moves nothing out of `inner`, so neither owes a drop and `inner`
+  // is still readable by the second match.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function probe at test.ign:20:36
+  <no owned values>
+"
+  );
+}
+
+#[test]
 fn a_program_without_owned_values_still_lists_every_function() {
   assert_eq!(
     dump("function main(): i32 {\n  return 0;\n}\n"),
