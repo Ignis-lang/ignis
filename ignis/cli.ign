@@ -16,6 +16,7 @@ export enum CliCommand {
   CHECK,
   BUILD_STD,
   TEST,
+  TEST_STD,
   FMT,
   HELP,
   VERSION,
@@ -124,6 +125,14 @@ export record CliOptions {
 
   public isTestMode(&self): boolean {
     if (let CliCommand::TEST = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isTestStdMode(&self): boolean {
+    if (let CliCommand::TEST_STD = self.command) {
       return true;
     }
 
@@ -281,6 +290,10 @@ function cliSubcommandOf(argument: &String): Option<CliCommand> {
     return Option::SOME(CliCommand::TEST);
   }
 
+  if (argument.equals("test-std")) {
+    return Option::SOME(CliCommand::TEST_STD);
+  }
+
   if (argument.equals("fmt")) {
     return Option::SOME(CliCommand::FMT);
   }
@@ -306,6 +319,17 @@ function cliEndsWith(value: &String, suffix: str): boolean {
 
   let actualSuffix: String = value.substringBytes(value.length() - suffixText.length(), value.length());
   return actualSuffix.equals(&suffixText);
+}
+
+/// True for a flag `test-std` takes. The subcommand mirrors the host's
+/// `TestStdCommand`, which accepts nothing else: a std test run has no project
+/// file to override and always builds the whole standard library.
+function cliTestStdAcceptsFlag(argument: &String): boolean {
+  if (argument.equals("-o") || argument.equals("--output-dir") || argument.equals("--std-path")) {
+    return true;
+  }
+
+  return argument.equals("--feature") || argument.equals("--features") || argument.equals("--update-snapshots");
 }
 
 function cliMissingValue(flag: str, expected: str): String {
@@ -1093,6 +1117,22 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       return Result::OK(options);
     }
 
+    if (options.isTestStdMode() && argument.startsWith("-") && !cliTestStdAcceptsFlag(argument)) {
+      return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+    }
+
+    // `test-std` spells its output directory `-o` / `--output-dir`, the way
+    // the host's `TestStdCommand` does, rather than naming a binary.
+    if (options.isTestStdMode() && (argument.equals("-o") || argument.equals("--output-dir"))) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue(argument.toStr(), "a directory"));
+      };
+
+      options.outDir = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
     if (argument.equals("-o")) {
       let Option::SOME(value) = arguments.get(index + 1) else {
         return Result::ERROR(cliMissingValue("-o", "an output path"));
@@ -1264,7 +1304,7 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
-    if (options.isTestMode() && argument.equals("--update-snapshots")) {
+    if ((options.isTestMode() || options.isTestStdMode()) && argument.equals("--update-snapshots")) {
       options.updateSnapshots = true;
       index += 1;
       continue;
@@ -1340,6 +1380,17 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    // The one positional `test-std` takes is its name filter.
+    if (options.isTestStdMode()) {
+      if (options.filter.length() > 0) {
+        return Result::ERROR(`error: unexpected argument '${argument.toStr()}'`);
+      }
+
+      options.filter = argument.clone();
+      index += 1;
+      continue;
+    }
+
     options.path = Option::SOME(argument.clone());
     index += 1;
   }
@@ -1359,10 +1410,13 @@ export function helpText(): String {
   text.pushStr("  check      Check file or project without codegen or linking\n");
   text.pushStr("  build-std  Build the standard library\n");
   text.pushStr("  test       Run language-native tests for a project\n");
+  text.pushStr("  test-std   Run language-native tests for the standard library\n");
   text.pushStr("  fmt        Format Ignis source canonically with parse/reparse safety checks\n");
   text.pushStr("\n");
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
   text.pushStr("Without a path the project containing the current directory is used.\n");
+  text.pushStr("`ignis test-std [FILTER]` takes a test-name filter instead of a path, and reads\n");
+  text.pushStr("only --std-path, -o/--output-dir, --feature, --features and --update-snapshots.\n");
   text.pushStr("\n");
   text.pushStr("Options:\n");
   text.pushStr("  -o <PATH>                 Write the linked binary here, or the directory build-std fills\n");
@@ -1388,7 +1442,8 @@ export function helpText(): String {
   text.pushStr("      --feature <NAME>      Enable one feature (can be repeated)\n");
   text.pushStr("      --features <LIST>     Enable features separated by commas\n");
   text.pushStr("      --filter <SUBSTRING>  Select tests whose name contains it (test only)\n");
-  text.pushStr("      --update-snapshots    Create or replace selected snapshots (test only)\n");
+  text.pushStr("      --update-snapshots    Create or replace selected snapshots (test, test-std)\n");
+  text.pushStr("      --output-dir <DIR>    Output directory for std test artifacts (test-std only)\n");
   text.pushStr("      --fixtures <DIR>      Add a directory of program fixture cases (test only)\n");
   text.pushStr("      --partition <K/N>     Run only shard K of N, 1-based (test only)\n");
   text.pushStr("      --test-timeout <SECS> Wall-clock budget for one test process (test only)\n");
@@ -1459,6 +1514,7 @@ function cliCommandName(command: CliCommand): str {
     CliCommand::CHECK -> "check",
     CliCommand::BUILD_STD -> "build-std",
     CliCommand::TEST -> "test",
+    CliCommand::TEST_STD -> "test-std",
     CliCommand::FMT -> "fmt",
     CliCommand::HELP -> "help",
     CliCommand::VERSION -> "version",
@@ -1602,6 +1658,92 @@ function cliParsesTestFlags(): void {
 
   Test::assertEq<str>(options.filter.toStr(), "resolver");
   Test::assertEq<boolean>(options.updateSnapshots, true);
+}
+
+/// `test-std` takes the host's `TestStdCommand` flags: a positional name
+/// filter, `--update-snapshots`, `--std-path`, `--output-dir`, and the feature
+/// flags.
+@test
+function cliParsesTestStdFlags(): void {
+  let mut values: Vector<String> = cliWords();
+  cliPush(&mut values, "test-std");
+  cliPush(&mut values, "time::tests");
+  cliPush(&mut values, "--update-snapshots");
+  cliPush(&mut values, "--std-path");
+  cliPush(&mut values, "./std");
+  cliPush(&mut values, "--output-dir");
+  cliPush(&mut values, "./build/std-tests");
+  cliPush(&mut values, "--feature");
+  cliPush(&mut values, "alloc-trace");
+  cliPush(&mut values, "--features");
+  cliPush(&mut values, "one,two");
+
+  let options: CliOptions = cliParse(&values);
+  Test::assertEq<str>(cliCommandName(options.command), "test-std");
+  Test::assertEq<str>(options.filter.toStr(), "time::tests");
+  Test::assertEq<boolean>(options.updateSnapshots, true);
+  Test::assertEq<str>(cliOptionText(&options.stdPath).toStr(), "./std");
+  Test::assertEq<str>(cliOptionText(&options.outDir).toStr(), "./build/std-tests");
+  Test::assertEq<boolean>(options.path.isNone(), true);
+  Test::assertEq<u64>(options.features.length(), 3);
+}
+
+/// `-o` names the std test output directory, not a binary.
+@test
+function cliReadsTestStdShortOutputFlagAsADirectory(): void {
+  let mut values: Vector<String> = cliWords();
+  cliPush(&mut values, "test-std");
+  cliPush(&mut values, "-o");
+  cliPush(&mut values, "out");
+
+  let options: CliOptions = cliParse(&values);
+  Test::assertEq<str>(cliOptionText(&options.outDir).toStr(), "out");
+  Test::assertEq<boolean>(options.outputPath.isNone(), true);
+}
+
+@test
+function cliParsesTestStdWithoutAFilter(): void {
+  let mut values: Vector<String> = cliWords();
+  cliPush(&mut values, "test-std");
+
+  let options: CliOptions = cliParse(&values);
+  Test::assertEq<str>(cliCommandName(options.command), "test-std");
+  Test::assertEq<str>(options.filter.toStr(), "");
+  Test::assertEq<boolean>(options.updateSnapshots, false);
+  Test::assertEq<boolean>(options.stdPath.isNone(), true);
+  Test::assertEq<boolean>(options.outDir.isNone(), true);
+  Test::assertEq<u64>(options.features.length(), 0);
+}
+
+/// `test-std` rejects the flags the host's `TestStdCommand` does not declare,
+/// including `test`'s own `--filter` and the build overrides.
+@test
+function cliRejectsFlagsTestStdDoesNotTake(): void {
+  let mut filterFlag: Vector<String> = cliWords();
+  cliPush(&mut filterFlag, "test-std");
+  cliPush(&mut filterFlag, "--filter");
+  cliPush(&mut filterFlag, "time");
+  Test::assertEq<str>(cliParseError(&filterFlag).toStr(), "error: unknown argument: --filter");
+
+  let mut ccFlag: Vector<String> = cliWords();
+  cliPush(&mut ccFlag, "test-std");
+  cliPush(&mut ccFlag, "--cc");
+  cliPush(&mut ccFlag, "clang");
+  Test::assertEq<str>(cliParseError(&ccFlag).toStr(), "error: unknown argument: --cc");
+
+  let mut forceFlag: Vector<String> = cliWords();
+  cliPush(&mut forceFlag, "test-std");
+  cliPush(&mut forceFlag, "-f");
+  Test::assertEq<str>(cliParseError(&forceFlag).toStr(), "error: unknown argument: -f");
+}
+
+@test
+function cliRejectsASecondTestStdFilter(): void {
+  let mut values: Vector<String> = cliWords();
+  cliPush(&mut values, "test-std");
+  cliPush(&mut values, "time");
+  cliPush(&mut values, "vector");
+  Test::assertEq<str>(cliParseError(&values).toStr(), "error: unexpected argument 'vector'");
 }
 
 /// A build has no `--filter`, so the flag is rejected instead of ignored.

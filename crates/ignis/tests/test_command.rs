@@ -1012,6 +1012,119 @@ fn ignis_test_std_updates_workspace_snapshots_via_cli() {
   cleanup_project_dir(&project_dir);
 }
 
+/// Run the selfhost compiler's `test-std` from `project_dir` against `std_root`, writing its
+/// artifacts under `output_dir`.
+fn run_selfhost_test_std(
+  project_dir: &Path,
+  std_root: &Path,
+  output_dir: &Path,
+  extra_args: &[&str],
+) -> std::process::Output {
+  Command::new(selfhost_compiler())
+    .current_dir(project_dir)
+    .arg("test-std")
+    .args(extra_args)
+    .arg("--std-path")
+    .arg(std_root)
+    .arg("--output-dir")
+    .arg(output_dir)
+    .output()
+    .expect("run selfhost ignis test-std")
+}
+
+#[test]
+fn selfhost_test_std_executes_a_named_std_test_from_outside_project_root() {
+  let project_dir = make_temp_project_dir("selfhost-test-std-outside-project");
+  let output_dir = project_dir.join("std-build");
+  let std_root = copy_workspace_std(&project_dir);
+
+  let output = run_selfhost_test_std(
+    &project_dir,
+    &std_root,
+    &output_dir,
+    &["vector::tests::clearDropsStringElementsBeforeReuse"],
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    output.status.success(),
+    "expected selfhost test-std to succeed from outside any project root\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stderr.contains("vector::tests::clearDropsStringElementsBeforeReuse ... ok"),
+    "expected the named std test to run and pass\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    std_harness_binary_path(&output_dir).exists(),
+    "expected selfhost test-std to link the harness binary at <out>/bin/std-tests"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn selfhost_test_std_selects_only_time_tests_by_filter() {
+  let project_dir = make_temp_project_dir("selfhost-test-std-time-module");
+  let output_dir = project_dir.join("std-build");
+  let std_root = copy_workspace_std(&project_dir);
+
+  let output = run_selfhost_test_std(&project_dir, &std_root, &output_dir, &["time::tests"]);
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    output.status.success(),
+    "expected selfhost test-std time::tests to succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+
+  let executed: Vec<&str> = stderr.lines().filter(|line| line.contains(" ... ")).collect();
+
+  assert!(
+    !executed.is_empty(),
+    "expected selfhost test-std to run time::tests entries\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    executed.iter().all(|line| line.contains("time::tests::")),
+    "expected the time::tests filter to select only time tests\nstderr:\n{stderr}"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn selfhost_test_std_updates_std_snapshots() {
+  let project_dir = make_temp_project_dir("selfhost-test-std-update-snapshots");
+  let output_dir = project_dir.join("std-build");
+  let std_root = copy_workspace_std(&project_dir);
+  let snapshot_path = std_snapshot_path(&std_root, "string", "string::tests::snapshotStdRunnerSmoke", "smoke");
+
+  let original_snapshot = read_optional_file(&snapshot_path).expect("expected committed std snapshot baseline");
+
+  let _ = fs::remove_file(&snapshot_path);
+
+  let output = run_selfhost_test_std(
+    &project_dir,
+    &std_root,
+    &output_dir,
+    &["string::tests::snapshotStdRunnerSmoke", "--update-snapshots"],
+  );
+
+  assert!(
+    output.status.success(),
+    "expected selfhost test-std --update-snapshots to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    read_optional_file(&snapshot_path).as_deref(),
+    Some(original_snapshot.as_slice()),
+    "expected the selfhost snapshot update to recreate the committed baseline contents"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
 #[test]
 fn ignis_fmt_rewrites_single_file_in_place() {
   let project_dir = make_temp_project_dir("fmt-single-file");

@@ -1444,6 +1444,86 @@ function resolverDiscoverStdRoots(
   });
 }
 
+/// The `tests.ign` companion beside each manifest module that has one, in
+/// sorted module-name order, mirroring the host's
+/// `discover_std_test_companions`.
+function resolverStdTestCompanions(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+): Vector<Path::PathBuf> {
+  let mut moduleNames: Vector<String> = Vector::new<String>();
+  let mut nameIndex: u64 = 0;
+
+  while (nameIndex < manifest.modules.length()) {
+    if (let Option::SOME(module) = manifest.modules.get(nameIndex)) {
+      moduleNames.push(module.name.clone());
+    }
+
+    nameIndex += 1;
+  }
+
+  Sort::stableLexicalStrings(&mut moduleNames);
+
+  let mut companions: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut sortedIndex: u64 = 0;
+
+  while (sortedIndex < moduleNames.length()) {
+    let Option::SOME(moduleName) = moduleNames.get(sortedIndex) else {
+      break;
+    };
+    let Option::SOME(relativePath) = manifest.modulePathText(moduleName.toStr()) else {
+      sortedIndex += 1;
+      continue;
+    };
+
+    let modulePath: Path::PathBuf = project.stdRoot.join(relativePath.toStr()).normalize();
+
+    if (let Option::SOME(moduleDir) = modulePath.parent()) {
+      let companion: Path::PathBuf = moduleDir.join("tests.ign");
+
+      if (Fs::exists(companion.asStr())) {
+        companions.push(companion.clone());
+      }
+    }
+
+    sortedIndex += 1;
+  }
+
+  return companions;
+}
+
+/// Discovers the graph `ignis test-std` compiles: every std module a
+/// standard-library build compiles, plus the `tests.ign` companion of each
+/// manifest module. Companions classify as `PROJECT`, so they are the only
+/// modules whose `@test` functions a run collects.
+function resolverDiscoverStdTestRoots(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+): Result<DiscoveryResult, DiagnosticBag> {
+  if (manifest.modules.length() == 0) {
+    let manifestText: String = project.stdManifestPath.toString();
+    let message: String = `No modules found in std manifest at '${manifestText.toStr()}'`;
+    return Result::ERROR(resolverSimpleDiagnostic(&project.stdManifestPath, MISSING_MODULE, message.toStr()));
+  }
+
+  let mut discovery: DiscoveryResult = resolverDiscoverStdRoots(project, manifest)!;
+  let companions: Vector<Path::PathBuf> = resolverStdTestCompanions(project, manifest);
+  let mut companionIndex: u64 = 0;
+
+  while (companionIndex < companions.length()) {
+    let Option::SOME(companion) = companions.get(companionIndex) else {
+      break;
+    };
+
+    let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    resolverDiscoverModule(project, manifest, &mut discovery.graph, companion, BuildModuleKind::PROJECT, &mut stack)!;
+    companionIndex += 1;
+  }
+
+  discovery.order = ModuleGraph::allModulesTopologicalOrder(&discovery.graph);
+  return Result::OK(discovery);
+}
+
 function resolverDiagnosticSummary(bag: &DiagnosticBag): String {
   let Option::SOME(diagnostic) = bag.get(0) else {
     Test::fail();
@@ -1554,6 +1634,20 @@ export namespace Resolver {
     let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
 
     return resolverDiscoverStdRoots(&project, &manifest);
+  }
+
+  /// Discovers the graph `ignis test-std` compiles. The std root comes only
+  /// from `--std-path` or `IGNIS_STD_PATH`: like the host, a std test run
+  /// never reads a project file, even when one governs `startPath`.
+  function discoverStdTests(
+    startPath: &Path::PathBuf,
+    overrides: &BuildOverrides,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = resolverStdOnlyProject(startPath, overrides)!;
+    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
+    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+
+    return resolverDiscoverStdTestRoots(&project, &manifest);
   }
 
   function orderSummaryRelativeTo(discovery: &DiscoveryResult, root: &Path::PathBuf): String {
@@ -2028,4 +2122,100 @@ function resolverPathUnderRootRejectsASiblingDirectoryWithAPrefixMatch(): void {
 
   Test::assertEq<boolean>(resolverPathUnderRoot(&sibling, &root), false);
   Test::assertEq<boolean>(resolverPathUnderRoot(&inside, &root), true);
+}
+
+/// The `PROJECT` modules of a discovery, relative to `root`, in graph order.
+function resolverProjectModulesRelativeTo(
+  discovery: &DiscoveryResult,
+  root: &Path::PathBuf
+): String {
+  let mut summary: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < discovery.graph.nodes.length()) {
+    let Option::SOME(node) = discovery.graph.nodes.get(index) else {
+      break;
+    };
+
+    if (node.kind == BuildModuleKind::PROJECT) {
+      if (summary.length() > 0) {
+        summary.pushChar('\n');
+      }
+
+      let relative: String = resolverRelativePathText(&node.path, root);
+      summary.push(&relative);
+    }
+
+    index += 1;
+  }
+
+  return summary;
+}
+
+/// A std test run compiles every manifest module as `STD` and adds each
+/// module's `tests.ign` companion as `PROJECT`, in sorted module-name order
+/// rather than manifest order.
+@test
+function resolverDiscoversStdTestCompanionsInSortedModuleOrder(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_tests");
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = Option::SOME(fixtureRoot.join("std").toString());
+
+  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&fixtureRoot, &overrides)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let companions: String = resolverProjectModulesRelativeTo(&discovery, &fixtureRoot);
+  Test::assertEq<str>(companions.toStr(), "std/alpha/tests.ign\nstd/beta/tests.ign");
+
+  let Option::SOME(gammaKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "std/gamma/mod.ign") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(gammaKind == BuildModuleKind::STD, true);
+  Test::assertEq<u64>(discovery.orderCount(), 5);
+}
+
+/// A std test run reads the std root only from `--std-path`: the project file
+/// governing the start directory is never consulted.
+@test
+function resolverStdTestDiscoveryIgnoresTheGoverningProjectFile(): void {
+  let projectRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind");
+  let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_tests/std");
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = Option::SOME(stdRoot.toString());
+
+  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&projectRoot, &overrides)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(discovery.hasProjectFile, false);
+  Test::assertEq<str>(discovery.stdRoot.asStr(), stdRoot.asStr());
+}
+
+/// A manifest that declares no modules is a setup error, reported with the
+/// host's wording.
+@test
+function resolverRejectsAStdTestRunOverAnEmptyManifest(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_tests_empty");
+  let stdRoot: Path::PathBuf = fixtureRoot.join("std");
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = Option::SOME(stdRoot.toString());
+
+  let Result::ERROR(bag) = Resolver::discoverStdTests(&fixtureRoot, &overrides) else {
+    Test::fail();
+    return;
+  };
+
+  let expected: String = `B2001|No modules found in std manifest at '${stdRoot.asStr()}/manifest.toml'`;
+  Test::assertEq<str>(resolverDiagnosticSummary(&bag).toStr(), expected.toStr());
 }

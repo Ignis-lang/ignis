@@ -801,6 +801,10 @@ record CompileOptions {
   public ownershipReportFunction: String;
   /// Send progress lines to stderr so stdout carries only report records.
   public statusToStderr: boolean;
+  /// Set for `ignis test-std`: test names are relative to this std root
+  /// rather than to the graph root's directory, and a `@test` in a shipping
+  /// std module is a setup error.
+  public stdTestRoot: Option<Path::PathBuf>;
 
   public static build(emitCode: boolean): CompileOptions {
     return CompileOptions {
@@ -813,6 +817,7 @@ record CompileOptions {
       dumpOwnershipReport: false,
       ownershipReportFunction: String::new(),
       statusToStderr: false,
+      stdTestRoot: Option::NONE,
     };
   }
 }
@@ -822,6 +827,14 @@ record CompileOptions {
 function testCompileOptions(): CompileOptions {
   let mut options: CompileOptions = CompileOptions::build(true);
   options.collectTests = true;
+  return options;
+}
+
+/// A std test run collects the `@test` functions of the `tests.ign`
+/// companions, named relative to `stdRoot` the way the host names them.
+function stdTestCompileOptions(stdRoot: &Path::PathBuf): CompileOptions {
+  let mut options: CompileOptions = testCompileOptions();
+  options.stdTestRoot = Option::SOME(stdRoot.clone());
   return options;
 }
 
@@ -1150,13 +1163,47 @@ function compileDiscovered(
   let mut tests: Vector<TestCase> = Vector::new<TestCase>();
 
   if (collectTests) {
-    let sourceRoot: Path::PathBuf = TestRunner::sourceRootOf(&discovery.graph);
+    let sourceRoot: Path::PathBuf = match (&options.stdTestRoot) {
+      Option::SOME(stdRoot) -> stdRoot.clone(),
+      Option::NONE -> TestRunner::sourceRootOf(&discovery.graph),
+    };
+    let rejectsShippingTests: boolean = options.stdTestRoot.isSome();
     let mut testModuleIndex: u64 = 0;
 
     while (testModuleIndex < records.length()) {
       let Option::SOME(isProject) = moduleIsProject.get(testModuleIndex) else {
         break;
       };
+
+      if (!*isProject && rejectsShippingTests) {
+        let Option::SOME(analysisRecord) = records.get(testModuleIndex) else {
+          break;
+        };
+        let Option::SOME(module) = modules.get(testModuleIndex) else {
+          break;
+        };
+        let Option::SOME(modulePath) = modulePaths.get(testModuleIndex) else {
+          break;
+        };
+
+        let mut shippingTests: Vector<TestCase> = Vector::new<TestCase>();
+        TestRunner::collectModuleTests(
+          &mut defStore,
+          &mut symbols,
+          module,
+          &analysisRecord.output.pass2,
+          modulePath,
+          &sourceRoot,
+          &mut shippingTests,
+        );
+
+        if (shippingTests.length() > 0) {
+          let moduleName: String = TestRunner::moduleSegments(modulePath, &sourceRoot);
+          let message: String = `error: std::${moduleName.toStr()} contains @test in a shipping source module; move std tests into the sibling tests.ign file`;
+          Io::eprintln(message);
+          return failedCompilation(1, 0);
+        }
+      }
 
       if (*isProject) {
         let Option::SOME(analysisRecord) = records.get(testModuleIndex) else {
@@ -2168,8 +2215,9 @@ function linkTestBinary(
   options: &CliOptions,
   compiled: &CompiledProgram,
   selected: &Vector<TestCase>,
+  binaryPathText: &String,
 ): Option<Path::PathBuf> {
-  let outputPath: String = options.outputPathOr("selfhost_tests");
+  let outputPath: String = binaryPathText.clone();
   let programSourceText: String = outputPath.concat("-program.c");
   let harnessSourceText: String = outputPath.concat("-harness.c");
   let programObjectText: String = outputPath.concat("-program.o");
@@ -2308,7 +2356,9 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     FixtureTests::prepareSnapshotDirectories(&selectedFixtures);
   }
 
-  let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected) else {
+  let binaryPathText: String = options.outputPathOr("selfhost_tests");
+
+  let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected, &binaryPathText) else {
     Io::eprintln(String::create("error: test setup failed"));
     return 1;
   };
@@ -2336,6 +2386,100 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     outcomes.push(runFixture(fixture, startPath, &discovery, options, timeoutSeconds));
     fixtureIndex += 1;
   }
+
+  if (TestRunner::report(&outcomes, &binaryPath) > 0) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Build the standard library's test harness and run every selected std test
+/// in its own process, the way the host's `ignis test-std` does: the graph is
+/// every manifest module plus each one's `tests.ign` companion, test names are
+/// relative to the std root, and the binary is `<out>/bin/std-tests`, where
+/// `<out>` is `-o` / `--output-dir` or `build` under the current directory.
+///
+/// Returns 0 when every selected test exits 0, and 1 on any failure,
+/// including an empty manifest, a `@test` in a shipping std module, or a
+/// discovery or analysis error.
+function runStdTests(options: &CliOptions): i32 {
+  let Result::OK(currentDir) = Env::currentDir() else {
+    Io::eprintln(String::create("error: the current directory could not be read"));
+    return 1;
+  };
+
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&currentDir, &overrides)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      let startFile: SourceFile = entrySourceFile(&currentDir);
+      reportDiscoveryFailure(&diagnostics, &startFile, true);
+      Io::eprintln(String::create("error: test setup failed"));
+      return 1;
+    },
+  };
+
+  Io::eprintln(`Testing std ${discovery.stdRoot.asStr()}\n`);
+
+  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let compileOptions: CompileOptions = stdTestCompileOptions(&discovery.stdRoot);
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
+
+  if (compiled.errors > 0 || compiled.source.length() == 0) {
+    Io::eprintln(String::create("error: test setup failed"));
+    return 1;
+  }
+
+  let noFixtures: Vector<FixtureCase> = Vector::new<FixtureCase>();
+  let noPartition: TestPartition = TestPartition::none();
+  let plan: TestPlan = TestRunner::buildPlan(&compiled.tests, &noFixtures, &options.filter, &noPartition);
+  let selected: Vector<TestCase> = plan.tests;
+
+  Io::eprintln(TestRunner::sectionHeader("Planning"));
+
+  if (selected.length() == 0) {
+    Io::eprintln(String::create("  - No tests selected"));
+    return 0;
+  }
+
+  let mut plannedIndex: u64 = 0;
+
+  while (plannedIndex < selected.length()) {
+    if (let Option::SOME(testCase) = selected.get(plannedIndex)) {
+      Io::eprintln(`  - ${testCase.fqName.toStr()}`);
+    }
+
+    plannedIndex += 1;
+  }
+
+  let outDirText: String = match (&options.outDir) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> String::create("build"),
+  };
+  let binaryPathText: String = Path::PathBuf::fromString(&outDirText).join("bin").join("std-tests").toString();
+  let requestedBinaryPath: Path::PathBuf = Path::PathBuf::fromString(&binaryPathText);
+
+  if (!ensureParentDirectory(&requestedBinaryPath)) {
+    Io::eprintln(String::create("error: test setup failed"));
+    return 1;
+  }
+
+  let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected, &binaryPathText) else {
+    Io::eprintln(String::create("error: test setup failed"));
+    return 1;
+  };
+
+  Io::eprintln(TestRunner::sectionHeader("Running"));
+
+  let outcomes: Vector<TestOutcome> = TestRunner::execute(
+    &binaryPath,
+    &selected,
+    options.updateSnapshots,
+    TestRunner::jobLimit(),
+    TestRunner::resolvedTimeoutSeconds(Option::NONE),
+  );
 
   if (TestRunner::report(&outcomes, &binaryPath) > 0) {
     return 1;
@@ -3553,7 +3697,8 @@ function runBuildStd(options: &CliOptions): i32 {
 ///
 /// `ignis build [PATH]`, `ignis check [PATH]`, `ignis build-std` and
 /// `ignis test [PATH]` run against the project that contains `PATH`, which
-/// defaults to the current directory. The bare form `ignis <entry.ign>` is the
+/// defaults to the current directory. `ignis test-std [FILTER]` runs the
+/// standard library's own tests and reads no project file. The bare form `ignis <entry.ign>` is the
 /// build the bootstrap ladder and the parity harness call, and stays a build of
 /// the project that contains that file.
 ///
@@ -3593,6 +3738,10 @@ function main(): i32 {
 
   if (let CliCommand::FMT = options.command) {
     return runFmt(&options);
+  }
+
+  if (let CliCommand::TEST_STD = options.command) {
+    return runStdTests(&options);
   }
 
   let Option::SOME(target) = resolveTarget(&options) else {
