@@ -1382,6 +1382,41 @@ function compileDiscovered(
     printStatus(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`, statusToStderr);
   }
 
+  let verifyMessages: Vector<String> = LirVerify::findingMessages(&verifyFindings);
+  let verifyErrors: u64 = verifyMessages.length();
+  let mut verifyIndex: u64 = 0;
+
+  while (verifyIndex < verifyMessages.length()) {
+    if (let Option::SOME(message) = verifyMessages.get(verifyIndex)) {
+      let line: String = `error: ${message.toStr()}`;
+
+      Io::eprintln(line.clone());
+
+      if (quiet) {
+        errorMessages.push(message.clone());
+      } else {
+        report.push(&line);
+        report.pushChar('\n');
+      }
+    }
+
+    verifyIndex += 1;
+  }
+
+  // A program the verifier rejects would still emit, and the C it produces
+  // frees or reads storage the analysis never agreed to.
+  if (verifyErrors > 0) {
+    return CompiledProgram {
+      source: String::new(),
+      tests: tests,
+      errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors + verifyErrors,
+      warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
+      errorMessages: errorMessages,
+      warningMessages: warningMessages,
+      report: report,
+    };
+  }
+
   // The harness translation unit defines `main` and calls the selected tests
   // directly, so the program unit must not carry an entry wrapper too.
   if (collectTests) {

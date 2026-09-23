@@ -279,7 +279,8 @@ export namespace LirVerify {
         // accept different programs.
         if (let Option::SOME(localData) = function_.locals.get(node.local.raw() as u64)) {
           if (!Borrowck::needsDropType(defStore, typeStore, localData.ty)) {
-            LirVerify::report(state, functionLabel, blockLabel, "drop of a non-droppable local");
+            let message: String = `drop of a non-droppable local l${node.local.raw()}`;
+            LirVerify::report(state, functionLabel, blockLabel, message.toStr());
           }
         }
       },
@@ -647,7 +648,8 @@ export namespace LirVerify {
     }
 
     if (alreadyDropped) {
-      LirVerify::report(state, functionLabel, blockLabel, "double drop of a local without an intervening store");
+      let message: String = `double drop of local l${local.raw()} without an intervening store`;
+      LirVerify::report(state, functionLabel, blockLabel, message.toStr());
       return;
     }
 
@@ -865,5 +867,23 @@ export namespace LirVerify {
     }
 
     return state.errors;
+  }
+
+  /// The error message each finding fails the build with, in finding order.
+  /// A finding already names its function and block, so the message only says
+  /// which phase rejected the program.
+  function findingMessages(findings: &Vector<String>): Vector<String> {
+    let mut messages: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < findings.length()) {
+      if (let Option::SOME(finding) = findings.get(index)) {
+        messages.push(`LIR verification: ${finding.toStr()}`);
+      }
+
+      index += 1;
+    }
+
+    return messages;
   }
 }
