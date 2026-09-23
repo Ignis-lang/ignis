@@ -4,7 +4,7 @@
 # committed C seed (bootstrap/seed) with gcc alone.
 #
 # Each test runs the script in an isolated project root (a temp directory
-# with its own scripts/, std/runtime/ and seed directory), the same sandbox
+# with its own scripts/ and seed directory), the same sandbox
 # style scripts/tests/test_stage_stamps.sh uses. The seed is a tiny C program
 # rather than the real compiler, so a test takes well under a second; what is
 # under test is the manifest handling, the checksum checks and the toolchain
@@ -35,8 +35,10 @@ fail_test() {
 #   $1  seed directory
 #   $2  xz sha256 to record
 #   $3  c sha256 to record
+#   $4  sha256 to record for the bundled header, default: its real hash
 write_manifest() {
   local seed_dir="$1" xz_sha256="$2" c_sha256="$3"
+  local header_sha256="${4:-$(sha256sum "${seed_dir}/seed_test.h" | cut -d' ' -f1)}"
 
   cat >"${seed_dir}/manifest.json" <<EOF
 {
@@ -54,7 +56,7 @@ write_manifest() {
   "cc": "gcc",
   "cc_version": "test",
   "compile_flags": "-O2",
-  "include_dirs": "std/runtime",
+  "headers": "seed_test.h:${header_sha256}",
   "link_flags": "-O2",
   "libs": "m",
   "created": "1970-01-01T00:00:00Z"
@@ -63,17 +65,18 @@ EOF
 }
 
 # A throwaway project root holding a valid seed for a program that prints
-# "seed ok" and exits 0. It includes a header from std/runtime and calls into
-# libm, so a recipe that drops the include directory or `-lm` fails to build.
+# "seed ok" and exits 0. It includes a header bundled in the seed directory
+# and calls into libm, so a recipe that drops `-I <seed dir>` or `-lm` fails
+# to build. The sandbox has no std/ at all: the seed must not need one.
 make_sandbox() {
   local root seed_dir
   root="$(mktemp -d)"
   seed_dir="${root}/bootstrap/seed"
 
-  mkdir -p "$root/scripts" "$root/std/runtime" "$seed_dir"
+  mkdir -p "$root/scripts" "$seed_dir"
   cp "$BUILD_FROM_SEED_SH" "$root/scripts/build_from_seed.sh"
 
-  printf '#define SEED_TEST_MESSAGE "seed ok"\n' >"$root/std/runtime/seed_test.h"
+  printf '#define SEED_TEST_MESSAGE "seed ok"\n' >"$seed_dir/seed_test.h"
 
   cat >"${root}/selfhost_emit.c" <<'EOF'
 #include <math.h>
@@ -181,6 +184,25 @@ test_c_sha_mismatch_fails() {
   rm -rf "$root"
 }
 
+test_header_sha_mismatch_fails() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a bundled header whose sha256 differs from the manifest fails"
+
+  local root status=0
+  root="$(make_sandbox)"
+
+  printf '/* tampered */\n' >>"$root/bootstrap/seed/seed_test.h"
+
+  (cd "$root" && scripts/build_from_seed.sh -o "$root/out/ignis") >"$root/stdout" 2>"$root/stderr" || status=$?
+
+  [[ "$status" -ne 0 ]] && pass "non-zero exit" || fail_test "exit 0 on a tampered header"
+  grep -q 'sha256 mismatch for .*seed_test.h' "$root/stderr" && pass "the error names the header" \
+    || fail_test "no header mismatch message, see ${root}/stderr"
+  [[ ! -e "$root/out/ignis" ]] && pass "no binary written" || fail_test "a binary was written"
+
+  rm -rf "$root"
+}
+
 test_missing_manifest_fails() {
   TESTS_RUN=$((TESTS_RUN + 1))
   echo "test: a seed directory without a manifest fails"
@@ -234,6 +256,7 @@ test_valid_seed_builds
 test_verify_only_compiles_nothing
 test_xz_sha_mismatch_fails
 test_c_sha_mismatch_fails
+test_header_sha_mismatch_fails
 test_missing_manifest_fails
 test_malformed_manifest_fails
 

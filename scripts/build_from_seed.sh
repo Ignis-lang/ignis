@@ -11,6 +11,10 @@
 # serve as stage0 for the bootstrap ladder (`scripts/bootstrap.sh
 # stage1-from-seed`). See BOOTSTRAP.md, "C seed (A3)".
 #
+# The seed is self-contained: the std/runtime headers the C includes are
+# copied into the seed directory, checksummed in the manifest, and the C is
+# compiled with `-I <seed dir>`. Nothing is read from the checkout's std/.
+#
 # Every toolchain flag is read from the seed's manifest.json, the only place
 # they are recorded. The manifest is a flat JSON object of string values, one
 # key per line, which is what lets this script read it without python or jq.
@@ -112,7 +116,7 @@ c_file="$(manifest_get c_file)"
 c_sha256="$(manifest_get c_sha256)"
 cc="$(manifest_get cc)"
 compile_flags="$(manifest_get compile_flags)"
-include_dirs="$(manifest_get include_dirs)"
+headers="$(manifest_get headers)"
 link_flags="$(manifest_get link_flags)"
 libs="$(manifest_get libs)"
 
@@ -139,7 +143,28 @@ actual_c_sha256="$(sha256sum "$c_path" | cut -d' ' -f1)"
 [[ "$actual_c_sha256" == "$c_sha256" ]] ||
   fail "sha256 mismatch for the decompressed ${c_file}: manifest records ${c_sha256}, content is ${actual_c_sha256}"
 
-info "seed ok: ${seed_xz} (xz ${xz_sha256}, c ${c_sha256})"
+# `headers` lists the bundled headers as space-separated `<name>:<sha256>`
+# pairs.
+read -r -a header_list <<<"$headers"
+[[ ${#header_list[@]} -gt 0 ]] || fail "manifest ${manifest}: \"headers\" is empty"
+
+for header_entry in "${header_list[@]}"; do
+  [[ "$header_entry" == *:* ]] || fail "manifest ${manifest}: header entry is not <name>:<sha256>: ${header_entry}"
+
+  header_name="${header_entry%%:*}"
+  header_sha256="${header_entry#*:}"
+  require_plain_name "headers" "$header_name"
+  require_sha256 "headers (${header_name})" "$header_sha256"
+
+  header_path="${seed_dir}/${header_name}"
+  [[ -f "$header_path" ]] || fail "seed header not found: ${header_path}"
+
+  actual_header_sha256="$(sha256sum "$header_path" | cut -d' ' -f1)"
+  [[ "$actual_header_sha256" == "$header_sha256" ]] ||
+    fail "sha256 mismatch for ${header_path}: manifest records ${header_sha256}, file is ${actual_header_sha256}"
+done
+
+info "seed ok: ${seed_xz} (xz ${xz_sha256}, c ${c_sha256}, ${#header_list[@]} header(s))"
 
 if [[ -n "$verify_only" ]]; then
   exit 0
@@ -151,14 +176,7 @@ read -r -a compile_flag_list <<<"$compile_flags"
 read -r -a link_flag_list <<<"$link_flags"
 read -r -a lib_list <<<"$libs"
 
-# Include directories are recorded relative to the repository root, the way
-# the selfhost driver passes `<std>/runtime`.
-include_arguments=()
-read -r -a include_dir_list <<<"$include_dirs"
-for include_dir in "${include_dir_list[@]}"; do
-  [[ -d "${PROJECT_ROOT}/${include_dir}" ]] || fail "include directory not found: ${PROJECT_ROOT}/${include_dir}"
-  include_arguments+=(-I "${PROJECT_ROOT}/${include_dir}")
-done
+include_directory="$(cd "$seed_dir" && pwd)"
 
 lib_arguments=()
 for lib in "${lib_list[@]}"; do
@@ -168,7 +186,7 @@ done
 object_path="${work_dir}/${c_file%.c}.o"
 
 info "compiling ${c_file} with ${cc} ${compile_flags}"
-"$cc" -c "$c_path" -o "$object_path" "${compile_flag_list[@]}" "${include_arguments[@]}" ||
+"$cc" -c "$c_path" -o "$object_path" "${compile_flag_list[@]}" -I "$include_directory" ||
   fail "${cc} could not compile the seed"
 
 mkdir -p "$(dirname "$output")"

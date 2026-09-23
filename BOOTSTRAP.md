@@ -42,30 +42,30 @@ the official binary, and a build failure there is terminal, not a fallback.
 
 `bootstrap/seed/` holds the whole compiler, standard library included, as the
 single C file a fixed-point stage2 emits (`selfhost_emit.c`, xz-compressed),
-plus `manifest.json`. It rebuilds the compiler with gcc alone, so the ladder
-can start without Rust, and without any release asset, once the host is
-frozen and deleted.
+a copy of every std/runtime header that C includes (today only
+`ignis_rt.h`), and `manifest.json`. It rebuilds the compiler with gcc alone,
+reading nothing else from the checkout, so the ladder can start without Rust,
+and without any release asset, once the host is frozen and deleted.
 
-| File | Size |
-| --- | --- |
-| `selfhost_emit.c.xz` | 1,685,680 bytes (1.6 MiB) |
-| `selfhost_emit.c`, uncompressed | 29,046,207 bytes (28 MiB) |
-
-The manifest records the source commit, the sha256 of both the archive and
-the uncompressed C, the compiler that emitted it (stage2 of that commit), the
-gcc recipe, the gcc it was generated next to, and the date. The recipe is the
-one the selfhost driver runs on itself for `ignis.toml`'s `[build]` profile,
-and the manifest is the only place it is written down:
+The manifest records the source commit, the sha256 and size of both the
+archive and the uncompressed C (`xz_size`, `c_size`), the sha256 of each
+bundled header, the compiler that emitted the C (stage2 of that commit), the
+gcc recipe, the gcc it was generated next to, and the date. Read sizes and
+hashes there; this document does not copy them. The recipe is the one the
+selfhost driver runs on itself for `ignis.toml`'s `[build]` profile, with the
+bundled headers standing in for std/runtime, and the manifest is the only
+place it is written down:
 
 ```bash
-gcc -c selfhost_emit.c -o selfhost_emit.o -O2 -I std/runtime
+gcc -c selfhost_emit.c -o selfhost_emit.o -O2 -I bootstrap/seed
 gcc -O2 selfhost_emit.o -o ignis -lm
 ```
 
-Besides `std/runtime/ignis_rt.h`, the C includes only standard C and POSIX
+Besides the bundled headers, the C includes only standard C and POSIX
 headers (libc, libm, `unistd.h`, `sys/*.h`), and holds no absolute path, so
 it does not depend on the machine that generated it. `scripts/bootstrap.sh
-seed` refuses to write a seed whose C contains the repository's own path.
+seed` refuses to write a seed whose C contains the repository's own path, or
+includes a quoted header that is not in std/runtime.
 
 ### Rebuilding from it
 
@@ -75,8 +75,9 @@ scripts/bootstrap.sh all-from-seed      # the ladder with no Rust at all
 ```
 
 `build_from_seed.sh` needs bash, xz, sha256sum and gcc, and nothing else. It
-checks the archive's sha256 against the manifest, decompresses it, checks the
-C's sha256, compiles and links, and prints the binary's path. A mismatch or a
+checks the archive's and each bundled header's sha256 against the manifest,
+decompresses the archive, checks the C's sha256, compiles and links, and
+prints the binary's path. A mismatch or a
 malformed manifest stops it with a non-zero exit. `--verify-only` runs the
 checks and compiles nothing; pull-request CI runs that on every change.
 
@@ -87,8 +88,10 @@ to prove the ladder needs no Rust. Later subcommands (`stage2`, `stage3`, the
 gates) keep using that stage0 until `clean` or an explicit `IGNIS_STAGE0`.
 `all-from-seed` continues through stage3, so it ends with G1.
 
-The nightly job "Rebuild from the C seed (no Rust)" runs `all-from-seed` on a
-runner with no Rust toolchain and requires G1. It is independent of the
+The nightly job "Rebuild from the C seed (no Rust)" installs no Rust
+toolchain, removes every cargo and rustup directory from PATH, fails unless
+cargo, rustc, rustup and ignis are all absent, then runs `all-from-seed` and
+requires G1. It is independent of the
 promotion flow: its verdict never touches the streak.
 
 ### Refreshing it
@@ -98,7 +101,8 @@ scripts/bootstrap.sh seed
 ```
 
 It builds stage3, requires G1, and writes the C stage2 emitted, which G1 has
-just shown equal to stage1's. ignis/ and std/ must be committed first, so
+just shown equal to stage1's, with the std/runtime headers it includes and a
+new manifest. ignis/ and std/ must be committed first, so
 the recorded source commit describes the seed. Commit the new
 `bootstrap/seed/` on its own.
 

@@ -1725,12 +1725,60 @@ SEED_FORMAT="ignis-c-seed v1"
 # runs for ignis.toml's [build] profile (opt_level = 2, debug = false,
 # cflags = []): CCompiler::profileFlags for both steps, `-I <std>/runtime`
 # when compiling, and `-lm` when linking (ignis/main.ign,
-# compileAndLinkUnits).
+# compileAndLinkUnits). The std/runtime headers the C includes are copied
+# into the seed, so build_from_seed.sh compiles with `-I <seed dir>` instead.
 SEED_CC="gcc"
 SEED_COMPILE_FLAGS="-O2"
-SEED_INCLUDE_DIRS="std/runtime"
+SEED_HEADER_SOURCE_DIR="${PROJECT_ROOT}/std/runtime"
 SEED_LINK_FLAGS="-O2"
 SEED_LIBS="m"
+
+# The quoted `#include "..."` names in the files given, one per line. Angle
+# includes are system headers and are not bundled.
+quoted_includes() {
+  sed -n -E 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*"([^"]+)".*/\1/p' "$@" | LC_ALL=C sort -u
+}
+
+# Copy every std/runtime header the seed C reaches through quoted includes,
+# following includes between headers too, into the seed directory, and print
+# the manifest's `headers` value: space-separated `<name>:<sha256>` pairs.
+# Headers left over from a previous seed are removed first.
+bundle_seed_headers() {
+  local seed_c="$1"
+  local pending=() seen=() name
+
+  rm -f "${SEED_DIR}"/*.h
+
+  mapfile -t pending < <(quoted_includes "$seed_c")
+
+  while [[ ${#pending[@]} -gt 0 ]]; do
+    name="${pending[0]}"
+    pending=("${pending[@]:1}")
+
+    [[ " ${seen[*]-} " == *" ${name} "* ]] && continue
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] ||
+      fail "seed: the C includes \"${name}\", which is not a plain header name in ${SEED_HEADER_SOURCE_DIR}"
+    [[ -f "${SEED_HEADER_SOURCE_DIR}/${name}" ]] ||
+      fail "seed: the C includes \"${name}\", which is not in ${SEED_HEADER_SOURCE_DIR}"
+
+    seen+=("$name")
+    cp "${SEED_HEADER_SOURCE_DIR}/${name}" "${SEED_DIR}/${name}"
+    chmod 644 "${SEED_DIR}/${name}"
+
+    local nested
+    mapfile -t nested < <(quoted_includes "${SEED_DIR}/${name}")
+    pending+=("${nested[@]}")
+  done
+
+  [[ ${#seen[@]} -gt 0 ]] || fail "seed: the C includes no std/runtime header; expected at least ignis_rt.h"
+
+  local entries=()
+  while IFS= read -r name; do
+    entries+=("${name}:$(sha256sum "${SEED_DIR}/${name}" | cut -d' ' -f1)")
+  done < <(printf '%s\n' "${seen[@]}" | LC_ALL=C sort)
+
+  echo "${entries[*]}"
+}
 
 seed_manifest_field() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "${SEED_DIR}/manifest.json" "$1"
@@ -1774,6 +1822,9 @@ write_seed() {
   xz -9 -T1 -c "$seed_c" >"$xz_temp" || { rm -f "$xz_temp"; fail "seed: xz failed"; }
   mv "$xz_temp" "${SEED_DIR}/${xz_name}"
 
+  local headers
+  headers="$(bundle_seed_headers "$seed_c")"
+
   FORMAT="$SEED_FORMAT" \
   SOURCE_COMMIT="$source_commit" \
   SOURCES_HASH="$sources" \
@@ -1786,7 +1837,7 @@ write_seed() {
   CC_NAME="$SEED_CC" \
   CC_VERSION="$("$SEED_CC" --version | head -n1)" \
   COMPILE_FLAGS="$SEED_COMPILE_FLAGS" \
-  INCLUDE_DIRS="$SEED_INCLUDE_DIRS" \
+  HEADERS="$headers" \
   LINK_FLAGS="$SEED_LINK_FLAGS" \
   LIBS="$SEED_LIBS" \
   CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1812,7 +1863,7 @@ payload = {
   "cc": environment["CC_NAME"],
   "cc_version": environment["CC_VERSION"],
   "compile_flags": environment["COMPILE_FLAGS"],
-  "include_dirs": environment["INCLUDE_DIRS"],
+  "headers": environment["HEADERS"],
   "link_flags": environment["LINK_FLAGS"],
   "libs": environment["LIBS"],
   "created": environment["CREATED"],
@@ -1895,7 +1946,8 @@ except BaseException:
 
 # Once stage0.json records a seed-built stage0, later invocations keep using
 # it unless IGNIS_STAGE0 says otherwise, so `stage2` or `stage3` run after
-# `stage1-from-seed` stay on the seed lineage. `clean` leaves it.
+# `stage1-from-seed` stay on the seed lineage, until an explicit IGNIS_STAGE0
+# overrides it or `clean` removes build/bootstrap, stage0.json included.
 adopt_seed_stage0() {
   [[ -z "${IGNIS_STAGE0:-}" ]] || return 0
   [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]] || return 0
