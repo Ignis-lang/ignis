@@ -532,6 +532,19 @@ function codegenEmitsSignedMinimumsAsSingleConstants(): void {
   Test::assert(!codegenContains(&emission.source, "-0U"));
 }
 
+/// A record with no fields is an empty GNU C struct, sized zero like the
+/// reference lays it out, not one padded with a dummy byte.
+@test
+function codegenEmitsRecordWithoutFieldsAsEmptyStruct(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "record Empty {}\n\nfunction main(): i32 {\n  let _value: Empty = Empty {};\n\n  return @sizeOf<Empty>() as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "sizeof(struct Empty_"));
+  Test::assert(codegenContains(&emission.source, " {\n};\n"));
+  Test::assert(!codegenContains(&emission.source, "char _empty;"));
+}
+
 /// The reserved-name table is the contract both compilers share, so it is
 /// asserted directly rather than through an emission: a divergence here is a
 /// bootstrap fixed-point failure, not a wrong-looking function body.

@@ -2561,7 +2561,6 @@ export namespace CodegenC {
       outputRef.pushStr(name.toStr());
       outputRef.pushStr(" {\n");
 
-      let mut wroteField: boolean = false;
       let mut index: u64 = 0;
 
       while (index < members.length()) {
@@ -2578,7 +2577,6 @@ export namespace CodegenC {
 
             let mut fieldRef: &mut String = output;
             fieldRef.pushStr(line.toStr());
-            wroteField = true;
           }
         }
 
@@ -2587,14 +2585,10 @@ export namespace CodegenC {
 
       let mut tailRef: &mut String = output;
 
+      // A record with no fields stays an empty GNU C struct, sized zero, which
+      // is how the reference lays it out in its module headers.
       if (implementsDrop) {
         tailRef.pushStr("    uint8_t __ignis_drop_state;\n");
-        wroteField = true;
-      }
-
-      // C rejects an empty struct.
-      if (!wroteField) {
-        tailRef.pushStr("    char _empty;\n");
       }
 
       tailRef.pushStr("}");
