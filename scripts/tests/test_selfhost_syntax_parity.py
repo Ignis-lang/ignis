@@ -370,13 +370,17 @@ class RepositorySnippetTests(unittest.TestCase):
     repository_root = SCRIPT_DIR.parent
     parser_sources = repository_root / "crates/ignis_parser/src"
 
-    if not parser_sources.is_dir():
+    message_file = repository_root / "crates/ignis_diagnostics/src/message.rs"
+
+    if not parser_sources.is_dir() or not message_file.is_file():
       self.skipTest("the host parser sources are gone")
 
-    messages = (repository_root / "crates/ignis_diagnostics/src/message.rs").read_text(encoding="utf-8")
+    messages = message_file.read_text(encoding="utf-8")
     code_of = dict(
       re.findall(r"DiagnosticMessage::(\w+)\s*(?:\{[^}]*\}|\([^)]*\))?\s*=>\s*\"([A-Z]\d{4})\"", messages)
     )
+
+    self.assertTrue(code_of, "no diagnostic code mapping was read from message.rs")
 
     raised: set[str] = set()
 
@@ -384,6 +388,7 @@ class RepositorySnippetTests(unittest.TestCase):
       production = path.read_text(encoding="utf-8").split("#[cfg(test)]")[0]
       raised |= {code_of[name] for name in re.findall(r"DiagnosticMessage::(\w+)", production) if name in code_of}
 
+    self.assertTrue(raised, "no diagnostic raised by the host parser was found")
     self.assertEqual(sorted(raised - PARSE_DIAGNOSTIC_CODES - {"A0111"}), [])
 
 
