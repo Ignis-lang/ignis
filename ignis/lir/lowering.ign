@@ -333,21 +333,21 @@ export namespace LirLowering {
     return Lir::Terminator::Return(Option::SOME(bodyValue));
   }
 
+  // One nested pattern, not an `if let` on the payload binding: compilers
+  // without the #256 fix free a string constant's payload on that shape, and
+  // the official stage0 and the C seed build this file. Keep it until both
+  // carry the fix (the two-step rule in BOOTSTRAP.md).
   function isUndefOperand(operand: &Lir::Operand): boolean {
-    if (let Lir::Operand::Const(value) = operand) {
-      if (let Lir::ConstValue::Undef(_) = value) {
-        return true;
-      }
+    if (let Lir::Operand::Const(Lir::ConstValue::Undef(_)) = operand) {
+      return true;
     }
 
     return false;
   }
 
   function isValuelessUndef(typeStore: &mut Analyzer::TypeStore, operand: &Lir::Operand): boolean {
-    if (let Lir::Operand::Const(value) = operand) {
-      if (let Lir::ConstValue::Undef(ty) = value) {
-        return LirLowering::producesNoValue(typeStore, ty);
-      }
+    if (let Lir::Operand::Const(Lir::ConstValue::Undef(ty)) = operand) {
+      return LirLowering::producesNoValue(typeStore, ty);
     }
 
     return false;
