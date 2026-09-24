@@ -1,0 +1,441 @@
+//! Front-end analysis of a project or single file for the language server,
+//! with open editor buffers standing in for the files on disk.
+//!
+//! Analysis stops after the analyzer (binding, resolution, typechecking,
+//! constant evaluation, checks and lints). Monomorphization, ownership and
+//! code generation never run. Every failure this module can see comes back
+//! as a diagnostic or a stderr line, so the server loop survives it. A panic
+//! inside the front end (`@panic`, `@unreachable` or a failed `unwrap` in the
+//! binder, resolver or typechecker) still ends the process: the selfhost has
+//! no way to catch one.
+
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+import Config from "@compiler::config";
+import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import ParseOutput, Parser from "@compiler::parser";
+
+import Io from "std::io";
+import Path from "std::path";
+import String from "std::string";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import analyzerModuleKind, mapImportSourcesToDiscoveryTargets from "../build/import_targets";
+import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
+import SourceOverrides from "../build/sources";
+
+/// One diagnostic in LSP terms: a UTF-16 range, an LSP severity
+/// (1 error, 2 warning, 3 information, 4 hint), the code and the message.
+export record LspDiagnostic {
+  public start: Text::Position;
+  public end: Text::Position;
+  public severity: u64;
+  public code: String;
+  public message: String;
+}
+
+/// The diagnostics of one file, which is never empty.
+export record FileDiagnostics {
+  public path: String;
+  public diagnostics: Vector<LspDiagnostic>;
+}
+
+/// A compiler diagnostic reduced to owned data and the index, in the analyzed
+/// file list, of the file its byte offsets point into.
+record PendingDiagnostic {
+  public fileIndex: u64;
+  public start: u64;
+  public end: u64;
+  public severity: u64;
+  public code: String;
+  public message: String;
+}
+
+/// The modules of one analysis, parsed. `files` owns the texts every span
+/// points into, so it has to outlive the diagnostics taken from them.
+record ParsedProgram {
+  public files: Vector<SourceFile>;
+  public modules: Vector<Ast::Module>;
+  public infos: Vector<Analyzer::Imports::ModuleInfo>;
+  public pending: Vector<PendingDiagnostic>;
+  public frontendErrors: u64;
+}
+
+/// The LSP severity of a compiler severity.
+export function lspSeverity(severity: Severity): u64 {
+  return match (severity) {
+    Severity::ERROR -> 1,
+    Severity::WARNING -> 2,
+    Severity::INFO -> 3,
+    Severity::HINT -> 4,
+  };
+}
+
+/// What identifies the analysis a file belongs to: the `ignis.toml` that
+/// governs it, or the file itself when none does. Files with the same key are
+/// analyzed together, once per batch of changes.
+export function analysisKeyOf(path: &Path::PathBuf): String {
+  return match (Config::findProjectFile(path)) {
+    Option::SOME(projectFile) -> projectFile.toString(),
+    Option::NONE -> path.toString(),
+  };
+}
+
+/// The number of errors in `bag`.
+function countErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      if (diagnostic.severity == Severity::ERROR) {
+        count += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// The index of the file whose path is `spanPath`, or `fallback`.
+function fileIndexForSpan(files: &Vector<SourceFile>, spanPath: str, fallback: u64): u64 {
+  let wanted: String = String::create(spanPath);
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    if (let Option::SOME(file) = files.get(index)) {
+      let candidate: String = file.path.toString();
+
+      if (candidate.equals(&wanted)) {
+        return index;
+      }
+    }
+
+    index += 1;
+  }
+
+  return fallback;
+}
+
+/// Appends every diagnostic of `bag`. A diagnostic whose span names another
+/// analyzed file is attributed to that file, any other to `fallback`.
+function collectBag(
+  bag: &DiagnosticBag,
+  files: &Vector<SourceFile>,
+  fallback: u64,
+  pending: &mut Vector<PendingDiagnostic>,
+): void {
+  let mut pendingRef: &mut Vector<PendingDiagnostic> = pending;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      pendingRef.push(PendingDiagnostic {
+        fileIndex: fileIndexForSpan(files, diagnostic.primarySpan.filePath, fallback),
+        start: diagnostic.primarySpan.start,
+        end: diagnostic.primarySpan.end,
+        severity: lspSeverity(diagnostic.severity),
+        code: String::create(diagnostic.code),
+        message: diagnostic.message.clone(),
+      });
+    }
+
+    index += 1;
+  }
+}
+
+/// Appends every diagnostic of `bag` at the start of file `fileIndex`,
+/// ignoring its spans.
+///
+/// Module discovery reports failures with spans whose file path it has
+/// already freed, so those spans cannot be read.
+function collectBagAtFileStart(
+  bag: &DiagnosticBag,
+  fileIndex: u64,
+  pending: &mut Vector<PendingDiagnostic>
+): void {
+  let mut pendingRef: &mut Vector<PendingDiagnostic> = pending;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      pendingRef.push(PendingDiagnostic {
+        fileIndex: fileIndex,
+        start: 0,
+        end: 0,
+        severity: lspSeverity(diagnostic.severity),
+        code: String::create(diagnostic.code),
+        message: diagnostic.message.clone(),
+      });
+    }
+
+    index += 1;
+  }
+}
+
+function hasPendingFor(pending: &Vector<PendingDiagnostic>, fileIndex: u64): boolean {
+  let mut index: u64 = 0;
+
+  while (index < pending.length()) {
+    if (let Option::SOME(entry) = pending.get(index)) {
+      if (entry.fileIndex == fileIndex) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// Converts byte offsets to UTF-16 positions and groups the diagnostics by
+/// file, in file order. Each file is indexed once.
+function convertPending(
+  pending: &Vector<PendingDiagnostic>,
+  files: &Vector<SourceFile>
+): Vector<FileDiagnostics> {
+  let mut result: Vector<FileDiagnostics> = Vector::new<FileDiagnostics>();
+  let mut fileIndex: u64 = 0;
+
+  while (fileIndex < files.length()) {
+    let Option::SOME(file) = files.get(fileIndex) else {
+      break;
+    };
+
+    if (!hasPendingFor(pending, fileIndex)) {
+      fileIndex += 1;
+      continue;
+    }
+
+    let lineIndex: Text::LineIndex = Text::LineIndex::create(file.text.clone());
+    let mut diagnostics: Vector<LspDiagnostic> = Vector::new<LspDiagnostic>();
+    let mut pendingIndex: u64 = 0;
+
+    while (pendingIndex < pending.length()) {
+      if (let Option::SOME(entry) = pending.get(pendingIndex)) {
+        if (entry.fileIndex == fileIndex) {
+          diagnostics.push(LspDiagnostic {
+            start: lineIndex.position(entry.start),
+            end: lineIndex.position(entry.end),
+            severity: entry.severity,
+            code: entry.code.clone(),
+            message: entry.message.clone(),
+          });
+        }
+      }
+
+      pendingIndex += 1;
+    }
+
+    result.push(FileDiagnostics { path: file.path.toString(), diagnostics: diagnostics });
+    fileIndex += 1;
+  }
+
+  return result;
+}
+
+/// Parses every module discovery ordered, reading open buffers instead of
+/// the disk, and collects their lexer and parser diagnostics.
+///
+/// Returns an error message when the modules no longer match what discovery
+/// saw, which means a file changed on disk in between.
+function parseDiscoveredModules(
+  discovery: &DiscoveryResult,
+  sources: &SourceOverrides,
+): Result<ParsedProgram, String> {
+  let mut program: ParsedProgram = ParsedProgram {
+    files: Vector::new<SourceFile>(),
+    modules: Vector::new<Ast::Module>(),
+    infos: Vector::new<Analyzer::Imports::ModuleInfo>(),
+    pending: Vector::new<PendingDiagnostic>(),
+    frontendErrors: 0,
+  };
+  let mut orderIndex: u64 = 0;
+
+  while (orderIndex < discovery.order.length()) {
+    let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
+      return Result::ERROR(String::create("discovery order is incomplete"));
+    };
+    let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
+      return Result::ERROR(String::create("discovery order references a missing module"));
+    };
+    let Result::OK(moduleText) = sources.read(&node.path) else {
+      return Result::ERROR(`cannot read source file: ${node.path.toString().toStr()}`);
+    };
+
+    let fileIndex: u64 = program.files.length();
+    program.files.push(SourceFile { path: node.path.clone(), text: moduleText });
+
+    let Option::SOME(moduleFile) = program.files.get(fileIndex) else {
+      return Result::ERROR(String::create("parsed file list is incomplete"));
+    };
+
+    let mut output: ParseOutput = Parser::parseFileWithFlags(moduleFile, &discovery.flags);
+
+    program.frontendErrors += countErrors(&output.lexDiagnostics) + countErrors(&output.parseDiagnostics);
+    collectBag(&output.lexDiagnostics, &program.files, fileIndex, &mut program.pending);
+    collectBag(&output.parseDiagnostics, &program.files, fileIndex, &mut program.pending);
+
+    if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
+      return Result::ERROR(`import mapping is incomplete for ${node.path.toString().toStr()}`);
+    }
+
+    program.modules.push(output.module);
+    program.infos.push(Analyzer::Imports::ModuleInfo {
+      index: *nodeIndex,
+      pathText: node.path.toString(),
+      kind: analyzerModuleKind(node.kind),
+    });
+    orderIndex += 1;
+  }
+
+  return Result::OK(program);
+}
+
+/// Runs the analyzer over parsed modules and collects its diagnostics.
+function analyzeParsedModules(discovery: &DiscoveryResult, program: &mut ParsedProgram): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut preludePaths: Vector<String> = Vector::new<String>();
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < discovery.preludePaths.length()) {
+    if (let Option::SOME(preludePath) = discovery.preludePaths.get(preludeIndex)) {
+      preludePaths.push(preludePath.toString());
+    }
+
+    preludeIndex += 1;
+  }
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &program.modules,
+    &program.infos,
+    &preludePaths,
+  );
+
+  let mut recordIndex: u64 = 0;
+
+  while (recordIndex < records.length()) {
+    if (let Option::SOME(analysisRecord) = records.get(recordIndex)) {
+      collectBag(&analysisRecord.output.diagnostics, &program.files, recordIndex, &mut program.pending);
+    }
+
+    recordIndex += 1;
+  }
+}
+
+/// The diagnostics to publish when module discovery failed.
+///
+/// Discovery stops at the first file it cannot parse, and its diagnostics
+/// cannot be placed (see `collectBagAtFileStart`). So the open buffers of
+/// this analysis are parsed again here: their own lexer and parser errors are
+/// exact. When none of them has one, the failure lies elsewhere (a missing
+/// module, an import cycle, an unreadable project file or a file on disk that
+/// does not parse), and discovery's diagnostics are reported at the start of
+/// the file that started the analysis.
+function discoveryFailureDiagnostics(
+  failure: &DiagnosticBag,
+  startPath: &Path::PathBuf,
+  key: &String,
+  sources: &SourceOverrides,
+): Vector<FileDiagnostics> {
+  let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
+  let mut pending: Vector<PendingDiagnostic> = Vector::new<PendingDiagnostic>();
+  let mut parseErrors: u64 = 0;
+  let mut sourceIndex: u64 = 0;
+
+  while (sourceIndex < sources.length()) {
+    let Option::SOME(path) = sources.pathAt(sourceIndex) else {
+      break;
+    };
+
+    let pathKey: String = analysisKeyOf(&path);
+
+    if (!pathKey.equals(key)) {
+      sourceIndex += 1;
+      continue;
+    }
+
+    let Result::OK(text) = sources.read(&path) else {
+      sourceIndex += 1;
+      continue;
+    };
+
+    let fileIndex: u64 = files.length();
+    files.push(SourceFile { path: path, text: text });
+
+    if (let Option::SOME(file) = files.get(fileIndex)) {
+      let output: ParseOutput = Parser::parseFile(file);
+
+      parseErrors += countErrors(&output.lexDiagnostics) + countErrors(&output.parseDiagnostics);
+      collectBag(&output.lexDiagnostics, &files, fileIndex, &mut pending);
+      collectBag(&output.parseDiagnostics, &files, fileIndex, &mut pending);
+    }
+
+    sourceIndex += 1;
+  }
+
+  if (parseErrors > 0) {
+    return convertPending(&pending, &files);
+  }
+
+  let startText: String = match (sources.read(startPath)) {
+    Result::OK(text) -> text,
+    Result::ERROR(_) -> String::new(),
+  };
+
+  let mut startFiles: Vector<SourceFile> = Vector::new<SourceFile>();
+  startFiles.push(SourceFile { path: startPath.clone(), text: startText });
+
+  let mut startPending: Vector<PendingDiagnostic> = Vector::new<PendingDiagnostic>();
+  collectBagAtFileStart(failure, 0, &mut startPending);
+  return convertPending(&startPending, &startFiles);
+}
+
+/// Analyzes the project or single file `startPath` belongs to and returns
+/// the diagnostics of every file that has any.
+///
+/// `key` is `analysisKeyOf(startPath)`. `stdPath` overrides the standard
+/// library root the way `--std-path` does. `sources` holds the open buffers.
+export function analyzeForDiagnostics(
+  startPath: &Path::PathBuf,
+  key: &String,
+  stdPath: &Option<String>,
+  sources: &SourceOverrides,
+): Vector<FileDiagnostics> {
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.sources = sources.clone();
+
+  if (let Option::SOME(value) = stdPath) {
+    overrides.stdPath = Option::SOME(value.clone());
+  }
+
+  let discovery: DiscoveryResult = match (Resolver::discover(startPath, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(failure) -> {
+      return discoveryFailureDiagnostics(&failure, startPath, key, sources);
+    },
+  };
+
+  let mut program: ParsedProgram = match (parseDiscoveredModules(&discovery, sources)) {
+    Result::OK(value) -> value,
+    Result::ERROR(message) -> {
+      Io::eprintln(`[ignis-lsp] analysis of ${key.toStr()} stopped: ${message.toStr()}`);
+      return Vector::new<FileDiagnostics>();
+    },
+  };
+
+  if (program.frontendErrors == 0) {
+    analyzeParsedModules(&discovery, &mut program);
+  }
+
+  return convertPending(&program.pending, &program.files);
+}

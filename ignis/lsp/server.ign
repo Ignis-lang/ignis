@@ -1,0 +1,612 @@
+//! `ignis lsp`: a sequential Language Server Protocol server over stdio that
+//! publishes diagnostics.
+//!
+//! Messages are handled one at a time, in arrival order. Document changes
+//! only mark their analysis dirty. The analysis runs once no bytes of a
+//! further message are buffered, so a burst of changes that arrived together
+//! costs one analysis. Without `poll(2)` in the standard library the server
+//! cannot see bytes the kernel holds but has not handed over yet, so a burst
+//! split across two reads can cost two analyses.
+
+import JsonObjectEntry, JsonValue, JsonValueKind from "std::json";
+import Io, Stream from "std::io";
+import LibC from "std::libc";
+import Path from "std::path";
+import String from "std::string";
+import Vector from "std::vector";
+
+import SourceOverrides from "../build/sources";
+
+import FileDiagnostics, LspDiagnostic, analysisKeyOf, analyzeForDiagnostics from "./analysis";
+import DocumentHandle, DocumentStore from "./documents";
+import
+  DecodeError,
+  LspErrorCode,
+  LspMessage,
+  LspNotification,
+  LspRequest,
+  RequestId,
+  decodeMessage,
+  errorResponseBody,
+  initializeResult,
+  jsonIntegerMember,
+  jsonMember,
+  jsonStringMember,
+  notificationBody,
+  responseBody,
+from "./protocol";
+import uriFromFilePath from "./uri";
+
+/// Largest message body the server reads, 64 MiB. A longer one is skipped
+/// without being buffered and answered with an error.
+export const LSP_MAX_MESSAGE_BYTES: u64 = 67108864;
+
+/// Where the server is in the protocol lifecycle.
+export enum LspPhase {
+  /// Before `initialize`: every other request is refused.
+  WAITING,
+  /// Between `initialize` and `shutdown`.
+  RUNNING,
+  /// After `shutdown`: only `exit` has an effect.
+  SHUT_DOWN,
+}
+
+/// The URIs one analysis last published non-empty diagnostics for, so the
+/// next run of the same analysis can clear the ones that are clean now.
+record PublishedSet {
+  public key: String;
+  public uris: Vector<String>;
+}
+
+/// What handling one message asks the loop to do next.
+export enum LspStep {
+  CONTINUE,
+  /// `exit` arrived: stop with this process exit code.
+  EXIT(i32),
+}
+
+/// One diagnostic in its LSP JSON form.
+function diagnosticJson(diagnostic: &LspDiagnostic): JsonValue {
+  let mut start: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  start.push(JsonObjectEntry::create("line", JsonValue::unsignedValue(diagnostic.start.line)));
+  start.push(JsonObjectEntry::create("character", JsonValue::unsignedValue(diagnostic.start.character)));
+
+  let mut end: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  end.push(JsonObjectEntry::create("line", JsonValue::unsignedValue(diagnostic.end.line)));
+  end.push(JsonObjectEntry::create("character", JsonValue::unsignedValue(diagnostic.end.character)));
+
+  let mut range: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  range.push(JsonObjectEntry::create("start", JsonValue::object(start)));
+  range.push(JsonObjectEntry::create("end", JsonValue::object(end)));
+
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("range", JsonValue::object(range)));
+  entries.push(JsonObjectEntry::create("severity", JsonValue::unsignedValue(diagnostic.severity)));
+  entries.push(JsonObjectEntry::create("code", JsonValue::fromString(diagnostic.code.clone())));
+  entries.push(JsonObjectEntry::create("source", JsonValue::stringValue("ignis")));
+  entries.push(JsonObjectEntry::create("message", JsonValue::fromString(diagnostic.message.clone())));
+  return JsonValue::object(entries);
+}
+
+/// The params of a `textDocument/publishDiagnostics` notification.
+export function publishDiagnosticsParams(
+  uri: &String,
+  diagnostics: &Vector<LspDiagnostic>,
+  version: Option<i64>,
+): JsonValue {
+  let mut items: Vector<JsonValue> = Vector::new<JsonValue>();
+  let mut index: u64 = 0;
+
+  while (index < diagnostics.length()) {
+    if (let Option::SOME(diagnostic) = diagnostics.get(index)) {
+      items.push(diagnosticJson(diagnostic));
+    }
+
+    index += 1;
+  }
+
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("uri", JsonValue::fromString(uri.clone())));
+  entries.push(JsonObjectEntry::create("diagnostics", JsonValue::array(items)));
+
+  if (let Option::SOME(value) = version) {
+    entries.push(JsonObjectEntry::create("version", JsonValue::integerValue(value)));
+  }
+
+  return JsonValue::object(entries);
+}
+
+/// The error text for a skipped message of `length` bytes.
+function oversizedMessageText(length: u64): String {
+  let limit: u64 = LSP_MAX_MESSAGE_BYTES;
+  return `message of ${length} bytes exceeds the ${limit}-byte limit`;
+}
+
+/// A copy of every string in `values`.
+function cloneTexts(values: &Vector<String>): Vector<String> {
+  let mut copy: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      copy.push(value.clone());
+    }
+
+    index += 1;
+  }
+
+  return copy;
+}
+
+/// True when `values` holds a string equal to `wanted`.
+function containsText(values: &Vector<String>, wanted: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      if (value.equals(wanted)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function lspLog(message: String): void {
+  let mut line: String = String::create("[ignis-lsp] ");
+  line.push(&message);
+  Io::eprintln(line);
+}
+
+/// The text of the last `contentChanges` entry of a `didChange` that has no
+/// `range`: with full-document sync that entry is the whole new text. `NONE`
+/// when there is none.
+function fullTextOfChanges(params: &JsonValue): Option<String> {
+  let Option::SOME(changes) = jsonMember(params, "contentChanges") else {
+    return Option::NONE;
+  };
+
+  return lastFullTextChange(changes);
+}
+
+function lastFullTextChange(changes: &JsonValue): Option<String> {
+  let JsonValueKind::ARRAY(items) = &changes.kind else {
+    return Option::NONE;
+  };
+
+  let mut index: u64 = items.length();
+
+  while (index > 0) {
+    index -= 1;
+
+    let Option::SOME(change) = items.get(index) else {
+      break;
+    };
+
+    if (jsonMember(change, "range").isNone()) {
+      return jsonStringMember(change, "text");
+    }
+  }
+
+  return Option::NONE;
+}
+
+/// A sequential language server over one reader and one writer.
+export record LspServer {
+  reader: Stream::ByteReader;
+  writer: Stream::ByteWriter;
+  phase: LspPhase;
+  documents: DocumentStore;
+  /// Documents changed since the last analysis, as their paths.
+  dirty: Vector<Path::PathBuf>;
+  published: Vector<PublishedSet>;
+  /// `--std-path`, applied to every analysis.
+  stdPath: Option<String>;
+
+  public static create(
+    reader: Stream::ByteReader,
+    writer: Stream::ByteWriter,
+    stdPath: Option<String>
+  ): LspServer {
+    return LspServer {
+      reader: reader,
+      writer: writer,
+      phase: LspPhase::WAITING,
+      documents: DocumentStore::create(),
+      dirty: Vector::new<Path::PathBuf>(),
+      published: Vector::new<PublishedSet>(),
+      stdPath: stdPath,
+    };
+  }
+
+  /// Serves stdin and stdout until `exit` or the end of input, and returns
+  /// the process exit code: 0 after `shutdown`, 1 otherwise.
+  ///
+  /// Standard output is moved to a duplicate descriptor first and descriptor
+  /// 1 is pointed at stderr, so nothing the compiler prints while analyzing
+  /// can corrupt the message stream.
+  public static runStdio(stdPath: Option<String>): i32 {
+    let mut protocolFd: i32 = LibC::File::dup(LibC::File::STDOUT_FILENO);
+
+    if (protocolFd < 0) {
+      protocolFd = LibC::File::STDOUT_FILENO;
+    } else {
+      LibC::File::dup2(LibC::File::STDERR_FILENO, LibC::File::STDOUT_FILENO);
+    }
+
+    let mut server: LspServer = LspServer::create(
+      Stream::ByteReader::stdin(),
+      Stream::ByteWriter::fromFd(protocolFd),
+      stdPath,
+    );
+
+    return server.run();
+  }
+
+  public run(&mut self): i32 {
+    while (true) {
+      if (let LspStep::EXIT(code) = self.step()) {
+        return code;
+      }
+
+      if (self.dirty.length() > 0 && self.reader.available() == 0) {
+        self.analyzeDirty();
+      }
+    }
+
+    return 1;
+  }
+
+  /// Reads and handles one message.
+  step(&mut self): LspStep {
+    match (self.reader.readFramedMessageWithin(LSP_MAX_MESSAGE_BYTES)) {
+      Result::OK(body) -> {
+        return self.handleMessage(&body);
+      },
+      Result::ERROR(Stream::FrameError::TOO_LARGE(length)) -> {
+        self.sendError(Option::NONE, LspErrorCode::INVALID_REQUEST, oversizedMessageText(length));
+        return LspStep::CONTINUE;
+      },
+      Result::ERROR(Stream::FrameError::END_OF_INPUT) -> {
+        return LspStep::EXIT(self.exitCode());
+      },
+      Result::ERROR(_) -> {
+        lspLog(String::create("the input stream is malformed or unreadable; stopping"));
+        return LspStep::EXIT(1);
+      },
+    };
+
+    return LspStep::EXIT(1);
+  }
+
+  /// 0 when `shutdown` was received, 1 otherwise, as the protocol asks of
+  /// `exit`.
+  exitCode(&self): i32 {
+    return match (self.phase) {
+      LspPhase::SHUT_DOWN -> 0,
+      _ -> 1,
+    };
+  }
+
+  send(&self, body: &String): void {
+    if (let Result::ERROR(_) = self.writer.writeFramedMessage(body)) {
+      lspLog(String::create("could not write a message to the client"));
+    }
+  }
+
+  sendError(&self, id: Option<RequestId>, code: i64, message: String): void {
+    let body: String = errorResponseBody(id, code, message);
+    self.send(&body);
+  }
+
+  /// Handles one message body.
+  public handleMessage(&mut self, body: &String): LspStep {
+    match (decodeMessage(body)) {
+      Result::OK(LspMessage::REQUEST(request)) -> {
+        return self.handleRequest(request);
+      },
+      Result::OK(LspMessage::NOTIFICATION(notification)) -> {
+        return self.handleNotification(notification);
+      },
+      Result::OK(LspMessage::RESPONSE) -> {
+        return LspStep::CONTINUE;
+      },
+      Result::ERROR(DecodeError::PARSE(message)) -> {
+        self.sendError(Option::NONE, LspErrorCode::PARSE_ERROR, message);
+        return LspStep::CONTINUE;
+      },
+      Result::ERROR(DecodeError::INVALID(message)) -> {
+        self.sendError(Option::NONE, LspErrorCode::INVALID_REQUEST, message);
+        return LspStep::CONTINUE;
+      },
+    };
+
+    return LspStep::CONTINUE;
+  }
+
+  /// The error a request gets in the current phase, or `NONE` when it may run.
+  refusalOf(&self, isInitialize: boolean): Option<String> {
+    return match (self.phase) {
+      LspPhase::WAITING -> {
+        if (isInitialize) {
+          return Option::NONE;
+        }
+
+        return Option::SOME(String::create("server not initialized"));
+      },
+      LspPhase::RUNNING -> {
+        if (isInitialize) {
+          return Option::SOME(String::create("initialize was already received"));
+        }
+
+        return Option::NONE;
+      },
+      LspPhase::SHUT_DOWN -> Option::SOME(String::create("shutdown was already requested")),
+    };
+  }
+
+  handleRequest(&mut self, request: LspRequest): LspStep {
+    let isInitialize: boolean = request.method.equals("initialize");
+
+    if (let Option::SOME(message) = self.refusalOf(isInitialize)) {
+      let code: i64 = match (self.phase) {
+        LspPhase::WAITING -> LspErrorCode::SERVER_NOT_INITIALIZED,
+        _ -> LspErrorCode::INVALID_REQUEST,
+      };
+
+      self.sendError(Option::SOME(request.id), code, message);
+      return LspStep::CONTINUE;
+    }
+
+    if (isInitialize) {
+      self.phase = LspPhase::RUNNING;
+      let body: String = responseBody(request.id, initializeResult());
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("shutdown")) {
+      self.phase = LspPhase::SHUT_DOWN;
+      let body: String = responseBody(request.id, JsonValue::nullValue());
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    let message: String = `method not found: ${request.method.toStr()}`;
+    self.sendError(Option::SOME(request.id), LspErrorCode::METHOD_NOT_FOUND, message);
+    return LspStep::CONTINUE;
+  }
+
+  handleNotification(&mut self, notification: LspNotification): LspStep {
+    if (notification.method.equals("exit")) {
+      return LspStep::EXIT(self.exitCode());
+    }
+
+    let isRunning: boolean = match (self.phase) {
+      LspPhase::RUNNING -> true,
+      _ -> false,
+    };
+
+    if (!isRunning) {
+      return LspStep::CONTINUE;
+    }
+
+    let Option::SOME(params) = jsonMember(&notification.message, "params") else {
+      return LspStep::CONTINUE;
+    };
+
+    if (notification.method.equals("textDocument/didOpen")) {
+      self.didOpen(params);
+    } else if (notification.method.equals("textDocument/didChange")) {
+      self.didChange(params);
+    } else if (notification.method.equals("textDocument/didClose")) {
+      self.didClose(params);
+    }
+
+    return LspStep::CONTINUE;
+  }
+
+  didOpen(&mut self, params: &JsonValue): void {
+    let Option::SOME(document) = jsonMember(params, "textDocument") else {
+      return;
+    };
+    let Option::SOME(uri) = jsonStringMember(document, "uri") else {
+      return;
+    };
+    let Option::SOME(text) = jsonStringMember(document, "text") else {
+      return;
+    };
+
+    let version: i64 = jsonIntegerMember(document, "version").unwrapOr(0);
+
+    let Option::SOME(path) = self.documents.open(&uri, text, version) else {
+      lspLog(`ignoring ${uri.toStr()}: not a file URI`);
+      return;
+    };
+
+    self.markDirty(path);
+  }
+
+  didChange(&mut self, params: &JsonValue): void {
+    let Option::SOME(document) = jsonMember(params, "textDocument") else {
+      return;
+    };
+    let Option::SOME(uri) = jsonStringMember(document, "uri") else {
+      return;
+    };
+    let Option::SOME(text) = fullTextOfChanges(params) else {
+      lspLog(`ignoring a change to ${uri.toStr()} without a full-document text`);
+      return;
+    };
+
+    let version: i64 = jsonIntegerMember(document, "version").unwrapOr(0);
+
+    let Option::SOME(path) = self.documents.change(&uri, text, version) else {
+      lspLog(`ignoring a change to ${uri.toStr()}: the document is not open`);
+      return;
+    };
+
+    self.markDirty(path);
+  }
+
+  /// Forgets the document and clears its diagnostics, as the host server does.
+  /// Other files are not re-analyzed until they change.
+  didClose(&mut self, params: &JsonValue): void {
+    let Option::SOME(document) = jsonMember(params, "textDocument") else {
+      return;
+    };
+    let Option::SOME(uri) = jsonStringMember(document, "uri") else {
+      return;
+    };
+
+    if (!self.documents.close(&uri)) {
+      return;
+    }
+
+    self.forgetPublished(&uri);
+
+    let empty: Vector<LspDiagnostic> = Vector::new<LspDiagnostic>();
+    let body: String = notificationBody("textDocument/publishDiagnostics", publishDiagnosticsParams(&uri, &empty, Option::NONE));
+    self.send(&body);
+  }
+
+  markDirty(&mut self, path: Path::PathBuf): void {
+    self.dirty.push(path);
+  }
+
+  forgetPublished(&mut self, uri: &String): void {
+    let mut setIndex: u64 = 0;
+
+    while (setIndex < self.published.length()) {
+      if (let Option::SOME(set) = self.published.getMut(setIndex)) {
+        let mut kept: Vector<String> = Vector::new<String>();
+        let mut uriIndex: u64 = 0;
+
+        while (uriIndex < set.uris.length()) {
+          if (let Option::SOME(candidate) = set.uris.get(uriIndex)) {
+            if (!candidate.equals(uri)) {
+              kept.push(candidate.clone());
+            }
+          }
+
+          uriIndex += 1;
+        }
+
+        set.uris = kept;
+      }
+
+      setIndex += 1;
+    }
+  }
+
+  /// Runs each distinct analysis the dirty documents belong to, once.
+  analyzeDirty(&mut self): void {
+    let mut keys: Vector<String> = Vector::new<String>();
+    let mut starts: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut dirtyIndex: u64 = 0;
+
+    while (dirtyIndex < self.dirty.length()) {
+      if (let Option::SOME(path) = self.dirty.get(dirtyIndex)) {
+        let key: String = analysisKeyOf(path);
+
+        if (!containsText(&keys, &key)) {
+          keys.push(key);
+          starts.push(path.clone());
+        } else {
+          let _duplicate: String = key;
+        }
+      }
+
+      dirtyIndex += 1;
+    }
+
+    self.dirty = Vector::new<Path::PathBuf>();
+
+    let sources: SourceOverrides = self.documents.sourceOverrides();
+    let mut keyIndex: u64 = 0;
+
+    while (keyIndex < keys.length()) {
+      let Option::SOME(key) = keys.get(keyIndex) else {
+        break;
+      };
+      let Option::SOME(start) = starts.get(keyIndex) else {
+        break;
+      };
+
+      let files: Vector<FileDiagnostics> = analyzeForDiagnostics(start, key, &self.stdPath, &sources);
+      self.publish(key, &files);
+      keyIndex += 1;
+    }
+  }
+
+  /// Publishes one analysis: every file with diagnostics, then an empty list
+  /// for each file the previous run of the same analysis reported and this
+  /// one did not.
+  publish(&mut self, key: &String, files: &Vector<FileDiagnostics>): void {
+    let mut uris: Vector<String> = Vector::new<String>();
+    let mut fileIndex: u64 = 0;
+
+    while (fileIndex < files.length()) {
+      if (let Option::SOME(file) = files.get(fileIndex)) {
+        let handle: DocumentHandle = match (self.documents.findByPath(&file.path)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> DocumentHandle { uri: uriFromFilePath(&file.path), version: -1 },
+        };
+        let mut version: Option<i64> = Option::NONE;
+
+        if (handle.version >= 0) {
+          version = Option::SOME(handle.version);
+        }
+
+        let params: JsonValue = publishDiagnosticsParams(&handle.uri, &file.diagnostics, version);
+        let body: String = notificationBody("textDocument/publishDiagnostics", params);
+        self.send(&body);
+        uris.push(handle.uri);
+      }
+
+      fileIndex += 1;
+    }
+
+    let previous: Vector<String> = self.takePublished(key);
+    let empty: Vector<LspDiagnostic> = Vector::new<LspDiagnostic>();
+    let mut previousIndex: u64 = 0;
+
+    while (previousIndex < previous.length()) {
+      if (let Option::SOME(uri) = previous.get(previousIndex)) {
+        if (!containsText(&uris, uri)) {
+          let body: String = notificationBody("textDocument/publishDiagnostics", publishDiagnosticsParams(uri, &empty, Option::NONE));
+          self.send(&body);
+        }
+      }
+
+      previousIndex += 1;
+    }
+
+    self.published.push(PublishedSet { key: key.clone(), uris: uris });
+  }
+
+  /// Removes and returns the URIs the analysis `key` last published.
+  takePublished(&mut self, key: &String): Vector<String> {
+    let mut kept: Vector<PublishedSet> = Vector::new<PublishedSet>();
+    let mut taken: Vector<String> = Vector::new<String>();
+
+    while (self.published.length() > 0) {
+      let Option::SOME(set) = self.published.pop() else {
+        break;
+      };
+
+      if (set.key.equals(key)) {
+        taken = cloneTexts(&set.uris);
+        let _replaced: PublishedSet = set;
+      } else {
+        kept.push(set);
+      }
+    }
+
+    self.published = kept;
+    return taken;
+  }
+}
