@@ -14,6 +14,8 @@
 //! | `Stream::ByteReader::readExact`        | Exactly `count` bytes                              |
 //! | `Stream::ByteReader::readLine`         | One line terminated by `\r\n`                      |
 //! | `Stream::ByteReader::readFramedMessage`| One `Content-Length` framed message body           |
+//! | `Stream::ByteReader::readFramedMessageWithin`| Same, skipping bodies over a byte limit      |
+//! | `Stream::ByteReader::skipExact`        | Discard exactly `count` bytes                      |
 //! | `Stream::ReadError`                    | End of input, truncated input, or a failed read    |
 //! | `Stream::FrameError`                   | Why a framed message could not be read             |
 //! | `Stream::ByteWriter`                   | Unbuffered whole-buffer writer over a descriptor   |
@@ -177,6 +179,11 @@ export namespace Stream {
 
     /// The underlying `read(2)` failed with an error other than `EINTR`.
     FAILED(Io::IoError),
+
+    /// `readFramedMessageWithin` skipped a body longer than its limit. Holds
+    /// the declared `Content-Length`. The stream is positioned at the next
+    /// message, so reading can go on.
+    TOO_LARGE(u64),
   }
 
   /// Buffered reader over a file descriptor it does not own.
@@ -350,13 +357,49 @@ export namespace Stream {
       return Result::ERROR(self.endError());
     }
 
-    /// Reads one `Content-Length` framed message and returns its body.
+    /// Discards exactly `count` bytes without keeping them, so a body of any
+    /// size costs at most one read chunk of memory.
     ///
-    /// Reads header lines up to the empty line that ends them, then exactly
-    /// `Content-Length` bytes. `END_OF_INPUT` means input ended cleanly
-    /// between messages. On any other error the stream position is
-    /// unspecified and the session should end.
-    public readFramedMessage(&mut self): Result<String, FrameError> {
+    /// Returns `END_OF_INPUT` when input ends before the first byte and
+    /// `TRUNCATED` when it ends after some of them. Unlike `readExact`, the
+    /// bytes skipped before an error are consumed.
+    public skipExact(&mut self, count: u64): Result<void, ReadError> {
+      let mut remaining: u64 = count;
+      let mut skippedAny: boolean = false;
+
+      while (remaining > 0) {
+        let buffered: u64 = self.available();
+
+        if (buffered > 0) {
+          let step: u64 = buffered < remaining ? buffered : remaining;
+          self.position += step;
+          remaining -= step;
+          skippedAny = true;
+          continue;
+        }
+
+        let more: boolean = match (self.fillMore()) {
+          Result::OK(value) -> value,
+          Result::ERROR(error) -> {
+            return Result::ERROR(ReadError::FAILED(error));
+          },
+        };
+
+        if (!more) {
+          if (skippedAny) {
+            return Result::ERROR(ReadError::TRUNCATED);
+          }
+
+          return Result::ERROR(ReadError::END_OF_INPUT);
+        }
+      }
+
+      return Result::OK(());
+    }
+
+    /// Reads the header block of one framed message, up to and including the
+    /// empty line that ends it, and returns its `Content-Length`.
+    readFrameLength(&mut self): Result<u64, FrameError> {
       let mut contentLength: u64 = 0;
       let mut hasContentLength: boolean = false;
       let mut sawHeader: boolean = false;
@@ -415,8 +458,43 @@ export namespace Stream {
         return Result::ERROR(FrameError::MISSING_CONTENT_LENGTH);
       }
 
+      return Result::OK(contentLength);
+    }
+
+    /// Reads a message body of `contentLength` bytes.
+    readFrameBody(&mut self, contentLength: u64): Result<String, FrameError> {
       return match (self.readExact(contentLength)) {
         Result::OK(body) -> Result::OK(body),
+        Result::ERROR(ReadError::FAILED(error)) -> Result::ERROR(FrameError::FAILED(error)),
+        Result::ERROR(_) -> Result::ERROR(FrameError::TRUNCATED),
+      };
+    }
+
+    /// Reads one `Content-Length` framed message and returns its body.
+    ///
+    /// Reads header lines up to the empty line that ends them, then exactly
+    /// `Content-Length` bytes. `END_OF_INPUT` means input ended cleanly
+    /// between messages. On any other error the stream position is
+    /// unspecified and the session should end.
+    public readFramedMessage(&mut self): Result<String, FrameError> {
+      let contentLength: u64 = self.readFrameLength()!;
+      return self.readFrameBody(contentLength);
+    }
+
+    /// Reads one framed message like `readFramedMessage`, but a body whose
+    /// `Content-Length` exceeds `limit` is skipped instead of read and
+    /// reported as `TOO_LARGE`, so a peer cannot make the reader allocate an
+    /// arbitrary amount of memory. After `TOO_LARGE` the next message can be
+    /// read.
+    public readFramedMessageWithin(&mut self, limit: u64): Result<String, FrameError> {
+      let contentLength: u64 = self.readFrameLength()!;
+
+      if (contentLength <= limit) {
+        return self.readFrameBody(contentLength);
+      }
+
+      return match (self.skipExact(contentLength)) {
+        Result::OK(_) -> Result::ERROR(FrameError::TOO_LARGE(contentLength)),
         Result::ERROR(ReadError::FAILED(error)) -> Result::ERROR(FrameError::FAILED(error)),
         Result::ERROR(_) -> Result::ERROR(FrameError::TRUNCATED),
       };
