@@ -1524,6 +1524,207 @@ function resolverDiscoverStdTestRoots(
   return Result::OK(discovery);
 }
 
+/// The graph `ignis doc` analyzes, with the name each module is documented
+/// under.
+export record DocDiscovery {
+  public discovery: DiscoveryResult;
+  /// One name per graph node, indexed like `discovery.graph.nodes`, spelled
+  /// the way the host's `module_display_name` spells it.
+  public moduleNames: Vector<String>;
+}
+
+/// The std module name `path` resolves to, the way the host's
+/// `try_resolve_std_module_name` answers it: a manifest entry naming that file
+/// first, then the path below the std root with a trailing `mod` dropped.
+/// `NONE` outside the std root, for a `tests.ign` companion, and for a file
+/// that is not Ignis source.
+function resolverStdModuleName(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+  path: &Path::PathBuf,
+): Option<String> {
+  if (!resolverPathUnderRoot(path, &project.stdRoot) || resolverIsStdTestCompanionPath(path)) {
+    return Option::NONE;
+  }
+
+  let pathText: String = path.toString();
+  let mut moduleIndex: u64 = 0;
+
+  while (moduleIndex < manifest.modules.length()) {
+    if (let Option::SOME(module) = manifest.modules.get(moduleIndex)) {
+      let modulePath: Path::PathBuf = project.stdRoot.join(module.path.toStr()).normalize();
+
+      if (modulePath.toString().equals(&pathText)) {
+        return Option::SOME(module.name.clone());
+      }
+    }
+
+    moduleIndex += 1;
+  }
+
+  if (!pathText.endsWith(".ign")) {
+    return Option::NONE;
+  }
+
+  let rootText: String = project.stdRoot.toString();
+
+  if (pathText.length() <= rootText.length() + 1) {
+    return Option::NONE;
+  }
+
+  let relative: String = pathText.substringBytes(rootText.length() + 1, pathText.length() - 4);
+  let mut name: String = String::new();
+  let mut segmentStart: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= relative.length()) {
+    let mut atSeparator: boolean = index == relative.length();
+
+    if (let Option::SOME(byte) = relative.byteAt(index)) {
+      atSeparator = byte == '/' as u8;
+    }
+
+    if (atSeparator) {
+      let segment: String = relative.substringBytes(segmentStart, index);
+      let isLast: boolean = index == relative.length();
+
+      if (segment.length() > 0 && !(isLast && segment.equals("mod"))) {
+        if (name.length() > 0) {
+          name.pushStr("::");
+        }
+
+        name.push(&segment);
+      }
+
+      segmentStart = index + 1;
+    }
+
+    index += 1;
+  }
+
+  if (name.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(name);
+}
+
+/// The name a documented module is listed under.
+///
+/// The host builds `ignis doc`'s configuration without a project root, so a
+/// project module is always named by its file stem, in project mode too.
+function resolverDocModuleName(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+  path: &Path::PathBuf,
+  kind: BuildModuleKind,
+): String {
+  if (let BuildModuleKind::STD = kind) {
+    if (let Option::SOME(name) = resolverStdModuleName(project, manifest, path)) {
+      return `std::${name.toStr()}`;
+    }
+  }
+
+  return match (path.fileName()) {
+    Option::SOME(fileName) -> resolverStemOf(&fileName),
+    Option::NONE -> String::new(),
+  };
+}
+
+/// Discovers the graph `ignis doc` analyzes, mirroring the host's
+/// `document_project`: the prelude, then every std module the manifest
+/// declares when the entry is itself a std module, then the entry.
+///
+/// Compile-only std modules are included, unlike a std build: documentation
+/// describes them even though nothing links them.
+function resolverDiscoverDocRoots(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+): Result<DocDiscovery, DiagnosticBag> {
+  let mut graph: BuildGraph = BuildGraph::init();
+  let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < manifest.autoLoadCount()) {
+    let Option::SOME(moduleName) = manifest.autoLoadText(preludeIndex) else {
+      preludeIndex += 1;
+      continue;
+    };
+
+    let mut candidateBase: Path::PathBuf = project.stdRoot.join(moduleName.toStr()).normalize();
+    if (let Option::SOME(relativePath) = manifest.modulePathText(moduleName.toStr())) {
+      candidateBase = project.stdRoot.join(relativePath.toStr()).normalize();
+    }
+
+    let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
+    preludePaths.push(candidateBase.clone());
+    preludeIndex += 1;
+  }
+
+  let entryIsStd: boolean = resolverStdModuleName(project, manifest, &project.entry).isSome();
+
+  if (entryIsStd) {
+    let mut moduleIndex: u64 = 0;
+
+    while (moduleIndex < manifest.modules.length()) {
+      if (let Option::SOME(module) = manifest.modules.get(moduleIndex)) {
+        let candidateBase: Path::PathBuf = project.stdRoot.join(module.path.toStr()).normalize();
+        let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+        resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut stack)!;
+      }
+
+      moduleIndex += 1;
+    }
+  }
+
+  let mut entryKind: BuildModuleKind = BuildModuleKind::PROJECT;
+
+  if (entryIsStd) {
+    entryKind = BuildModuleKind::STD;
+  }
+
+  let mut entryStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let rootIndex: u64 = resolverDiscoverModule(project, manifest, &mut graph, &project.entry, entryKind, &mut entryStack)!;
+  ModuleGraph::setRoot(&mut graph, rootIndex);
+
+  let mut moduleNames: Vector<String> = Vector::new<String>();
+  let mut nodeIndex: u64 = 0;
+
+  while (nodeIndex < graph.nodes.length()) {
+    if (let Option::SOME(node) = graph.nodes.get(nodeIndex)) {
+      moduleNames.push(resolverDocModuleName(project, manifest, &node.path, node.kind));
+    }
+
+    nodeIndex += 1;
+  }
+
+  let order: Vector<u64> = ModuleGraph::allModulesTopologicalOrder(&graph);
+
+  return Result::OK(DocDiscovery {
+    discovery: DiscoveryResult {
+      graph: graph,
+      order: order,
+      preludePaths: preludePaths,
+      stdRoot: project.stdRoot.clone(),
+      flags: project.flags.clone(),
+      optLevel: project.optLevel,
+      cflags: resolverCloneStrings(&project.cflags),
+      outDir: project.outDir.clone(),
+      name: project.name.clone(),
+      cc: project.cc.clone(),
+      bin: project.bin,
+      emitC: project.emitC,
+      entry: project.entry.clone(),
+      hasProjectFile: project.hasProjectFile,
+      root: project.root.clone(),
+      stdEnabled: project.stdEnabled,
+      testFixtures: resolverClonePaths(&project.testFixtures),
+    },
+    moduleNames: moduleNames,
+  });
+}
+
 function resolverDiagnosticSummary(bag: &DiagnosticBag): String {
   let Option::SOME(diagnostic) = bag.get(0) else {
     Test::fail();
@@ -1648,6 +1849,27 @@ export namespace Resolver {
     let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
 
     return resolverDiscoverStdTestRoots(&project, &manifest);
+  }
+
+  /// Discovers the graph `ignis doc` documents.
+  ///
+  /// `projectMode` loads the project that governs `startPath`; otherwise
+  /// `startPath` is documented as a single file, even when a project file
+  /// governs it, which is how the host's `ignis doc <file>` resolves it.
+  function discoverDoc(
+    startPath: &Path::PathBuf,
+    overrides: &BuildOverrides,
+    projectMode: boolean,
+  ): Result<DocDiscovery, DiagnosticBag> {
+    if (projectMode) {
+      let project: ResolverProject = resolverLoadProject(startPath, overrides)!;
+      let manifest: StdManifest = Manifest::loadFile(&project.stdManifestPath)!;
+      return resolverDiscoverDocRoots(&project, &manifest);
+    }
+
+    let project: ResolverProject = resolverSingleFileProject(startPath, overrides)!;
+    let manifest: StdManifest = Manifest::loadFile(&project.stdManifestPath)!;
+    return resolverDiscoverDocRoots(&project, &manifest);
   }
 
   function orderSummaryRelativeTo(discovery: &DiscoveryResult, root: &Path::PathBuf): String {
