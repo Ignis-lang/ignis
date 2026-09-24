@@ -782,7 +782,21 @@ function parseDocArgument(
     return Result::OK(index + 1);
   }
 
+  if (let Option::SOME(value) = flagEqualsValue(argument, "--std-path")) {
+    optionsRef.stdPath = Option::SOME(value);
+    return Result::OK(index + 1);
+  }
+
   if (let Option::SOME(value) = flagEqualsValue(argument, "--output")) {
+    optionsRef.outputPath = Option::SOME(value);
+    return Result::OK(index + 1);
+  }
+
+  if (let Option::SOME(value) = flagEqualsValue(argument, "--json")) {
+    return Result::ERROR(`error: unexpected value '${value.toStr()}' for '--json' found; no more were expected`);
+  }
+
+  if (let Option::SOME(value) = attachedShortValue(argument, "-o")) {
     optionsRef.outputPath = Option::SOME(value);
     return Result::OK(index + 1);
   }
@@ -797,6 +811,27 @@ function parseDocArgument(
 
   optionsRef.path = Option::SOME(argument.clone());
   return Result::OK(index + 1);
+}
+
+/// The value attached to a short flag, the way `clap` reads one: `-ofile`
+/// and `-o=file` both give `file`. `NONE` for the bare flag and for any other
+/// argument.
+function attachedShortValue(argument: &String, flag: str): Option<String> {
+  let flagText: String = String::create(flag);
+
+  if (!argument.startsWith(flag) || argument.length() <= flagText.length()) {
+    return Option::NONE;
+  }
+
+  let mut start: u64 = flagText.length();
+
+  if (let Option::SOME(byte) = argument.byteAt(start)) {
+    if (byte == '=' as u8) {
+      start += 1;
+    }
+  }
+
+  return Option::SOME(argument.substringBytes(start, argument.length()));
 }
 
 function applyDocValueFlag(options: &mut CliOptions, flag: &String, value: &String): void {
@@ -1713,6 +1748,46 @@ function cliParsesDocWithAFileAndAnOutput(): void {
   Test::assertEq<str>(cliOptionText(&shortOptions.outputPath).toStr(), "api.json");
   Test::assertEq<str>(cliOptionText(&shortOptions.docProject).toStr(), "example/demo");
   Test::assertEq<str>(cliPathText(&shortOptions).toStr(), "");
+}
+
+/// Every `doc` flag that takes a value also takes it attached, as `clap`
+/// allows: `--project=`, `--std-path=`, `--output=`, `-o=` and `-o<file>`.
+@test
+function cliParsesDocFlagsWithAttachedValues(): void {
+  let mut longForms: Vector<String> = Vector::new<String>();
+  cliPush(&mut longForms, "doc");
+  cliPush(&mut longForms, "--project=example/demo");
+  cliPush(&mut longForms, "--std-path=std");
+  cliPush(&mut longForms, "--output=docs-pkg/api.json");
+
+  let longOptions: CliOptions = cliParse(&longForms);
+
+  Test::assertEq<str>(cliOptionText(&longOptions.docProject).toStr(), "example/demo");
+  Test::assertEq<str>(cliOptionText(&longOptions.stdPath).toStr(), "std");
+  Test::assertEq<str>(cliOptionText(&longOptions.outputPath).toStr(), "docs-pkg/api.json");
+
+  let mut shortEquals: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortEquals, "doc");
+  cliPush(&mut shortEquals, "-o=api.json");
+  Test::assertEq<str>(cliOptionText(&cliParse(&shortEquals).outputPath).toStr(), "api.json");
+
+  let mut shortAttached: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortAttached, "doc");
+  cliPush(&mut shortAttached, "-oapi.json");
+  Test::assertEq<str>(cliOptionText(&cliParse(&shortAttached).outputPath).toStr(), "api.json");
+}
+
+/// `--json` is a switch, so the host rejects a value given to it.
+@test
+function cliRejectsAValueForDocJson(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "doc");
+  cliPush(&mut arguments, "--json=true");
+
+  Test::assertEq<str>(
+    cliParseError(&arguments).toStr(),
+    "error: unexpected value 'true' for '--json' found; no more were expected",
+  );
 }
 
 /// `doc` rejects what its host counterpart does not take: build flags, a
