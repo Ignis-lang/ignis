@@ -1,0 +1,143 @@
+import Fs from "std::fs";
+import Io from "std::io";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+/// One file whose text replaces its contents on disk.
+record SourceOverride {
+  public path: Path::PathBuf;
+  public text: String;
+}
+
+/// Source texts that stand in for the on-disk contents of some files, keyed
+/// by the exact path discovery uses for them (canonical, as the resolver
+/// canonicalizes every module path).
+///
+/// The language server fills this with the buffers an editor has open, so a
+/// check sees unsaved text. A build uses `none()` and reads the disk.
+export record SourceOverrides {
+  entries: Vector<SourceOverride>;
+
+  public static none(): SourceOverrides {
+    return SourceOverrides { entries: Vector::new<SourceOverride>() };
+  }
+
+  public length(&self): u64 {
+    return self.entries.length();
+  }
+
+  /// The path of the `index`th recorded file, in the order they were set.
+  public pathAt(&self, index: u64): Option<Path::PathBuf> {
+    let Option::SOME(entry) = self.entries.get(index) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(entry.path.clone());
+  }
+
+  /// Replaces the text recorded for `path`, or records it.
+  public set(&mut self, path: &Path::PathBuf, text: &String): void {
+    let key: String = path.toString();
+    let mut index: u64 = 0;
+
+    while (index < self.entries.length()) {
+      let Option::SOME(entry) = self.entries.getMut(index) else {
+        break;
+      };
+
+      let entryKey: String = entry.path.toString();
+
+      if (entryKey.equals(&key)) {
+        entry.text = text.clone();
+        return;
+      }
+
+      index += 1;
+    }
+
+    self.entries.push(SourceOverride { path: path.clone(), text: text.clone() });
+  }
+
+  /// A copy of the text recorded for `path`, or `NONE`.
+  public textOf(&self, path: &Path::PathBuf): Option<String> {
+    let key: String = path.toString();
+    let mut index: u64 = 0;
+
+    while (index < self.entries.length()) {
+      let Option::SOME(entry) = self.entries.get(index) else {
+        break;
+      };
+
+      let entryKey: String = entry.path.toString();
+
+      if (entryKey.equals(&key)) {
+        return Option::SOME(entry.text.clone());
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The text of `path`: the recorded one when there is one, the file's
+  /// contents otherwise.
+  public read(&self, path: &Path::PathBuf): Result<String, Io::IoError> {
+    if (let Option::SOME(text) = self.textOf(path)) {
+      return Result::OK(text);
+    }
+
+    return Fs::readToString(path);
+  }
+
+  public clone(&self): SourceOverrides {
+    let mut copy: SourceOverrides = SourceOverrides::none();
+    let mut index: u64 = 0;
+
+    while (index < self.entries.length()) {
+      if (let Option::SOME(entry) = self.entries.get(index)) {
+        copy.entries.push(SourceOverride { path: entry.path.clone(), text: entry.text.clone() });
+      }
+
+      index += 1;
+    }
+
+    return copy;
+  }
+}
+
+@test
+function sourceOverridesReplaceTheTextOfARecordedPath(): void {
+  let mut overrides: SourceOverrides = SourceOverrides::none();
+  let path: Path::PathBuf = Path::PathBuf::create("/virtual/lsp/sources/main.ign");
+
+  let first: String = String::create("first");
+  let second: String = String::create("second");
+
+  overrides.set(&path, &first);
+  overrides.set(&path, &second);
+
+  Test::assertEq<u64>(overrides.length(), 1);
+
+  let Result::OK(text) = overrides.read(&path) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(text.toStr(), "second");
+}
+
+@test
+function sourceOverridesFallBackToTheDiskForOtherPaths(): void {
+  let overrides: SourceOverrides = SourceOverrides::none();
+  let missing: Path::PathBuf = Path::PathBuf::create("/virtual/lsp/sources/missing.ign");
+
+  let Result::ERROR(_) = overrides.read(&missing) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(overrides.textOf(&missing).isSome(), false);
+}
