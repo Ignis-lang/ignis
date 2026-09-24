@@ -1,0 +1,246 @@
+//! Writes a `JsonValue` tree back out as JSON text, byte-compatible with
+//! `serde_json`: `Json::toJsonString` matches `serde_json::to_string` and
+//! `Json::toJsonStringPretty` matches `serde_json::to_string_pretty`.
+//!
+//! `NUMBER` payloads are written as their stored text, unchanged. A tree from
+//! `Json::parse` or the `JsonValue` integer constructors always holds valid
+//! number text; a caller building `JsonValueKind::NUMBER` by hand owns that.
+
+import JsonObjectEntry, JsonValue, JsonValueKind from "./value";
+import String from "std::string";
+import Vector from "std::vector";
+
+export namespace Json {
+  /// Appends `value` to `output` as compact JSON, with no whitespace between
+  /// tokens.
+  function writeValue(output: &mut String, value: &JsonValue): void {
+    writeJsonValue(output, value, false, 0);
+  }
+
+  /// Appends `value` to `output` as pretty JSON: two-space indentation, one
+  /// array element or object member per line, `": "` between a key and its
+  /// value, `[]`/`{}` for empty containers, and no trailing newline.
+  function writeValuePretty(output: &mut String, value: &JsonValue): void {
+    writeJsonValue(output, value, true, 0);
+  }
+
+  /// Returns `value` as compact JSON in a fresh `String`.
+  function toJsonString(value: &JsonValue): String {
+    let mut output: String = String::new();
+    Json::writeValue(&mut output, value);
+
+    return output;
+  }
+
+  /// Returns `value` as pretty JSON in a fresh `String`; see
+  /// `Json::writeValuePretty` for the layout.
+  function toJsonStringPretty(value: &JsonValue): String {
+    let mut output: String = String::new();
+    Json::writeValuePretty(&mut output, value);
+
+    return output;
+  }
+
+  /// Appends `value` to `output` as a quoted JSON string with `serde_json`'s
+  /// escaping: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, every other byte below
+  /// `0x20` as `\u00xx` with lowercase hex, and everything else (`/`, `0x7f`,
+  /// and non-ASCII UTF-8) written through unchanged.
+  function writeQuotedString(output: &mut String, value: &String): void {
+    let mut writer: &mut String = output;
+    writer.pushStr("\"");
+
+    let mut index: u64 = 0;
+
+    while (index < value.length()) {
+      let Option::SOME(byte) = value.byteAt(index) else {
+        break;
+      };
+
+      writeEscapedJsonByte(writer, byte);
+      index += 1;
+    }
+
+    writer.pushStr("\"");
+  }
+}
+
+function writeEscapedJsonByte(output: &mut String, byte: u8): void {
+  let mut writer: &mut String = output;
+
+  if (byte == '"' as u8) {
+    writer.pushStr("\\\"");
+    return;
+  }
+
+  if (byte == '\\' as u8) {
+    writer.pushStr("\\\\");
+    return;
+  }
+
+  if (byte == 8) {
+    writer.pushStr("\\b");
+    return;
+  }
+
+  if (byte == 12) {
+    writer.pushStr("\\f");
+    return;
+  }
+
+  if (byte == '\n' as u8) {
+    writer.pushStr("\\n");
+    return;
+  }
+
+  if (byte == '\r' as u8) {
+    writer.pushStr("\\r");
+    return;
+  }
+
+  if (byte == '\t' as u8) {
+    writer.pushStr("\\t");
+    return;
+  }
+
+  if (byte < 32) {
+    writer.pushStr("\\u00");
+    writer.pushByte(lowerHexDigit(byte >> 4));
+    writer.pushByte(lowerHexDigit(byte & 15));
+    return;
+  }
+
+  writer.pushByte(byte);
+}
+
+function lowerHexDigit(value: u8): u8 {
+  if (value < 10) {
+    return ('0' as u8) + value;
+  }
+
+  return ('a' as u8) + value - 10;
+}
+
+function pushIndent(output: &mut String, depth: u64): void {
+  let mut writer: &mut String = output;
+  let mut level: u64 = 0;
+
+  while (level < depth) {
+    writer.pushStr("  ");
+    level += 1;
+  }
+}
+
+function writeJsonValue(output: &mut String, value: &JsonValue, pretty: boolean, depth: u64): void {
+  let mut writer: &mut String = output;
+
+  match (&value.kind) {
+    JsonValueKind::NULL -> {
+      writer.pushStr("null");
+    },
+    JsonValueKind::BOOL(flag) -> {
+      writer.pushStr(flag ? "true" : "false");
+    },
+    JsonValueKind::NUMBER(text) -> {
+      writer.push(&text);
+    },
+    JsonValueKind::STRING(text) -> {
+      Json::writeQuotedString(writer, &text);
+    },
+    JsonValueKind::ARRAY(items) -> {
+      writeJsonArray(writer, &items, pretty, depth);
+    },
+    JsonValueKind::OBJECT(entries) -> {
+      writeJsonObject(writer, &entries, pretty, depth);
+    },
+  };
+}
+
+/// Starts the next element of a non-empty container: a comma after the
+/// first one, then (pretty only) a newline and the element's indentation.
+function beginContainerElement(output: &mut String, index: u64, pretty: boolean, depth: u64): void {
+  let mut writer: &mut String = output;
+
+  if (index > 0) {
+    writer.pushStr(",");
+  }
+
+  if (pretty) {
+    writer.pushStr("\n");
+    pushIndent(writer, depth + 1);
+  }
+}
+
+/// Closes a non-empty container, putting the closing bracket on its own line
+/// at the container's indentation when pretty.
+function endContainer(output: &mut String, closing: str, pretty: boolean, depth: u64): void {
+  let mut writer: &mut String = output;
+
+  if (pretty) {
+    writer.pushStr("\n");
+    pushIndent(writer, depth);
+  }
+
+  writer.pushStr(closing);
+}
+
+function writeJsonArray(
+  output: &mut String,
+  items: &Vector<JsonValue>,
+  pretty: boolean,
+  depth: u64
+): void {
+  let mut writer: &mut String = output;
+
+  if (items.length() == 0) {
+    writer.pushStr("[]");
+    return;
+  }
+
+  writer.pushStr("[");
+
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    let Option::SOME(item) = items.get(index) else {
+      break;
+    };
+
+    beginContainerElement(writer, index, pretty, depth);
+    writeJsonValue(writer, item, pretty, depth + 1);
+    index += 1;
+  }
+
+  endContainer(writer, "]", pretty, depth);
+}
+
+function writeJsonObject(
+  output: &mut String,
+  entries: &Vector<JsonObjectEntry>,
+  pretty: boolean,
+  depth: u64
+): void {
+  let mut writer: &mut String = output;
+
+  if (entries.length() == 0) {
+    writer.pushStr("{}");
+    return;
+  }
+
+  writer.pushStr("{");
+
+  let mut index: u64 = 0;
+
+  while (index < entries.length()) {
+    let Option::SOME(entry) = entries.get(index) else {
+      break;
+    };
+
+    beginContainerElement(writer, index, pretty, depth);
+    Json::writeQuotedString(writer, &entry.key);
+    writer.pushStr(pretty ? ": " : ":");
+    writeJsonValue(writer, &entry.value, pretty, depth + 1);
+    index += 1;
+  }
+
+  endContainer(writer, "}", pretty, depth);
+}
