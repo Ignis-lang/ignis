@@ -1,0 +1,300 @@
+//!
+//! # Text
+//!
+//! Position conversion between UTF-8 byte offsets and editor positions.
+//!
+//! ## Overview
+//!
+//! Compiler spans are UTF-8 byte offsets into a source text. Editors that
+//! speak the Language Server Protocol address the same text as a 0-based line
+//! plus a 0-based column counted in UTF-16 code units, the protocol's default
+//! position encoding. `Text::LineIndex` converts in both directions.
+//!
+//! ```text
+//!   source: "a😀b\n"          bytes: a=0  😀=1..5  b=5  \n=6
+//!
+//!   byte offset 5  ── position ──▶  line 0, character 3   (a=1, 😀=2)
+//!   line 0, character 3  ── offset ──▶  byte offset 5
+//! ```
+//!
+//! ## APIs
+//!
+//! | Function                          | Description                                  |
+//! |-----------------------------------|----------------------------------------------|
+//! | `Text::LineIndex::create`         | Index a source text (takes ownership)        |
+//! | `Text::LineIndex::position`       | Byte offset to line and UTF-16 column        |
+//! | `Text::LineIndex::offset`         | Line and UTF-16 column to byte offset        |
+//! | `Text::LineIndex::endPosition`    | Position of the end of the text              |
+//! | `Text::LineIndex::lineCount`      | Number of lines (a trailing `\n` opens one)  |
+//! | `Text::utf16Length`               | UTF-16 code units of the whole text          |
+//!
+//! ## Semantics
+//!
+//! The rules mirror the host language server (`crates/ignis_lsp/src/convert.rs`):
+//!
+//! - Only `\n` starts a new line. In CRLF text the `\r` is the last column of
+//!   its line, so the offset just before `\n` has a column one past the text.
+//! - A character outside the Basic Multilingual Plane (4 UTF-8 bytes) counts as
+//!   two UTF-16 units, every other character as one.
+//! - `position` of an offset inside a multi-byte character reports the column
+//!   of that character's first byte. An offset past the end reports the end.
+//! - `offset` of a column past the end of a line walks through the line break
+//!   and lands on the start of the next line. A column that falls inside a
+//!   surrogate pair lands after the character. A line past the last one
+//!   returns the text length.
+//! - The host only indexes valid UTF-8. Here, a byte that does not start a
+//!   complete, well-formed sequence counts as one character of one byte and one
+//!   UTF-16 unit, the width of the U+FFFD replacement character.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import String from "std::string";
+//! import Text from "std::text";
+//!
+//! function main(): i32 {
+//!   let index: Text::LineIndex = Text::LineIndex::create(String::create("hola\nmundo\n"));
+//!
+//!   let position: Text::Position = index.position(7);
+//!   // position.line == 1, position.character == 2
+//!
+//!   let offset: u64 = index.offset(Text::Position { line: 1, character: 2 });
+//!   // offset == 7
+//!   return 0;
+//! }
+//! ```
+
+import String from "std::string";
+import Vector from "std::vector";
+
+/// Returns the byte length of the well-formed UTF-8 sequence starting at
+/// `index`, or 1 when the byte there does not start one.
+///
+/// Overlong encodings, surrogate code points and values above U+10FFFF are
+/// rejected with the same lead and second-byte ranges `str::from_utf8` uses,
+/// so every accepted sequence is one the host could have indexed.
+export function textUtf8SequenceLength(text: &String, index: u64): u64 {
+  let Option::SOME(lead) = text.byteAt(index) else {
+    return 1;
+  };
+
+  if (lead < 194 || lead > 244) {
+    return 1;
+  }
+
+  let mut length: u64 = 2;
+  let mut secondLow: u8 = 128;
+  let mut secondHigh: u8 = 191;
+
+  if (lead >= 224) {
+    length = 3;
+  }
+
+  if (lead >= 240) {
+    length = 4;
+  }
+
+  if (lead == 224) {
+    secondLow = 160;
+  }
+
+  if (lead == 237) {
+    secondHigh = 159;
+  }
+
+  if (lead == 240) {
+    secondLow = 144;
+  }
+
+  if (lead == 244) {
+    secondHigh = 143;
+  }
+
+  let mut offset: u64 = 1;
+
+  while (offset < length) {
+    let Option::SOME(continuation) = text.byteAt(index + offset) else {
+      return 1;
+    };
+
+    let low: u8 = offset == 1 ? secondLow : 128;
+    let high: u8 = offset == 1 ? secondHigh : 191;
+
+    if (continuation < low || continuation > high) {
+      return 1;
+    }
+
+    offset += 1;
+  }
+
+  return length;
+}
+
+/// Number of UTF-16 code units for a sequence of `sequenceLength` UTF-8 bytes:
+/// two for a supplementary-plane character, one otherwise.
+function textUtf16UnitsOf(sequenceLength: u64): u64 {
+  return sequenceLength == 4 ? 2 : 1;
+}
+
+/// Counts the UTF-16 code units of the characters that lie entirely inside
+/// `start..end` of `text`. A character straddling `end` is not counted.
+function textUtf16UnitsBetween(text: &String, start: u64, end: u64): u64 {
+  let mut cursor: u64 = start;
+  let mut units: u64 = 0;
+
+  while (cursor < end) {
+    let sequenceLength: u64 = textUtf8SequenceLength(text, cursor);
+
+    if (cursor + sequenceLength > end) {
+      break;
+    }
+
+    units += textUtf16UnitsOf(sequenceLength);
+    cursor += sequenceLength;
+  }
+
+  return units;
+}
+
+/// UTF-8 to UTF-16 position conversion for editor protocols.
+export namespace Text {
+  /// A 0-based line and a 0-based column counted in UTF-16 code units, the
+  /// shape of an LSP `Position` under the default position encoding.
+  record Position {
+    /// 0-based line number.
+    public line: u64;
+
+    /// 0-based column in UTF-16 code units from the start of the line.
+    public character: u64;
+  }
+
+  /// Line start table over an owned source text, for converting UTF-8 byte
+  /// offsets to `Position` values and back.
+  ///
+  /// Building the index is one pass over the bytes. `position` finds the
+  /// line with a binary search and then walks only that line.
+  record LineIndex {
+    /// Byte offset of the start of each line. Never empty: line 0 starts at 0.
+    lineStarts: Vector<u64>;
+
+    /// The indexed source text.
+    text: String;
+
+    /// Indexes `text`, taking ownership of it.
+    public static create(text: String): LineIndex {
+      let mut lineStarts: Vector<u64> = Vector::new<u64>();
+      lineStarts.push(0);
+
+      let length: u64 = text.length();
+      let mut index: u64 = 0;
+
+      while (index < length) {
+        let Option::SOME(byte) = text.byteAt(index) else {
+          break;
+        };
+
+        if (byte == 10) {
+          lineStarts.push(index + 1);
+        }
+
+        index += 1;
+      }
+
+      return LineIndex { lineStarts: lineStarts, text: text };
+    }
+
+    /// Returns the number of lines. A text ending in `\n` has an empty last
+    /// line after it, and an empty text has one line.
+    public lineCount(&self): u64 {
+      return self.lineStarts.length();
+    }
+
+    /// Returns the byte offset where `line` starts, or `NONE` past the last line.
+    public lineStart(&self, line: u64): Option<u64> {
+      let Option::SOME(start) = self.lineStarts.get(line) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*start);
+    }
+
+    /// Returns the 0-based line that contains byte `offset`. Offsets past the
+    /// end belong to the last line.
+    public lineOf(&self, offset: u64): u64 {
+      let mut low: u64 = 0;
+      let mut high: u64 = self.lineStarts.length();
+
+      while (low + 1 < high) {
+        let middle: u64 = (low + high) / 2;
+        let Option::SOME(start) = self.lineStarts.get(middle) else {
+          break;
+        };
+
+        if (*start <= offset) {
+          low = middle;
+        } else {
+          high = middle;
+        }
+      }
+
+      return low;
+    }
+
+    /// Converts a UTF-8 byte offset to a line and UTF-16 column.
+    ///
+    /// An offset inside a multi-byte character reports the column of that
+    /// character's first byte, and an offset past the end of the text reports
+    /// the end of the text.
+    public position(&self, offset: u64): Position {
+      let line: u64 = self.lineOf(offset);
+      let start: u64 = self.lineStart(line).unwrapOr(0);
+      let length: u64 = self.text.length();
+      let end: u64 = offset < length ? offset : length;
+
+      if (start >= end) {
+        return Position { line: line, character: 0 };
+      }
+
+      return Position { line: line, character: textUtf16UnitsBetween(&self.text, start, end) };
+    }
+
+    /// Returns the position of the end of the text: after a trailing `\n`
+    /// that is column 0 of the empty last line.
+    public endPosition(&self): Position {
+      return self.position(self.text.length());
+    }
+
+    /// Converts a line and UTF-16 column to a UTF-8 byte offset.
+    ///
+    /// A line past the last one returns the text length. A column past the
+    /// end of its line walks through the line break, so it lands on the
+    /// start of the next line. A column inside a surrogate pair lands after
+    /// that character.
+    public offset(&self, position: Position): u64 {
+      let length: u64 = self.text.length();
+
+      let Option::SOME(start) = self.lineStart(position.line) else {
+        return length;
+      };
+
+      let end: u64 = self.lineStart(position.line + 1).unwrapOr(length);
+      let mut cursor: u64 = start;
+      let mut units: u64 = 0;
+
+      while (cursor < end && units < position.character) {
+        let sequenceLength: u64 = textUtf8SequenceLength(&self.text, cursor);
+
+        units += textUtf16UnitsOf(sequenceLength);
+        cursor += sequenceLength;
+      }
+
+      return cursor;
+    }
+  }
+
+  /// Returns the number of UTF-16 code units needed to encode `text`, with
+  /// the same per-byte rule as `LineIndex` for bytes that are not UTF-8.
+  function utf16Length(text: &String): u64 {
+    return textUtf16UnitsBetween(text, 0, text.length());
+  }
+}

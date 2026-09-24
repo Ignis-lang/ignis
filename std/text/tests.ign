@@ -1,0 +1,236 @@
+import String from "std::string";
+import Test from "std::test";
+import Text, textUtf8SequenceLength from "./mod";
+
+function textIndexOf(text: str): Text::LineIndex {
+  return Text::LineIndex::create(String::create(text));
+}
+
+function textAssertPosition(index: &Text::LineIndex, offset: u64, line: u64, character: u64): void {
+  let position: Text::Position = index.position(offset);
+
+  Test::assertEq<u64>(position.line, line);
+  Test::assertEq<u64>(position.character, character);
+}
+
+function textAssertOffset(index: &Text::LineIndex, line: u64, character: u64, offset: u64): void {
+  Test::assertEq<u64>(index.offset(Text::Position { line: line, character: character }), offset);
+}
+
+@test
+function positionCountsAsciiColumnsPerLine(): void {
+  let index: Text::LineIndex = textIndexOf("hello\nworld\n");
+
+  textAssertPosition(&index, 0, 0, 0);
+  textAssertPosition(&index, 3, 0, 3);
+  textAssertPosition(&index, 5, 0, 5);
+  textAssertPosition(&index, 6, 1, 0);
+  textAssertPosition(&index, 9, 1, 3);
+}
+
+@test
+function positionCountsATwoByteCharacterAsOneUnit(): void {
+  let index: Text::LineIndex = textIndexOf("holá\n");
+
+  textAssertPosition(&index, 3, 0, 3);
+  textAssertPosition(&index, 5, 0, 4);
+}
+
+@test
+function positionCountsAFourByteCharacterAsTwoUnits(): void {
+  let index: Text::LineIndex = textIndexOf("a😀b\n");
+
+  textAssertPosition(&index, 0, 0, 0);
+  textAssertPosition(&index, 1, 0, 1);
+  textAssertPosition(&index, 5, 0, 3);
+  textAssertPosition(&index, 6, 0, 4);
+}
+
+@test
+function positionCountsAThreeByteCharacterAsOneUnit(): void {
+  let index: Text::LineIndex = textIndexOf("a─b");
+
+  textAssertPosition(&index, 1, 0, 1);
+  textAssertPosition(&index, 4, 0, 2);
+  textAssertPosition(&index, 5, 0, 3);
+}
+
+@test
+function positionInsideAMultiByteCharacterReportsItsStart(): void {
+  let index: Text::LineIndex = textIndexOf("a─b\n");
+
+  textAssertPosition(&index, 2, 0, 1);
+  textAssertPosition(&index, 3, 0, 1);
+
+  let emoji: Text::LineIndex = textIndexOf("a😀b");
+
+  textAssertPosition(&emoji, 2, 0, 1);
+  textAssertPosition(&emoji, 3, 0, 1);
+  textAssertPosition(&emoji, 4, 0, 1);
+}
+
+@test
+function positionPastTheEndClampsToTheEnd(): void {
+  let index: Text::LineIndex = textIndexOf("a─b");
+
+  textAssertPosition(&index, 100, 0, 3);
+
+  let trailing: Text::LineIndex = textIndexOf("ab\ncd");
+
+  textAssertPosition(&trailing, 5, 1, 2);
+  textAssertPosition(&trailing, 99, 1, 2);
+}
+
+@test
+function endPositionOfAnAsciiDocument(): void {
+  let index: Text::LineIndex = textIndexOf("function main(): void {}");
+  let end: Text::Position = index.endPosition();
+
+  Test::assertEq<u64>(end.line, 0);
+  Test::assertEq<u64>(end.character, 24);
+}
+
+@test
+function endPositionAfterATrailingNewlineIsTheNextLineStart(): void {
+  let index: Text::LineIndex = textIndexOf("function main(): void {}\n");
+  let end: Text::Position = index.endPosition();
+
+  Test::assertEq<u64>(end.line, 1);
+  Test::assertEq<u64>(end.character, 0);
+  Test::assertEq<u64>(index.lineCount(), 2);
+}
+
+@test
+function endPositionUsesUtf16ColumnsForNonBmpText(): void {
+  let index: Text::LineIndex = textIndexOf("let face = '😀';");
+  let end: Text::Position = index.endPosition();
+
+  Test::assertEq<u64>(end.line, 0);
+  Test::assertEq<u64>(end.character, 16);
+}
+
+@test
+function crlfKeepsTheCarriageReturnOnItsLine(): void {
+  let index: Text::LineIndex = textIndexOf("ab\r\ncd\r\n");
+
+  Test::assertEq<u64>(index.lineCount(), 3);
+  textAssertPosition(&index, 2, 0, 2);
+  textAssertPosition(&index, 3, 0, 3);
+  textAssertPosition(&index, 4, 1, 0);
+  textAssertPosition(&index, 6, 1, 2);
+  textAssertPosition(&index, 8, 2, 0);
+
+  textAssertOffset(&index, 0, 2, 2);
+  textAssertOffset(&index, 0, 3, 3);
+  textAssertOffset(&index, 0, 4, 4);
+  textAssertOffset(&index, 0, 9, 4);
+  textAssertOffset(&index, 1, 1, 5);
+}
+
+@test
+function emptyTextHasOneEmptyLine(): void {
+  let index: Text::LineIndex = textIndexOf("");
+
+  Test::assertEq<u64>(index.lineCount(), 1);
+  textAssertPosition(&index, 0, 0, 0);
+  textAssertPosition(&index, 5, 0, 0);
+  textAssertOffset(&index, 0, 0, 0);
+  textAssertOffset(&index, 0, 3, 0);
+  textAssertOffset(&index, 1, 0, 0);
+}
+
+@test
+function offsetRoundTripsEveryCharacterBoundary(): void {
+  let index: Text::LineIndex = textIndexOf("a─é😀\nb");
+
+  textAssertOffset(&index, 0, 0, 0);
+  textAssertOffset(&index, 0, 1, 1);
+  textAssertOffset(&index, 0, 2, 4);
+  textAssertOffset(&index, 0, 3, 6);
+  textAssertOffset(&index, 0, 5, 10);
+  textAssertOffset(&index, 1, 0, 11);
+  textAssertOffset(&index, 1, 1, 12);
+
+  textAssertPosition(&index, 4, 0, 2);
+  textAssertPosition(&index, 6, 0, 3);
+  textAssertPosition(&index, 10, 0, 5);
+  textAssertPosition(&index, 12, 1, 1);
+}
+
+@test
+function offsetInsideASurrogatePairLandsAfterTheCharacter(): void {
+  let index: Text::LineIndex = textIndexOf("a😀b");
+
+  textAssertOffset(&index, 0, 2, 5);
+}
+
+@test
+function offsetPastTheLineEndWalksThroughTheLineBreak(): void {
+  let index: Text::LineIndex = textIndexOf("hello\nworld");
+
+  textAssertOffset(&index, 0, 5, 5);
+  textAssertOffset(&index, 0, 6, 6);
+  textAssertOffset(&index, 0, 50, 6);
+  textAssertOffset(&index, 1, 50, 11);
+}
+
+@test
+function offsetPastTheLastLineIsTheTextLength(): void {
+  let index: Text::LineIndex = textIndexOf("hello\nworld\n");
+
+  textAssertOffset(&index, 2, 0, 12);
+  textAssertOffset(&index, 3, 0, 12);
+  textAssertOffset(&index, 40, 7, 12);
+}
+
+@test
+function invalidUtf8BytesCountAsOneUnitEach(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(255);
+  text.pushByte(195);
+  text.pushStr("b");
+  text.pushByte(128);
+  text.pushByte(240);
+  text.pushByte(159);
+  text.pushByte(152);
+
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 1), 1);
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 2), 1);
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 4), 1);
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 5), 1);
+  Test::assertEq<u64>(Text::utf16Length(&text), 8);
+
+  let index: Text::LineIndex = Text::LineIndex::create(text);
+
+  textAssertPosition(&index, 8, 0, 8);
+  textAssertOffset(&index, 0, 4, 4);
+}
+
+@test
+function utf8SequenceLengthRejectsOverlongAndSurrogateForms(): void {
+  let mut text: String = String::new();
+  text.pushByte(192);
+  text.pushByte(175);
+  text.pushByte(224);
+  text.pushByte(128);
+  text.pushByte(175);
+  text.pushByte(237);
+  text.pushByte(160);
+  text.pushByte(128);
+  text.pushByte(244);
+  text.pushByte(144);
+  text.pushByte(128);
+  text.pushByte(128);
+
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 0), 1);
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 2), 1);
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 5), 1);
+  Test::assertEq<u64>(textUtf8SequenceLength(&text, 8), 1);
+
+  let valid: String = String::create("é─😀");
+
+  Test::assertEq<u64>(textUtf8SequenceLength(&valid, 0), 2);
+  Test::assertEq<u64>(textUtf8SequenceLength(&valid, 2), 3);
+  Test::assertEq<u64>(textUtf8SequenceLength(&valid, 5), 4);
+  Test::assertEq<u64>(Text::utf16Length(&valid), 4);
+}

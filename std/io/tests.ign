@@ -1,0 +1,418 @@
+import Stream from "std::io";
+import LibC from "std::libc";
+import String from "std::string";
+
+import Test from "std::test";
+
+/// Both ends of a pipe, so the reader and writer run the real `read(2)` and
+/// `write(2)` paths without touching the process's standard streams.
+record IoTestPipe {
+  public readFd: i32;
+  public writeFd: i32;
+}
+
+function ioTestOpenPipe(): IoTestPipe {
+  let mut fds: i32[2] = [0, 0];
+
+  if (LibC::Process::pipe((&mut fds[0]) as *mut i32) == -1) {
+    Test::fail();
+  }
+
+  return IoTestPipe { readFd: fds[0], writeFd: fds[1] };
+}
+
+/// Returns the read end of a pipe that holds `input` followed by end of
+/// input. The caller closes it.
+function ioTestInputFd(input: &String): i32 {
+  let pipe: IoTestPipe = ioTestOpenPipe();
+
+  let Result::OK(_) = Stream::writeAll(pipe.writeFd, input) else {
+    Test::fail();
+    return pipe.readFd;
+  };
+
+  LibC::File::close(pipe.writeFd);
+  return pipe.readFd;
+}
+
+@test
+function readFramedMessageReturnsTheBodyThenEndOfInput(): void {
+  let input: String = String::create("Content-Length: 5\r\n\r\nhello");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::OK(body) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(body.toStr(), "hello");
+
+  let Result::ERROR(Stream::FrameError::END_OF_INPUT) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageReadsBackToBackMessagesAndIgnoresOtherHeaders(): void {
+  let input: String = String::create(
+    "content-LENGTH: 3\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\nabcContent-Length:\t 2 \r\n\r\nde"
+  );
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::OK(first) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  let Result::OK(second) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(first.toStr(), "abc");
+  Test::assertEq<str>(second.toStr(), "de");
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageAcceptsAnEmptyBody(): void {
+  let input: String = String::create("Content-Length: 0\r\n\r\n");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::OK(body) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(body.length(), 0);
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageReadsABodyLargerThanOneReadChunk(): void {
+  let mut body: String = String::new();
+  body.pushRepeated("0123456789", 1000);
+  body.pushStr("end");
+
+  let pipe: IoTestPipe = ioTestOpenPipe();
+
+  let Result::OK(_) = Stream::writeFramedMessageTo(pipe.writeFd, &body) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(pipe.writeFd);
+
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(pipe.readFd);
+
+  let Result::OK(read) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(read.length(), 10003);
+  Test::assertEq<boolean>(read.equals(&body), true);
+
+  LibC::File::close(pipe.readFd);
+}
+
+@test
+function writeFramedMessageToWritesTheHeaderAndTheBody(): void {
+  let body: String = String::create("{\"id\":1,\"text\":\"é\"}");
+  let pipe: IoTestPipe = ioTestOpenPipe();
+
+  let Result::OK(_) = Stream::writeFramedMessageTo(pipe.writeFd, &body) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(pipe.writeFd);
+
+  let expected: String = String::create("Content-Length: 20\r\n\r\n{\"id\":1,\"text\":\"é\"}");
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(pipe.readFd);
+
+  let Result::OK(written) = reader.readExact(expected.length()) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(written.equals(&expected), true);
+
+  let Result::ERROR(Stream::ReadError::END_OF_INPUT) = reader.readExact(1) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(pipe.readFd);
+}
+
+@test
+function readFramedMessageRejectsAMissingContentLength(): void {
+  let input: String = String::create("Content-Type: text/plain\r\n\r\nhello");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::MISSING_CONTENT_LENGTH) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageRejectsAHeaderWithoutAColon(): void {
+  let input: String = String::create("Content-Length 5\r\n\r\nhello");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::MALFORMED_HEADER(line)) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(line.toStr(), "Content-Length 5");
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageRejectsAnEmptyHeaderName(): void {
+  let input: String = String::create(": 5\r\n\r\nhello");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::MALFORMED_HEADER(line)) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(line.toStr(), ": 5");
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageRejectsANonNumericContentLength(): void {
+  let input: String = String::create("Content-Length: 12a\r\n\r\nhello");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::INVALID_CONTENT_LENGTH(value)) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(value.toStr(), " 12a");
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageRejectsANegativeOrEmptyContentLength(): void {
+  let negative: String = String::create("Content-Length: -1\r\n\r\n");
+  let negativeFd: i32 = ioTestInputFd(&negative);
+  let mut negativeReader: Stream::ByteReader = Stream::ByteReader::fromFd(negativeFd);
+
+  let Result::ERROR(Stream::FrameError::INVALID_CONTENT_LENGTH(_)) = negativeReader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(negativeFd);
+
+  let empty: String = String::create("Content-Length:\r\n\r\n");
+  let emptyFd: i32 = ioTestInputFd(&empty);
+  let mut emptyReader: Stream::ByteReader = Stream::ByteReader::fromFd(emptyFd);
+
+  let Result::ERROR(Stream::FrameError::INVALID_CONTENT_LENGTH(_)) = emptyReader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(emptyFd);
+}
+
+@test
+function readFramedMessageRejectsAnOverlongContentLength(): void {
+  let input: String = String::create("Content-Length: 99999999999999999999\r\n\r\n");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::INVALID_CONTENT_LENGTH(_)) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageRejectsADuplicateContentLength(): void {
+  let input: String = String::create("Content-Length: 1\r\nContent-Length: 1\r\n\r\na");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::DUPLICATE_CONTENT_LENGTH) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageReportsEndOfInputOnEmptyInput(): void {
+  let input: String = String::new();
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::END_OF_INPUT) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageReportsTruncationInsideAHeaderLine(): void {
+  let input: String = String::create("Content-Len");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::TRUNCATED) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageReportsTruncationBeforeTheEmptyLine(): void {
+  let input: String = String::create("Content-Length: 5\r\n");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::TRUNCATED) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageReportsTruncationInsideTheBody(): void {
+  let input: String = String::create("Content-Length: 10\r\n\r\nabc");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::TRUNCATED) = reader.readFramedMessage() else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readLineSplitsOnlyAtCarriageReturnLineFeed(): void {
+  let input: String = String::create("a\nb\rc\r\n\r\ntail");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::OK(first) = reader.readLine() else {
+    Test::fail();
+    return;
+  };
+
+  let Result::OK(second) = reader.readLine() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(first.toStr(), "a\nb\rc");
+  Test::assertEq<u64>(second.length(), 0);
+
+  let Result::ERROR(Stream::ReadError::TRUNCATED) = reader.readLine() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(reader.available(), 4);
+
+  LibC::File::close(fd);
+}
+
+@test
+function readExactReturnsExactlyTheRequestedBytes(): void {
+  let input: String = String::create("abcdef");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::OK(none) = reader.readExact(0) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::OK(head) = reader.readExact(4) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(none.length(), 0);
+  Test::assertEq<str>(head.toStr(), "abcd");
+
+  let Result::ERROR(Stream::ReadError::TRUNCATED) = reader.readExact(3) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::OK(rest) = reader.readExact(2) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(rest.toStr(), "ef");
+
+  let Result::ERROR(Stream::ReadError::END_OF_INPUT) = reader.readExact(1) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function writeAllAcceptsAnEmptyString(): void {
+  let pipe: IoTestPipe = ioTestOpenPipe();
+  let empty: String = String::new();
+
+  let Result::OK(_) = Stream::writeAll(pipe.writeFd, &empty) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(pipe.writeFd);
+  LibC::File::close(pipe.readFd);
+}
+
+@test
+function writeAllReportsAFailedWrite(): void {
+  let text: String = String::create("x");
+
+  let Result::ERROR(_) = Stream::writeAll(-1, &text) else {
+    Test::fail();
+    return;
+  };
+}
