@@ -1,0 +1,46 @@
+// e2e: std
+//
+// A `let ... else` over a binding destructured out of a reference binds a place in the
+// referent. It takes nothing out of the binding, which stays readable afterwards.
+import String from "std::string";
+
+enum Inner {
+  TEXT(String),
+  EMPTY(i32),
+}
+
+enum Outer {
+  WRAP(Inner),
+  NONE,
+}
+
+function textLength(outer: &Outer): i32 {
+  let Outer::WRAP(inner) = outer else {
+    return -1;
+  };
+
+  let Inner::TEXT(text) = inner else {
+    return 0;
+  };
+
+  let length: i32 = text.length() as i32;
+
+  if (let Inner::TEXT(again) = inner) {
+    return length + (again.length() as i32);
+  }
+
+  return length;
+}
+
+function main(): i32 {
+  let value: Outer = Outer::WRAP(Inner::TEXT(String::create("hello")));
+  let mut sum: i32 = 0;
+  let mut index: i32 = 0;
+
+  while (index < 3) {
+    sum += textLength(&value);
+    index += 1;
+  }
+
+  return sum;
+}
