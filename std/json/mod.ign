@@ -31,6 +31,11 @@
 //! |---------------------|--------------------------------------------------|
 //! | `Json::writer`      | JSON writer configuration                        |
 //! | `Json::writeRoot`   | Serialize a root scalar or `Serialize` value     |
+//! | `Json::parse`       | Parse JSON text into a `JsonValue` tree          |
+//! | `Json::writeValue`  | Append a `JsonValue` tree as compact JSON        |
+//! | `Json::writeValuePretty` | Append a `JsonValue` tree as pretty JSON    |
+//! | `Json::toJsonString` | Compact JSON for a `JsonValue` tree             |
+//! | `Json::toJsonStringPretty` | Pretty JSON for a `JsonValue` tree        |
 //!
 //! ## Notes
 //!
@@ -45,7 +50,34 @@
 //! |-------------------------------|-----------|-----------------------------|
 //! | Boolean, number, char, string | Yes       | Uses scalar overloads        |
 //! | `T: Serialize`                | Yes       | Uses record serialization    |
-//! | Arrays                        | No        | No generic array writer yet  |
+//! | `JsonValue` (any shape)       | Yes       | Uses `Json::writeValue`      |
+//!
+//! ## JSON Values
+//!
+//! A `JsonValue` tree holds any JSON document: null, booleans, numbers,
+//! strings, arrays, and objects with keys kept in insertion order. `Json::parse`
+//! builds one from text, and the `JsonValue` static constructors (`nullValue`,
+//! `boolValue`, `stringValue`, `fromString`, `integerValue`, `unsignedValue`,
+//! `array`, `object`) build one in code.
+//!
+//! | Value shape                   | Build | Parse | Write |
+//! |-------------------------------|-------|-------|-------|
+//! | Null, boolean, string         | Yes   | Yes   | Yes   |
+//! | Integers (`i64`, `u64`)       | Yes   | Yes   | Yes   |
+//! | Floats                        | No    | Yes   | Yes   |
+//! | Arrays                        | Yes   | Yes   | Yes   |
+//! | Objects (ordered keys)        | Yes   | Yes   | Yes   |
+//!
+//! Parsed numbers keep their source text, so a parsed float is written back
+//! unchanged. There is no float constructor because `f64.toString()` uses
+//! C `%g` formatting (six significant digits, `42.0` as `42`), which neither
+//! round-trips nor matches the text `serde_json` writes.
+//!
+//! `Json::writeValue` and `Json::writeValuePretty` match `serde_json::to_string`
+//! and `serde_json::to_string_pretty` byte for byte, string escaping included.
+//! The scalar `writeRoot` overloads use the shared serializer escaping instead,
+//! which writes other control bytes as uppercase `\u00XX` and has no `\b` or
+//! `\f`.
 //!
 //! ## Example
 //!
@@ -64,6 +96,7 @@ import Serialize from "std::serializer::serialize";
 import Serializer from "std::serializer::writer";
 
 import _ from "./parser";
+import _ from "./writer";
 
 export JsonObjectEntry, JsonValue, JsonValueKind from "./value";
 export
