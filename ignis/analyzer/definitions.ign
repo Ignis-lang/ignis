@@ -427,6 +427,10 @@ export namespace Analyzer {
     /// which is which methods a nominal owns after monomorphization has added
     /// specializations.
     byMethodOwner: HashMap<u32, Vector<Analyzer::DefinitionId>>;
+    /// The `///` documentation of each documented definition, keyed by raw
+    /// definition id: the host's `Definition::doc`, held aside so the many
+    /// undocumented definitions carry no field for it.
+    docs: HashMap<u32, String>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -439,7 +443,19 @@ export namespace Analyzer {
         bySymbol: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
         byPathSuffix: HashMap::new<u64, Vector<Analyzer::DefinitionId>>(),
         byMethodOwner: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
+        docs: HashMap::new<u32, String>(),
       };
+    }
+
+    /// Record the documentation of `id`, replacing any recorded before.
+    public setDoc(&mut self, id: Analyzer::DefinitionId, doc: &String): void {
+      self.docs.insert(id.raw(), doc.clone());
+    }
+
+    /// The documentation recorded for `id`, if it has any.
+    public docOf(&self, id: Analyzer::DefinitionId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.docs.get(&raw);
     }
 
     /// Every definition declaring `symbol`, ascending by id.

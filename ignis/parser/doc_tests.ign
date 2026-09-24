@@ -1,0 +1,267 @@
+import Test from "std::test";
+
+import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Ast from "@compiler::ast";
+import Parser from "@compiler::parser";
+
+function docParse(text: str): Ast::Module {
+  let source: SourceFile = SourceFile::create("fixtures/parser_doc_comments.ign", text);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  return module;
+}
+
+/// The written name of a declaration item, or an empty string for an import
+/// or export.
+function docItemName(node: &Ast::Item::Node): String {
+  return match (node) {
+    Ast::Item::Node::Function(item) -> item.name.clone(),
+    Ast::Item::Node::Record(item) -> item.name.clone(),
+    Ast::Item::Node::Enum(item) -> item.name.clone(),
+    Ast::Item::Node::Namespace(item) -> item.name.clone(),
+    Ast::Item::Node::Extern(item) -> item.name.clone(),
+    Ast::Item::Node::Constant(item) -> item.name.clone(),
+    Ast::Item::Node::TypeAlias(item) -> item.name.clone(),
+    Ast::Item::Node::Trait(item) -> item.name.clone(),
+    Ast::Item::Node::Import(_) -> String::new(),
+    Ast::Item::Node::Export(_) -> String::new(),
+  };
+}
+
+/// The first item, in allocation order, declaring `name`.
+function docItemNamed(module: &Ast::Module, name: str): Ast::ItemId {
+  let mut index: u64 = 0;
+
+  while (index < module.items.length()) {
+    let id: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(index as u32);
+
+    if (let Option::SOME(node) = module.items.get(id)) {
+      if (docItemName(node).equals(name)) {
+        return id;
+      }
+    }
+
+    index += 1;
+  }
+
+  let missing: Option<Ast::ItemId> = Option::NONE;
+
+  return match (missing) {
+    Option::SOME(id) -> id,
+    Option::NONE -> @panic("no item with that name"),
+  };
+}
+
+/// The first field, variant or enum static field pattern declaring `name`.
+function docPatternNamed(module: &Ast::Module, name: str): Ast::PatternId {
+  let mut index: u64 = 0;
+
+  while (index < module.patterns.length()) {
+    let id: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(index as u32);
+    let mut matched: boolean = false;
+
+    match (module.patterns.get(id)) {
+      Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
+        matched = binding.name.equals(name);
+      },
+      Option::SOME(Ast::Pattern::Node::Path(path)) -> {
+        if (let Option::SOME(last) = path.segments.get(path.segments.length() - 1)) {
+          matched = last.equals(name);
+        }
+      },
+      _ -> {},
+    };
+
+    if (matched) {
+      return id;
+    }
+
+    index += 1;
+  }
+
+  let missing: Option<Ast::PatternId> = Option::NONE;
+
+  return match (missing) {
+    Option::SOME(id) -> id,
+    Option::NONE -> @panic("no pattern with that name"),
+  };
+}
+
+function docOrNone(doc: Option<&String>): String {
+  return match (doc) {
+    Option::SOME(text) -> text.clone(),
+    Option::NONE -> String::create("<none>"),
+  };
+}
+
+function docOfItem(module: &Ast::Module, name: str): String {
+  return docOrNone(module.itemDoc(docItemNamed(module, name)));
+}
+
+function docOfPattern(module: &Ast::Module, name: str): String {
+  return docOrNone(module.patternDoc(docPatternNamed(module, name)));
+}
+
+function moduleDocOf(module: &Ast::Module): String {
+  return match (&module.doc) {
+    Option::SOME(text) -> text.clone(),
+    Option::NONE -> String::create("<none>"),
+  };
+}
+
+/// Mirrors the host's `parses_line_doc_comments_with_line_breaks` and
+/// `extract_doc_content_handles_line_comments`.
+@test
+function parserJoinsDocLinesWithHardBreaks(): void {
+  let module: Ast::Module = docParse(
+    "/// Concatenates two strings.\n///   Indented content   \n///No space\nfunction concat(a: str): str {\n  return a;\n}\nfunction plain(): void {}\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "concat").toStr(), "Concatenates two strings.  \n  Indented content  \nNo space");
+  Test::assertEq<str>(docOfItem(&module, "plain").toStr(), "<none>");
+  Test::assertEq<str>(moduleDocOf(&module).toStr(), "<none>");
+}
+
+/// Mirrors the host's `extract_doc_content_handles_block_comments`.
+@test
+function parserReadsBlockDocComments(): void {
+  let module: Ast::Module = docParse(
+    "/** Single line block */\nfunction single(): void {}\n/**\n * Line one\n *   Indented\n */\nfunction starred(): void {}\n/**\nLine one\nLine two\n*/\nfunction bare(): void {}\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "single").toStr(), "Single line block");
+  Test::assertEq<str>(docOfItem(&module, "starred").toStr(), "Line one\n  Indented");
+  Test::assertEq<str>(docOfItem(&module, "bare").toStr(), "Line one\nLine two");
+}
+
+/// Mirrors the host's `inner_doc_comment_on_namespace`, plus the file-level
+/// `//!` block the first namespace must not take.
+@test
+function parserKeepsModuleAndNamespaceDocsApart(): void {
+  let module: Ast::Module = docParse(
+    "//! The module.\n//! Second line.\n\n/// Outer doc for namespace\nnamespace Math {\n  //! This module provides mathematical functions.\n  //! It includes basic arithmetic operations.\n\n  function add(a: i32, b: i32): i32 { return a + b; }\n}\n"
+  );
+
+  Test::assertEq<str>(moduleDocOf(&module).toStr(), "The module.  \nSecond line.");
+
+  let namespaceId: Ast::ItemId = docItemNamed(&module, "Math");
+  Test::assertEq<str>(docOrNone(module.itemDoc(namespaceId)).toStr(), "Outer doc for namespace");
+  Test::assertEq<str>(
+    docOrNone(module.namespaceInnerDoc(namespaceId)).toStr(),
+    "This module provides mathematical functions.  \nIt includes basic arithmetic operations.",
+  );
+  Test::assertEq<str>(docOfItem(&module, "add").toStr(), "<none>");
+}
+
+@test
+function parserReadsBlockModuleDoc(): void {
+  let module: Ast::Module = docParse("/*!\n * Module documentation\n * Second line\n */\nfunction main(): void {}\n");
+
+  Test::assertEq<str>(moduleDocOf(&module).toStr(), "Module documentation\nSecond line");
+  Test::assertEq<str>(docOfItem(&module, "main").toStr(), "<none>");
+}
+
+/// Mirrors the host's `doc_comment_on_record_field` and
+/// `doc_comment_on_static_method`.
+@test
+function parserAttachesDocsToRecordMembers(): void {
+  let module: Ast::Module = docParse(
+    "/// A point.\nrecord Point {\n  /// X coordinate\n  x: i32;\n  /// Y coordinate\n  @aligned(8)\n  y: i32;\n  z: i32;\n  /// The origin count.\n  static COUNT: i32 = 0;\n  /// Static method documentation\n  static bar(): void { }\n  /// Instance method\n  public length(&self): i32 { return self.x; }\n}\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "Point").toStr(), "A point.");
+  Test::assertEq<str>(docOfPattern(&module, "x").toStr(), "X coordinate");
+  Test::assertEq<str>(docOfPattern(&module, "y").toStr(), "Y coordinate");
+  Test::assertEq<str>(docOfPattern(&module, "z").toStr(), "<none>");
+  Test::assertEq<str>(docOfPattern(&module, "COUNT").toStr(), "The origin count.");
+  Test::assertEq<str>(docOfItem(&module, "bar").toStr(), "Static method documentation");
+  Test::assertEq<str>(docOfItem(&module, "length").toStr(), "Instance method");
+}
+
+/// Mirrors the host's `doc_comment_on_enum_variant`.
+@test
+function parserAttachesDocsToEnumMembers(): void {
+  let module: Ast::Module = docParse(
+    "/// A color.\nenum Color {\n  /// Red color\n  Red,\n  /// Custom color\n  Custom(u8, u8, u8),\n  Blue,\n  /// The default channel.\n  CHANNEL: u8 = 0;\n  /// Whether it is red.\n  isRed(&self): boolean { return true; }\n}\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "Color").toStr(), "A color.");
+  Test::assertEq<str>(docOfPattern(&module, "Red").toStr(), "Red color");
+  Test::assertEq<str>(docOfPattern(&module, "Custom").toStr(), "Custom color");
+  Test::assertEq<str>(docOfPattern(&module, "Blue").toStr(), "<none>");
+  Test::assertEq<str>(docOfPattern(&module, "CHANNEL").toStr(), "The default channel.");
+  Test::assertEq<str>(docOfItem(&module, "isRed").toStr(), "Whether it is red.");
+}
+
+@test
+function parserAttachesDocsToTraitMethodsAndTheirSignatureTwins(): void {
+  let module: Ast::Module = docParse(
+    "/// Shows a value.\ntrait Show {\n  /// Required.\n  show(&self): i32;\n  /// Has a default.\n  twice(&self): i32 { return 2; }\n}\n"
+  );
+
+  let traitId: Ast::ItemId = docItemNamed(&module, "Show");
+  Test::assertEq<str>(docOrNone(module.itemDoc(traitId)).toStr(), "Shows a value.");
+  Test::assertEq<str>(docOfItem(&module, "show").toStr(), "Required.");
+
+  let Option::SOME(Ast::Item::Node::Trait(traitItem)) = module.items.get(traitId) else {
+    @panic("expected trait item");
+  };
+
+  let Option::SOME(twinId) = traitItem.methods.get(1) else {
+    @panic("expected the default method's signature twin");
+  };
+
+  let Option::SOME(defaultId) = traitItem.defaultMethods.get(0) else {
+    @panic("expected the default method");
+  };
+
+  Test::assertEq<str>(docOrNone(module.itemDoc(*twinId)).toStr(), "Has a default.");
+  Test::assertEq<str>(docOrNone(module.itemDoc(*defaultId)).toStr(), "Has a default.");
+}
+
+/// Mirrors the host's `doc_comment_survives_attributes`,
+/// `doc_comment_survives_multiple_attributes` and
+/// `doc_comment_on_export_function`.
+@test
+function parserKeepsDocsAcrossAttributesAndExport(): void {
+  let module: Ast::Module = docParse(
+    "/// Documented function with attribute\n@deprecated(\"use bar instead\")\nfunction foo(): void { }\nnamespace Ns {\n  /// Documented with two attributes\n  @deprecated\n  @cold\n  function baz(): void { }\n}\n/// Exported function documentation\nexport function exported(): void { }\n/// Inline documentation\ninline function fast(): void { }\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "foo").toStr(), "Documented function with attribute");
+  Test::assertEq<str>(docOfItem(&module, "baz").toStr(), "Documented with two attributes");
+  Test::assertEq<str>(docOfItem(&module, "exported").toStr(), "Exported function documentation");
+  Test::assertEq<str>(docOfItem(&module, "fast").toStr(), "Inline documentation");
+}
+
+@test
+function parserAttachesDocsToAliasesConstantsAndExterns(): void {
+  let module: Ast::Module = docParse(
+    "/// An alias.\ntype Count = i32;\n/// A constant.\nconst LIMIT: i32 = 3;\n/// The C library.\nextern libc {\n  /// Writes a string.\n  function puts(text: str): i32;\n  /// The error number.\n  const errno: i32;\n  function abort(): void;\n}\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "Count").toStr(), "An alias.");
+  Test::assertEq<str>(docOfItem(&module, "LIMIT").toStr(), "A constant.");
+  Test::assertEq<str>(docOfItem(&module, "libc").toStr(), "The C library.");
+  Test::assertEq<str>(docOfItem(&module, "puts").toStr(), "Writes a string.");
+  Test::assertEq<str>(docOfItem(&module, "errno").toStr(), "The error number.");
+  Test::assertEq<str>(docOfItem(&module, "abort").toStr(), "<none>");
+}
+
+/// A plain comment after the doc discards it and a blank line keeps it, as
+/// the host's `skip_comments` does; a doc a local claims does not reach the
+/// next item.
+@test
+function parserDropsDocsThatDoNotPrecedeTheirItem(): void {
+  let module: Ast::Module = docParse(
+    "/// Lost.\n// A plain comment.\nfunction cleared(): void {}\n/// Kept.\n\nfunction spaced(): void {}\nfunction body(): void {\n  /// Local.\n  let value: i32 = 1;\n}\nfunction after(): void {}\n/// Ignored.\n// Plain.\n/// Last run wins.\nfunction lastRun(): void {}\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "cleared").toStr(), "<none>");
+  Test::assertEq<str>(docOfItem(&module, "spaced").toStr(), "Kept.");
+  Test::assertEq<str>(docOfItem(&module, "after").toStr(), "<none>");
+  Test::assertEq<str>(docOfItem(&module, "lastRun").toStr(), "Last run wins.");
+}
