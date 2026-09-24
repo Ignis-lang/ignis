@@ -1,0 +1,273 @@
+//! JSON-RPC 2.0 message decoding and encoding for the language server.
+//!
+//! A decoded message keeps its whole parsed JSON tree, and fields are read
+//! out of it on demand, because `JsonValue` has no `Clone` and a member cannot
+//! be moved out of the tree it lives in.
+
+import Json, JsonObjectEntry, JsonValue, JsonValueKind from "std::json";
+import String from "std::string";
+import Vector from "std::vector";
+
+import IGNIS_VERSION from "../cli";
+
+/// JSON-RPC and LSP error codes the server answers with.
+export namespace LspErrorCode {
+  const PARSE_ERROR: i64 = -32700;
+  const INVALID_REQUEST: i64 = -32600;
+  const METHOD_NOT_FOUND: i64 = -32601;
+  const SERVER_NOT_INITIALIZED: i64 = -32002;
+}
+
+/// `TextDocumentSyncKind.Full`: every change carries the whole document.
+const TEXT_DOCUMENT_SYNC_FULL: i64 = 1;
+
+/// The `id` of a request, which a response echoes unchanged.
+export enum RequestId {
+  /// The raw JSON number text.
+  NUMBER(String),
+  TEXT(String),
+}
+
+/// A message that expects a response.
+export record LspRequest {
+  public id: RequestId;
+  public method: String;
+  /// The whole message, `params` included.
+  public message: JsonValue;
+}
+
+/// A message that expects no response.
+export record LspNotification {
+  public method: String;
+  /// The whole message, `params` included.
+  public message: JsonValue;
+}
+
+export enum LspMessage {
+  REQUEST(LspRequest),
+  NOTIFICATION(LspNotification),
+  /// A message without a `method`: a response to a request. This server
+  /// sends no requests, so it ignores them.
+  RESPONSE,
+}
+
+/// Why a message body could not be decoded. Both are answered with an error
+/// response whose `id` is `null`, because the request's own id is unknown.
+export enum DecodeError {
+  /// The body is not JSON. Holds the parser's message.
+  PARSE(String),
+  /// The body is JSON but not a JSON-RPC message. Holds a description.
+  INVALID(String),
+}
+
+/// Returns the member `key` of `value`, or `NONE` when `value` is not an
+/// object or has no such member. With duplicate keys the last one wins.
+export function jsonMember(value: &JsonValue, key: str): Option<&JsonValue> {
+  let JsonValueKind::OBJECT(entries) = &value.kind else {
+    return Option::NONE;
+  };
+
+  let mut index: u64 = entries.length();
+
+  while (index > 0) {
+    index -= 1;
+
+    let Option::SOME(entry) = entries.get(index) else {
+      break;
+    };
+
+    if (entry.key.equals(key)) {
+      return Option::SOME(&entry.value);
+    }
+  }
+
+  return Option::NONE;
+}
+
+/// Returns a copy of `value` when it is a JSON string.
+export function jsonString(value: &JsonValue): Option<String> {
+  return match (&value.kind) {
+    JsonValueKind::STRING(text) -> Option::SOME(text.clone()),
+    _ -> Option::NONE,
+  };
+}
+
+/// Returns the raw number text of `value` when it is a JSON number.
+function jsonNumberText(value: &JsonValue): Option<String> {
+  return match (&value.kind) {
+    JsonValueKind::NUMBER(text) -> Option::SOME(text.clone()),
+    _ -> Option::NONE,
+  };
+}
+
+/// Parses an optionally negative decimal integer that fits in an `i64`.
+/// Returns `NONE` for fractions, exponents and anything longer than 18 digits.
+export function parseInteger(text: &String): Option<i64> {
+  let length: u64 = text.length();
+  let mut index: u64 = 0;
+  let mut negative: boolean = false;
+
+  if (let Option::SOME(first) = text.byteAt(0)) {
+    if (first == '-' as u8) {
+      negative = true;
+      index = 1;
+    }
+  }
+
+  if (index >= length || length - index > 18) {
+    return Option::NONE;
+  }
+
+  let mut value: i64 = 0;
+
+  while (index < length) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      return Option::NONE;
+    };
+
+    if (byte < '0' as u8 || byte > '9' as u8) {
+      return Option::NONE;
+    }
+
+    value = value * 10 + ((byte - '0' as u8) as i64);
+    index += 1;
+  }
+
+  if (negative) {
+    return Option::SOME(0 - value);
+  }
+
+  return Option::SOME(value);
+}
+
+/// Returns the member `key` of `value` as a string, or `NONE`.
+export function jsonStringMember(value: &JsonValue, key: str): Option<String> {
+  let Option::SOME(member) = jsonMember(value, key) else {
+    return Option::NONE;
+  };
+
+  return jsonString(member);
+}
+
+/// Returns the member `key` of `value` as an integer, or `NONE`.
+export function jsonIntegerMember(value: &JsonValue, key: str): Option<i64> {
+  let Option::SOME(member) = jsonMember(value, key) else {
+    return Option::NONE;
+  };
+
+  let Option::SOME(text) = jsonNumberText(member) else {
+    return Option::NONE;
+  };
+
+  return parseInteger(&text);
+}
+
+/// Reads the `id` member of a request.
+function decodeRequestId(value: &JsonValue): Result<RequestId, DecodeError> {
+  return match (&value.kind) {
+    JsonValueKind::NUMBER(text) -> Result::OK(RequestId::NUMBER(text.clone())),
+    JsonValueKind::STRING(text) -> Result::OK(RequestId::TEXT(text.clone())),
+    _ -> Result::ERROR(DecodeError::INVALID(String::create("request id must be a number or a string"))),
+  };
+}
+
+/// Decodes one message body into a request, a notification or a response.
+export function decodeMessage(body: &String): Result<LspMessage, DecodeError> {
+  let message: JsonValue = match (Json::parse(body)) {
+    Result::OK(value) -> value,
+    Result::ERROR(error) -> {
+      return Result::ERROR(DecodeError::PARSE(error));
+    },
+  };
+
+  let isObject: boolean = match (&message.kind) {
+    JsonValueKind::OBJECT(_) -> true,
+    _ -> false,
+  };
+
+  if (!isObject) {
+    return Result::ERROR(DecodeError::INVALID(String::create("message must be a JSON object")));
+  }
+
+  let Option::SOME(methodValue) = jsonMember(&message, "method") else {
+    return Result::OK(LspMessage::RESPONSE);
+  };
+
+  let Option::SOME(method) = jsonString(methodValue) else {
+    return Result::ERROR(DecodeError::INVALID(String::create("method must be a string")));
+  };
+
+  let Option::SOME(idValue) = jsonMember(&message, "id") else {
+    return Result::OK(LspMessage::NOTIFICATION(LspNotification { method: method, message: message }));
+  };
+
+  let id: RequestId = decodeRequestId(idValue)!;
+  return Result::OK(LspMessage::REQUEST(LspRequest { id: id, method: method, message: message }));
+}
+
+/// The JSON form of a request id.
+function requestIdValue(id: RequestId): JsonValue {
+  return match (id) {
+    RequestId::NUMBER(text) -> JsonValue { kind: JsonValueKind::NUMBER(text), endOffset: 0 },
+    RequestId::TEXT(text) -> JsonValue::fromString(text),
+  };
+}
+
+/// A successful response to request `id`.
+export function responseBody(id: RequestId, result: JsonValue): String {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("jsonrpc", JsonValue::stringValue("2.0")));
+  entries.push(JsonObjectEntry::create("id", requestIdValue(id)));
+  entries.push(JsonObjectEntry::create("result", result));
+
+  let response: JsonValue = JsonValue::object(entries);
+  return Json::toJsonString(&response);
+}
+
+/// An error response. `id` is `NONE` when the request's id could not be read,
+/// which JSON-RPC writes as `null`.
+export function errorResponseBody(id: Option<RequestId>, code: i64, message: String): String {
+  let idValue: JsonValue = match (id) {
+    Option::SOME(value) -> requestIdValue(value),
+    Option::NONE -> JsonValue::nullValue(),
+  };
+
+  let mut errorEntries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  errorEntries.push(JsonObjectEntry::create("code", JsonValue::integerValue(code)));
+  errorEntries.push(JsonObjectEntry::create("message", JsonValue::fromString(message)));
+
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("jsonrpc", JsonValue::stringValue("2.0")));
+  entries.push(JsonObjectEntry::create("id", idValue));
+  entries.push(JsonObjectEntry::create("error", JsonValue::object(errorEntries)));
+
+  let response: JsonValue = JsonValue::object(entries);
+  return Json::toJsonString(&response);
+}
+
+/// A notification from the server to the client.
+export function notificationBody(method: str, params: JsonValue): String {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("jsonrpc", JsonValue::stringValue("2.0")));
+  entries.push(JsonObjectEntry::create("method", JsonValue::stringValue(method)));
+  entries.push(JsonObjectEntry::create("params", params));
+
+  let notification: JsonValue = JsonValue::object(entries);
+  return Json::toJsonString(&notification);
+}
+
+/// The `initialize` result: full-document sync and nothing else, which is
+/// everything this server implements.
+export function initializeResult(): JsonValue {
+  let mut capabilities: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  capabilities.push(JsonObjectEntry::create("textDocumentSync", JsonValue::integerValue(TEXT_DOCUMENT_SYNC_FULL)));
+
+  let mut serverInfo: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  serverInfo.push(JsonObjectEntry::create("name", JsonValue::stringValue("ignis-lsp")));
+  serverInfo.push(JsonObjectEntry::create("version", JsonValue::stringValue(IGNIS_VERSION)));
+
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("capabilities", JsonValue::object(capabilities)));
+  entries.push(JsonObjectEntry::create("serverInfo", JsonValue::object(serverInfo)));
+  return JsonValue::object(entries);
+}

@@ -1,0 +1,129 @@
+//! Conversion between `file:` URIs and filesystem paths.
+//!
+//! Encoding percent-escapes the same bytes the `url` crate's
+//! `Url::from_file_path` escapes on Unix, so a URI this server builds for a
+//! file the editor has not opened matches the one the host server would send.
+
+import String from "std::string";
+
+const FILE_SCHEME: str = "file://";
+
+/// True for a byte `Url::from_file_path` writes as `%XX` in a path segment:
+/// controls, space, non-ASCII, and `"`, `#`, `%`, `<`, `>`, `?`, `` ` ``,
+/// `{`, `}`.
+function uriByteNeedsEscape(byte: u8): boolean {
+  if (byte <= 32 || byte >= 127) {
+    return true;
+  }
+
+  return byte == '"' as u8 || byte == '#' as u8 || byte == '%' as u8 || byte == '<' as u8 || byte == '>' as u8 || byte == '?' as u8 || byte == '`' as u8 || byte == '{' as u8 || byte == '}' as u8;
+}
+
+function uriHexDigit(value: u8): u8 {
+  if (value < 10) {
+    return '0' as u8 + value;
+  }
+
+  return 'A' as u8 + (value - 10);
+}
+
+function uriHexValue(byte: u8): Option<u8> {
+  if (byte >= '0' as u8 && byte <= '9' as u8) {
+    return Option::SOME(byte - '0' as u8);
+  }
+
+  if (byte >= 'a' as u8 && byte <= 'f' as u8) {
+    return Option::SOME(byte - 'a' as u8 + 10);
+  }
+
+  if (byte >= 'A' as u8 && byte <= 'F' as u8) {
+    return Option::SOME(byte - 'A' as u8 + 10);
+  }
+
+  return Option::NONE;
+}
+
+/// The `file://` URI of an absolute path.
+export function uriFromFilePath(path: &String): String {
+  let mut uri: String = String::create(FILE_SCHEME);
+  let length: u64 = path.length();
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    let Option::SOME(byte) = path.byteAt(index) else {
+      break;
+    };
+
+    if (uriByteNeedsEscape(byte)) {
+      uri.pushByte('%' as u8);
+      uri.pushByte(uriHexDigit(byte / 16));
+      uri.pushByte(uriHexDigit(byte % 16));
+    } else {
+      uri.pushByte(byte);
+    }
+
+    index += 1;
+  }
+
+  return uri;
+}
+
+/// The path a `file:` URI names, percent-decoded. Returns `NONE` for another
+/// scheme, a host other than `localhost`, or a malformed escape. A query or
+/// fragment is dropped.
+export function filePathFromUri(uri: &String): Option<String> {
+  if (!uri.startsWith(FILE_SCHEME)) {
+    return Option::NONE;
+  }
+
+  let length: u64 = uri.length();
+  let mut index: u64 = 7;
+
+  if (uri.startsWith("file://localhost/")) {
+    index = 16;
+  }
+
+  let Option::SOME(first) = uri.byteAt(index) else {
+    return Option::NONE;
+  };
+
+  if (first != '/' as u8) {
+    return Option::NONE;
+  }
+
+  let mut path: String = String::new();
+
+  while (index < length) {
+    let Option::SOME(byte) = uri.byteAt(index) else {
+      break;
+    };
+
+    if (byte == '?' as u8 || byte == '#' as u8) {
+      break;
+    }
+
+    if (byte != '%' as u8) {
+      path.pushByte(byte);
+      index += 1;
+      continue;
+    }
+
+    let Option::SOME(high) = uri.byteAt(index + 1) else {
+      return Option::NONE;
+    };
+    let Option::SOME(low) = uri.byteAt(index + 2) else {
+      return Option::NONE;
+    };
+    let Option::SOME(highValue) = uriHexValue(high) else {
+      return Option::NONE;
+    };
+    let Option::SOME(lowValue) = uriHexValue(low) else {
+      return Option::NONE;
+    };
+
+    path.pushByte(highValue * 16 + lowValue);
+    index += 3;
+  }
+
+  return Option::SOME(path);
+}
