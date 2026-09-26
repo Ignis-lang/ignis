@@ -843,3 +843,32 @@ function serverReleasesNavigationWhenTheLastDocumentOfAnAnalysisCloses(): void {
 
   lspTestClose(&harness);
 }
+
+@test
+function serverAnswersCompletionWithAnArrayOfItems(): void {
+  let directory: Path::PathBuf = lspTestDirectory("completion");
+  let main: Path::PathBuf = lspTestWrite(&directory, "main.ign", "function main(): i32 {\n  let count: i32 = 1;\n  return count;\n}\n");
+  let closed: Path::PathBuf = lspTestWrite(&directory, "closed.ign", "function main(): i32 {\n  return 0;\n}\n");
+  let afterCo: str = "{\"line\":2,\"character\":11}";
+
+  let noInput: Vector<String> = Vector::new<String>();
+  let mut harness: LspTestHarness = lspTestHarnessWith(&noInput, lspTestStdPath());
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
+  lspTestReplyTo(&mut harness, 1);
+
+  lspTestSend(
+    &mut harness,
+    lspTestDidOpen(&main, "function main(): i32 {\\n  let count: i32 = 1;\\n  return co;\\n}\\n").toStr(),
+  );
+
+  let completion: String = lspTestPositionRequest(&mut harness, 2, "textDocument/completion", &main, afterCo);
+  Test::assertEq<str>(
+    completion.toStr(),
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[{\"label\":\"count\",\"kind\":6,\"detail\":\"(local)\",\"sortText\":\"100000\"},{\"label\":\"compileError\",\"kind\":3,\"detail\":\"builtin\",\"documentation\":{\"kind\":\"markdown\",\"value\":\"```ignis\\n@compileError(\\\"message\\\")\\n```\\n\\n(builtin) Emits a compile-time error with the given message.\\n\\n---\\n\\nReturn type is `Never`. Useful for static assertions and unsupported platform guards.\"},\"sortText\":\"350001\",\"insertText\":\"@compileError(\\\"${1:message}\\\")\",\"insertTextFormat\":2}]}",
+  );
+
+  let unknown: String = lspTestPositionRequest(&mut harness, 3, "textDocument/completion", &closed, afterCo);
+  Test::assertEq<str>(unknown.toStr(), "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null}");
+
+  lspTestClose(&harness);
+}

@@ -1,0 +1,110 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import AtItem, allAtItems, atItemHover, atItemSnippet, atItemsMatching from "./at_items";
+
+/// The names of the items matching `prefix`, joined by spaces.
+function namesMatching(prefix: str): String {
+  let wanted: String = String::create(prefix);
+  let items: Vector<AtItem> = atItemsMatching(&wanted);
+  let mut names: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    if (let Option::SOME(item) = items.get(index)) {
+      if (index > 0) {
+        names.pushStr(" ");
+      }
+
+      names.pushStr(item.name);
+    }
+
+    index += 1;
+  }
+
+  return names;
+}
+
+/// The item named `name`.
+function itemNamed(name: str): AtItem {
+  let all: Vector<AtItem> = allAtItems();
+  let mut index: u64 = 0;
+
+  while (index < all.length()) {
+    if (let Option::SOME(item) = all.get(index)) {
+      if (String::create(item.name).equals(name)) {
+        return AtItem {
+          name: item.name,
+          isBuiltin: item.isBuiltin,
+          syntax: item.syntax,
+          summary: item.summary,
+          doc: item.doc,
+        };
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::fail();
+  @unreachable();
+}
+
+/// The snippet of the item named `name`, `-` when it has none.
+function snippetOf(name: str): String {
+  let item: AtItem = itemNamed(name);
+  return atItemSnippet(&item).unwrapOr(String::create("-"));
+}
+
+@test
+function atItemsMatchPrefixesIgnoringCase(): void {
+  Test::assertEq<str>(namesMatching("SIZE").toStr(), "sizeOf");
+  Test::assertEq<str>(namesMatching("pointer").toStr(), "pointerCast pointerFromInteger");
+  Test::assertEq<str>(namesMatching("De").toStr(), "deprecated deny");
+  Test::assertEq<str>(namesMatching("zz").toStr(), "");
+
+  let empty: String = String::new();
+  Test::assertEq<u64>(atItemsMatching(&empty).length(), allAtItems().length());
+  Test::assertEq<u64>(allAtItems().length(), 38);
+}
+
+@test
+function atItemHoverShowsTheSyntaxTheKindAndTheDoc(): void {
+  let packed: AtItem = itemNamed("packed");
+  Test::assertEq<str>(
+    atItemHover(&packed).toStr(),
+    "```ignis\n@packed\n```\n\n(directive) Removes field padding from a record (tightly packed layout).\n\n---\n\nValid on: record.",
+  );
+
+  let integer: AtItem = itemNamed("integerFromPointer");
+  Test::assertEq<str>(
+    atItemHover(&integer).toStr(),
+    "```ignis\n@integerFromPointer(ptr)\n```\n\n(builtin) Converts a pointer to its integer address as `u64`.",
+  );
+}
+
+@test
+function atItemSnippetsFollowEachBuiltin(): void {
+  Test::assertEq<str>(snippetOf("sizeOf").toStr(), "sizeOf<${1:T}>()");
+  Test::assertEq<str>(snippetOf("alignOf").toStr(), "alignOf<${1:T}>()");
+  Test::assertEq<str>(snippetOf("typeName").toStr(), "typeName<${1:T}>()");
+  Test::assertEq<str>(snippetOf("dropGlue").toStr(), "dropGlue<${1:T}>()");
+  Test::assertEq<str>(snippetOf("bitCast").toStr(), "bitCast<${1:T}>(${2:expr})");
+  Test::assertEq<str>(snippetOf("pointerCast").toStr(), "pointerCast<${1:T}>(${2:expr})");
+  Test::assertEq<str>(snippetOf("read").toStr(), "read<${1:T}>(${2:expr})");
+  Test::assertEq<str>(snippetOf("dropInPlace").toStr(), "dropInPlace<${1:T}>(${2:expr})");
+  Test::assertEq<str>(snippetOf("pointerFromInteger").toStr(), "pointerFromInteger<${1:*const T}>(${2:addr})");
+  Test::assertEq<str>(snippetOf("sliceFromParts").toStr(), "sliceFromParts<${1:T}>(${2:ptr}, ${3:len})");
+  Test::assertEq<str>(snippetOf("write").toStr(), "write<${1:T}>(${2:ptr}, ${3:value})");
+  Test::assertEq<str>(snippetOf("integerFromPointer").toStr(), "integerFromPointer(${1:ptr})");
+  Test::assertEq<str>(snippetOf("compileError").toStr(), "compileError(\"${1:message}\")");
+  Test::assertEq<str>(snippetOf("panic").toStr(), "panic(\"${1:message}\")");
+  Test::assertEq<str>(snippetOf("trap").toStr(), "trap()");
+  Test::assertEq<str>(snippetOf("unreachable").toStr(), "unreachable()");
+  Test::assertEq<str>(snippetOf("typeOf").toStr(), "-");
+  Test::assertEq<str>(snippetOf("hash").toStr(), "-");
+  Test::assertEq<str>(snippetOf("maxOf").toStr(), "-");
+  Test::assertEq<str>(snippetOf("packed").toStr(), "-");
+  Test::assertEq<str>(snippetOf("configFlag").toStr(), "-");
+}

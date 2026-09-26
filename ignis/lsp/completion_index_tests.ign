@@ -1,0 +1,242 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import SourceOverrides from "../build/sources";
+
+import LspAnalysis, analysisKeyOf, analyzeDocuments from "./analysis";
+import
+  CompletionIndex,
+  CompletionSymbol,
+  MemberEntry,
+  NamespaceEntry,
+  SymbolCategory,
+from "./completion_index";
+
+const INDEX_TEST_UTIL: str = "/// Doubles a value.\nexport function double(value: i32): i32 {\n  return value * 2;\n}\n\nfunction helper(): i32 {\n  return 1;\n}\n\nexport record Pair {\n  public left: i32;\n  secret: i32;\n\n  /// Adds both halves.\n  public sum(&self): i32 {\n    return self.left + self.secret;\n  }\n\n  public static make(): Pair {\n    return Pair { left: helper(), secret: 2 };\n  }\n}\n";
+
+const INDEX_TEST_MAIN: str = "import double, Pair from \"./util\";\n\nnamespace Outer {\n  const TOP: i32 = 1;\n\n  namespace Inner {\n    const DEPTH: i32 = 2;\n  }\n}\n\n/// Triples a value.\n@extension(i32)\nfunction tripled(value: i32): i32 {\n  return value * 3;\n}\n\nfunction main(): i32 {\n  let pair: Pair = Pair::make();\n  let count: i32 = 2;\n  return double(pair.sum()) + Outer::TOP + Outer::Inner::DEPTH + count.tripled();\n}\n";
+
+/// Writes `main.ign` and `util.ign` into a scratch directory, analyzes them
+/// with `main.ign` open and returns the completion index.
+function indexFixture(tag: str): CompletionIndex {
+  let directory: String = `/tmp/ignis_lsp_completion_index_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::fromString(&directory);
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&root)) {
+    Test::fail();
+  }
+
+  let utilText: String = String::create(INDEX_TEST_UTIL);
+  let mainText: String = String::create(INDEX_TEST_MAIN);
+  let mainPath: Path::PathBuf = root.join("main.ign");
+  let utilPath: Path::PathBuf = root.join("util.ign");
+
+  if (let Result::ERROR(_) = Fs::writeString(&utilPath, &utilText)) {
+    Test::fail();
+  }
+
+  if (let Result::ERROR(_) = Fs::writeString(&mainPath, &mainText)) {
+    Test::fail();
+  }
+
+  let path: Path::PathBuf = match (Fs::canonicalize(&mainPath)) {
+    Result::OK(canonical) -> canonical,
+    Result::ERROR(_) -> mainPath,
+  };
+
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&path, &mainText);
+
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let stdPath: Option<String> = Option::SOME(workingDirectory.join("std").toString());
+  let key: String = analysisKeyOf(&path);
+  let analysis: LspAnalysis = analyzeDocuments(&path, &key, &stdPath, &sources);
+
+  let Option::SOME(navigation) = analysis.navigation else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return navigation.completion;
+}
+
+/// The first symbol named `name`.
+function symbolNamed(index: &CompletionIndex, name: str): &CompletionSymbol {
+  let mut position: u64 = 0;
+
+  while (position < index.symbols.length()) {
+    if (let Option::SOME(symbol) = index.symbols.get(position)) {
+      if (symbol.name.equals(name)) {
+        return symbol;
+      }
+    }
+
+    position += 1;
+  }
+
+  Test::fail();
+  @unreachable();
+}
+
+function textOr(text: &Option<String>, fallback: str): String {
+  return match (text) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> String::create(fallback),
+  };
+}
+
+/// The names in `names`, joined by spaces.
+function joined(names: &Vector<String>): String {
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    if (let Option::SOME(name) = names.get(index)) {
+      if (index > 0) {
+        rendered.pushStr(" ");
+      }
+
+      rendered.push(name);
+    }
+
+    index += 1;
+  }
+
+  return rendered;
+}
+
+/// The names of the symbols a namespace holds, joined by spaces.
+function memberNames(index: &CompletionIndex, entry: &NamespaceEntry): String {
+  let mut names: Vector<String> = Vector::new<String>();
+  let mut position: u64 = 0;
+
+  while (position < entry.members.length()) {
+    if (let Option::SOME(raw) = entry.members.get(position)) {
+      if (let Option::SOME(symbol) = index.symbolOf(*raw)) {
+        names.push(symbol.name.clone());
+      }
+    }
+
+    position += 1;
+  }
+
+  return joined(&names);
+}
+
+function visibilityOf(isPublic: boolean): str {
+  return isPublic ? "public" : "private";
+}
+
+/// `name:detail:visibility` for each entry, joined by spaces.
+function entriesText(entries: &Vector<MemberEntry>): String {
+  let mut rendered: Vector<String> = Vector::new<String>();
+  let mut position: u64 = 0;
+
+  while (position < entries.length()) {
+    if (let Option::SOME(entry) = entries.get(position)) {
+      let detail: String = textOr(&entry.detail, "-");
+      rendered.push(`${entry.name.toStr()}:${detail.toStr()}:${visibilityOf(entry.isPublic)}`);
+    }
+
+    position += 1;
+  }
+
+  return joined(&rendered);
+}
+
+@test
+function completionIndexNestsNamespacesUnderTheirParents(): void {
+  let index: CompletionIndex = indexFixture("namespaces");
+  let outerPath: String = String::create("Outer");
+  let innerPath: String = String::create("Outer::Inner");
+
+  let Option::SOME(outer) = index.namespaceAt(&outerPath) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(inner) = index.namespaceAt(&innerPath) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(joined(&outer.children).toStr(), "Inner");
+  Test::assertEq<str>(joined(&inner.children).toStr(), "");
+  Test::assertEq<str>(memberNames(&index, outer).toStr(), "TOP Inner");
+  Test::assertEq<str>(memberNames(&index, inner).toStr(), "DEPTH");
+
+  let outerSymbol: &CompletionSymbol = symbolNamed(&index, "Outer");
+  let innerSymbol: &CompletionSymbol = symbolNamed(&index, "Inner");
+  Test::assertEq<u64>(outerSymbol.category, SymbolCategory::NAMESPACE);
+  Test::assertEq<str>(outerSymbol.namespacePath.toStr(), "Outer");
+  Test::assert(outerSymbol.topLevel);
+  Test::assertEq<str>(innerSymbol.namespacePath.toStr(), "Outer::Inner");
+  Test::assert(!innerSymbol.topLevel);
+  Test::assert(!symbolNamed(&index, "DEPTH").topLevel);
+}
+
+@test
+function completionIndexMarksWhatOtherModulesSee(): void {
+  let index: CompletionIndex = indexFixture("visibility");
+
+  let doubler: &CompletionSymbol = symbolNamed(&index, "double");
+  Test::assert(doubler.isPublic);
+  Test::assertEq<u64>(doubler.category, SymbolCategory::FUNCTION);
+  Test::assertEq<str>(textOr(&doubler.detail, "-").toStr(), "function(value: i32): i32");
+  Test::assertEq<str>(textOr(&doubler.callSnippet, "-").toStr(), "double(${1:value})");
+  Test::assertEq<str>(textOr(&doubler.documentation, "-").toStr(), "Doubles a value.");
+
+  Test::assert(!symbolNamed(&index, "helper").isPublic);
+  Test::assert(symbolNamed(&index, "Pair").isPublic);
+  Test::assert(!symbolNamed(&index, "main").isPublic);
+}
+
+@test
+function completionIndexDetailsMembersAndExtensions(): void {
+  let index: CompletionIndex = indexFixture("members");
+  let pair: &CompletionSymbol = symbolNamed(&index, "Pair");
+
+  let Option::SOME(members) = index.members.get(&pair.raw) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(entriesText(&members.fields).toStr(), "left:i32:public secret:i32:private");
+  Test::assertEq<str>(entriesText(&members.instanceMethods).toStr(), "sum:fn(&self, self: &Pair) -> i32:public");
+  Test::assertEq<str>(entriesText(&members.staticMethods).toStr(), "make:fn() -> Pair:public");
+
+  let mut extensions: Vector<String> = Vector::new<String>();
+  let mut documentation: String = String::new();
+  let mut cursor: Option<u64> = index.extensions.firstEntryCursor();
+
+  while (cursor.isSome()) {
+    let position: u64 = cursor.unwrapOr(0);
+    let entries: &Vector<MemberEntry> = index.extensions.entryValue(position);
+    let mut slot: u64 = 0;
+
+    while (slot < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(slot)) {
+        if (entry.name.equals("tripled")) {
+          let detail: String = textOr(&entry.detail, "-");
+          extensions.push(`${entry.name.toStr()}:${detail.toStr()}:${visibilityOf(entry.isPublic)}`);
+          documentation = textOr(&entry.documentation, "-");
+        }
+      }
+
+      slot += 1;
+    }
+
+    cursor = index.extensions.nextEntryCursor(position);
+  }
+
+  Test::assertEq<str>(joined(&extensions).toStr(), "tripled:fn() -> i32:public");
+  Test::assertEq<str>(documentation.toStr(), "Triples a value.");
+}
