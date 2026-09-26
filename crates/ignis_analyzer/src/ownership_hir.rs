@@ -976,6 +976,7 @@ impl<'a> HirOwnershipChecker<'a> {
         // Mirrors the check_match scrutinee-consumption logic.
         let value_ty = self.hir.get(value).type_id;
         if self.pattern_moves_owned_value(value_ty, &pattern)
+          && !self.is_borrowed_binding(value)
           && let Some(source_def) = self.get_moved_var(value)
         {
           self.try_consume(source_def, span.clone());
@@ -1821,9 +1822,14 @@ impl<'a> HirOwnershipChecker<'a> {
     self.check_node(scrutinee);
 
     let scrutinee_ty = self.hir.get(scrutinee).type_id;
-    let moves_scrutinee_payload = arms
-      .iter()
-      .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
+
+    // A binding destructured out of a reference names a place in the referent, so
+    // matching it again moves nothing: its own bindings borrow the same storage.
+    let scrutinee_is_borrowed_binding = self.is_borrowed_binding(scrutinee);
+    let moves_scrutinee_payload = !scrutinee_is_borrowed_binding
+      && arms
+        .iter()
+        .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
 
     // `if (let P = value)` and `while (let P = value)` desugar to a two-armed match that
     // yields `true` from the pattern arm and `false` from a trailing wildcard: the
@@ -1856,7 +1862,7 @@ impl<'a> HirOwnershipChecker<'a> {
         // field behind a reference, which cannot be moved out of at all.
         self.reject_move_out_of_borrow(scrutinee);
       }
-    } else if let Some(source_def) = self.get_moved_var(scrutinee) {
+    } else if !scrutinee_is_borrowed_binding && let Some(source_def) = self.get_moved_var(scrutinee) {
       self.record_let_condition_scrutinee(hir_id, source_def, is_let_condition_match);
       self.try_consume(source_def, span.clone());
     }

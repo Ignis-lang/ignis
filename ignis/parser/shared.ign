@@ -32,6 +32,115 @@ export namespace ParserShared {
     return token;
   }
 
+  function isDocWhitespace(byte: u8): boolean {
+    return byte == 32 || byte == 9 || byte == 13 || byte == 10;
+  }
+
+  /// End of `text[start..end]` once trailing whitespace is dropped.
+  function docTrimmedEnd(text: &String, start: u64, end: u64): u64 {
+    let mut cursor: u64 = end;
+
+    while (cursor > start) {
+      let Option::SOME(byte) = text.byteAt(cursor - 1) else {
+        break;
+      };
+
+      if (!ParserShared::isDocWhitespace(byte)) {
+        break;
+      }
+
+      cursor -= 1;
+    }
+
+    return cursor;
+  }
+
+  /// The documentation a doc comment's lexeme carries, as the host's
+  /// `extract_doc_content` and `extract_inner_doc_content` read it. A line
+  /// comment loses its three-byte marker, one following space and its
+  /// trailing whitespace, keeping any deeper indentation. A block comment
+  /// loses its delimiters and each line's leading `*` and one space after
+  /// it; the lines are joined with newlines and the whole text is trimmed.
+  function docCommentContent(lexeme: &String): String {
+    if (lexeme.startsWith("///") || lexeme.startsWith("//!")) {
+      let mut start: u64 = 3;
+
+      if (let Option::SOME(byte) = lexeme.byteAt(3)) {
+        if (byte == 32) {
+          start = 4;
+        }
+      }
+
+      return lexeme.substringBytes(start, ParserShared::docTrimmedEnd(lexeme, start, lexeme.length()));
+    }
+
+    if (lexeme.length() < 5 || !lexeme.endsWith("*/")) {
+      return lexeme.clone();
+    }
+
+    let innerEnd: u64 = lexeme.length() - 2;
+    let mut joined: String = String::new();
+    let mut lineStart: u64 = 3;
+
+    while (lineStart <= innerEnd) {
+      let mut lineEnd: u64 = lineStart;
+
+      while (lineEnd < innerEnd) {
+        let Option::SOME(byte) = lexeme.byteAt(lineEnd) else {
+          break;
+        };
+
+        if (byte == 10) {
+          break;
+        }
+
+        lineEnd += 1;
+      }
+
+      let mut contentStart: u64 = lineStart;
+
+      while (contentStart < lineEnd) {
+        let Option::SOME(byte) = lexeme.byteAt(contentStart) else {
+          break;
+        };
+
+        if (!ParserShared::isDocWhitespace(byte)) {
+          break;
+        }
+
+        contentStart += 1;
+      }
+
+      let mut starred: boolean = false;
+
+      if (let Option::SOME(byte) = lexeme.byteAt(contentStart)) {
+        starred = contentStart < lineEnd && byte == 42;
+      }
+
+      if (starred) {
+        contentStart += 1;
+
+        if (let Option::SOME(byte) = lexeme.byteAt(contentStart)) {
+          if (contentStart < lineEnd && byte == 32) {
+            contentStart += 1;
+          }
+        }
+      } else {
+        contentStart = lineStart;
+      }
+
+      if (lineStart > 3) {
+        joined.pushStr("\n");
+      }
+
+      let line: String = lexeme.substringBytes(contentStart, ParserShared::docTrimmedEnd(lexeme, contentStart, lineEnd));
+      joined.push(&line);
+      lineStart = lineEnd + 1;
+    }
+
+    return joined.trimAsciiWhitespace();
+  }
+
   function mergeSpans(start: SourceSpan, end: SourceSpan): SourceSpan {
     return SourceSpan::new(start.filePath, start.start, end.end);
   }
@@ -405,6 +514,12 @@ export namespace ParserShared {
     /// Compile-time configuration `@configFlag`, `@if` and `@ifelse` fold
     /// against while this file is parsed.
     public flags: CompileFlags;
+    /// `///` text of the last comment run, waiting for the declaration that
+    /// follows. Mirrors the host parser's `pending_doc`: only a run of comment
+    /// tokens rewrites it, so attributes between a doc and its item keep it.
+    pendingDoc: Option<String>;
+    /// `//!` text of the last comment run, the host's `pending_inner_doc`.
+    pendingInnerDoc: Option<String>;
 
     public current(&self): Token {
       return self.tokens.peek();
@@ -419,12 +534,12 @@ export namespace ParserShared {
         let token: Token = self.current();
 
         if (token.kindValue() == TokenKind::LINE_COMMENT || token.kindValue() == TokenKind::BLOCK_COMMENT) {
-          self.bump();
+          self.consumeCommentRun();
           continue;
         }
 
         if (token.kindValue() == TokenKind::OUTER_DOC_COMMENT || token.kindValue() == TokenKind::INNER_DOC_COMMENT) {
-          self.bump();
+          self.consumeCommentRun();
           continue;
         }
 
@@ -435,6 +550,88 @@ export namespace ParserShared {
 
         return;
       }
+    }
+
+    /// Consumes a run of comments and whitespace and replaces both pending
+    /// docs with what the run carries, as the host's `skip_comments` does: a
+    /// plain comment discards the `///` lines before it, and lines are joined
+    /// with a Markdown hard break.
+    consumeCommentRun(&mut self): void {
+      let mut outerDoc: String = String::new();
+      let mut hasOuterDoc: boolean = false;
+      let mut innerDoc: String = String::new();
+      let mut hasInnerDoc: boolean = false;
+
+      while (true) {
+        let token: Token = self.current();
+        let kind: TokenKind = token.kindValue();
+
+        if (kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT) {
+          outerDoc.clear();
+          hasOuterDoc = false;
+          self.bump();
+          continue;
+        }
+
+        if (kind == TokenKind::OUTER_DOC_COMMENT) {
+          if (hasOuterDoc) {
+            outerDoc.pushStr("  \n");
+          }
+
+          let content: String = ParserShared::docCommentContent(&token.lexeme);
+          outerDoc.push(&content);
+          hasOuterDoc = true;
+          self.bump();
+          continue;
+        }
+
+        if (kind == TokenKind::INNER_DOC_COMMENT) {
+          if (hasInnerDoc) {
+            innerDoc.pushStr("  \n");
+          }
+
+          let content: String = ParserShared::docCommentContent(&token.lexeme);
+          innerDoc.push(&content);
+          hasInnerDoc = true;
+          self.bump();
+          continue;
+        }
+
+        if (kind == TokenKind::WHITESPACE) {
+          self.bump();
+          continue;
+        }
+
+        break;
+      }
+
+      if (hasOuterDoc) {
+        self.pendingDoc = Option::SOME(outerDoc.clone());
+      } else {
+        self.pendingDoc = Option::NONE;
+      }
+
+      if (hasInnerDoc) {
+        self.pendingInnerDoc = Option::SOME(innerDoc.clone());
+      } else {
+        self.pendingInnerDoc = Option::NONE;
+      }
+    }
+
+    /// Takes the pending `///` text for the declaration starting here.
+    public takePendingDoc(&mut self): Option<String> {
+      self.skipTrivia();
+      let doc: Option<String> = Ast::copyOptionalString(&self.pendingDoc);
+      self.pendingDoc = Option::NONE;
+      return doc;
+    }
+
+    /// Takes the pending `//!` text for the module or namespace starting here.
+    public takePendingInnerDoc(&mut self): Option<String> {
+      self.skipTrivia();
+      let doc: Option<String> = Ast::copyOptionalString(&self.pendingInnerDoc);
+      self.pendingInnerDoc = Option::NONE;
+      return doc;
     }
 
     public atEof(&mut self): boolean {
@@ -559,6 +756,8 @@ export namespace ParserShared {
       diagnostics: diagnostics,
       module: module,
       flags: flags.clone(),
+      pendingDoc: Option::NONE,
+      pendingInnerDoc: Option::NONE,
     };
   }
 }

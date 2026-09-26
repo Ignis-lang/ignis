@@ -5329,7 +5329,11 @@ export namespace Borrowck {
       scrutineeType = scrutineeNode.typeId;
     }
 
-    let movesScrutineePayload: boolean = Borrowck::armsMoveScrutineePayload(
+    // A binding destructured out of a reference names a place in the referent, so
+    // matching it again moves nothing: its own bindings borrow the same storage.
+    // Mirrors `scrutinee_is_borrowed_binding`.
+    let scrutineeIsBorrowedBinding: boolean = Borrowck::isBorrowedBindingNode(hir, state, matchNode.scrutinee);
+    let movesScrutineePayload: boolean = !scrutineeIsBorrowedBinding && Borrowck::armsMoveScrutineePayload(
       defStore,
       typeStore,
       scrutineeType,
@@ -5364,9 +5368,11 @@ export namespace Borrowck {
         // a reference and cannot be moved out at all.
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
       }
-    } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
-      Borrowck::recordLetConditionScrutinee(defStore, typeStore, state, matchId, source, isLetConditionMatch);
-      Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_PATTERN);
+    } else if (!scrutineeIsBorrowedBinding) {
+      if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
+        Borrowck::recordLetConditionScrutinee(defStore, typeStore, state, matchId, source, isLetConditionMatch);
+        Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_PATTERN);
+      }
     }
     let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, matchNode.scrutinee);

@@ -1,0 +1,43 @@
+// e2e: std
+//
+// A binding destructured out of a reference scrutinee names a place in the referent.
+// Matching it again with a second `if let` must not treat it as an owned value: the
+// inner match used to drop its copy of the binding, freeing the referent's `String`
+// once per call, and the owner freed it again at scope end.
+import String from "std::string";
+
+enum Inner {
+  TEXT(String),
+  EMPTY(i32),
+}
+
+enum Outer {
+  WRAP(Inner),
+  NONE,
+}
+
+function probeEmpty(outer: &Outer): boolean {
+  if (let Outer::WRAP(inner) = outer) {
+    if (let Inner::EMPTY(_) = inner) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function main(): i32 {
+  let value: Outer = Outer::WRAP(Inner::TEXT(String::create("hello")));
+  let mut hits: i32 = 0;
+  let mut index: i32 = 0;
+
+  while (index < 3) {
+    if (probeEmpty(&value)) {
+      hits += 1;
+    }
+
+    index += 1;
+  }
+
+  return hits;
+}

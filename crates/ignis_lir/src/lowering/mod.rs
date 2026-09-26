@@ -1780,15 +1780,16 @@ impl<'a> LoweringContext<'a> {
   /// A temporary or a variable has no other holder — the HIR ownership checker consumes
   /// the variable in `check_match`. A field read by value out of storage this function
   /// owns is a partial move: `lower_field_access` marks it moved, so the owner's drop
-  /// skips it. Elements, dereferences, statics and anything behind a reference are the
-  /// opposite case: the place they were read from still owns and still frees them.
+  /// skips it. Elements, dereferences, statics, anything behind a reference and a
+  /// binding destructured out of one are the opposite case: the place they were read
+  /// from still owns and still frees them.
   fn match_owns_scrutinee_bytes(
     &mut self,
     scrutinee: HIRId,
   ) -> bool {
     let scrutinee_ty = self.hir.get(scrutinee).type_id;
 
-    if !self.types.needs_drop_with_defs(&scrutinee_ty, self.defs) {
+    if !self.types.needs_drop_with_defs(&scrutinee_ty, self.defs) || self.is_borrowed_pattern_binding(scrutinee) {
       return false;
     }
 
@@ -2357,7 +2358,8 @@ impl<'a> LoweringContext<'a> {
     // ownership_hir::check_match), so drop-tracking the synthetic local is
     // correct there. Owned rvalues (calls, constructors, etc.) still need
     // drop tracking when no arm extracts the inner value.
-    let scrutinee_aliases_external_storage = Self::hir_aliases_external_storage(self.hir.get(scrutinee));
+    let scrutinee_aliases_external_storage =
+      Self::hir_aliases_external_storage(self.hir.get(scrutinee)) || self.is_borrowed_pattern_binding(scrutinee);
 
     let scrutinee_needs_drop = self.types.needs_drop_with_defs(&scrutinee_ty, self.defs);
 
@@ -2546,6 +2548,19 @@ impl<'a> LoweringContext<'a> {
       });
       Operand::Temp(temp)
     })
+  }
+
+  /// Whether the node names a pattern binding destructured out of a reference scrutinee.
+  /// Its bytes are the referent's, so the HIR ownership checker never consumes it and a
+  /// match over it owns none of them.
+  fn is_borrowed_pattern_binding(
+    &self,
+    hir_id: HIRId,
+  ) -> bool {
+    matches!(
+      &self.hir.get(hir_id).kind,
+      HIRKind::Variable(def_id) if self.drop_schedules.borrowed_pattern_bindings.contains(def_id)
+    )
   }
 
   /// True when the HIR node refers to storage owned by an external place

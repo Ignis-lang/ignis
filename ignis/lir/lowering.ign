@@ -333,8 +333,10 @@ export namespace LirLowering {
     return Lir::Terminator::Return(Option::SOME(bodyValue));
   }
 
-  // One nested pattern, not an `if let` on the payload binding: matching that
-  // binding again frees a string constant's payload (#256).
+  // One nested pattern, not an `if let` on the payload binding: compilers
+  // without the #256 fix free a string constant's payload on that shape, and
+  // the official stage0 and the C seed build this file. Keep it until both
+  // carry the fix (the two-step rule in BOOTSTRAP.md).
   function isUndefOperand(operand: &Lir::Operand): boolean {
     if (let Lir::Operand::Const(Lir::ConstValue::Undef(_)) = operand) {
       return true;
@@ -3743,13 +3745,19 @@ export namespace LirLowering {
   /// partial move: the field access marks the field moved, so the owner's own
   /// drop skips it. A field reached through a reference is the opposite case —
   /// the referent still owns and drops it — and so are elements, dereferences
-  /// and statics, which are never marked moved. Mirrors
-  /// `match_owns_scrutinee`.
+  /// and statics, which are never marked moved, and a binding destructured out
+  /// of a reference, whose bytes are the referent's. Mirrors
+  /// `match_owns_scrutinee_bytes`.
   function matchOwnsScrutinee(
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     nodeId: Hir::HirId,
   ): boolean {
+    if (LirLowering::isBorrowedPatternBindingNode(hirStore, dropSchedules, nodeId)) {
+      return false;
+    }
+
     if (!Borrowck::aliasesExternalStorage(hirStore, nodeId)) {
       return true;
     }
@@ -3763,6 +3771,22 @@ export namespace LirLowering {
     }
 
     return false;
+  }
+
+  /// Whether the node names a pattern binding destructured out of a reference
+  /// scrutinee. Its bytes are the referent's, so the borrow checker never
+  /// consumes it and a match over it owns none of them. Mirrors
+  /// `is_borrowed_pattern_binding`.
+  function isBorrowedPatternBindingNode(
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    nodeId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(defId) = Borrowck::variableOf(hirStore, nodeId) else {
+      return false;
+    };
+
+    return dropSchedules.isBorrowedPatternBinding(defId);
   }
 
   function lowerMatch(
@@ -3869,14 +3893,16 @@ export namespace LirLowering {
         scrutineeType,
         &matchNode.arms,
       );
-      let ownsScrutinee: boolean = LirLowering::matchOwnsScrutinee(typeStore, hirStore, matchNode.scrutinee);
+      let ownsScrutinee: boolean = LirLowering::matchOwnsScrutinee(typeStore, hirStore, dropSchedules, matchNode.scrutinee);
 
       // When no arm takes the payload the scrutinee leaves the match whole, so
       // the block that opened it owns the drop, exactly as it would for any
       // other unnamed temporary. A scrutinee that aliases storage it does not
       // own is left alone: the owner's schedule already frees it. Mirrors
       // `track_scrutinee_drop`.
-      let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hirStore, matchNode.scrutinee);
+      let aliasesStorage: boolean = Borrowck::aliasesExternalStorage(hirStore, matchNode.scrutinee);
+      let borrowedBinding: boolean = LirLowering::isBorrowedPatternBindingNode(hirStore, dropSchedules, matchNode.scrutinee);
+      let aliasesExternalStorage: boolean = aliasesStorage || borrowedBinding;
       dropScrutineePerArm = ownsScrutinee && scrutineeNeedsDrop && someArmMovesPayload;
 
       if (scrutineeNeedsDrop && !someArmMovesPayload && !aliasesExternalStorage) {
@@ -4166,7 +4192,7 @@ export namespace LirLowering {
     // borrow checker consume the source place. Without that, the source is still
     // dropped where it was declared and freeing a payload here frees it twice.
     let takesPayload: boolean = Borrowck::patternMovesOwnedValue(defStore, typeStore, valueType, &letElseNode.pattern);
-    let ownsValue: boolean = LirLowering::matchOwnsScrutinee(typeStore, hirStore, letElseNode.value);
+    let ownsValue: boolean = LirLowering::matchOwnsScrutinee(typeStore, hirStore, dropSchedules, letElseNode.value);
     let valueNeedsDrop: boolean = Borrowck::needsDropType(defStore, typeStore, valueType);
 
     if (takesPayload && ownsValue && valueNeedsDrop) {

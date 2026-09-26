@@ -1,3 +1,4 @@
+import HashMap from "std::collections";
 import Vector from "std::vector";
 
 import _ from "./expressions";
@@ -14,6 +15,17 @@ export namespace Ast {
     public statements: Ast::Store<Ast::StatementTag, Ast::Statement::Node>;
     public types: Ast::Store<Ast::TypeTag, Ast::Type::Node>;
     public patterns: Ast::Store<Ast::PatternTag, Ast::Pattern::Node>;
+    /// The file's leading `//!` block.
+    public doc: Option<String>;
+    /// `///` text of each documented declaration item, keyed by raw item id.
+    /// Kept beside the nodes so undocumented items cost nothing.
+    public itemDocs: HashMap<u32, String>;
+    /// `///` text of each documented record field and enum member, keyed by
+    /// raw pattern id.
+    public patternDocs: HashMap<u32, String>;
+    /// `//!` text right after a namespace's opening brace, keyed by the
+    /// namespace's raw item id.
+    public namespaceInnerDocs: HashMap<u32, String>;
 
     public static init(): Module {
       return Module {
@@ -23,7 +35,48 @@ export namespace Ast {
         statements: Ast::Store::init<Ast::StatementTag, Ast::Statement::Node>(),
         types: Ast::Store::init<Ast::TypeTag, Ast::Type::Node>(),
         patterns: Ast::Store::init<Ast::PatternTag, Ast::Pattern::Node>(),
+        doc: Option::NONE,
+        itemDocs: HashMap::new<u32, String>(),
+        patternDocs: HashMap::new<u32, String>(),
+        namespaceInnerDocs: HashMap::new<u32, String>(),
       };
+    }
+
+    public setDoc(&mut self, doc: Option<String>): void {
+      self.doc = doc;
+    }
+
+    public setItemDoc(&mut self, id: Ast::ItemId, doc: &Option<String>): void {
+      if (let Option::SOME(text) = doc) {
+        self.itemDocs.insert(id.raw(), text.clone());
+      }
+    }
+
+    public setPatternDoc(&mut self, id: Ast::PatternId, doc: &Option<String>): void {
+      if (let Option::SOME(text) = doc) {
+        self.patternDocs.insert(id.raw(), text.clone());
+      }
+    }
+
+    public setNamespaceInnerDoc(&mut self, id: Ast::ItemId, doc: &Option<String>): void {
+      if (let Option::SOME(text) = doc) {
+        self.namespaceInnerDocs.insert(id.raw(), text.clone());
+      }
+    }
+
+    public itemDoc(&self, id: Ast::ItemId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.itemDocs.get(&raw);
+    }
+
+    public patternDoc(&self, id: Ast::PatternId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.patternDocs.get(&raw);
+    }
+
+    public namespaceInnerDoc(&self, id: Ast::ItemId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.namespaceInnerDocs.get(&raw);
     }
 
     public addRootItem(&mut self, item: Ast::Item::Node): Ast::ItemId {
