@@ -44,6 +44,8 @@ export namespace TokenCode {
   const WHILE: u64 = 28;
   const FOR: u64 = 29;
   const MATCH: u64 = 30;
+  const RETURN: u64 = 31;
+  const QUESTION_MARK: u64 = 32;
 }
 
 /// What a completion request completes.
@@ -120,6 +122,7 @@ function keywordCode(keyword: Keyword): u64 {
     Keyword::WHILE -> TokenCode::WHILE,
     Keyword::FOR -> TokenCode::FOR,
     Keyword::MATCH -> TokenCode::MATCH,
+    Keyword::RETURN -> TokenCode::RETURN,
     _ -> TokenCode::OTHER,
   };
 }
@@ -141,6 +144,7 @@ function punctuationCode(punctuation: Punctuation): u64 {
     Punctuation::SEMICOLON -> TokenCode::SEMICOLON,
     Punctuation::EQUAL -> TokenCode::EQUAL,
     Punctuation::ARROW -> TokenCode::ARROW,
+    Punctuation::QUESTION_MARK -> TokenCode::QUESTION_MARK,
     _ -> TokenCode::OTHER,
   };
 }
@@ -548,9 +552,33 @@ function importPathFallback(text: &String, cursor: u64): Option<CompletionContex
   return Option::SOME(contextOf(ContextKind::IMPORT_PATH, content));
 }
 
+/// True when the type name at `name`, with the `Path::` segments before it,
+/// stands where an expression starts: after `=`, `(`, `[`, `,`, `->`, `?`,
+/// `return`, or a `:` that does not follow a `)`. After a declaration
+/// keyword or a signature's return type, a `{` opens a body instead.
+function inExpressionPosition(tokens: &Vector<CompletionToken>, name: u64): boolean {
+  let mut first: u64 = name;
+
+  while (first >= 2 && codeAt(tokens, first - 1) == TokenCode::DOUBLE_COLON && codeAt(tokens, first - 2) == TokenCode::IDENTIFIER) {
+    first -= 2;
+  }
+
+  if (first == 0) {
+    return false;
+  }
+
+  let before: u64 = codeAt(tokens, first - 1);
+
+  if (before == TokenCode::COLON) {
+    return first < 2 || codeAt(tokens, first - 2) != TokenCode::RIGHT_PAREN;
+  }
+
+  return before == TokenCode::EQUAL || before == TokenCode::LEFT_PAREN || before == TokenCode::LEFT_BRACKET || before == TokenCode::COMMA || before == TokenCode::ARROW || before == TokenCode::QUESTION_MARK || before == TokenCode::RETURN;
+}
+
 /// The record literal the cursor is inside, `Name { a: 1, | }`, found from
 /// the `,` or `{` before it: the name before the enclosing `{` and the fields
-/// written so far. A block after `)` or `else` is not one.
+/// written so far, when that name stands in expression position.
 function recordInitContext(
   tokens: &Vector<CompletionToken>,
   trigger: u64,
@@ -585,12 +613,8 @@ function recordInitContext(
     return Option::NONE;
   }
 
-  if (brace >= 2) {
-    let beforeName: u64 = codeAt(tokens, brace - 2);
-
-    if (beforeName == TokenCode::RIGHT_PAREN || beforeName == TokenCode::ELSE) {
-      return Option::NONE;
-    }
+  if (!inExpressionPosition(tokens, brace - 1)) {
+    return Option::NONE;
   }
 
   let Option::SOME(nameToken) = tokens.get(brace - 1) else {
