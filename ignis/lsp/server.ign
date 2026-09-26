@@ -1,6 +1,7 @@
 //! `ignis lsp`: a sequential Language Server Protocol server over stdio that
 //! publishes diagnostics and answers hovers, go-to-definition,
-//! find-references, document symbols and completion.
+//! find-references, document symbols, completion, formatting and code
+//! actions.
 //!
 //! Messages are handled one at a time, in arrival order. Document changes
 //! only mark their analysis dirty. The analysis runs once no bytes of a
@@ -26,6 +27,7 @@ import
   analysisKeyOf,
   analyzeDocuments,
 from "./analysis";
+import codeActionsFor from "./code_actions";
 import
   CompletionAnalysis,
   CompletionCandidate,
@@ -34,6 +36,7 @@ import
 from "./completion";
 import CompletionIndex, emptyCompletionIndex from "./completion_index";
 import Document, DocumentHandle, DocumentStore, isIgnisSourcePath from "./documents";
+import documentFormattingEdits from "./formatting";
 import
   ByteRange,
   FileHoverIndex,
@@ -58,6 +61,7 @@ import
   jsonMember,
   jsonStringMember,
   notificationBody,
+  rangeJson,
   responseBody,
 from "./protocol";
 import uriFromFilePath from "./uri";
@@ -163,22 +167,6 @@ export function publishDiagnosticsParams(
   return JsonValue::object(entries);
 }
 
-/// A position in its LSP JSON form.
-function positionJson(position: Text::Position): JsonValue {
-  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
-  entries.push(JsonObjectEntry::create("line", JsonValue::unsignedValue(position.line)));
-  entries.push(JsonObjectEntry::create("character", JsonValue::unsignedValue(position.character)));
-  return JsonValue::object(entries);
-}
-
-/// A range in its LSP JSON form.
-function rangeJson(start: Text::Position, end: Text::Position): JsonValue {
-  let mut range: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
-  range.push(JsonObjectEntry::create("start", positionJson(start)));
-  range.push(JsonObjectEntry::create("end", positionJson(end)));
-  return JsonValue::object(range);
-}
-
 /// A `Location`: a URI and a range in it.
 function locationJson(uri: String, range: JsonValue): JsonValue {
   let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
@@ -226,6 +214,18 @@ function positionRequestOf(message: &JsonValue): Option<PositionRequest> {
     uri: uri,
     position: Text::Position { line: line as u64, character: character as u64 },
   });
+}
+
+/// `textDocument.uri` of a request's params.
+function textDocumentUriOf(message: &JsonValue): Option<String> {
+  let Option::SOME(params) = jsonMember(message, "params") else {
+    return Option::NONE;
+  };
+  let Option::SOME(textDocument) = jsonMember(params, "textDocument") else {
+    return Option::NONE;
+  };
+
+  return jsonStringMember(textDocument, "uri");
 }
 
 /// `context.includeDeclaration` of a references request, false when absent.
@@ -557,6 +557,20 @@ export record LspServer {
 
     if (request.method.equals("textDocument/completion")) {
       let result: JsonValue = self.completion(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("textDocument/formatting")) {
+      let result: JsonValue = self.formatting(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("textDocument/codeAction")) {
+      let result: JsonValue = self.codeActions(&request.message);
       let body: String = responseBody(request.id, result);
       self.send(&body);
       return LspStep::CONTINUE;
@@ -1212,6 +1226,51 @@ export record LspServer {
     let analysis: Option<CompletionAnalysis> = Option::SOME(CompletionAnalysis { module: module, edit: file.editTo(&document.text) });
     let candidates: Vector<CompletionCandidate> = completionCandidates(&document.text, cursor, &navigation.completion, &analysis, &self.stdPath);
     return JsonValue::array(completionItemsJson(&candidates));
+  }
+
+  /// Answers `textDocument/formatting` as the host does
+  /// (crates/ignis_lsp/src/server.rs:2101): the open buffer, not the file on
+  /// disk, formatted with its project's configuration. No edits when the
+  /// document is not open or cannot be formatted.
+  formatting(&self, message: &JsonValue): JsonValue {
+    let Option::SOME(uri) = textDocumentUriOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(document) = self.documents.find(&uri) else {
+      return JsonValue::array(Vector::new<JsonValue>());
+    };
+
+    return match (documentFormattingEdits(&document.text, &document.path)) {
+      Result::OK(edits) -> JsonValue::array(edits),
+      Result::ERROR(error) -> {
+        lspLog(`[formatting] ${error.toStr()}`);
+        return JsonValue::array(Vector::new<JsonValue>());
+      },
+    };
+  }
+
+  /// Answers `textDocument/codeAction` with the quick fixes for the
+  /// diagnostics the request carries, as the host does
+  /// (crates/ignis_lsp/src/server.rs:2117). No actions when the document is
+  /// not open.
+  codeActions(&self, message: &JsonValue): JsonValue {
+    let Option::SOME(params) = jsonMember(message, "params") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(uri) = textDocumentUriOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(context) = jsonMember(params, "context") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(diagnostics) = jsonMember(context, "diagnostics") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(document) = self.documents.find(&uri) else {
+      return JsonValue::array(Vector::new<JsonValue>());
+    };
+
+    return JsonValue::array(codeActionsFor(&uri, &document.text, diagnostics));
   }
 
   /// Answers `textDocument/documentSymbol` with the outline of the document:

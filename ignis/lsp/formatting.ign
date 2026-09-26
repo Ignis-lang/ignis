@@ -1,0 +1,119 @@
+//! `textDocument/formatting`: the open buffer through the formatter `ignis fmt`
+//! runs, with the configuration of the project the file belongs to.
+
+import Fs from "std::fs";
+import JsonObjectEntry, JsonValue from "std::json";
+import Path from "std::path";
+import String from "std::string";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import Config from "@compiler::config";
+import DiagnosticBag from "@compiler::diagnostics";
+
+import Format from "../format/api";
+import _ from "../format/config";
+import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "../format/config";
+import FormatError from "../format/error";
+
+import rangeJson from "./protocol";
+
+/// A `TextEdit` that replaces `start..end` with `newText`.
+export function textEditJson(start: Text::Position, end: Text::Position, newText: String): JsonValue {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("range", rangeJson(start, end)));
+  entries.push(JsonObjectEntry::create("newText", JsonValue::fromString(newText)));
+  return JsonValue::object(entries);
+}
+
+/// The formatter configuration for the file at `path`, resolved as the host
+/// server does (crates/ignis_lsp/src/server.rs:481): the project the upward
+/// search from the file's directory finds, or that directory on its own, with
+/// its `ignis.toml` and `ignisfmt.toml` and no command-line overrides. The
+/// editor's `FormattingOptions` play no part.
+export function formatterConfigForFile(path: &Path::PathBuf): Result<FormatterConfig, DiagnosticBag> {
+  let parentDir: Path::PathBuf = match (path.parent()) {
+    Option::SOME(value) -> value,
+    Option::NONE -> Path::PathBuf::create("."),
+  };
+
+  let projectRoot: Path::PathBuf = match (Config::findProjectFile(&parentDir)) {
+    Option::SOME(configPath) -> match (configPath.parent()) {
+      Option::SOME(root) -> root,
+      Option::NONE -> parentDir.clone(),
+    },
+    Option::NONE -> parentDir.clone(),
+  };
+
+  let ignisToml: Path::PathBuf = projectRoot.join("ignis.toml");
+  let dedicatedConfig: Path::PathBuf = projectRoot.join("ignisfmt.toml");
+
+  let mut ignisTomlOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(ignisToml.asStr())) {
+    ignisTomlOption = Option::SOME(ignisToml.clone());
+  }
+
+  let mut dedicatedConfigOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(dedicatedConfig.asStr())) {
+    dedicatedConfigOption = Option::SOME(dedicatedConfig.clone());
+  }
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: projectRoot,
+    ignisToml: ignisTomlOption,
+    dedicatedConfig: dedicatedConfigOption,
+    explicitConfig: Option::NONE,
+  };
+
+  let overrides: FormatterCliOverrides = FormatterCliOverrides::default();
+  return Format::Config::load(&paths, &overrides);
+}
+
+/// The edits that format `text` with `config`, as the host builds them
+/// (crates/ignis_lsp/src/server.rs:497): none when the text is already
+/// formatted, otherwise one edit that replaces the whole document.
+export function formattingEditsWith(
+  text: &String,
+  config: &FormatterConfig
+): Result<Vector<JsonValue>, FormatError> {
+  let formatted: String = Format::formatSource(text, config)!;
+  let mut edits: Vector<JsonValue> = Vector::new<JsonValue>();
+
+  if (formatted.equals(text)) {
+    return Result::OK(edits);
+  }
+
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(text.clone());
+  let start: Text::Position = Text::Position { line: 0, character: 0 };
+
+  edits.push(textEditJson(start, lineIndex.endPosition(), formatted));
+  return Result::OK(edits);
+}
+
+/// The edits that format the open document `text` of the file at `path`.
+/// A configuration the file's project cannot load, or a text the formatter
+/// refuses, such as one that does not parse, is an error the caller logs and
+/// answers with no edits, as the host does.
+export function documentFormattingEdits(
+  text: &String,
+  path: &Path::PathBuf
+): Result<Vector<JsonValue>, String> {
+  let config: FormatterConfig = match (formatterConfigForFile(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(bag) -> {
+      return Result::ERROR(formatterConfigErrorText(&bag));
+    },
+  };
+
+  return match (formattingEditsWith(text, &config)) {
+    Result::OK(edits) -> Result::OK(edits),
+    Result::ERROR(error) -> Result::ERROR(error.describe()),
+  };
+}
+function formatterConfigErrorText(bag: &DiagnosticBag): String {
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    return String::create("formatter configuration failed: unknown formatter configuration error");
+  };
+
+  return `formatter configuration failed: ${diagnostic.messageText()}`;
+}

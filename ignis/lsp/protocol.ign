@@ -6,6 +6,7 @@
 
 import Json, JsonObjectEntry, JsonValue, JsonValueKind from "std::json";
 import String from "std::string";
+import Text from "std::text";
 import Vector from "std::vector";
 
 import IGNIS_VERSION from "../cli";
@@ -256,16 +257,42 @@ export function notificationBody(method: str, params: JsonValue): String {
   return Json::toJsonString(&notification);
 }
 
+/// A position in its LSP JSON form.
+export function positionJson(position: Text::Position): JsonValue {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("line", JsonValue::unsignedValue(position.line)));
+  entries.push(JsonObjectEntry::create("character", JsonValue::unsignedValue(position.character)));
+  return JsonValue::object(entries);
+}
+
+/// A range in its LSP JSON form.
+export function rangeJson(start: Text::Position, end: Text::Position): JsonValue {
+  let mut range: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  range.push(JsonObjectEntry::create("start", positionJson(start)));
+  range.push(JsonObjectEntry::create("end", positionJson(end)));
+  return JsonValue::object(range);
+}
+
 /// The `initialize` result: full-document sync, hover, definition,
-/// references and document symbols, which is everything this server
-/// implements. The outline options are the host's
-/// (crates/ignis_lsp/src/server.rs:455).
+/// references, document symbols, completion, whole-document formatting and
+/// quick-fix code actions, which is everything this server implements. The
+/// outline, formatting and code-action options are the host's
+/// (crates/ignis_lsp/src/server.rs:427, :431 and :455).
 export function initializeResult(): JsonValue {
   let mut capabilities: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   capabilities.push(JsonObjectEntry::create("textDocumentSync", JsonValue::integerValue(TEXT_DOCUMENT_SYNC_FULL)));
   capabilities.push(JsonObjectEntry::create("hoverProvider", JsonValue::boolValue(true)));
   capabilities.push(JsonObjectEntry::create("definitionProvider", JsonValue::boolValue(true)));
   capabilities.push(JsonObjectEntry::create("referencesProvider", JsonValue::boolValue(true)));
+  capabilities.push(JsonObjectEntry::create("documentFormattingProvider", JsonValue::boolValue(true)));
+
+  let mut actionKinds: Vector<JsonValue> = Vector::new<JsonValue>();
+  actionKinds.push(JsonValue::stringValue("quickfix"));
+
+  let mut codeAction: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  codeAction.push(JsonObjectEntry::create("codeActionKinds", JsonValue::array(actionKinds)));
+  codeAction.push(JsonObjectEntry::create("resolveProvider", JsonValue::boolValue(false)));
+  capabilities.push(JsonObjectEntry::create("codeActionProvider", JsonValue::object(codeAction)));
 
   let mut outline: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   outline.push(JsonObjectEntry::create("label", JsonValue::stringValue("Ignis Outline")));
