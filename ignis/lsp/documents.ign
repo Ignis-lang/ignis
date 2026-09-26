@@ -37,7 +37,15 @@ export function documentPathFromUri(uri: &String): Option<Path::PathBuf> {
   };
 }
 
-/// Open documents, in the order they were opened.
+/// True when `path` names an Ignis source file, the only kind of document
+/// analysis reads or starts from.
+export function isIgnisSourcePath(path: &Path::PathBuf): boolean {
+  let pathText: String = path.toString();
+  return pathText.endsWith(".ign");
+}
+
+/// Open documents, in no particular order: closing one moves the last into
+/// its place.
 export record DocumentStore {
   documents: Vector<Document>;
 
@@ -153,9 +161,7 @@ export record DocumentStore {
 
     while (index < self.documents.length()) {
       if (let Option::SOME(document) = self.documents.get(index)) {
-        let pathText: String = document.path.toString();
-
-        if (pathText.endsWith(".ign")) {
+        if (isIgnisSourcePath(&document.path)) {
           overrides.set(&document.path, &document.text);
         }
       }

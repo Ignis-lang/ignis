@@ -20,6 +20,7 @@ import
   analyzeDiscovered,
   analyzeForDiagnostics,
 from "./analysis";
+import DocumentStore from "./documents";
 import
   DecodeError,
   LspErrorCode,
@@ -62,15 +63,34 @@ function lspTestPipe(): LspTestPipe {
 /// The server reads from an input pipe whose write end is already closed,
 /// so `run` sees the end of input at once.
 function lspTestHarness(): LspTestHarness {
+  let noInput: Vector<String> = Vector::new<String>();
+  return lspTestHarnessWith(&noInput, Option::NONE);
+}
+
+/// A harness whose input pipe holds the framed `messages`, then the end of
+/// input, so `run` handles them the way it handles a client's.
+function lspTestHarnessWith(messages: &Vector<String>, stdPath: Option<String>): LspTestHarness {
   let input: LspTestPipe = lspTestPipe();
   let replies: LspTestPipe = lspTestPipe();
+  let inputWriter: Stream::ByteWriter = Stream::ByteWriter::fromFd(input.writeFd);
+  let mut messageIndex: u64 = 0;
+
+  while (messageIndex < messages.length()) {
+    if (let Option::SOME(message) = messages.get(messageIndex)) {
+      if (let Result::ERROR(_) = inputWriter.writeFramedMessage(message)) {
+        Test::fail();
+      }
+    }
+
+    messageIndex += 1;
+  }
 
   LibC::File::close(input.writeFd);
 
   let server: LspServer = LspServer::create(
     Stream::ByteReader::fromFd(input.readFd),
     Stream::ByteWriter::fromFd(replies.writeFd),
-    Option::NONE,
+    stdPath,
   );
 
   return LspTestHarness {
@@ -631,4 +651,74 @@ function analysisReportsAModuleThatVanishedAfterDiscovery(): void {
   Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
   Test::assertEq<boolean>(diagnostic.message.startsWith("analysis stopped: cannot read source file: "), true);
   Test::assertEq<u64>(diagnostic.start.line, 0);
+}
+
+/// A `didOpen` notification body for `path` holding `text`, which must
+/// already be escaped for a JSON string.
+function lspTestDidOpen(path: &Path::PathBuf, text: str): String {
+  let pathText: String = path.toString();
+  let uri: String = uriFromFilePath(&pathText);
+  return String::create("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"")
+    .concat(&uri)
+    .concat("\",\"languageId\":\"ignis\",\"version\":1,\"text\":\"")
+    .concat(text)
+    .concat("\"}}}");
+}
+
+@test
+function serverOnlyAnalyzesIgnisDocuments(): void {
+  let directory: Path::PathBuf = lspTestDirectory("nonignis");
+  let notes: Path::PathBuf = lspTestWrite(&directory, "notes.md", "# notes\n");
+  let main: Path::PathBuf = lspTestWrite(&directory, "main.ign", "function main(): i32 {\n  return 0;\n}\n");
+
+  let mut messages: Vector<String> = Vector::new<String>();
+  messages.push(String::create("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
+  messages.push(lspTestDidOpen(&notes, "# notes\\n"));
+  messages.push(lspTestDidOpen(&main, "function main(): i32 {\\n  return 0\\n}\\n"));
+
+  let mut harness: LspTestHarness = lspTestHarnessWith(&messages, lspTestStdPath());
+  Test::assertEq<i32>(harness.server.run(), 1);
+
+  let initialized: String = lspTestReply(&mut harness);
+  Test::assertEq<boolean>(initialized.startsWith("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":"), true);
+
+  let mainPath: String = main.toString();
+  let mainUri: String = uriFromFilePath(&mainPath);
+  let expected: String = String::create("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"")
+    .concat(&mainUri);
+  let published: String = lspTestReply(&mut harness);
+  Test::assertEq<boolean>(published.startsWith(expected.toStr()), true);
+
+  lspTestClose(&harness);
+}
+
+@test
+function documentStoreCloseForgetsOnlyTheClosedDocument(): void {
+  let mut store: DocumentStore = DocumentStore::create();
+  let first: String = String::create("file:///virtual/lsp/documents/first.ign");
+  let second: String = String::create("file:///virtual/lsp/documents/second.ign");
+  let third: String = String::create("file:///virtual/lsp/documents/third.ign");
+
+  store.open(&first, String::create("a"), 1);
+  store.open(&second, String::create("b"), 2);
+  store.open(&third, String::create("c"), 3);
+
+  Test::assertEq<boolean>(store.close(&first), true);
+  Test::assertEq<boolean>(store.close(&first), false);
+  Test::assertEq<u64>(store.length(), 2);
+
+  let secondPath: String = String::create("/virtual/lsp/documents/second.ign");
+  let thirdPath: String = String::create("/virtual/lsp/documents/third.ign");
+
+  let Option::SOME(secondHandle) = store.findByPath(&secondPath) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(thirdHandle) = store.findByPath(&thirdPath) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i64>(secondHandle.version, 2);
+  Test::assertEq<i64>(thirdHandle.version, 3);
 }

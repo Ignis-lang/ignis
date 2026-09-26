@@ -18,7 +18,7 @@ import Vector from "std::vector";
 import SourceOverrides from "../build/sources";
 
 import FileDiagnostics, LspDiagnostic, analysisKeyOf, analyzeForDiagnostics from "./analysis";
-import DocumentHandle, DocumentStore from "./documents";
+import DocumentHandle, DocumentStore, isIgnisSourcePath from "./documents";
 import
   DecodeError,
   LspErrorCode,
@@ -473,7 +473,14 @@ export record LspServer {
     self.send(&body);
   }
 
+  /// Queues the analysis of `path`. Only an Ignis source file starts one,
+  /// as in the host server, which never analyzes `ignis.toml` and reads only
+  /// `.ign` buffers.
   markDirty(&mut self, path: Path::PathBuf): void {
+    if (!isIgnisSourcePath(&path)) {
+      return;
+    }
+
     self.dirty.push(path);
   }
 
