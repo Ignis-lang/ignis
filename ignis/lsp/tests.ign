@@ -10,9 +10,16 @@ import Test from "std::test";
 import Text from "std::text";
 import Vector from "std::vector";
 
+import BuildOverrides, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
-import FileDiagnostics, LspDiagnostic, analysisKeyOf, analyzeForDiagnostics from "./analysis";
+import
+  FileDiagnostics,
+  LspDiagnostic,
+  analysisKeyOf,
+  analyzeDiscovered,
+  analyzeForDiagnostics,
+from "./analysis";
 import
   DecodeError,
   LspErrorCode,
@@ -427,4 +434,201 @@ function analysisReportsParseErrorsOfTheOpenBuffer(): void {
 
   Test::assertEq<u64>(diagnostic.severity, 1);
   Test::assertEq<boolean>(diagnostic.start.line >= 1, true);
+}
+
+/// Writes `text` to `name` in `directory` and returns the file's canonical
+/// path.
+function lspTestWrite(directory: &Path::PathBuf, name: str, text: str): Path::PathBuf {
+  let diskPath: Path::PathBuf = directory.join(name);
+  let content: String = String::create(text);
+
+  if (let Result::ERROR(_) = Fs::writeString(&diskPath, &content)) {
+    Test::fail();
+    return diskPath;
+  }
+
+  return match (Fs::canonicalize(&diskPath)) {
+    Result::OK(path) -> path,
+    Result::ERROR(_) -> diskPath,
+  };
+}
+
+/// A project directory whose sources live in `src`, entered at `main.ign`.
+function lspTestProject(tag: str): Path::PathBuf {
+  let root: Path::PathBuf = lspTestDirectory(tag);
+  let source: Path::PathBuf = root.join("src");
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&source)) {
+    Test::fail();
+  }
+
+  lspTestWrite(
+    &root,
+    "ignis.toml",
+    "[package]\nname = \"lsp-test\"\nversion = \"0.1.0\"\n\n[ignis]\nstd = true\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n",
+  );
+  return source;
+}
+
+/// The only diagnostic of the only file in `files`, which must be `path`.
+function lspTestOnlyDiagnostic(
+  files: &Vector<FileDiagnostics>,
+  path: &Path::PathBuf
+): LspDiagnostic {
+  Test::assertEq<u64>(files.length(), 1);
+
+  let Option::SOME(file) = files.get(0) else {
+    Test::fail();
+    return LspDiagnostic {
+      start: Text::Position { line: 0, character: 0 },
+      end: Text::Position { line: 0, character: 0 },
+      severity: 0,
+      code: String::new(),
+      message: String::new(),
+    };
+  };
+
+  Test::assertEq<str>(file.path.toStr(), path.asStr());
+  Test::assertEq<u64>(file.diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = file.diagnostics.get(0) else {
+    Test::fail();
+    return LspDiagnostic {
+      start: Text::Position { line: 0, character: 0 },
+      end: Text::Position { line: 0, character: 0 },
+      severity: 0,
+      code: String::new(),
+      message: String::new(),
+    };
+  };
+
+  return LspDiagnostic {
+    start: diagnostic.start,
+    end: diagnostic.end,
+    severity: diagnostic.severity,
+    code: diagnostic.code.clone(),
+    message: diagnostic.message.clone(),
+  };
+}
+
+@test
+function analysisReportsAMissingModuleAtTheStartOfTheStartFile(): void {
+  let directory: Path::PathBuf = lspTestDirectory("missing");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./absent\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
+  Test::assertEq<str>(diagnostic.message.toStr(), "module './absent' could not be resolved");
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+  Test::assertEq<u64>(diagnostic.start.character, 0);
+}
+
+@test
+function analysisReportsAnImportCycleAtTheStartOfTheStartFile(): void {
+  let directory: Path::PathBuf = lspTestDirectory("cycle");
+  lspTestWrite(&directory, "other.ign", "import first from \"./main\";\n\nexport function second(): i32 {\n  return first();\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import second from \"./other\";\n\nexport function first(): i32 {\n  return 1;\n}\n\nfunction main(): i32 {\n  return second();\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2003");
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+  Test::assertEq<u64>(diagnostic.start.character, 0);
+}
+
+@test
+function analysisKeepsTheDiscoveryFailureOverAnUnreachableBrokenBuffer(): void {
+  let source: Path::PathBuf = lspTestProject("unreachable");
+  let path: Path::PathBuf = lspTestWrite(
+    &source,
+    "main.ign",
+    "import value from \"./absent\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let orphan: Path::PathBuf = lspTestWrite(&source, "orphan.ign", "function orphan(): void {}\n");
+  let broken: String = String::create("function orphan(: void {}\n");
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&orphan, &broken);
+
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+}
+
+@test
+function analysisPlacesTheParseErrorsOfTheReachableBrokenBuffer(): void {
+  let source: Path::PathBuf = lspTestProject("reachable");
+  let path: Path::PathBuf = lspTestWrite(
+    &source,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let helper: Path::PathBuf = lspTestWrite(&source, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+  let orphan: Path::PathBuf = lspTestWrite(&source, "orphan.ign", "function orphan(): void {}\n");
+  let brokenHelper: String = String::create("export function value(): i32 {\n  return 1\n}\n");
+  let brokenOrphan: String = String::create("function orphan(: void {}\n");
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&orphan, &brokenOrphan);
+  sources.set(&helper, &brokenHelper);
+
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &helper);
+
+  Test::assertEq<u64>(diagnostic.severity, 1);
+  Test::assertEq<boolean>(diagnostic.start.line >= 1, true);
+}
+
+@test
+function analysisReportsAModuleThatVanishedAfterDiscovery(): void {
+  let directory: Path::PathBuf = lspTestDirectory("vanished");
+  let helper: Path::PathBuf = lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = lspTestStdPath();
+
+  let Result::OK(discovery) = Resolver::discover(&path, &overrides, false) else {
+    Test::fail();
+    return;
+  };
+
+  if (let Result::ERROR(_) = Fs::removeFile(&helper)) {
+    Test::fail();
+    return;
+  }
+
+  let files: Vector<FileDiagnostics> = analyzeDiscovered(&discovery, &path, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
+  Test::assertEq<boolean>(diagnostic.message.startsWith("analysis stopped: cannot read source file: "), true);
+  Test::assertEq<u64>(diagnostic.start.line, 0);
 }
