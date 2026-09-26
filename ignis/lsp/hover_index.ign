@@ -1,15 +1,21 @@
 //! The hover index of one analyzed file: every range a hover can land on,
-//! innermost first, with the text shown for it.
+//! innermost first, with the text shown for it and what it names.
 //!
 //! The index is built once per analysis, while the analyzer's stores are
-//! alive, and keeps only byte ranges and rendered texts, so the stores can be
-//! dropped. A lookup is a binary search plus a walk up the enclosing ranges.
+//! alive, and keeps only byte ranges, rendered texts and target keys, so the
+//! stores can be dropped. A lookup is a binary search plus a walk up the
+//! enclosing ranges.
 //!
 //! A range is an identifier or literal: a name where it is declared, a
-//! reference to a declaration or local, a member access, an import binding.
-//! The host server instead picks the smallest node of any kind
-//! (crates/ignis_lsp/src/server.rs:2482), which also answers on keywords,
-//! operators and whitespace inside a block; here those find nothing.
+//! reference to a declaration or local, a member access, a record literal's
+//! field name, an import binding or an import path. The host server instead
+//! picks the smallest node of any kind (crates/ignis_lsp/src/server.rs:2482),
+//! which also answers on keywords, operators and whitespace inside a block;
+//! here those find nothing.
+//!
+//! The target of a range is what go-to-definition and find-references follow:
+//! a definition, a local of this file or a module. Files that are not open
+//! are indexed without texts, for their references only.
 
 import HashMap from "std::collections";
 import String from "std::string";
@@ -29,16 +35,69 @@ const HOVER_KEY_DEFINITION: u64 = 1;
 const HOVER_KEY_NAMESPACE: u64 = 2;
 const HOVER_KEY_LOCAL: u64 = 3;
 const HOVER_KEY_TYPE: u64 = 4;
+const HOVER_KEY_MODULE: u64 = 5;
 const HOVER_KEY_UNIT: u64 = 4294967296;
 
-/// One hoverable byte range, `start..=end` as the host compares them.
-/// `parent` is one plus the position of the innermost entry that contains
-/// this one, 0 when none does.
+/// One byte range, `start..=end` as the host compares them. `parent` is one
+/// plus the position of the innermost entry that contains this one, 0 when
+/// none does.
 record HoverEntry {
   public start: u64;
   public end: u64;
   public parent: u64;
+  /// The position of its markdown in `texts`, 0 (the empty text) when a
+  /// hover shows nothing for it.
   public text: u64;
+  /// The key of what it names, a definition, local or module key, or 0.
+  public target: u64;
+  /// The name inside the range: `x` of `point.x`, `area` of `Shapes::area`.
+  public nameStart: u64;
+  public nameEnd: u64;
+}
+
+/// A byte range `start..end`.
+export record ByteRange {
+  public start: u64;
+  public end: u64;
+}
+
+/// Where a local is declared: its `let` statement, or the binding itself for
+/// any other binding, and the name inside it.
+export record LocalDeclaration {
+  public start: u64;
+  public end: u64;
+  public nameStart: u64;
+  public nameEnd: u64;
+}
+
+/// An entry found for a position of the current text, and its range there.
+record IndexHit {
+  public position: u64;
+  public start: u64;
+  public end: u64;
+}
+
+/// The definition a target key names, or `NONE` for any other target.
+export function definitionOfTarget(target: u64): Option<Analyzer::DefinitionId> {
+  if (target / HOVER_KEY_UNIT != HOVER_KEY_DEFINITION) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(Id::fromRaw<Analyzer::DefinitionTag>((target % HOVER_KEY_UNIT) as u32));
+}
+
+/// The module index a target key names, or `NONE` for any other target.
+export function moduleOfTarget(target: u64): Option<u64> {
+  if (target / HOVER_KEY_UNIT != HOVER_KEY_MODULE) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(target % HOVER_KEY_UNIT);
+}
+
+/// True when a target key names a local of the file it was found in.
+export function isLocalTarget(target: u64): boolean {
+  return target / HOVER_KEY_UNIT == HOVER_KEY_LOCAL;
 }
 
 /// What a hover found: the byte range it covers and its markdown.
@@ -49,19 +108,39 @@ export record HoverHit {
 }
 
 /// The hover ranges of one file, sorted by start and, for equal starts,
-/// longest first, and the source they were built from.
+/// longest first, the source they were built from, and where its locals are
+/// declared.
 export record FileHoverIndex {
   public path: String;
-  source: String;
+  /// The text the index was built from.
+  public source: String;
   entries: Vector<HoverEntry>;
   texts: Vector<String>;
+  locals: HashMap<u64, LocalDeclaration>;
 
   public entryCount(&self): u64 {
     return self.entries.length();
   }
 
-  /// The innermost range that contains `offset`, both ends included.
+  /// The innermost range that contains `offset` and shows a hover, both
+  /// ends included.
   public hoverAt(&self, offset: u64): Option<HoverHit> {
+    let Option::SOME(position) = self.entryAt(offset, false) else {
+      return Option::NONE;
+    };
+    let Option::SOME(entry) = self.entries.get(position) else {
+      return Option::NONE;
+    };
+    let Option::SOME(text) = self.textOf(position) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(HoverHit { start: entry.start, end: entry.end, text: text });
+  }
+
+  /// The position of the innermost entry that contains `offset` and shows a
+  /// hover or, when `wantsTarget`, names something.
+  entryAt(&self, offset: u64, wantsTarget: boolean): Option<u64> {
     let mut low: u64 = 0;
     let mut high: u64 = self.entries.length();
 
@@ -85,12 +164,10 @@ export record FileHoverIndex {
         return Option::NONE;
       };
 
-      if (entry.end >= offset) {
-        let Option::SOME(text) = self.texts.get(entry.text) else {
-          return Option::NONE;
-        };
+      let wanted: boolean = wantsTarget ? entry.target != 0 : entry.text != 0;
 
-        return Option::SOME(HoverHit { start: entry.start, end: entry.end, text: text.clone() });
+      if (entry.end >= offset && wanted) {
+        return Option::SOME(candidate - 1);
       }
 
       candidate = entry.parent;
@@ -99,14 +176,58 @@ export record FileHoverIndex {
     return Option::NONE;
   }
 
+  /// The markdown of the entry at `position`.
+  textOf(&self, position: u64): Option<String> {
+    let Option::SOME(entry) = self.entries.get(position) else {
+      return Option::NONE;
+    };
+
+    return match (self.texts.get(entry.text)) {
+      Option::SOME(text) -> Option::SOME(text.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
   /// The innermost range that contains `offset` of `current`, the text the
   /// client has now, with the range in `current`'s coordinates. When the
   /// index was built from another text, only a position and a range outside
   /// the edited region answer, and the name under the cursor has to lie
   /// inside the range: an edit that extends the name makes it another one.
   public hoverAtIn(&self, current: &String, offset: u64): Option<HoverHit> {
+    let Option::SOME(hit) = self.entryAtIn(current, offset, false) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(text) = self.textOf(hit.position) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(HoverHit { start: hit.start, end: hit.end, text: text });
+  }
+
+  /// The target key of the innermost range that contains `offset` of
+  /// `current` and names something, found as `hoverAtIn` finds a hover.
+  public targetAtIn(&self, current: &String, offset: u64): Option<u64> {
+    let Option::SOME(hit) = self.entryAtIn(current, offset, true) else {
+      return Option::NONE;
+    };
+
+    return match (self.entries.get(hit.position)) {
+      Option::SOME(entry) -> Option::SOME(entry.target),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  entryAtIn(&self, current: &String, offset: u64, wantsTarget: boolean): Option<IndexHit> {
     if (self.source.equals(current)) {
-      return self.hoverAt(offset);
+      let Option::SOME(position) = self.entryAt(offset, wantsTarget) else {
+        return Option::NONE;
+      };
+      let Option::SOME(entry) = self.entries.get(position) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(IndexHit { position: position, start: entry.start, end: entry.end });
     }
 
     let edit: TextEdit = textEditBetween(&self.source, current);
@@ -114,26 +235,88 @@ export record FileHoverIndex {
     let Option::SOME(sourceOffset) = edit.sourceOffsetOf(offset) else {
       return Option::NONE;
     };
-    let Option::SOME(hit) = self.hoverAt(sourceOffset) else {
+    let Option::SOME(position) = self.entryAt(sourceOffset, wantsTarget) else {
       return Option::NONE;
     };
-    let Option::SOME(start) = edit.currentStartOf(hit.start, hit.end) else {
+    let Option::SOME(entry) = self.entries.get(position) else {
+      return Option::NONE;
+    };
+    let Option::SOME(start) = edit.currentStartOf(entry.start, entry.end) else {
       return Option::NONE;
     };
 
-    let end: u64 = start + (hit.end - hit.start);
+    let end: u64 = start + (entry.end - entry.start);
 
     if (identifierStart(current, offset) < start || identifierEnd(current, offset) > end) {
       return Option::NONE;
     }
 
-    return Option::SOME(HoverHit { start: start, end: end, text: hit.text.clone() });
+    return Option::SOME(IndexHit { position: position, start: start, end: end });
+  }
+
+  /// The name range of every entry that names `target`, in source order.
+  public namesOf(&self, target: u64): Vector<ByteRange> {
+    let mut names: Vector<ByteRange> = Vector::new<ByteRange>();
+    let mut index: u64 = 0;
+
+    while (index < self.entries.length()) {
+      if (let Option::SOME(entry) = self.entries.get(index)) {
+        if (entry.target == target) {
+          names.push(ByteRange { start: entry.nameStart, end: entry.nameEnd });
+        }
+      }
+
+      index += 1;
+    }
+
+    return names;
+  }
+
+  /// Where the local `target` names is declared.
+  public localDeclaration(&self, target: u64): Option<LocalDeclaration> {
+    return match (self.locals.get(&target)) {
+      Option::SOME(declaration) -> Option::SOME(LocalDeclaration {
+        start: declaration.start,
+        end: declaration.end,
+        nameStart: declaration.nameStart,
+        nameEnd: declaration.nameEnd,
+      }),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  /// How the source differs from `current`.
+  public editTo(&self, current: &String): TextEdit {
+    return textEditBetween(&self.source, current);
+  }
+
+  /// Where the name at `start..end` of the source is in `current`, which
+  /// `edit` leads to: `NONE` when the edit reaches it or the word there is no
+  /// longer the same.
+  public currentNameRange(
+    &self,
+    current: &String,
+    edit: &TextEdit,
+    start: u64,
+    end: u64
+  ): Option<ByteRange> {
+    let Option::SOME(currentStart) = edit.currentStartOf(start, end) else {
+      return Option::NONE;
+    };
+
+    let name: String = self.source.substringBytes(start, end);
+
+    if (!wordAt(current, currentStart, &name)) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(ByteRange { start: currentStart, end: currentStart + name.length() });
   }
 }
 
 /// How the text an index was built from differs from the current one: the
 /// bytes both start with and, after those, the bytes both end with.
-record TextEdit {
+export record TextEdit {
   public prefix: u64;
   public suffix: u64;
   public sourceLength: u64;
@@ -165,6 +348,35 @@ record TextEdit {
     }
 
     return Option::NONE;
+  }
+
+  /// Where the source range `start..end` lies in the current text, or `NONE`
+  /// when either end falls inside the edited region. A range around the
+  /// edited region grows or shrinks with it.
+  public currentRangeOf(&self, start: u64, end: u64): Option<ByteRange> {
+    let unchangedFrom: u64 = self.sourceLength - self.suffix;
+    let mut currentStart: u64 = start;
+    let mut currentEnd: u64 = end;
+
+    if (start >= unchangedFrom) {
+      currentStart = start + self.currentLength - self.sourceLength;
+    } else if (start > self.prefix) {
+      return Option::NONE;
+    }
+
+    if (end > self.prefix) {
+      if (end < unchangedFrom) {
+        return Option::NONE;
+      }
+
+      currentEnd = end + self.currentLength - self.sourceLength;
+    }
+
+    if (currentEnd < currentStart) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(ByteRange { start: currentStart, end: currentEnd });
   }
 }
 
@@ -253,17 +465,27 @@ record ModuleHoverTables {
   public localMutable: HashMap<u32, boolean>;
   /// Parameter patterns, with the declared type when the signature has one.
   public parameters: HashMap<u32, Option<Analyzer::TypeId>>;
+  /// The `let` statement that binds a pattern directly.
+  public letStatements: HashMap<u32, ByteRange>;
 }
 
 /// An index under construction.
 record HoverCollector {
   public path: String;
+  /// The text being indexed.
+  public source: String;
+  /// False for a file that is not open: its entries keep their targets only.
+  public rendersTexts: boolean;
   public starts: Vector<u64>;
   public ends: Vector<u64>;
   public textIndexes: Vector<u64>;
+  public targets: Vector<u64>;
+  public nameStarts: Vector<u64>;
+  public nameEnds: Vector<u64>;
   public texts: Vector<String>;
   public textByKey: HashMap<u64, u64>;
   public locals: Vector<LocalSite>;
+  public localDeclarations: HashMap<u64, LocalDeclaration>;
 }
 
 /// The placeholder records every namespace and extern block of `modules` is
@@ -337,37 +559,49 @@ function collectNamespaceDefinitions(
   }
 }
 
-/// Builds the hover index of the module analyzed as `analysisRecord`, whose
-/// source is `text`.
+/// Builds the index of the module analyzed as `analysisRecord`, whose
+/// source is `text`. Without `rendersTexts` the entries show no hover.
 export function buildFileHoverIndex(
   text: &String,
   module: &Ast::Module,
   analysisRecord: &Analyzer::ModuleAnalysisRecord,
   program: &HoverProgram,
+  rendersTexts: boolean,
   defs: &Analyzer::DefinitionStore,
   types: &Analyzer::TypeStore,
   symbols: &Analyzer::SymbolTable,
 ): FileHoverIndex {
   let analysis: &Analyzer::AnalyzerOutput = &analysisRecord.output;
+  let mut texts: Vector<String> = Vector::new<String>();
+  texts.push(String::new());
+
   let mut collector: HoverCollector = HoverCollector {
     path: analysisRecord.info.pathText.clone(),
+    source: text.clone(),
+    rendersTexts: rendersTexts,
     starts: Vector::new<u64>(),
     ends: Vector::new<u64>(),
     textIndexes: Vector::new<u64>(),
-    texts: Vector::new<String>(),
+    targets: Vector::new<u64>(),
+    nameStarts: Vector::new<u64>(),
+    nameEnds: Vector::new<u64>(),
+    texts: texts,
     textByKey: HashMap::new<u64, u64>(),
     locals: Vector::new<LocalSite>(),
+    localDeclarations: HashMap::new<u64, LocalDeclaration>(),
   };
   let mut tables: ModuleHoverTables = moduleHoverTables(analysis);
 
   collectItemHovers(&mut collector, &mut tables, text, module, analysis, &module.roots, program, defs, types, symbols);
   collectImportHovers(&mut collector, &analysisRecord.imports, program, defs, types, symbols);
+  collectImportPaths(&mut collector, module, program);
   collectCallees(&mut tables, module);
+  collectLetStatements(&mut tables, module);
   collectPatternHovers(&mut collector, text, module, analysis, program, defs, types, symbols);
   collectExpressionHovers(&mut collector, &tables, module, analysis, program, defs, types, symbols);
   pairLocals(&mut collector, &tables, module, defs, types, symbols);
 
-  return finishIndex(collector, text.clone());
+  return finishIndex(collector);
 }
 
 /// The typechecker's side tables as lookups. The last entry for a node wins,
@@ -381,6 +615,7 @@ function moduleHoverTables(analysis: &Analyzer::AnalyzerOutput): ModuleHoverTabl
     localTypes: HashMap::new<u32, Analyzer::TypeId>(),
     localMutable: HashMap::new<u32, boolean>(),
     parameters: HashMap::new<u32, Option<Analyzer::TypeId>>(),
+    letStatements: HashMap::new<u32, ByteRange>(),
   };
   let mut index: u64 = 0;
 
@@ -438,41 +673,52 @@ function hoverKey(kind: u64, raw: u32): u64 {
   return kind * HOVER_KEY_UNIT + (raw as u64);
 }
 
-/// Adds the range `start..=end` showing the text stored under `key`.
-/// Returns false when no text is stored under it yet.
-function addKeyedEntry(collector: &mut HoverCollector, start: u64, end: u64, key: u64): boolean {
-  let mut collectorRef: &mut HoverCollector = collector;
-
-  let Option::SOME(textIndex) = collectorRef.textByKey.get(&key) else {
-    return false;
-  };
-
-  let index: u64 = *textIndex;
-  collectorRef.starts.push(start);
-  collectorRef.ends.push(end);
-  collectorRef.textIndexes.push(index);
-  return true;
-}
-
-/// Stores `text` under `key` and adds the range showing it. An empty text
-/// adds nothing.
-function addTextEntry(
+/// Adds the range `start..=end` with the name `name` inside it, showing the
+/// text at `text` and naming `target`. A range that does neither is left out.
+function pushEntry(
   collector: &mut HoverCollector,
   start: u64,
   end: u64,
-  key: u64,
-  text: String
+  name: ByteRange,
+  text: u64,
+  target: u64,
 ): void {
   let mut collectorRef: &mut HoverCollector = collector;
 
-  if (text.length() == 0) {
+  if (text == 0 && target == 0) {
     return;
   }
 
-  let textIndex: u64 = collectorRef.texts.length();
+  collectorRef.starts.push(start);
+  collectorRef.ends.push(end);
+  collectorRef.textIndexes.push(text);
+  collectorRef.targets.push(target);
+  collectorRef.nameStarts.push(name.start);
+  collectorRef.nameEnds.push(name.end);
+}
+
+/// The position of the text stored under `key`, if one is.
+function storedText(textByKey: &HashMap<u64, u64>, key: u64): Option<u64> {
+  return match (textByKey.get(&key)) {
+    Option::SOME(position) -> Option::SOME(*position),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+/// Stores `text` under `key` and returns its position. An empty text is
+/// stored as the shared empty text at 0.
+function storeText(collector: &mut HoverCollector, key: u64, text: String): u64 {
+  let mut collectorRef: &mut HoverCollector = collector;
+
+  if (text.length() == 0) {
+    collectorRef.textByKey.insert(key, 0);
+    return 0;
+  }
+
+  let position: u64 = collectorRef.texts.length();
   collectorRef.texts.push(text);
-  collectorRef.textByKey.insert(key, textIndex);
-  addKeyedEntry(collectorRef, start, end, key);
+  collectorRef.textByKey.insert(key, position);
+  return position;
 }
 
 function addDefinitionEntry(
@@ -485,16 +731,46 @@ function addDefinitionEntry(
   types: &Analyzer::TypeStore,
   symbols: &Analyzer::SymbolTable,
 ): void {
+  let collectorRef: &mut HoverCollector = collector;
   let raw: u32 = defId.raw();
   let isNamespace: boolean = program.namespaces.get(&raw).isSome();
   let key: u64 = hoverKey(isNamespace ? HOVER_KEY_NAMESPACE : HOVER_KEY_DEFINITION, raw);
+  let name: ByteRange = definitionNameIn(&collectorRef.source, start, end, defId, defs, symbols);
+  let mut text: u64 = 0;
 
-  if (addKeyedEntry(collector, start, end, key)) {
-    return;
+  if (collectorRef.rendersTexts) {
+    if (let Option::SOME(position) = storedText(&collectorRef.textByKey, key)) {
+      text = position;
+    } else {
+      let rendered: String = definitionHoverText(defId, isNamespace, defs, types, symbols, &program.modulePaths);
+      text = storeText(collectorRef, key, rendered);
+    }
   }
 
-  let text: String = definitionHoverText(defId, isNamespace, defs, types, symbols, &program.modulePaths);
-  addTextEntry(collector, start, end, key, text);
+  pushEntry(collectorRef, start, end, name, text, hoverKey(HOVER_KEY_DEFINITION, raw));
+}
+
+/// Where the name of `defId` is last written in `start..end` of `text`: the
+/// member of a member access, the last segment of a path. The whole range
+/// when it is not there.
+function definitionNameIn(
+  text: &String,
+  start: u64,
+  end: u64,
+  defId: Analyzer::DefinitionId,
+  defs: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+): ByteRange {
+  let Option::SOME(definition) = defs.get(defId) else {
+    return ByteRange { start: start, end: end };
+  };
+
+  let name: String = String::create(symbols.resolve(definition.name()).unwrapOr(""));
+
+  return match (findLastWord(text, start, end, &name)) {
+    Option::SOME(position) -> ByteRange { start: position, end: position + name.length() },
+    Option::NONE -> ByteRange { start: start, end: end },
+  };
 }
 
 function addTypeEntry(
@@ -506,13 +782,22 @@ function addTypeEntry(
   types: &Analyzer::TypeStore,
   symbols: &Analyzer::SymbolTable,
 ): void {
+  let collectorRef: &mut HoverCollector = collector;
   let key: u64 = hoverKey(HOVER_KEY_TYPE, typeId.raw());
 
-  if (addKeyedEntry(collector, start, end, key)) {
+  if (!collectorRef.rendersTexts) {
     return;
   }
 
-  addTextEntry(collector, start, end, key, typeHoverText(typeId, defs, types, symbols));
+  let mut text: u64 = 0;
+
+  if (let Option::SOME(position) = storedText(&collectorRef.textByKey, key)) {
+    text = position;
+  } else {
+    text = storeText(collectorRef, key, typeHoverText(typeId, defs, types, symbols));
+  }
+
+  pushEntry(collectorRef, start, end, ByteRange { start: start, end: end }, text, 0);
 }
 
 /// True for a byte that can continue an identifier.
@@ -523,7 +808,7 @@ function isIdentifierByte(byte: u8): boolean {
 /// Where `name` is first written as a whole word in `text` between `start`
 /// and `end`, or `NONE`. Declarations keep only their whole span, and the
 /// name follows the keyword and modifiers.
-function findWord(text: &String, start: u64, end: u64, name: &String): Option<u64> {
+export function findWord(text: &String, start: u64, end: u64, name: &String): Option<u64> {
   let length: u64 = name.length();
 
   if (length == 0 || end > text.length() || start + length > end) {
@@ -538,6 +823,28 @@ function findWord(text: &String, start: u64, end: u64, name: &String): Option<u6
     }
 
     position += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Where `name` is last written as a whole word in `text` between `start`
+/// and `end`, or `NONE`.
+function findLastWord(text: &String, start: u64, end: u64, name: &String): Option<u64> {
+  let length: u64 = name.length();
+
+  if (length == 0 || end > text.length() || start + length > end) {
+    return Option::NONE;
+  }
+
+  let mut position: u64 = end - length + 1;
+
+  while (position > start) {
+    position -= 1;
+
+    if (wordAt(text, position, name)) {
+      return Option::SOME(position);
+    }
   }
 
   return Option::NONE;
@@ -583,7 +890,7 @@ function addDeclarationName(
 
 /// True when `span` points into the file being indexed. Trait default
 /// methods are copied into their implementers with the trait's spans.
-function spanInFile(path: &String, span: SourceSpan): boolean {
+export function spanInFile(path: &String, span: SourceSpan): boolean {
   return path.equals(span.filePath);
 }
 
@@ -672,7 +979,7 @@ function collectItemHover(
   };
 }
 
-function itemSpanOf(item: &Ast::Item::Node): SourceSpan {
+export function itemSpanOf(item: &Ast::Item::Node): SourceSpan {
   return match (item) {
     Ast::Item::Node::Function(node) -> node.span,
     Ast::Item::Node::Record(node) -> node.span,
@@ -689,7 +996,7 @@ function itemSpanOf(item: &Ast::Item::Node): SourceSpan {
 
 /// The name a declaration item is written with. A multi-segment namespace
 /// is bound under its last segment.
-function itemNameOf(item: &Ast::Item::Node): Option<String> {
+export function itemNameOf(item: &Ast::Item::Node): Option<String> {
   return match (item) {
     Ast::Item::Node::Function(node) -> Option::SOME(node.name.clone()),
     Ast::Item::Node::Record(node) -> Option::SOME(node.name.clone()),
@@ -799,7 +1106,7 @@ function collectMemberHovers(
 }
 
 /// Every field, variant and static field of a record or enum.
-function memberDefinitions(
+export function memberDefinitions(
   owner: Analyzer::DefinitionId,
   defs: &Analyzer::DefinitionStore
 ): Vector<Analyzer::DefinitionId> {
@@ -819,7 +1126,6 @@ function memberDefinitions(
 
   return all;
 }
-
 function appendDefinitionIds(
   target: &mut Vector<Analyzer::DefinitionId>,
   ids: &Vector<Analyzer::DefinitionId>
@@ -837,7 +1143,7 @@ function appendDefinitionIds(
 }
 
 /// The first of `candidates` declaring `name`.
-function definitionNamed(
+export function definitionNamed(
   candidates: &Vector<Analyzer::DefinitionId>,
   name: &String,
   defs: &Analyzer::DefinitionStore,
@@ -859,8 +1165,7 @@ function definitionNamed(
 
   return Option::NONE;
 }
-
-function patternSpanOf(module: &Ast::Module, pattern: Ast::PatternId): SourceSpan {
+export function patternSpanOf(module: &Ast::Module, pattern: Ast::PatternId): SourceSpan {
   return match (module.patterns.get(pattern)) {
     Option::SOME(Ast::Pattern::Node::Wildcard(node)) -> node.span,
     Option::SOME(Ast::Pattern::Node::Binding(node)) -> node.span,
@@ -873,14 +1178,13 @@ function patternSpanOf(module: &Ast::Module, pattern: Ast::PatternId): SourceSpa
 }
 
 /// The name a field, variant or static field pattern declares.
-function memberNameOf(module: &Ast::Module, pattern: Ast::PatternId): Option<String> {
+export function memberNameOf(module: &Ast::Module, pattern: Ast::PatternId): Option<String> {
   return match (module.patterns.get(pattern)) {
     Option::SOME(Ast::Pattern::Node::Binding(node)) -> Option::SOME(node.name.clone()),
     Option::SOME(Ast::Pattern::Node::Path(node)) -> lastSegmentOf(&node.segments),
     _ -> Option::NONE,
   };
 }
-
 function lastSegmentOf(segments: &Vector<String>): Option<String> {
   if (segments.length() == 0) {
     return Option::NONE;
@@ -923,6 +1227,51 @@ function collectImportHovers(
   }
 }
 
+/// Adds every import path, naming the module it loads.
+function collectImportPaths(
+  collector: &mut HoverCollector,
+  module: &Ast::Module,
+  program: &HoverProgram
+): void {
+  let collectorRef: &mut HoverCollector = collector;
+  let mut rootIndex: u64 = 0;
+
+  while (rootIndex < module.roots.length()) {
+    if (let Option::SOME(rootId) = module.roots.get(rootIndex)) {
+      if (let Option::SOME(Ast::Item::Node::Import(importItem)) = module.items.get(*rootId)) {
+        let span: SourceSpan = importItem.sourceSpan;
+        let range: ByteRange = ByteRange { start: span.start, end: span.end };
+        let loaded: Option<u64> = modulePathIndex(program, &importItem.source);
+
+        if (let Option::SOME(moduleIndex) = loaded) {
+          if (spanInFile(&collectorRef.path, span)) {
+            pushEntry(collectorRef, span.start, span.end, range, 0, hoverKey(HOVER_KEY_MODULE, moduleIndex as u32));
+          }
+        }
+      }
+    }
+
+    rootIndex += 1;
+  }
+}
+
+/// The index of the module at `path`.
+function modulePathIndex(program: &HoverProgram, path: &String): Option<u64> {
+  let mut index: u64 = 0;
+
+  while (index < program.modulePaths.length()) {
+    if (let Option::SOME(modulePath) = program.modulePaths.get(index)) {
+      if (modulePath.equals(path)) {
+        return Option::SOME(index);
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
 /// Maps each callee to the call it is called by, and marks lambda
 /// parameters as parameters.
 function collectCallees(tables: &mut ModuleHoverTables, module: &Ast::Module): void {
@@ -948,6 +1297,27 @@ function collectCallees(tables: &mut ModuleHoverTables, module: &Ast::Module): v
 
           index += 1;
         }
+      },
+      _ -> {},
+    };
+
+    raw += 1;
+  }
+}
+
+/// Maps the pattern of each `let` and `let mut` that binds one name to the
+/// statement.
+function collectLetStatements(tables: &mut ModuleHoverTables, module: &Ast::Module): void {
+  let mut tablesRef: &mut ModuleHoverTables = tables;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < module.statements.length()) {
+    match (module.statements.get(Id::fromRaw<Ast::StatementTag>(raw))) {
+      Option::SOME(Ast::Statement::Node::Let(statement)) -> {
+        tablesRef.letStatements.insert(statement.pattern.raw(), ByteRange { start: statement.span.start, end: statement.span.end });
+      },
+      Option::SOME(Ast::Statement::Node::Variable(statement)) -> {
+        tablesRef.letStatements.insert(statement.pattern.raw(), ByteRange { start: statement.span.start, end: statement.span.end });
       },
       _ -> {},
     };
@@ -1057,6 +1427,9 @@ function collectExpressionHovers(
       },
       Option::SOME(Ast::Expression::Node::MemberAccess(access)) -> {
         collectMemberAccessHover(collectorRef, tables, analysis, raw, &access, program, defs, types, symbols);
+      },
+      Option::SOME(Ast::Expression::Node::RecordInit(recordInit)) -> {
+        collectRecordInitHovers(collectorRef, tables, module, raw, &recordInit, program, defs, types, symbols);
       },
       Option::SOME(Ast::Expression::Node::Literal(literal)) -> {
         if (spanInFile(&collectorRef.path, literal.span)) {
@@ -1182,6 +1555,60 @@ function collectMemberAccessHover(
   }
 }
 
+/// The field names of a record literal, as hovers of the fields they set.
+/// Each name is the last one written before its value.
+function collectRecordInitHovers(
+  collector: &mut HoverCollector,
+  tables: &ModuleHoverTables,
+  module: &Ast::Module,
+  raw: u32,
+  recordInit: &Ast::Expression::RecordInit,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let collectorRef: &mut HoverCollector = collector;
+
+  if (!spanInFile(&collectorRef.path, recordInit.span)) {
+    return;
+  }
+
+  let Option::SOME(recordType) = tables.exprTypes.get(&raw) else {
+    return;
+  };
+
+  let recordTypeId: Analyzer::TypeId = *recordType;
+  let mut searchFrom: u64 = expressionSpanOf(module, recordInit.path).end;
+  let mut index: u64 = 0;
+
+  while (index < recordInit.fields.length()) {
+    let Option::SOME(field) = recordInit.fields.get(index) else {
+      break;
+    };
+
+    let valueSpan: SourceSpan = expressionSpanOf(module, field.value);
+    let nameStart: Option<u64> = findLastWord(&collectorRef.source, searchFrom, valueSpan.start, &field.name);
+    let fieldId: Option<Analyzer::DefinitionId> = memberOfType(recordTypeId, &field.name, false, defs, types, symbols);
+
+    if (let Option::SOME(start) = nameStart) {
+      if (let Option::SOME(id) = fieldId) {
+        addDefinitionEntry(collectorRef, start, start + field.name.length(), id, program, defs, types, symbols);
+      }
+    }
+
+    searchFrom = valueSpan.end;
+    index += 1;
+  }
+}
+
+function expressionSpanOf(module: &Ast::Module, id: Ast::ExpressionId): SourceSpan {
+  return match (module.expressions.get(id)) {
+    Option::SOME(node) -> Ast::Serializer::expressionSpan(node),
+    Option::NONE -> SourceSpan::new("", 0, 0),
+  };
+}
+
 /// The record or enum a value of `typeId` is, through references, pointers
 /// and aliases.
 function nominalOf(
@@ -1280,7 +1707,7 @@ function pairLocals(
     siteIndex += 1;
   }
 
-  let order: Vector<u64> = stableOrder(&keys);
+  let order: Vector<u64> = ascendingOrder(&keys);
   let mut bindingOfSlot: HashMap<u64, u32> = HashMap::new<u64, u32>();
   let mut orderIndex: u64 = 0;
 
@@ -1300,6 +1727,7 @@ function pairLocals(
 
     if (isBinding) {
       bindingOfSlot.insert(slot, pattern);
+      declareLocal(collectorRef, tables, pattern, start, end);
     } else {
       let Option::SOME(bound) = bindingOfSlot.get(&slot) else {
         continue;
@@ -1309,12 +1737,39 @@ function pairLocals(
     }
 
     let key: u64 = hoverKey(HOVER_KEY_LOCAL, pattern);
+    let mut text: u64 = 0;
 
-    if (!addKeyedEntry(collectorRef, start, end, key)) {
-      let text: String = localBindingText(&collectorRef.path, tables, module, pattern, defs, types, symbols);
-      addTextEntry(collectorRef, start, end, key, text);
+    if (collectorRef.rendersTexts) {
+      if (let Option::SOME(stored) = storedText(&collectorRef.textByKey, key)) {
+        text = stored;
+      } else {
+        let rendered: String = localBindingText(&collectorRef.path, tables, module, pattern, defs, types, symbols);
+        text = storeText(collectorRef, key, rendered);
+      }
     }
+
+    pushEntry(collectorRef, start, end, ByteRange { start: start, end: end }, text, key);
   }
+}
+
+/// Records where the local bound by `pattern` at `start..end` is declared:
+/// its `let` statement when one binds it directly.
+function declareLocal(
+  collector: &mut HoverCollector,
+  tables: &ModuleHoverTables,
+  pattern: u32,
+  start: u64,
+  end: u64
+): void {
+  let mut collectorRef: &mut HoverCollector = collector;
+  let mut declaration: LocalDeclaration = LocalDeclaration { start: start, end: end, nameStart: start, nameEnd: end };
+
+  if (let Option::SOME(statement) = tables.letStatements.get(&pattern)) {
+    declaration.start = statement.start;
+    declaration.end = statement.end;
+  }
+
+  collectorRef.localDeclarations.insert(hoverKey(HOVER_KEY_LOCAL, pattern), declaration);
 }
 
 /// The hover of the local bound by `pattern`.
@@ -1354,7 +1809,7 @@ function localBindingText(
 }
 
 /// The positions of `keys` in ascending, stable order: a bottom-up merge sort.
-function stableOrder(keys: &Vector<u64>): Vector<u64> {
+export function ascendingOrder(keys: &Vector<u64>): Vector<u64> {
   let count: u64 = keys.length();
   let mut order: Vector<u64> = Vector::new<u64>();
   let mut position: u64 = 0;
@@ -1419,7 +1874,7 @@ function mergeRuns(
 
 /// Sorts the collected ranges, drops repeats of a range, and links each to
 /// the innermost range that contains it.
-function finishIndex(collector: HoverCollector, source: String): FileHoverIndex {
+function finishIndex(collector: HoverCollector): FileHoverIndex {
   let mut keys: Vector<u64> = Vector::new<u64>();
   let mut index: u64 = 0;
 
@@ -1432,7 +1887,7 @@ function finishIndex(collector: HoverCollector, source: String): FileHoverIndex 
     index += 1;
   }
 
-  let order: Vector<u64> = stableOrder(&keys);
+  let order: Vector<u64> = ascendingOrder(&keys);
   let mut entries: Vector<HoverEntry> = Vector::new<HoverEntry>();
   let mut open: Vector<u64> = Vector::new<u64>();
   let mut orderIndex: u64 = 0;
@@ -1441,7 +1896,6 @@ function finishIndex(collector: HoverCollector, source: String): FileHoverIndex 
     let position: u64 = u64At(&order, orderIndex);
     let start: u64 = u64At(&collector.starts, position);
     let end: u64 = u64At(&collector.ends, position);
-    let text: u64 = u64At(&collector.textIndexes, position);
     orderIndex += 1;
 
     if (entries.length() > 0) {
@@ -1454,14 +1908,23 @@ function finishIndex(collector: HoverCollector, source: String): FileHoverIndex 
 
     let parent: u64 = enclosingEntry(&entries, &mut open, end);
     open.push(entries.length());
-    entries.push(HoverEntry { start: start, end: end, parent: parent, text: text });
+    entries.push(HoverEntry {
+      start: start,
+      end: end,
+      parent: parent,
+      text: u64At(&collector.textIndexes, position),
+      target: u64At(&collector.targets, position),
+      nameStart: u64At(&collector.nameStarts, position),
+      nameEnd: u64At(&collector.nameEnds, position),
+    });
   }
 
   return FileHoverIndex {
     path: collector.path,
-    source: source,
+    source: collector.source,
     entries: entries,
     texts: collector.texts,
+    locals: collector.localDeclarations,
   };
 }
 
@@ -1490,7 +1953,7 @@ function enclosingEntry(entries: &Vector<HoverEntry>, open: &mut Vector<u64>, en
   return 0;
 }
 
-function u64At(values: &Vector<u64>, index: u64): u64 {
+export function u64At(values: &Vector<u64>, index: u64): u64 {
   return match (values.get(index)) {
     Option::SOME(value) -> *value,
     Option::NONE -> 0,
