@@ -14,6 +14,7 @@ import Ast from "@compiler::ast";
 import Config, ResolvedProject from "@compiler::config";
 import ParseOutput, Parser from "@compiler::parser";
 import Hir from "@compiler::hir";
+import Id from "@compiler::ids";
 
 import Format from "./format/api";
 import _ from "./format/config";
@@ -32,6 +33,7 @@ import LirLowering from "./lir/lowering";
 import LirVerify from "./lir/verify";
 
 import CliCommand, CliOptions, IGNIS_VERSION, helpText, parseArguments, versionText from "./cli";
+import Doc from "./doc/mod";
 import BuildGraph, BuildModuleKind from "./build/module_graph";
 import BuildLayout from "./build/layout";
 import
@@ -43,7 +45,7 @@ from "./build/artifacts";
 import ArchiveTool from "./build/archive";
 import CCompiler from "./build/c_compiler";
 import Linker from "./build/linker";
-import BuildOverrides, DiscoveryResult, Resolver from "./build/resolver";
+import BuildOverrides, DiscoveryResult, DocDiscovery, Resolver from "./build/resolver";
 import
   FixtureCase,
   FixtureKind,
@@ -3684,6 +3686,293 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   return 0;
 }
 
+/// What `ignis doc` documents: the project `start` belongs to, or `start` as
+/// a single file. `entry` is the entry as the package reports it.
+record DocTarget {
+  public start: Path::PathBuf;
+  public projectMode: boolean;
+  public entry: Option<String>;
+}
+
+/// Resolve what `ignis doc` documents the way the host's
+/// `resolve_compile_input` does: `--project` first, then a file, then the
+/// project around the current directory. Each failure prints the host's
+/// message.
+function resolveDocTarget(options: &CliOptions): Option<DocTarget> {
+  if (let Option::SOME(projectText) = &options.docProject) {
+    let root: Path::PathBuf = Path::PathBuf::fromString(&projectText);
+
+    if (!Fs::exists(root.join("ignis.toml").asStr())) {
+      Io::eprintln(`Error: No ignis.toml found in '${projectText.toStr()}'`);
+      return Option::NONE;
+    }
+
+    return Option::SOME(DocTarget { start: root, projectMode: true, entry: Option::NONE });
+  }
+
+  if (let Option::SOME(pathText) = &options.path) {
+    let path: Path::PathBuf = Path::PathBuf::fromString(&pathText);
+
+    if (!Fs::exists(path.asStr())) {
+      Io::eprintln(`Error: File not found: '${pathText.toStr()}'`);
+      return Option::NONE;
+    }
+
+    return Option::SOME(DocTarget { start: path, projectMode: false, entry: Option::SOME(pathText.clone()) });
+  }
+
+  let Result::OK(currentDir) = Env::currentDir() else {
+    Io::eprintln(String::create("Error: Failed to get current directory"));
+    return Option::NONE;
+  };
+
+  if (Config::findProjectFile(&currentDir).isNone()) {
+    Io::eprintln(String::create("Error: No ignis.toml found"));
+    Io::eprintln(String::create("Hint: Run 'ignis init' to create a project, or provide a file path."));
+    return Option::NONE;
+  }
+
+  return Option::SOME(DocTarget { start: currentDir, projectMode: true, entry: Option::NONE });
+}
+
+/// The parsed modules of a documentation run, in analysis order, with the
+/// name each one is documented under.
+record DocSources {
+  public modules: Vector<Ast::Module>;
+  public files: Vector<SourceFile>;
+  public infos: Vector<Analyzer::Imports::ModuleInfo>;
+  public names: Vector<String>;
+}
+
+/// Parse every discovered module, rendering lexer and parser diagnostics to
+/// stderr. `NONE` when any of them is an error.
+function parseDocSources(docDiscovery: &DocDiscovery): Option<DocSources> {
+  let discovery: &DiscoveryResult = &docDiscovery.discovery;
+  let mut sources: DocSources = DocSources {
+    modules: Vector::new<Ast::Module>(),
+    files: Vector::new<SourceFile>(),
+    infos: Vector::new<Analyzer::Imports::ModuleInfo>(),
+    names: Vector::new<String>(),
+  };
+  let mut errors: u64 = 0;
+  let mut orderIndex: u64 = 0;
+
+  while (orderIndex < discovery.order.length()) {
+    let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
+      return Option::NONE;
+    };
+    let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
+      return Option::NONE;
+    };
+    let Result::OK(moduleText) = Fs::readToString(&node.path) else {
+      Io::eprintln(`error: cannot read source file: ${node.path.toString().toStr()}`);
+      return Option::NONE;
+    };
+
+    let modulePath: String = node.path.toString();
+    let moduleFile: SourceFile = SourceFile::create(modulePath.toStr(), moduleText.toStr());
+    let mut output: ParseOutput = Parser::parseFileWithFlags(&moduleFile, &discovery.flags);
+
+    errors += countBySeverity(&output.lexDiagnostics, Severity::ERROR);
+    errors += countBySeverity(&output.parseDiagnostics, Severity::ERROR);
+    renderBagToStderr(&output.lexDiagnostics, &moduleFile);
+    renderBagToStderr(&output.parseDiagnostics, &moduleFile);
+
+    if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
+      Io::eprintln(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
+      return Option::NONE;
+    }
+
+    let mut moduleName: String = String::new();
+
+    if (let Option::SOME(name) = docDiscovery.moduleNames.get(*nodeIndex)) {
+      moduleName = name.clone();
+    }
+
+    sources.names.push(moduleName);
+    sources.modules.push(output.module);
+    sources.files.push(moduleFile);
+    sources.infos.push(Analyzer::Imports::ModuleInfo {
+      index: *nodeIndex,
+      pathText: modulePath,
+      kind: analyzerModuleKind(node.kind),
+    });
+    orderIndex += 1;
+  }
+
+  if (errors > 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(sources);
+}
+
+/// `ignis doc`: analyze a project or a file as `ignis check` would, then print
+/// its API documentation as the host's JSON package, or write it to
+/// `--output` without a trailing newline.
+///
+/// Analysis stops before ownership checking, as the host's does: closure
+/// conversion still runs, because the functions it creates are part of the
+/// package.
+function runDoc(options: &CliOptions): i32 {
+  let Option::SOME(target) = resolveDocTarget(options) else {
+    return 1;
+  };
+
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+  let docDiscovery: DocDiscovery = match (Resolver::discoverDoc(&target.start, &overrides, target.projectMode)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      let file: SourceFile = entrySourceFile(&target.start);
+      renderBagToStderr(&diagnostics, &file);
+      return 1;
+    },
+  };
+
+  let Option::SOME(sources) = parseDocSources(&docDiscovery) else {
+    return 1;
+  };
+
+  let entry: String = match (&target.entry) {
+    Option::SOME(text) -> text.clone(),
+    Option::NONE -> docDiscovery.discovery.entry.toString(),
+  };
+
+  let Option::SOME(json) = documentSources(&docDiscovery.discovery, &sources, entry) else {
+    return 1;
+  };
+
+  let Option::SOME(outputText) = &options.outputPath else {
+    Io::println(json);
+    return 0;
+  };
+
+  let outputPath: Path::PathBuf = Path::PathBuf::fromString(&outputText);
+
+  if (let Result::ERROR(_) = Fs::writeString(&outputPath, &json)) {
+    Io::eprintln(`Error: Could not write '${outputText.toStr()}'`);
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Analyze the parsed sources and build the documentation package. `NONE`
+/// after rendering the diagnostics when analysis or closure conversion
+/// reports an error.
+function documentSources(
+  discovery: &DiscoveryResult,
+  sources: &DocSources,
+  entry: String
+): Option<String> {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut preludePaths: Vector<String> = Vector::new<String>();
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < discovery.preludePaths.length()) {
+    if (let Option::SOME(preludePath) = discovery.preludePaths.get(preludeIndex)) {
+      preludePaths.push(preludePath.toString());
+    }
+
+    preludeIndex += 1;
+  }
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &sources.modules,
+    &sources.infos,
+    &preludePaths,
+  );
+
+  let mut errors: u64 = 0;
+  let mut recordIndex: u64 = 0;
+
+  while (recordIndex < records.length()) {
+    if (let Option::SOME(analysisRecord) = records.get(recordIndex)) {
+      if (let Option::SOME(moduleFile) = sources.files.get(recordIndex)) {
+        errors += countBySeverity(&analysisRecord.output.diagnostics, Severity::ERROR);
+        renderBagToStderr(&analysisRecord.output.diagnostics, moduleFile);
+      }
+    }
+
+    recordIndex += 1;
+  }
+
+  if (errors > 0) {
+    return Option::NONE;
+  }
+
+  let mut program: Doc::DocProgram = Doc::DocProgram {
+    entry: entry,
+    moduleNames: buildProfileCloneStrings(&sources.names),
+    closureDefs: Vector::new<Analyzer::DefinitionId>(),
+    closureModules: Vector::new<u64>(),
+  };
+
+  if (!convertDocClosures(&mut defStore, &mut typeStore, &mut symbols, sources, &records, &mut program)) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(Doc::packageJson(&program, &sources.modules, &records, &defStore, &typeStore, &symbols));
+}
+
+/// Lower each module and run closure conversion on it, recording every
+/// function the conversion defines against the module it came from.
+function convertDocClosures(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  symbols: &mut Analyzer::SymbolTable,
+  sources: &DocSources,
+  records: &Vector<Analyzer::ModuleAnalysisRecord>,
+  program: &mut Doc::DocProgram,
+): boolean {
+  let defsRef: &mut Analyzer::DefinitionStore = defStore;
+  let programRef: &mut Doc::DocProgram = program;
+  let mut programHir: Hir::HirStore = Hir::HirStore::init();
+  let mut errors: u64 = 0;
+  let mut moduleIndex: u64 = 0;
+
+  while (moduleIndex < records.length()) {
+    let Option::SOME(analysisRecord) = records.get(moduleIndex) else {
+      break;
+    };
+    let Option::SOME(module) = sources.modules.get(moduleIndex) else {
+      break;
+    };
+
+    Lowering::lowerModuleInto(defsRef, typeStore, symbols, module, &analysisRecord.output, &mut programHir);
+
+    let firstNewDef: u64 = defsRef.length();
+    let diagnostics: DiagnosticBag = Capture::populateClosureCaptures(defsRef, typeStore, symbols, &mut programHir);
+
+    if (let Option::SOME(moduleFile) = sources.files.get(moduleIndex)) {
+      errors += countBySeverity(&diagnostics, Severity::ERROR);
+      renderBagToStderr(&diagnostics, moduleFile);
+    }
+
+    let mut rawId: u64 = firstNewDef;
+
+    while (rawId < defsRef.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+
+      if (let Option::SOME(Analyzer::Definition::Function(_)) = defsRef.get(defId)) {
+        programRef.closureDefs.push(defId);
+        programRef.closureModules.push(moduleIndex);
+      }
+
+      rawId += 1;
+    }
+
+    moduleIndex += 1;
+  }
+
+  return errors == 0;
+}
+
 /// Build the standard library into the archive a project links against.
 function runBuildStd(options: &CliOptions): i32 {
   let Option::SOME(target) = resolveTarget(options) else {
@@ -3738,6 +4027,10 @@ function main(): i32 {
 
   if (let CliCommand::FMT = options.command) {
     return runFmt(&options);
+  }
+
+  if (let CliCommand::DOC = options.command) {
+    return runDoc(&options);
   }
 
   if (let CliCommand::TEST_STD = options.command) {

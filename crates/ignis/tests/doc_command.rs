@@ -1,6 +1,7 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -8,11 +9,61 @@ fn workspace_std_path() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std")
 }
 
+fn workspace_root() -> PathBuf {
+  PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("../..")
+    .canonicalize()
+    .expect("canonicalize workspace root")
+}
+
+fn host_compiler() -> &'static Path {
+  Path::new(env!("CARGO_BIN_EXE_ignis"))
+}
+
+/// Build the selfhost compiler once for the whole test binary and return its path.
+///
+/// The selfhost tests share one build, for the reason `test_command.rs` gives: concurrent
+/// builds into the one output directory the project config names would read each other's
+/// half-written binaries.
+fn selfhost_compiler() -> &'static Path {
+  static COMPILER: OnceLock<PathBuf> = OnceLock::new();
+
+  COMPILER.get_or_init(|| {
+    let workspace_root = workspace_root();
+
+    let build = Command::new(host_compiler())
+      .current_dir(&workspace_root)
+      .arg("build")
+      .arg("--project")
+      .arg(".")
+      .arg("ignis/main.ign")
+      .output()
+      .expect("build selfhost compiler");
+
+    assert!(
+      build.status.success(),
+      "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&build.stdout),
+      String::from_utf8_lossy(&build.stderr)
+    );
+
+    workspace_root.join("build/selfhost/bin/ignis")
+  })
+}
+
+/// Writes a fixture into a directory owned by one compiler, so the host and selfhost
+/// tests never rewrite a file the other is reading.
 fn fixture(
+  compiler: &Path,
   name: &str,
   source: &str,
 ) -> PathBuf {
-  let dir = std::env::temp_dir().join(format!("ignis-doc-{}", std::process::id()));
+  let owner = if compiler == host_compiler() {
+    "host"
+  } else {
+    "selfhost"
+  };
+  let dir = std::env::temp_dir().join(format!("ignis-doc-{owner}-{}", std::process::id()));
   fs::create_dir_all(&dir).expect("create fixture directory");
 
   let path = dir.join(format!("{name}.ign"));
@@ -21,13 +72,14 @@ fn fixture(
   path
 }
 
-fn document(
+fn document_with(
+  compiler: &Path,
   name: &str,
   source: &str,
 ) -> Value {
-  let path = fixture(name, source);
+  let path = fixture(compiler, name, source);
 
-  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+  let output = Command::new(compiler)
     .arg("doc")
     .arg(&path)
     .arg("--std-path")
@@ -56,9 +108,9 @@ fn find<'a>(
     .unwrap_or_else(|| panic!("no item at path {path}"))
 }
 
-#[test]
-fn documents_a_function_with_its_doc_comment() {
-  let package = document(
+fn check_function_with_its_doc_comment(compiler: &Path) {
+  let package = document_with(
+    compiler,
     "adds",
     r#"
 /// Adds two numbers.
@@ -76,9 +128,9 @@ export function add(a: i32, b: i32): i32 {
   assert_eq!(item["doc"], "Adds two numbers.");
 }
 
-#[test]
-fn reports_private_declarations_without_dropping_them() {
-  let package = document(
+fn check_private_declarations_are_kept(compiler: &Path) {
+  let package = document_with(
+    compiler,
     "helper",
     r#"
 /// Not exported.
@@ -91,9 +143,9 @@ function helper(): i32 {
   assert_eq!(find(&package, "helper::helper")["visibility"], "private");
 }
 
-#[test]
-fn renders_records_with_their_fields_and_methods() {
-  let package = document(
+fn check_records_with_their_fields_and_methods(compiler: &Path) {
+  let package = document_with(
+    compiler,
     "counter",
     r#"
 /// A counter.
@@ -132,9 +184,9 @@ export record Counter {
   assert_eq!(constructor["signature"], "static new(start: i32): Counter");
 }
 
-#[test]
-fn renders_enum_variants_with_their_payloads() {
-  let package = document(
+fn check_enum_variants_with_their_payloads(compiler: &Path) {
+  let package = document_with(
+    compiler,
     "outcome",
     r#"
 /// A result of sorts.
@@ -156,9 +208,9 @@ export enum Outcome {
   assert_eq!(failed["signature"], "FAILED");
 }
 
-#[test]
-fn qualifies_namespace_members_with_the_namespace_path() {
-  let package = document(
+fn check_namespace_members_are_qualified(compiler: &Path) {
+  let package = document_with(
+    compiler,
     "math",
     r#"
 namespace Math {
@@ -179,9 +231,9 @@ namespace Math {
   assert_eq!(item["visibility"], "private");
 }
 
-#[test]
-fn carries_the_modules_own_documentation() {
-  let package = document(
+fn check_module_documentation(compiler: &Path) {
+  let package = document_with(
+    compiler,
     "described",
     r#"
 //! # The module
@@ -208,12 +260,11 @@ export function noop(): void {
   assert_eq!(find(&package, "described::noop")["doc"], "A function.");
 }
 
-#[test]
-fn writes_to_a_file_when_asked() {
-  let path = fixture("written", "export function noop(): void {\n  return;\n}\n");
+fn check_writes_to_a_file_when_asked(compiler: &Path) {
+  let path = fixture(compiler, "written", "export function noop(): void {\n  return;\n}\n");
   let out = path.with_extension("json");
 
-  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+  let output = Command::new(compiler)
     .arg("doc")
     .arg(&path)
     .arg("--std-path")
@@ -236,4 +287,74 @@ fn writes_to_a_file_when_asked() {
       .iter()
       .any(|item| item["name"] == "noop")
   );
+}
+
+#[test]
+fn documents_a_function_with_its_doc_comment() {
+  check_function_with_its_doc_comment(host_compiler());
+}
+
+#[test]
+fn reports_private_declarations_without_dropping_them() {
+  check_private_declarations_are_kept(host_compiler());
+}
+
+#[test]
+fn renders_records_with_their_fields_and_methods() {
+  check_records_with_their_fields_and_methods(host_compiler());
+}
+
+#[test]
+fn renders_enum_variants_with_their_payloads() {
+  check_enum_variants_with_their_payloads(host_compiler());
+}
+
+#[test]
+fn qualifies_namespace_members_with_the_namespace_path() {
+  check_namespace_members_are_qualified(host_compiler());
+}
+
+#[test]
+fn carries_the_modules_own_documentation() {
+  check_module_documentation(host_compiler());
+}
+
+#[test]
+fn writes_to_a_file_when_asked() {
+  check_writes_to_a_file_when_asked(host_compiler());
+}
+
+#[test]
+fn selfhost_documents_a_function_with_its_doc_comment() {
+  check_function_with_its_doc_comment(selfhost_compiler());
+}
+
+#[test]
+fn selfhost_reports_private_declarations_without_dropping_them() {
+  check_private_declarations_are_kept(selfhost_compiler());
+}
+
+#[test]
+fn selfhost_renders_records_with_their_fields_and_methods() {
+  check_records_with_their_fields_and_methods(selfhost_compiler());
+}
+
+#[test]
+fn selfhost_renders_enum_variants_with_their_payloads() {
+  check_enum_variants_with_their_payloads(selfhost_compiler());
+}
+
+#[test]
+fn selfhost_qualifies_namespace_members_with_the_namespace_path() {
+  check_namespace_members_are_qualified(selfhost_compiler());
+}
+
+#[test]
+fn selfhost_carries_the_modules_own_documentation() {
+  check_module_documentation(selfhost_compiler());
+}
+
+#[test]
+fn selfhost_writes_to_a_file_when_asked() {
+  check_writes_to_a_file_when_asked(selfhost_compiler());
 }

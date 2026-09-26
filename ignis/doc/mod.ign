@@ -1,0 +1,1385 @@
+import Json, JsonObjectEntry, JsonValue from "std::json";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+
+/// API documentation extracted from an analyzed program, serialized the way
+/// the host's `ignis doc` serializes its `DocPackage`
+/// (`crates/ignis_driver/src/doc.rs`): the same items, the same signatures,
+/// the same order, and `serde_json::to_string_pretty`'s bytes.
+export namespace Doc {
+  /// A member of a record, enum or trait.
+  record DocMember {
+    public name: String;
+    public kind: str;
+    public signature: String;
+    public doc: Option<String>;
+  }
+
+  /// One documented declaration.
+  record DocItem {
+    public module: String;
+    public path: String;
+    public name: String;
+    public kind: str;
+    public isPublic: boolean;
+    public signature: String;
+    public doc: Option<String>;
+    public members: Vector<Doc::DocMember>;
+  }
+
+  /// Where a declaration sits: its module's name and the path its own name is
+  /// appended to, which is the module name followed by any enclosing
+  /// namespaces.
+  record DocScope {
+    public moduleName: String;
+    public prefix: String;
+  }
+
+  /// Everything the package is built from besides the analyzer stores. The
+  /// per-module vectors are indexed like the analysis records.
+  record DocProgram {
+    /// The entry the package was produced from, as the command line named it.
+    public entry: String;
+    public moduleNames: Vector<String>;
+    /// Every function closure conversion created, with the index of the
+    /// module whose closure it was made for.
+    public closureDefs: Vector<Analyzer::DefinitionId>;
+    public closureModules: Vector<u64>;
+  }
+
+  /// Builds the package and returns it as pretty JSON, without a trailing
+  /// newline.
+  function packageJson(
+    program: &Doc::DocProgram,
+    modules: &Vector<Ast::Module>,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    let exported: Vector<String> = Doc::exportedPaths(program, modules, records);
+    let mut items: Vector<Doc::DocItem> = Vector::new<Doc::DocItem>();
+    let mut moduleIndex: u64 = 0;
+
+    while (moduleIndex < modules.length()) {
+      let Option::SOME(module) = modules.get(moduleIndex) else {
+        break;
+      };
+      let Option::SOME(analysisRecord) = records.get(moduleIndex) else {
+        break;
+      };
+      let Option::SOME(moduleName) = program.moduleNames.get(moduleIndex) else {
+        break;
+      };
+
+      let scope: Doc::DocScope = Doc::DocScope { moduleName: moduleName.clone(), prefix: moduleName.clone() };
+      Doc::collectItems(module, &analysisRecord.output, &module.roots, &scope, &exported, defs, types, symbols, &mut items);
+      moduleIndex += 1;
+    }
+
+    Doc::collectClosures(program, defs, types, symbols, &mut items);
+
+    let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+    entries.push(JsonObjectEntry::create("entry", JsonValue::fromString(program.entry.clone())));
+    entries.push(JsonObjectEntry::create("modules", Doc::modulesJson(program, modules)));
+    entries.push(JsonObjectEntry::create("items", Doc::itemsJson(&items)));
+
+    let package: JsonValue = JsonValue::object(entries);
+    return Json::toJsonStringPretty(&package);
+  }
+
+  /// The paths an `export { ... }` list or an `export ... from` re-export
+  /// names, which the host marks public wherever they were declared.
+  function exportedPaths(
+    program: &Doc::DocProgram,
+    modules: &Vector<Ast::Module>,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+  ): Vector<String> {
+    let mut paths: Vector<String> = Vector::new<String>();
+    let mut moduleIndex: u64 = 0;
+
+    while (moduleIndex < modules.length()) {
+      let Option::SOME(module) = modules.get(moduleIndex) else {
+        break;
+      };
+      let Option::SOME(moduleName) = program.moduleNames.get(moduleIndex) else {
+        break;
+      };
+
+      Doc::collectExportedPaths(program, module, records, &module.roots, moduleName, &mut paths);
+      moduleIndex += 1;
+    }
+
+    return paths;
+  }
+
+  function collectExportedPaths(
+    program: &Doc::DocProgram,
+    module: &Ast::Module,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    itemIds: &Vector<Ast::ItemId>,
+    prefix: &String,
+    paths: &mut Vector<String>,
+  ): void {
+    let pathsRef: &mut Vector<String> = paths;
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      let Option::SOME(itemId) = itemIds.get(index) else {
+        break;
+      };
+
+      match (module.items.get(*itemId)) {
+        Option::SOME(Ast::Item::Node::Namespace(namespaceItem)) -> {
+          let childPrefix: String = Doc::joinPath(prefix, &namespaceItem.name);
+          Doc::collectExportedPaths(program, module, records, &namespaceItem.items, &childPrefix, pathsRef);
+        },
+        Option::SOME(Ast::Item::Node::Extern(externItem)) -> {
+          let childPrefix: String = Doc::joinPath(prefix, &externItem.name);
+          Doc::collectExportedPaths(program, module, records, &externItem.items, &childPrefix, pathsRef);
+        },
+        Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
+          if (exportItem.declaration.isNone()) {
+            let target: String = Doc::exportTargetPrefix(program, records, &exportItem.source, prefix);
+            Doc::pushBindingPaths(&exportItem.items, &target, pathsRef);
+          }
+        },
+        _ -> {},
+      };
+
+      index += 1;
+    }
+  }
+
+  /// The prefix an export list's names resolve under: the exporting scope
+  /// itself, or the module a re-export reads from.
+  function exportTargetPrefix(
+    program: &Doc::DocProgram,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    source: &Option<String>,
+    prefix: &String,
+  ): String {
+    let Option::SOME(sourcePath) = source else {
+      return prefix.clone();
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < records.length()) {
+      if (let Option::SOME(analysisRecord) = records.get(index)) {
+        if (analysisRecord.info.pathText.equals(&sourcePath)) {
+          if (let Option::SOME(name) = program.moduleNames.get(index)) {
+            return name.clone();
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return prefix.clone();
+  }
+
+  function pushBindingPaths(
+    bindings: &Vector<Ast::ImportBinding>,
+    prefix: &String,
+    paths: &mut Vector<String>
+  ): void {
+    let mut pathsRef: &mut Vector<String> = paths;
+    let mut index: u64 = 0;
+
+    while (index < bindings.length()) {
+      if (let Option::SOME(binding) = bindings.get(index)) {
+        if (let Option::SOME(name) = &binding.name) {
+          pathsRef.push(Doc::joinPath(prefix, &name));
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  function collectItems(
+    module: &Ast::Module,
+    analysis: &Analyzer::AnalyzerOutput,
+    itemIds: &Vector<Ast::ItemId>,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      if (let Option::SOME(itemId) = itemIds.get(index)) {
+        Doc::collectItem(module, analysis, *itemId, false, scope, exported, defs, types, symbols, out);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Documents one item. `exportedHere` is set when an `export` wraps it.
+  function collectItem(
+    module: &Ast::Module,
+    analysis: &Analyzer::AnalyzerOutput,
+    itemId: Ast::ItemId,
+    exportedHere: boolean,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let outRef: &mut Vector<Doc::DocItem> = out;
+    let defId: Option<Analyzer::DefinitionId> = Doc::itemDefinition(analysis, itemId);
+
+    match (module.items.get(itemId)) {
+      Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+        let isPublic: boolean = exportedHere || Doc::metadataIsPublic(&functionItem.metadata);
+        Doc::documentFunction(defId, &functionItem.name, isPublic, scope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
+        Doc::documentRecord(defId, &recordItem.name, exportedHere, scope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::Enum(enumItem)) -> {
+        Doc::documentEnum(defId, &enumItem.name, exportedHere, scope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::Trait(traitItem)) -> {
+        Doc::documentTrait(defId, &traitItem.name, exportedHere, scope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::TypeAlias(aliasItem)) -> {
+        Doc::documentTypeAlias(defId, &aliasItem.name, exportedHere, scope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::Constant(constantItem)) -> {
+        Doc::documentConstant(defId, &constantItem.name, exportedHere, scope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::Namespace(namespaceItem)) -> {
+        let doc: Option<String> = Doc::cloneDoc(module.itemDoc(itemId));
+        Doc::pushNamespace(&namespaceItem.name, exportedHere, doc, scope, exported, outRef);
+
+        let childScope: Doc::DocScope = Doc::DocScope {
+          moduleName: scope.moduleName.clone(),
+          prefix: Doc::joinPath(&scope.prefix, &namespaceItem.name),
+        };
+        Doc::collectItems(module, analysis, &namespaceItem.items, &childScope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::Extern(externItem)) -> {
+        let doc: Option<String> = Doc::cloneDoc(module.itemDoc(itemId));
+        Doc::pushNamespace(&externItem.name, true, doc, scope, exported, outRef);
+
+        let childScope: Doc::DocScope = Doc::DocScope {
+          moduleName: scope.moduleName.clone(),
+          prefix: Doc::joinPath(&scope.prefix, &externItem.name),
+        };
+        Doc::collectItems(module, analysis, &externItem.items, &childScope, exported, defs, types, symbols, outRef);
+      },
+      Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
+        if (let Option::SOME(innerId) = exportItem.declaration) {
+          Doc::collectItem(module, analysis, innerId, true, scope, exported, defs, types, symbols, outRef);
+        }
+      },
+      Option::SOME(Ast::Item::Node::Import(_)) -> {},
+      Option::NONE -> {},
+    };
+  }
+
+  /// The definition the binder made for `itemId`. Types, traits and
+  /// namespaces are only in the first pass's table, everything else is in the
+  /// second's.
+  function itemDefinition(
+    analysis: &Analyzer::AnalyzerOutput,
+    itemId: Ast::ItemId
+  ): Option<Analyzer::DefinitionId> {
+    if (let Option::SOME(defId) = Analyzer::Binder::findDef(&analysis.pass2, itemId.raw())) {
+      return Option::SOME(defId);
+    }
+
+    return Analyzer::Binder::findDef(&analysis.pass1, itemId.raw());
+  }
+
+  /// A namespace or extern block. A multi-segment name documents its last
+  /// segment, directly under the enclosing scope, which is where the host's
+  /// binder records the namespace definition.
+  function pushNamespace(
+    writtenName: &String,
+    exportedHere: boolean,
+    doc: Option<String>,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let name: String = Doc::lastSegment(writtenName);
+    let path: String = Doc::joinPath(&scope.prefix, &name);
+    let isPublic: boolean = exportedHere || Doc::containsText(exported, &path);
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+
+    outRef.push(Doc::DocItem {
+      module: scope.moduleName.clone(),
+      path: path,
+      name: name.clone(),
+      kind: "namespace",
+      isPublic: isPublic,
+      signature: `namespace ${name.toStr()}`,
+      doc: doc,
+      members: Vector::new<Doc::DocMember>(),
+    });
+  }
+
+  function documentFunction(
+    defId: Option<Analyzer::DefinitionId>,
+    name: &String,
+    publicHere: boolean,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let Option::SOME(id) = defId else {
+      return;
+    };
+    let Option::SOME(Analyzer::Definition::Function(functionDef)) = defs.get(id) else {
+      return;
+    };
+
+    let path: String = Doc::joinPath(&scope.prefix, name);
+    let isPublic: boolean = publicHere || Doc::containsText(exported, &path);
+    let signature: String = Doc::functionSignature(name, &functionDef.typeParams, &functionDef.params, functionDef.returnType, defs, types, symbols);
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+
+    outRef.push(Doc::DocItem {
+      module: scope.moduleName.clone(),
+      path: path,
+      name: name.clone(),
+      kind: "function",
+      isPublic: isPublic,
+      signature: signature,
+      doc: Doc::cloneDoc(defs.docOf(id)),
+      members: Vector::new<Doc::DocMember>(),
+    });
+  }
+
+  function documentRecord(
+    defId: Option<Analyzer::DefinitionId>,
+    name: &String,
+    exportedHere: boolean,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let Option::SOME(id) = defId else {
+      return;
+    };
+    let Option::SOME(Analyzer::Definition::Record(recordDef)) = defs.get(id) else {
+      return;
+    };
+
+    let mut members: Vector<Doc::DocMember> = Vector::new<Doc::DocMember>();
+    let mut fieldIndex: u64 = 0;
+
+    while (fieldIndex < recordDef.fields.length()) {
+      if (let Option::SOME(fieldId) = recordDef.fields.get(fieldIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Field(field)) = defs.get(*fieldId)) {
+          let fieldName: String = Doc::symbolText(symbols, field.name);
+          let fieldType: String = Doc::renderType(field.fieldType, defs, types, symbols);
+
+          members.push(Doc::DocMember {
+            name: fieldName.clone(),
+            kind: "field",
+            signature: `${fieldName.toStr()}: ${fieldType.toStr()}`,
+            doc: Doc::cloneDoc(defs.docOf(*fieldId)),
+          });
+        }
+      }
+
+      fieldIndex += 1;
+    }
+
+    Doc::appendMethods(&recordDef.staticMethods, defs, types, symbols, &mut members);
+    Doc::appendMethods(&recordDef.instanceMethods, defs, types, symbols, &mut members);
+
+    let path: String = Doc::joinPath(&scope.prefix, name);
+    let isPublic: boolean = exportedHere || Doc::containsText(exported, &path);
+    let signature: String = `record ${name.toStr()}${Doc::typeParamsText(&recordDef.typeParams, defs, symbols).toStr()}`;
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+
+    outRef.push(Doc::DocItem {
+      module: scope.moduleName.clone(),
+      path: path,
+      name: name.clone(),
+      kind: "record",
+      isPublic: isPublic,
+      signature: signature,
+      doc: Doc::cloneDoc(defs.docOf(id)),
+      members: members,
+    });
+
+    Doc::documentStaticFields(&recordDef.staticFields, true, scope, defs, types, symbols, outRef);
+  }
+
+  function documentEnum(
+    defId: Option<Analyzer::DefinitionId>,
+    name: &String,
+    exportedHere: boolean,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let Option::SOME(id) = defId else {
+      return;
+    };
+    let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defs.get(id) else {
+      return;
+    };
+
+    let mut members: Vector<Doc::DocMember> = Vector::new<Doc::DocMember>();
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < enumDef.variants.length()) {
+      if (let Option::SOME(variantId) = enumDef.variants.get(variantIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variant(variant)) = defs.get(*variantId)) {
+          let variantName: String = Doc::symbolText(symbols, variant.name);
+          let mut signature: String = variantName.clone();
+
+          if (variant.payload.length() > 0) {
+            signature.pushStr("(");
+            let payload: String = Doc::joinTypes(&variant.payload, defs, types, symbols);
+            signature.push(&payload);
+            signature.pushStr(")");
+          }
+
+          members.push(Doc::DocMember { name: variantName, kind: "variant", signature: signature, doc: Option::NONE });
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    Doc::appendMethods(&enumDef.staticMethods, defs, types, symbols, &mut members);
+    Doc::appendMethods(&enumDef.instanceMethods, defs, types, symbols, &mut members);
+
+    let path: String = Doc::joinPath(&scope.prefix, name);
+    let isPublic: boolean = exportedHere || Doc::containsText(exported, &path);
+    let signature: String = `enum ${name.toStr()}${Doc::typeParamsText(&enumDef.typeParams, defs, symbols).toStr()}`;
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+
+    outRef.push(Doc::DocItem {
+      module: scope.moduleName.clone(),
+      path: path,
+      name: name.clone(),
+      kind: "enum",
+      isPublic: isPublic,
+      signature: signature,
+      doc: Doc::cloneDoc(defs.docOf(id)),
+      members: members,
+    });
+
+    Doc::documentStaticFields(&enumDef.staticFields, false, scope, defs, types, symbols, outRef);
+  }
+
+  /// The static fields of a record or enum. The host binds each as a
+  /// constant of the enclosing namespace rather than of the type, public and,
+  /// for an enum, undocumented.
+  function documentStaticFields(
+    fieldIds: &Vector<Analyzer::DefinitionId>,
+    keepDocs: boolean,
+    scope: &Doc::DocScope,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+    let mut index: u64 = 0;
+
+    while (index < fieldIds.length()) {
+      if (let Option::SOME(fieldId) = fieldIds.get(index)) {
+        if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defs.get(*fieldId)) {
+          let name: String = Doc::symbolText(symbols, variable.name);
+          let fieldType: String = Doc::renderType(variable.declaredType, defs, types, symbols);
+          let mut doc: Option<String> = Option::NONE;
+
+          if (keepDocs) {
+            doc = Doc::cloneDoc(defs.docOf(*fieldId));
+          }
+
+          outRef.push(Doc::DocItem {
+            module: scope.moduleName.clone(),
+            path: Doc::joinPath(&scope.prefix, &name),
+            name: name.clone(),
+            kind: "constant",
+            isPublic: true,
+            signature: `const ${name.toStr()}: ${fieldType.toStr()}`,
+            doc: doc,
+            members: Vector::new<Doc::DocMember>(),
+          });
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  function documentTrait(
+    defId: Option<Analyzer::DefinitionId>,
+    name: &String,
+    exportedHere: boolean,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let Option::SOME(id) = defId else {
+      return;
+    };
+    let Option::SOME(Analyzer::Definition::Trait(traitDef)) = defs.get(id) else {
+      return;
+    };
+
+    let mut members: Vector<Doc::DocMember> = Vector::new<Doc::DocMember>();
+    let mut methodIndex: u64 = 0;
+
+    while (methodIndex < traitDef.methods.length()) {
+      if (let Option::SOME(methodId) = traitDef.methods.get(methodIndex)) {
+        if (let Option::SOME(member) = Doc::methodMember(*methodId, true, defs, types, symbols)) {
+          members.push(member);
+        }
+      }
+
+      methodIndex += 1;
+    }
+
+    let path: String = Doc::joinPath(&scope.prefix, name);
+    let isPublic: boolean = exportedHere || Doc::containsText(exported, &path);
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+
+    outRef.push(Doc::DocItem {
+      module: scope.moduleName.clone(),
+      path: path,
+      name: name.clone(),
+      kind: "trait",
+      isPublic: isPublic,
+      signature: `trait ${name.toStr()}`,
+      doc: Doc::cloneDoc(defs.docOf(id)),
+      members: members,
+    });
+  }
+
+  function documentTypeAlias(
+    defId: Option<Analyzer::DefinitionId>,
+    name: &String,
+    exportedHere: boolean,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let Option::SOME(id) = defId else {
+      return;
+    };
+    let Option::SOME(Analyzer::Definition::TypeAlias(alias)) = defs.get(id) else {
+      return;
+    };
+
+    let path: String = Doc::joinPath(&scope.prefix, name);
+    let isPublic: boolean = exportedHere || Doc::containsText(exported, &path);
+    let generics: String = Doc::typeParamsText(&alias.typeParams, defs, symbols);
+    let target: String = Doc::renderType(alias.aliasedType, defs, types, symbols);
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+
+    outRef.push(Doc::DocItem {
+      module: scope.moduleName.clone(),
+      path: path,
+      name: name.clone(),
+      kind: "type_alias",
+      isPublic: isPublic,
+      signature: `type ${name.toStr()}${generics.toStr()} = ${target.toStr()}`,
+      doc: Doc::cloneDoc(defs.docOf(id)),
+      members: Vector::new<Doc::DocMember>(),
+    });
+  }
+
+  /// A module-level constant. The host binds these without their `///` text.
+  function documentConstant(
+    defId: Option<Analyzer::DefinitionId>,
+    name: &String,
+    exportedHere: boolean,
+    scope: &Doc::DocScope,
+    exported: &Vector<String>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let Option::SOME(id) = defId else {
+      return;
+    };
+    let Option::SOME(Analyzer::Definition::Variable(variable)) = defs.get(id) else {
+      return;
+    };
+
+    let path: String = Doc::joinPath(&scope.prefix, name);
+    let isPublic: boolean = exportedHere || Doc::containsText(exported, &path);
+    let constantType: String = Doc::renderType(variable.declaredType, defs, types, symbols);
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+
+    outRef.push(Doc::DocItem {
+      module: scope.moduleName.clone(),
+      path: path,
+      name: name.clone(),
+      kind: "constant",
+      isPublic: isPublic,
+      signature: `const ${name.toStr()}: ${constantType.toStr()}`,
+      doc: Option::NONE,
+      members: Vector::new<Doc::DocMember>(),
+    });
+  }
+
+  /// The functions closure conversion added: private, undocumented, and
+  /// declared at the top of the module whose closure they implement.
+  function collectClosures(
+    program: &Doc::DocProgram,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    out: &mut Vector<Doc::DocItem>,
+  ): void {
+    let mut outRef: &mut Vector<Doc::DocItem> = out;
+    let mut index: u64 = 0;
+
+    while (index < program.closureDefs.length()) {
+      let Option::SOME(defId) = program.closureDefs.get(index) else {
+        break;
+      };
+      let Option::SOME(moduleIndex) = program.closureModules.get(index) else {
+        break;
+      };
+      let Option::SOME(moduleName) = program.moduleNames.get(*moduleIndex) else {
+        break;
+      };
+
+      if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defs.get(*defId)) {
+        let name: String = Doc::symbolText(symbols, functionDef.name);
+        let signature: String = Doc::closureSignature(&name, &functionDef.params, functionDef.returnType, defs, types, symbols);
+
+        outRef.push(Doc::DocItem {
+          module: moduleName.clone(),
+          path: Doc::joinPath(moduleName, &name),
+          name: name.clone(),
+          kind: "function",
+          isPublic: false,
+          signature: signature,
+          doc: Option::NONE,
+          members: Vector::new<Doc::DocMember>(),
+        });
+      }
+
+      index += 1;
+    }
+  }
+
+  /// A closure function's signature. Its first parameter is the environment
+  /// pointer, which the host types `*mut u8`; closure conversion here types it
+  /// `*u8`, a difference the emitted C does not carry, so the host's spelling
+  /// is written out rather than read from the definition.
+  function closureSignature(
+    name: &String,
+    params: &Vector<Analyzer::DefinitionId>,
+    returnType: Analyzer::TypeId,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    let mut paramText: String = String::new();
+
+    if (let Option::SOME(environmentId) = params.get(0)) {
+      if (let Option::SOME(environment) = defs.get(*environmentId)) {
+        let environmentName: String = Doc::symbolText(symbols, environment.name());
+        paramText = `${environmentName.toStr()}: *mut u8`;
+      }
+    }
+
+    let rest: String = Doc::paramsText(params, 1, defs, types, symbols);
+
+    if (rest.length() > 0) {
+      paramText.pushStr(", ");
+      paramText.push(&rest);
+    }
+
+    let returnText: String = Doc::renderType(returnType, defs, types, symbols);
+    return `function ${name.toStr()}(${paramText.toStr()}): ${returnText.toStr()}`;
+  }
+
+  /// Appends the methods of one table sorted by name and then signature,
+  /// the order the host settles its hash-map method tables into.
+  function appendMethods(
+    methodIds: &Vector<Analyzer::DefinitionId>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+    members: &mut Vector<Doc::DocMember>,
+  ): void {
+    let mut collected: Vector<Doc::DocMember> = Vector::new<Doc::DocMember>();
+    let mut names: Vector<String> = Vector::new<String>();
+    let mut signatures: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < methodIds.length()) {
+      if (let Option::SOME(methodId) = methodIds.get(index)) {
+        if (let Option::SOME(member) = Doc::methodMember(*methodId, false, defs, types, symbols)) {
+          names.push(member.name.clone());
+          signatures.push(member.signature.clone());
+          collected.push(member);
+        }
+      }
+
+      index += 1;
+    }
+
+    let order: Vector<u64> = Doc::stableOrder(&names, &signatures);
+    let mut membersRef: &mut Vector<Doc::DocMember> = members;
+    let mut orderIndex: u64 = 0;
+
+    while (orderIndex < order.length()) {
+      if (let Option::SOME(position) = order.get(orderIndex)) {
+        if (let Option::SOME(member) = collected.get(*position)) {
+          membersRef.push(Doc::cloneMember(member));
+        }
+      }
+
+      orderIndex += 1;
+    }
+  }
+
+  /// A method as its owner lists it.
+  ///
+  /// The host keeps a record method's receiver as its first parameter and
+  /// renders it as `self`, `&self` or `&mut self`. A trait method's parameter
+  /// list leaves the receiver out, yet the host still drops a first parameter
+  /// for it, so a trait method loses its first written parameter too:
+  /// `inTrait` reproduces that.
+  function methodMember(
+    methodId: Analyzer::DefinitionId,
+    inTrait: boolean,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): Option<Doc::DocMember> {
+    let Option::SOME(Analyzer::Definition::Method(method)) = defs.get(methodId) else {
+      return Option::NONE;
+    };
+
+    let name: String = Doc::symbolText(symbols, method.name);
+    let returnType: String = Doc::renderType(method.returnType, defs, types, symbols);
+    let mut signature: String = String::new();
+
+    if (method.isStatic) {
+      let params: String = Doc::paramsText(&method.params, 0, defs, types, symbols);
+      signature = `static ${name.toStr()}(${params.toStr()}): ${returnType.toStr()}`;
+    } else {
+      let mut skipped: u64 = 1;
+
+      if (inTrait) {
+        skipped = 2;
+      }
+
+      let mut receiver: str = "&self";
+
+      if (method.selfByValue) {
+        receiver = "self";
+      } else if (method.selfMutable) {
+        receiver = "&mut self";
+      }
+
+      let rest: String = Doc::paramsText(&method.params, skipped, defs, types, symbols);
+      let mut params: String = String::create(receiver);
+
+      if (rest.length() > 0) {
+        params.pushStr(", ");
+        params.push(&rest);
+      }
+
+      signature = `${name.toStr()}(${params.toStr()}): ${returnType.toStr()}`;
+    }
+
+    return Option::SOME(Doc::DocMember {
+      name: name,
+      kind: "method",
+      signature: signature,
+      doc: Doc::cloneDoc(defs.docOf(methodId)),
+    });
+  }
+
+  function functionSignature(
+    name: &String,
+    typeParams: &Vector<Analyzer::DefinitionId>,
+    params: &Vector<Analyzer::DefinitionId>,
+    returnType: Analyzer::TypeId,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    let generics: String = Doc::typeParamsText(typeParams, defs, symbols);
+    let paramText: String = Doc::paramsText(params, 0, defs, types, symbols);
+    let returnText: String = Doc::renderType(returnType, defs, types, symbols);
+
+    return `function ${name.toStr()}${generics.toStr()}(${paramText.toStr()}): ${returnText.toStr()}`;
+  }
+
+  /// `name: type` for every parameter from `start` on, joined with `, `.
+  function paramsText(
+    params: &Vector<Analyzer::DefinitionId>,
+    start: u64,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    let mut text: String = String::new();
+    let mut index: u64 = start;
+
+    while (index < params.length()) {
+      if (let Option::SOME(paramId) = params.get(index)) {
+        if (text.length() > 0) {
+          text.pushStr(", ");
+        }
+
+        match (defs.get(*paramId)) {
+          Option::SOME(Analyzer::Definition::Variable(variable)) -> {
+            let paramName: String = Doc::symbolText(symbols, variable.name);
+            let paramType: String = Doc::renderType(variable.declaredType, defs, types, symbols);
+            text.push(&paramName);
+            text.pushStr(": ");
+            text.push(&paramType);
+          },
+          Option::SOME(other) -> {
+            let otherName: String = Doc::symbolText(symbols, other.name());
+            text.push(&otherName);
+          },
+          Option::NONE -> {},
+        };
+      }
+
+      index += 1;
+    }
+
+    return text;
+  }
+
+  /// `<A, B>` for a generic declaration, empty otherwise.
+  function typeParamsText(
+    typeParams: &Vector<Analyzer::DefinitionId>,
+    defs: &Analyzer::DefinitionStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    if (typeParams.length() == 0) {
+      return String::new();
+    }
+
+    let mut text: String = String::create("<");
+    let mut index: u64 = 0;
+
+    while (index < typeParams.length()) {
+      if (let Option::SOME(paramId) = typeParams.get(index)) {
+        if (index > 0) {
+          text.pushStr(", ");
+        }
+
+        if (let Option::SOME(param) = defs.get(*paramId)) {
+          let paramName: String = Doc::symbolText(symbols, param.name());
+          text.push(&paramName);
+        }
+      }
+
+      index += 1;
+    }
+
+    text.pushStr(">");
+    return text;
+  }
+
+  function joinTypes(
+    typeIds: &Vector<Analyzer::TypeId>,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    let mut text: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < typeIds.length()) {
+      if (let Option::SOME(typeId) = typeIds.get(index)) {
+        if (index > 0) {
+          text.pushStr(", ");
+        }
+
+        let rendered: String = Doc::renderType(*typeId, defs, types, symbols);
+        text.push(&rendered);
+      }
+
+      index += 1;
+    }
+
+    return text;
+  }
+
+  /// A type the way source writes it, which is the host's `render_type`:
+  /// its diagnostic formatter without the `record `/`enum ` prefixes and
+  /// with `bool` spelled `boolean`. An alias is transparent, because the
+  /// host resolves every alias to its target before a type is stored.
+  function renderType(
+    typeId: Analyzer::TypeId,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    match (types.get(typeId)) {
+      Option::SOME(Analyzer::Type::BOOLEAN) -> {
+        return String::create("boolean");
+      },
+      Option::SOME(Analyzer::Type::Pointer(pointer)) -> {
+        let prefix: str = pointer.mutable ? "*mut " : "*";
+        return String::create(prefix).concat(Doc::renderType(pointer.pointee, defs, types, symbols));
+      },
+      Option::SOME(Analyzer::Type::Reference(reference)) -> {
+        let prefix: str = reference.mutable ? "&mut " : "&";
+        return String::create(prefix).concat(Doc::renderType(reference.referent, defs, types, symbols));
+      },
+      Option::SOME(Analyzer::Type::Slice(element)) -> {
+        return Doc::renderType(element, defs, types, symbols).concat("[]");
+      },
+      Option::SOME(Analyzer::Type::FixedArray(element, length)) -> {
+        let inner: String = Doc::renderType(element, defs, types, symbols);
+        return `${inner.toStr()}[${length}]`;
+      },
+      Option::SOME(Analyzer::Type::Tuple(tuple)) -> {
+        let elements: String = Doc::joinTypes(&tuple.elements, defs, types, symbols);
+        return `(${elements.toStr()})`;
+      },
+      Option::SOME(Analyzer::Type::Function(functionType)) -> {
+        let params: String = Doc::joinTypes(&functionType.params, defs, types, symbols);
+        let returnText: String = Doc::renderType(functionType.returnType, defs, types, symbols);
+        return `fn(${params.toStr()}) -> ${returnText.toStr()}`;
+      },
+      Option::SOME(Analyzer::Type::Record(defId)) -> {
+        return Doc::definitionName(defId, defs, symbols);
+      },
+      Option::SOME(Analyzer::Type::Enum(defId)) -> {
+        return Doc::definitionName(defId, defs, symbols);
+      },
+      Option::SOME(Analyzer::Type::Param(symbol)) -> {
+        return Doc::symbolText(symbols, symbol);
+      },
+      Option::SOME(Analyzer::Type::Instance(instance)) -> {
+        let name: String = Doc::definitionName(instance.definition, defs, symbols);
+        let arguments: String = Doc::joinTypes(&instance.typeArguments, defs, types, symbols);
+        return `${name.toStr()}<${arguments.toStr()}>`;
+      },
+      Option::SOME(Analyzer::Type::Alias(defId)) -> {
+        return Doc::aliasTarget(defId, defs, types, symbols);
+      },
+      Option::SOME(primitive) -> {
+        return String::create(primitive.name());
+      },
+      Option::NONE -> {},
+    };
+
+    return String::create("unknown");
+  }
+
+  function aliasTarget(
+    defId: Analyzer::DefinitionId,
+    defs: &Analyzer::DefinitionStore,
+    types: &Analyzer::TypeStore,
+    symbols: &Analyzer::SymbolTable,
+  ): String {
+    let Option::SOME(Analyzer::Definition::TypeAlias(alias)) = defs.get(defId) else {
+      return Doc::definitionName(defId, defs, symbols);
+    };
+
+    return Doc::renderType(alias.aliasedType, defs, types, symbols);
+  }
+
+  function definitionName(
+    defId: Analyzer::DefinitionId,
+    defs: &Analyzer::DefinitionStore,
+    symbols: &Analyzer::SymbolTable
+  ): String {
+    let Option::SOME(definition) = defs.get(defId) else {
+      return String::new();
+    };
+
+    return Doc::symbolText(symbols, definition.name());
+  }
+
+  function symbolText(symbols: &Analyzer::SymbolTable, symbol: Analyzer::SymbolId): String {
+    return match (symbols.resolve(symbol)) {
+      Option::SOME(text) -> String::create(text),
+      Option::NONE -> String::new(),
+    };
+  }
+
+  function metadataIsPublic(metadata: &Ast::Metadata): boolean {
+    let mut index: u64 = 0;
+
+    while (index < metadata.modifiers.length()) {
+      if (let Option::SOME(Ast::Modifier::Public) = metadata.modifiers.get(index)) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function cloneDoc(doc: Option<&String>): Option<String> {
+    if (let Option::SOME(text) = doc) {
+      return Option::SOME(text.clone());
+    }
+
+    return Option::NONE;
+  }
+
+  function cloneMember(member: &Doc::DocMember): Doc::DocMember {
+    return Doc::DocMember {
+      name: member.name.clone(),
+      kind: member.kind,
+      signature: member.signature.clone(),
+      doc: Doc::cloneDoc(member.doc.asRef()),
+    };
+  }
+
+  function joinPath(prefix: &String, name: &String): String {
+    return `${prefix.toStr()}::${name.toStr()}`;
+  }
+
+  /// The text after the last `::`, or all of it.
+  function lastSegment(name: &String): String {
+    let mut start: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index + 1 < name.length()) {
+      if (let Option::SOME(first) = name.byteAt(index)) {
+        if (let Option::SOME(second) = name.byteAt(index + 1)) {
+          if (first == ':' as u8 && second == ':' as u8) {
+            start = index + 2;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return name.substringBytes(start, name.length());
+  }
+
+  function containsText(values: &Vector<String>, target: &String): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(value) = values.get(index)) {
+        if (value.equals(target)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Compares two positions by `primary`, then by `secondary`, bytewise.
+  function comparePositions(
+    primary: &Vector<String>,
+    secondary: &Vector<String>,
+    left: u64,
+    right: u64
+  ): i32 {
+    let byPrimary: i32 = Doc::compareAt(primary, left, right);
+
+    if (byPrimary != 0) {
+      return byPrimary;
+    }
+
+    return Doc::compareAt(secondary, left, right);
+  }
+
+  /// Compares two entries of `values` bytewise; a missing entry sorts first.
+  function compareAt(values: &Vector<String>, left: u64, right: u64): i32 {
+    let Option::SOME(leftText) = values.get(left) else {
+      return values.get(right).isSome() ? -1 : 0;
+    };
+    let Option::SOME(rightText) = values.get(right) else {
+      return 1;
+    };
+
+    return leftText.compare(rightText);
+  }
+
+  /// The positions of `primary` in stable order by `primary` and then
+  /// `secondary`, which is what `sort_by` on the host's key tuples yields.
+  function stableOrder(primary: &Vector<String>, secondary: &Vector<String>): Vector<u64> {
+    let count: u64 = primary.length();
+    let mut current: Vector<u64> = Vector::new<u64>();
+    let mut position: u64 = 0;
+
+    while (position < count) {
+      current.push(position);
+      position += 1;
+    }
+
+    let mut width: u64 = 1;
+
+    while (width < count) {
+      let mut next: Vector<u64> = Vector::new<u64>();
+      let mut start: u64 = 0;
+
+      while (start < count) {
+        let middle: u64 = start + width < count ? start + width : count;
+        let end: u64 = start + 2 * width < count ? start + 2 * width : count;
+        Doc::mergeRuns(primary, secondary, &current, start, middle, end, &mut next);
+        start = end;
+      }
+
+      current = next;
+      width = width * 2;
+    }
+
+    return current;
+  }
+
+  function mergeRuns(
+    primary: &Vector<String>,
+    secondary: &Vector<String>,
+    current: &Vector<u64>,
+    start: u64,
+    middle: u64,
+    end: u64,
+    next: &mut Vector<u64>,
+  ): void {
+    let mut nextRef: &mut Vector<u64> = next;
+    let mut left: u64 = start;
+    let mut right: u64 = middle;
+
+    while (left < middle || right < end) {
+      let leftValue: u64 = Doc::positionAt(current, left);
+      let rightValue: u64 = Doc::positionAt(current, right);
+      let takeRight: boolean = left >= middle || (right < end && Doc::comparePositions(primary, secondary, rightValue, leftValue) < 0);
+
+      if (takeRight) {
+        nextRef.push(rightValue);
+        right += 1;
+      } else {
+        nextRef.push(leftValue);
+        left += 1;
+      }
+    }
+  }
+
+  function positionAt(positions: &Vector<u64>, index: u64): u64 {
+    if (let Option::SOME(position) = positions.get(index)) {
+      return *position;
+    }
+
+    return 0;
+  }
+
+  function modulesJson(program: &Doc::DocProgram, modules: &Vector<Ast::Module>): JsonValue {
+    let noSecondary: Vector<String> = Vector::new<String>();
+    let order: Vector<u64> = Doc::stableOrder(&program.moduleNames, &noSecondary);
+    let mut entries: Vector<JsonValue> = Vector::new<JsonValue>();
+    let mut index: u64 = 0;
+
+    while (index < order.length()) {
+      if (let Option::SOME(position) = order.get(index)) {
+        let mut fields: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+
+        if (let Option::SOME(name) = program.moduleNames.get(*position)) {
+          fields.push(JsonObjectEntry::create("name", JsonValue::fromString(name.clone())));
+        }
+
+        if (let Option::SOME(module) = modules.get(*position)) {
+          if (let Option::SOME(doc) = &module.doc) {
+            fields.push(JsonObjectEntry::create("doc", JsonValue::fromString(doc.clone())));
+          }
+        }
+
+        entries.push(JsonValue::object(fields));
+      }
+
+      index += 1;
+    }
+
+    return JsonValue::array(entries);
+  }
+
+  function itemsJson(items: &Vector<Doc::DocItem>): JsonValue {
+    let mut moduleKeys: Vector<String> = Vector::new<String>();
+    let mut pathKeys: Vector<String> = Vector::new<String>();
+    let mut keyIndex: u64 = 0;
+
+    while (keyIndex < items.length()) {
+      if (let Option::SOME(item) = items.get(keyIndex)) {
+        moduleKeys.push(item.module.clone());
+        pathKeys.push(item.path.clone());
+      }
+
+      keyIndex += 1;
+    }
+
+    let order: Vector<u64> = Doc::stableOrder(&moduleKeys, &pathKeys);
+    let mut entries: Vector<JsonValue> = Vector::new<JsonValue>();
+    let mut index: u64 = 0;
+
+    while (index < order.length()) {
+      if (let Option::SOME(position) = order.get(index)) {
+        if (let Option::SOME(item) = items.get(*position)) {
+          entries.push(Doc::itemJson(item));
+        }
+      }
+
+      index += 1;
+    }
+
+    return JsonValue::array(entries);
+  }
+
+  function itemJson(item: &Doc::DocItem): JsonValue {
+    let mut fields: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+    let visibility: str = item.isPublic ? "public" : "private";
+
+    fields.push(JsonObjectEntry::create("module", JsonValue::fromString(item.module.clone())));
+    fields.push(JsonObjectEntry::create("path", JsonValue::fromString(item.path.clone())));
+    fields.push(JsonObjectEntry::create("name", JsonValue::fromString(item.name.clone())));
+    fields.push(JsonObjectEntry::create("kind", JsonValue::stringValue(item.kind)));
+    fields.push(JsonObjectEntry::create("visibility", JsonValue::stringValue(visibility)));
+    fields.push(JsonObjectEntry::create("signature", JsonValue::fromString(item.signature.clone())));
+
+    if (let Option::SOME(doc) = &item.doc) {
+      fields.push(JsonObjectEntry::create("doc", JsonValue::fromString(doc.clone())));
+    }
+
+    if (item.members.length() > 0) {
+      let mut members: Vector<JsonValue> = Vector::new<JsonValue>();
+      let mut index: u64 = 0;
+
+      while (index < item.members.length()) {
+        if (let Option::SOME(member) = item.members.get(index)) {
+          members.push(Doc::memberJson(member));
+        }
+
+        index += 1;
+      }
+
+      fields.push(JsonObjectEntry::create("members", JsonValue::array(members)));
+    }
+
+    return JsonValue::object(fields);
+  }
+
+  function memberJson(member: &Doc::DocMember): JsonValue {
+    let mut fields: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+
+    fields.push(JsonObjectEntry::create("name", JsonValue::fromString(member.name.clone())));
+    fields.push(JsonObjectEntry::create("kind", JsonValue::stringValue(member.kind)));
+    fields.push(JsonObjectEntry::create("signature", JsonValue::fromString(member.signature.clone())));
+
+    if (let Option::SOME(doc) = &member.doc) {
+      fields.push(JsonObjectEntry::create("doc", JsonValue::fromString(doc.clone())));
+    }
+
+    return JsonValue::object(fields);
+  }
+}
+
+function docTestStrings(values: &Vector<str>): Vector<String> {
+  let mut strings: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      strings.push(String::create(*value));
+    }
+
+    index += 1;
+  }
+
+  return strings;
+}
+
+function docTestOrderText(order: &Vector<u64>): String {
+  let mut text: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < order.length()) {
+    if (let Option::SOME(position) = order.get(index)) {
+      if (index > 0) {
+        text.pushStr(",");
+      }
+
+      text.pushStr(`${*position}`.toStr());
+    }
+
+    index += 1;
+  }
+
+  return text;
+}
+
+/// Items sort by module and then path, bytewise, and equal keys keep the
+/// order they were collected in, which is what the host's stable `sort_by`
+/// does to overloads sharing one path.
+@test
+function docStableOrderSortsByBothKeysAndKeepsTies(): void {
+  let mut modules: Vector<str> = Vector::new<str>();
+  modules.push("std::io");
+  modules.push("app");
+  modules.push("std::io");
+  modules.push("app");
+  modules.push("std::io");
+
+  let mut paths: Vector<str> = Vector::new<str>();
+  paths.push("std::io::Io::println");
+  paths.push("app::main");
+  paths.push("std::io::Io::eprintln");
+  paths.push("app::Main");
+  paths.push("std::io::Io::println");
+
+  let moduleKeys: Vector<String> = docTestStrings(&modules);
+  let pathKeys: Vector<String> = docTestStrings(&paths);
+  let order: Vector<u64> = Doc::stableOrder(&moduleKeys, &pathKeys);
+
+  Test::assertEq<str>(docTestOrderText(&order).toStr(), "3,1,2,0,4");
+}
+
+/// A multi-segment namespace is documented under its last segment.
+@test
+function docLastSegmentTakesTheTextAfterTheLastSeparator(): void {
+  let nested: String = String::create("LibC::Process");
+  let plain: String = String::create("Io");
+  let deep: String = String::create("Fs::Sys::Unix");
+
+  Test::assertEq<str>(Doc::lastSegment(&nested).toStr(), "Process");
+  Test::assertEq<str>(Doc::lastSegment(&plain).toStr(), "Io");
+  Test::assertEq<str>(Doc::lastSegment(&deep).toStr(), "Unix");
+}

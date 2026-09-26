@@ -18,6 +18,7 @@ export enum CliCommand {
   TEST,
   TEST_STD,
   FMT,
+  DOC,
   HELP,
   VERSION,
 }
@@ -80,6 +81,8 @@ export record CliOptions {
   public fmtStdinJson: boolean;
   /// Emits a unified diff instead of rewriting files (fmt only).
   public fmtEmitDiff: boolean;
+  /// Explicit project directory to document (doc only).
+  public docProject: Option<String>;
 
   public static create(command: CliCommand): CliOptions {
     return CliOptions {
@@ -112,6 +115,7 @@ export record CliOptions {
       fmtSortImports: false,
       fmtStdinJson: false,
       fmtEmitDiff: false,
+      docProject: Option::NONE,
     };
   }
 
@@ -141,6 +145,14 @@ export record CliOptions {
 
   public isFmtMode(&self): boolean {
     if (let CliCommand::FMT = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isDocMode(&self): boolean {
+    if (let CliCommand::DOC = self.command) {
       return true;
     }
 
@@ -296,6 +308,10 @@ function cliSubcommandOf(argument: &String): Option<CliCommand> {
 
   if (argument.equals("fmt")) {
     return Option::SOME(CliCommand::FMT);
+  }
+
+  if (argument.equals("doc")) {
+    return Option::SOME(CliCommand::DOC);
   }
 
   return Option::NONE;
@@ -735,6 +751,101 @@ function flagEqualsValue(argument: &String, flagName: str): Option<String> {
   return Option::SOME(argument.substringBytes(prefixLength + 1, argument.length()));
 }
 
+/// Parses one `doc` argument, returning the index of the next one.
+///
+/// `doc` takes what the host's `DocCommand` takes and nothing else: one path,
+/// `--project`, `--std-path`, `-o`/`--output`, and `--json`, which selects the
+/// only format there is.
+function parseDocArgument(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+): Result<u64, String> {
+  let mut optionsRef: &mut CliOptions = options;
+
+  if (argument.equals("--json")) {
+    return Result::OK(index + 1);
+  }
+
+  if (argument.equals("--project") || argument.equals("--std-path") || argument.equals("-o") || argument.equals("--output")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue(argument.toStr(), "a value"));
+    };
+
+    applyDocValueFlag(optionsRef, argument, value);
+    return Result::OK(index + 2);
+  }
+
+  if (let Option::SOME(value) = flagEqualsValue(argument, "--project")) {
+    optionsRef.docProject = Option::SOME(value);
+    return Result::OK(index + 1);
+  }
+
+  if (let Option::SOME(value) = flagEqualsValue(argument, "--std-path")) {
+    optionsRef.stdPath = Option::SOME(value);
+    return Result::OK(index + 1);
+  }
+
+  if (let Option::SOME(value) = flagEqualsValue(argument, "--output")) {
+    optionsRef.outputPath = Option::SOME(value);
+    return Result::OK(index + 1);
+  }
+
+  if (let Option::SOME(value) = flagEqualsValue(argument, "--json")) {
+    return Result::ERROR(`error: unexpected value '${value.toStr()}' for '--json' found; no more were expected`);
+  }
+
+  if (let Option::SOME(value) = attachedShortValue(argument, "-o")) {
+    optionsRef.outputPath = Option::SOME(value);
+    return Result::OK(index + 1);
+  }
+
+  if (argument.startsWith("-")) {
+    return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+  }
+
+  if (optionsRef.path.isSome()) {
+    return Result::ERROR(`error: unexpected argument '${argument.toStr()}'`);
+  }
+
+  optionsRef.path = Option::SOME(argument.clone());
+  return Result::OK(index + 1);
+}
+
+/// The value attached to a short flag, the way `clap` reads one: `-ofile`
+/// and `-o=file` both give `file`. `NONE` for the bare flag and for any other
+/// argument.
+function attachedShortValue(argument: &String, flag: str): Option<String> {
+  let flagText: String = String::create(flag);
+
+  if (!argument.startsWith(flag) || argument.length() <= flagText.length()) {
+    return Option::NONE;
+  }
+
+  let mut start: u64 = flagText.length();
+
+  if (let Option::SOME(byte) = argument.byteAt(start)) {
+    if (byte == '=' as u8) {
+      start += 1;
+    }
+  }
+
+  return Option::SOME(argument.substringBytes(start, argument.length()));
+}
+
+function applyDocValueFlag(options: &mut CliOptions, flag: &String, value: &String): void {
+  let mut optionsRef: &mut CliOptions = options;
+
+  if (flag.equals("--project")) {
+    optionsRef.docProject = Option::SOME(value.clone());
+  } else if (flag.equals("--std-path")) {
+    optionsRef.stdPath = Option::SOME(value.clone());
+  } else {
+    optionsRef.outputPath = Option::SOME(value.clone());
+  }
+}
+
 /// Applies `--emit`'s comma-separated mode list to `options`. An empty
 /// value (`--emit=`) enables nothing, matching the host.
 function applyFmtEmitModes(options: &mut CliOptions, value: &String): void {
@@ -1117,6 +1228,18 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       return Result::OK(options);
     }
 
+    if (options.isDocMode()) {
+      match (parseDocArgument(arguments, argument, index, &mut options)) {
+        Result::OK(next) -> {
+          index = next;
+          continue;
+        },
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+      };
+    }
+
     if (options.isTestStdMode() && argument.startsWith("-") && !cliTestStdAcceptsFlag(argument)) {
       return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
     }
@@ -1412,6 +1535,7 @@ export function helpText(): String {
   text.pushStr("  test       Run language-native tests for a project\n");
   text.pushStr("  test-std   Run language-native tests for the standard library\n");
   text.pushStr("  fmt        Format Ignis source canonically with parse/reparse safety checks\n");
+  text.pushStr("  doc        Extract API documentation from doc comments\n");
   text.pushStr("\n");
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
   text.pushStr("Without a path the project containing the current directory is used.\n");
@@ -1447,7 +1571,10 @@ export function helpText(): String {
   text.pushStr("      --fixtures <DIR>      Add a directory of program fixture cases (test only)\n");
   text.pushStr("      --partition <K/N>     Run only shard K of N, 1-based (test only)\n");
   text.pushStr("      --test-timeout <SECS> Wall-clock budget for one test process (test only)\n");
-  text.pushStr("      --project <DIR>       Explicit project directory (fmt only)\n");
+  text.pushStr("      --project <DIR>       Explicit project directory (fmt, doc)\n");
+  text.pushStr("      --output <FILE>       Write the JSON document here instead of stdout (doc only;\n");
+  text.pushStr("                            -o works too)\n");
+  text.pushStr("      --json                Emit JSON, the only format there is (doc only)\n");
   text.pushStr("      --check               Validate formatting without rewriting files (fmt only)\n");
   text.pushStr("      --config <FILE>       Explicit formatter config file (fmt only)\n");
   text.pushStr("      --indent-width <N>    Override formatter indentation width (fmt only)\n");
@@ -1516,6 +1643,7 @@ function cliCommandName(command: CliCommand): str {
     CliCommand::TEST -> "test",
     CliCommand::TEST_STD -> "test-std",
     CliCommand::FMT -> "fmt",
+    CliCommand::DOC -> "doc",
     CliCommand::HELP -> "help",
     CliCommand::VERSION -> "version",
   };
@@ -1586,6 +1714,102 @@ function cliParsesEverySubcommand(): void {
   let mut testArguments: Vector<String> = Vector::new<String>();
   cliPush(&mut testArguments, "test");
   Test::assertEq<str>(cliCommandName(cliParse(&testArguments).command), "test");
+}
+
+/// `doc` reads the host `DocCommand`'s flags: a file, `--std-path`, and
+/// `--output` or its `-o` short form.
+@test
+function cliParsesDocWithAFileAndAnOutput(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "doc");
+  cliPush(&mut arguments, "std/io/mod.ign");
+  cliPush(&mut arguments, "--std-path");
+  cliPush(&mut arguments, "std");
+  cliPush(&mut arguments, "--output");
+  cliPush(&mut arguments, "docs-pkg/api.json");
+  cliPush(&mut arguments, "--json");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "doc");
+  Test::assertEq<str>(cliPathText(&options).toStr(), "std/io/mod.ign");
+  Test::assertEq<str>(cliOptionText(&options.stdPath).toStr(), "std");
+  Test::assertEq<str>(cliOptionText(&options.outputPath).toStr(), "docs-pkg/api.json");
+  Test::assertEq<boolean>(options.docProject.isNone(), true);
+
+  let mut shortArguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortArguments, "doc");
+  cliPush(&mut shortArguments, "-o");
+  cliPush(&mut shortArguments, "api.json");
+  cliPush(&mut shortArguments, "--project=example/demo");
+
+  let shortOptions: CliOptions = cliParse(&shortArguments);
+
+  Test::assertEq<str>(cliOptionText(&shortOptions.outputPath).toStr(), "api.json");
+  Test::assertEq<str>(cliOptionText(&shortOptions.docProject).toStr(), "example/demo");
+  Test::assertEq<str>(cliPathText(&shortOptions).toStr(), "");
+}
+
+/// Every `doc` flag that takes a value also takes it attached, as `clap`
+/// allows: `--project=`, `--std-path=`, `--output=`, `-o=` and `-o<file>`.
+@test
+function cliParsesDocFlagsWithAttachedValues(): void {
+  let mut longForms: Vector<String> = Vector::new<String>();
+  cliPush(&mut longForms, "doc");
+  cliPush(&mut longForms, "--project=example/demo");
+  cliPush(&mut longForms, "--std-path=std");
+  cliPush(&mut longForms, "--output=docs-pkg/api.json");
+
+  let longOptions: CliOptions = cliParse(&longForms);
+
+  Test::assertEq<str>(cliOptionText(&longOptions.docProject).toStr(), "example/demo");
+  Test::assertEq<str>(cliOptionText(&longOptions.stdPath).toStr(), "std");
+  Test::assertEq<str>(cliOptionText(&longOptions.outputPath).toStr(), "docs-pkg/api.json");
+
+  let mut shortEquals: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortEquals, "doc");
+  cliPush(&mut shortEquals, "-o=api.json");
+  Test::assertEq<str>(cliOptionText(&cliParse(&shortEquals).outputPath).toStr(), "api.json");
+
+  let mut shortAttached: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortAttached, "doc");
+  cliPush(&mut shortAttached, "-oapi.json");
+  Test::assertEq<str>(cliOptionText(&cliParse(&shortAttached).outputPath).toStr(), "api.json");
+}
+
+/// `--json` is a switch, so the host rejects a value given to it.
+@test
+function cliRejectsAValueForDocJson(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "doc");
+  cliPush(&mut arguments, "--json=true");
+
+  Test::assertEq<str>(
+    cliParseError(&arguments).toStr(),
+    "error: unexpected value 'true' for '--json' found; no more were expected",
+  );
+}
+
+/// `doc` rejects what its host counterpart does not take: build flags, a
+/// second path, and a flag with no value.
+@test
+function cliRejectsWhatDocDoesNotTake(): void {
+  let mut buildFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut buildFlag, "doc");
+  cliPush(&mut buildFlag, "--cc");
+  cliPush(&mut buildFlag, "clang");
+  Test::assertEq<str>(cliParseError(&buildFlag).toStr(), "error: unknown argument: --cc");
+
+  let mut twoPaths: Vector<String> = Vector::new<String>();
+  cliPush(&mut twoPaths, "doc");
+  cliPush(&mut twoPaths, "a.ign");
+  cliPush(&mut twoPaths, "b.ign");
+  Test::assertEq<str>(cliParseError(&twoPaths).toStr(), "error: unexpected argument 'b.ign'");
+
+  let mut missingValue: Vector<String> = Vector::new<String>();
+  cliPush(&mut missingValue, "doc");
+  cliPush(&mut missingValue, "--output");
+  Test::assertEq<str>(cliParseError(&missingValue).toStr(), "error: --output requires a value");
 }
 
 /// A subcommand takes a project path the same way a build takes one.
