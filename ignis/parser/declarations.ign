@@ -913,6 +913,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::TYPE, "expected 'type'")!;
     let nameToken = parserRef.expectIdentifier("expected type alias name")!;
@@ -924,13 +925,15 @@ export namespace ParserDeclarations {
     let value = ParserTypes::parseType(parserRef)!;
     let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after type alias")!;
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
       name: nameToken.lexemeString(),
       genericParameters: Ast::copyGenericParams(&genericParameters),
       value: value,
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   function parseFunctionItem(
@@ -938,6 +941,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::FUNCTION, "expected 'function'")!;
     let nameToken = parserRef.expectIdentifier("expected function name")!;
@@ -985,7 +989,7 @@ export namespace ParserDeclarations {
       Option::NONE -> keyword.span,
     };
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
       span: ParserShared::mergeSpans(keyword.span, bodySpan),
       name: nameToken.lexemeString(),
       genericParameters: Ast::copyGenericParams(&genericParameters),
@@ -993,7 +997,9 @@ export namespace ParserDeclarations {
       returnType: returnType,
       body: body,
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   /// A signature-only extern constant: `const NAME: Type;`. A zero literal
@@ -1004,6 +1010,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::CONST, "expected 'const'")!;
     let nameToken = parserRef.expectIdentifier("expected constant name")!;
@@ -1018,13 +1025,15 @@ export namespace ParserDeclarations {
       value: Ast::Expression::LiteralValue::Int(0),
     }));
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
       name: nameToken.lexemeString(),
       annotation: Option::SOME(typeId),
       value: placeholder,
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   /// A signature-only extern function: same head as `parseFunctionItem`, a
@@ -1035,6 +1044,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::FUNCTION, "expected 'function'")!;
     let nameToken = parserRef.expectIdentifier("expected function name")!;
@@ -1080,7 +1090,7 @@ export namespace ParserDeclarations {
       tail: Option::NONE,
     }));
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
       span: ParserShared::mergeSpans(keyword.span, endSpan),
       name: nameToken.lexemeString(),
       genericParameters: Vector::new<Ast::GenericParam>(),
@@ -1088,7 +1098,9 @@ export namespace ParserDeclarations {
       returnType: Option::SOME(typeId),
       body: body,
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   function parseFunctionSignatureOnly(parser: &mut ParserShared::State): boolean {
@@ -1166,6 +1178,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::CONST, "expected 'const'")!;
     let nameToken = parserRef.expectIdentifier("expected constant name")!;
@@ -1179,13 +1192,15 @@ export namespace ParserDeclarations {
     let valueExpression = ParserExpressions::parseExpression(parserRef)!;
     let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after constant declaration")!;
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
       name: nameToken.lexemeString(),
       annotation: Option::SOME(annotation),
       value: valueExpression.id,
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   function createEnumVariantPattern(
@@ -1245,6 +1260,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::RECORD, "expected 'record'")!;
     let nameToken = parserRef.expectIdentifier("expected record name")!;
@@ -1258,6 +1274,7 @@ export namespace ParserDeclarations {
     let mut endSpan: SourceSpan = nameToken.span;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      let memberDoc: Option<String> = parserRef.takePendingDoc();
       let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
       parserRef.skipTrivia();
 
@@ -1266,6 +1283,7 @@ export namespace ParserDeclarations {
           ParserRecovery::synchronizeTopLevel(parserRef);
           break;
         };
+        parserRef.module.setItemDoc(methodId, &memberDoc);
         methods.push(methodId);
         endSpan = match (parserRef.module.items.get(methodId)) {
           Option::SOME(node) -> ParserDeclarations::itemSpan(node),
@@ -1278,6 +1296,7 @@ export namespace ParserDeclarations {
         ParserRecovery::synchronizeTopLevel(parserRef);
         break;
       };
+      parserRef.module.setPatternDoc(field, &memberDoc);
       fields.push(field);
 
       if (parserRef.consumePunctuation(Punctuation::EQUAL).isSome()) {
@@ -1307,14 +1326,16 @@ export namespace ParserDeclarations {
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after record fields")!;
     endSpan = closeBrace.span;
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
       span: ParserShared::mergeSpans(keyword.span, endSpan),
       name: nameToken.lexemeString(),
       genericParameters: Ast::copyGenericParams(&genericParameters),
       fields: ParserDeclarations::copyPatternIds(&fields),
       methods: ParserDeclarations::copyItemIds(&methods),
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   function parseNamespaceItem(
@@ -1322,12 +1343,14 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::NAMESPACE, "expected 'namespace'")!;
     let namespaceName = ParserDeclarations::parseQualifiedName(parserRef, "expected namespace name")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after namespace name") else {
       return Option::NONE;
     };
+    let innerDoc: Option<String> = parserRef.takePendingInnerDoc();
     let mut items: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
@@ -1338,12 +1361,15 @@ export namespace ParserDeclarations {
 
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after namespace body")!;
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
       name: namespaceName.name.clone(),
       items: ParserDeclarations::copyItemIds(&items),
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    parserRef.module.setNamespaceInnerDoc(itemId, &innerDoc);
+    return Option::SOME(itemId);
   }
 
   function metadataHasStatic(metadata: &Ast::Metadata): boolean {
@@ -1370,6 +1396,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::ENUM, "expected 'enum'")!;
     let nameToken = parserRef.expectIdentifier("expected enum name")!;
@@ -1383,6 +1410,7 @@ export namespace ParserDeclarations {
     let mut endSpan: SourceSpan = nameToken.span;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      let memberDoc: Option<String> = parserRef.takePendingDoc();
       let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
       parserRef.skipTrivia();
 
@@ -1405,6 +1433,7 @@ export namespace ParserDeclarations {
           break;
         };
 
+        parserRef.module.setPatternDoc(staticField, &memberDoc);
         variants.push(staticField);
 
         if (let Option::SOME(terminator) = parserRef.consumePunctuation(Punctuation::SEMICOLON)) {
@@ -1423,6 +1452,7 @@ export namespace ParserDeclarations {
 
       if (ParserDeclarations::enumMemberLooksLikeMethod(parserRef)) {
         let methodId = ParserDeclarations::parseMethodLikeItem(parserRef, Ast::copyMetadata(&memberMetadata), false)!;
+        parserRef.module.setItemDoc(methodId, &memberDoc);
         methods.push(methodId);
 
         endSpan = match (parserRef.module.items.get(methodId)) {
@@ -1447,6 +1477,7 @@ export namespace ParserDeclarations {
       };
       let variantLexeme: String = variantName.lexemeString();
       let variantId = ParserDeclarations::createEnumVariantPattern(parserRef, variantName)!;
+      parserRef.module.setPatternDoc(variantId, &memberDoc);
       variants.push(variantId);
 
       endSpan = match (parserRef.module.patterns.get(variantId)) {
@@ -1468,14 +1499,16 @@ export namespace ParserDeclarations {
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after enum variants")!;
     endSpan = closeBrace.span;
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
       span: ParserShared::mergeSpans(keyword.span, endSpan),
       name: nameToken.lexemeString(),
       genericParameters: Ast::copyGenericParams(&genericParameters),
       variants: ParserDeclarations::copyPatternIds(&variants),
       methods: ParserDeclarations::copyItemIds(&methods),
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   /// Copies a method declaration without its body.
@@ -1526,6 +1559,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::TRAIT, "expected 'trait'")!;
     let nameToken = parserRef.expectIdentifier("expected trait name")!;
@@ -1538,11 +1572,15 @@ export namespace ParserDeclarations {
     let mut defaultMethods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      let memberDoc: Option<String> = parserRef.takePendingDoc();
       let method = ParserDeclarations::parseTraitMethodItem(parserRef)!;
+      parserRef.module.setItemDoc(method.id, &memberDoc);
 
       if (method.hasBody) {
         defaultMethods.push(method.id);
-        methods.push(ParserDeclarations::signatureTwinOf(parserRef, method.id)!);
+        let twinId = ParserDeclarations::signatureTwinOf(parserRef, method.id)!;
+        parserRef.module.setItemDoc(twinId, &memberDoc);
+        methods.push(twinId);
         continue;
       }
 
@@ -1551,14 +1589,16 @@ export namespace ParserDeclarations {
 
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after trait body")!;
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Trait(Ast::Item::Trait {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
       name: nameToken.lexemeString(),
       genericParameters: Ast::copyGenericParams(&genericParameters),
       methods: ParserDeclarations::copyItemIds(&methods),
       defaultMethods: ParserDeclarations::copyItemIds(&defaultMethods),
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   function parseExternItem(
@@ -1566,6 +1606,7 @@ export namespace ParserDeclarations {
     metadata: Ast::Metadata
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
 
     let keyword = parserRef.expectKeyword(Keyword::EXTERN, "expected 'extern'")!;
     let externName = ParserDeclarations::parseQualifiedName(parserRef, "expected extern namespace")!;
@@ -1596,12 +1637,14 @@ export namespace ParserDeclarations {
 
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after extern block")!;
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Extern(Ast::Item::Extern {
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Extern(Ast::Item::Extern {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
       name: externName.name.clone(),
       items: items,
       metadata: Ast::copyMetadata(&metadata),
-    })));
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    return Option::SOME(itemId);
   }
 
   function parseExportedDeclarationAfterMetadata(

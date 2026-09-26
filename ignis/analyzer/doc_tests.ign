@@ -1,0 +1,100 @@
+import Test from "std::test";
+
+import SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
+
+record DocBinding {
+  public defStore: Analyzer::DefinitionStore;
+  public symbols: Analyzer::SymbolTable;
+}
+
+/// Bind `source` through both binder passes.
+function docBind(source: str): DocBinding {
+  let file: SourceFile = SourceFile::create("doc_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let pass1 = Analyzer::Binder::predeclareRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+  let _pass2 = Analyzer::Binder::completeRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &pass1,
+  );
+
+  return DocBinding {
+    defStore: defStore,
+    symbols: symbols,
+  };
+}
+
+/// The documentation of the first definition declaring `name`, or `<none>`.
+function docOfDefinition(binding: &mut DocBinding, name: str): String {
+  let symbol: Analyzer::SymbolId = binding.symbols.intern(name);
+  let ids: Vector<Analyzer::DefinitionId> = binding.defStore.definitionsNamed(symbol);
+
+  let Option::SOME(id) = ids.get(0) else {
+    @panic("no definition with that name");
+  };
+
+  return match (binding.defStore.docOf(*id)) {
+    Option::SOME(text) -> text.clone(),
+    Option::NONE -> String::create("<none>"),
+  };
+}
+
+/// Every definition kind the host's binder documents carries its `///` text;
+/// constants, enum static fields and undocumented items carry none.
+@test
+function binderCarriesDocsOntoDefinitions(): void {
+  let mut binding: DocBinding = docBind(
+    "/// A point.\nrecord Point {\n  /// X coordinate\n  x: i32;\n  y: i32;\n  /// Shared count.\n  static COUNT: i32 = 0;\n  /// Makes one.\n  static make(): i32 { return 0; }\n}\n/// A color.\nenum Color {\n  /// Red color\n  Red,\n  /// Custom color\n  Custom(u8),\n  /// The default channel.\n  CHANNEL: u8 = 0;\n  /// Whether it is red.\n  isRed(&self): boolean { return true; }\n}\n/// Shows a value.\ntrait Show {\n  /// Required.\n  show(&self): i32;\n}\n/// An alias.\ntype Count = i32;\n/// A constant.\nconst LIMIT: i32 = 3;\n/// Math helpers.\nnamespace MathNs {\n  /// Adds two values.\n  /// Wraps on overflow.\n  function add(a: i32, b: i32): i32 { return a + b; }\n}\n/// The C library.\nextern libc {\n  /// Writes a string.\n  function puts(text: str): i32;\n  /// The error number.\n  const errno: i32;\n}\nfunction undocumented(): void {}\n"
+  );
+
+  Test::assertEq<str>(docOfDefinition(&mut binding, "Point").toStr(), "A point.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "x").toStr(), "X coordinate");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "y").toStr(), "<none>");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "COUNT").toStr(), "Shared count.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "make").toStr(), "Makes one.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "Color").toStr(), "A color.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "Red").toStr(), "Red color");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "Custom").toStr(), "Custom color");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "CHANNEL").toStr(), "<none>");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "isRed").toStr(), "Whether it is red.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "Show").toStr(), "Shows a value.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "show").toStr(), "Required.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "Count").toStr(), "An alias.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "LIMIT").toStr(), "<none>");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "MathNs").toStr(), "Math helpers.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "add").toStr(), "Adds two values.  \nWraps on overflow.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "libc").toStr(), "The C library.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "puts").toStr(), "Writes a string.");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "errno").toStr(), "<none>");
+  Test::assertEq<str>(docOfDefinition(&mut binding, "undocumented").toStr(), "<none>");
+}
+
+/// A reopened namespace shares one definition, which keeps the first block's
+/// documentation.
+@test
+function binderKeepsTheFirstDocOfAReopenedNamespace(): void {
+  let mut binding: DocBinding = docBind(
+    "namespace Shared {}\n/// First.\nnamespace Shared {}\n/// Second.\nnamespace Shared {}\n"
+  );
+
+  Test::assertEq<str>(docOfDefinition(&mut binding, "Shared").toStr(), "First.");
+}
