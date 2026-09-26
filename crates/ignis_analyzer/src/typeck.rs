@@ -561,9 +561,20 @@ impl<'a> Analyzer<'a> {
 
         self.scopes.pop();
 
-        if let Some(else_branch) = &if_stmt.else_block {
-          let else_type = self.typecheck_node(else_branch, ScopeKind::Block, ctx);
-          self.typecheck_common_type(&then_type, &else_type, &if_stmt.span)
+        let Some(else_branch) = &if_stmt.else_block else {
+          return self.types.void();
+        };
+
+        let else_type = self.typecheck_node(else_branch, ScopeKind::Block, ctx);
+
+        // Statement blocks produce no value, so joining the branches' last-statement types
+        // only invents one: an error type when they disagree, which LIR lowering would
+        // materialize as a result local.
+        let then_diverges = matches!(self.types.get(&then_type), Type::Never);
+        let else_diverges = matches!(self.types.get(&else_type), Type::Never);
+
+        if then_diverges && else_diverges {
+          self.types.never()
         } else {
           self.types.void()
         }
@@ -13590,5 +13601,58 @@ function main(): boolean {
       "expected generated Eq trait overlays to satisfy builtin equality validation for generic instances, got diagnostics: {:?}",
       analyzer.diagnostics
     );
+  }
+
+  #[test]
+  fn statement_if_chain_ending_in_a_tail_if_is_void() {
+    let analyzer = analyze_typecheck_only(
+      r#"
+function chain(lead: i32): i32 {
+    let mut a: i32 = 0;
+
+    if (lead == 1) {
+        a = 5;
+    } else if (lead == 2) {
+        if (lead == 3) {
+            a = 1;
+        }
+    } else {
+        a = 9;
+    }
+
+    return a;
+}
+
+function diverging(lead: i32): i32 {
+    if (lead == 1) {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+"#,
+      false,
+    );
+
+    assert!(
+      analyzer.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+
+    let mut if_types: Vec<(u32, TypeId)> = analyzer
+      .node_types
+      .iter()
+      .filter(|(node_id, _)| matches!(analyzer.ast_node(node_id), ASTNode::Statement(ASTStatement::If(_))))
+      .map(|(node_id, type_id)| (analyzer.node_span(node_id).start.0, *type_id))
+      .collect();
+
+    if_types.sort_by_key(|(start, _)| *start);
+
+    let void = analyzer.types.void();
+    let never = analyzer.types.never();
+    let types_in_source_order: Vec<TypeId> = if_types.into_iter().map(|(_, type_id)| type_id).collect();
+
+    assert_eq!(types_in_source_order, vec![void, void, void, never]);
   }
 }

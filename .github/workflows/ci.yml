@@ -143,6 +143,7 @@ jobs:
           scripts/tests/test_baseline_churn_report.sh
           python3 scripts/tests/test_bootstrap_report.py
           python3 scripts/tests/test_selfhost_syntax_parity.py
+          python3 scripts/tests/test_selfhost_doc_parity.py
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -296,6 +297,12 @@ jobs:
         env:
           IGNIS_STAGE0: ${{ github.workspace }}/target/ci/ignis
         run: scripts/bootstrap.sh stage1
+
+      # `ignis doc` publishes the API package the release ships, so stage1's
+      # has to match the host's byte for byte on the release target, every std
+      # module entry and the doc_command.rs programs.
+      - name: Compare stage1's ignis doc output with the host's
+        run: python3 scripts/selfhost_doc_parity.py --compiler build/bootstrap/stage1/ignis --host "${GITHUB_WORKSPACE}/target/ci/ignis"
 
       # The same standard library suite as above, run by stage1, so the std
       # tests keep a runner once the host compiler is retired.
@@ -470,13 +477,19 @@ jobs:
       # `id: build` plus `continue-on-error` so the next step can turn a
       # failure into a warning when the override label is present, instead of
       # the job stopping here.
-      - name: Build stage1 with the official compiler (fallback disabled)
+      # stage1 must also compile stage2: a stage1 that builds but miscompiles
+      # the compiler (the official binary lacking a fix the sources now rely
+      # on) only shows up when it runs. #264 passed the stage1-only gate and
+      # broke the nightly exactly that way.
+      - name: Build stage1 with the official compiler, then stage2 with it (fallback disabled)
         id: build
         if: steps.stage0.outputs.resolved == 'true'
         continue-on-error: true
         env:
           IGNIS_STAGE0_NO_FALLBACK: "1"
-        run: scripts/bootstrap.sh stage1
+        run: |
+          scripts/bootstrap.sh stage1
+          scripts/bootstrap.sh stage2
 
       # `stage0-break-approved` exists for the one case the two-step rule
       # cannot itself tell apart from an ordinary violation: a bug fix the
@@ -491,7 +504,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          MESSAGE="stage1 did not build with the official stage0 compiler. If the uploaded log (official-stage0-gate-log) shows a compiler diagnostic, this is a two-step rule violation: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote, then use the feature), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label. If the log instead shows a build/link/environment failure unrelated to a compiler diagnostic, that is a gate problem, not a two-step rule violation — please report it."
+          MESSAGE="stage1 did not build with the official stage0 compiler, or that stage1 could not compile stage2. If the uploaded log (official-stage0-gate-log) shows a compiler diagnostic, this is a two-step rule violation: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote, then use the feature), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label. If the log instead shows a build/link/environment failure unrelated to a compiler diagnostic, that is a gate problem, not a two-step rule violation — please report it."
 
           if echo "$LABELS_JSON" | jq -e 'index("stage0-break-approved") != null' >/dev/null 2>&1; then
             echo "::warning::${MESSAGE} The 'stage0-break-approved' label is present, so this is a warning, not a failure."
@@ -506,5 +519,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: official-stage0-gate-log
-          path: build/bootstrap/stage1/log*.txt
+          path: |
+            build/bootstrap/stage1/log*.txt
+            build/bootstrap/stage2/log*.txt
           if-no-files-found: ignore
