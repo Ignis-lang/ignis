@@ -5,7 +5,8 @@ Spawns the language server, speaks JSON-RPC with Content-Length framing, and
 checks the lifecycle (initialize, shutdown, exit and its exit code), the error
 responses, the diagnostics published for an open buffer (a type error
 reported at the right UTF-16 range, then cleared once the buffer is fixed or
-closed) and the hovers answered for it.
+closed), the hovers answered for it, and go-to-definition, find-references
+and the document outline over a two-file project.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
 also proves analysis reads open documents instead of the disk.
 
@@ -30,6 +31,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent.parent
 MESSAGE_TIMEOUT_SECONDS = 120
@@ -100,6 +102,63 @@ HOVER_DOUBLE = (
 )
 
 
+# The navigation sources: `main.ign` declares a constant after a string with
+# a two-unit emoji and a two-byte letter on the same line, a namespace, a
+# record with fields and methods and an enum, and calls a function of
+# `util.ign`, one of the standard library, a method and a field.
+NAVIGATION_UTIL_SOURCE = HOVER_UTIL_SOURCE
+NAVIGATION_SOURCE = (
+  'import double from "./util";\n'
+  'import Io from "std::io";\n'
+  "\n"
+  'const GREETING: str = "héllo 😀"; const SCALE: i32 = 3;\n'
+  "\n"
+  "namespace Shapes {\n"
+  "  const LIMIT: i32 = 4;\n"
+  "\n"
+  "  function area(side: i32): i32 {\n"
+  "    return side * side;\n"
+  "  }\n"
+  "}\n"
+  "\n"
+  "record Point {\n"
+  "  public x: i32;\n"
+  "  public y: i32;\n"
+  "\n"
+  "  public length(&self): i32 {\n"
+  "    return self.x + self.y;\n"
+  "  }\n"
+  "\n"
+  "  public static origin(): Point {\n"
+  "    return Point { x: 0, y: 0 };\n"
+  "  }\n"
+  "}\n"
+  "\n"
+  "enum Mode {\n"
+  "  FAST,\n"
+  "  SLOW,\n"
+  "}\n"
+  "\n"
+  "function main(): i32 {\n"
+  '  let label: str = "héllo 😀"; let count: i32 = double(SCALE);\n'
+  "  let point: Point = Point::origin();\n"
+  "  Io::println(label);\n"
+  "\n"
+  "  return point.x + point.length() + double(count) + Shapes::area(Shapes::LIMIT);\n"
+  "}\n"
+)
+
+# The outline of `NAVIGATION_SOURCE`: (name, SymbolKind, children).
+NAVIGATION_OUTLINE = [
+  ("GREETING", 14, []),
+  ("SCALE", 14, []),
+  ("Shapes", 3, [("LIMIT", 14, []), ("area", 12, [])]),
+  ("Point", 23, [("x", 8, []), ("y", 8, []), ("length", 6, []), ("origin", 6, [])]),
+  ("Mode", 10, [("FAST", 22, []), ("SLOW", 22, [])]),
+  ("main", 12, []),
+]
+
+
 def position_of(text, needle, occurrence=1, delta=0):
   """The LSP position `delta` characters into the `occurrence`th `needle`."""
   offset = -1
@@ -111,6 +170,49 @@ def position_of(text, needle, occurrence=1, delta=0):
   line_start = text.rfind("\n", 0, offset) + 1
   column = len(text[line_start:offset].encode("utf-16-le")) // 2
   return {"line": text.count("\n", 0, offset), "character": column}
+
+
+def range_of(text, needle, occurrence=1, delta=0, length=None):
+  """The LSP range of `length` characters (all of `needle` by default) from
+  `delta` characters into the `occurrence`th `needle`."""
+  if length is None:
+    length = len(needle) - delta
+
+  return {
+    "start": position_of(text, needle, occurrence, delta),
+    "end": position_of(text, needle, occurrence, delta + length),
+  }
+
+
+def span_of(text, first, last):
+  """The LSP range from the first `first` to the end of the first `last`
+  after it."""
+  start = text.index(first)
+  end = text.index(last, start) + len(last)
+  return range_of(text[:end], first, length=end - start)
+
+
+def text_in(text, lsp_range):
+  """The characters of `text` an LSP range covers."""
+  lines = text.split("\n")
+
+  def offset(position):
+    line = lines[position["line"]]
+    units = 0
+    column = 0
+
+    while units < position["character"] and column < len(line):
+      units += len(line[column].encode("utf-16-le")) // 2
+      column += 1
+
+    return sum(len(previous) + 1 for previous in lines[:position["line"]]) + column
+
+  return text[offset(lsp_range["start"]):offset(lsp_range["end"])]
+
+
+def outline_of(symbols):
+  """The (name, kind, children) tree of a DocumentSymbol list."""
+  return [(symbol["name"], symbol["kind"], outline_of(symbol.get("children", []))) for symbol in symbols]
 
 
 def take_compiler_argument(argv):
@@ -276,6 +378,22 @@ class LanguageServer:
 
   def hover(self, request_id, uri, position):
     self.request(request_id, "textDocument/hover", {"textDocument": {"uri": uri}, "position": position})
+    return self.response(request_id)["result"]
+
+  def definition(self, request_id, uri, position):
+    self.request(request_id, "textDocument/definition", {"textDocument": {"uri": uri}, "position": position})
+    return self.response(request_id)["result"]
+
+  def references(self, request_id, uri, position, include_declaration):
+    self.request(request_id, "textDocument/references", {
+      "textDocument": {"uri": uri},
+      "position": position,
+      "context": {"includeDeclaration": include_declaration},
+    })
+    return self.response(request_id)["result"]
+
+  def document_symbols(self, request_id, uri):
+    self.request(request_id, "textDocument/documentSymbol", {"textDocument": {"uri": uri}})
     return self.response(request_id)["result"]
 
   def wait(self):
@@ -468,6 +586,146 @@ class LanguageServerTest(unittest.TestCase):
 
     self.server.notify("exit")
     self.assertEqual(self.server.wait(), 0)
+
+  def open_navigation_project(self):
+    """Writes the navigation sources, opens `main.ign` and returns the URIs
+    of `main.ign` and `util.ign`."""
+    util_uri = self.source_file("util.ign", NAVIGATION_UTIL_SOURCE)
+    uri = self.source_file("main.ign", NAVIGATION_SOURCE)
+    capabilities = self.server.initialize(self.workspace)["capabilities"]
+    self.assertTrue(capabilities["definitionProvider"])
+    self.assertTrue(capabilities["referencesProvider"])
+    self.assertIn("documentSymbolProvider", capabilities)
+
+    self.server.notify("textDocument/didOpen", {
+      "textDocument": {"uri": uri, "languageId": "ignis", "version": 1, "text": NAVIGATION_SOURCE},
+    })
+    return uri, util_uri
+
+  def finish(self, request_id):
+    self.server.request(request_id, "shutdown")
+    self.assertIsNone(self.server.response(request_id)["result"])
+
+    self.server.notify("exit")
+    self.assertEqual(self.server.wait(), 0)
+
+  def show(self, label, result):
+    if "-v" in sys.argv:
+      print("%s: %s" % (label, json.dumps(result, ensure_ascii=False)), file=sys.stderr)
+
+  def test_definitions_lead_to_declarations_in_the_project_and_std(self):
+    uri, util_uri = self.open_navigation_project()
+    source = NAVIGATION_SOURCE
+
+    local = self.server.definition(2, uri, position_of(source, "count)", delta=1))
+    self.show("definition of a local", local)
+    self.assertEqual(local, {"uri": uri, "range": span_of(source, "let count", "double(SCALE);")})
+
+    imported = self.server.definition(3, uri, position_of(source, "double(SCALE)", delta=2))
+    self.show("definition of an imported function", imported)
+    self.assertEqual(imported["uri"], util_uri)
+    self.assertIn("double(value: i32): i32", text_in(NAVIGATION_UTIL_SOURCE, imported["range"]))
+
+    method = self.server.definition(4, uri, position_of(source, "point.length", delta=7))
+    self.show("definition of a method", method)
+    self.assertEqual(method, {"uri": uri, "range": span_of(source, "length(&self)", "self.y;\n  }")})
+
+    field = self.server.definition(5, uri, position_of(source, "point.x", delta=6))
+    self.show("definition of a field", field)
+    self.assertEqual(field, {"uri": uri, "range": range_of(source, "x: i32;")})
+
+    constant = self.server.definition(6, uri, position_of(source, "SCALE)", delta=1))
+    self.show("definition of a constant", constant)
+    self.assertEqual(constant, {"uri": uri, "range": range_of(source, "const SCALE: i32 = 3;")})
+
+    standard = self.server.definition(7, uri, position_of(source, "Io::println", delta=6))
+    self.show("definition of a std function", standard)
+    self.assertIsNotNone(standard)
+    self.assertTrue(standard["uri"].endswith("/std/io/mod.ign"), standard["uri"])
+    io_source = Path(unquote(urlparse(standard["uri"]).path)).read_text(encoding="utf-8")
+    self.assertIn("println(", text_in(io_source, standard["range"]))
+
+    self.assertIsNone(self.server.definition(8, uri, position_of(source, "  let point", delta=1)))
+    self.assertIsNone(self.server.definition(9, uri, {"line": 2, "character": 0}))
+    self.finish(10)
+
+  def test_references_follow_includeDeclaration_across_files(self):
+    uri, util_uri = self.open_navigation_project()
+    source = NAVIGATION_SOURCE
+    uses = [
+      {"uri": uri, "range": range_of(source, "double from", length=6)},
+      {"uri": uri, "range": range_of(source, "double(SCALE)", length=6)},
+      {"uri": uri, "range": range_of(source, "double(count)", length=6)},
+    ]
+    declaration = {"uri": util_uri, "range": range_of(NAVIGATION_UTIL_SOURCE, "double(value", length=6)}
+
+    with_declaration = self.server.references(2, uri, position_of(source, "double(count)", delta=3), True)
+    self.show("references with the declaration", with_declaration)
+    self.assertEqual(with_declaration, uses + [declaration])
+
+    without_declaration = self.server.references(3, uri, position_of(source, "double(count)", delta=3), False)
+    self.assertEqual(without_declaration, uses)
+
+    count_uses = [{"uri": uri, "range": range_of(source, "count)", length=5)}]
+    count_declaration = {"uri": uri, "range": range_of(source, "count: i32", length=5)}
+    self.assertEqual(self.server.references(4, uri, position_of(source, "count)"), True), [count_declaration] + count_uses)
+    self.assertEqual(self.server.references(5, uri, position_of(source, "count: i32", delta=2), False), count_uses)
+
+    field = self.server.references(6, uri, position_of(source, "point.x", delta=6), False)
+    self.show("references of a field", field)
+    self.assertEqual(field, [
+      {"uri": uri, "range": range_of(source, "self.x", delta=5)},
+      {"uri": uri, "range": range_of(source, "x: 0", length=1)},
+      {"uri": uri, "range": range_of(source, "point.x", delta=6)},
+    ])
+
+    self.assertIsNone(self.server.references(7, uri, position_of(source, "  return point", delta=1), True))
+    self.finish(8)
+
+  def test_document_symbols_nest_members_with_their_kinds(self):
+    uri, _ = self.open_navigation_project()
+    source = NAVIGATION_SOURCE
+
+    symbols = self.server.document_symbols(2, uri)
+    self.show("document symbols", symbols)
+    self.assertEqual(outline_of(symbols), NAVIGATION_OUTLINE)
+
+    by_name = {symbol["name"]: symbol for symbol in symbols}
+    self.assertEqual(by_name["Point"]["range"], span_of(source, "record Point", "}\n}"))
+    self.assertEqual(by_name["Point"]["selectionRange"], range_of(source, "Point {", length=5))
+    self.assertEqual(by_name["SCALE"]["range"], range_of(source, "const SCALE: i32 = 3;"))
+    self.assertEqual(by_name["SCALE"]["selectionRange"], range_of(source, "SCALE:", length=5))
+
+    fields = {symbol["name"]: symbol for symbol in by_name["Point"]["children"]}
+    self.assertEqual(fields["x"]["range"], range_of(source, "x: i32;"))
+    self.assertEqual(fields["x"]["selectionRange"], range_of(source, "x: i32;", length=1))
+    self.finish(3)
+
+  def test_navigation_after_an_edit_that_breaks_parsing_moves_with_the_text(self):
+    uri, util_uri = self.open_navigation_project()
+    self.assertEqual(self.server.definition(2, uri, position_of(NAVIGATION_SOURCE, "double(SCALE)"))["uri"], util_uri)
+
+    broken = "function broken(\n" + NAVIGATION_SOURCE
+    self.server.notify("textDocument/didChange", {
+      "textDocument": {"uri": uri, "version": 2},
+      "contentChanges": [{"text": broken}],
+    })
+
+    local = self.server.definition(3, uri, position_of(broken, "count)", delta=1))
+    self.assertEqual(local, {"uri": uri, "range": span_of(broken, "let count", "double(SCALE);")})
+
+    uses = self.server.references(4, uri, position_of(broken, "count)"), False)
+    self.assertEqual(uses, [{"uri": uri, "range": range_of(broken, "count)", length=5)}])
+
+    symbols = self.server.document_symbols(5, uri)
+    self.assertEqual(outline_of(symbols), NAVIGATION_OUTLINE)
+    self.assertEqual(
+      {symbol["name"]: symbol for symbol in symbols}["Point"]["range"],
+      span_of(broken, "record Point", "}\n}"),
+    )
+
+    self.assertIsNone(self.server.definition(6, uri, position_of(broken, "broken", delta=2)))
+    self.finish(7)
 
   def test_errors_answer_bad_messages_and_exit_without_shutdown_fails(self):
     self.server.initialize(self.workspace)
