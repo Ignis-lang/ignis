@@ -725,3 +725,121 @@ function documentStoreCloseForgetsOnlyTheClosedDocument(): void {
   Test::assertEq<i64>(secondHandle.version, 2);
   Test::assertEq<i64>(thirdHandle.version, 3);
 }
+
+/// A message body that opens with `header`, then names `method` and the
+/// document at `path` in `params`, followed by `extra` members.
+function lspTestDocumentMessage(
+  header: str,
+  method: str,
+  path: &Path::PathBuf,
+  extra: str
+): String {
+  let pathText: String = path.toString();
+  let uri: String = uriFromFilePath(&pathText);
+  return String::create(header)
+    .concat("\"method\":\"")
+    .concat(method)
+    .concat("\",\"params\":{\"textDocument\":{\"uri\":\"")
+    .concat(&uri)
+    .concat("\"}")
+    .concat(extra)
+    .concat("}}");
+}
+
+/// The reply to request `id`, skipping the notifications written before it.
+function lspTestReplyTo(harness: &mut LspTestHarness, id: u64): String {
+  let harnessRef: &mut LspTestHarness = harness;
+  let prefix: String = `{"jsonrpc":"2.0","id":${id},`;
+
+  while (true) {
+    let reply: String = lspTestReply(harnessRef);
+
+    if (reply.startsWith(prefix.toStr())) {
+      return reply;
+    }
+  }
+
+  return String::new();
+}
+
+/// Asks for `method` at `position` in the document at `path` and returns the
+/// reply.
+function lspTestPositionRequest(
+  harness: &mut LspTestHarness,
+  id: u64,
+  method: str,
+  path: &Path::PathBuf,
+  position: str
+): String {
+  let mut harnessRef: &mut LspTestHarness = harness;
+  let header: String = `{"jsonrpc":"2.0","id":${id},`;
+  let extra: String = String::create(",\"position\":").concat(position);
+  let body: String = lspTestDocumentMessage(header.toStr(), method, path, extra.toStr());
+  harnessRef.server.handleMessage(&body);
+  return lspTestReplyTo(harnessRef, id);
+}
+
+function lspTestDidClose(harness: &mut LspTestHarness, path: &Path::PathBuf): void {
+  let mut harnessRef: &mut LspTestHarness = harness;
+  let body: String = lspTestDocumentMessage("{\"jsonrpc\":\"2.0\",", "textDocument/didClose", path, "");
+  harnessRef.server.handleMessage(&body);
+}
+
+@test
+function serverReleasesNavigationWhenTheLastDocumentOfAnAnalysisCloses(): void {
+  let source: Path::PathBuf = lspTestProject("navrelease");
+  let mainText: str = "import double from \"./helper\";\n\nfunction main(): i32 {\n  return double(2);\n}\n";
+  let helperText: str = "export function double(value: i32): i32 {\n  return value * 2;\n}\n";
+  let main: Path::PathBuf = lspTestWrite(&source, "main.ign", mainText);
+  let helper: Path::PathBuf = lspTestWrite(&source, "helper.ign", helperText);
+  let singleDirectory: Path::PathBuf = lspTestDirectory("navreleasesingle");
+  let single: Path::PathBuf = lspTestWrite(&singleDirectory, "main.ign", "function main(): i32 {\n  return 0;\n}\n");
+  let projectKey: String = analysisKeyOf(&main);
+  let singleKey: String = analysisKeyOf(&single);
+  let mainOpen: String = lspTestDidOpen(
+    &main,
+    "import double from \\\"./helper\\\";\\n\\nfunction main(): i32 {\\n  return double(2);\\n}\\n",
+  );
+  let onDouble: str = "{\"line\":3,\"character\":10}";
+
+  let noInput: Vector<String> = Vector::new<String>();
+  let mut harness: LspTestHarness = lspTestHarnessWith(&noInput, lspTestStdPath());
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
+  lspTestReplyTo(&mut harness, 1);
+
+  lspTestSend(&mut harness, mainOpen.toStr());
+  lspTestSend(
+    &mut harness,
+    lspTestDidOpen(&helper, "export function double(value: i32): i32 {\\n  return value * 2;\\n}\\n").toStr(),
+  );
+  lspTestSend(&mut harness, lspTestDidOpen(&single, "function main(): i32 {\\n  return 0;\\n}\\n").toStr());
+
+  let firstHover: String = lspTestPositionRequest(&mut harness, 2, "textDocument/hover", &main, onDouble);
+  Test::assertEq<boolean>(firstHover.startsWith("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{"), true);
+  Test::assertEq<boolean>(harness.server.navigationFor(&projectKey).isSome(), true);
+  Test::assertEq<boolean>(harness.server.navigationFor(&singleKey).isSome(), true);
+
+  lspTestDidClose(&mut harness, &helper);
+  Test::assertEq<boolean>(harness.server.navigationFor(&projectKey).isSome(), true);
+
+  lspTestDidClose(&mut harness, &main);
+  Test::assertEq<boolean>(harness.server.navigationFor(&projectKey).isNone(), true);
+  Test::assertEq<boolean>(harness.server.navigationFor(&singleKey).isSome(), true);
+
+  lspTestDidClose(&mut harness, &single);
+  Test::assertEq<boolean>(harness.server.navigationFor(&singleKey).isNone(), true);
+
+  lspTestSend(&mut harness, mainOpen.toStr());
+
+  let hover: String = lspTestPositionRequest(&mut harness, 3, "textDocument/hover", &main, onDouble);
+  Test::assertEq<boolean>(hover.startsWith("{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{"), true);
+
+  let definition: String = lspTestPositionRequest(&mut harness, 4, "textDocument/definition", &main, onDouble);
+  let helperPath: String = helper.toString();
+  let helperUri: String = uriFromFilePath(&helperPath);
+  Test::assertEq<boolean>(definition.startsWith("{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"uri\":\""), true);
+  Test::assertEq<boolean>(definition.contains(&helperUri), true);
+  Test::assertEq<boolean>(harness.server.navigationFor(&projectKey).isSome(), true);
+
+  lspTestClose(&harness);
+}

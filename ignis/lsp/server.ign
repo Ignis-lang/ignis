@@ -648,7 +648,9 @@ export record LspServer {
 
   /// Forgets the document and clears its diagnostics, as the host server does.
   /// Other files are not re-analyzed until they change, and the navigation
-  /// data keeps the closed file until the next analysis.
+  /// data keeps the closed file until the next analysis, unless it was the
+  /// last open document of its analysis: then that navigation data is
+  /// released, and reopening a document analyzes it again.
   didClose(&mut self, params: &JsonValue): void {
     let Option::SOME(document) = jsonMember(params, "textDocument") else {
       return;
@@ -656,9 +658,18 @@ export record LspServer {
     let Option::SOME(uri) = jsonStringMember(document, "uri") else {
       return;
     };
+    let Option::SOME(closing) = self.documents.find(&uri) else {
+      return;
+    };
+
+    let key: String = analysisKeyOf(&closing.path);
 
     if (!self.documents.close(&uri)) {
       return;
+    }
+
+    if (!self.documents.hasDocumentWithKey(&key)) {
+      self.forgetNavigation(&key);
     }
 
     self.forgetPublished(&uri);
@@ -820,6 +831,12 @@ export record LspServer {
       return;
     };
 
+    self.forgetNavigation(key);
+    self.navigations.push(NavigationSet { key: key.clone(), index: index });
+  }
+
+  /// Drops the navigation data of the analysis `key`, if any.
+  forgetNavigation(&mut self, key: &String): void {
     let mut kept: Vector<NavigationSet> = Vector::new<NavigationSet>();
 
     while (self.navigations.length() > 0) {
@@ -828,19 +845,23 @@ export record LspServer {
       };
 
       if (set.key.equals(key)) {
-        let _replaced: NavigationSet = set;
+        let _released: NavigationSet = set;
       } else {
         kept.push(set);
       }
     }
 
-    kept.push(NavigationSet { key: key.clone(), index: index });
     self.navigations = kept;
   }
 
   /// The navigation data of the analysis `document` belongs to.
   navigationOf(&self, document: &Document): Option<&NavigationIndex> {
     let key: String = analysisKeyOf(&document.path);
+    return self.navigationFor(&key);
+  }
+
+  /// The navigation data kept for the analysis `key`.
+  public navigationFor(&self, key: &String): Option<&NavigationIndex> {
     let mut index: u64 = 0;
 
     while (index < self.navigations.length()) {
@@ -848,7 +869,7 @@ export record LspServer {
         break;
       };
 
-      if (set.key.equals(&key)) {
+      if (set.key.equals(key)) {
         return Option::SOME(&set.index);
       }
 
