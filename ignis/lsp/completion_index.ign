@@ -1,0 +1,1291 @@
+//! What completion reads from one analysis: every declaration of the
+//! program with the detail it is offered with, the members of each record
+//! and enum, the namespaces and what they hold, the extension methods of each
+//! type, and, for each indexed file, the types of its locals, parameters and
+//! expressions and the names its imports bind.
+//!
+//! Like the hover index, it is built while the analyzer's stores are alive
+//! and keeps only names, rendered texts and raw ids, so the stores can be
+//! dropped. Completion then answers from it by name, the way the host looks
+//! its declarations up (crates/ignis_lsp/src/completion.rs).
+
+import HashMap from "std::collections";
+import String from "std::string";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+import SourceFile, SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+
+import Doc from "../doc/mod";
+
+import ascendingOrder, spanInFile, u64At from "./hover_index";
+
+/// The kind of declaration a completion symbol is.
+export namespace SymbolCategory {
+  const FUNCTION: u64 = 1;
+  const CONSTANT: u64 = 2;
+  const RECORD: u64 = 3;
+  const ENUM: u64 = 4;
+  const NAMESPACE: u64 = 5;
+  const TYPE_ALIAS: u64 = 6;
+  const TRAIT: u64 = 7;
+}
+
+/// A declaration of a module or namespace.
+export record CompletionSymbol {
+  public raw: u32;
+  public name: String;
+  public category: u64;
+  public module: u64;
+  /// Declared at the top of its module, outside every namespace.
+  public topLevel: boolean;
+  public isPublic: boolean;
+  public isExtern: boolean;
+  /// The path a namespace symbol opens, `Outer::Inner`.
+  public namespacePath: String;
+  public detail: Option<String>;
+  public documentation: Option<String>;
+  /// `name(${1:a}, ${2:b})` for a function.
+  public callSnippet: Option<String>;
+}
+
+/// A field, method, static field, variant or extension method.
+export record MemberEntry {
+  public name: String;
+  public detail: Option<String>;
+  public documentation: Option<String>;
+  public isPublic: boolean;
+  public module: u64;
+  public hasPayload: boolean;
+}
+
+/// The members of one record or enum.
+export record OwnerMembers {
+  public fields: Vector<MemberEntry>;
+  public instanceMethods: Vector<MemberEntry>;
+  public staticMethods: Vector<MemberEntry>;
+  public staticFields: Vector<MemberEntry>;
+  public variants: Vector<MemberEntry>;
+}
+
+/// A namespace, reopened across files: the segments of its child
+/// namespaces and the declarations it holds, nested namespaces included.
+export record NamespaceEntry {
+  public path: String;
+  public children: Vector<String>;
+  public members: Vector<u32>;
+}
+
+/// Where the members of a value come from: the record or enum whose fields
+/// and methods it has, through references and pointers, and the type its
+/// extension methods are registered on.
+export record ReceiverType {
+  public owner: Option<u32>;
+  public extension: Option<u32>;
+}
+
+/// A local or parameter of a file, by name.
+export record NamedReceiver {
+  public name: String;
+  public start: u64;
+  public receiver: ReceiverType;
+}
+
+/// An expression of a file and the type it has.
+export record TypedSpan {
+  public start: u64;
+  public end: u64;
+  public receiver: ReceiverType;
+}
+
+/// A name an import line binds, as written, and the declaration it names.
+export record ImportedName {
+  public text: String;
+  public raw: u32;
+}
+
+/// What completion reads for one indexed file. Offsets are in the text the
+/// analysis read.
+export record FileCompletion {
+  public path: String;
+  public module: u64;
+  /// In source order.
+  public receivers: Vector<NamedReceiver>;
+  public typedSpans: Vector<TypedSpan>;
+  public imports: Vector<ImportedName>;
+}
+
+/// The completion data of one analysis.
+export record CompletionIndex {
+  public symbols: Vector<CompletionSymbol>;
+  public symbolAt: HashMap<u32, u64>;
+  public members: HashMap<u32, OwnerMembers>;
+  public namespaces: Vector<NamespaceEntry>;
+  public extensions: HashMap<u32, Vector<MemberEntry>>;
+  public files: Vector<FileCompletion>;
+
+  /// The symbol of the definition `raw`.
+  public symbolOf(&self, raw: u32): Option<&CompletionSymbol> {
+    let Option::SOME(position) = self.symbolAt.get(&raw) else {
+      return Option::NONE;
+    };
+
+    return self.symbols.get(*position);
+  }
+
+  /// The namespace at `path`.
+  public namespaceAt(&self, path: &String): Option<&NamespaceEntry> {
+    let mut index: u64 = 0;
+
+    while (index < self.namespaces.length()) {
+      let Option::SOME(entry) = self.namespaces.get(index) else {
+        break;
+      };
+
+      if (entry.path.equals(path)) {
+        return self.namespaces.get(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The completion data of the file at `path`, when it was indexed.
+  public fileAt(&self, path: &String): Option<&FileCompletion> {
+    let mut index: u64 = 0;
+
+    while (index < self.files.length()) {
+      let Option::SOME(file) = self.files.get(index) else {
+        break;
+      };
+
+      if (file.path.equals(path)) {
+        return self.files.get(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+}
+
+/// An index with nothing in it.
+export function emptyCompletionIndex(): CompletionIndex {
+  return CompletionIndex {
+    symbols: Vector::new<CompletionSymbol>(),
+    symbolAt: HashMap::new<u32, u64>(),
+    members: HashMap::new<u32, OwnerMembers>(),
+    namespaces: Vector::new<NamespaceEntry>(),
+    extensions: HashMap::new<u32, Vector<MemberEntry>>(),
+    files: Vector::new<FileCompletion>(),
+  };
+}
+
+/// The analyzer's stores, read together.
+record Stores {
+  public defs: &Analyzer::DefinitionStore;
+  public types: &Analyzer::TypeStore;
+  public symbols: &Analyzer::SymbolTable;
+}
+
+/// Where a declaration walk is: its module, the path `ignis doc` gives what
+/// it declares (the module followed by the written namespaces), and the
+/// namespace path it declares into, empty at the top of the module.
+record WalkScope {
+  public module: u64;
+  public docPrefix: String;
+  public namespacePath: String;
+}
+
+/// `a::b`, or `b` when `a` is empty.
+function joinNamespace(parent: &String, segment: &String): String {
+  if (parent.length() == 0) {
+    return segment.clone();
+  }
+
+  let mut path: String = parent.clone();
+  path.pushStr("::");
+  path.push(segment);
+  return path;
+}
+
+/// The `::`-separated segments of `name`.
+function segmentsOf(name: &String): Vector<String> {
+  let mut segments: Vector<String> = Vector::new<String>();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index + 1 < name.length()) {
+    if (name.byteAt(index).unwrapOr(0) == ':' as u8 && name.byteAt(index + 1).unwrapOr(0) == ':' as u8) {
+      segments.push(name.substringBytes(start, index));
+      index += 2;
+      start = index;
+    } else {
+      index += 1;
+    }
+  }
+
+  segments.push(name.substringBytes(start, name.length()));
+  return segments;
+}
+
+function containsText(values: &Vector<String>, wanted: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      if (value.equals(wanted)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// The position of the namespace at `path`, created with its parents when
+/// missing, each linked as a child of the one before.
+function ensureNamespace(index: &mut CompletionIndex, path: &String): u64 {
+  let mut indexRef: &mut CompletionIndex = index;
+  let mut position: u64 = 0;
+
+  while (position < indexRef.namespaces.length()) {
+    if (let Option::SOME(entry) = indexRef.namespaces.get(position)) {
+      if (entry.path.equals(path)) {
+        return position;
+      }
+    }
+
+    position += 1;
+  }
+
+  let segments: Vector<String> = segmentsOf(path);
+
+  if (segments.length() > 1) {
+    let last: String = match (segments.get(segments.length() - 1)) {
+      Option::SOME(segment) -> segment.clone(),
+      Option::NONE -> String::new(),
+    };
+    let parentPath: String = path.substringBytes(0, path.length() - last.length() - 2);
+    let parent: u64 = ensureNamespace(indexRef, &parentPath);
+
+    if (let Option::SOME(parentEntry) = indexRef.namespaces.getMut(parent)) {
+      if (!containsText(&parentEntry.children, &last)) {
+        parentEntry.children.push(last.clone());
+      }
+    }
+  }
+
+  let created: u64 = indexRef.namespaces.length();
+  indexRef.namespaces.push(NamespaceEntry {
+    path: path.clone(),
+    children: Vector::new<String>(),
+    members: Vector::new<u32>(),
+  });
+  return created;
+}
+
+function cloneText(text: Option<&String>): Option<String> {
+  return match (text) {
+    Option::SOME(value) -> Option::SOME(value.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function copyText(text: &Option<String>): Option<String> {
+  return match (text) {
+    Option::SOME(value) -> Option::SOME(value.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+/// The documentation of `defId`, or of the item when the definition has
+/// none recorded, as for a namespace.
+function documentationOf(
+  defId: Analyzer::DefinitionId,
+  module: &Ast::Module,
+  itemId: Ast::ItemId,
+  stores: &Stores
+): Option<String> {
+  if (let Option::SOME(doc) = stores.defs.docOf(defId)) {
+    return Option::SOME(doc.clone());
+  }
+
+  return cloneText(module.itemDoc(itemId));
+}
+
+/// Records a symbol, and registers it in the namespace the walk declares
+/// into.
+function pushSymbol(
+  index: &mut CompletionIndex,
+  scope: &WalkScope,
+  symbol: CompletionSymbol
+): void {
+  let mut indexRef: &mut CompletionIndex = index;
+  let raw: u32 = symbol.raw;
+
+  if (indexRef.symbolAt.get(&raw).isSome()) {
+    return;
+  }
+
+  indexRef.symbolAt.insert(raw, indexRef.symbols.length());
+  indexRef.symbols.push(symbol);
+
+  if (scope.namespacePath.length() > 0) {
+    let position: u64 = ensureNamespace(indexRef, &scope.namespacePath);
+
+    if (let Option::SOME(entry) = indexRef.namespaces.getMut(position)) {
+      entry.members.push(raw);
+    }
+  }
+}
+
+function symbolOf(
+  defId: Analyzer::DefinitionId,
+  name: &String,
+  category: u64,
+  scope: &WalkScope,
+  isPublic: boolean,
+  detail: Option<String>,
+  documentation: Option<String>,
+): CompletionSymbol {
+  return CompletionSymbol {
+    raw: defId.raw(),
+    name: name.clone(),
+    category: category,
+    module: scope.module,
+    topLevel: scope.namespacePath.length() == 0,
+    isPublic: isPublic,
+    isExtern: false,
+    namespacePath: String::new(),
+    detail: detail,
+    documentation: documentation,
+    callSnippet: Option::NONE,
+  };
+}
+
+/// Builds the completion data of an analysis over `modules`, analyzed as
+/// `records` from `files`. The modules whose index is in `indexed` also get
+/// their file data.
+export function buildCompletionIndex(
+  files: &Vector<SourceFile>,
+  modules: &Vector<Ast::Module>,
+  records: &Vector<Analyzer::ModuleAnalysisRecord>,
+  indexed: &Vector<u64>,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): CompletionIndex {
+  let stores: Stores = Stores { defs: defs, types: types, symbols: symbols };
+  let mut moduleNames: Vector<String> = Vector::new<String>();
+  let mut moduleIndex: u64 = 0;
+
+  while (moduleIndex < records.length()) {
+    if (let Option::SOME(analysisRecord) = records.get(moduleIndex)) {
+      moduleNames.push(analysisRecord.info.pathText.clone());
+    }
+
+    moduleIndex += 1;
+  }
+
+  let program: Doc::DocProgram = Doc::DocProgram {
+    entry: String::new(),
+    moduleNames: moduleNames,
+    closureDefs: Vector::new<Analyzer::DefinitionId>(),
+    closureModules: Vector::new<u64>(),
+  };
+  let exported: Vector<String> = Doc::exportedPaths(&program, modules, records);
+  let mut index: CompletionIndex = emptyCompletionIndex();
+  moduleIndex = 0;
+
+  while (moduleIndex < records.length()) {
+    let Option::SOME(module) = modules.get(moduleIndex) else {
+      break;
+    };
+    let Option::SOME(analysisRecord) = records.get(moduleIndex) else {
+      break;
+    };
+
+    let scope: WalkScope = WalkScope {
+      module: moduleIndex,
+      docPrefix: analysisRecord.info.pathText.clone(),
+      namespacePath: String::new(),
+    };
+    walkItems(&mut index, module, &analysisRecord.output, &module.roots, &scope, &exported, &stores);
+
+    if (containsIndex(indexed, moduleIndex)) {
+      if (let Option::SOME(file) = files.get(moduleIndex)) {
+        index.files.push(buildFileCompletion(&file.text, module, analysisRecord, moduleIndex, &stores));
+      }
+    }
+
+    moduleIndex += 1;
+  }
+
+  collectExtensions(&mut index, &stores);
+  return index;
+}
+function containsIndex(values: &Vector<u64>, wanted: u64): boolean {
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (u64At(values, index) == wanted) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function walkItems(
+  index: &mut CompletionIndex,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemIds: &Vector<Ast::ItemId>,
+  scope: &WalkScope,
+  exported: &Vector<String>,
+  stores: &Stores,
+): void {
+  let indexRef: &mut CompletionIndex = index;
+  let mut position: u64 = 0;
+
+  while (position < itemIds.length()) {
+    if (let Option::SOME(itemId) = itemIds.get(position)) {
+      walkItem(indexRef, module, analysis, *itemId, false, scope, exported, stores);
+    }
+
+    position += 1;
+  }
+}
+
+/// Records one item. `exportedHere` is set when an `export` wraps it.
+function walkItem(
+  index: &mut CompletionIndex,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemId: Ast::ItemId,
+  exportedHere: boolean,
+  scope: &WalkScope,
+  exported: &Vector<String>,
+  stores: &Stores,
+): void {
+  let indexRef: &mut CompletionIndex = index;
+
+  let Option::SOME(item) = module.items.get(itemId) else {
+    return;
+  };
+
+  match (item) {
+    Ast::Item::Node::Export(exportItem) -> {
+      if (let Option::SOME(innerId) = exportItem.declaration) {
+        walkItem(indexRef, module, analysis, innerId, true, scope, exported, stores);
+      }
+
+      return;
+    },
+    Ast::Item::Node::Namespace(namespaceItem) -> {
+      walkNamespace(indexRef, module, analysis, itemId, &namespaceItem.name, &namespaceItem.items, exportedHere, false, scope, exported, stores);
+      return;
+    },
+    Ast::Item::Node::Extern(externItem) -> {
+      walkNamespace(indexRef, module, analysis, itemId, &externItem.name, &externItem.items, true, true, scope, exported, stores);
+      return;
+    },
+    Ast::Item::Node::Import(_) -> {
+      return;
+    },
+    _ -> {},
+  };
+
+  let Option::SOME(defId) = Doc::itemDefinition(analysis, itemId) else {
+    return;
+  };
+  let Option::SOME(definition) = stores.defs.get(defId) else {
+    return;
+  };
+
+  let name: String = Doc::symbolText(stores.symbols, definition.name());
+  let path: String = Doc::joinPath(&scope.docPrefix, &name);
+  let mut isPublic: boolean = exportedHere || containsText(exported, &path);
+
+  if (let Ast::Item::Node::Function(functionItem) = item) {
+    isPublic = isPublic || Doc::metadataIsPublic(&functionItem.metadata);
+  }
+
+  let documentation: Option<String> = documentationOf(defId, module, itemId, stores);
+  let symbol: CompletionSymbol = declarationSymbol(defId, definition, &name, scope, isPublic, &documentation, stores);
+  pushSymbol(indexRef, scope, symbol);
+
+  match (item) {
+    Ast::Item::Node::Record(recordItem) -> {
+      collectOwnerMembers(indexRef, module, analysis, defId, &recordItem.fields, &recordItem.methods, scope.module, stores);
+    },
+    Ast::Item::Node::Enum(enumItem) -> {
+      collectOwnerMembers(indexRef, module, analysis, defId, &enumItem.variants, &enumItem.methods, scope.module, stores);
+    },
+    _ -> {},
+  };
+}
+
+/// The symbol of a function, constant, record, enum, type alias or trait,
+/// with the detail the host shows for it (completion.rs:2479).
+function declarationSymbol(
+  defId: Analyzer::DefinitionId,
+  definition: &Analyzer::Definition,
+  name: &String,
+  scope: &WalkScope,
+  isPublic: boolean,
+  documentation: &Option<String>,
+  stores: &Stores,
+): CompletionSymbol {
+  match (definition) {
+    Analyzer::Definition::Function(functionDef) -> {
+      let params: String = Doc::paramsText(&functionDef.params, 0, stores.defs, stores.types, stores.symbols);
+      let returnType: String = Doc::renderType(functionDef.returnType, stores.defs, stores.types, stores.symbols);
+      let detail: String = `function(${params.toStr()}): ${returnType.toStr()}`;
+      let mut symbol: CompletionSymbol = symbolOf(defId, name, SymbolCategory::FUNCTION, scope, isPublic, Option::SOME(detail), copyText(documentation));
+      symbol.callSnippet = Option::SOME(callSnippet(name, &functionDef.params, stores));
+      return symbol;
+    },
+    Analyzer::Definition::Record(recordDef) -> {
+      let generics: String = Doc::typeParamsText(&recordDef.typeParams, stores.defs, stores.symbols);
+      return symbolOf(defId, name, SymbolCategory::RECORD, scope, isPublic, Option::SOME(String::create("record").concat(generics)), copyText(documentation));
+    },
+    Analyzer::Definition::Enum(enumDef) -> {
+      let generics: String = Doc::typeParamsText(&enumDef.typeParams, stores.defs, stores.symbols);
+      return symbolOf(defId, name, SymbolCategory::ENUM, scope, isPublic, Option::SOME(String::create("enum").concat(generics)), copyText(documentation));
+    },
+    Analyzer::Definition::TypeAlias(alias) -> {
+      let target: String = Doc::renderType(alias.aliasedType, stores.defs, stores.types, stores.symbols);
+      return symbolOf(defId, name, SymbolCategory::TYPE_ALIAS, scope, isPublic, Option::SOME(String::create("type = ").concat(target)), copyText(documentation));
+    },
+    Analyzer::Definition::Variable(variable) -> {
+      let typeText: String = Doc::renderType(variable.declaredType, stores.defs, stores.types, stores.symbols);
+      return symbolOf(defId, name, SymbolCategory::CONSTANT, scope, isPublic, Option::SOME(String::create("const: ").concat(typeText)), copyText(documentation));
+    },
+    _ -> {},
+  };
+
+  return symbolOf(defId, name, SymbolCategory::TRAIT, scope, isPublic, Option::NONE, copyText(documentation));
+}
+
+/// `name(${1:a}, ${2:b})`: the call with one placeholder per parameter.
+function callSnippet(
+  name: &String,
+  params: &Vector<Analyzer::DefinitionId>,
+  stores: &Stores
+): String {
+  let mut snippet: String = name.clone();
+  snippet.pushStr("(");
+  let mut position: u64 = 0;
+
+  while (position < params.length()) {
+    if (let Option::SOME(paramId) = params.get(position)) {
+      if (let Option::SOME(param) = stores.defs.get(*paramId)) {
+        let paramName: String = Doc::symbolText(stores.symbols, param.name());
+        let placeholder: u64 = position + 1;
+
+        if (position > 0) {
+          snippet.pushStr(", ");
+        }
+
+        snippet.pushStr("${");
+        let number: String = `${placeholder}`;
+        snippet.push(&number);
+        snippet.pushStr(":");
+        snippet.push(&paramName);
+        snippet.pushStr("}");
+      }
+    }
+
+    position += 1;
+  }
+
+  snippet.pushStr(")");
+  return snippet;
+}
+
+/// Records a namespace or extern block and what it declares. A written
+/// path `A::B` opens `B` inside `A`, and the symbol, named `B`, is
+/// declared where the item is, as the host binds it.
+function walkNamespace(
+  index: &mut CompletionIndex,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemId: Ast::ItemId,
+  writtenName: &String,
+  items: &Vector<Ast::ItemId>,
+  exportedHere: boolean,
+  isExtern: boolean,
+  scope: &WalkScope,
+  exported: &Vector<String>,
+  stores: &Stores,
+): void {
+  let indexRef: &mut CompletionIndex = index;
+  let segments: Vector<String> = segmentsOf(writtenName);
+  let mut opened: String = scope.namespacePath.clone();
+  let mut position: u64 = 0;
+
+  while (position < segments.length()) {
+    if (let Option::SOME(segment) = segments.get(position)) {
+      opened = joinNamespace(&opened, segment);
+    }
+
+    position += 1;
+  }
+
+  ensureNamespace(indexRef, &opened);
+
+  let name: String = Doc::lastSegment(writtenName);
+  let path: String = Doc::joinPath(&scope.docPrefix, &name);
+  let isPublic: boolean = exportedHere || containsText(exported, &path);
+
+  if (let Option::SOME(defId) = Doc::itemDefinition(analysis, itemId)) {
+    let detail: str = isExtern ? "extern" : "namespace";
+    let mut symbol: CompletionSymbol = symbolOf(defId, &name, SymbolCategory::NAMESPACE, scope, isPublic, Option::SOME(String::create(detail)), documentationOf(defId, module, itemId, stores));
+    symbol.isExtern = isExtern;
+    symbol.namespacePath = opened.clone();
+    pushSymbol(indexRef, scope, symbol);
+  }
+
+  let inner: WalkScope = WalkScope {
+    module: scope.module,
+    docPrefix: Doc::joinPath(&scope.docPrefix, writtenName),
+    namespacePath: opened,
+  };
+  walkItems(indexRef, module, analysis, items, &inner, exported, stores);
+}
+
+/// Whether the field or static field written as `name` among `patterns` is
+/// declared `public`.
+function memberIsPublic(
+  module: &Ast::Module,
+  patterns: &Vector<Ast::PatternId>,
+  name: &String
+): boolean {
+  let mut position: u64 = 0;
+
+  while (position < patterns.length()) {
+    if (let Option::SOME(pattern) = patterns.get(position)) {
+      if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*pattern)) {
+        if (binding.name.equals(name)) {
+          return Doc::metadataIsPublic(&binding.metadata);
+        }
+      }
+    }
+
+    position += 1;
+  }
+
+  return false;
+}
+
+function memberOf(
+  name: String,
+  detail: Option<String>,
+  documentation: Option<String>,
+  isPublic: boolean,
+  module: u64
+): MemberEntry {
+  return MemberEntry {
+    name: name,
+    detail: detail,
+    documentation: documentation,
+    isPublic: isPublic,
+    module: module,
+    hasPayload: false,
+  };
+}
+
+/// Records the fields, variants, static fields and methods of the record or
+/// enum `owner`, declared by `memberPatterns` and `methodIds` of `module`.
+/// Fields and methods are public when declared `public`, as the host binds
+/// them; static fields always are.
+function collectOwnerMembers(
+  index: &mut CompletionIndex,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  owner: Analyzer::DefinitionId,
+  memberPatterns: &Vector<Ast::PatternId>,
+  methodIds: &Vector<Ast::ItemId>,
+  moduleIndex: u64,
+  stores: &Stores,
+): void {
+  let mut indexRef: &mut CompletionIndex = index;
+  let mut members: OwnerMembers = OwnerMembers {
+    fields: Vector::new<MemberEntry>(),
+    instanceMethods: Vector::new<MemberEntry>(),
+    staticMethods: Vector::new<MemberEntry>(),
+    staticFields: Vector::new<MemberEntry>(),
+    variants: Vector::new<MemberEntry>(),
+  };
+
+  let mut memberIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut staticIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+  match (stores.defs.get(owner)) {
+    Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+      appendIds(&mut memberIds, &recordDef.fields);
+      appendIds(&mut staticIds, &recordDef.staticFields);
+    },
+    Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+      appendIds(&mut memberIds, &enumDef.variants);
+      appendIds(&mut staticIds, &enumDef.staticFields);
+    },
+    _ -> {
+      return;
+    },
+  };
+
+  collectFieldsAndVariants(&mut members, module, memberPatterns, &memberIds, moduleIndex, stores);
+
+  let mut position: u64 = 0;
+
+  while (position < staticIds.length()) {
+    if (let Option::SOME(staticId) = staticIds.get(position)) {
+      if (let Option::SOME(definition) = stores.defs.get(*staticId)) {
+        members.staticFields.push(memberOf(Doc::symbolText(stores.symbols, definition.name()), Option::NONE, Option::NONE, true, moduleIndex));
+      }
+    }
+
+    position += 1;
+  }
+
+  collectMethods(&mut members, module, analysis, methodIds, moduleIndex, stores);
+  indexRef.members.insert(owner.raw(), members);
+}
+
+function appendIds(
+  target: &mut Vector<Analyzer::DefinitionId>,
+  ids: &Vector<Analyzer::DefinitionId>
+): void {
+  let mut targetRef: &mut Vector<Analyzer::DefinitionId> = target;
+  let mut position: u64 = 0;
+
+  while (position < ids.length()) {
+    if (let Option::SOME(id) = ids.get(position)) {
+      targetRef.push(*id);
+    }
+
+    position += 1;
+  }
+}
+
+function collectFieldsAndVariants(
+  members: &mut OwnerMembers,
+  module: &Ast::Module,
+  memberPatterns: &Vector<Ast::PatternId>,
+  memberIds: &Vector<Analyzer::DefinitionId>,
+  moduleIndex: u64,
+  stores: &Stores,
+): void {
+  let mut membersRef: &mut OwnerMembers = members;
+  let mut position: u64 = 0;
+
+  while (position < memberIds.length()) {
+    let Option::SOME(memberId) = memberIds.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    match (stores.defs.get(*memberId)) {
+      Option::SOME(Analyzer::Definition::Field(field)) -> {
+        let name: String = Doc::symbolText(stores.symbols, field.name);
+        let typeText: String = Doc::renderType(field.fieldType, stores.defs, stores.types, stores.symbols);
+        let isPublic: boolean = memberIsPublic(module, memberPatterns, &name);
+        membersRef.fields.push(memberOf(name, Option::SOME(typeText), cloneText(stores.defs.docOf(*memberId)), isPublic, moduleIndex));
+      },
+      Option::SOME(Analyzer::Definition::Variant(variant)) -> {
+        let name: String = Doc::symbolText(stores.symbols, variant.name);
+        let mut entry: MemberEntry = memberOf(name, Option::NONE, Option::NONE, true, moduleIndex);
+
+        if (variant.payload.length() > 0) {
+          let payload: String = Doc::joinTypes(&variant.payload, stores.defs, stores.types, stores.symbols);
+          entry.detail = Option::SOME(`(${payload.toStr()})`);
+          entry.hasPayload = true;
+        }
+
+        membersRef.variants.push(entry);
+      },
+      _ -> {},
+    };
+  }
+}
+
+/// Records the methods of a record or enum: an instance method with its
+/// receiver spelled first, then every parameter, the receiver included, as
+/// the host lists them (completion.rs:2396); a static one with its
+/// parameters only.
+function collectMethods(
+  members: &mut OwnerMembers,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  methodIds: &Vector<Ast::ItemId>,
+  moduleIndex: u64,
+  stores: &Stores,
+): void {
+  let mut membersRef: &mut OwnerMembers = members;
+  let mut position: u64 = 0;
+
+  while (position < methodIds.length()) {
+    let Option::SOME(methodId) = methodIds.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(Ast::Item::Node::Function(functionItem)) = module.items.get(*methodId) else {
+      continue;
+    };
+    let Option::SOME(defId) = Doc::itemDefinition(analysis, *methodId) else {
+      continue;
+    };
+    let Option::SOME(Analyzer::Definition::Method(method)) = stores.defs.get(defId) else {
+      continue;
+    };
+
+    let name: String = Doc::symbolText(stores.symbols, method.name);
+    let returnType: String = Doc::renderType(method.returnType, stores.defs, stores.types, stores.symbols);
+    let isPublic: boolean = Doc::metadataIsPublic(&functionItem.metadata);
+    let documentation: Option<String> = cloneText(stores.defs.docOf(defId));
+
+    if (method.isStatic) {
+      let params: String = Doc::paramsText(&method.params, 0, stores.defs, stores.types, stores.symbols);
+      let detail: String = `fn(${params.toStr()}) -> ${returnType.toStr()}`;
+      membersRef.staticMethods.push(memberOf(name, Option::SOME(detail), documentation, isPublic, moduleIndex));
+      continue;
+    }
+
+    let mut receiver: str = "&self";
+
+    if (method.selfByValue) {
+      receiver = "self";
+    } else if (method.selfMutable) {
+      receiver = "&mut self";
+    }
+
+    let rest: String = Doc::paramsText(&method.params, 0, stores.defs, stores.types, stores.symbols);
+    let mut params: String = String::create(receiver);
+
+    if (rest.length() > 0) {
+      params.pushStr(", ");
+      params.push(&rest);
+    }
+
+    let detail: String = `fn(${params.toStr()}) -> ${returnType.toStr()}`;
+    membersRef.instanceMethods.push(memberOf(name, Option::SOME(detail), documentation, isPublic, moduleIndex));
+  }
+}
+
+/// `typeId` with every alias replaced by what it names.
+function unaliased(typeId: Analyzer::TypeId, stores: &Stores): Analyzer::TypeId {
+  let mut current: Analyzer::TypeId = typeId;
+  let mut depth: u64 = 0;
+
+  while (depth < 16) {
+    let Option::SOME(Analyzer::Type::Alias(aliasId)) = stores.types.get(current) else {
+      return current;
+    };
+    let Option::SOME(Analyzer::Definition::TypeAlias(alias)) = stores.defs.get(aliasId) else {
+      return current;
+    };
+
+    current = alias.aliasedType;
+    depth += 1;
+  }
+
+  return current;
+}
+
+/// Where the members of a value of `typeId` come from: the record or enum
+/// behind any references and pointers, and the type itself or, for a
+/// reference or pointer, the type it points to (completion.rs:886 and 983).
+/// Aliases are transparent, as the host resolves them before a type is
+/// stored.
+function receiverTypeOf(typeId: Analyzer::TypeId, stores: &Stores): ReceiverType {
+  let mut receiver: ReceiverType = ReceiverType { owner: Option::NONE, extension: Option::NONE };
+  let mut current: Analyzer::TypeId = unaliased(typeId, stores);
+  let mut depth: u64 = 0;
+
+  receiver.extension = Option::SOME(current.raw());
+
+  match (stores.types.get(current)) {
+    Option::SOME(Analyzer::Type::Reference(reference)) -> {
+      receiver.extension = Option::SOME(unaliased(reference.referent, stores).raw());
+    },
+    Option::SOME(Analyzer::Type::Pointer(pointer)) -> {
+      receiver.extension = Option::SOME(unaliased(pointer.pointee, stores).raw());
+    },
+    _ -> {},
+  };
+
+  while (depth < 16) {
+    match (stores.types.get(current)) {
+      Option::SOME(Analyzer::Type::Record(defId)) -> {
+        receiver.owner = Option::SOME(defId.raw());
+        return receiver;
+      },
+      Option::SOME(Analyzer::Type::Enum(defId)) -> {
+        receiver.owner = Option::SOME(defId.raw());
+        return receiver;
+      },
+      Option::SOME(Analyzer::Type::Instance(instance)) -> {
+        receiver.owner = Option::SOME(instance.definition.raw());
+        return receiver;
+      },
+      Option::SOME(Analyzer::Type::Reference(reference)) -> {
+        current = unaliased(reference.referent, stores);
+      },
+      Option::SOME(Analyzer::Type::Pointer(pointer)) -> {
+        current = unaliased(pointer.pointee, stores);
+      },
+      _ -> {
+        return receiver;
+      },
+    };
+
+    depth += 1;
+  }
+
+  return receiver;
+}
+
+function appendMember(target: &mut Vector<MemberEntry>, entry: MemberEntry): void {
+  let mut targetRef: &mut Vector<MemberEntry> = target;
+  targetRef.push(entry);
+}
+
+/// Records every `@extension` function under the type it extends.
+function collectExtensions(index: &mut CompletionIndex, stores: &Stores): void {
+  let mut indexRef: &mut CompletionIndex = index;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < stores.defs.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(raw);
+    raw += 1;
+
+    let Option::SOME(Analyzer::Definition::Function(functionDef)) = stores.defs.get(defId) else {
+      continue;
+    };
+    let Option::SOME(target) = functionDef.extensionTarget else {
+      continue;
+    };
+
+    let name: String = Doc::symbolText(stores.symbols, functionDef.name);
+    let params: String = Doc::paramsText(&functionDef.params, 1, stores.defs, stores.types, stores.symbols);
+    let returnType: String = Doc::renderType(functionDef.returnType, stores.defs, stores.types, stores.symbols);
+    let detail: String = `fn(${params.toStr()}) -> ${returnType.toStr()}`;
+    let entry: MemberEntry = memberOf(name, Option::SOME(detail), cloneText(stores.defs.docOf(defId)), true, 0);
+    let key: u32 = unaliased(target, stores).raw();
+
+    if (let Option::SOME(entries) = indexRef.extensions.getMut(&key)) {
+      appendMember(entries, entry);
+    } else {
+      let mut entries: Vector<MemberEntry> = Vector::new<MemberEntry>();
+      entries.push(entry);
+      indexRef.extensions.insert(key, entries);
+    }
+  }
+}
+
+/// The receiver type of `typeId`, computed once per type.
+function cachedReceiver(
+  cache: &mut HashMap<u32, ReceiverType>,
+  typeId: Analyzer::TypeId,
+  stores: &Stores
+): ReceiverType {
+  let mut cacheRef: &mut HashMap<u32, ReceiverType> = cache;
+  let raw: u32 = typeId.raw();
+
+  if (let Option::SOME(known) = cacheRef.get(&raw)) {
+    return ReceiverType { owner: known.owner, extension: known.extension };
+  }
+
+  let receiver: ReceiverType = receiverTypeOf(typeId, stores);
+  cacheRef.insert(raw, ReceiverType { owner: receiver.owner, extension: receiver.extension });
+  return receiver;
+}
+
+/// The completion data of the module analyzed as `analysisRecord`, whose
+/// source is `text`.
+function buildFileCompletion(
+  text: &String,
+  module: &Ast::Module,
+  analysisRecord: &Analyzer::ModuleAnalysisRecord,
+  moduleIndex: u64,
+  stores: &Stores,
+): FileCompletion {
+  let path: String = analysisRecord.info.pathText.clone();
+  let mut cache: HashMap<u32, ReceiverType> = HashMap::new<u32, ReceiverType>();
+  let mut receivers: Vector<NamedReceiver> = Vector::new<NamedReceiver>();
+
+  collectParameterReceivers(&mut receivers, &mut cache, &path, module, &analysisRecord.output, &module.roots, stores);
+  collectLocalReceivers(&mut receivers, &mut cache, &path, module, &analysisRecord.output, stores);
+
+  return FileCompletion {
+    path: path.clone(),
+    module: moduleIndex,
+    receivers: inSourceOrder(&receivers),
+    typedSpans: typedSpansOf(&mut cache, &path, module, &analysisRecord.output, stores),
+    imports: importedNames(text, &path, &analysisRecord.imports),
+  };
+}
+
+/// `receivers` sorted by where they are declared.
+function inSourceOrder(receivers: &Vector<NamedReceiver>): Vector<NamedReceiver> {
+  let mut starts: Vector<u64> = Vector::new<u64>();
+  let mut position: u64 = 0;
+
+  while (position < receivers.length()) {
+    if (let Option::SOME(receiver) = receivers.get(position)) {
+      starts.push(receiver.start);
+    }
+
+    position += 1;
+  }
+
+  let order: Vector<u64> = ascendingOrder(&starts);
+  let mut sorted: Vector<NamedReceiver> = Vector::new<NamedReceiver>();
+  position = 0;
+
+  while (position < order.length()) {
+    if (let Option::SOME(receiver) = receivers.get(u64At(&order, position))) {
+      sorted.push(NamedReceiver {
+        name: receiver.name.clone(),
+        start: receiver.start,
+        receiver: ReceiverType { owner: receiver.receiver.owner, extension: receiver.receiver.extension },
+      });
+    }
+
+    position += 1;
+  }
+
+  return sorted;
+}
+
+/// Adds the parameters of every function and method `itemIds` declares,
+/// typed as their signatures declare them.
+function collectParameterReceivers(
+  receivers: &mut Vector<NamedReceiver>,
+  cache: &mut HashMap<u32, ReceiverType>,
+  path: &String,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemIds: &Vector<Ast::ItemId>,
+  stores: &Stores,
+): void {
+  let receiversRef: &mut Vector<NamedReceiver> = receivers;
+  let cacheRef: &mut HashMap<u32, ReceiverType> = cache;
+  let mut position: u64 = 0;
+
+  while (position < itemIds.length()) {
+    let Option::SOME(itemId) = itemIds.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    match (module.items.get(*itemId)) {
+      Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+        if (spanInFile(path, functionItem.span)) {
+          addParameterReceivers(receiversRef, cacheRef, module, analysis, *itemId, &functionItem.parameters, stores);
+        }
+      },
+      Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
+        collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &recordItem.methods, stores);
+      },
+      Option::SOME(Ast::Item::Node::Enum(enumItem)) -> {
+        collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &enumItem.methods, stores);
+      },
+      Option::SOME(Ast::Item::Node::Namespace(namespaceItem)) -> {
+        collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &namespaceItem.items, stores);
+      },
+      Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
+        if (let Option::SOME(innerId) = exportItem.declaration) {
+          let mut inner: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+          inner.push(innerId);
+          collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &inner, stores);
+        }
+      },
+      _ -> {},
+    };
+  }
+}
+
+function addParameterReceivers(
+  receivers: &mut Vector<NamedReceiver>,
+  cache: &mut HashMap<u32, ReceiverType>,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemId: Ast::ItemId,
+  patterns: &Vector<Ast::PatternId>,
+  stores: &Stores,
+): void {
+  let mut receiversRef: &mut Vector<NamedReceiver> = receivers;
+  let cacheRef: &mut HashMap<u32, ReceiverType> = cache;
+  let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+  let Option::SOME(defId) = Doc::itemDefinition(analysis, itemId) else {
+    return;
+  };
+
+  match (stores.defs.get(defId)) {
+    Option::SOME(Analyzer::Definition::Function(functionDef)) -> appendIds(&mut params, &functionDef.params),
+    Option::SOME(Analyzer::Definition::Method(methodDef)) -> appendIds(&mut params, &methodDef.params),
+    _ -> {},
+  };
+
+  if (params.length() != patterns.length()) {
+    return;
+  }
+
+  let mut position: u64 = 0;
+
+  while (position < patterns.length()) {
+    let Option::SOME(pattern) = patterns.get(position) else {
+      break;
+    };
+    let Option::SOME(paramId) = params.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*pattern) else {
+      continue;
+    };
+    let Option::SOME(Analyzer::Definition::Variable(variable)) = stores.defs.get(*paramId) else {
+      continue;
+    };
+
+    receiversRef.push(NamedReceiver {
+      name: binding.name.clone(),
+      start: binding.span.start,
+      receiver: cachedReceiver(cacheRef, variable.declaredType, stores),
+    });
+  }
+}
+
+/// Adds every local binding the typechecker settled a type for.
+function collectLocalReceivers(
+  receivers: &mut Vector<NamedReceiver>,
+  cache: &mut HashMap<u32, ReceiverType>,
+  path: &String,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  stores: &Stores,
+): void {
+  let mut receiversRef: &mut Vector<NamedReceiver> = receivers;
+  let cacheRef: &mut HashMap<u32, ReceiverType> = cache;
+  let localTypes: &Analyzer::Typecheck::LocalTypeMap = &analysis.typecheck.localTypes;
+  let mut position: u64 = 0;
+
+  while (position < localTypes.patterns.length()) {
+    let Option::SOME(patternRaw) = localTypes.patterns.get(position) else {
+      break;
+    };
+    let Option::SOME(typeId) = localTypes.typeIds.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(Id::fromRaw<Ast::PatternTag>(*patternRaw)) else {
+      continue;
+    };
+
+    if (!spanInFile(path, binding.span)) {
+      continue;
+    }
+
+    receiversRef.push(NamedReceiver {
+      name: binding.name.clone(),
+      start: binding.span.start,
+      receiver: cachedReceiver(cacheRef, *typeId, stores),
+    });
+  }
+}
+
+/// Every expression of the module the typechecker typed.
+function typedSpansOf(
+  cache: &mut HashMap<u32, ReceiverType>,
+  path: &String,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  stores: &Stores,
+): Vector<TypedSpan> {
+  let cacheRef: &mut HashMap<u32, ReceiverType> = cache;
+  let exprTypes: &Analyzer::Typecheck::ExprTypeMap = &analysis.typecheck.exprTypes;
+  let mut spans: Vector<TypedSpan> = Vector::new<TypedSpan>();
+  let mut position: u64 = 0;
+
+  while (position < exprTypes.nodeIds.length()) {
+    let Option::SOME(nodeRaw) = exprTypes.nodeIds.get(position) else {
+      break;
+    };
+    let Option::SOME(typeId) = exprTypes.typeIds.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(node) = module.expressions.get(Id::fromRaw<Ast::ExpressionTag>(*nodeRaw)) else {
+      continue;
+    };
+
+    let span: SourceSpan = Ast::Serializer::expressionSpan(node);
+
+    if (!spanInFile(path, span)) {
+      continue;
+    }
+
+    spans.push(TypedSpan { start: span.start, end: span.end, receiver: cachedReceiver(cacheRef, *typeId, stores) });
+  }
+
+  return spans;
+}
+
+/// The names the module's import lines bind, as written in `text`, and
+/// what each names.
+function importedNames(
+  text: &String,
+  path: &String,
+  overlay: &Analyzer::Imports::ImportOverlay
+): Vector<ImportedName> {
+  let mut names: Vector<ImportedName> = Vector::new<ImportedName>();
+  let mut position: u64 = 0;
+
+  while (position < overlay.defs.length()) {
+    let implicit: boolean = match (overlay.implicit.get(position)) {
+      Option::SOME(flag) -> *flag,
+      Option::NONE -> true,
+    };
+    let Option::SOME(defId) = overlay.defs.get(position) else {
+      break;
+    };
+    let Option::SOME(span) = overlay.spans.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    if (implicit || !spanInFile(path, *span) || span.end > text.length() || span.start >= span.end) {
+      continue;
+    }
+
+    let written: String = text.substringBytes(span.start, span.end).trimAsciiWhitespace();
+    names.push(ImportedName { text: written, raw: defId.raw() });
+  }
+
+  return names;
+}
