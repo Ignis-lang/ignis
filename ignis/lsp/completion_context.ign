@@ -89,11 +89,14 @@ export record CompletionContext {
   public assignedFields: Vector<String>;
 }
 
-/// The scope at a position, and where the innermost callable block starts
-/// when it is inside one.
+/// The scope at a position. Inside a callable, `localStart` is where the
+/// body of the enclosing function starts, and `parameterStarts` where the
+/// blocks whose parameters are in scope start, innermost first: the
+/// closures around the position, then the function.
 export record ScopeAt {
   public scope: u64;
   public localStart: Option<u64>;
+  public parameterStarts: Vector<u64>;
 }
 
 function contextOf(kind: u64, prefix: String): CompletionContext {
@@ -967,11 +970,14 @@ function braceScope(tokens: &Vector<CompletionToken>, index: u64, parent: Option
 }
 
 /// The scope at `cursor`: the kind of the innermost block open there and,
-/// inside a callable, where that innermost block starts.
+/// inside a callable, where the enclosing function and closures start. A
+/// block opens a function when it is the first callable block around the
+/// position, and a closure when a `->` comes right before it inside one.
 export function scopeAt(tokens: &Vector<CompletionToken>, cursor: u64): ScopeAt {
   let meaningful: Vector<CompletionToken> = meaningfulTokens(tokens);
   let mut scopes: Vector<u64> = Vector::new<u64>();
   let mut starts: Vector<u64> = Vector::new<u64>();
+  let mut opensCallable: Vector<boolean> = Vector::new<boolean>();
   let mut index: u64 = 0;
 
   while (index < meaningful.length()) {
@@ -984,24 +990,53 @@ export function scopeAt(tokens: &Vector<CompletionToken>, cursor: u64): ScopeAt 
     }
 
     if (token.code == TokenCode::LEFT_BRACE) {
-      let parent: Option<u64> = lastOf(&scopes);
-      scopes.push(braceScope(&meaningful, index, parent));
+      let parent: u64 = lastOf(&scopes).unwrapOr(CompletionScope::GLOBAL);
+      let scope: u64 = braceScope(&meaningful, index, lastOf(&scopes));
+      let opensFunction: boolean = parent != CompletionScope::CALLABLE_BODY && scope == CompletionScope::CALLABLE_BODY;
+      let opensClosure: boolean = parent == CompletionScope::CALLABLE_BODY && index > 0 && codeAt(&meaningful, index - 1) == TokenCode::ARROW;
+
+      scopes.push(scope);
       starts.push(token.start);
+      opensCallable.push(opensFunction || opensClosure);
     } else if (token.code == TokenCode::RIGHT_BRACE) {
       let _closedScope: Option<u64> = scopes.pop();
       let _closedStart: Option<u64> = starts.pop();
+      let _closedCallable: Option<boolean> = opensCallable.pop();
     }
 
     index += 1;
   }
 
   let scope: u64 = lastOf(&scopes).unwrapOr(CompletionScope::GLOBAL);
+  let mut parameterStarts: Vector<u64> = Vector::new<u64>();
 
   if (scope != CompletionScope::CALLABLE_BODY) {
-    return ScopeAt { scope: scope, localStart: Option::NONE };
+    return ScopeAt { scope: scope, localStart: Option::NONE, parameterStarts: parameterStarts };
   }
 
-  return ScopeAt { scope: scope, localStart: lastOf(&starts) };
+  let mut localStart: Option<u64> = Option::NONE;
+  let mut position: u64 = starts.length();
+
+  while (position > 0) {
+    position -= 1;
+
+    let opens: boolean = match (opensCallable.get(position)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> false,
+    };
+
+    if (opens) {
+      let start: u64 = match (starts.get(position)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> 0,
+      };
+
+      parameterStarts.push(start);
+      localStart = Option::SOME(start);
+    }
+  }
+
+  return ScopeAt { scope: scope, localStart: localStart, parameterStarts: parameterStarts };
 }
 
 /// The code of the last token before `startOffset` that is not a comment,
@@ -1076,15 +1111,17 @@ export record ScannedLocal {
   public detail: str;
 }
 
-/// The locals declared with `let`, `let mut` or `const` before `cursor`,
-/// nearest first, then the parameters of the callable whose block starts at
-/// `localStart`. Names in `known` and names that do not match `prefix` are
-/// left out. The scan stops at `localStart`, and 500 tokens back.
+/// The locals declared with `let`, `let mut` or `const` before `cursor` in
+/// the blocks around it, nearest first, then the parameters of the closures
+/// and the function of `scope`, innermost first. A name already found hides
+/// the ones further out. Names in `known` and names that do not match
+/// `prefix` are left out. The scan stops where the function's body starts,
+/// and 500 tokens back.
 export function scannedLocals(
   tokens: &Vector<CompletionToken>,
   cursor: u64,
   prefix: &String,
-  localStart: Option<u64>,
+  scope: &ScopeAt,
   known: &Vector<String>,
 ): Vector<ScannedLocal> {
   let mut found: Vector<ScannedLocal> = Vector::new<ScannedLocal>();
@@ -1095,6 +1132,7 @@ export function scannedLocals(
     cursorIndex += 1;
   }
 
+  let mut closedDepth: u64 = 0;
   let mut position: u64 = cursorIndex;
 
   while (position > 0) {
@@ -1104,27 +1142,22 @@ export function scannedLocals(
       break;
     };
 
-    if (let Option::SOME(start) = localStart) {
+    if (let Option::SOME(start) = scope.localStart) {
       if (token.start < start) {
         break;
       }
     }
 
-    if (token.code == TokenCode::IDENTIFIER) {
-      if (!matchesPrefix(&token.lexeme, prefix) || containsName(known, &token.lexeme)) {
-        continue;
-      }
-
-      let before: u64 = position > 0 ? codeAt(tokens, position - 1) : TokenCode::OTHER;
-      let mut declared: boolean = before == TokenCode::LET || before == TokenCode::CONST;
-
-      if (before == TokenCode::MUT && position > 1) {
-        declared = codeAt(tokens, position - 2) == TokenCode::LET;
-      }
-
-      if (declared && !containsName(&seen, &token.lexeme)) {
-        seen.push(token.lexeme.clone());
-        found.push(ScannedLocal { name: token.lexeme.clone(), detail: "(local)" });
+    if (token.code == TokenCode::RIGHT_BRACE) {
+      closedDepth += 1;
+    } else if (token.code == TokenCode::LEFT_BRACE && closedDepth > 0) {
+      closedDepth -= 1;
+    } else if (token.code == TokenCode::IDENTIFIER && closedDepth == 0) {
+      if (matchesPrefix(&token.lexeme, prefix) && !containsName(known, &token.lexeme) && !containsName(&seen, &token.lexeme)) {
+        if (isDeclaredLocal(tokens, position)) {
+          seen.push(token.lexeme.clone());
+          found.push(ScannedLocal { name: token.lexeme.clone(), detail: "(local)" });
+        }
       }
     }
 
@@ -1133,23 +1166,45 @@ export function scannedLocals(
     }
   }
 
-  if (let Option::SOME(start) = localStart) {
-    let parameters: Vector<String> = parameterNames(tokens, start);
-    let mut index: u64 = 0;
+  let mut block: u64 = 0;
 
-    while (index < parameters.length()) {
-      if (let Option::SOME(name) = parameters.get(index)) {
-        if (matchesPrefix(name, prefix) && !containsName(known, name) && !containsName(&seen, name)) {
-          seen.push(name.clone());
-          found.push(ScannedLocal { name: name.clone(), detail: "(param)" });
+  while (block < scope.parameterStarts.length()) {
+    if (let Option::SOME(start) = scope.parameterStarts.get(block)) {
+      let parameters: Vector<String> = parameterNames(tokens, *start);
+      let mut index: u64 = 0;
+
+      while (index < parameters.length()) {
+        if (let Option::SOME(name) = parameters.get(index)) {
+          if (matchesPrefix(name, prefix) && !containsName(known, name) && !containsName(&seen, name)) {
+            seen.push(name.clone());
+            found.push(ScannedLocal { name: name.clone(), detail: "(param)" });
+          }
         }
-      }
 
-      index += 1;
+        index += 1;
+      }
     }
+
+    block += 1;
   }
 
   return found;
+}
+
+/// True when the identifier at `position` follows `let`, `let mut` or
+/// `const`.
+function isDeclaredLocal(tokens: &Vector<CompletionToken>, position: u64): boolean {
+  if (position == 0) {
+    return false;
+  }
+
+  let before: u64 = codeAt(tokens, position - 1);
+
+  if (before == TokenCode::MUT && position > 1) {
+    return codeAt(tokens, position - 2) == TokenCode::LET;
+  }
+
+  return before == TokenCode::LET || before == TokenCode::CONST;
 }
 
 /// The names followed by `:` inside the last parenthesized list before the

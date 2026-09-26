@@ -178,7 +178,8 @@ function scopesFollowTheBracesBeforeTheCursor(): void {
   Test::assertEq<str>(scopeText("function f(): void {\n  \n}", 23).toStr(), "callable@19");
   Test::assertEq<str>(scopeText("const value: i32 = 1;\n", 22).toStr(), "global");
   Test::assertEq<str>(scopeText("record Rc {\n  public get(&self): i32 {\n    \n  }\n}", 43).toStr(), "callable@37");
-  Test::assertEq<str>(scopeText("function f(): void {\n  if (x) {\n    \n  }\n}", 36).toStr(), "callable@30");
+  Test::assertEq<str>(scopeText("function f(): void {\n  if (x) {\n    \n  }\n}", 36).toStr(), "callable@19");
+  Test::assertEq<str>(scopeText("function f(): void {\n  run((x: i32): void -> {\n    \n  });\n}", 50).toStr(), "callable@19");
 }
 
 function localsText(source: str, cursor: u64, prefix: str): String {
@@ -187,7 +188,7 @@ function localsText(source: str, cursor: u64, prefix: str): String {
   let scope: ScopeAt = scopeAt(&tokens, cursor);
   let known: Vector<String> = Vector::new<String>();
   let wanted: String = String::create(prefix);
-  let locals: Vector<ScannedLocal> = scannedLocals(&tokens, cursor, &wanted, scope.localStart, &known);
+  let locals: Vector<ScannedLocal> = scannedLocals(&tokens, cursor, &wanted, &scope, &known);
   let mut rendered: String = String::new();
   let mut index: u64 = 0;
 
@@ -243,4 +244,20 @@ function charBoundariesMoveForward(): void {
   Test::assertEq<u64>(nextCharBoundary(&text, 8), 10);
   Test::assertEq<u64>(nextCharBoundary(&text, 10), 10);
   Test::assertEq<u64>(nextCharBoundary(&text, 100), text.length());
+}
+
+@test
+function scannedLocalsCoverTheEnclosingBlocks(): void {
+  let source: str = "function main(count: i32): void {\n  let before = 1;\n  if (count > 0) {\n    let inside = 2;\n  }\n  while (true) {\n    let nested = 3;\n    if (ready) {\n      ";
+  let cursor: u64 = String::create(source).length();
+
+  Test::assertEq<str>(localsText(source, cursor, "").toStr(), "nested(local) before(local) count(param)");
+}
+
+@test
+function scannedLocalsIncludeClosureParameters(): void {
+  let source: str = "function main(count: i32): void {\n  let value = 1;\n  items.forEach((item: &i32): void -> {\n    let value = 2;\n    ";
+  let cursor: u64 = String::create(source).length();
+
+  Test::assertEq<str>(localsText(source, cursor, "").toStr(), "value(local) item(param) count(param)");
 }
