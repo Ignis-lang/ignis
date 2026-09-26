@@ -1,0 +1,515 @@
+//!
+//! # I/O Streams
+//!
+//! Buffered byte reading from a file descriptor, whole-buffer writes, and
+//! `Content-Length` message framing, exposed under the `Stream` namespace and
+//! re-exported by `std::io`.
+//!
+//! ## Types and Functions
+//!
+//! | Item                               | Description                                        |
+//! |------------------------------------|----------------------------------------------------|
+//! | `Stream::ByteReader`                   | Buffered reader over a file descriptor             |
+//! | `Stream::ByteReader::stdin`            | Reader over standard input                         |
+//! | `Stream::ByteReader::readExact`        | Exactly `count` bytes                              |
+//! | `Stream::ByteReader::readLine`         | One line terminated by `\r\n`                      |
+//! | `Stream::ByteReader::readFramedMessage`| One `Content-Length` framed message body           |
+//! | `Stream::ReadError`                    | End of input, truncated input, or a failed read    |
+//! | `Stream::FrameError`                   | Why a framed message could not be read             |
+//! | `Stream::ByteWriter`                   | Unbuffered whole-buffer writer over a descriptor   |
+//! | `Stream::writeAll`                     | Write a whole `String` to a file descriptor        |
+//! | `Stream::writeFramedMessage`           | Write one framed message to stdout                 |
+//! | `Stream::writeFramedMessageTo`         | Write one framed message to a file descriptor      |
+//!
+//! ## Framing
+//!
+//! A framed message is a block of `Name: value` header lines, each ended by
+//! `\r\n`, then an empty line, then exactly `Content-Length` bytes of body:
+//!
+//! ```text
+//!   Content-Length: 17\r\n
+//!   Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n
+//!   \r\n
+//!   {"jsonrpc":"2.0"}
+//! ```
+//!
+//! `Content-Length` is required, its name matches case-insensitively, and its
+//! value is a decimal byte count with optional surrounding spaces or tabs.
+//! Every other header, `Content-Type` included, is ignored.
+//!
+//! ## Reads and Writes
+//!
+//! `read(2)` and `write(2)` may transfer fewer bytes than requested and may be
+//! interrupted by a signal. `ByteReader` keeps reading until it has the bytes
+//! it needs or reaches end of input, and `writeAll` keeps writing until every
+//! byte is written. Both retry on `EINTR`. There is no user-space write
+//! buffer, so the bytes have reached the descriptor when `writeAll` returns.
+//!
+//! A `ByteReader` does not own its descriptor: the caller closes it. The
+//! reader may read ahead of the data it returns, so do not mix it with other
+//! reads of the same descriptor.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Stream from "std::io";
+//! import String from "std::string";
+//!
+//! function main(): i32 {
+//!   let mut reader: Stream::ByteReader = Stream::ByteReader::stdin();
+//!
+//!   while (true) {
+//!     let body: String = match (reader.readFramedMessage()) {
+//!       Result::OK(body) -> body,
+//!       Result::ERROR(Stream::FrameError::END_OF_INPUT) -> {
+//!         return 0;
+//!       },
+//!       Result::ERROR(_) -> {
+//!         return 1;
+//!       },
+//!     };
+//!
+//!     let Result::OK(_) = Stream::writeFramedMessage(&body) else {
+//!       return 1;
+//!     };
+//!   }
+//!
+//!   return 0;
+//! }
+//! ```
+
+import LibC from "std::libc";
+import Memory from "std::memory";
+import String from "std::string";
+
+import Io from "./error";
+
+/// Bytes requested from the descriptor by one `read(2)` call.
+const STREAM_READ_CHUNK: u64 = 4096;
+
+/// A `Content-Length` value longer than this is rejected instead of parsed,
+/// which keeps the decimal conversion below `u64` overflow.
+const STREAM_MAX_LENGTH_DIGITS: u64 = 19;
+
+/// Parses a `Content-Length` value: decimal digits with optional surrounding
+/// spaces or tabs. Returns `NONE` for anything else.
+function streamParseContentLength(value: &String): Option<u64> {
+  let trimmed: String = value.trimAsciiWhitespace();
+  let length: u64 = trimmed.length();
+
+  if (length == 0 || length > STREAM_MAX_LENGTH_DIGITS) {
+    return Option::NONE;
+  }
+
+  let mut result: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    let Option::SOME(byte) = trimmed.byteAt(index) else {
+      return Option::NONE;
+    };
+
+    if (byte < 48 || byte > 57) {
+      return Option::NONE;
+    }
+
+    result = result * 10 + ((byte - 48) as u64);
+    index += 1;
+  }
+
+  return Option::SOME(result);
+}
+
+/// Returns the index of the first `:` in `line`, or `NONE`.
+function streamFindColon(line: &String): Option<u64> {
+  let length: u64 = line.length();
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    let Option::SOME(byte) = line.byteAt(index) else {
+      return Option::NONE;
+    };
+
+    if (byte == 58) {
+      return Option::SOME(index);
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Buffered byte streams and `Content-Length` framing.
+export namespace Stream {
+  /// Why a `ByteReader` read did not return the requested bytes.
+  enum ReadError {
+    /// Input ended before the first byte of the requested data.
+    END_OF_INPUT,
+
+    /// Input ended after part of the requested data had arrived.
+    TRUNCATED,
+
+    /// The underlying `read(2)` failed with an error other than `EINTR`.
+    FAILED(Io::IoError),
+  }
+
+  /// Why `ByteReader::readFramedMessage` did not return a message body.
+  enum FrameError {
+    /// Input ended cleanly before the first byte of a message. A server
+    /// reading messages in a loop treats this as the end of the session.
+    END_OF_INPUT,
+
+    /// Input ended inside the headers or the body of a message.
+    TRUNCATED,
+
+    /// A header line has no `:` or an empty name. Holds the line.
+    MALFORMED_HEADER(String),
+
+    /// The header block ended without a `Content-Length` header.
+    MISSING_CONTENT_LENGTH,
+
+    /// A `Content-Length` value is not a decimal byte count. Holds the value.
+    INVALID_CONTENT_LENGTH(String),
+
+    /// The header block has more than one `Content-Length` header.
+    DUPLICATE_CONTENT_LENGTH,
+
+    /// The underlying `read(2)` failed with an error other than `EINTR`.
+    FAILED(Io::IoError),
+  }
+
+  /// Buffered reader over a file descriptor it does not own.
+  ///
+  /// Bytes read from the descriptor but not yet returned stay in `buffer`
+  /// from `position` on, so a message boundary in the middle of one
+  /// `read(2)` loses nothing.
+  record ByteReader {
+    /// Descriptor to read from. Not closed by the reader.
+    fd: i32;
+
+    /// Bytes read from `fd`. Those before `position` are already returned.
+    buffer: String;
+
+    /// Index in `buffer` of the first byte not yet returned.
+    position: u64;
+
+    /// True once `read(2)` reported end of input. No later read is attempted.
+    reachedEnd: boolean;
+
+    /// Creates a reader over `fd`. The caller keeps ownership of `fd`.
+    public static fromFd(fd: i32): ByteReader {
+      return ByteReader {
+        fd: fd,
+        buffer: String::new(),
+        position: 0,
+        reachedEnd: false,
+      };
+    }
+
+    /// Creates a reader over standard input (file descriptor 0).
+    public static stdin(): ByteReader {
+      return ByteReader::fromFd(LibC::File::STDIN_FILENO);
+    }
+
+    /// Returns the number of buffered bytes not yet returned.
+    public available(&self): u64 {
+      return self.buffer.length() - self.position;
+    }
+
+    /// Reads one chunk from the descriptor into the buffer, retrying on
+    /// `EINTR`. Returns the byte count, 0 at end of input.
+    ///
+    /// Already returned bytes are discarded first, so buffer indexes taken
+    /// before a call are relative to `position` afterwards.
+    fill(&mut self): Result<u64, Io::IoError> {
+      if (self.position > 0) {
+        self.buffer = self.buffer.substringBytes(self.position, self.buffer.length());
+        self.position = 0;
+      }
+
+      let chunk: *mut u8 = Memory::allocateVector<u8>(STREAM_READ_CHUNK);
+
+      while (true) {
+        let count: i64 = LibC::File::read(self.fd, chunk as *mut void, STREAM_READ_CHUNK);
+
+        if (count < 0) {
+          let error: Io::IoError = Io::IoError::lastError();
+
+          if (error.rawCode() == LibC::Errno::EINTR) {
+            continue;
+          }
+
+          Memory::free(chunk);
+          return Result::ERROR(error);
+        }
+
+        let mut index: u64 = 0;
+
+        while (index < count as u64) {
+          self.buffer.pushByte(@read<u8>(chunk + index));
+          index += 1;
+        }
+
+        if (count == 0) {
+          self.reachedEnd = true;
+        }
+
+        Memory::free(chunk);
+        return Result::OK(count as u64);
+      }
+
+      Memory::free(chunk);
+      return Result::OK(0);
+    }
+
+    /// Reads one more chunk unless end of input was already reached.
+    /// Returns false when no more bytes can arrive.
+    fillMore(&mut self): Result<boolean, Io::IoError> {
+      if (self.reachedEnd) {
+        return Result::OK(false);
+      }
+
+      let count: u64 = self.fill()!;
+      return Result::OK(count > 0);
+    }
+
+    /// The error for input that ended with `available` unread bytes short of
+    /// what was requested.
+    endError(&self): ReadError {
+      if (self.available() == 0) {
+        return ReadError::END_OF_INPUT;
+      }
+
+      return ReadError::TRUNCATED;
+    }
+
+    /// Reads exactly `count` bytes.
+    ///
+    /// Returns `END_OF_INPUT` when input ends before the first byte and
+    /// `TRUNCATED` when it ends after some of them. Neither consumes the
+    /// bytes that did arrive.
+    public readExact(&mut self, count: u64): Result<String, ReadError> {
+      while (self.available() < count) {
+        let more: boolean = match (self.fillMore()) {
+          Result::OK(value) -> value,
+          Result::ERROR(error) -> {
+            return Result::ERROR(ReadError::FAILED(error));
+          },
+        };
+
+        if (!more) {
+          return Result::ERROR(self.endError());
+        }
+      }
+
+      let start: u64 = self.position;
+      self.position += count;
+      return Result::OK(self.buffer.substringBytes(start, start + count));
+    }
+
+    /// Reads one line terminated by `\r\n` and returns it without the
+    /// terminator. A lone `\n` or `\r` is part of the line.
+    ///
+    /// Returns `END_OF_INPUT` when input ends before the first byte and
+    /// `TRUNCATED` when it ends inside a line.
+    public readLine(&mut self): Result<String, ReadError> {
+      let mut scanned: u64 = 0;
+
+      while (true) {
+        while (self.position + scanned + 1 < self.buffer.length()) {
+          let at: u64 = self.position + scanned;
+          let Option::SOME(current) = self.buffer.byteAt(at) else {
+            break;
+          };
+          let Option::SOME(next) = self.buffer.byteAt(at + 1) else {
+            break;
+          };
+
+          if (current == 13 && next == 10) {
+            let line: String = self.buffer.substringBytes(self.position, at);
+            self.position = at + 2;
+            return Result::OK(line);
+          }
+
+          scanned += 1;
+        }
+
+        let more: boolean = match (self.fillMore()) {
+          Result::OK(value) -> value,
+          Result::ERROR(error) -> {
+            return Result::ERROR(ReadError::FAILED(error));
+          },
+        };
+
+        if (!more) {
+          return Result::ERROR(self.endError());
+        }
+      }
+
+      return Result::ERROR(self.endError());
+    }
+
+    /// Reads one `Content-Length` framed message and returns its body.
+    ///
+    /// Reads header lines up to the empty line that ends them, then exactly
+    /// `Content-Length` bytes. `END_OF_INPUT` means input ended cleanly
+    /// between messages. On any other error the stream position is
+    /// unspecified and the session should end.
+    public readFramedMessage(&mut self): Result<String, FrameError> {
+      let mut contentLength: u64 = 0;
+      let mut hasContentLength: boolean = false;
+      let mut sawHeader: boolean = false;
+
+      while (true) {
+        let line: String = match (self.readLine()) {
+          Result::OK(value) -> value,
+          Result::ERROR(ReadError::END_OF_INPUT) -> {
+            if (sawHeader) {
+              return Result::ERROR(FrameError::TRUNCATED);
+            }
+
+            return Result::ERROR(FrameError::END_OF_INPUT);
+          },
+          Result::ERROR(ReadError::TRUNCATED) -> {
+            return Result::ERROR(FrameError::TRUNCATED);
+          },
+          Result::ERROR(ReadError::FAILED(error)) -> {
+            return Result::ERROR(FrameError::FAILED(error));
+          },
+        };
+
+        if (line.length() == 0) {
+          break;
+        }
+
+        sawHeader = true;
+
+        let Option::SOME(colon) = streamFindColon(&line) else {
+          return Result::ERROR(FrameError::MALFORMED_HEADER(line));
+        };
+
+        if (colon == 0) {
+          return Result::ERROR(FrameError::MALFORMED_HEADER(line));
+        }
+
+        let name: String = line.substringBytes(0, colon).toLowerCase();
+
+        if (name.equals("content-length")) {
+          if (hasContentLength) {
+            return Result::ERROR(FrameError::DUPLICATE_CONTENT_LENGTH);
+          }
+
+          let value: String = line.substringBytes(colon + 1, line.length());
+
+          let Option::SOME(parsed) = streamParseContentLength(&value) else {
+            return Result::ERROR(FrameError::INVALID_CONTENT_LENGTH(value));
+          };
+
+          contentLength = parsed;
+          hasContentLength = true;
+        }
+      }
+
+      if (!hasContentLength) {
+        return Result::ERROR(FrameError::MISSING_CONTENT_LENGTH);
+      }
+
+      return match (self.readExact(contentLength)) {
+        Result::OK(body) -> Result::OK(body),
+        Result::ERROR(ReadError::FAILED(error)) -> Result::ERROR(FrameError::FAILED(error)),
+        Result::ERROR(_) -> Result::ERROR(FrameError::TRUNCATED),
+      };
+    }
+  }
+
+  /// Unbuffered writer over a file descriptor it does not own.
+  ///
+  /// Every call hands all of its bytes to `write(2)` before returning, so
+  /// there is nothing left to flush afterwards.
+  record ByteWriter {
+    /// Descriptor to write to. Not closed by the writer.
+    fd: i32;
+
+    /// Creates a writer over `fd`. The caller keeps ownership of `fd`.
+    public static fromFd(fd: i32): ByteWriter {
+      return ByteWriter { fd: fd };
+    }
+
+    /// Creates a writer over standard output (file descriptor 1).
+    public static stdout(): ByteWriter {
+      return ByteWriter::fromFd(LibC::File::STDOUT_FILENO);
+    }
+
+    /// Writes every byte of `bytes`, looping over partial writes and
+    /// retrying on `EINTR`.
+    public writeAll(&self, bytes: &String): Result<void, Io::IoError> {
+      let total: u64 = bytes.length();
+
+      if (total == 0) {
+        return Result::OK(());
+      }
+
+      let data: *u8 = bytes.toStr() as *u8;
+      let mut offset: u64 = 0;
+
+      while (offset < total) {
+        let written: i64 = LibC::File::write(self.fd, (data + offset) as *void, total - offset);
+
+        if (written < 0) {
+          let error: Io::IoError = Io::IoError::lastError();
+
+          if (error.rawCode() == LibC::Errno::EINTR) {
+            continue;
+          }
+
+          return Result::ERROR(error);
+        }
+
+        if (written == 0) {
+          return Result::ERROR(Io::IoError {
+            kind: Io::ErrorKind::OTHER,
+            raw: 0,
+            message: "write returned zero bytes",
+          });
+        }
+
+        offset += written as u64;
+      }
+
+      return Result::OK(());
+    }
+
+    /// Writes `body` as one `Content-Length` framed message: the header, the
+    /// empty line, then the body, in a single `writeAll`.
+    public writeFramedMessage(&self, body: &String): Result<void, Io::IoError> {
+      let bodyLength: u64 = body.length();
+      let lengthText: String = bodyLength.toString();
+
+      let mut frame: String = String::create("Content-Length: ");
+      frame.push(&lengthText);
+      frame.pushStr("\r\n\r\n");
+      frame.push(body);
+
+      return self.writeAll(&frame);
+    }
+  }
+
+  /// Writes every byte of `bytes` to `fd`. See `ByteWriter::writeAll`.
+  function writeAll(fd: i32, bytes: &String): Result<void, Io::IoError> {
+    let writer: ByteWriter = Stream::ByteWriter::fromFd(fd);
+    return writer.writeAll(bytes);
+  }
+
+  /// Writes `body` to `fd` as one `Content-Length` framed message.
+  function writeFramedMessageTo(fd: i32, body: &String): Result<void, Io::IoError> {
+    let writer: ByteWriter = Stream::ByteWriter::fromFd(fd);
+    return writer.writeFramedMessage(body);
+  }
+
+  /// Writes `body` to standard output as one `Content-Length` framed message.
+  function writeFramedMessage(body: &String): Result<void, Io::IoError> {
+    let writer: ByteWriter = Stream::ByteWriter::stdout();
+    return writer.writeFramedMessage(body);
+  }
+}
