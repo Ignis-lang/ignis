@@ -1,0 +1,38 @@
+// e2e: std
+//
+// The same re-match through a `&mut` scrutinee: the binding is a place in the mutably
+// borrowed referent, and matching it again leaves the payload with its owner.
+import String from "std::string";
+
+enum Inner {
+  TEXT(String),
+  EMPTY(i32),
+}
+
+enum Outer {
+  WRAP(Inner),
+  NONE,
+}
+
+function probeText(outer: &mut Outer): i32 {
+  if (let Outer::WRAP(inner) = outer) {
+    if (let Inner::TEXT(text) = inner) {
+      return text.length() as i32;
+    }
+  }
+
+  return 0;
+}
+
+function main(): i32 {
+  let mut value: Outer = Outer::WRAP(Inner::TEXT(String::create("hello")));
+  let mut sum: i32 = 0;
+  let mut index: i32 = 0;
+
+  while (index < 3) {
+    sum += probeText(&mut value);
+    index += 1;
+  }
+
+  return sum;
+}

@@ -68,6 +68,11 @@ export namespace ParserStatements {
 
   function parseLetStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
+
+    // A local declaration claims the doc before it, as the host parser does,
+    // so the doc cannot reach the next item.
+    let _doc: Option<String> = parserRef.takePendingDoc();
+
     let keyword = parserRef.expectKeyword(Keyword::LET, "expected 'let'")!;
     let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
     let patternResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);

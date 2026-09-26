@@ -8,6 +8,7 @@ import
 from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
 import HashMap from "std::collections";
 import Char from "std::char";
 
@@ -1606,6 +1607,7 @@ export namespace Analyzer {
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let staticId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(staticDef));
+                Analyzer::Binder::recordPatternDoc(ast, defStore, *patId, staticId);
                 staticFields.push(staticId);
               } else {
                 seenSyms.push(sym);
@@ -1618,6 +1620,7 @@ export namespace Analyzer {
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let fieldId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Field(fieldDef));
+                Analyzer::Binder::recordPatternDoc(ast, defStore, *patId, fieldId);
                 out.push(fieldId);
               }
             },
@@ -1716,6 +1719,7 @@ export namespace Analyzer {
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let variantId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variant(variantDef));
+                Analyzer::Binder::recordPatternDoc(ast, defStore, *patId, variantId);
                 out.push(variantId);
                 tagValue += 1;
               }
@@ -1765,6 +1769,7 @@ export namespace Analyzer {
                   };
                   let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                   let variantId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variant(variantDef));
+                  Analyzer::Binder::recordPatternDoc(ast, defStore, *patId, variantId);
                   out.push(variantId);
                   tagValue += 1;
                 }
@@ -3032,6 +3037,64 @@ export namespace Analyzer {
     ///
     /// Postcondition: `typeStore.length()` is identical before and after the call
     /// (sentinel typeId = VOID, already cached in every fresh TypeStore at id 13).
+    /// Copy the `///` text of each bound item onto its definition.
+    ///
+    /// Constants stay undocumented, as the host's `bind_constant` leaves
+    /// `doc` unset. A reopened namespace shares one definition, which keeps
+    /// the text of the first block that has any.
+    function recordItemDocs(
+      ast: &Ast::Module,
+      defStore: &mut Analyzer::DefinitionStore,
+      nodeIds: &Vector<u32>,
+      defIds: &Vector<Analyzer::DefinitionId>,
+    ): void {
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let mut index: u64 = 0;
+
+      while (index < nodeIds.length()) {
+        let Option::SOME(rawItemId) = nodeIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(defId) = defIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(doc) = ast.itemDoc(Id::fromRaw<Ast::ItemTag>(*rawItemId)) else {
+          index += 1;
+          continue;
+        };
+
+        let mut documentable: boolean = defsRef.docOf(*defId).isNone();
+
+        if (let Option::SOME(Analyzer::Definition::Variable(_)) = defsRef.get(*defId)) {
+          documentable = false;
+        }
+
+        if (documentable) {
+          defsRef.setDoc(*defId, doc);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Copy the `///` text of a field or enum member pattern onto `defId`.
+    function recordPatternDoc(
+      ast: &Ast::Module,
+      defStore: &mut Analyzer::DefinitionStore,
+      patternId: Ast::PatternId,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+
+      if (let Option::SOME(doc) = ast.patternDoc(patternId)) {
+        defsRef.setDoc(defId, doc);
+      }
+    }
+
     function predeclareRoots(
       roots: &Vector<Ast::ItemId>,
       defStore: &mut Analyzer::DefinitionStore,
@@ -3075,6 +3138,8 @@ export namespace Analyzer {
       if (typeStore.length() != typeStoreLengthBefore) {
         @panic("Binder::predeclareRoots: TypeStore.length() changed during pass 1, which breaks the pass-1 invariant");
       }
+
+      Analyzer::Binder::recordItemDocs(ast, defStore, &state.nodeIds, &state.defIds);
 
       let nodeDefIndex: HashMap<u32, Analyzer::DefinitionId> = Analyzer::Binder::buildNodeDefIndex(&state.nodeIds, &state.defIds);
 
@@ -3143,6 +3208,8 @@ export namespace Analyzer {
         }
         index += 1;
       }
+
+      Analyzer::Binder::recordItemDocs(ast, defStore, &state.nodeIds, &state.defIds);
 
       let nodeDefIndex: HashMap<u32, Analyzer::DefinitionId> = Analyzer::Binder::buildNodeDefIndex(&state.nodeIds, &state.defIds);
 

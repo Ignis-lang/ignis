@@ -1,0 +1,41 @@
+// e2e: std
+//
+// The `match` form of a re-match on a binding destructured out of a reference: the
+// arm's inner `match` reads a place in the referent and owns none of its bytes.
+import String from "std::string";
+
+enum Inner {
+  TEXT(String),
+  EMPTY(i32),
+}
+
+enum Outer {
+  WRAP(Inner),
+  NONE,
+}
+
+function probeEmpty(outer: &Outer): boolean {
+  return match (outer) {
+    Outer::WRAP(inner) -> match (inner) {
+      Inner::EMPTY(_) -> true,
+      _ -> false,
+    },
+    Outer::NONE -> false,
+  };
+}
+
+function main(): i32 {
+  let value: Outer = Outer::WRAP(Inner::TEXT(String::create("hello")));
+  let mut hits: i32 = 0;
+  let mut index: i32 = 0;
+
+  while (index < 3) {
+    if (probeEmpty(&value)) {
+      hits += 1;
+    }
+
+    index += 1;
+  }
+
+  return hits;
+}
