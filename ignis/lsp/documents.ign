@@ -8,6 +8,7 @@ import Vector from "std::vector";
 
 import SourceOverrides from "../build/sources";
 
+import analysisKeyOf from "./analysis";
 import filePathFromUri from "./uri";
 
 /// One open document.
@@ -139,6 +140,27 @@ export record DocumentStore {
     };
 
     return self.documents.get(index);
+  }
+
+  /// True when an open document belongs to the analysis `key`.
+  public hasDocumentWithKey(&self, key: &String): boolean {
+    let mut index: u64 = 0;
+
+    while (index < self.documents.length()) {
+      let Option::SOME(document) = self.documents.get(index) else {
+        break;
+      };
+
+      let documentKey: String = analysisKeyOf(&document.path);
+
+      if (documentKey.equals(key)) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
   }
 
   /// The client's URI and version for the open document at `path`.

@@ -1,0 +1,690 @@
+//! What go-to-definition, find-references and the document outline read from
+//! one analysis: the index of every project file and open document, and where
+//! every declaration of the program, the standard library included, is.
+//!
+//! Like the hover index, it is built while the analyzer's stores are alive and
+//! keeps only paths, byte ranges and names. References are searched in the
+//! indexed files only, so a use inside the standard library is never listed;
+//! the host also lists those (crates/ignis_lsp/src/server.rs:956).
+
+import HashMap from "std::collections";
+import String from "std::string";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+import SourceFile, SourceSpan from "@compiler::diagnostics";
+
+import Doc from "../doc/mod";
+
+import
+  ByteRange,
+  FileHoverIndex,
+  HoverProgram,
+  ascendingOrder,
+  buildFileHoverIndex,
+  definitionNamed,
+  definitionOfTarget,
+  findWord,
+  hoverProgramOf,
+  isLocalTarget,
+  itemNameOf,
+  itemSpanOf,
+  memberDefinitions,
+  memberNameOf,
+  patternSpanOf,
+  spanInFile,
+  u64At,
+from "./hover_index";
+
+/// The LSP `SymbolKind` of each declaration the outline shows, as the host
+/// picks them (crates/ignis_lsp/src/server.rs:3588).
+export namespace SymbolKind {
+  const NAMESPACE: u64 = 3;
+  const METHOD: u64 = 6;
+  const FIELD: u64 = 8;
+  const ENUM: u64 = 10;
+  const INTERFACE: u64 = 11;
+  const FUNCTION: u64 = 12;
+  const CONSTANT: u64 = 14;
+  const ENUM_MEMBER: u64 = 22;
+  const STRUCT: u64 = 23;
+}
+
+const SORT_KEY_UNIT: u64 = 4294967296;
+
+/// One declaration: the whole of it at `start..end`, its name at
+/// `nameStart..nameEnd`, in the text module `module` was analyzed from.
+export record DeclarationSite {
+  public module: u64;
+  public name: String;
+  public kind: u64;
+  public start: u64;
+  public end: u64;
+  public nameStart: u64;
+  public nameEnd: u64;
+  /// The four offsets as positions, filled only for a module without an
+  /// index, whose text is not kept.
+  public startPosition: Text::Position;
+  public endPosition: Text::Position;
+  public nameStartPosition: Text::Position;
+  public nameEndPosition: Text::Position;
+  /// One plus the position of the declaration this one is a member of, 0 at
+  /// the top level of its module or namespace chain.
+  public parent: u64;
+  /// False for what the host's outline leaves out: trait methods and the
+  /// instance methods of an enum (crates/ignis_lsp/src/server.rs:3402).
+  public inOutline: boolean;
+}
+
+/// A place a target is named: `start..end` of module `module`.
+export record NameSite {
+  public module: u64;
+  public start: u64;
+  public end: u64;
+  public isDeclaration: boolean;
+}
+
+/// The navigation data of one analysis.
+export record NavigationIndex {
+  /// The path of every module, in analysis order.
+  public paths: Vector<String>;
+  /// The index of every project module and open document.
+  public files: Vector<FileHoverIndex>;
+  public declarations: Vector<DeclarationSite>;
+  /// The position of each definition's declaration, by raw definition id.
+  public sites: HashMap<u32, u64>;
+
+  /// The index of the module at `path`.
+  public moduleOf(&self, path: &String): Option<u64> {
+    return positionOfText(&self.paths, path);
+  }
+
+  /// The file index of the module at `path`, when it was indexed.
+  public fileOf(&self, path: &String): Option<&FileHoverIndex> {
+    let mut index: u64 = 0;
+
+    while (index < self.files.length()) {
+      let Option::SOME(file) = self.files.get(index) else {
+        break;
+      };
+
+      if (file.path.equals(path)) {
+        return self.files.get(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Where `defId` is declared, when it is declared in a module's source.
+  public declarationOf(&self, defId: Analyzer::DefinitionId): Option<&DeclarationSite> {
+    let raw: u32 = defId.raw();
+
+    let Option::SOME(position) = self.sites.get(&raw) else {
+      return Option::NONE;
+    };
+
+    return self.declarations.get(*position);
+  }
+
+  /// Every place `target`, found in `file`, is named: in `file` for a local,
+  /// in every indexed file for a definition. The declaration's name counts
+  /// only with `includeDeclaration`, as in the host
+  /// (crates/ignis_lsp/src/server.rs:960). Sorted by path and position, each
+  /// place once.
+  public referenceSites(
+    &self,
+    file: &FileHoverIndex,
+    target: u64,
+    includeDeclaration: boolean
+  ): Vector<NameSite> {
+    let mut sites: Vector<NameSite> = Vector::new<NameSite>();
+    let mut declared: Option<NameSite> = Option::NONE;
+
+    if (isLocalTarget(target)) {
+      let Option::SOME(moduleIndex) = self.moduleOf(&file.path) else {
+        return sites;
+      };
+
+      if (let Option::SOME(local) = file.localDeclaration(target)) {
+        declared = Option::SOME(NameSite { module: moduleIndex, start: local.nameStart, end: local.nameEnd, isDeclaration: true });
+      }
+
+      let names: Vector<ByteRange> = file.namesOf(target);
+      appendNameSites(&mut sites, moduleIndex, &names, &declared, includeDeclaration);
+    } else {
+      let Option::SOME(defId) = definitionOfTarget(target) else {
+        return sites;
+      };
+
+      if (let Option::SOME(declaration) = self.declarationOf(defId)) {
+        declared = Option::SOME(NameSite {
+          module: declaration.module,
+          start: declaration.nameStart,
+          end: declaration.nameEnd,
+          isDeclaration: true,
+        });
+      }
+
+      let mut fileIndex: u64 = 0;
+
+      while (fileIndex < self.files.length()) {
+        if (let Option::SOME(candidate) = self.files.get(fileIndex)) {
+          if (let Option::SOME(moduleIndex) = self.moduleOf(&candidate.path)) {
+            let names: Vector<ByteRange> = candidate.namesOf(target);
+            appendNameSites(&mut sites, moduleIndex, &names, &declared, includeDeclaration);
+          }
+        }
+
+        fileIndex += 1;
+      }
+    }
+
+    if (includeDeclaration) {
+      if (let Option::SOME(site) = declared) {
+        sites.push(site);
+      }
+    }
+
+    return self.ordered(&sites);
+  }
+
+  /// `sites` sorted by path, start and end, without repeats.
+  ordered(&self, sites: &Vector<NameSite>): Vector<NameSite> {
+    let mut ends: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < sites.length()) {
+      if (let Option::SOME(site) = sites.get(index)) {
+        ends.push(site.end);
+      }
+
+      index += 1;
+    }
+
+    let byEnd: Vector<u64> = ascendingOrder(&ends);
+    let mut keys: Vector<u64> = Vector::new<u64>();
+    index = 0;
+
+    while (index < byEnd.length()) {
+      if (let Option::SOME(site) = sites.get(u64At(&byEnd, index))) {
+        keys.push(self.pathRank(site.module) * SORT_KEY_UNIT + site.start);
+      }
+
+      index += 1;
+    }
+
+    let byPlace: Vector<u64> = ascendingOrder(&keys);
+    let mut result: Vector<NameSite> = Vector::new<NameSite>();
+    index = 0;
+
+    while (index < byPlace.length()) {
+      let position: u64 = u64At(&byEnd, u64At(&byPlace, index));
+      index += 1;
+
+      let Option::SOME(site) = sites.get(position) else {
+        continue;
+      };
+
+      if (result.length() > 0) {
+        if (let Option::SOME(previous) = result.get(result.length() - 1)) {
+          if (previous.module == site.module && previous.start == site.start && previous.end == site.end) {
+            continue;
+          }
+        }
+      }
+
+      result.push(NameSite { module: site.module, start: site.start, end: site.end, isDeclaration: site.isDeclaration });
+    }
+
+    return result;
+  }
+
+  /// How many module paths sort before the path of `module`.
+  pathRank(&self, module: u64): u64 {
+    let Option::SOME(path) = self.paths.get(module) else {
+      return 0;
+    };
+
+    let mut rank: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < self.paths.length()) {
+      if (let Option::SOME(other) = self.paths.get(index)) {
+        if (other.compare(path) < 0) {
+          rank += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return rank;
+  }
+
+  /// The positions of the declarations of `module` the outline shows.
+  public outlineOf(&self, module: u64): Vector<u64> {
+    let mut positions: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < self.declarations.length()) {
+      if (let Option::SOME(declaration) = self.declarations.get(index)) {
+        if (declaration.module == module && declaration.inOutline) {
+          positions.push(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return positions;
+  }
+
+  /// The positions among `outline` whose parent is `parent`, in source order
+  /// as the host sorts them (crates/ignis_lsp/src/server.rs:3208).
+  public outlineChildren(&self, outline: &Vector<u64>, parent: u64): Vector<u64> {
+    let mut positions: Vector<u64> = Vector::new<u64>();
+    let mut ends: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < outline.length()) {
+      let position: u64 = u64At(outline, index);
+
+      if (let Option::SOME(declaration) = self.declarations.get(position)) {
+        if (declaration.parent == parent) {
+          positions.push(position);
+          ends.push(declaration.end);
+        }
+      }
+
+      index += 1;
+    }
+
+    let byEnd: Vector<u64> = ascendingOrder(&ends);
+    let mut starts: Vector<u64> = Vector::new<u64>();
+    index = 0;
+
+    while (index < byEnd.length()) {
+      if (let Option::SOME(declaration) = self.declarations.get(u64At(&positions, u64At(&byEnd, index)))) {
+        starts.push(declaration.start);
+      }
+
+      index += 1;
+    }
+
+    let byStart: Vector<u64> = ascendingOrder(&starts);
+    let mut sorted: Vector<u64> = Vector::new<u64>();
+    index = 0;
+
+    while (index < byStart.length()) {
+      sorted.push(u64At(&positions, u64At(&byEnd, u64At(&byStart, index))));
+      index += 1;
+    }
+
+    return sorted;
+  }
+}
+
+/// Appends each of `names`, in module `module`, as a site. A name that is the
+/// declaration's is left out without `includeDeclaration`.
+function appendNameSites(
+  sites: &mut Vector<NameSite>,
+  module: u64,
+  names: &Vector<ByteRange>,
+  declared: &Option<NameSite>,
+  includeDeclaration: boolean,
+): void {
+  let mut sitesRef: &mut Vector<NameSite> = sites;
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    if (let Option::SOME(name) = names.get(index)) {
+      let mut isDeclaration: boolean = false;
+
+      if (let Option::SOME(declaration) = declared) {
+        isDeclaration = declaration.module == module && declaration.start == name.start && declaration.end == name.end;
+      }
+
+      if (includeDeclaration || !isDeclaration) {
+        sitesRef.push(NameSite { module: module, start: name.start, end: name.end, isDeclaration: isDeclaration });
+      }
+    }
+
+    index += 1;
+  }
+}
+
+function positionOfText(values: &Vector<String>, wanted: &String): Option<u64> {
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      if (value.equals(wanted)) {
+        return Option::SOME(index);
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Builds the navigation data of an analysis over `modules`, parsed from
+/// `files` and analyzed as `records`. Project modules and the modules at
+/// `openPaths` are indexed, only the open ones with hover texts.
+export function buildNavigationIndex(
+  files: &Vector<SourceFile>,
+  modules: &Vector<Ast::Module>,
+  records: &Vector<Analyzer::ModuleAnalysisRecord>,
+  openPaths: &Vector<String>,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): NavigationIndex {
+  let program: HoverProgram = hoverProgramOf(modules, records);
+  let mut index: NavigationIndex = NavigationIndex {
+    paths: Vector::new<String>(),
+    files: Vector::new<FileHoverIndex>(),
+    declarations: Vector::new<DeclarationSite>(),
+    sites: HashMap::new<u32, u64>(),
+  };
+  let mut moduleIndex: u64 = 0;
+
+  while (moduleIndex < records.length()) {
+    let Option::SOME(file) = files.get(moduleIndex) else {
+      break;
+    };
+    let Option::SOME(module) = modules.get(moduleIndex) else {
+      break;
+    };
+    let Option::SOME(analysisRecord) = records.get(moduleIndex) else {
+      break;
+    };
+
+    let path: String = analysisRecord.info.pathText.clone();
+    let isOpen: boolean = positionOfText(openPaths, &path).isSome();
+    let isProject: boolean = match (analysisRecord.info.kind) {
+      Analyzer::Imports::ModuleKind::PROJECT -> true,
+      _ -> false,
+    };
+
+    if (isOpen || isProject) {
+      index.files.push(buildFileHoverIndex(&file.text, module, analysisRecord, &program, isOpen, defs, types, symbols));
+    }
+
+    let first: u64 = index.declarations.length();
+    let walk: DeclarationWalk = DeclarationWalk {
+      module: moduleIndex,
+      path: path.clone(),
+      text: file.text.clone(),
+    };
+
+    collectDeclarations(&mut index, &walk, module, &analysisRecord.output, &module.roots, 0, true, defs, symbols);
+
+    if (!isOpen && !isProject) {
+      fillPositions(&mut index, first, &file.text);
+    }
+
+    index.paths.push(path);
+    moduleIndex += 1;
+  }
+
+  return index;
+}
+
+/// The module a declaration walk is in.
+record DeclarationWalk {
+  public module: u64;
+  public path: String;
+  public text: String;
+}
+
+/// Sets the positions of the declarations from `first` on, all in `text`.
+function fillPositions(index: &mut NavigationIndex, first: u64, text: &String): void {
+  let mut indexRef: &mut NavigationIndex = index;
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(text.clone());
+  let mut position: u64 = first;
+
+  while (position < indexRef.declarations.length()) {
+    if (let Option::SOME(declaration) = indexRef.declarations.getMut(position)) {
+      declaration.startPosition = lineIndex.position(declaration.start);
+      declaration.endPosition = lineIndex.position(declaration.end);
+      declaration.nameStartPosition = lineIndex.position(declaration.nameStart);
+      declaration.nameEndPosition = lineIndex.position(declaration.nameEnd);
+    }
+
+    position += 1;
+  }
+}
+
+/// Records `defId`, declared at `span` under `name`, and returns one plus its
+/// position.
+function pushDeclaration(
+  index: &mut NavigationIndex,
+  walk: &DeclarationWalk,
+  span: SourceSpan,
+  name: &String,
+  defId: Analyzer::DefinitionId,
+  kind: u64,
+  parent: u64,
+  inOutline: boolean,
+): u64 {
+  let mut indexRef: &mut NavigationIndex = index;
+  let mut nameStart: u64 = span.start;
+  let mut nameEnd: u64 = span.end;
+
+  if (let Option::SOME(found) = findWord(&walk.text, span.start, span.end, name)) {
+    nameStart = found;
+    nameEnd = found + name.length();
+  }
+
+  let position: u64 = indexRef.declarations.length();
+  indexRef.sites.insert(defId.raw(), position);
+  indexRef.declarations.push(DeclarationSite {
+    module: walk.module,
+    name: name.clone(),
+    kind: kind,
+    start: span.start,
+    end: span.end,
+    nameStart: nameStart,
+    nameEnd: nameEnd,
+    startPosition: Text::Position { line: 0, character: 0 },
+    endPosition: Text::Position { line: 0, character: 0 },
+    nameStartPosition: Text::Position { line: 0, character: 0 },
+    nameEndPosition: Text::Position { line: 0, character: 0 },
+    parent: parent,
+    inOutline: inOutline,
+  });
+  return position + 1;
+}
+
+/// Records the declarations `itemIds` lists and their members.
+function collectDeclarations(
+  index: &mut NavigationIndex,
+  walk: &DeclarationWalk,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemIds: &Vector<Ast::ItemId>,
+  parent: u64,
+  inOutline: boolean,
+  defs: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let indexRef: &mut NavigationIndex = index;
+  let mut position: u64 = 0;
+
+  while (position < itemIds.length()) {
+    if (let Option::SOME(itemId) = itemIds.get(position)) {
+      collectDeclaration(indexRef, walk, module, analysis, *itemId, parent, inOutline, defs, symbols);
+    }
+
+    position += 1;
+  }
+}
+
+function collectDeclaration(
+  index: &mut NavigationIndex,
+  walk: &DeclarationWalk,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemId: Ast::ItemId,
+  parent: u64,
+  inOutline: boolean,
+  defs: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let indexRef: &mut NavigationIndex = index;
+
+  let Option::SOME(item) = module.items.get(itemId) else {
+    return;
+  };
+
+  let span: SourceSpan = itemSpanOf(item);
+
+  if (!spanInFile(&walk.path, span)) {
+    return;
+  }
+
+  if (let Ast::Item::Node::Export(exportItem) = item) {
+    if (let Option::SOME(innerId) = exportItem.declaration) {
+      collectDeclaration(indexRef, walk, module, analysis, innerId, parent, inOutline, defs, symbols);
+    }
+
+    return;
+  }
+
+  let Option::SOME(defId) = Doc::itemDefinition(analysis, itemId) else {
+    return;
+  };
+  let Option::SOME(name) = itemNameOf(item) else {
+    return;
+  };
+
+  let members: u64 = pushDeclaration(indexRef, walk, span, &name, defId, itemSymbolKind(item), parent, inOutline);
+
+  match (item) {
+    Ast::Item::Node::Record(recordItem) -> {
+      collectMembers(indexRef, walk, module, &recordItem.fields, defId, members, inOutline, defs, symbols);
+      collectMethods(indexRef, walk, module, analysis, &recordItem.methods, members, inOutline, false, defs);
+    },
+    Ast::Item::Node::Enum(enumItem) -> {
+      collectMembers(indexRef, walk, module, &enumItem.variants, defId, members, inOutline, defs, symbols);
+      collectMethods(indexRef, walk, module, analysis, &enumItem.methods, members, inOutline, true, defs);
+    },
+    Ast::Item::Node::Trait(traitItem) -> {
+      collectMethods(indexRef, walk, module, analysis, &traitItem.methods, members, false, false, defs);
+    },
+    Ast::Item::Node::Namespace(namespaceItem) -> {
+      collectDeclarations(indexRef, walk, module, analysis, &namespaceItem.items, members, inOutline, defs, symbols);
+    },
+    Ast::Item::Node::Extern(externItem) -> {
+      collectDeclarations(indexRef, walk, module, analysis, &externItem.items, members, inOutline, defs, symbols);
+    },
+    _ -> {},
+  };
+}
+
+/// The outline kind of a declaration item. An extern block is a namespace,
+/// as the host binds it.
+function itemSymbolKind(item: &Ast::Item::Node): u64 {
+  return match (item) {
+    Ast::Item::Node::Function(_) -> SymbolKind::FUNCTION,
+    Ast::Item::Node::Record(_) -> SymbolKind::STRUCT,
+    Ast::Item::Node::Enum(_) -> SymbolKind::ENUM,
+    Ast::Item::Node::Namespace(_) -> SymbolKind::NAMESPACE,
+    Ast::Item::Node::Extern(_) -> SymbolKind::NAMESPACE,
+    Ast::Item::Node::Constant(_) -> SymbolKind::CONSTANT,
+    Ast::Item::Node::TypeAlias(_) -> SymbolKind::INTERFACE,
+    Ast::Item::Node::Trait(_) -> SymbolKind::INTERFACE,
+    _ -> SymbolKind::FUNCTION,
+  };
+}
+
+/// Records the methods of a record, enum or trait. With `staticOnly` the
+/// outline keeps only the static ones, as the host's does for an enum.
+function collectMethods(
+  index: &mut NavigationIndex,
+  walk: &DeclarationWalk,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  methods: &Vector<Ast::ItemId>,
+  parent: u64,
+  inOutline: boolean,
+  staticOnly: boolean,
+  defs: &Analyzer::DefinitionStore,
+): void {
+  let indexRef: &mut NavigationIndex = index;
+  let mut position: u64 = 0;
+
+  while (position < methods.length()) {
+    let Option::SOME(methodId) = methods.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(Ast::Item::Node::Function(method)) = module.items.get(*methodId) else {
+      continue;
+    };
+    let Option::SOME(defId) = Doc::itemDefinition(analysis, *methodId) else {
+      continue;
+    };
+
+    if (!spanInFile(&walk.path, method.span)) {
+      continue;
+    }
+
+    let isStatic: boolean = match (defs.get(defId)) {
+      Option::SOME(Analyzer::Definition::Method(methodDef)) -> methodDef.isStatic,
+      _ -> true,
+    };
+    let shown: boolean = inOutline && (!staticOnly || isStatic);
+
+    pushDeclaration(indexRef, walk, method.span, &method.name, defId, SymbolKind::METHOD, parent, shown);
+  }
+}
+
+/// Records the fields, variants and static fields of a record or enum.
+function collectMembers(
+  index: &mut NavigationIndex,
+  walk: &DeclarationWalk,
+  module: &Ast::Module,
+  members: &Vector<Ast::PatternId>,
+  owner: Analyzer::DefinitionId,
+  parent: u64,
+  inOutline: boolean,
+  defs: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let indexRef: &mut NavigationIndex = index;
+  let memberDefs: Vector<Analyzer::DefinitionId> = memberDefinitions(owner, defs);
+  let mut position: u64 = 0;
+
+  while (position < members.length()) {
+    let Option::SOME(pattern) = members.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(name) = memberNameOf(module, *pattern) else {
+      continue;
+    };
+    let Option::SOME(memberId) = definitionNamed(&memberDefs, &name, defs, symbols) else {
+      continue;
+    };
+
+    let kind: u64 = match (defs.get(memberId)) {
+      Option::SOME(Analyzer::Definition::Field(_)) -> SymbolKind::FIELD,
+      Option::SOME(Analyzer::Definition::Variant(_)) -> SymbolKind::ENUM_MEMBER,
+      _ -> SymbolKind::CONSTANT,
+    };
+
+    pushDeclaration(indexRef, walk, patternSpanOf(module, *pattern), &name, memberId, kind, parent, inOutline);
+  }
+}

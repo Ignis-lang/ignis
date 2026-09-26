@@ -256,12 +256,21 @@ export function notificationBody(method: str, params: JsonValue): String {
   return Json::toJsonString(&notification);
 }
 
-/// The `initialize` result: full-document sync and hover, which is
-/// everything this server implements.
+/// The `initialize` result: full-document sync, hover, definition,
+/// references and document symbols, which is everything this server
+/// implements. The outline options are the host's
+/// (crates/ignis_lsp/src/server.rs:455).
 export function initializeResult(): JsonValue {
   let mut capabilities: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   capabilities.push(JsonObjectEntry::create("textDocumentSync", JsonValue::integerValue(TEXT_DOCUMENT_SYNC_FULL)));
   capabilities.push(JsonObjectEntry::create("hoverProvider", JsonValue::boolValue(true)));
+  capabilities.push(JsonObjectEntry::create("definitionProvider", JsonValue::boolValue(true)));
+  capabilities.push(JsonObjectEntry::create("referencesProvider", JsonValue::boolValue(true)));
+
+  let mut outline: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  outline.push(JsonObjectEntry::create("label", JsonValue::stringValue("Ignis Outline")));
+  outline.push(JsonObjectEntry::create("workDoneProgress", JsonValue::boolValue(false)));
+  capabilities.push(JsonObjectEntry::create("documentSymbolProvider", JsonValue::object(outline)));
 
   let mut serverInfo: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   serverInfo.push(JsonObjectEntry::create("name", JsonValue::stringValue("ignis-lsp")));

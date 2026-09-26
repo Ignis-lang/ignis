@@ -24,7 +24,7 @@ import analyzerModuleKind, mapImportSourcesToDiscoveryTargets from "../build/imp
 import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
-import FileHoverIndex, HoverProgram, buildFileHoverIndex, hoverProgramOf from "./hover_index";
+import NavigationIndex, buildNavigationIndex from "./navigation";
 
 /// One diagnostic in LSP terms: a UTF-16 range, an LSP severity
 /// (1 error, 2 warning, 3 information, 4 hint), the code and the message.
@@ -42,14 +42,14 @@ export record FileDiagnostics {
   public diagnostics: Vector<LspDiagnostic>;
 }
 
-/// What one analysis produced: the diagnostics to publish and the hover
-/// index of every open document the analyzer ran over.
+/// What one analysis produced: the diagnostics to publish and what hovers
+/// and navigation read.
 export record LspAnalysis {
   public diagnostics: Vector<FileDiagnostics>;
-  /// Empty when the analyzer did not run, because discovery or parsing
-  /// failed: the server then keeps answering hovers from the last analysis
-  /// that did.
-  public hovers: Vector<FileHoverIndex>;
+  /// `NONE` when the analyzer did not run, because discovery or parsing
+  /// failed: the server then keeps answering from the last analysis that
+  /// did.
+  public navigation: Option<NavigationIndex>;
 }
 
 /// The code of the diagnostic that reports an analysis stopped between
@@ -312,13 +312,13 @@ function parseDiscoveredModules(
 }
 
 /// Runs the analyzer over parsed modules, collects its diagnostics, and
-/// builds the hover index of every module `sources` holds an open buffer
-/// for.
+/// builds the navigation data, with hover texts for every module `sources`
+/// holds an open buffer for.
 function analyzeParsedModules(
   discovery: &DiscoveryResult,
   program: &mut ParsedProgram,
   sources: &SourceOverrides,
-): Vector<FileHoverIndex> {
+): NavigationIndex {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -352,19 +352,6 @@ function analyzeParsedModules(
     recordIndex += 1;
   }
 
-  return buildHoverIndexes(&program.files, &program.modules, &records, sources, &defStore, &typeStore, &symbols);
-}
-
-/// The hover index of every analyzed module that is an open document.
-function buildHoverIndexes(
-  files: &Vector<SourceFile>,
-  modules: &Vector<Ast::Module>,
-  records: &Vector<Analyzer::ModuleAnalysisRecord>,
-  sources: &SourceOverrides,
-  defs: &Analyzer::DefinitionStore,
-  types: &Analyzer::TypeStore,
-  symbols: &Analyzer::SymbolTable,
-): Vector<FileHoverIndex> {
   let mut openPaths: Vector<String> = Vector::new<String>();
   let mut sourceIndex: u64 = 0;
 
@@ -376,47 +363,7 @@ function buildHoverIndexes(
     sourceIndex += 1;
   }
 
-  let hoverProgram: HoverProgram = hoverProgramOf(modules, records);
-  let mut indexes: Vector<FileHoverIndex> = Vector::new<FileHoverIndex>();
-  let mut moduleIndex: u64 = 0;
-
-  while (moduleIndex < records.length()) {
-    let Option::SOME(file) = files.get(moduleIndex) else {
-      break;
-    };
-    let Option::SOME(module) = modules.get(moduleIndex) else {
-      break;
-    };
-    let Option::SOME(analysisRecord) = records.get(moduleIndex) else {
-      break;
-    };
-
-    let filePath: String = file.path.toString();
-
-    if (containsPath(&openPaths, &filePath)) {
-      indexes.push(buildFileHoverIndex(&file.text, module, analysisRecord, &hoverProgram, defs, types, symbols));
-    }
-
-    moduleIndex += 1;
-  }
-
-  return indexes;
-}
-
-function containsPath(paths: &Vector<String>, wanted: &String): boolean {
-  let mut index: u64 = 0;
-
-  while (index < paths.length()) {
-    if (let Option::SOME(path) = paths.get(index)) {
-      if (path.equals(wanted)) {
-        return true;
-      }
-    }
-
-    index += 1;
-  }
-
-  return false;
+  return buildNavigationIndex(&program.files, &program.modules, &records, &openPaths, &defStore, &typeStore, &symbols);
 }
 
 /// True when `candidate` holds exactly the diagnostics of `failure`, in the
@@ -574,8 +521,8 @@ export function analyzeForDiagnostics(
   return analyzeDocuments(startPath, key, stdPath, sources).diagnostics;
 }
 
-/// Analyzes like `analyzeForDiagnostics` and also returns the hover index of
-/// every open document the analyzer ran over.
+/// Analyzes like `analyzeForDiagnostics` and also returns what hovers and
+/// navigation read.
 export function analyzeDocuments(
   startPath: &Path::PathBuf,
   key: &String,
@@ -594,7 +541,7 @@ export function analyzeDocuments(
     Result::ERROR(failure) -> {
       return LspAnalysis {
         diagnostics: discoveryFailureDiagnostics(&failure, startPath, key, sources),
-        hovers: Vector::new<FileHoverIndex>(),
+        navigation: Option::NONE,
       };
     },
   };
@@ -623,19 +570,19 @@ function analyzeDiscoveredDocuments(
     Result::ERROR(message) -> {
       return LspAnalysis {
         diagnostics: analysisStoppedDiagnostics(startPath, &message),
-        hovers: Vector::new<FileHoverIndex>(),
+        navigation: Option::NONE,
       };
     },
   };
 
-  let mut hovers: Vector<FileHoverIndex> = Vector::new<FileHoverIndex>();
+  let mut navigation: Option<NavigationIndex> = Option::NONE;
 
   if (program.frontendErrors == 0) {
-    hovers = analyzeParsedModules(discovery, &mut program, sources);
+    navigation = Option::SOME(analyzeParsedModules(discovery, &mut program, sources));
   }
 
   return LspAnalysis {
     diagnostics: convertPending(&program.pending, &program.files),
-    hovers: hovers,
+    navigation: navigation,
   };
 }

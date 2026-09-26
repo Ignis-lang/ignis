@@ -1,5 +1,6 @@
 //! `ignis lsp`: a sequential Language Server Protocol server over stdio that
-//! publishes diagnostics and answers hovers.
+//! publishes diagnostics and answers hovers, go-to-definition,
+//! find-references and document symbols.
 //!
 //! Messages are handled one at a time, in arrival order. Document changes
 //! only mark their analysis dirty. The analysis runs once no bytes of a
@@ -26,7 +27,16 @@ import
   analyzeDocuments,
 from "./analysis";
 import Document, DocumentHandle, DocumentStore, isIgnisSourcePath from "./documents";
-import FileHoverIndex, HoverHit from "./hover_index";
+import
+  ByteRange,
+  FileHoverIndex,
+  HoverHit,
+  TextEdit,
+  definitionOfTarget,
+  isLocalTarget,
+  moduleOfTarget,
+from "./hover_index";
+import DeclarationSite, NameSite, NavigationIndex from "./navigation";
 import
   DecodeError,
   LspErrorCode,
@@ -64,6 +74,28 @@ export enum LspPhase {
 record PublishedSet {
   public key: String;
   public uris: Vector<String>;
+}
+
+/// The navigation data of the last analysis of `key` that reached the
+/// analyzer.
+record NavigationSet {
+  public key: String;
+  public index: NavigationIndex;
+}
+
+/// The document and position a request names.
+record PositionRequest {
+  public uri: String;
+  public position: Text::Position;
+}
+
+/// A file's text as the client has it, to turn byte ranges of the text it
+/// was analyzed from into LSP ranges.
+record FileView {
+  public uri: String;
+  public current: String;
+  public edit: TextEdit;
+  public lineIndex: Text::LineIndex;
 }
 
 /// What handling one message asks the loop to do next.
@@ -132,6 +164,22 @@ function positionJson(position: Text::Position): JsonValue {
   return JsonValue::object(entries);
 }
 
+/// A range in its LSP JSON form.
+function rangeJson(start: Text::Position, end: Text::Position): JsonValue {
+  let mut range: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  range.push(JsonObjectEntry::create("start", positionJson(start)));
+  range.push(JsonObjectEntry::create("end", positionJson(end)));
+  return JsonValue::object(range);
+}
+
+/// A `Location`: a URI and a range in it.
+function locationJson(uri: String, range: JsonValue): JsonValue {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("uri", JsonValue::fromString(uri)));
+  entries.push(JsonObjectEntry::create("range", range));
+  return JsonValue::object(entries);
+}
+
 /// A `Hover` result: the markdown and the range it describes, the shape the
 /// host answers with (crates/ignis_lsp/src/server.rs:2596).
 export function hoverResult(hit: &HoverHit, lineIndex: &Text::LineIndex): JsonValue {
@@ -139,14 +187,80 @@ export function hoverResult(hit: &HoverHit, lineIndex: &Text::LineIndex): JsonVa
   contents.push(JsonObjectEntry::create("kind", JsonValue::stringValue("markdown")));
   contents.push(JsonObjectEntry::create("value", JsonValue::fromString(hit.text.clone())));
 
-  let mut range: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
-  range.push(JsonObjectEntry::create("start", positionJson(lineIndex.position(hit.start))));
-  range.push(JsonObjectEntry::create("end", positionJson(lineIndex.position(hit.end))));
-
   let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   entries.push(JsonObjectEntry::create("contents", JsonValue::object(contents)));
-  entries.push(JsonObjectEntry::create("range", JsonValue::object(range)));
+  entries.push(JsonObjectEntry::create("range", rangeJson(lineIndex.position(hit.start), lineIndex.position(hit.end))));
   return JsonValue::object(entries);
+}
+
+/// The document and position of a `TextDocumentPositionParams` request.
+function positionRequestOf(message: &JsonValue): Option<PositionRequest> {
+  let Option::SOME(params) = jsonMember(message, "params") else {
+    return Option::NONE;
+  };
+  let Option::SOME(textDocument) = jsonMember(params, "textDocument") else {
+    return Option::NONE;
+  };
+  let Option::SOME(uri) = jsonStringMember(textDocument, "uri") else {
+    return Option::NONE;
+  };
+  let Option::SOME(position) = jsonMember(params, "position") else {
+    return Option::NONE;
+  };
+
+  let line: i64 = jsonIntegerMember(position, "line").unwrapOr(-1);
+  let character: i64 = jsonIntegerMember(position, "character").unwrapOr(-1);
+
+  if (line < 0 || character < 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(PositionRequest {
+    uri: uri,
+    position: Text::Position { line: line as u64, character: character as u64 },
+  });
+}
+
+/// `context.includeDeclaration` of a references request, false when absent.
+function includesDeclaration(message: &JsonValue): boolean {
+  let Option::SOME(params) = jsonMember(message, "params") else {
+    return false;
+  };
+  let Option::SOME(context) = jsonMember(params, "context") else {
+    return false;
+  };
+  let Option::SOME(flag) = jsonMember(context, "includeDeclaration") else {
+    return false;
+  };
+
+  return match (&flag.kind) {
+    JsonValueKind::BOOL(value) -> value,
+    _ -> false,
+  };
+}
+
+/// The LSP range of `start..end` in `view`. A name has to still read the same
+/// there; any other range only has to keep both ends out of the edited
+/// region.
+function viewRange(
+  view: &FileView,
+  file: &FileHoverIndex,
+  start: u64,
+  end: u64,
+  isName: boolean
+): Option<JsonValue> {
+  let mut current: Option<ByteRange> = Option::NONE;
+
+  if (isName) {
+    current = file.currentNameRange(&view.current, &view.edit, start, end);
+  } else {
+    current = view.edit.currentRangeOf(start, end);
+  }
+
+  return match (current) {
+    Option::SOME(range) -> Option::SOME(rangeJson(view.lineIndex.position(range.start), view.lineIndex.position(range.end))),
+    Option::NONE -> Option::NONE,
+  };
 }
 
 /// The error text for a skipped message of `length` bytes.
@@ -236,11 +350,10 @@ export record LspServer {
   /// Documents changed since the last analysis, as their paths.
   dirty: Vector<Path::PathBuf>;
   published: Vector<PublishedSet>;
-  /// The hover index of each open document, from the last analysis that
-  /// reached the analyzer: an edit that breaks parsing keeps the previous
-  /// one, as the host keeps its last good analysis
-  /// (crates/ignis_lsp/src/state.rs:59).
-  hovers: Vector<FileHoverIndex>;
+  /// The navigation data of each analysis, from its last run that reached
+  /// the analyzer: an edit that breaks parsing keeps the previous one, as the
+  /// host keeps its last good analysis (crates/ignis_lsp/src/state.rs:59).
+  navigations: Vector<NavigationSet>;
   /// `--std-path`, applied to every analysis.
   stdPath: Option<String>;
 
@@ -256,7 +369,7 @@ export record LspServer {
       documents: DocumentStore::create(),
       dirty: Vector::new<Path::PathBuf>(),
       published: Vector::new<PublishedSet>(),
-      hovers: Vector::new<FileHoverIndex>(),
+      navigations: Vector::new<NavigationSet>(),
       stdPath: stdPath,
     };
   }
@@ -414,6 +527,27 @@ export record LspServer {
       return LspStep::CONTINUE;
     }
 
+    if (request.method.equals("textDocument/definition")) {
+      let result: JsonValue = self.definition(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("textDocument/references")) {
+      let result: JsonValue = self.references(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("textDocument/documentSymbol")) {
+      let result: JsonValue = self.documentSymbols(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
     if (request.method.equals("shutdown")) {
       self.phase = LspPhase::SHUT_DOWN;
       let body: String = responseBody(request.id, JsonValue::nullValue());
@@ -499,7 +633,10 @@ export record LspServer {
   }
 
   /// Forgets the document and clears its diagnostics, as the host server does.
-  /// Other files are not re-analyzed until they change.
+  /// Other files are not re-analyzed until they change, and the navigation
+  /// data keeps the closed file until the next analysis, unless it was the
+  /// last open document of its analysis: then that navigation data is
+  /// released, and reopening a document analyzes it again.
   didClose(&mut self, params: &JsonValue): void {
     let Option::SOME(document) = jsonMember(params, "textDocument") else {
       return;
@@ -507,14 +644,18 @@ export record LspServer {
     let Option::SOME(uri) = jsonStringMember(document, "uri") else {
       return;
     };
+    let Option::SOME(closing) = self.documents.find(&uri) else {
+      return;
+    };
 
-    if (let Option::SOME(document) = self.documents.find(&uri)) {
-      let path: String = document.path.toString();
-      let _closed: Option<FileHoverIndex> = self.takeHoverIndex(&path);
-    }
+    let key: String = analysisKeyOf(&closing.path);
 
     if (!self.documents.close(&uri)) {
       return;
+    }
+
+    if (!self.documents.hasDocumentWithKey(&key)) {
+      self.forgetNavigation(&key);
     }
 
     self.forgetPublished(&uri);
@@ -596,7 +737,7 @@ export record LspServer {
 
       let analysis: LspAnalysis = analyzeDocuments(start, key, &self.stdPath, &sources);
       self.publish(key, &analysis.diagnostics);
-      self.keepHoverIndexes(analysis.hovers);
+      self.keepNavigation(key, analysis.navigation);
       keyIndex += 1;
     }
   }
@@ -669,45 +810,360 @@ export record LspServer {
     return taken;
   }
 
-  /// Replaces the hover index of every file `indexes` covers.
-  keepHoverIndexes(&mut self, indexes: Vector<FileHoverIndex>): void {
-    let mut fresh: Vector<FileHoverIndex> = indexes;
+  /// Replaces the navigation data of the analysis `key` with `navigation`,
+  /// unless the analyzer did not run.
+  keepNavigation(&mut self, key: &String, navigation: Option<NavigationIndex>): void {
+    let Option::SOME(index) = navigation else {
+      return;
+    };
 
-    while (fresh.length() > 0) {
-      let Option::SOME(index) = fresh.pop() else {
-        break;
-      };
-
-      let _replaced: Option<FileHoverIndex> = self.takeHoverIndex(&index.path);
-      self.hovers.push(index);
-    }
+    self.forgetNavigation(key);
+    self.navigations.push(NavigationSet { key: key.clone(), index: index });
   }
 
-  /// Removes and returns the hover index of the file at `path`.
-  takeHoverIndex(&mut self, path: &String): Option<FileHoverIndex> {
-    let mut kept: Vector<FileHoverIndex> = Vector::new<FileHoverIndex>();
-    let mut taken: Option<FileHoverIndex> = Option::NONE;
+  /// Drops the navigation data of the analysis `key`, if any.
+  forgetNavigation(&mut self, key: &String): void {
+    let mut kept: Vector<NavigationSet> = Vector::new<NavigationSet>();
 
-    while (self.hovers.length() > 0) {
-      let Option::SOME(index) = self.hovers.pop() else {
+    while (self.navigations.length() > 0) {
+      let Option::SOME(set) = self.navigations.pop() else {
         break;
       };
 
-      if (taken.isNone() && index.path.equals(path)) {
-        taken = Option::SOME(index);
+      if (set.key.equals(key)) {
+        let _released: NavigationSet = set;
       } else {
-        kept.push(index);
+        kept.push(set);
       }
     }
 
-    self.hovers = kept;
-    return taken;
+    self.navigations = kept;
+  }
+
+  /// The navigation data of the analysis `document` belongs to.
+  navigationOf(&self, document: &Document): Option<&NavigationIndex> {
+    let key: String = analysisKeyOf(&document.path);
+    return self.navigationFor(&key);
+  }
+
+  /// The navigation data kept for the analysis `key`.
+  public navigationFor(&self, key: &String): Option<&NavigationIndex> {
+    let mut index: u64 = 0;
+
+    while (index < self.navigations.length()) {
+      let Option::SOME(set) = self.navigations.get(index) else {
+        break;
+      };
+
+      if (set.key.equals(key)) {
+        return Option::SOME(&set.index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
   }
 
   /// Answers `textDocument/hover`: the innermost hover range at the
   /// position, or `null`. Pending changes are analyzed first, so a hover
   /// right after an edit sees it.
   hover(&mut self, message: &JsonValue): JsonValue {
+    if (self.dirty.length() > 0) {
+      self.analyzeDirty();
+    }
+
+    let Option::SOME(request) = positionRequestOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(document) = self.documents.find(&request.uri) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      return JsonValue::nullValue();
+    };
+    let path: String = document.path.toString();
+
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return JsonValue::nullValue();
+    };
+
+    let lineIndex: Text::LineIndex = Text::LineIndex::create(document.text.clone());
+
+    return match (file.hoverAtIn(&document.text, lineIndex.offset(request.position))) {
+      Option::SOME(hit) -> hoverResult(&hit, &lineIndex),
+      Option::NONE -> JsonValue::nullValue(),
+    };
+  }
+
+  /// The target key of what the position `request` names.
+  targetOf(&self, request: &PositionRequest): Option<u64> {
+    let Option::SOME(document) = self.documents.find(&request.uri) else {
+      return Option::NONE;
+    };
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      return Option::NONE;
+    };
+    let path: String = document.path.toString();
+
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return Option::NONE;
+    };
+
+    let lineIndex: Text::LineIndex = Text::LineIndex::create(document.text.clone());
+    return file.targetAtIn(&document.text, lineIndex.offset(request.position));
+  }
+
+  /// Answers `textDocument/definition` with the `Location` of what the
+  /// position names, or `null`, as the host does
+  /// (crates/ignis_lsp/src/server.rs:2264): an import path leads to the start
+  /// of its module, a local to its `let` statement or binding, anything else
+  /// to its whole declaration, in the project or the standard library.
+  definition(&mut self, message: &JsonValue): JsonValue {
+    if (self.dirty.length() > 0) {
+      self.analyzeDirty();
+    }
+
+    let Option::SOME(request) = positionRequestOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(target) = self.targetOf(&request) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(document) = self.documents.find(&request.uri) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      return JsonValue::nullValue();
+    };
+    let path: String = document.path.toString();
+
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return JsonValue::nullValue();
+    };
+
+    let location: Option<JsonValue> = self.definitionLocation(navigation, file, target);
+
+    return match (location) {
+      Option::SOME(value) -> value,
+      Option::NONE -> JsonValue::nullValue(),
+    };
+  }
+
+  definitionLocation(
+    &self,
+    navigation: &NavigationIndex,
+    file: &FileHoverIndex,
+    target: u64
+  ): Option<JsonValue> {
+    if (let Option::SOME(moduleIndex) = moduleOfTarget(target)) {
+      let Option::SOME(path) = navigation.paths.get(moduleIndex) else {
+        return Option::NONE;
+      };
+
+      let origin: JsonValue = rangeJson(Text::Position { line: 0, character: 0 }, Text::Position { line: 0, character: 0 });
+      return Option::SOME(locationJson(self.uriOfPath(path), origin));
+    }
+
+    if (isLocalTarget(target)) {
+      let Option::SOME(local) = file.localDeclaration(target) else {
+        return Option::NONE;
+      };
+
+      let view: FileView = self.fileView(file);
+
+      return match (viewRange(&view, file, local.start, local.end, false)) {
+        Option::SOME(range) -> Option::SOME(locationJson(view.uri.clone(), range)),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    let Option::SOME(defId) = definitionOfTarget(target) else {
+      return Option::NONE;
+    };
+    let Option::SOME(declaration) = navigation.declarationOf(defId) else {
+      return Option::NONE;
+    };
+
+    return self.declarationLocation(navigation, declaration, false);
+  }
+
+  /// The `Location` of `declaration`, its name only with `nameOnly`.
+  declarationLocation(
+    &self,
+    navigation: &NavigationIndex,
+    declaration: &DeclarationSite,
+    nameOnly: boolean
+  ): Option<JsonValue> {
+    let Option::SOME(path) = navigation.paths.get(declaration.module) else {
+      return Option::NONE;
+    };
+
+    if (let Option::SOME(file) = navigation.fileOf(path)) {
+      let view: FileView = self.fileView(file);
+      let start: u64 = nameOnly ? declaration.nameStart : declaration.start;
+      let end: u64 = nameOnly ? declaration.nameEnd : declaration.end;
+
+      return match (viewRange(&view, file, start, end, nameOnly)) {
+        Option::SOME(range) -> Option::SOME(locationJson(view.uri.clone(), range)),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    if (nameOnly) {
+      return Option::SOME(locationJson(self.uriOfPath(path), rangeJson(declaration.nameStartPosition, declaration.nameEndPosition)));
+    }
+
+    return Option::SOME(locationJson(self.uriOfPath(path), rangeJson(declaration.startPosition, declaration.endPosition)));
+  }
+
+  /// The URI of `path`: the client's own when the file is open.
+  uriOfPath(&self, path: &String): String {
+    return match (self.documents.findByPath(path)) {
+      Option::SOME(handle) -> handle.uri,
+      Option::NONE -> uriFromFilePath(path),
+    };
+  }
+
+  /// The text the client has of `file`: the open document, or else the text
+  /// it was analyzed from.
+  fileView(&self, file: &FileHoverIndex): FileView {
+    let mut uri: String = uriFromFilePath(&file.path);
+    let mut current: String = file.source.clone();
+
+    if (let Option::SOME(handle) = self.documents.findByPath(&file.path)) {
+      if (let Option::SOME(document) = self.documents.find(&handle.uri)) {
+        current = document.text.clone();
+      }
+
+      uri = handle.uri;
+    }
+
+    return FileView {
+      uri: uri,
+      current: current.clone(),
+      edit: file.editTo(&current),
+      lineIndex: Text::LineIndex::create(current),
+    };
+  }
+
+  /// Answers `textDocument/references` with every `Location` that names what
+  /// the position names, or `null` when it names nothing, as the host does
+  /// (crates/ignis_lsp/src/server.rs:2786).
+  references(&mut self, message: &JsonValue): JsonValue {
+    if (self.dirty.length() > 0) {
+      self.analyzeDirty();
+    }
+
+    let Option::SOME(request) = positionRequestOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(target) = self.targetOf(&request) else {
+      return JsonValue::nullValue();
+    };
+
+    if (moduleOfTarget(target).isSome()) {
+      return JsonValue::nullValue();
+    }
+
+    let Option::SOME(document) = self.documents.find(&request.uri) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      return JsonValue::nullValue();
+    };
+    let path: String = document.path.toString();
+
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return JsonValue::nullValue();
+    };
+
+    let sites: Vector<NameSite> = navigation.referenceSites(file, target, includesDeclaration(message));
+    return JsonValue::array(self.siteLocations(navigation, target, &sites));
+  }
+
+  /// The `Location` of each site that is still where it was analyzed.
+  siteLocations(
+    &self,
+    navigation: &NavigationIndex,
+    target: u64,
+    sites: &Vector<NameSite>
+  ): Vector<JsonValue> {
+    let mut locations: Vector<JsonValue> = Vector::new<JsonValue>();
+    let mut views: Vector<FileView> = Vector::new<FileView>();
+    let mut viewModule: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < sites.length()) {
+      let Option::SOME(site) = sites.get(index) else {
+        break;
+      };
+
+      index += 1;
+
+      let Option::SOME(path) = navigation.paths.get(site.module) else {
+        continue;
+      };
+
+      let indexed: Option<&FileHoverIndex> = navigation.fileOf(path);
+
+      if (indexed.isNone()) {
+        if (let Option::SOME(location) = self.declarationSiteLocation(navigation, target, site)) {
+          locations.push(location);
+        }
+
+        continue;
+      }
+
+      let Option::SOME(file) = indexed else {
+        continue;
+      };
+
+      if (views.length() == 0 || viewModule != site.module) {
+        views = Vector::new<FileView>();
+        views.push(self.fileView(file));
+        viewModule = site.module;
+      }
+
+      let Option::SOME(current) = views.get(0) else {
+        continue;
+      };
+
+      if (let Option::SOME(range) = viewRange(current, file, site.start, site.end, true)) {
+        locations.push(locationJson(current.uri.clone(), range));
+      }
+    }
+
+    return locations;
+  }
+
+  /// The location of a declaration site in a file without an index.
+  declarationSiteLocation(
+    &self,
+    navigation: &NavigationIndex,
+    target: u64,
+    site: &NameSite
+  ): Option<JsonValue> {
+    if (!site.isDeclaration) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(defId) = definitionOfTarget(target) else {
+      return Option::NONE;
+    };
+    let Option::SOME(declaration) = navigation.declarationOf(defId) else {
+      return Option::NONE;
+    };
+
+    return self.declarationLocation(navigation, declaration, true);
+  }
+
+  /// Answers `textDocument/documentSymbol` with the outline of the document:
+  /// namespaces with their declarations, records with their fields, methods
+  /// and static fields, enums with their variants, static methods and static
+  /// fields, as the host nests them (crates/ignis_lsp/src/server.rs:3300).
+  /// `null` when the document has not been analyzed.
+  documentSymbols(&mut self, message: &JsonValue): JsonValue {
     if (self.dirty.length() > 0) {
       self.analyzeDirty();
     }
@@ -721,45 +1177,74 @@ export record LspServer {
     let Option::SOME(uri) = jsonStringMember(textDocument, "uri") else {
       return JsonValue::nullValue();
     };
-    let Option::SOME(position) = jsonMember(params, "position") else {
-      return JsonValue::nullValue();
-    };
-
-    let line: i64 = jsonIntegerMember(position, "line").unwrapOr(-1);
-    let character: i64 = jsonIntegerMember(position, "character").unwrapOr(-1);
-
-    if (line < 0 || character < 0) {
-      return JsonValue::nullValue();
-    }
-
     let Option::SOME(document) = self.documents.find(&uri) else {
       return JsonValue::nullValue();
     };
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      return JsonValue::nullValue();
+    };
 
-    return self.hoverIn(document, Text::Position { line: line as u64, character: character as u64 });
-  }
-
-  /// The hover at `position` of the open `document`. The position and the
-  /// range are in the text the client has, even when the index is older.
-  hoverIn(&self, document: &Document, position: Text::Position): JsonValue {
     let path: String = document.path.toString();
-    let mut index: u64 = 0;
 
-    while (index < self.hovers.length()) {
-      if (let Option::SOME(hoverIndex) = self.hovers.get(index)) {
-        if (hoverIndex.path.equals(&path)) {
-          let lineIndex: Text::LineIndex = Text::LineIndex::create(document.text.clone());
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(moduleIndex) = navigation.moduleOf(&path) else {
+      return JsonValue::nullValue();
+    };
 
-          return match (hoverIndex.hoverAtIn(&document.text, lineIndex.offset(position))) {
-            Option::SOME(hit) -> hoverResult(&hit, &lineIndex),
-            Option::NONE -> JsonValue::nullValue(),
-          };
-        }
-      }
+    let view: FileView = self.fileView(file);
+    let outline: Vector<u64> = navigation.outlineOf(moduleIndex);
+    return JsonValue::array(symbolsJson(navigation, file, &view, &outline, 0));
+  }
+}
 
-      index += 1;
+/// The symbols among the declarations at `outline` whose parent is `parent`.
+/// A symbol the edit since the analysis reaches into is left out with its
+/// children.
+function symbolsJson(
+  navigation: &NavigationIndex,
+  file: &FileHoverIndex,
+  view: &FileView,
+  outline: &Vector<u64>,
+  parent: u64,
+): Vector<JsonValue> {
+  let mut symbols: Vector<JsonValue> = Vector::new<JsonValue>();
+  let positions: Vector<u64> = navigation.outlineChildren(outline, parent);
+  let mut index: u64 = 0;
+
+  while (index < positions.length()) {
+    let Option::SOME(position) = positions.get(index) else {
+      break;
+    };
+
+    index += 1;
+
+    let Option::SOME(declaration) = navigation.declarations.get(*position) else {
+      continue;
+    };
+    let Option::SOME(range) = viewRange(view, file, declaration.start, declaration.end, false) else {
+      continue;
+    };
+    let Option::SOME(selection) = viewRange(view, file, declaration.nameStart, declaration.nameEnd, false) else {
+      continue;
+    };
+
+    let children: Vector<JsonValue> = symbolsJson(navigation, file, view, outline, *position + 1);
+    let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+    entries.push(JsonObjectEntry::create("name", JsonValue::fromString(declaration.name.clone())));
+    entries.push(JsonObjectEntry::create("kind", JsonValue::unsignedValue(declaration.kind)));
+    entries.push(JsonObjectEntry::create("range", range));
+    entries.push(JsonObjectEntry::create("selectionRange", selection));
+
+    if (children.length() > 0) {
+      entries.push(JsonObjectEntry::create("children", JsonValue::array(children)));
+    } else {
+      let _none: Vector<JsonValue> = children;
     }
 
-    return JsonValue::nullValue();
+    symbols.push(JsonValue::object(entries));
   }
+
+  return symbols;
 }
