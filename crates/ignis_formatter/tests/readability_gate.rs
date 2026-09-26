@@ -228,6 +228,8 @@ import Vector from "std::vector";
 
 import _ from "std::io::error";
 
+export Stream from "./stream";
+
 /// Keeps `Vector<String>` monomorphizations reachable for std I/O builds.
 ///
 /// Some std APIs return or manipulate `Vector<String>` only through code paths
