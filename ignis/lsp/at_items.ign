@@ -1,0 +1,168 @@
+//! The `@` builtins and directives completion offers, with the syntax,
+//! summary and documentation the host lists for each
+//! (crates/ignis_type/src/at_items.rs), in its order.
+
+import String from "std::string";
+import Vector from "std::vector";
+
+/// One `@` item. `doc` is empty when the host has none.
+export record AtItem {
+  public name: str;
+  public isBuiltin: boolean;
+  public syntax: str;
+  public summary: str;
+  public doc: str;
+}
+
+function pushAtItem(
+  items: &mut Vector<AtItem>,
+  name: str,
+  isBuiltin: boolean,
+  syntax: str,
+  summary: str,
+  doc: str,
+): void {
+  let mut itemsRef: &mut Vector<AtItem> = items;
+  itemsRef.push(AtItem { name: name, isBuiltin: isBuiltin, syntax: syntax, summary: summary, doc: doc });
+}
+
+/// The builtins of the registry, in its order.
+function pushBuiltins(items: &mut Vector<AtItem>): void {
+  let itemsRef: &mut Vector<AtItem> = items;
+  pushAtItem(itemsRef, "typeOf", true, "@typeOf(expr)", "Returns the semantic type of `expr` for compile-time builtin dispatch.", "Internal builtin used by semantic analysis. Not all tooling surfaces it yet.");
+  pushAtItem(itemsRef, "sizeOf", true, "@sizeOf<T>()", "Returns the size in bytes of type `T` as `u64`.", "Emits C `sizeof(T)`. The type argument is required; no expression arguments.");
+  pushAtItem(itemsRef, "alignOf", true, "@alignOf<T>()", "Returns the alignment in bytes of type `T` as `u64`.", "Emits C `_Alignof(T)`. The type argument is required; no expression arguments.");
+  pushAtItem(itemsRef, "typeName", true, "@typeName<T>()", "Returns the name of type `T` as a `str`.", "Resolved at compile time to a string literal (`str`). No runtime cost.");
+  pushAtItem(itemsRef, "bitCast", true, "@bitCast<T>(value)", "Reinterprets the bits of `value` as type `T`.", "Requires `@sizeOf<Source>() == @sizeOf<T>()`. Emits a `memcpy` with a compile-time size assertion.");
+  pushAtItem(itemsRef, "pointerCast", true, "@pointerCast<T>(ptr)", "Casts a pointer to a different pointer type `T`.", "Both the type argument and the expression must be pointer types.");
+  pushAtItem(itemsRef, "integerFromPointer", true, "@integerFromPointer(ptr)", "Converts a pointer to its integer address as `u64`.", "");
+  pushAtItem(itemsRef, "pointerFromInteger", true, "@pointerFromInteger<T>(addr)", "Creates a pointer of type `T` from an integer address.", "The type argument must be a pointer type. The expression must be an integer.");
+  pushAtItem(itemsRef, "sliceFromParts", true, "@sliceFromParts<T>(ptr, len)", "Creates a non-owning `T[]` slice from a data pointer and length.", "Low-level builtin for std containers. The pointer must address at least `len` initialized `T` values.");
+  pushAtItem(itemsRef, "read", true, "@read<T>(ptr)", "Loads a value of type `T` from a pointer.", "Performs an untyped load through a raw pointer. Equivalent to C dereference.");
+  pushAtItem(itemsRef, "write", true, "@write<T>(ptr, value)", "Stores a value of type `T` through a pointer.", "Performs an untyped store through a raw pointer. Takes the pointer and the value to write.");
+  pushAtItem(itemsRef, "dropInPlace", true, "@dropInPlace<T>(ptr)", "Calls the drop glue for type `T` on the value behind `ptr`.", "Used for manual resource cleanup through raw pointers. Only valid for types that implement Drop.");
+  pushAtItem(itemsRef, "dropGlue", true, "@dropGlue<T>()", "Returns the drop glue function pointer for type `T`.", "Returns `(*mut u8) -> void`. Used for passing drop functions to allocators and containers.");
+  pushAtItem(itemsRef, "hash", true, "@hash<T>(value, hasher)", "Hashes `value` with the concrete `Hash` implementation for `T`.", "Used by std collections to force concrete hash dispatch after monomorphization.");
+  pushAtItem(itemsRef, "eq", true, "@eq<T>(left, right)", "Compares two values with the concrete `Eq` implementation for `T`.", "Used by std collections to force concrete equality dispatch after monomorphization.");
+  pushAtItem(itemsRef, "maxOf", true, "@maxOf<T>()", "Returns the maximum representable value of type `T`.", "Compile-time builtin for integer limits.");
+  pushAtItem(itemsRef, "minOf", true, "@minOf<T>()", "Returns the minimum representable value of type `T`.", "Compile-time builtin for integer limits.");
+}
+
+/// The rest of the registry: `configFlag`, the last builtins and the
+/// directives.
+function pushDirectives(items: &mut Vector<AtItem>): void {
+  let itemsRef: &mut Vector<AtItem> = items;
+  pushAtItem(itemsRef, "configFlag", false, "@configFlag(@platform(\"linux\"))", "Compile-time condition: as item attribute strips the next declaration; as expression evaluates to `boolean`.", "**Item attribute**: applied before a declaration, includes/excludes it at parse time.\n**Expression**: evaluates to a literal `true` or `false` for use in `if` conditions.\n\nPredicates: `@platform(\"linux\")`, `@arch(\"x86_64\")`, `@abi(\"gnu\")`, `@target(\"triple\")`, `@feature(\"name\")`, `@debug()`, `@release()`.\nCombinators: `&&`, `||`, `!`, parentheses.");
+  pushAtItem(itemsRef, "compileError", true, "@compileError(\"message\")", "Emits a compile-time error with the given message.", "Return type is `Never`. Useful for static assertions and unsupported platform guards.");
+  pushAtItem(itemsRef, "panic", true, "@panic(\"message\")", "Terminates the program with an error message at runtime.", "Emits `fprintf(stderr, ...)` + `exit(1)`. Return type is `Never`.");
+  pushAtItem(itemsRef, "trap", true, "@trap()", "Emits a hardware trap instruction.", "Low-level crash with no message. Return type is `Never`. Use for impossible states.");
+  pushAtItem(itemsRef, "unreachable", true, "@unreachable()", "Marks a code point as unreachable for the optimizer.", "Emits `__builtin_unreachable()`. Return type is `Never`. No safety check — undefined behavior if reached.");
+  pushAtItem(itemsRef, "packed", false, "@packed", "Removes field padding from a record (tightly packed layout).", "Valid on: record.");
+  pushAtItem(itemsRef, "aligned", false, "@aligned(N)", "Sets minimum alignment to `N` bytes.", "Valid on: record, field. `N` must be a power of two.");
+  pushAtItem(itemsRef, "implements", false, "@implements(TraitName)", "Declares that a record implements a trait.", "Valid on: record. Accepts one or more trait names: `@implements(Drop)`, `@implements(Clone, Copy)`.");
+  pushAtItem(itemsRef, "lang", false, "@lang(try)", "Marks a declaration with compiler-recognized language semantics.", "Currently used for language hooks such as `try`-capable records.");
+  pushAtItem(itemsRef, "externName", false, "@externName(\"symbol\")", "Sets the C symbol name for an extern function.", "Valid on: function. Overrides the default mangled name in the generated C code.");
+  pushAtItem(itemsRef, "test", false, "@test", "Marks a top-level function as a native test case.", "Valid on: top-level function. Tests must be non-generic, take zero parameters, return `void`, and not be extern.");
+  pushAtItem(itemsRef, "cold", false, "@cold", "Marks a function as unlikely to be called (cold path).", "Valid on: function. Hint to the optimizer for branch prediction and code layout.");
+  pushAtItem(itemsRef, "deprecated", false, "@deprecated or @deprecated(\"message\")", "Marks a function as deprecated.", "Valid on: function. Emits a warning at call sites. Optional message for migration guidance.");
+  pushAtItem(itemsRef, "extension", false, "@extension(TypeName) or @extension(TypeName, mut)", "Declares a standalone function as an extension method on a type.", "Valid on: function. Adds instance methods to types you don't own, including primitives.");
+  pushAtItem(itemsRef, "inline", false, "@inline or @inline(always) or @inline(never)", "Controls inlining behavior of a function.", "Valid on: function. `@inline` suggests inlining, `always` forces it, `never` prevents it.");
+  pushAtItem(itemsRef, "takes", false, "@takes", "Declares that a parameter takes ownership of the passed value.", "Valid on: parameter. Used for FFI functions that consume their arguments.");
+  pushAtItem(itemsRef, "noescape", false, "@noescape", "Declares that a closure parameter must not escape the callee.", "Valid on: parameter. Used by escape analysis.");
+  pushAtItem(itemsRef, "allow", false, "@allow(lint_name)", "Suppresses a lint warning for the annotated item.", "Valid on: record, function, field. Known lints: `unused_variable`, `unused_import`, `deprecated`.");
+  pushAtItem(itemsRef, "warn", false, "@warn(lint_name)", "Promotes a lint to warning level for the annotated item.", "Valid on: record, function, field. Known lints: `unused_variable`, `unused_import`, `deprecated`.");
+  pushAtItem(itemsRef, "deny", false, "@deny(lint_name)", "Promotes a lint to error level for the annotated item.", "Valid on: record, function, field. Known lints: `unused_variable`, `unused_import`, `deprecated`.");
+  pushAtItem(itemsRef, "langHook", false, "@langHook(\"hook_name\")", "Marks a namespace as a compiler-recognized language hook provider.", "Valid on: namespace. Used internally for runtime integration (e.g. `rc_runtime`, `string_runtime`).");
+}
+
+/// Every `@` item, in the registry's order.
+export function allAtItems(): Vector<AtItem> {
+  let mut items: Vector<AtItem> = Vector::new<AtItem>();
+  pushBuiltins(&mut items);
+  pushDirectives(&mut items);
+  return items;
+}
+
+/// The items whose name starts with `prefix`, ignoring case.
+export function atItemsMatching(prefix: &String): Vector<AtItem> {
+  let wanted: String = prefix.toLowerCase();
+  let all: Vector<AtItem> = allAtItems();
+  let mut matching: Vector<AtItem> = Vector::new<AtItem>();
+  let mut index: u64 = 0;
+
+  while (index < all.length()) {
+    if (let Option::SOME(item) = all.get(index)) {
+      let name: String = String::create(item.name).toLowerCase();
+
+      if (name.startsWith(wanted.toStr())) {
+        matching.push(AtItem { name: item.name, isBuiltin: item.isBuiltin, syntax: item.syntax, summary: item.summary, doc: item.doc });
+      }
+    }
+
+    index += 1;
+  }
+
+  return matching;
+}
+
+/// The markdown the host shows for an item (crates/ignis_lsp/src/at_items.rs:17).
+export function atItemHover(item: &AtItem): String {
+  let kindLabel: str = item.isBuiltin ? "builtin" : "directive";
+  let mut text: String = String::create("```ignis\n");
+  text.pushStr(item.syntax);
+  text.pushStr("\n```\n\n(");
+  text.pushStr(kindLabel);
+  text.pushStr(") ");
+  text.pushStr(item.summary);
+
+  if (String::create(item.doc).length() > 0) {
+    text.pushStr("\n\n---\n\n");
+    text.pushStr(item.doc);
+  }
+
+  return text;
+}
+
+/// The call snippet of a builtin, without its `@`, or `NONE` for a directive
+/// and a builtin the host inserts by name.
+export function atItemSnippet(item: &AtItem): Option<String> {
+  if (!item.isBuiltin) {
+    return Option::NONE;
+  }
+
+  let name: String = String::create(item.name);
+
+  if (name.equals("sizeOf") || name.equals("alignOf") || name.equals("typeName") || name.equals("dropGlue")) {
+    return Option::SOME(name.concat("<${1:T}>()"));
+  }
+
+  if (name.equals("bitCast") || name.equals("pointerCast") || name.equals("read") || name.equals("dropInPlace")) {
+    return Option::SOME(name.concat("<${1:T}>(${2:expr})"));
+  }
+
+  if (name.equals("pointerFromInteger")) {
+    return Option::SOME(name.concat("<${1:*const T}>(${2:addr})"));
+  }
+
+  if (name.equals("sliceFromParts")) {
+    return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3:len})"));
+  }
+
+  if (name.equals("write")) {
+    return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3:value})"));
+  }
+
+  if (name.equals("integerFromPointer")) {
+    return Option::SOME(name.concat("(${1:ptr})"));
+  }
+
+  if (name.equals("compileError") || name.equals("panic")) {
+    return Option::SOME(name.concat("(\"${1:message}\")"));
+  }
+
+  if (name.equals("trap") || name.equals("unreachable")) {
+    return Option::SOME(name.concat("()"));
+  }
+
+  return Option::NONE;
+}

@@ -5,7 +5,8 @@
 //! Like the hover index, it is built while the analyzer's stores are alive and
 //! keeps only paths, byte ranges and names. References are searched in the
 //! indexed files only, so a use inside the standard library is never listed;
-//! the host also lists those (crates/ignis_lsp/src/server.rs:956).
+//! the host also lists those (crates/ignis_lsp/src/server.rs:956). The
+//! completion data of the same analysis rides along.
 
 import HashMap from "std::collections";
 import String from "std::string";
@@ -17,6 +18,8 @@ import Ast from "@compiler::ast";
 import SourceFile, SourceSpan from "@compiler::diagnostics";
 
 import Doc from "../doc/mod";
+
+import CompletionIndex, buildCompletionIndex, emptyCompletionIndex from "./completion_index";
 
 import
   ByteRange,
@@ -95,6 +98,7 @@ export record NavigationIndex {
   public declarations: Vector<DeclarationSite>;
   /// The position of each definition's declaration, by raw definition id.
   public sites: HashMap<u32, u64>;
+  public completion: CompletionIndex;
 
   /// The index of the module at `path`.
   public moduleOf(&self, path: &String): Option<u64> {
@@ -387,11 +391,13 @@ export function buildNavigationIndex(
   symbols: &Analyzer::SymbolTable,
 ): NavigationIndex {
   let program: HoverProgram = hoverProgramOf(modules, records);
+  let mut indexed: Vector<u64> = Vector::new<u64>();
   let mut index: NavigationIndex = NavigationIndex {
     paths: Vector::new<String>(),
     files: Vector::new<FileHoverIndex>(),
     declarations: Vector::new<DeclarationSite>(),
     sites: HashMap::new<u32, u64>(),
+    completion: emptyCompletionIndex(),
   };
   let mut moduleIndex: u64 = 0;
 
@@ -415,6 +421,7 @@ export function buildNavigationIndex(
 
     if (isOpen || isProject) {
       index.files.push(buildFileHoverIndex(&file.text, module, analysisRecord, &program, isOpen, defs, types, symbols));
+      indexed.push(moduleIndex);
     }
 
     let first: u64 = index.declarations.length();
@@ -434,6 +441,7 @@ export function buildNavigationIndex(
     moduleIndex += 1;
   }
 
+  index.completion = buildCompletionIndex(files, modules, records, &indexed, defs, types, symbols);
   return index;
 }
 
