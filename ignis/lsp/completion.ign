@@ -1,0 +1,1521 @@
+//! `textDocument/completion`: the candidates for each context the host
+//! completes (crates/ignis_lsp/src/completion.rs), with its labels, kinds,
+//! details, insert texts and priorities, and the `CompletionItem` list it
+//! answers with.
+//!
+//! The context comes from the text the client has now. What the analysis
+//! knows comes from the last analysis that reached the analyzer, so a buffer
+//! that stopped parsing still completes the declarations it had.
+
+import JsonObjectEntry, JsonValue from "std::json";
+import Env from "std::env";
+import HashMap from "std::collections";
+import Path from "std::path";
+import String from "std::string";
+import Vector from "std::vector";
+
+import Manifest from "../build/manifest";
+
+import AtItem, atItemHover, atItemSnippet, atItemsMatching from "./at_items";
+import
+  CompletionContext,
+  CompletionScope,
+  CompletionToken,
+  ContextKind,
+  ScannedLocal,
+  ScopeAt,
+  TokenCode,
+  completionTokens,
+  detectContext,
+  matchesPrefix,
+  nextTokenIsParen,
+  previousMeaningfulCode,
+  scannedLocals,
+  scopeAt,
+from "./completion_context";
+import
+  CompletionIndex,
+  CompletionSymbol,
+  FileCompletion,
+  MemberEntry,
+  NamespaceEntry,
+  OwnerMembers,
+  ReceiverType,
+  SymbolCategory,
+from "./completion_index";
+import TextEdit, ascendingOrder, u64At from "./hover_index";
+
+/// The LSP `CompletionItemKind` of each candidate, as the host maps its own
+/// kinds (completion.rs:141).
+export namespace CompletionItemKind {
+  const METHOD: u64 = 2;
+  const FUNCTION: u64 = 3;
+  const FIELD: u64 = 5;
+  const VARIABLE: u64 = 6;
+  const INTERFACE: u64 = 8;
+  const MODULE: u64 = 9;
+  const ENUM: u64 = 13;
+  const KEYWORD: u64 = 14;
+  const ENUM_MEMBER: u64 = 20;
+  const CONSTANT: u64 = 21;
+  const STRUCT: u64 = 22;
+}
+
+/// One candidate. A lower `priority` sorts first.
+export record CompletionCandidate {
+  public label: String;
+  public kind: u64;
+  public detail: Option<String>;
+  public documentation: Option<String>;
+  public insertText: Option<String>;
+  public isSnippet: boolean;
+  public priority: u64;
+}
+
+/// Where the document being completed sits in the analysis: its module,
+/// and how its text changed since the analysis read it.
+export record CompletionAnalysis {
+  public module: u64;
+  public edit: TextEdit;
+}
+
+function candidateOf(
+  label: String,
+  kind: u64,
+  detail: Option<String>,
+  priority: u64
+): CompletionCandidate {
+  return CompletionCandidate {
+    label: label,
+    kind: kind,
+    detail: detail,
+    documentation: Option::NONE,
+    insertText: Option::NONE,
+    isSnippet: false,
+    priority: priority,
+  };
+}
+
+function cloneText(text: &Option<String>): Option<String> {
+  return match (text) {
+    Option::SOME(value) -> Option::SOME(value.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+/// Whether a declaration of `module` is offered in `current`.
+function isVisible(module: u64, isPublic: boolean, current: u64): boolean {
+  return module == current || isPublic;
+}
+
+/// The candidates at byte `cursor` of `text`. `analysis` is `NONE` when no
+/// analysis of the document reached the analyzer yet; only what the text
+/// alone tells is offered then. `stdPath` is the standard library root.
+export function completionCandidates(
+  text: &String,
+  cursor: u64,
+  index: &CompletionIndex,
+  analysis: &Option<CompletionAnalysis>,
+  stdPath: &Option<String>,
+): Vector<CompletionCandidate> {
+  let tokens: Vector<CompletionToken> = completionTokens(text);
+  let context: CompletionContext = detectContext(&tokens, cursor, text);
+
+  if (context.kind == ContextKind::IMPORT_PATH) {
+    return importPathCandidates(&context.prefix, stdPath);
+  }
+
+  if (context.kind == ContextKind::AFTER_AT) {
+    return atCandidates(&context.prefix);
+  }
+
+  if (context.kind == ContextKind::IDENTIFIER || context.kind == ContextKind::AFTER_PIPE) {
+    let candidates: Vector<CompletionCandidate> = identifierCandidates(&context.prefix, context.startOffset, &tokens, index, analysis);
+
+    if (context.kind == ContextKind::IDENTIFIER) {
+      return candidates;
+    }
+
+    return pipeTargets(&candidates);
+  }
+
+  let Option::SOME(known) = analysis else {
+    return Vector::new<CompletionCandidate>();
+  };
+
+  if (context.kind == ContextKind::AFTER_DOT) {
+    return dotCandidates(context.dotOffset, &context.prefix, &tokens, index, &known);
+  }
+
+  if (context.kind == ContextKind::AFTER_DOUBLE_COLON) {
+    return pathCandidates(&context.segments, &context.prefix, index, known.module);
+  }
+
+  return recordInitCandidates(&context.recordName, &context.assignedFields, &context.prefix, index, known.module);
+}
+
+/// The candidate for a declaration (completion.rs:2479). A function is
+/// inserted as a call snippet unless a `(` already follows.
+function symbolCandidate(
+  symbol: &CompletionSymbol,
+  nextIsParen: boolean,
+  priority: u64
+): CompletionCandidate {
+  let mut kind: u64 = CompletionItemKind::VARIABLE;
+
+  if (symbol.category == SymbolCategory::FUNCTION) {
+    kind = CompletionItemKind::FUNCTION;
+  } else if (symbol.category == SymbolCategory::CONSTANT) {
+    kind = CompletionItemKind::CONSTANT;
+  } else if (symbol.category == SymbolCategory::RECORD) {
+    kind = CompletionItemKind::STRUCT;
+  } else if (symbol.category == SymbolCategory::ENUM) {
+    kind = CompletionItemKind::ENUM;
+  } else if (symbol.category == SymbolCategory::NAMESPACE) {
+    kind = CompletionItemKind::MODULE;
+  } else if (symbol.category == SymbolCategory::TYPE_ALIAS) {
+    kind = CompletionItemKind::INTERFACE;
+  }
+
+  let mut candidate: CompletionCandidate = candidateOf(symbol.name.clone(), kind, cloneText(&symbol.detail), priority);
+  candidate.documentation = cloneText(&symbol.documentation);
+
+  if (symbol.category == SymbolCategory::FUNCTION) {
+    if (nextIsParen) {
+      candidate.insertText = Option::SOME(symbol.name.clone());
+    } else {
+      candidate.insertText = cloneText(&symbol.callSnippet);
+      candidate.isSnippet = true;
+    }
+  }
+
+  return candidate;
+}
+
+/// A declaration offered by name, and from where: 20 for the document's
+/// own, 30 for an import, 40 for a type of another file.
+record RankedSymbol {
+  public position: u64;
+  public priority: u64;
+}
+
+function isInFileCategory(category: u64): boolean {
+  return category == SymbolCategory::FUNCTION || category == SymbolCategory::CONSTANT || category == SymbolCategory::RECORD || category == SymbolCategory::ENUM || category == SymbolCategory::NAMESPACE || category == SymbolCategory::TYPE_ALIAS;
+}
+
+function isTypeCategory(category: u64): boolean {
+  return category == SymbolCategory::RECORD || category == SymbolCategory::ENUM || category == SymbolCategory::NAMESPACE || category == SymbolCategory::TYPE_ALIAS;
+}
+
+/// Keeps the lowest priority `raw` is offered with.
+function rankSymbol(
+  ranks: &mut HashMap<u32, u64>,
+  order: &mut Vector<u32>,
+  raw: u32,
+  priority: u64
+): void {
+  let mut ranksRef: &mut HashMap<u32, u64> = ranks;
+  let mut orderRef: &mut Vector<u32> = order;
+
+  if (let Option::SOME(existing) = ranksRef.get(&raw)) {
+    if (priority < *existing) {
+      ranksRef.insert(raw, priority);
+    }
+
+    return;
+  }
+
+  ranksRef.insert(raw, priority);
+  orderRef.push(raw);
+}
+
+/// The declarations an identifier is completed with, sorted by priority
+/// and name (completion.rs:1253): the document's top-level declarations, what
+/// its imports name and, once a prefix is typed, the public types of other
+/// files.
+function rankedSymbols(
+  prefix: &String,
+  index: &CompletionIndex,
+  analysis: &CompletionAnalysis
+): Vector<RankedSymbol> {
+  let mut ranks: HashMap<u32, u64> = HashMap::new<u32, u64>();
+  let mut order: Vector<u32> = Vector::new<u32>();
+  let mut position: u64 = 0;
+
+  while (position < index.symbols.length()) {
+    if (let Option::SOME(symbol) = index.symbols.get(position)) {
+      if (symbol.module == analysis.module && symbol.topLevel && isInFileCategory(symbol.category)) {
+        rankSymbol(&mut ranks, &mut order, symbol.raw, 20);
+      }
+    }
+
+    position += 1;
+  }
+
+  if (let Option::SOME(file) = fileOfModule(index, analysis.module)) {
+    position = 0;
+
+    while (position < file.imports.length()) {
+      if (let Option::SOME(imported) = file.imports.get(position)) {
+        rankSymbol(&mut ranks, &mut order, imported.raw, 30);
+      }
+
+      position += 1;
+    }
+  }
+
+  if (prefix.length() > 0) {
+    position = 0;
+
+    while (position < index.symbols.length()) {
+      if (let Option::SOME(symbol) = index.symbols.get(position)) {
+        if (symbol.module != analysis.module && symbol.topLevel && isTypeCategory(symbol.category) && symbol.isPublic) {
+          rankSymbol(&mut ranks, &mut order, symbol.raw, 40);
+        }
+      }
+
+      position += 1;
+    }
+  }
+
+  return sortedRanks(index, &ranks, &order);
+}
+
+/// `order` as ranked symbols, by priority, then name, then definition.
+function sortedRanks(
+  index: &CompletionIndex,
+  ranks: &HashMap<u32, u64>,
+  order: &Vector<u32>
+): Vector<RankedSymbol> {
+  let mut entries: Vector<RankedSymbol> = Vector::new<RankedSymbol>();
+  let mut position: u64 = 0;
+
+  while (position < order.length()) {
+    let Option::SOME(raw) = order.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(symbolPosition) = index.symbolAt.get(raw) else {
+      continue;
+    };
+
+    let priority: u64 = match (ranks.get(raw)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> 20,
+    };
+    entries.push(RankedSymbol { position: *symbolPosition, priority: priority });
+  }
+
+  let mut sortedOrder: Vector<u64> = Vector::new<u64>();
+  position = 0;
+
+  while (position < entries.length()) {
+    sortedOrder.push(position);
+    let mut slot: u64 = position;
+
+    while (slot > 0 && rankGoesAfter(index, &entries, u64At(&sortedOrder, slot - 1), u64At(&sortedOrder, slot))) {
+      let previous: u64 = u64At(&sortedOrder, slot - 1);
+      let _raised: boolean = sortedOrder.set(slot - 1, u64At(&sortedOrder, slot));
+      let _lowered: boolean = sortedOrder.set(slot, previous);
+      slot -= 1;
+    }
+
+    position += 1;
+  }
+
+  let mut sorted: Vector<RankedSymbol> = Vector::new<RankedSymbol>();
+  position = 0;
+
+  while (position < sortedOrder.length()) {
+    if (let Option::SOME(entry) = entries.get(u64At(&sortedOrder, position))) {
+      sorted.push(RankedSymbol { position: entry.position, priority: entry.priority });
+    }
+
+    position += 1;
+  }
+
+  return sorted;
+}
+
+/// True when the entry at `left` sorts after the one at `right`.
+function rankGoesAfter(
+  index: &CompletionIndex,
+  entries: &Vector<RankedSymbol>,
+  left: u64,
+  right: u64
+): boolean {
+  let Option::SOME(leftEntry) = entries.get(left) else {
+    return false;
+  };
+  let Option::SOME(rightEntry) = entries.get(right) else {
+    return false;
+  };
+
+  if (leftEntry.priority != rightEntry.priority) {
+    return leftEntry.priority > rightEntry.priority;
+  }
+
+  let Option::SOME(leftSymbol) = index.symbols.get(leftEntry.position) else {
+    return false;
+  };
+  let Option::SOME(rightSymbol) = index.symbols.get(rightEntry.position) else {
+    return false;
+  };
+
+  let order: i32 = leftSymbol.name.compare(&rightSymbol.name);
+
+  if (order != 0) {
+    return order > 0;
+  }
+
+  return leftSymbol.raw > rightSymbol.raw;
+}
+
+function fileOfModule(index: &CompletionIndex, module: u64): Option<&FileCompletion> {
+  let mut position: u64 = 0;
+
+  while (position < index.files.length()) {
+    let Option::SOME(file) = index.files.get(position) else {
+      break;
+    };
+
+    if (file.module == module) {
+      return index.files.get(position);
+    }
+
+    position += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// The candidates for an identifier (completion.rs:1222): declarations,
+/// then, inside a callable, the locals and parameters the tokens declare,
+/// the `@` items the scope takes without their `@`, and keyword snippets.
+function identifierCandidates(
+  prefix: &String,
+  startOffset: u64,
+  tokens: &Vector<CompletionToken>,
+  index: &CompletionIndex,
+  analysis: &Option<CompletionAnalysis>,
+): Vector<CompletionCandidate> {
+  let mut candidates: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+  let mut seen: Vector<String> = Vector::new<String>();
+  let nextIsParen: boolean = nextTokenIsParen(tokens, startOffset);
+  let scope: ScopeAt = scopeAt(tokens, startOffset);
+
+  if (let Option::SOME(known) = analysis) {
+    let ranked: Vector<RankedSymbol> = rankedSymbols(prefix, index, &known);
+    let mut position: u64 = 0;
+
+    while (position < ranked.length()) {
+      let Option::SOME(entry) = ranked.get(position) else {
+        break;
+      };
+
+      position += 1;
+
+      let Option::SOME(symbol) = index.symbols.get(entry.position) else {
+        continue;
+      };
+
+      if (!matchesPrefix(&symbol.name, prefix) || !isVisible(symbol.module, symbol.isPublic, known.module)) {
+        continue;
+      }
+
+      seen.push(symbol.name.clone());
+      candidates.push(symbolCandidate(symbol, nextIsParen, entry.priority));
+    }
+  }
+
+  if (scope.scope == CompletionScope::CALLABLE_BODY) {
+    let locals: Vector<ScannedLocal> = scannedLocals(tokens, startOffset, prefix, scope.localStart, &seen);
+    let mut position: u64 = 0;
+
+    while (position < locals.length()) {
+      if (let Option::SOME(local) = locals.get(position)) {
+        candidates.push(candidateOf(local.name.clone(), CompletionItemKind::VARIABLE, Option::SOME(String::create(local.detail)), 10));
+      }
+
+      position += 1;
+    }
+  }
+
+  addBareAtItems(prefix, scope.scope, &mut candidates);
+  addKeywordSnippets(tokens, startOffset, prefix, scope.scope, &mut candidates);
+  return candidates;
+}
+
+/// The identifier candidates a `|>` can call into: functions, variables,
+/// constants and namespaces.
+function pipeTargets(candidates: &Vector<CompletionCandidate>): Vector<CompletionCandidate> {
+  let mut kept: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+  let mut position: u64 = 0;
+
+  while (position < candidates.length()) {
+    if (let Option::SOME(candidate) = candidates.get(position)) {
+      let kind: u64 = candidate.kind;
+
+      if (kind == CompletionItemKind::FUNCTION || kind == CompletionItemKind::VARIABLE || kind == CompletionItemKind::CONSTANT || kind == CompletionItemKind::MODULE) {
+        kept.push(copyCandidate(candidate));
+      }
+    }
+
+    position += 1;
+  }
+
+  return kept;
+}
+
+function copyCandidate(candidate: &CompletionCandidate): CompletionCandidate {
+  return CompletionCandidate {
+    label: candidate.label.clone(),
+    kind: candidate.kind,
+    detail: cloneText(&candidate.detail),
+    documentation: cloneText(&candidate.documentation),
+    insertText: cloneText(&candidate.insertText),
+    isSnippet: candidate.isSnippet,
+    priority: candidate.priority,
+  };
+}
+
+/// The `@` items the scope takes without their `@` (completion.rs:1442):
+/// builtins in a callable, directives at the top level, none in a record
+/// or enum body.
+function addBareAtItems(
+  prefix: &String,
+  scope: u64,
+  candidates: &mut Vector<CompletionCandidate>
+): void {
+  let mut candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+
+  if (scope == CompletionScope::TYPE_BODY) {
+    return;
+  }
+
+  let wantsBuiltins: boolean = scope == CompletionScope::CALLABLE_BODY;
+  let items: Vector<AtItem> = atItemsMatching(prefix);
+  let mut position: u64 = 0;
+
+  while (position < items.length()) {
+    let Option::SOME(item) = items.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    if (item.isBuiltin != wantsBuiltins) {
+      continue;
+    }
+
+    let name: String = String::create(item.name);
+    let mut candidate: CompletionCandidate = candidateOf(name.clone(), CompletionItemKind::KEYWORD, Option::SOME(String::create("directive")), 45);
+    candidate.documentation = Option::SOME(atItemHover(item));
+
+    if (item.isBuiltin) {
+      candidate.kind = CompletionItemKind::FUNCTION;
+      candidate.detail = Option::SOME(String::create("builtin"));
+      candidate.priority = 35;
+      candidate.insertText = Option::SOME(String::create("@").concat(name));
+
+      if (let Option::SOME(snippet) = atItemSnippet(item)) {
+        candidate.insertText = Option::SOME(String::create("@").concat(snippet));
+        candidate.isSnippet = true;
+      }
+    } else {
+      let snippet: Option<String> = directiveSnippet(&name);
+      candidate.insertText = Option::SOME(String::create("@").concat(name));
+
+      if (let Option::SOME(text) = snippet) {
+        candidate.insertText = Option::SOME(text);
+        candidate.isSnippet = true;
+      }
+    }
+
+    candidatesRef.push(candidate);
+  }
+}
+
+/// The snippet a directive is inserted as without its `@` typed, or `NONE`
+/// for one inserted by name (completion.rs:1493).
+function directiveSnippet(name: &String): Option<String> {
+  if (name.equals("aligned")) {
+    return Option::SOME(String::create("@aligned(${1:N})"));
+  }
+
+  if (name.equals("implements")) {
+    return Option::SOME(String::create("@implements(${1:Trait})"));
+  }
+
+  if (name.equals("externName")) {
+    return Option::SOME(String::create("@externName(\"${1:symbol}\")"));
+  }
+
+  if (name.equals("deprecated")) {
+    return Option::SOME(String::create("@deprecated(${1:\"message\"})"));
+  }
+
+  if (name.equals("extension")) {
+    return Option::SOME(String::create("@extension(${1:TypeName})"));
+  }
+
+  if (name.equals("inline")) {
+    return Option::SOME(String::create("@inline(${1:always})"));
+  }
+
+  if (name.equals("takes")) {
+    return Option::SOME(String::create("@takes"));
+  }
+
+  if (name.equals("allow") || name.equals("warn") || name.equals("deny")) {
+    return Option::SOME(`@${name.toStr()}(`.concat("${1:lint_name})"));
+  }
+
+  if (name.equals("langHook")) {
+    return Option::SOME(String::create("@langHook(\"${1:hook_name}\")"));
+  }
+
+  return Option::NONE;
+}
+
+/// The candidates after `@` (completion.rs:656).
+function atCandidates(prefix: &String): Vector<CompletionCandidate> {
+  let mut candidates: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+  let items: Vector<AtItem> = atItemsMatching(prefix);
+  let mut position: u64 = 0;
+
+  while (position < items.length()) {
+    let Option::SOME(item) = items.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let kind: u64 = item.isBuiltin ? CompletionItemKind::FUNCTION : CompletionItemKind::KEYWORD;
+    let kindLabel: str = item.isBuiltin ? "builtin" : "directive";
+    let detail: String = `(${kindLabel}) ${item.summary}`;
+    let mut candidate: CompletionCandidate = candidateOf(String::create(item.name), kind, Option::SOME(detail), 15);
+    candidate.insertText = Option::SOME(String::create(item.name));
+
+    if (String::create(item.doc).length() > 0) {
+      candidate.documentation = Option::SOME(String::create(item.doc));
+    }
+
+    if (let Option::SOME(snippet) = atItemSnippet(item)) {
+      candidate.insertText = Option::SOME(snippet);
+      candidate.isSnippet = true;
+    }
+
+    candidates.push(candidate);
+  }
+
+  return candidates;
+}
+
+/// True when the first character of `text` is a letter.
+function startsWithLetter(text: &String): boolean {
+  let Option::SOME(first) = text.charAt(0 as u64) else {
+    return false;
+  };
+
+  return first.isAlphabetic();
+}
+
+function isExactKeyword(prefix: &String): boolean {
+  let keywords: str = " if else while for match return let const function record enum namespace type import from public private static extern mut ";
+  let needle: String = ` ${prefix.toStr()} `;
+  return String::create(keywords).contains(&needle);
+}
+
+function pushSnippet(
+  candidates: &mut Vector<CompletionCandidate>,
+  prefix: &String,
+  label: str,
+  detail: str,
+  snippet: str,
+  priority: u64,
+): void {
+  let mut candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+  let name: String = String::create(label);
+
+  if (!matchesPrefix(&name, prefix)) {
+    return;
+  }
+
+  let mut candidate: CompletionCandidate = candidateOf(name, CompletionItemKind::KEYWORD, Option::SOME(String::create(detail)), priority);
+  candidate.insertText = Option::SOME(String::create(snippet));
+  candidate.isSnippet = true;
+  candidatesRef.push(candidate);
+}
+
+/// The keyword snippets of the scope at a statement start, `else` after a
+/// `}`, and the literals where a value can start (completion.rs:1650). With
+/// a word typed, snippets are offered only for an exact keyword.
+function addKeywordSnippets(
+  tokens: &Vector<CompletionToken>,
+  startOffset: u64,
+  prefix: &String,
+  scope: u64,
+  candidates: &mut Vector<CompletionCandidate>,
+): void {
+  let candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+  let previous: Option<u64> = previousMeaningfulCode(tokens, startOffset);
+  let code: u64 = previous.unwrapOr(TokenCode::OTHER);
+  let isStartOfStatement: boolean = previous.isNone() || code == TokenCode::SEMICOLON || code == TokenCode::LEFT_BRACE || code == TokenCode::RIGHT_BRACE || code == TokenCode::LEFT_PAREN || code == TokenCode::RIGHT_PAREN || code == TokenCode::LEFT_BRACKET || code == TokenCode::RIGHT_BRACKET || code == TokenCode::COMMA || code == TokenCode::EQUAL || code == TokenCode::ARROW;
+  let afterRightBrace: boolean = previous.isSome() && code == TokenCode::RIGHT_BRACE;
+  let wantsSnippets: boolean = prefix.length() == 0 || !startsWithLetter(prefix) || isExactKeyword(prefix);
+
+  if (isStartOfStatement && wantsSnippets) {
+    if (scope == CompletionScope::CALLABLE_BODY) {
+      pushSnippet(candidatesRef, prefix, "if", "if (...) { ... }", "if ($1) {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "if else", "if (...) { ... } else { ... }", "if ($1) {\n\t$2\n} else {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "while", "while (...) { ... }", "while ($1) {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "for", "for { ... }", "for (let $1 = $2; $3; $4) {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "for of", "for { ... }", "for (let $1 of $2) {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "match", "match { ... }", "match ($1) {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "return", "return val", "return $0;", 80);
+      pushSnippet(candidatesRef, prefix, "let", "let var: type = ...", "let $1: $2 = $0;", 80);
+      pushSnippet(candidatesRef, prefix, "const", "const var: type = ...", "const $1: $2 = $0;", 80);
+    } else if (scope == CompletionScope::TYPE_BODY) {
+      pushSnippet(candidatesRef, prefix, "public", "public modifier", "public ", 80);
+      pushSnippet(candidatesRef, prefix, "private", "private modifier", "private ", 80);
+      pushSnippet(candidatesRef, prefix, "static", "static modifier", "static ", 80);
+      pushSnippet(candidatesRef, prefix, "inline", "inline modifier", "inline ", 80);
+    } else {
+      pushSnippet(candidatesRef, prefix, "const", "const var: type = ...", "const $1: $2 = $0;", 80);
+      pushSnippet(candidatesRef, prefix, "function", "function name(): type { ... }", "function $1($2): $3 {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "record", "record Name { ... }", "record $1 {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "enum", "enum Name { ... }", "enum $1 {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "namespace", "namespace Name { ... }", "namespace $1 {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "type", "type Alias = ...", "type $1 = $0;", 80);
+      pushSnippet(candidatesRef, prefix, "extern", "extern path { ... }", "extern $1 {\n\t$0\n}", 80);
+      pushSnippet(candidatesRef, prefix, "import", "import ... from ...", "import $0 from \"$1\"", 80);
+    }
+  }
+
+  if (scope == CompletionScope::CALLABLE_BODY && afterRightBrace && wantsSnippets) {
+    pushSnippet(candidatesRef, prefix, "else", "else { ... }", "else {\n\t$0\n}", 80);
+  }
+
+  let startsValue: boolean = code == TokenCode::COLON || code == TokenCode::EQUAL || code == TokenCode::LEFT_PAREN || code == TokenCode::COMMA;
+
+  if (scope == CompletionScope::CALLABLE_BODY && (isStartOfStatement || (previous.isSome() && startsValue))) {
+    pushSnippet(candidatesRef, prefix, "true", "boolean true", "true", 60);
+    pushSnippet(candidatesRef, prefix, "false", "boolean false", "false", 60);
+    pushSnippet(candidatesRef, prefix, "null", "null value", "null", 60);
+    pushSnippet(candidatesRef, prefix, "self", "self reference", "self", 60);
+  }
+}
+
+/// The receiver of the member access whose `.` is at `dotOffset`: the local
+/// or parameter named right before it, else the type of the expression that
+/// ends last before it in the text the analysis read (completion.rs:752).
+function receiverAt(
+  dotOffset: u64,
+  tokens: &Vector<CompletionToken>,
+  file: &FileCompletion,
+  edit: &TextEdit,
+): Option<ReceiverType> {
+  let mut named: Option<&CompletionToken> = Option::NONE;
+  let mut position: u64 = 0;
+
+  while (position < tokens.length()) {
+    if (let Option::SOME(token) = tokens.get(position)) {
+      if (token.code == TokenCode::IDENTIFIER && token.end <= dotOffset) {
+        named = Option::SOME(token);
+      }
+    }
+
+    position += 1;
+  }
+
+  if (let Option::SOME(token) = named) {
+    if (token.end == dotOffset) {
+      position = 0;
+
+      while (position < file.receivers.length()) {
+        if (let Option::SOME(receiver) = file.receivers.get(position)) {
+          if (receiver.name.equals(&token.lexeme)) {
+            return Option::SOME(ReceiverType { owner: receiver.receiver.owner, extension: receiver.receiver.extension });
+          }
+        }
+
+        position += 1;
+      }
+    }
+  }
+
+  let Option::SOME(offset) = edit.sourceOffsetOf(dotOffset) else {
+    return Option::NONE;
+  };
+
+  return typedSpanBefore(file, offset);
+}
+
+/// The type of the expression that ends last at or before `offset`, the
+/// innermost of those that end together.
+function typedSpanBefore(file: &FileCompletion, offset: u64): Option<ReceiverType> {
+  let mut best: Option<u64> = Option::NONE;
+  let mut bestEnd: u64 = 0;
+  let mut bestSize: u64 = 0;
+  let mut position: u64 = 0;
+
+  while (position < file.typedSpans.length()) {
+    if (let Option::SOME(span) = file.typedSpans.get(position)) {
+      let size: u64 = span.end - span.start;
+
+      if (span.end <= offset && (best.isNone() || span.end > bestEnd || (span.end == bestEnd && size <= bestSize))) {
+        best = Option::SOME(position);
+        bestEnd = span.end;
+        bestSize = size;
+      }
+    }
+
+    position += 1;
+  }
+
+  let Option::SOME(found) = best else {
+    return Option::NONE;
+  };
+  let Option::SOME(span) = file.typedSpans.get(found) else {
+    return Option::NONE;
+  };
+
+  return Option::SOME(ReceiverType { owner: span.receiver.owner, extension: span.receiver.extension });
+}
+
+function memberCandidate(member: &MemberEntry, kind: u64, priority: u64): CompletionCandidate {
+  let mut candidate: CompletionCandidate = candidateOf(member.name.clone(), kind, cloneText(&member.detail), priority);
+  candidate.documentation = cloneText(&member.documentation);
+  return candidate;
+}
+
+/// A method, inserted as a call with the cursor between its parentheses.
+function methodCandidate(member: &MemberEntry): CompletionCandidate {
+  let mut candidate: CompletionCandidate = memberCandidate(member, CompletionItemKind::METHOD, 15);
+  candidate.insertText = Option::SOME(member.name.concat("($0)"));
+  candidate.isSnippet = true;
+  return candidate;
+}
+
+/// Adds the methods of `members` that match `prefix` and are visible from
+/// `module`.
+function addMethods(
+  candidates: &mut Vector<CompletionCandidate>,
+  members: &Vector<MemberEntry>,
+  prefix: &String,
+  module: u64
+): void {
+  let mut candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+  let mut position: u64 = 0;
+
+  while (position < members.length()) {
+    if (let Option::SOME(member) = members.get(position)) {
+      if (matchesPrefix(&member.name, prefix) && isVisible(member.module, member.isPublic, module)) {
+        candidatesRef.push(methodCandidate(member));
+      }
+    }
+
+    position += 1;
+  }
+}
+
+/// The candidates after `.`: the fields and instance methods of the
+/// receiver's record or enum, then the extension methods of its type.
+function dotCandidates(
+  dotOffset: u64,
+  prefix: &String,
+  tokens: &Vector<CompletionToken>,
+  index: &CompletionIndex,
+  analysis: &CompletionAnalysis,
+): Vector<CompletionCandidate> {
+  let mut candidates: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+
+  let Option::SOME(file) = fileOfModule(index, analysis.module) else {
+    return candidates;
+  };
+  let Option::SOME(receiver) = receiverAt(dotOffset, tokens, file, &analysis.edit) else {
+    return candidates;
+  };
+
+  if (let Option::SOME(owner) = receiver.owner) {
+    if (let Option::SOME(members) = index.members.get(&owner)) {
+      let mut position: u64 = 0;
+
+      while (position < members.fields.length()) {
+        if (let Option::SOME(field) = members.fields.get(position)) {
+          if (matchesPrefix(&field.name, prefix) && isVisible(field.module, field.isPublic, analysis.module)) {
+            candidates.push(candidateOf(field.name.clone(), CompletionItemKind::FIELD, cloneText(&field.detail), 10));
+          }
+        }
+
+        position += 1;
+      }
+
+      addMethods(&mut candidates, &members.instanceMethods, prefix, analysis.module);
+    }
+  }
+
+  if (let Option::SOME(key) = receiver.extension) {
+    if (let Option::SOME(extensions) = index.extensions.get(&key)) {
+      let mut position: u64 = 0;
+
+      while (position < extensions.length()) {
+        if (let Option::SOME(extension) = extensions.get(position)) {
+          if (matchesPrefix(&extension.name, prefix)) {
+            candidates.push(methodCandidate(extension));
+          }
+        }
+
+        position += 1;
+      }
+    }
+  }
+
+  return candidates;
+}
+
+/// `segments` joined with `::`.
+function joinedPath(segments: &Vector<String>, count: u64): String {
+  let mut path: String = String::new();
+  let mut position: u64 = 0;
+
+  while (position < count) {
+    if (let Option::SOME(segment) = segments.get(position)) {
+      if (position > 0) {
+        path.pushStr("::");
+      }
+
+      path.push(segment);
+    }
+
+    position += 1;
+  }
+
+  return path;
+}
+
+/// The symbol of the namespace declaration that opens `path` and is
+/// visible from `module`, the document's own first (completion.rs:2245).
+function namespaceSymbol(index: &CompletionIndex, path: &String, module: u64): Option<u64> {
+  let mut own: Option<u64> = Option::NONE;
+  let mut other: Option<u64> = Option::NONE;
+  let mut position: u64 = 0;
+
+  while (position < index.symbols.length()) {
+    if (let Option::SOME(symbol) = index.symbols.get(position)) {
+      let visible: boolean = symbol.isExtern || isVisible(symbol.module, symbol.isPublic, module);
+
+      if (symbol.category == SymbolCategory::NAMESPACE && symbol.namespacePath.equals(path) && visible) {
+        if (symbol.module == module) {
+          own = lowerRaw(index, own, position);
+        } else {
+          other = lowerRaw(index, other, position);
+        }
+      }
+    }
+
+    position += 1;
+  }
+
+  return own.isSome() ? own : other;
+}
+
+/// Whichever of `current` and `candidate` declares the lower definition id.
+function lowerRaw(index: &CompletionIndex, current: Option<u64>, candidate: u64): Option<u64> {
+  let Option::SOME(existing) = current else {
+    return Option::SOME(candidate);
+  };
+
+  return rawAt(index, candidate) < rawAt(index, existing) ? Option::SOME(candidate) : current;
+}
+
+function rawAt(index: &CompletionIndex, position: u64): u32 {
+  return match (index.symbols.get(position)) {
+    Option::SOME(symbol) -> symbol.raw,
+    Option::NONE -> 0,
+  };
+}
+
+/// The first declaration named `name` in the namespace `entry`.
+function namespaceMemberNamed(
+  index: &CompletionIndex,
+  entry: &NamespaceEntry,
+  name: &String
+): Option<u64> {
+  let mut position: u64 = 0;
+
+  while (position < entry.members.length()) {
+    if (let Option::SOME(raw) = entry.members.get(position)) {
+      if (let Option::SOME(symbolPosition) = index.symbolAt.get(raw)) {
+        if (let Option::SOME(symbol) = index.symbols.get(*symbolPosition)) {
+          if (symbol.name.equals(name)) {
+            return Option::SOME(*symbolPosition);
+          }
+        }
+      }
+    }
+
+    position += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// The symbol the path `segments` names (completion.rs:2100): a
+/// declaration of the namespace the leading segments name, else its head,
+/// an imported name or a record, enum, namespace or type alias the
+/// document's own first, then each later segment inside a namespace.
+function resolvePath(segments: &Vector<String>, index: &CompletionIndex, module: u64): Option<u64> {
+  let count: u64 = segments.length();
+
+  if (count > 1) {
+    let parentPath: String = joinedPath(segments, count - 1);
+    let last: String = match (segments.get(count - 1)) {
+      Option::SOME(segment) -> segment.clone(),
+      Option::NONE -> String::new(),
+    };
+
+    if (let Option::SOME(parent) = index.namespaceAt(&parentPath)) {
+      if (let Option::SOME(found) = namespaceMemberNamed(index, parent, &last)) {
+        return Option::SOME(found);
+      }
+
+      let childPath: String = joinedPath(segments, count);
+
+      if (index.namespaceAt(&childPath).isSome()) {
+        if (let Option::SOME(found) = namespaceSymbol(index, &childPath, module)) {
+          return Option::SOME(found);
+        }
+      }
+    }
+  }
+
+  let Option::SOME(head) = segments.get(0) else {
+    return Option::NONE;
+  };
+
+  let mut current: Option<u64> = pathHead(head, index, module);
+  let mut position: u64 = 1;
+
+  while (position < count) {
+    let Option::SOME(symbolPosition) = current else {
+      return Option::NONE;
+    };
+    let Option::SOME(symbol) = index.symbols.get(symbolPosition) else {
+      return Option::NONE;
+    };
+    let Option::SOME(segment) = segments.get(position) else {
+      return Option::NONE;
+    };
+
+    position += 1;
+
+    if (symbol.category != SymbolCategory::NAMESPACE) {
+      return Option::NONE;
+    }
+
+    let childPath: String = symbol.namespacePath.clone().concat("::").concat(segment.clone());
+
+    if (index.namespaceAt(&childPath).isSome()) {
+      current = namespaceSymbol(index, &childPath, module);
+    } else if (let Option::SOME(entry) = index.namespaceAt(&symbol.namespacePath)) {
+      current = namespaceMemberNamed(index, entry, segment);
+    } else {
+      current = Option::NONE;
+    }
+  }
+
+  return current;
+}
+
+/// The symbol a path starting with `head` starts at: the document's own
+/// record, enum, namespace or type alias of that name, else what an import
+/// of the document names so, else the first such declaration elsewhere.
+function pathHead(head: &String, index: &CompletionIndex, module: u64): Option<u64> {
+  let mut own: Option<u64> = Option::NONE;
+  let mut other: Option<u64> = Option::NONE;
+  let mut position: u64 = 0;
+
+  while (position < index.symbols.length()) {
+    if (let Option::SOME(symbol) = index.symbols.get(position)) {
+      let isExternNamespace: boolean = symbol.category == SymbolCategory::NAMESPACE && symbol.isExtern;
+      let visible: boolean = isExternNamespace || isVisible(symbol.module, symbol.isPublic, module);
+
+      if (symbol.name.equals(head) && isTypeCategory(symbol.category) && visible) {
+        if (symbol.module == module) {
+          own = lowerRaw(index, own, position);
+        } else {
+          other = lowerRaw(index, other, position);
+        }
+      }
+    }
+
+    position += 1;
+  }
+
+  if (own.isSome()) {
+    return own;
+  }
+
+  if (let Option::SOME(imported) = importedHead(head, index, module)) {
+    return Option::SOME(imported);
+  }
+
+  return other;
+}
+
+/// The symbol an import of `module` binds under the written name `head`.
+function importedHead(head: &String, index: &CompletionIndex, module: u64): Option<u64> {
+  let Option::SOME(file) = fileOfModule(index, module) else {
+    return Option::NONE;
+  };
+
+  let mut position: u64 = 0;
+
+  while (position < file.imports.length()) {
+    if (let Option::SOME(imported) = file.imports.get(position)) {
+      if (imported.text.equals(head)) {
+        return match (index.symbolAt.get(&imported.raw)) {
+          Option::SOME(symbolPosition) -> Option::SOME(*symbolPosition),
+          Option::NONE -> Option::NONE,
+        };
+      }
+    }
+
+    position += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// The child namespaces and declarations of the namespace at `path`
+/// (completion.rs:2327).
+function addNamespaceMembers(
+  candidates: &mut Vector<CompletionCandidate>,
+  path: &String,
+  prefix: &String,
+  index: &CompletionIndex,
+  module: u64,
+): void {
+  let mut candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+
+  let Option::SOME(entry) = index.namespaceAt(path) else {
+    return;
+  };
+
+  let mut position: u64 = 0;
+
+  while (position < entry.children.length()) {
+    if (let Option::SOME(child) = entry.children.get(position)) {
+      let childPath: String = path.clone().concat("::").concat(child.clone());
+
+      if (matchesPrefix(child, prefix) && namespaceSymbol(index, &childPath, module).isSome()) {
+        candidatesRef.push(candidateOf(child.clone(), CompletionItemKind::MODULE, Option::NONE, 10));
+      }
+    }
+
+    position += 1;
+  }
+
+  position = 0;
+
+  while (position < entry.members.length()) {
+    if (let Option::SOME(raw) = entry.members.get(position)) {
+      if (let Option::SOME(symbol) = index.symbolOf(*raw)) {
+        if (matchesPrefix(&symbol.name, prefix)) {
+          candidatesRef.push(symbolCandidate(symbol, false, 20));
+        }
+      }
+    }
+
+    position += 1;
+  }
+}
+
+/// Adds the static fields of `members` visible from `module`, as constants.
+function addStaticFields(
+  candidates: &mut Vector<CompletionCandidate>,
+  members: &OwnerMembers,
+  prefix: &String,
+  module: u64
+): void {
+  let mut candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+  let mut position: u64 = 0;
+
+  while (position < members.staticFields.length()) {
+    if (let Option::SOME(field) = members.staticFields.get(position)) {
+      if (matchesPrefix(&field.name, prefix) && isVisible(field.module, field.isPublic, module)) {
+        candidatesRef.push(candidateOf(field.name.clone(), CompletionItemKind::CONSTANT, Option::NONE, 20));
+      }
+    }
+
+    position += 1;
+  }
+}
+
+/// Adds the variants of `members`, a variant with a payload inserted as a
+/// call.
+function addVariants(
+  candidates: &mut Vector<CompletionCandidate>,
+  members: &OwnerMembers,
+  prefix: &String
+): void {
+  let mut candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+  let mut position: u64 = 0;
+
+  while (position < members.variants.length()) {
+    if (let Option::SOME(variant) = members.variants.get(position)) {
+      if (matchesPrefix(&variant.name, prefix)) {
+        let mut candidate: CompletionCandidate = candidateOf(variant.name.clone(), CompletionItemKind::ENUM_MEMBER, cloneText(&variant.detail), 10);
+
+        if (variant.hasPayload) {
+          candidate.insertText = Option::SOME(variant.name.concat("($0)"));
+          candidate.isSnippet = true;
+        }
+
+        candidatesRef.push(candidate);
+      }
+    }
+
+    position += 1;
+  }
+}
+
+/// The candidates after `::` (completion.rs:1055): the static methods and
+/// static fields of a record, the variants, static methods and static
+/// fields of an enum, the members of a namespace.
+function pathCandidates(
+  segments: &Vector<String>,
+  prefix: &String,
+  index: &CompletionIndex,
+  module: u64
+): Vector<CompletionCandidate> {
+  let mut candidates: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+
+  if (segments.length() == 0) {
+    return candidates;
+  }
+
+  let Option::SOME(position) = resolvePath(segments, index, module) else {
+    let path: String = joinedPath(segments, segments.length());
+    addNamespaceMembers(&mut candidates, &path, prefix, index, module);
+    return candidates;
+  };
+  let Option::SOME(symbol) = index.symbols.get(position) else {
+    return candidates;
+  };
+
+  if (symbol.category == SymbolCategory::NAMESPACE) {
+    addNamespaceMembers(&mut candidates, &symbol.namespacePath, prefix, index, module);
+    return candidates;
+  }
+
+  let Option::SOME(members) = index.members.get(&symbol.raw) else {
+    return candidates;
+  };
+
+  if (symbol.category == SymbolCategory::ENUM) {
+    addVariants(&mut candidates, members, prefix);
+  }
+
+  if (symbol.category == SymbolCategory::RECORD || symbol.category == SymbolCategory::ENUM) {
+    addMethods(&mut candidates, &members.staticMethods, prefix, module);
+    addStaticFields(&mut candidates, members, prefix, module);
+  }
+
+  return candidates;
+}
+
+/// The fields a record literal has not set yet (completion.rs:688), of the
+/// first visible record named `recordName`.
+function recordInitCandidates(
+  recordName: &String,
+  assigned: &Vector<String>,
+  prefix: &String,
+  index: &CompletionIndex,
+  module: u64,
+): Vector<CompletionCandidate> {
+  let mut candidates: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+  let mut found: Option<u64> = Option::NONE;
+  let mut position: u64 = 0;
+
+  while (position < index.symbols.length()) {
+    if (let Option::SOME(symbol) = index.symbols.get(position)) {
+      if (symbol.category == SymbolCategory::RECORD && symbol.name.equals(recordName) && isVisible(symbol.module, symbol.isPublic, module)) {
+        found = lowerRaw(index, found, position);
+      }
+    }
+
+    position += 1;
+  }
+
+  let Option::SOME(recordPosition) = found else {
+    return candidates;
+  };
+  let raw: u32 = rawAt(index, recordPosition);
+  let Option::SOME(members) = index.members.get(&raw) else {
+    return candidates;
+  };
+
+  position = 0;
+
+  while (position < members.fields.length()) {
+    if (let Option::SOME(field) = members.fields.get(position)) {
+      let fresh: boolean = !containsText(assigned, &field.name);
+
+      if (fresh && matchesPrefix(&field.name, prefix) && isVisible(field.module, field.isPublic, module)) {
+        let mut candidate: CompletionCandidate = memberCandidate(field, CompletionItemKind::FIELD, 10);
+        candidate.insertText = Option::SOME(field.name.concat(": $0"));
+        candidate.isSnippet = true;
+        candidates.push(candidate);
+      }
+    }
+
+    position += 1;
+  }
+
+  return candidates;
+}
+
+function containsText(values: &Vector<String>, wanted: &String): boolean {
+  let mut position: u64 = 0;
+
+  while (position < values.length()) {
+    if (let Option::SOME(value) = values.get(position)) {
+      if (value.equals(wanted)) {
+        return true;
+      }
+    }
+
+    position += 1;
+  }
+
+  return false;
+}
+
+/// The module names of the standard library manifest at `stdPath`, or at
+/// `$IGNIS_STD_PATH`, sorted.
+function stdModuleNames(stdPath: &Option<String>): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+  let mut root: Option<String> = cloneText(stdPath);
+
+  if (root.isNone()) {
+    if (let Result::OK(value) = Env::var("IGNIS_STD_PATH")) {
+      root = Option::SOME(value.clone());
+    }
+  }
+
+  let Option::SOME(rootText) = root else {
+    return names;
+  };
+
+  let manifestPath: Path::PathBuf = Path::PathBuf::fromString(&rootText).join("manifest.toml");
+  let Result::OK(manifest) = Manifest::loadFile(&manifestPath) else {
+    return names;
+  };
+
+  let mut position: u64 = 0;
+
+  while (position < manifest.modules.length()) {
+    if (let Option::SOME(module) = manifest.modules.get(position)) {
+      names.push(module.name.clone());
+      let mut slot: u64 = names.length() - 1;
+
+      while (slot > 0) {
+        let previous: String = textAt(&names, slot - 1);
+        let next: String = textAt(&names, slot);
+
+        if (previous.compare(&next) <= 0) {
+          break;
+        }
+
+        let _raised: boolean = names.set(slot - 1, next);
+        let _lowered: boolean = names.set(slot, previous);
+        slot -= 1;
+      }
+    }
+
+    position += 1;
+  }
+
+  return names;
+}
+
+function textAt(values: &Vector<String>, position: u64): String {
+  return match (values.get(position)) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> String::new(),
+  };
+}
+
+/// The candidates inside an import path (completion.rs:1948): `std::`, then
+/// the standard library modules once `std::` is typed.
+function importPathCandidates(
+  prefix: &String,
+  stdPath: &Option<String>
+): Vector<CompletionCandidate> {
+  let mut candidates: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+
+  if (prefix.length() == 0 || String::create("std").startsWith(prefix.toStr())) {
+    let mut root: CompletionCandidate = candidateOf(String::create("std::"), CompletionItemKind::MODULE, Option::SOME(String::create("Standard library")), 10);
+    root.insertText = Option::SOME(String::create("std::"));
+    candidates.push(root);
+  }
+
+  if (!prefix.startsWith("std::")) {
+    return candidates;
+  }
+
+  let wanted: String = prefix.substringBytes(5, prefix.length());
+  let names: Vector<String> = stdModuleNames(stdPath);
+  let mut position: u64 = 0;
+
+  while (position < names.length()) {
+    if (let Option::SOME(name) = names.get(position)) {
+      if (name.startsWith(wanted.toStr())) {
+        let mut candidate: CompletionCandidate = candidateOf(String::create("std::").concat(name.clone()), CompletionItemKind::MODULE, Option::SOME(String::create("Module: ").concat(name.clone())), 10);
+        candidate.insertText = Option::SOME(name.clone());
+        candidates.push(candidate);
+      }
+    }
+
+    position += 1;
+  }
+
+  return candidates;
+}
+
+/// `value` written with at least `width` digits.
+function padded(value: u64, width: u64): String {
+  let mut text: String = `${value}`;
+
+  while (text.length() < width) {
+    text = String::create("0").concat(text);
+  }
+
+  return text;
+}
+
+function sameKey(left: &CompletionCandidate, right: &CompletionCandidate): boolean {
+  if (!left.label.equals(&right.label) || left.kind != right.kind) {
+    return false;
+  }
+
+  if (left.detail.isNone() || right.detail.isNone()) {
+    return left.detail.isNone() && right.detail.isNone();
+  }
+
+  let leftDetail: String = cloneText(&left.detail).unwrapOr(String::new());
+  let rightDetail: String = cloneText(&right.detail).unwrapOr(String::new());
+  return leftDetail.equals(&rightDetail);
+}
+
+/// `candidates` without repeats of a label, kind and detail, where the one
+/// with the lowest priority takes the first one's place (completion.rs:1991).
+function uniqueCandidates(candidates: &Vector<CompletionCandidate>): Vector<CompletionCandidate> {
+  let mut unique: Vector<CompletionCandidate> = Vector::new<CompletionCandidate>();
+  let mut position: u64 = 0;
+
+  while (position < candidates.length()) {
+    let Option::SOME(candidate) = candidates.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let mut existing: Option<u64> = Option::NONE;
+    let mut slot: u64 = 0;
+
+    while (slot < unique.length() && existing.isNone()) {
+      if (let Option::SOME(kept) = unique.get(slot)) {
+        if (sameKey(kept, candidate)) {
+          existing = Option::SOME(slot);
+        }
+      }
+
+      slot += 1;
+    }
+
+    let Option::SOME(found) = existing else {
+      unique.push(copyCandidate(candidate));
+      continue;
+    };
+
+    let lower: boolean = match (unique.get(found)) {
+      Option::SOME(kept) -> candidate.priority < kept.priority,
+      Option::NONE -> false,
+    };
+
+    if (lower) {
+      let _replaced: boolean = unique.set(found, copyCandidate(candidate));
+    }
+  }
+
+  return unique;
+}
+
+/// One `CompletionItem`.
+function itemJson(candidate: &CompletionCandidate, sortText: String): JsonValue {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("label", JsonValue::fromString(candidate.label.clone())));
+  entries.push(JsonObjectEntry::create("kind", JsonValue::unsignedValue(candidate.kind)));
+
+  if (let Option::SOME(detail) = &candidate.detail) {
+    entries.push(JsonObjectEntry::create("detail", JsonValue::fromString(detail.clone())));
+  }
+
+  if (let Option::SOME(documentation) = &candidate.documentation) {
+    let mut markup: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+    markup.push(JsonObjectEntry::create("kind", JsonValue::stringValue("markdown")));
+    markup.push(JsonObjectEntry::create("value", JsonValue::fromString(documentation.clone())));
+    entries.push(JsonObjectEntry::create("documentation", JsonValue::object(markup)));
+  }
+
+  entries.push(JsonObjectEntry::create("sortText", JsonValue::fromString(sortText)));
+
+  if (let Option::SOME(insertText) = &candidate.insertText) {
+    entries.push(JsonObjectEntry::create("insertText", JsonValue::fromString(insertText.clone())));
+  }
+
+  if (candidate.isSnippet) {
+    entries.push(JsonObjectEntry::create("insertTextFormat", JsonValue::unsignedValue(2)));
+  }
+
+  return JsonValue::object(entries);
+}
+
+/// The `CompletionItem`s of `candidates`: without repeats, each sorted by a
+/// `sortText` of its priority and its place, as the host numbers them.
+export function completionItemsJson(candidates: &Vector<CompletionCandidate>): Vector<JsonValue> {
+  let unique: Vector<CompletionCandidate> = uniqueCandidates(candidates);
+  let mut keys: Vector<u64> = Vector::new<u64>();
+  let mut position: u64 = 0;
+
+  while (position < unique.length()) {
+    if (let Option::SOME(candidate) = unique.get(position)) {
+      keys.push(candidate.priority * 1000000 + position);
+    }
+
+    position += 1;
+  }
+
+  let order: Vector<u64> = ascendingOrder(&keys);
+  let mut items: Vector<JsonValue> = Vector::new<JsonValue>();
+  position = 0;
+
+  while (position < order.length()) {
+    let place: u64 = u64At(&order, position);
+
+    if (let Option::SOME(candidate) = unique.get(place)) {
+      let sortText: String = padded(candidate.priority, 2).concat(padded(place, 4));
+      items.push(itemJson(candidate, sortText));
+    }
+
+    position += 1;
+  }
+
+  return items;
+}

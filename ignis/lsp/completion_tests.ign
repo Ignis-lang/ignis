@@ -1,0 +1,277 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import JsonValue from "std::json";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import SourceOverrides from "../build/sources";
+
+import LspAnalysis, analysisKeyOf, analyzeDocuments from "./analysis";
+import
+  CompletionAnalysis,
+  CompletionCandidate,
+  completionCandidates,
+  completionItemsJson,
+from "./completion";
+import CompletionIndex, emptyCompletionIndex from "./completion_index";
+import NavigationIndex from "./navigation";
+import jsonIntegerMember, jsonStringMember from "./protocol";
+
+const COMPLETION_TEST_UTIL: str = "/// Doubles a value.\nexport function double(value: i32): i32 {\n  return value * 2;\n}\n\nexport record Pair {\n  public left: i32;\n  secret: i32;\n\n  public static make(): Pair {\n    return Pair { left: 1, secret: 2 };\n  }\n}\n";
+
+const COMPLETION_TEST_MAIN: str = "import double, Pair from \"./util\";\nimport Io from \"std::io\";\n\nconst SCALE: i32 = 3;\n\nnamespace Shapes {\n  const LIMIT: i32 = 4;\n\n  function area(side: i32): i32 {\n    return side * side;\n  }\n\n  namespace Inner {\n    function deep(): i32 {\n      return 1;\n    }\n  }\n}\n\nrecord Point {\n  public x: i32;\n  public y: i32;\n  hidden: i32;\n\n  public length(&self): i32 {\n    return self.x + self.y;\n  }\n\n  public static origin(): Point {\n    return Point { x: 0, y: 0, hidden: 0 };\n  }\n}\n\nenum Shape {\n  CIRCLE(i32),\n  SQUARE,\n\n  public static unit(): Shape {\n    return Shape::SQUARE;\n  }\n\n  public isRound(&self): boolean {\n    return true;\n  }\n}\n\nfunction main(): i32 {\n  let point: Point = Point::origin();\n  let shape: Shape = Shape::unit();\n  let pair: Pair = Pair::make();\n  let total: i32 = double(point.x) + point.length() + pair.left;\n  Io::println(\"done\");\n\n  if (shape.isRound()) {\n    return total;\n  }\n\n  return total + Shapes::area(Shapes::LIMIT) + SCALE;\n}\n";
+
+/// The analyzed fixture: the source of `main.ign`, its path, the standard
+/// library root and the analysis data.
+record CompletionFixture {
+  public mainText: String;
+  public mainPath: String;
+  public stdPath: Option<String>;
+  public navigation: NavigationIndex;
+}
+
+/// Writes `main.ign` and `util.ign` into a scratch directory and analyzes
+/// them with `main.ign` open.
+function completionFixture(tag: str): CompletionFixture {
+  let directory: String = `/tmp/ignis_lsp_completion_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::fromString(&directory);
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&root)) {
+    Test::fail();
+  }
+
+  let utilText: String = String::create(COMPLETION_TEST_UTIL);
+  let mainText: String = String::create(COMPLETION_TEST_MAIN);
+  let mainPath: Path::PathBuf = root.join("main.ign");
+  let utilPath: Path::PathBuf = root.join("util.ign");
+
+  if (let Result::ERROR(_) = Fs::writeString(&utilPath, &utilText)) {
+    Test::fail();
+  }
+
+  if (let Result::ERROR(_) = Fs::writeString(&mainPath, &mainText)) {
+    Test::fail();
+  }
+
+  let path: Path::PathBuf = match (Fs::canonicalize(&mainPath)) {
+    Result::OK(canonical) -> canonical,
+    Result::ERROR(_) -> mainPath,
+  };
+
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&path, &mainText);
+
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let stdPath: Option<String> = Option::SOME(workingDirectory.join("std").toString());
+  let key: String = analysisKeyOf(&path);
+  let analysis: LspAnalysis = analyzeDocuments(&path, &key, &stdPath, &sources);
+
+  let Option::SOME(navigation) = analysis.navigation else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return CompletionFixture {
+    mainText: mainText,
+    mainPath: path.toString(),
+    stdPath: stdPath,
+    navigation: navigation,
+  };
+}
+
+/// A text the client has and the cursor in it.
+record EditedText {
+  public text: String;
+  public cursor: u64;
+}
+
+/// `text` with `inserted` written right before the first `before`, the
+/// cursor at its end.
+function insertBefore(text: &String, before: str, inserted: str): EditedText {
+  let wanted: String = String::create(before);
+  let position: u64 = text.indexOf(&wanted).unwrapOr(0);
+  let mut edited: String = text.substringBytes(0, position);
+  edited.pushStr(inserted);
+
+  let cursor: u64 = edited.length();
+  let rest: String = text.substringBytes(position, text.length());
+  edited.push(&rest);
+  return EditedText { text: edited, cursor: cursor };
+}
+
+/// The `CompletionItem`s at `cursor` of `text`, the fixture's analysis
+/// standing in for `main.ign`.
+function itemsAt(fixture: &CompletionFixture, text: &String, cursor: u64): Vector<JsonValue> {
+  let Option::SOME(module) = fixture.navigation.moduleOf(&fixture.mainPath) else {
+    Test::fail();
+    @unreachable();
+  };
+  let Option::SOME(file) = fixture.navigation.fileOf(&fixture.mainPath) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let analysis: Option<CompletionAnalysis> = Option::SOME(CompletionAnalysis { module: module, edit: file.editTo(text) });
+  let candidates: Vector<CompletionCandidate> = completionCandidates(text, cursor, &fixture.navigation.completion, &analysis, &fixture.stdPath);
+  return completionItemsJson(&candidates);
+}
+
+/// The labels of `items`, in order, joined by spaces.
+function labelsOf(items: &Vector<JsonValue>): String {
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    if (let Option::SOME(item) = items.get(index)) {
+      if (index > 0) {
+        rendered.pushStr(" ");
+      }
+
+      let label: String = jsonStringMember(item, "label").unwrapOr(String::new());
+      rendered.push(&label);
+    }
+
+    index += 1;
+  }
+
+  return rendered;
+}
+
+/// `field` of the first item labeled `label`, `-` when it has none.
+function fieldOf(items: &Vector<JsonValue>, label: str, field: str): String {
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    if (let Option::SOME(item) = items.get(index)) {
+      let itemLabel: String = jsonStringMember(item, "label").unwrapOr(String::new());
+
+      if (itemLabel.equals(label)) {
+        if (let Option::SOME(number) = jsonIntegerMember(item, field)) {
+          return `${number}`;
+        }
+
+        return jsonStringMember(item, field).unwrapOr(String::create("-"));
+      }
+    }
+
+    index += 1;
+  }
+
+  return String::create("<missing>");
+}
+
+/// The labels completed right after `inserted`, written before `before`.
+function labelsAfter(fixture: &CompletionFixture, before: str, inserted: str): String {
+  let edited: EditedText = insertBefore(&fixture.mainText, before, inserted);
+  let items: Vector<JsonValue> = itemsAt(fixture, &edited.text, edited.cursor);
+  return labelsOf(&items);
+}
+
+/// A member access lists the fields, then the methods, of the receiver's
+/// record or enum; another module's private fields stay out.
+@test
+function completionListsMembersAfterADot(): void {
+  let fixture: CompletionFixture = completionFixture("members");
+
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "point.").toStr(), "x y hidden length");
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "point.l").toStr(), "length");
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "pair.").toStr(), "left");
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "shape.").toStr(), "isRound");
+
+  let selfDot: String = String::create("self.x");
+  let cursor: u64 = fixture.mainText.indexOf(&selfDot).unwrapOr(0) + 5;
+  let items: Vector<JsonValue> = itemsAt(&fixture, &fixture.mainText, cursor);
+  Test::assertEq<str>(labelsOf(&items).toStr(), "x y hidden length");
+  Test::assertEq<str>(fieldOf(&items, "x", "detail").toStr(), "i32");
+  Test::assertEq<str>(fieldOf(&items, "length", "detail").toStr(), "fn(&self, self: &Point) -> i32");
+  Test::assertEq<str>(fieldOf(&items, "length", "insertText").toStr(), "length($0)");
+  Test::assertEq<str>(fieldOf(&items, "length", "kind").toStr(), "2");
+}
+
+/// A path lists static members, variants and namespace members.
+@test
+function completionListsPathMembers(): void {
+  let fixture: CompletionFixture = completionFixture("paths");
+
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "Point::").toStr(), "origin");
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "Pair::").toStr(), "make");
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "Shapes::").toStr(), "Inner LIMIT area Inner");
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "Shapes::Inner::").toStr(), "deep");
+
+  let edited: EditedText = insertBefore(&fixture.mainText, "  return total +", "Shape::");
+  let items: Vector<JsonValue> = itemsAt(&fixture, &edited.text, edited.cursor);
+  Test::assertEq<str>(labelsOf(&items).toStr(), "CIRCLE SQUARE unit");
+  Test::assertEq<str>(fieldOf(&items, "CIRCLE", "insertText").toStr(), "CIRCLE($0)");
+  Test::assertEq<str>(fieldOf(&items, "CIRCLE", "detail").toStr(), "(i32)");
+  Test::assertEq<str>(fieldOf(&items, "SQUARE", "insertText").toStr(), "-");
+
+  let io: String = labelsAfter(&fixture, "  return total +", "Io::printl");
+  Test::assert(io.startsWith("println"));
+}
+
+/// An identifier lists the document's declarations, imports and scanned
+/// locals, a function as a call snippet.
+@test
+function completionListsIdentifiers(): void {
+  let fixture: CompletionFixture = completionFixture("identifiers");
+
+  let edited: EditedText = insertBefore(&fixture.mainText, "  return total +", "dou");
+  let items: Vector<JsonValue> = itemsAt(&fixture, &edited.text, edited.cursor);
+  Test::assertEq<str>(labelsOf(&items).toStr(), "double");
+  Test::assertEq<str>(fieldOf(&items, "double", "insertText").toStr(), "double(${1:value})");
+  Test::assertEq<str>(fieldOf(&items, "double", "detail").toStr(), "function(value: i32): i32");
+  Test::assertEq<str>(fieldOf(&items, "double", "sortText").toStr(), "300000");
+
+  Test::assert(labelsAfter(&fixture, "  return total +", "po").startsWith("point Point"));
+  Test::assert(labelsAfter(&fixture, "  return total +", "Sha").startsWith("shape Shape Shapes"));
+  Test::assertEq<str>(labelsAfter(&fixture, "  return total +", "value |> dou").toStr(), "double");
+
+  let called: EditedText = insertBefore(&fixture.mainText, "(point.x)", "");
+  let beforeParen: EditedText = EditedText { text: called.text.clone(), cursor: called.cursor };
+  let parenItems: Vector<JsonValue> = itemsAt(&fixture, &beforeParen.text, beforeParen.cursor);
+  Test::assertEq<str>(fieldOf(&parenItems, "double", "insertText").toStr(), "double");
+}
+
+/// A record literal lists the fields not set yet.
+@test
+function completionListsUnsetFieldsOfARecordLiteral(): void {
+  let fixture: CompletionFixture = completionFixture("record");
+  let edited: EditedText = insertBefore(&fixture.mainText, "  return total +", "let other: Point = Point { x: 1, ");
+  let items: Vector<JsonValue> = itemsAt(&fixture, &edited.text, edited.cursor);
+
+  Test::assertEq<str>(labelsOf(&items).toStr(), "y hidden");
+  Test::assertEq<str>(fieldOf(&items, "y", "insertText").toStr(), "y: $0");
+}
+
+/// `@` items, import paths and keywords need no analysis.
+@test
+function completionListsAtItemsImportPathsAndKeywords(): void {
+  let fixture: CompletionFixture = completionFixture("text");
+
+  let at: EditedText = insertBefore(&fixture.mainText, "  return total +", "@si");
+  let atItems: Vector<JsonValue> = itemsAt(&fixture, &at.text, at.cursor);
+  Test::assertEq<str>(labelsOf(&atItems).toStr(), "sizeOf");
+  Test::assertEq<str>(fieldOf(&atItems, "sizeOf", "insertText").toStr(), "sizeOf<${1:T}>()");
+  Test::assertEq<str>(fieldOf(&atItems, "sizeOf", "detail").toStr(), "(builtin) Returns the size in bytes of type `T` as `u64`.");
+
+  Test::assertEq<str>(labelsAfter(&fixture, "const SCALE", "import Vector from \"std::vec").toStr(), "std::vector");
+  Test::assertEq<str>(labelsAfter(&fixture, "const SCALE", "import Vector from \"").toStr(), "std::");
+
+  let global: String = labelsAfter(&fixture, "const SCALE", "");
+  let keywords: String = String::create("function record enum namespace");
+  Test::assert(global.contains(&keywords));
+
+  let empty: CompletionIndex = emptyCompletionIndex();
+  let unanalyzed: Option<CompletionAnalysis> = Option::NONE;
+  let text: String = String::create("function main(): void {\n  let count: i32 = 1;\n  co\n}\n");
+  let candidates: Vector<CompletionCandidate> = completionCandidates(&text, 50, &empty, &unanalyzed, &fixture.stdPath);
+  let items: Vector<JsonValue> = completionItemsJson(&candidates);
+  Test::assertEq<str>(labelsOf(&items).toStr(), "count compileError");
+}

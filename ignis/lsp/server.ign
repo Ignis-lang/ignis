@@ -1,6 +1,6 @@
 //! `ignis lsp`: a sequential Language Server Protocol server over stdio that
 //! publishes diagnostics and answers hovers, go-to-definition,
-//! find-references and document symbols.
+//! find-references, document symbols and completion.
 //!
 //! Messages are handled one at a time, in arrival order. Document changes
 //! only mark their analysis dirty. The analysis runs once no bytes of a
@@ -26,6 +26,13 @@ import
   analysisKeyOf,
   analyzeDocuments,
 from "./analysis";
+import
+  CompletionAnalysis,
+  CompletionCandidate,
+  completionCandidates,
+  completionItemsJson,
+from "./completion";
+import CompletionIndex, emptyCompletionIndex from "./completion_index";
 import Document, DocumentHandle, DocumentStore, isIgnisSourcePath from "./documents";
 import
   ByteRange,
@@ -543,6 +550,13 @@ export record LspServer {
 
     if (request.method.equals("textDocument/documentSymbol")) {
       let result: JsonValue = self.documentSymbols(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("textDocument/completion")) {
+      let result: JsonValue = self.completion(&request.message);
       let body: String = responseBody(request.id, result);
       self.send(&body);
       return LspStep::CONTINUE;
@@ -1135,6 +1149,48 @@ export record LspServer {
     };
 
     return self.declarationLocation(navigation, declaration, true);
+  }
+
+  /// Answers `textDocument/completion` with the candidates at the position,
+  /// as the host does (crates/ignis_lsp/src/server.rs:2863): the context is
+  /// read from the document as it is now, the declarations from the last
+  /// analysis that reached the analyzer. `null` when the document is not
+  /// open, or when that analysis does not hold it.
+  completion(&mut self, message: &JsonValue): JsonValue {
+    if (self.dirty.length() > 0) {
+      self.analyzeDirty();
+    }
+
+    let Option::SOME(request) = positionRequestOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(document) = self.documents.find(&request.uri) else {
+      return JsonValue::nullValue();
+    };
+
+    let lineIndex: Text::LineIndex = Text::LineIndex::create(document.text.clone());
+    let offset: u64 = lineIndex.offset(request.position);
+    let cursor: u64 = offset < document.text.length() ? offset : document.text.length();
+
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      let empty: CompletionIndex = emptyCompletionIndex();
+      let unanalyzed: Option<CompletionAnalysis> = Option::NONE;
+      let candidates: Vector<CompletionCandidate> = completionCandidates(&document.text, cursor, &empty, &unanalyzed, &self.stdPath);
+      return JsonValue::array(completionItemsJson(&candidates));
+    };
+
+    let path: String = document.path.toString();
+
+    let Option::SOME(module) = navigation.moduleOf(&path) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return JsonValue::nullValue();
+    };
+
+    let analysis: Option<CompletionAnalysis> = Option::SOME(CompletionAnalysis { module: module, edit: file.editTo(&document.text) });
+    let candidates: Vector<CompletionCandidate> = completionCandidates(&document.text, cursor, &navigation.completion, &analysis, &self.stdPath);
+    return JsonValue::array(completionItemsJson(&candidates));
   }
 
   /// Answers `textDocument/documentSymbol` with the outline of the document:
