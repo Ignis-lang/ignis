@@ -265,3 +265,48 @@ function parserDropsDocsThatDoNotPrecedeTheirItem(): void {
   Test::assertEq<str>(docOfItem(&module, "after").toStr(), "<none>");
   Test::assertEq<str>(docOfItem(&module, "lastRun").toStr(), "Last run wins.");
 }
+
+/// The host parser only rewrites its pending doc at a comment run or a
+/// declaration that takes it (`skip_comments` and `take_pending_doc` in
+/// crates/ignis_parser/src/parser/mod.rs). A `let` takes it, so the next item
+/// has none. An expression statement or the end of a block does not, so the
+/// host's `ignis doc` gives the doc to the next item, and so does this parser.
+@test
+function parserCarriesAnUnclaimedDocToTheNextItemLikeTheHost(): void {
+  let module: Ast::Module = docParse(
+    "function withLet(): void {\n  /// Local let doc.\n  let value: i32 = 1;\n}\nfunction afterLet(): void {}\nfunction withExpr(): void {\n  /// Expression doc.\n  afterLet();\n}\nfunction afterExpr(): void {}\nfunction withOrphan(): void {\n  afterLet();\n  /// Orphan doc.\n}\nfunction afterOrphan(): void {}\nfunction withBlock(): void {\n  if (true) {\n    /// Orphan in a nested block.\n  }\n}\nfunction afterBlock(): void {}\n"
+  );
+
+  Test::assertEq<str>(docOfItem(&module, "withLet").toStr(), "<none>");
+  Test::assertEq<str>(docOfItem(&module, "afterLet").toStr(), "<none>");
+  Test::assertEq<str>(docOfItem(&module, "withExpr").toStr(), "<none>");
+  Test::assertEq<str>(docOfItem(&module, "afterExpr").toStr(), "Expression doc.");
+  Test::assertEq<str>(docOfItem(&module, "afterOrphan").toStr(), "Orphan doc.");
+  Test::assertEq<str>(docOfItem(&module, "afterBlock").toStr(), "Orphan in a nested block.");
+}
+
+/// The module takes the `//!` block that precedes its first item, and a
+/// namespace takes the pending `//!` text after its opening brace
+/// (declarations.rs:36-43 and :1143-1145). The pending text is only
+/// rewritten by a comment run, so a `//!` that no namespace follows directly
+/// is still taken by the next namespace whose brace has no comments after it.
+@test
+function parserPlacesInnerDocsLikeTheHost(): void {
+  let topLevel: Ast::Module = docParse("/// Outer first.\n//! Top inner.\nfunction top(): void {}\n");
+  Test::assertEq<str>(moduleDocOf(&topLevel).toStr(), "Top inner.");
+  Test::assertEq<str>(docOfItem(&topLevel, "top").toStr(), "Outer first.");
+
+  let late: Ast::Module = docParse("function early(): void {}\n//! Late inner doc.\nfunction late(): void {}\n");
+  Test::assertEq<str>(moduleDocOf(&late).toStr(), "<none>");
+  Test::assertEq<str>(docOfItem(&late, "late").toStr(), "<none>");
+
+  let namespaces: Ast::Module = docParse(
+    "//! Module doc.\nnamespace First {\n  function a(): void {}\n}\nfunction body(): void {\n  //! Inner in a body.\n}\nnamespace Later {\n  function b(): void {}\n}\n//! Stray before a namespace.\nnamespace Direct {\n  function c(): void {}\n}\nnamespace Own {\n  //! Own inner.\n  function d(): void {}\n}\n"
+  );
+
+  Test::assertEq<str>(moduleDocOf(&namespaces).toStr(), "Module doc.");
+  Test::assertEq<str>(docOrNone(namespaces.namespaceInnerDoc(docItemNamed(&namespaces, "First"))).toStr(), "<none>");
+  Test::assertEq<str>(docOrNone(namespaces.namespaceInnerDoc(docItemNamed(&namespaces, "Later"))).toStr(), "Inner in a body.");
+  Test::assertEq<str>(docOrNone(namespaces.namespaceInnerDoc(docItemNamed(&namespaces, "Direct"))).toStr(), "Stray before a namespace.");
+  Test::assertEq<str>(docOrNone(namespaces.namespaceInnerDoc(docItemNamed(&namespaces, "Own"))).toStr(), "Own inner.");
+}
