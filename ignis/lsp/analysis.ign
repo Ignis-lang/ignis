@@ -24,6 +24,8 @@ import analyzerModuleKind, mapImportSourcesToDiscoveryTargets from "../build/imp
 import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
+import FileHoverIndex, HoverProgram, buildFileHoverIndex, hoverProgramOf from "./hover_index";
+
 /// One diagnostic in LSP terms: a UTF-16 range, an LSP severity
 /// (1 error, 2 warning, 3 information, 4 hint), the code and the message.
 export record LspDiagnostic {
@@ -38,6 +40,16 @@ export record LspDiagnostic {
 export record FileDiagnostics {
   public path: String;
   public diagnostics: Vector<LspDiagnostic>;
+}
+
+/// What one analysis produced: the diagnostics to publish and the hover
+/// index of every open document the analyzer ran over.
+export record LspAnalysis {
+  public diagnostics: Vector<FileDiagnostics>;
+  /// Empty when the analyzer did not run, because discovery or parsing
+  /// failed: the server then keeps answering hovers from the last analysis
+  /// that did.
+  public hovers: Vector<FileHoverIndex>;
 }
 
 /// The code of the diagnostic that reports an analysis stopped between
@@ -299,8 +311,14 @@ function parseDiscoveredModules(
   return Result::OK(program);
 }
 
-/// Runs the analyzer over parsed modules and collects its diagnostics.
-function analyzeParsedModules(discovery: &DiscoveryResult, program: &mut ParsedProgram): void {
+/// Runs the analyzer over parsed modules, collects its diagnostics, and
+/// builds the hover index of every module `sources` holds an open buffer
+/// for.
+function analyzeParsedModules(
+  discovery: &DiscoveryResult,
+  program: &mut ParsedProgram,
+  sources: &SourceOverrides,
+): Vector<FileHoverIndex> {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -333,6 +351,72 @@ function analyzeParsedModules(discovery: &DiscoveryResult, program: &mut ParsedP
 
     recordIndex += 1;
   }
+
+  return buildHoverIndexes(&program.files, &program.modules, &records, sources, &defStore, &typeStore, &symbols);
+}
+
+/// The hover index of every analyzed module that is an open document.
+function buildHoverIndexes(
+  files: &Vector<SourceFile>,
+  modules: &Vector<Ast::Module>,
+  records: &Vector<Analyzer::ModuleAnalysisRecord>,
+  sources: &SourceOverrides,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): Vector<FileHoverIndex> {
+  let mut openPaths: Vector<String> = Vector::new<String>();
+  let mut sourceIndex: u64 = 0;
+
+  while (sourceIndex < sources.length()) {
+    if (let Option::SOME(path) = sources.pathAt(sourceIndex)) {
+      openPaths.push(path.toString());
+    }
+
+    sourceIndex += 1;
+  }
+
+  let hoverProgram: HoverProgram = hoverProgramOf(modules, records);
+  let mut indexes: Vector<FileHoverIndex> = Vector::new<FileHoverIndex>();
+  let mut moduleIndex: u64 = 0;
+
+  while (moduleIndex < records.length()) {
+    let Option::SOME(file) = files.get(moduleIndex) else {
+      break;
+    };
+    let Option::SOME(module) = modules.get(moduleIndex) else {
+      break;
+    };
+    let Option::SOME(analysisRecord) = records.get(moduleIndex) else {
+      break;
+    };
+
+    let filePath: String = file.path.toString();
+
+    if (containsPath(&openPaths, &filePath)) {
+      indexes.push(buildFileHoverIndex(&file.text, module, analysisRecord, &hoverProgram, defs, types, symbols));
+    }
+
+    moduleIndex += 1;
+  }
+
+  return indexes;
+}
+
+function containsPath(paths: &Vector<String>, wanted: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < paths.length()) {
+    if (let Option::SOME(path) = paths.get(index)) {
+      if (path.equals(wanted)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
 }
 
 /// True when `candidate` holds exactly the diagnostics of `failure`, in the
@@ -487,6 +571,17 @@ export function analyzeForDiagnostics(
   stdPath: &Option<String>,
   sources: &SourceOverrides,
 ): Vector<FileDiagnostics> {
+  return analyzeDocuments(startPath, key, stdPath, sources).diagnostics;
+}
+
+/// Analyzes like `analyzeForDiagnostics` and also returns the hover index of
+/// every open document the analyzer ran over.
+export function analyzeDocuments(
+  startPath: &Path::PathBuf,
+  key: &String,
+  stdPath: &Option<String>,
+  sources: &SourceOverrides,
+): LspAnalysis {
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.sources = sources.clone();
 
@@ -497,11 +592,14 @@ export function analyzeForDiagnostics(
   let discovery: DiscoveryResult = match (Resolver::discover(startPath, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(failure) -> {
-      return discoveryFailureDiagnostics(&failure, startPath, key, sources);
+      return LspAnalysis {
+        diagnostics: discoveryFailureDiagnostics(&failure, startPath, key, sources),
+        hovers: Vector::new<FileHoverIndex>(),
+      };
     },
   };
 
-  return analyzeDiscovered(&discovery, startPath, sources);
+  return analyzeDiscoveredDocuments(&discovery, startPath, sources);
 }
 
 /// Parses and analyzes the modules `discovery` found, reading `sources`
@@ -513,16 +611,31 @@ export function analyzeDiscovered(
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
 ): Vector<FileDiagnostics> {
+  return analyzeDiscoveredDocuments(discovery, startPath, sources).diagnostics;
+}
+function analyzeDiscoveredDocuments(
+  discovery: &DiscoveryResult,
+  startPath: &Path::PathBuf,
+  sources: &SourceOverrides,
+): LspAnalysis {
   let mut program: ParsedProgram = match (parseDiscoveredModules(discovery, sources)) {
     Result::OK(value) -> value,
     Result::ERROR(message) -> {
-      return analysisStoppedDiagnostics(startPath, &message);
+      return LspAnalysis {
+        diagnostics: analysisStoppedDiagnostics(startPath, &message),
+        hovers: Vector::new<FileHoverIndex>(),
+      };
     },
   };
 
+  let mut hovers: Vector<FileHoverIndex> = Vector::new<FileHoverIndex>();
+
   if (program.frontendErrors == 0) {
-    analyzeParsedModules(discovery, &mut program);
+    hovers = analyzeParsedModules(discovery, &mut program, sources);
   }
 
-  return convertPending(&program.pending, &program.files);
+  return LspAnalysis {
+    diagnostics: convertPending(&program.pending, &program.files),
+    hovers: hovers,
+  };
 }

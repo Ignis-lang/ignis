@@ -1,0 +1,457 @@
+//! Hover text in the host server's format (`format_definition_hover`,
+//! crates/ignis_lsp/src/server.rs:3700): an optional location line, the
+//! signature in an `ignis` code block, the documentation after a rule, and
+//! the file the declaration lives in.
+//!
+//! Signatures and types are rendered by the `ignis doc` helpers, so hover
+//! and the documentation package spell a declaration the same way.
+
+import String from "std::string";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+
+import Doc from "../doc/mod";
+
+/// `text` in an `ignis` code block.
+function codeBlock(text: &String): String {
+  let mut block: String = String::create("```ignis\n");
+  block.push(text);
+  block.pushStr("\n```");
+  return block;
+}
+
+/// The hover for an expression that names no declaration: its type alone,
+/// as the host shows it (server.rs:2570).
+export function typeHoverText(
+  typeId: Analyzer::TypeId,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): String {
+  let rendered: String = Doc::renderType(typeId, defs, types, symbols);
+  return codeBlock(&rendered);
+}
+
+/// The last `/`-separated segment of `path`.
+function fileNameOf(path: &String): String {
+  let Option::SOME(separator) = path.findLastByte((byte: u8): boolean -> {
+    return byte == '/' as u8;
+  }) else {
+    return path.clone();
+  };
+
+  return path.substringBytes(separator + 1, path.length());
+}
+
+/// Where a declaration without a namespace sits, from its file
+/// (server.rs:3729): the path under `/std/` without `.ign` and with `::`
+/// between directories for the standard library, the file stem otherwise.
+function fileLocationOf(path: &String): String {
+  let marker: String = String::create("/std/");
+
+  if (let Option::SOME(stdStart) = path.indexOf(&marker)) {
+    let mut relative: String = path.substringBytes(stdStart + 5, path.length());
+
+    if (relative.endsWith(".ign")) {
+      relative = relative.substringBytes(0, relative.length() - 4);
+    }
+
+    let mut location: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < relative.length()) {
+      if (let Option::SOME(byte) = relative.byteAt(index)) {
+        if (byte == '/' as u8) {
+          location.pushStr("::");
+        } else {
+          location.pushByte(byte);
+        }
+      }
+
+      index += 1;
+    }
+
+    return location;
+  }
+
+  let name: String = fileNameOf(path);
+
+  if (let Option::SOME(dot) = name.findLastByte((byte: u8): boolean -> {
+    return byte == '.' as u8;
+  })) {
+    if (dot > 0) {
+      return name.substringBytes(0, dot);
+    }
+  }
+
+  return name;
+}
+
+/// The text before the last `::` of `path`, or `NONE` when it has none.
+function namespaceOfPath(path: &String): Option<String> {
+  let mut index: u64 = path.length();
+
+  while (index > 1) {
+    index -= 1;
+
+    let Option::SOME(second) = path.byteAt(index) else {
+      break;
+    };
+    let Option::SOME(first) = path.byteAt(index - 1) else {
+      break;
+    };
+
+    if (first == ':' as u8 && second == ':' as u8) {
+      return Option::SOME(path.substringBytes(0, index - 1));
+    }
+  }
+
+  return Option::NONE;
+}
+
+/// The record, enum or trait a member belongs to, or the declaration itself.
+function declaringDefinition(
+  defId: Analyzer::DefinitionId,
+  defs: &Analyzer::DefinitionStore
+): Analyzer::DefinitionId {
+  return match (defs.get(defId)) {
+    Option::SOME(Analyzer::Definition::Method(method)) -> method.owner,
+    Option::SOME(Analyzer::Definition::Field(field)) -> field.owner,
+    Option::SOME(Analyzer::Definition::Variant(variant)) -> variant.owner,
+    Option::SOME(Analyzer::Definition::TypeParam(param)) -> param.owner,
+    _ -> defId,
+  };
+}
+
+/// The path of the module that declares `defId`, when the analysis knows it.
+function definitionFile(
+  defId: Analyzer::DefinitionId,
+  defs: &Analyzer::DefinitionStore,
+  modulePaths: &Vector<String>
+): Option<String> {
+  let mut current: Analyzer::DefinitionId = defId;
+  let mut depth: u64 = 0;
+
+  while (depth < 4) {
+    if (let Option::SOME(moduleIndex) = defs.defModuleOf(current)) {
+      return match (modulePaths.get(moduleIndex)) {
+        Option::SOME(path) -> Option::SOME(path.clone()),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    let owner: Analyzer::DefinitionId = declaringDefinition(current, defs);
+
+    if (owner.raw() == current.raw()) {
+      return Option::NONE;
+    }
+
+    current = owner;
+    depth += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// The location line: the namespace path the declaration (or its owner) is
+/// published under, else the one its file gives.
+function definitionLocation(
+  defId: Analyzer::DefinitionId,
+  defs: &Analyzer::DefinitionStore,
+  file: &Option<String>
+): Option<String> {
+  let declaring: Analyzer::DefinitionId = declaringDefinition(defId, defs);
+
+  if (let Option::SOME(qualified) = defs.qualifiedNameOf(declaring)) {
+    if (let Option::SOME(namespacePath) = namespaceOfPath(qualified)) {
+      return Option::SOME(namespacePath);
+    }
+  }
+
+  if (let Option::SOME(path) = file) {
+    return Option::SOME(fileLocationOf(&path));
+  }
+
+  return Option::NONE;
+}
+
+/// Joins the parts the host joins (server.rs:3873): location, signature,
+/// documentation and file.
+function assembleHover(
+  location: Option<String>,
+  signature: &String,
+  doc: Option<&String>,
+  file: &Option<String>
+): String {
+  let mut text: String = String::new();
+
+  if (let Option::SOME(line) = location) {
+    if (line.length() > 0) {
+      text.push(&line);
+      text.pushStr("\n\n");
+    }
+  }
+
+  text.push(signature);
+
+  if (let Option::SOME(docText) = doc) {
+    let trimmed: String = docText.trimAsciiWhitespace();
+
+    if (trimmed.length() > 0) {
+      text.pushStr("\n\n---\n\n");
+      text.push(&trimmed);
+    }
+  }
+
+  if (let Option::SOME(path) = file) {
+    let name: String = fileNameOf(&path);
+    text.pushStr("\n\n*Defined in `");
+    text.push(&name);
+    text.pushStr("`*");
+  }
+
+  return text;
+}
+
+/// The hover of a local binding or parameter declared in `filePath`
+/// (server.rs:3753 and 3764). `typeText` is empty when the type is unknown.
+export function localHoverText(
+  name: &String,
+  typeText: &String,
+  mutable: boolean,
+  isParameter: boolean,
+  filePath: &String,
+): String {
+  let mut signature: String = String::new();
+
+  if (isParameter) {
+    let prefix: str = mutable ? "mut " : "";
+    let declared: String = `${prefix}${name.toStr()}: ${typeText.toStr()}`;
+    signature = codeBlock(&declared);
+    signature.pushStr("\n\n(parameter)");
+  } else {
+    let keyword: str = mutable ? "let mut" : "let";
+    let declared: String = `${keyword} ${name.toStr()}: ${typeText.toStr()}`;
+    signature = codeBlock(&declared);
+  }
+
+  let file: Option<String> = Option::SOME(filePath.clone());
+  return assembleHover(Option::SOME(fileLocationOf(filePath)), &signature, Option::NONE, &file);
+}
+
+/// The hover of the declaration `defId`, or an empty string when the store
+/// has no such definition. `isNamespace` marks the placeholder record a
+/// namespace or extern block is bound to.
+export function definitionHoverText(
+  defId: Analyzer::DefinitionId,
+  isNamespace: boolean,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+  modulePaths: &Vector<String>,
+): String {
+  let Option::SOME(definition) = defs.get(defId) else {
+    return String::new();
+  };
+
+  let name: String = Doc::symbolText(symbols, definition.name());
+  let mut signature: String = String::new();
+
+  if (isNamespace) {
+    let declared: String = `namespace ${name.toStr()}`;
+    signature = codeBlock(&declared);
+  } else {
+    signature = definitionSignature(defId, definition, &name, defs, types, symbols);
+  }
+
+  let file: Option<String> = definitionFile(defId, defs, modulePaths);
+  let location: Option<String> = definitionLocation(defId, defs, &file);
+  return assembleHover(location, &signature, defs.docOf(defId), &file);
+}
+
+/// The signature block of one declaration (server.rs:3746).
+function definitionSignature(
+  defId: Analyzer::DefinitionId,
+  definition: &Analyzer::Definition,
+  name: &String,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): String {
+  match (definition) {
+    Analyzer::Definition::Function(functionDef) -> {
+      let mut declared: String = Doc::functionSignature(name, &functionDef.typeParams, &functionDef.params, functionDef.returnType, defs, types, symbols);
+
+      if (functionDef.isExtern) {
+        declared = String::create("extern ").concat(declared);
+      }
+
+      return codeBlock(&declared);
+    },
+    Analyzer::Definition::Method(method) -> {
+      return methodSignature(name, &method, defs, types, symbols);
+    },
+    Analyzer::Definition::Record(recordDef) -> {
+      let generics: String = Doc::typeParamsText(&recordDef.typeParams, defs, symbols);
+      let members: String = memberLines(&recordDef.fields, defs, types, symbols);
+      let declared: String = `record ${name.toStr()}${generics.toStr()} {${members.toStr()}}`;
+      return codeBlock(&declared);
+    },
+    Analyzer::Definition::Enum(enumDef) -> {
+      let generics: String = Doc::typeParamsText(&enumDef.typeParams, defs, symbols);
+      let members: String = memberLines(&enumDef.variants, defs, types, symbols);
+      let declared: String = `enum ${name.toStr()}${generics.toStr()} {${members.toStr()}}`;
+      return codeBlock(&declared);
+    },
+    Analyzer::Definition::Variable(variable) -> {
+      let typeText: String = Doc::renderType(variable.declaredType, defs, types, symbols);
+      let declared: String = `const ${name.toStr()}: ${typeText.toStr()}`;
+      return codeBlock(&declared);
+    },
+    Analyzer::Definition::Field(field) -> {
+      let typeText: String = Doc::renderType(field.fieldType, defs, types, symbols);
+      let owner: String = Doc::definitionName(field.owner, defs, symbols);
+      let declared: String = `${name.toStr()}: ${typeText.toStr()}`;
+      let mut block: String = codeBlock(&declared);
+      block.pushStr("\n\n(field of `");
+      block.push(&owner);
+      block.pushStr("`)");
+      return block;
+    },
+    Analyzer::Definition::Variant(variant) -> {
+      let owner: String = Doc::definitionName(variant.owner, defs, symbols);
+      let mut declared: String = `${owner.toStr()}::${name.toStr()}`;
+
+      if (variant.payload.length() > 0) {
+        let payload: String = Doc::joinTypes(&variant.payload, defs, types, symbols);
+        declared.pushStr("(");
+        declared.push(&payload);
+        declared.pushStr(")");
+      }
+
+      return codeBlock(&declared).concat("\n\n(enum variant)");
+    },
+    Analyzer::Definition::TypeParam(_) -> {
+      return codeBlock(name).concat("\n\n(type parameter)");
+    },
+    Analyzer::Definition::TypeAlias(alias) -> {
+      let generics: String = Doc::typeParamsText(&alias.typeParams, defs, symbols);
+      let target: String = Doc::renderType(alias.aliasedType, defs, types, symbols);
+      let declared: String = `type ${name.toStr()}${generics.toStr()} = ${target.toStr()}`;
+      return codeBlock(&declared);
+    },
+    Analyzer::Definition::Trait(traitDef) -> {
+      let generics: String = Doc::typeParamsText(&traitDef.typeParams, defs, symbols);
+      let declared: String = `trait ${name.toStr()}${generics.toStr()}`;
+      let count: u64 = traitDef.methods.length();
+      return codeBlock(&declared).concat(`\n\n(${count} methods)`);
+    },
+  };
+
+  return String::new();
+}
+
+/// `Owner::name(params): R` and whether it is static (server.rs:3948). An
+/// instance method's receiver is its first parameter, written as the
+/// receiver it declares.
+function methodSignature(
+  name: &String,
+  method: &Analyzer::MethodDef,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): String {
+  let owner: String = Doc::definitionName(method.owner, defs, symbols);
+  let generics: String = Doc::typeParamsText(&method.typeParams, defs, symbols);
+  let returnType: String = Doc::renderType(method.returnType, defs, types, symbols);
+
+  if (method.isStatic) {
+    let params: String = Doc::paramsText(&method.params, 0, defs, types, symbols);
+    let declared: String = `${owner.toStr()}::${name.toStr()}${generics.toStr()}(${params.toStr()}): ${returnType.toStr()}`;
+    return codeBlock(&declared).concat("\n\n(static method)");
+  }
+
+  let mut receiver: str = "&self";
+
+  if (method.selfByValue) {
+    receiver = "self";
+  } else if (method.selfMutable) {
+    receiver = "&mut self";
+  }
+
+  let rest: String = Doc::paramsText(&method.params, 1, defs, types, symbols);
+  let mut params: String = String::create(receiver);
+
+  if (rest.length() > 0) {
+    params.pushStr(", ");
+    params.push(&rest);
+  }
+
+  let declared: String = `${owner.toStr()}::${name.toStr()}${generics.toStr()}(${params.toStr()}): ${returnType.toStr()}`;
+  return codeBlock(&declared).concat("\n\n(instance method)");
+}
+
+/// The body lines of a record or enum: `\n  member,\n  member\n`, or
+/// nothing for an empty one (server.rs:3781 and 3808).
+function memberLines(
+  memberIds: &Vector<Analyzer::DefinitionId>,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): String {
+  let mut lines: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < memberIds.length()) {
+    if (let Option::SOME(memberId) = memberIds.get(index)) {
+      if (lines.length() > 0) {
+        lines.pushStr(",");
+      }
+
+      lines.pushStr("\n  ");
+      let member: String = memberLine(*memberId, defs, types, symbols);
+      lines.push(&member);
+    }
+
+    index += 1;
+  }
+
+  if (lines.length() > 0) {
+    lines.pushStr("\n");
+  }
+
+  return lines;
+}
+
+/// `name: type` for a field, `NAME` or `NAME(types)` for a variant.
+function memberLine(
+  memberId: Analyzer::DefinitionId,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): String {
+  match (defs.get(memberId)) {
+    Option::SOME(Analyzer::Definition::Field(field)) -> {
+      let fieldName: String = Doc::symbolText(symbols, field.name);
+      let fieldType: String = Doc::renderType(field.fieldType, defs, types, symbols);
+      return `${fieldName.toStr()}: ${fieldType.toStr()}`;
+    },
+    Option::SOME(Analyzer::Definition::Variant(variant)) -> {
+      let variantName: String = Doc::symbolText(symbols, variant.name);
+
+      if (variant.payload.length() == 0) {
+        return variantName;
+      }
+
+      let payload: String = Doc::joinTypes(&variant.payload, defs, types, symbols);
+      return `${variantName.toStr()}(${payload.toStr()})`;
+    },
+    Option::SOME(other) -> {
+      return Doc::symbolText(symbols, other.name());
+    },
+    Option::NONE -> {},
+  };
+
+  return String::new();
+}
