@@ -1,7 +1,8 @@
 //!
 //! # I/O
 //!
-//! Standard output, error printing, and structured I/O error types.
+//! Standard output, error printing, structured I/O error types, buffered
+//! descriptor reads, and `Content-Length` message framing.
 //!
 //! All types and functions live under the `Io` namespace.
 //!
@@ -31,6 +32,23 @@
 //! | `Io::ErrorKind`   | error.ign  | Category of the I/O error (8 variants)           |
 //! | `Io::IoError`     | error.ign  | Full error: kind + raw errno + strerror message  |
 //!
+//! ## Streams and Framing
+//!
+//! | Item                        | Source file | Description                               |
+//! |-----------------------------|-------------|-------------------------------------------|
+//! | `Stream::ByteReader`         | stream.ign  | Buffered reader over a file descriptor    |
+//! | `Stream::ByteWriter`         | stream.ign  | Unbuffered whole-buffer writer            |
+//! | `Stream::ReadError`          | stream.ign  | End of input, truncation, or read failure |
+//! | `Stream::FrameError`         | stream.ign  | Why a framed message could not be read    |
+//! | `Stream::writeAll`           | stream.ign  | Write a whole `String` to a descriptor    |
+//! | `Stream::writeFramedMessage` | stream.ign  | Write a `Content-Length` framed message   |
+//!
+//! These live in the `Stream` namespace, re-exported here:
+//! `import Io, Stream from "std::io";`. `Stream::ByteReader::stdin()` reads
+//! standard input. `readFramedMessage` and
+//! `writeFramedMessage` implement the header framing the Language Server
+//! Protocol uses on stdin and stdout.
+//!
 //! ## Example
 //!
 //! ```ignis
@@ -59,6 +77,8 @@ import String from "std::string";
 import Vector from "std::vector";
 
 import _ from "std::io::error";
+
+export Stream from "./stream";
 
 /// Keeps `Vector<String>` monomorphizations reachable for std I/O builds.
 ///
