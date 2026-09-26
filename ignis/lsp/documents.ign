@@ -1,0 +1,180 @@
+//! The documents an editor has open, which replace the files on disk while
+//! they stay open.
+
+import Fs from "std::fs";
+import Path from "std::path";
+import String from "std::string";
+import Vector from "std::vector";
+
+import SourceOverrides from "../build/sources";
+
+import filePathFromUri from "./uri";
+
+/// One open document.
+export record Document {
+  /// The URI exactly as the client sent it. Diagnostics for this file are
+  /// published under it, so the client matches them to the buffer.
+  public uri: String;
+  /// The file the URI names, canonical when it exists on disk, which is the
+  /// form module discovery uses for it.
+  public path: Path::PathBuf;
+  public text: String;
+  public version: i64;
+}
+
+/// The path discovery would use for a `file:` URI, or `NONE` for any other
+/// URI.
+export function documentPathFromUri(uri: &String): Option<Path::PathBuf> {
+  let Option::SOME(pathText) = filePathFromUri(uri) else {
+    return Option::NONE;
+  };
+
+  let path: Path::PathBuf = Path::PathBuf::fromString(&pathText).normalize();
+
+  return match (Fs::canonicalize(&path)) {
+    Result::OK(canonical) -> Option::SOME(canonical),
+    Result::ERROR(_) -> Option::SOME(path.clone()),
+  };
+}
+
+/// True when `path` names an Ignis source file, the only kind of document
+/// analysis reads or starts from.
+export function isIgnisSourcePath(path: &Path::PathBuf): boolean {
+  let pathText: String = path.toString();
+  return pathText.endsWith(".ign");
+}
+
+/// Open documents, in no particular order: closing one moves the last into
+/// its place.
+export record DocumentStore {
+  documents: Vector<Document>;
+
+  public static create(): DocumentStore {
+    return DocumentStore { documents: Vector::new<Document>() };
+  }
+
+  public length(&self): u64 {
+    return self.documents.length();
+  }
+
+  indexOf(&self, uri: &String): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < self.documents.length()) {
+      let Option::SOME(document) = self.documents.get(index) else {
+        break;
+      };
+
+      if (document.uri.equals(uri)) {
+        return Option::SOME(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Records an opened document, replacing one already open under `uri`.
+  /// Returns its path, or `NONE` when `uri` is not a `file:` URI.
+  public open(&mut self, uri: &String, text: String, version: i64): Option<Path::PathBuf> {
+    let Option::SOME(path) = documentPathFromUri(uri) else {
+      return Option::NONE;
+    };
+
+    let document: Document = Document { uri: uri.clone(), path: path.clone(), text: text, version: version };
+
+    match (self.indexOf(uri)) {
+      Option::SOME(index) -> {
+        self.documents.set(index, document);
+      },
+      Option::NONE -> {
+        self.documents.push(document);
+      },
+    };
+
+    return Option::SOME(path);
+  }
+
+  /// Replaces the text of an open document. Returns its path, or `NONE`
+  /// when no document is open under `uri`.
+  public change(&mut self, uri: &String, text: String, version: i64): Option<Path::PathBuf> {
+    let Option::SOME(index) = self.indexOf(uri) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(document) = self.documents.getMut(index) else {
+      return Option::NONE;
+    };
+
+    document.text = text;
+    document.version = version;
+    return Option::SOME(document.path.clone());
+  }
+
+  /// Forgets the document open under `uri`. Returns false when there was none.
+  public close(&mut self, uri: &String): boolean {
+    let Option::SOME(index) = self.indexOf(uri) else {
+      return false;
+    };
+
+    let lastIndex: u64 = self.documents.length() - 1;
+    let Option::SOME(last) = self.documents.pop() else {
+      return false;
+    };
+
+    if (index < lastIndex) {
+      let _replaced: boolean = self.documents.set(index, last);
+    } else {
+      let _closed: Document = last;
+    }
+
+    return true;
+  }
+
+  /// The client's URI and version for the open document at `path`.
+  public findByPath(&self, path: &String): Option<DocumentHandle> {
+    let mut index: u64 = 0;
+
+    while (index < self.documents.length()) {
+      let Option::SOME(document) = self.documents.get(index) else {
+        break;
+      };
+
+      let documentPath: String = document.path.toString();
+
+      if (documentPath.equals(path)) {
+        return Option::SOME(DocumentHandle { uri: document.uri.clone(), version: document.version });
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The text of every open `.ign` document, keyed by its path, for analysis
+  /// to read instead of the disk.
+  public sourceOverrides(&self): SourceOverrides {
+    let mut overrides: SourceOverrides = SourceOverrides::none();
+    let mut index: u64 = 0;
+
+    while (index < self.documents.length()) {
+      if (let Option::SOME(document) = self.documents.get(index)) {
+        if (isIgnisSourcePath(&document.path)) {
+          overrides.set(&document.path, &document.text);
+        }
+      }
+
+      index += 1;
+    }
+
+    return overrides;
+  }
+}
+
+/// How a published file is addressed: the open document's URI and version.
+export record DocumentHandle {
+  public uri: String;
+  public version: i64;
+}

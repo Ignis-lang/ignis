@@ -18,6 +18,7 @@ export enum CliCommand {
   TEST,
   TEST_STD,
   FMT,
+  LSP,
   DOC,
   HELP,
   VERSION,
@@ -145,6 +146,14 @@ export record CliOptions {
 
   public isFmtMode(&self): boolean {
     if (let CliCommand::FMT = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isLspMode(&self): boolean {
+    if (let CliCommand::LSP = self.command) {
       return true;
     }
 
@@ -308,6 +317,10 @@ function cliSubcommandOf(argument: &String): Option<CliCommand> {
 
   if (argument.equals("fmt")) {
     return Option::SOME(CliCommand::FMT);
+  }
+
+  if (argument.equals("lsp")) {
+    return Option::SOME(CliCommand::LSP);
   }
 
   if (argument.equals("doc")) {
@@ -1503,6 +1516,12 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    // The language server talks over stdio and analyzes whatever the editor
+    // opens, so it takes no path.
+    if (options.isLspMode()) {
+      return Result::ERROR(`error: unexpected argument '${argument.toStr()}'`);
+    }
+
     // The one positional `test-std` takes is its name filter.
     if (options.isTestStdMode()) {
       if (options.filter.length() > 0) {
@@ -1535,6 +1554,7 @@ export function helpText(): String {
   text.pushStr("  test       Run language-native tests for a project\n");
   text.pushStr("  test-std   Run language-native tests for the standard library\n");
   text.pushStr("  fmt        Format Ignis source canonically with parse/reparse safety checks\n");
+  text.pushStr("  lsp        Start the Language Server Protocol server on stdin and stdout\n");
   text.pushStr("  doc        Extract API documentation from doc comments\n");
   text.pushStr("\n");
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
@@ -1643,6 +1663,7 @@ function cliCommandName(command: CliCommand): str {
     CliCommand::TEST -> "test",
     CliCommand::TEST_STD -> "test-std",
     CliCommand::FMT -> "fmt",
+    CliCommand::LSP -> "lsp",
     CliCommand::DOC -> "doc",
     CliCommand::HELP -> "help",
     CliCommand::VERSION -> "version",
@@ -1714,6 +1735,32 @@ function cliParsesEverySubcommand(): void {
   let mut testArguments: Vector<String> = Vector::new<String>();
   cliPush(&mut testArguments, "test");
   Test::assertEq<str>(cliCommandName(cliParse(&testArguments).command), "test");
+}
+
+/// `lsp` selects the language server and still reads `--std-path`, which
+/// single-file analyses need.
+@test
+function cliParsesTheLspSubcommandWithAStdPath(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "lsp");
+  cliPush(&mut arguments, "--std-path");
+  cliPush(&mut arguments, "std");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "lsp");
+  Test::assertEq<str>(cliOptionText(&options.stdPath).toStr(), "std");
+  Test::assertEq<str>(cliPathText(&options).toStr(), "");
+}
+
+/// The language server analyzes what the editor opens, so a path is an error.
+@test
+function cliRejectsAPathAfterTheLspSubcommand(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "lsp");
+  cliPush(&mut arguments, "src/main.ign");
+
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unexpected argument 'src/main.ign'");
 }
 
 /// `doc` reads the host `DocCommand`'s flags: a file, `--std-path`, and

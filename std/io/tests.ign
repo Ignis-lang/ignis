@@ -326,6 +326,136 @@ function readFramedMessageReportsTruncationInsideTheBody(): void {
 }
 
 @test
+function readFramedMessageWithinSkipsAnOversizedBodyAndReadsTheNextMessage(): void {
+  let input: String = String::create("Content-Length: 10\r\n\r\n0123456789Content-Length: 2\r\n\r\nok");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::TOO_LARGE(length)) = reader.readFramedMessageWithin(5) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(length, 10);
+
+  let Result::OK(body) = reader.readFramedMessageWithin(5) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(body.toStr(), "ok");
+
+  let Result::ERROR(Stream::FrameError::END_OF_INPUT) = reader.readFramedMessageWithin(5) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageWithinReadsABodyExactlyAtTheLimit(): void {
+  let input: String = String::create("Content-Length: 5\r\n\r\nhello");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::OK(body) = reader.readFramedMessageWithin(5) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(body.toStr(), "hello");
+
+  LibC::File::close(fd);
+}
+
+@test
+function readFramedMessageWithinSkipsABodyLargerThanOneReadChunk(): void {
+  let mut body: String = String::new();
+  body.pushRepeated("0123456789", 1000);
+  body.pushStr("end");
+
+  let pipe: IoTestPipe = ioTestOpenPipe();
+
+  let Result::OK(_) = Stream::writeFramedMessageTo(pipe.writeFd, &body) else {
+    Test::fail();
+    return;
+  };
+
+  let small: String = String::create("{}");
+
+  let Result::OK(_) = Stream::writeFramedMessageTo(pipe.writeFd, &small) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(pipe.writeFd);
+
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(pipe.readFd);
+
+  let Result::ERROR(Stream::FrameError::TOO_LARGE(length)) = reader.readFramedMessageWithin(100) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(length, 10003);
+
+  let Result::OK(next) = reader.readFramedMessageWithin(100) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(next.toStr(), "{}");
+
+  LibC::File::close(pipe.readFd);
+}
+
+@test
+function readFramedMessageWithinReportsATruncatedOversizedBody(): void {
+  let input: String = String::create("Content-Length: 10\r\n\r\nabc");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::ERROR(Stream::FrameError::TRUNCATED) = reader.readFramedMessageWithin(2) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
+function skipExactDiscardsBytesAndReportsWhereInputEnded(): void {
+  let input: String = String::create("abcdef");
+  let fd: i32 = ioTestInputFd(&input);
+  let mut reader: Stream::ByteReader = Stream::ByteReader::fromFd(fd);
+
+  let Result::OK(_) = reader.skipExact(2) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::OK(middle) = reader.readExact(2) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(middle.toStr(), "cd");
+
+  let Result::ERROR(Stream::ReadError::TRUNCATED) = reader.skipExact(5) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::ERROR(Stream::ReadError::END_OF_INPUT) = reader.skipExact(1) else {
+    Test::fail();
+    return;
+  };
+
+  LibC::File::close(fd);
+}
+
+@test
 function readLineSplitsOnlyAtCarriageReturnLineFeed(): void {
   let input: String = String::create("a\nb\rc\r\n\r\ntail");
   let fd: i32 = ioTestInputFd(&input);

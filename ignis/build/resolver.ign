@@ -20,6 +20,7 @@ import Vector from "std::vector";
 
 import BuildGraph, BuildModuleKind, ModuleGraph from "./module_graph";
 import Manifest, StdManifest from "./manifest";
+import SourceOverrides from "./sources";
 
 const MISSING_MODULE: str = "B2001";
 const AMBIGUOUS_IMPORT: str = "B2002";
@@ -68,6 +69,8 @@ record ResolverProject {
   public stdEnabled: boolean;
   /// `[test] fixtures`, already resolved against the project root.
   public testFixtures: Vector<Path::PathBuf>;
+  /// Module texts discovery reads instead of the files on disk.
+  public sources: SourceOverrides;
 }
 
 /// Command-line values a build applies on top of what the project file declares.
@@ -78,6 +81,9 @@ export record BuildOverrides {
   public targetTriple: Option<String>;
   public cc: Option<String>;
   public outDir: Option<String>;
+  /// Module texts that replace the files on disk, which is how the language
+  /// server analyzes unsaved editor buffers. Empty for a build.
+  public sources: SourceOverrides;
 
   public static none(): BuildOverrides {
     return BuildOverrides {
@@ -87,6 +93,7 @@ export record BuildOverrides {
       targetTriple: Option::NONE,
       cc: Option::NONE,
       outDir: Option::NONE,
+      sources: SourceOverrides::none(),
     };
   }
 
@@ -526,6 +533,7 @@ function resolverLoadProject(
     hasProjectFile: true,
     stdEnabled: resolved.stdEnabled,
     testFixtures: resolverClonePaths(&resolved.testFixtures),
+    sources: overrides.sources.clone(),
   });
 }
 
@@ -624,6 +632,7 @@ function resolverSingleFileProject(
     hasProjectFile: false,
     stdEnabled: true,
     testFixtures: Vector::new<Path::PathBuf>(),
+    sources: overrides.sources.clone(),
   });
 }
 
@@ -678,6 +687,7 @@ function resolverStdOnlyProject(
     hasProjectFile: false,
     stdEnabled: true,
     testFixtures: Vector::new<Path::PathBuf>(),
+    sources: overrides.sources.clone(),
   });
 }
 
@@ -1077,8 +1087,9 @@ function resolverResolveImport(
 function resolverExtractImports(
   path: &Path::PathBuf,
   flags: &CompileFlags,
+  sources: &SourceOverrides,
 ): Result<Vector<ParsedImport>, DiagnosticBag> {
-  let Result::OK(sourceText) = Fs::readToString(path) else {
+  let Result::OK(sourceText) = sources.read(path) else {
     return Result::ERROR(resolverSingleDiagnostic(Diagnostic::new(
       Severity::ERROR,
       MISSING_MODULE,
@@ -1168,7 +1179,7 @@ function resolverDiscoverModule(
   let mut stackRef: &mut Vector<Path::PathBuf> = stack;
   stackRef.push(currentPath.clone());
 
-  let imports: Vector<ParsedImport> = resolverExtractImports(currentPath, &project.flags)!;
+  let imports: Vector<ParsedImport> = resolverExtractImports(currentPath, &project.flags, &project.sources)!;
   let mut importIndex: u64 = 0;
 
   while (importIndex < imports.length()) {

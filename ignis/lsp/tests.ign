@@ -1,0 +1,724 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Stream from "std::io";
+import Json, JsonValue from "std::json";
+import LibC from "std::libc";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import BuildOverrides, Resolver from "../build/resolver";
+import SourceOverrides from "../build/sources";
+
+import
+  FileDiagnostics,
+  LspDiagnostic,
+  analysisKeyOf,
+  analyzeDiscovered,
+  analyzeForDiagnostics,
+from "./analysis";
+import DocumentStore from "./documents";
+import
+  DecodeError,
+  LspErrorCode,
+  LspMessage,
+  RequestId,
+  decodeMessage,
+  errorResponseBody,
+  jsonIntegerMember,
+  jsonStringMember,
+  parseInteger,
+  responseBody,
+from "./protocol";
+import LspServer, LspStep, publishDiagnosticsParams from "./server";
+import filePathFromUri, uriFromFilePath from "./uri";
+
+/// A server whose replies land in a pipe the test reads back.
+record LspTestHarness {
+  public server: LspServer;
+  public replies: Stream::ByteReader;
+  public inputFd: i32;
+  public replyReadFd: i32;
+  public replyWriteFd: i32;
+}
+
+record LspTestPipe {
+  public readFd: i32;
+  public writeFd: i32;
+}
+
+function lspTestPipe(): LspTestPipe {
+  let mut fds: i32[2] = [0, 0];
+
+  if (LibC::Process::pipe((&mut fds[0]) as *mut i32) == -1) {
+    Test::fail();
+  }
+
+  return LspTestPipe { readFd: fds[0], writeFd: fds[1] };
+}
+
+/// The server reads from an input pipe whose write end is already closed,
+/// so `run` sees the end of input at once.
+function lspTestHarness(): LspTestHarness {
+  let noInput: Vector<String> = Vector::new<String>();
+  return lspTestHarnessWith(&noInput, Option::NONE);
+}
+
+/// A harness whose input pipe holds the framed `messages`, then the end of
+/// input, so `run` handles them the way it handles a client's.
+function lspTestHarnessWith(messages: &Vector<String>, stdPath: Option<String>): LspTestHarness {
+  let input: LspTestPipe = lspTestPipe();
+  let replies: LspTestPipe = lspTestPipe();
+  let inputWriter: Stream::ByteWriter = Stream::ByteWriter::fromFd(input.writeFd);
+  let mut messageIndex: u64 = 0;
+
+  while (messageIndex < messages.length()) {
+    if (let Option::SOME(message) = messages.get(messageIndex)) {
+      if (let Result::ERROR(_) = inputWriter.writeFramedMessage(message)) {
+        Test::fail();
+      }
+    }
+
+    messageIndex += 1;
+  }
+
+  LibC::File::close(input.writeFd);
+
+  let server: LspServer = LspServer::create(
+    Stream::ByteReader::fromFd(input.readFd),
+    Stream::ByteWriter::fromFd(replies.writeFd),
+    stdPath,
+  );
+
+  return LspTestHarness {
+    server: server,
+    replies: Stream::ByteReader::fromFd(replies.readFd),
+    inputFd: input.readFd,
+    replyReadFd: replies.readFd,
+    replyWriteFd: replies.writeFd,
+  };
+}
+
+function lspTestClose(harness: &LspTestHarness): void {
+  LibC::File::close(harness.inputFd);
+  LibC::File::close(harness.replyReadFd);
+  LibC::File::close(harness.replyWriteFd);
+}
+
+/// Hands `body` to the server and returns the step it asked for.
+function lspTestSend(harness: &mut LspTestHarness, body: str): LspStep {
+  let mut harnessRef: &mut LspTestHarness = harness;
+  let text: String = String::create(body);
+  return harnessRef.server.handleMessage(&text);
+}
+
+/// The next message the server wrote.
+function lspTestReply(harness: &mut LspTestHarness): String {
+  let mut harnessRef: &mut LspTestHarness = harness;
+
+  let Result::OK(reply) = harnessRef.replies.readFramedMessage() else {
+    Test::fail();
+    return String::new();
+  };
+
+  return reply;
+}
+
+function lspTestExitCode(step: LspStep): i32 {
+  return match (step) {
+    LspStep::EXIT(code) -> code,
+    LspStep::CONTINUE -> -1,
+  };
+}
+
+@test
+function decodeMessageReadsARequestWithANumericId(): void {
+  let body: String = String::create("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{}}");
+
+  let Result::OK(LspMessage::REQUEST(request)) = decodeMessage(&body) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(request.method.toStr(), "initialize");
+
+  let RequestId::NUMBER(id) = request.id else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(id.toStr(), "7");
+}
+
+@test
+function decodeMessageTellsNotificationsAndResponsesApart(): void {
+  let notification: String = String::create("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+  let response: String = String::create("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}");
+
+  let Result::OK(LspMessage::NOTIFICATION(decoded)) = decodeMessage(&notification) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(decoded.method.toStr(), "initialized");
+
+  let Result::OK(LspMessage::RESPONSE) = decodeMessage(&response) else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function decodeMessageRejectsInvalidJsonAndNonMessages(): void {
+  let broken: String = String::create("{\"jsonrpc\":");
+  let array: String = String::create("[1,2]");
+  let badId: String = String::create("{\"id\":[1],\"method\":\"shutdown\"}");
+
+  let Result::ERROR(DecodeError::PARSE(_)) = decodeMessage(&broken) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::ERROR(DecodeError::INVALID(_)) = decodeMessage(&array) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::ERROR(DecodeError::INVALID(_)) = decodeMessage(&badId) else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function jsonMemberReadersReturnTypedValues(): void {
+  let source: String = String::create("{\"uri\":\"file:///a.ign\",\"version\":-12,\"text\":3}");
+
+  let Result::OK(value) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(uri) = jsonStringMember(&value, "uri") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(uri.toStr(), "file:///a.ign");
+  Test::assertEq<i64>(jsonIntegerMember(&value, "version").unwrapOr(0), -12);
+  Test::assertEq<boolean>(jsonStringMember(&value, "text").isNone(), true);
+  Test::assertEq<boolean>(jsonIntegerMember(&value, "missing").isNone(), true);
+}
+
+@test
+function parseIntegerRejectsFractionsAndOverlongNumbers(): void {
+  let fraction: String = String::create("1.5");
+  let overlong: String = String::create("1234567890123456789");
+  let plain: String = String::create("42");
+
+  Test::assertEq<boolean>(parseInteger(&fraction).isNone(), true);
+  Test::assertEq<boolean>(parseInteger(&overlong).isNone(), true);
+  Test::assertEq<i64>(parseInteger(&plain).unwrapOr(0), 42);
+}
+
+@test
+function responsesEchoTheIdAndErrorsWithoutOneUseNull(): void {
+  let result: String = responseBody(RequestId::TEXT(String::create("a")), JsonValue::nullValue());
+  let failure: String = errorResponseBody(Option::NONE, LspErrorCode::PARSE_ERROR, String::create("bad"));
+
+  Test::assertEq<str>(result.toStr(), "{\"jsonrpc\":\"2.0\",\"id\":\"a\",\"result\":null}");
+  Test::assertEq<str>(failure.toStr(), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"bad\"}}");
+}
+
+@test
+function fileUrisDecodeAndEncodeLikeTheHost(): void {
+  let uri: String = String::create("file:///tmp/a%20b/%C3%A9%23.ign");
+
+  let Option::SOME(path) = filePathFromUri(&uri) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(path.toStr(), "/tmp/a b/é#.ign");
+  Test::assertEq<str>(uriFromFilePath(&path).toStr(), "file:///tmp/a%20b/%C3%A9%23.ign");
+
+  let localhost: String = String::create("file://localhost/x.ign");
+  let other: String = String::create("untitled:Untitled-1");
+  let badEscape: String = String::create("file:///a%2");
+
+  let localhostPath: String = filePathFromUri(&localhost).unwrapOr(String::new());
+
+  Test::assertEq<str>(localhostPath.toStr(), "/x.ign");
+  Test::assertEq<boolean>(filePathFromUri(&other).isNone(), true);
+  Test::assertEq<boolean>(filePathFromUri(&badEscape).isNone(), true);
+}
+
+@test
+function publishDiagnosticsParamsWriteTheLspShape(): void {
+  let mut diagnostics: Vector<LspDiagnostic> = Vector::new<LspDiagnostic>();
+  diagnostics.push(LspDiagnostic {
+    start: Text::Position { line: 5, character: 30 },
+    end: Text::Position { line: 5, character: 37 },
+    severity: 1,
+    code: String::create("A0018"),
+    message: String::create("boom"),
+  });
+
+  let uri: String = String::create("file:///m.ign");
+  let params: JsonValue = publishDiagnosticsParams(&uri, &diagnostics, Option::SOME(3));
+
+  Test::assertEq<str>(
+    Json::toJsonString(&params).toStr(),
+    "{\"uri\":\"file:///m.ign\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":5,\"character\":30},\"end\":{\"line\":5,\"character\":37}},\"severity\":1,\"code\":\"A0018\",\"source\":\"ignis\",\"message\":\"boom\"}],\"version\":3}",
+  );
+}
+
+@test
+function serverRefusesRequestsBeforeInitializeAndAnswersItsLifecycle(): void {
+  let mut harness: LspTestHarness = lspTestHarness();
+
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"textDocument/hover\",\"params\":{}}");
+  Test::assertEq<str>(
+    lspTestReply(&mut harness).toStr(),
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"server not initialized\"}}",
+  );
+
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{}}");
+  Test::assertEq<str>(
+    lspTestReply(&mut harness).toStr(),
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"capabilities\":{\"textDocumentSync\":1},\"serverInfo\":{\"name\":\"ignis-lsp\",\"version\":\"0.4.0\"}}}",
+  );
+
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"method\":\"workspace/unknownNotification\",\"params\":{}}");
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/hover\",\"params\":{}}");
+  Test::assertEq<str>(
+    lspTestReply(&mut harness).toStr(),
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32601,\"message\":\"method not found: textDocument/hover\"}}",
+  );
+
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"shutdown\"}");
+  Test::assertEq<str>(lspTestReply(&mut harness).toStr(), "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":null}");
+
+  lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"initialize\",\"params\":{}}");
+  Test::assertEq<str>(
+    lspTestReply(&mut harness).toStr(),
+    "{\"jsonrpc\":\"2.0\",\"id\":5,\"error\":{\"code\":-32600,\"message\":\"shutdown was already requested\"}}",
+  );
+
+  let step: LspStep = lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+  Test::assertEq<i32>(lspTestExitCode(step), 0);
+
+  lspTestClose(&harness);
+}
+
+@test
+function serverExitsWithOneWithoutShutdownAndAnswersBrokenJson(): void {
+  let mut harness: LspTestHarness = lspTestHarness();
+
+  lspTestSend(&mut harness, "{\"jsonrpc\"");
+  let reply: String = lspTestReply(&mut harness);
+  Test::assertEq<boolean>(reply.startsWith("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,"), true);
+
+  let step: LspStep = lspTestSend(&mut harness, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+  Test::assertEq<i32>(lspTestExitCode(step), 1);
+
+  lspTestClose(&harness);
+}
+
+@test
+function serverRunStopsWithOneAtTheEndOfInputBeforeShutdown(): void {
+  let mut harness: LspTestHarness = lspTestHarness();
+
+  Test::assertEq<i32>(harness.server.run(), 1);
+
+  lspTestClose(&harness);
+}
+
+/// A scratch directory with no `ignis.toml` above it, so a file in it is
+/// analyzed on its own.
+function lspTestDirectory(tag: str): Path::PathBuf {
+  let directory: String = `/tmp/ignis_lsp_test_${tag}_${Process::id()}`;
+  let path: Path::PathBuf = Path::PathBuf::fromString(&directory);
+
+  if (!Fs::exists(directory.toStr())) {
+    if (let Result::ERROR(_) = Fs::createDirAll(&path)) {
+      Test::fail();
+    }
+  }
+
+  return path;
+}
+
+function lspTestStdPath(): Option<String> {
+  let Result::OK(root) = Env::currentDir() else {
+    Test::fail();
+    return Option::NONE;
+  };
+
+  return Option::SOME(root.join("std").toString());
+}
+
+@test
+function analysisReadsTheOpenBufferAndReportsUtf16Ranges(): void {
+  let directory: Path::PathBuf = lspTestDirectory("analysis");
+  let diskPath: Path::PathBuf = directory.join("main.ign");
+  let diskText: String = String::create("function main(): i32 {\n  return 0;\n}\n");
+
+  if (let Result::ERROR(_) = Fs::writeString(&diskPath, &diskText)) {
+    Test::fail();
+    return;
+  }
+
+  let Result::OK(path) = Fs::canonicalize(&diskPath) else {
+    Test::fail();
+    return;
+  };
+
+  let buffer: String = String::create(
+    "function measure(label: str): i32 {\n  return 3;\n}\n\nfunction main(): i32 {\n  let label: str = \"héllo 😀\"; let count: i32 = label;\n  return count;\n}\n",
+  );
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&path, &buffer);
+
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+
+  Test::assertEq<u64>(files.length(), 1);
+
+  let Option::SOME(file) = files.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(file.path.toStr(), path.asStr());
+  Test::assertEq<u64>(file.diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = file.diagnostics.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "A0045");
+  Test::assertEq<u64>(diagnostic.severity, 1);
+  Test::assertEq<u64>(diagnostic.start.line, 5);
+  Test::assertEq<u64>(diagnostic.start.character, 31);
+  Test::assertEq<u64>(diagnostic.end.line, 5);
+  Test::assertEq<u64>(diagnostic.end.character, 54);
+
+  let clean: SourceOverrides = SourceOverrides::none();
+  let cleanFiles: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &clean);
+  Test::assertEq<u64>(cleanFiles.length(), 0);
+}
+
+@test
+function analysisReportsParseErrorsOfTheOpenBuffer(): void {
+  let directory: Path::PathBuf = lspTestDirectory("parse");
+  let diskPath: Path::PathBuf = directory.join("main.ign");
+  let diskText: String = String::create("function main(): i32 {\n  return 0;\n}\n");
+
+  if (let Result::ERROR(_) = Fs::writeString(&diskPath, &diskText)) {
+    Test::fail();
+    return;
+  }
+
+  let Result::OK(path) = Fs::canonicalize(&diskPath) else {
+    Test::fail();
+    return;
+  };
+
+  let buffer: String = String::create("function main(): i32 {\n  return 0\n}\n");
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&path, &buffer);
+
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+
+  Test::assertEq<u64>(files.length(), 1);
+
+  let Option::SOME(file) = files.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(file.diagnostics.length() > 0, true);
+
+  let Option::SOME(diagnostic) = file.diagnostics.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(diagnostic.severity, 1);
+  Test::assertEq<boolean>(diagnostic.start.line >= 1, true);
+}
+
+/// Writes `text` to `name` in `directory` and returns the file's canonical
+/// path.
+function lspTestWrite(directory: &Path::PathBuf, name: str, text: str): Path::PathBuf {
+  let diskPath: Path::PathBuf = directory.join(name);
+  let content: String = String::create(text);
+
+  if (let Result::ERROR(_) = Fs::writeString(&diskPath, &content)) {
+    Test::fail();
+    return diskPath;
+  }
+
+  return match (Fs::canonicalize(&diskPath)) {
+    Result::OK(path) -> path,
+    Result::ERROR(_) -> diskPath,
+  };
+}
+
+/// A project directory whose sources live in `src`, entered at `main.ign`.
+function lspTestProject(tag: str): Path::PathBuf {
+  let root: Path::PathBuf = lspTestDirectory(tag);
+  let source: Path::PathBuf = root.join("src");
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&source)) {
+    Test::fail();
+  }
+
+  lspTestWrite(
+    &root,
+    "ignis.toml",
+    "[package]\nname = \"lsp-test\"\nversion = \"0.1.0\"\n\n[ignis]\nstd = true\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n",
+  );
+  return source;
+}
+
+/// The only diagnostic of the only file in `files`, which must be `path`.
+function lspTestOnlyDiagnostic(
+  files: &Vector<FileDiagnostics>,
+  path: &Path::PathBuf
+): LspDiagnostic {
+  Test::assertEq<u64>(files.length(), 1);
+
+  let Option::SOME(file) = files.get(0) else {
+    Test::fail();
+    return LspDiagnostic {
+      start: Text::Position { line: 0, character: 0 },
+      end: Text::Position { line: 0, character: 0 },
+      severity: 0,
+      code: String::new(),
+      message: String::new(),
+    };
+  };
+
+  Test::assertEq<str>(file.path.toStr(), path.asStr());
+  Test::assertEq<u64>(file.diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = file.diagnostics.get(0) else {
+    Test::fail();
+    return LspDiagnostic {
+      start: Text::Position { line: 0, character: 0 },
+      end: Text::Position { line: 0, character: 0 },
+      severity: 0,
+      code: String::new(),
+      message: String::new(),
+    };
+  };
+
+  return LspDiagnostic {
+    start: diagnostic.start,
+    end: diagnostic.end,
+    severity: diagnostic.severity,
+    code: diagnostic.code.clone(),
+    message: diagnostic.message.clone(),
+  };
+}
+
+@test
+function analysisReportsAMissingModuleAtTheStartOfTheStartFile(): void {
+  let directory: Path::PathBuf = lspTestDirectory("missing");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./absent\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
+  Test::assertEq<str>(diagnostic.message.toStr(), "module './absent' could not be resolved");
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+  Test::assertEq<u64>(diagnostic.start.character, 0);
+}
+
+@test
+function analysisReportsAnImportCycleAtTheStartOfTheStartFile(): void {
+  let directory: Path::PathBuf = lspTestDirectory("cycle");
+  lspTestWrite(&directory, "other.ign", "import first from \"./main\";\n\nexport function second(): i32 {\n  return first();\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import second from \"./other\";\n\nexport function first(): i32 {\n  return 1;\n}\n\nfunction main(): i32 {\n  return second();\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2003");
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+  Test::assertEq<u64>(diagnostic.start.character, 0);
+}
+
+@test
+function analysisKeepsTheDiscoveryFailureOverAnUnreachableBrokenBuffer(): void {
+  let source: Path::PathBuf = lspTestProject("unreachable");
+  let path: Path::PathBuf = lspTestWrite(
+    &source,
+    "main.ign",
+    "import value from \"./absent\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let orphan: Path::PathBuf = lspTestWrite(&source, "orphan.ign", "function orphan(): void {}\n");
+  let broken: String = String::create("function orphan(: void {}\n");
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&orphan, &broken);
+
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+}
+
+@test
+function analysisPlacesTheParseErrorsOfTheReachableBrokenBuffer(): void {
+  let source: Path::PathBuf = lspTestProject("reachable");
+  let path: Path::PathBuf = lspTestWrite(
+    &source,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let helper: Path::PathBuf = lspTestWrite(&source, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+  let orphan: Path::PathBuf = lspTestWrite(&source, "orphan.ign", "function orphan(): void {}\n");
+  let brokenHelper: String = String::create("export function value(): i32 {\n  return 1\n}\n");
+  let brokenOrphan: String = String::create("function orphan(: void {}\n");
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&orphan, &brokenOrphan);
+  sources.set(&helper, &brokenHelper);
+
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &helper);
+
+  Test::assertEq<u64>(diagnostic.severity, 1);
+  Test::assertEq<boolean>(diagnostic.start.line >= 1, true);
+}
+
+@test
+function analysisReportsAModuleThatVanishedAfterDiscovery(): void {
+  let directory: Path::PathBuf = lspTestDirectory("vanished");
+  let helper: Path::PathBuf = lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = lspTestStdPath();
+
+  let Result::OK(discovery) = Resolver::discover(&path, &overrides, false) else {
+    Test::fail();
+    return;
+  };
+
+  if (let Result::ERROR(_) = Fs::removeFile(&helper)) {
+    Test::fail();
+    return;
+  }
+
+  let files: Vector<FileDiagnostics> = analyzeDiscovered(&discovery, &path, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
+  Test::assertEq<boolean>(diagnostic.message.startsWith("analysis stopped: cannot read source file: "), true);
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+}
+
+/// A `didOpen` notification body for `path` holding `text`, which must
+/// already be escaped for a JSON string.
+function lspTestDidOpen(path: &Path::PathBuf, text: str): String {
+  let pathText: String = path.toString();
+  let uri: String = uriFromFilePath(&pathText);
+  return String::create("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"")
+    .concat(&uri)
+    .concat("\",\"languageId\":\"ignis\",\"version\":1,\"text\":\"")
+    .concat(text)
+    .concat("\"}}}");
+}
+
+@test
+function serverOnlyAnalyzesIgnisDocuments(): void {
+  let directory: Path::PathBuf = lspTestDirectory("nonignis");
+  let notes: Path::PathBuf = lspTestWrite(&directory, "notes.md", "# notes\n");
+  let main: Path::PathBuf = lspTestWrite(&directory, "main.ign", "function main(): i32 {\n  return 0;\n}\n");
+
+  let mut messages: Vector<String> = Vector::new<String>();
+  messages.push(String::create("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
+  messages.push(lspTestDidOpen(&notes, "# notes\\n"));
+  messages.push(lspTestDidOpen(&main, "function main(): i32 {\\n  return 0\\n}\\n"));
+
+  let mut harness: LspTestHarness = lspTestHarnessWith(&messages, lspTestStdPath());
+  Test::assertEq<i32>(harness.server.run(), 1);
+
+  let initialized: String = lspTestReply(&mut harness);
+  Test::assertEq<boolean>(initialized.startsWith("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":"), true);
+
+  let mainPath: String = main.toString();
+  let mainUri: String = uriFromFilePath(&mainPath);
+  let expected: String = String::create("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"")
+    .concat(&mainUri);
+  let published: String = lspTestReply(&mut harness);
+  Test::assertEq<boolean>(published.startsWith(expected.toStr()), true);
+
+  lspTestClose(&harness);
+}
+
+@test
+function documentStoreCloseForgetsOnlyTheClosedDocument(): void {
+  let mut store: DocumentStore = DocumentStore::create();
+  let first: String = String::create("file:///virtual/lsp/documents/first.ign");
+  let second: String = String::create("file:///virtual/lsp/documents/second.ign");
+  let third: String = String::create("file:///virtual/lsp/documents/third.ign");
+
+  store.open(&first, String::create("a"), 1);
+  store.open(&second, String::create("b"), 2);
+  store.open(&third, String::create("c"), 3);
+
+  Test::assertEq<boolean>(store.close(&first), true);
+  Test::assertEq<boolean>(store.close(&first), false);
+  Test::assertEq<u64>(store.length(), 2);
+
+  let secondPath: String = String::create("/virtual/lsp/documents/second.ign");
+  let thirdPath: String = String::create("/virtual/lsp/documents/third.ign");
+
+  let Option::SOME(secondHandle) = store.findByPath(&secondPath) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(thirdHandle) = store.findByPath(&thirdPath) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i64>(secondHandle.version, 2);
+  Test::assertEq<i64>(thirdHandle.version, 3);
+}
