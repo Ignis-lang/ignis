@@ -1,0 +1,257 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+
+import SourceOverrides from "../build/sources";
+
+import LspAnalysis, analysisKeyOf, analyzeDocuments from "./analysis";
+import FileHoverIndex from "./hover_index";
+
+const HOVER_TEST_UTIL: str = "/// Doubles a value.\nexport function double(value: i32): i32 {\n  return value * 2;\n}\n";
+
+const HOVER_TEST_MAIN: str = "import double from \"./util\";\n\n/// Adds two numbers.\nfunction add(left: i32, right: i32): i32 {\n  return left + right;\n}\n\nrecord Point {\n  /// Horizontal.\n  public x: i32;\n  public y: i32;\n\n  public length(&self): i32 {\n    return self.x + self.y;\n  }\n}\n\nfunction main(): i32 {\n  let mut total: i32 = add(1, 2);\n  {\n    let mut total: i64 = 5;\n    let copy: i64 = total;\n    total = copy + 1;\n  }\n  let point: Point = Point { x: 1, y: 2 };\n  total = total + point.x + point.length() + double(4);\n  return total;\n}\n";
+
+/// The source of the module the test indexes, and its index.
+record HoverTestFile {
+  public text: String;
+  public index: FileHoverIndex;
+}
+
+/// Writes `main.ign` and `util.ign` into a scratch directory, analyzes
+/// `main.ign` with `mainText` as its open buffer, and returns its index.
+function hoverTestIndex(tag: str, mainText: str): HoverTestFile {
+  let directory: String = `/tmp/ignis_lsp_hover_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::fromString(&directory);
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&root)) {
+    Test::fail();
+  }
+
+  let utilText: String = String::create(HOVER_TEST_UTIL);
+  let text: String = String::create(mainText);
+  let mainPath: Path::PathBuf = root.join("main.ign");
+
+  let utilPath: Path::PathBuf = root.join("util.ign");
+
+  if (let Result::ERROR(_) = Fs::writeString(&utilPath, &utilText)) {
+    Test::fail();
+  }
+
+  if (let Result::ERROR(_) = Fs::writeString(&mainPath, &text)) {
+    Test::fail();
+  }
+
+  let path: Path::PathBuf = match (Fs::canonicalize(&mainPath)) {
+    Result::OK(canonical) -> canonical,
+    Result::ERROR(_) -> mainPath,
+  };
+
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&path, &text);
+
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let stdPath: Option<String> = Option::SOME(workingDirectory.join("std").toString());
+  let key: String = analysisKeyOf(&path);
+  let mut analysis: LspAnalysis = analyzeDocuments(&path, &key, &stdPath, &sources);
+
+  Test::assertEq<u64>(analysis.diagnostics.length(), 0);
+  Test::assertEq<u64>(analysis.hovers.length(), 1);
+
+  let Option::SOME(index) = analysis.hovers.pop() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assertEq<str>(index.path.toStr(), path.asStr());
+  return HoverTestFile { text: text, index: index };
+}
+
+/// The hover text `delta` bytes into the `occurrence`th (from 1) match of
+/// `needle`, or `<none>`.
+function hoverTextAt(file: &HoverTestFile, needle: str, occurrence: u64, delta: u64): String {
+  let wanted: String = String::create(needle);
+  let mut start: u64 = 0;
+  let mut found: u64 = 0;
+  let mut offset: u64 = 0;
+
+  while (found < occurrence) {
+    let rest: String = file.text.substringBytes(start, file.text.length());
+
+    let Option::SOME(position) = rest.indexOf(&wanted) else {
+      Test::fail();
+      return String::create("<needle not found>");
+    };
+
+    offset = start + position;
+    start = offset + 1;
+    found += 1;
+  }
+
+  return match (file.index.hoverAt(offset + delta)) {
+    Option::SOME(hit) -> hit.text,
+    Option::NONE -> String::create("<none>"),
+  };
+}
+
+/// A member access is one range and its object a smaller one inside it, so
+/// the object answers for itself and the member name for the member.
+@test
+function hoverIndexAnswersWithTheInnermostRange(): void {
+  let file: HoverTestFile = hoverTestIndex("innermost", HOVER_TEST_MAIN);
+
+  Test::assertEq<str>(
+    hoverTextAt(&file, "point.x", 1, 1).toStr(),
+    "main\n\n```ignis\nlet point: Point\n```\n\n*Defined in `main.ign`*",
+  );
+  Test::assertEq<str>(
+    hoverTextAt(&file, "point.x", 1, 6).toStr(),
+    "main\n\n```ignis\nx: i32\n```\n\n(field of `Point`)\n\n---\n\nHorizontal.\n\n*Defined in `main.ign`*",
+  );
+  Test::assertEq<str>(hoverTextAt(&file, "1, 2)", 1, 0).toStr(), "```ignis\ni32\n```");
+}
+
+/// A shadowing binding answers inside its block, and the outer one again
+/// after the block, although both use the same local slot index.
+@test
+function hoverIndexPairsEachUseWithTheBindingInScope(): void {
+  let file: HoverTestFile = hoverTestIndex("scopes", HOVER_TEST_MAIN);
+  let outer: str = "main\n\n```ignis\nlet mut total: i32\n```\n\n*Defined in `main.ign`*";
+  let inner: str = "main\n\n```ignis\nlet mut total: i64\n```\n\n*Defined in `main.ign`*";
+
+  Test::assertEq<str>(hoverTextAt(&file, "total", 1, 0).toStr(), outer);
+  Test::assertEq<str>(hoverTextAt(&file, "total", 2, 0).toStr(), inner);
+  Test::assertEq<str>(hoverTextAt(&file, "total", 3, 2).toStr(), inner);
+  Test::assertEq<str>(hoverTextAt(&file, "total", 4, 0).toStr(), inner);
+  Test::assertEq<str>(hoverTextAt(&file, "total", 5, 0).toStr(), outer);
+  Test::assertEq<str>(hoverTextAt(&file, "total", 6, 0).toStr(), outer);
+  Test::assertEq<str>(
+    hoverTextAt(&file, "left + right", 1, 0).toStr(),
+    "main\n\n```ignis\nleft: i32\n```\n\n(parameter)\n\n*Defined in `main.ign`*",
+  );
+}
+
+/// A called member resolves to the method on the receiver's type, and the
+/// receiver inside the method is its `self` parameter.
+@test
+function hoverIndexResolvesMethodCallsAndTheirReceiver(): void {
+  let file: HoverTestFile = hoverTestIndex("methods", HOVER_TEST_MAIN);
+  let method: str = "main\n\n```ignis\nPoint::length(&self): i32\n```\n\n(instance method)\n\n*Defined in `main.ign`*";
+
+  Test::assertEq<str>(hoverTextAt(&file, "point.length", 1, 7).toStr(), method);
+  Test::assertEq<str>(hoverTextAt(&file, "length(&self)", 1, 0).toStr(), method);
+  Test::assertEq<str>(
+    hoverTextAt(&file, "self.x", 1, 1).toStr(),
+    "main\n\n```ignis\nself: &Point\n```\n\n(parameter)\n\n*Defined in `main.ign`*",
+  );
+  Test::assertEq<str>(
+    hoverTextAt(&file, "Point {", 1, 0).toStr(),
+    "main\n\n```ignis\nrecord Point {\n  x: i32,\n  y: i32\n}\n```\n\n*Defined in `main.ign`*",
+  );
+}
+
+/// A symbol imported from another module shows that module's declaration
+/// and doc comment, both on the import line and where it is called.
+@test
+function hoverIndexShowsImportedSymbolsFromTheirModule(): void {
+  let file: HoverTestFile = hoverTestIndex("imports", HOVER_TEST_MAIN);
+  let imported: str = "util\n\n```ignis\nfunction double(value: i32): i32\n```\n\n---\n\nDoubles a value.\n\n*Defined in `util.ign`*";
+
+  Test::assertEq<str>(hoverTextAt(&file, "double", 1, 0).toStr(), imported);
+  Test::assertEq<str>(hoverTextAt(&file, "double(4)", 1, 3).toStr(), imported);
+  Test::assertEq<str>(
+    hoverTextAt(&file, "add(1", 1, 0).toStr(),
+    "main\n\n```ignis\nfunction add(left: i32, right: i32): i32\n```\n\n---\n\nAdds two numbers.\n\n*Defined in `main.ign`*",
+  );
+}
+
+/// Whitespace, keywords and punctuation name nothing.
+@test
+function hoverIndexFindsNothingBetweenNames(): void {
+  let file: HoverTestFile = hoverTestIndex("gaps", HOVER_TEST_MAIN);
+
+  Test::assertEq<str>(hoverTextAt(&file, "  {\n", 1, 0).toStr(), "<none>");
+  Test::assertEq<str>(hoverTextAt(&file, "record", 1, 2).toStr(), "<none>");
+  Test::assertEq<str>(hoverTextAt(&file, "): i32 {\n  let", 1, 4).toStr(), "<none>");
+}
+
+/// The byte offset of the first `needle` in `text`.
+function offsetOf(text: &String, needle: str): u64 {
+  let wanted: String = String::create(needle);
+
+  let Option::SOME(offset) = text.indexOf(&wanted) else {
+    Test::fail();
+    return 0;
+  };
+
+  return offset;
+}
+
+/// `before`, then `inserted`, then `after` bytes of `text` from `resume`.
+function spliced(text: &String, before: u64, inserted: str, resume: u64): String {
+  let head: String = text.substringBytes(0, before);
+  let tail: String = text.substringBytes(resume, text.length());
+  return head.concat(inserted).concat(&tail);
+}
+
+/// Asserts the hover `delta` bytes into `needle` of `current` covers
+/// `start..end` of `current` and describes `add`.
+function assertEditedHover(
+  file: &HoverTestFile,
+  current: &String,
+  needle: str,
+  delta: u64,
+  start: u64,
+  end: u64
+): void {
+  let Option::SOME(hit) = file.index.hoverAtIn(current, offsetOf(current, needle) + delta) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(hit.start, start);
+  Test::assertEq<u64>(hit.end, end);
+  Test::assertEq<str>(
+    hit.text.toStr(),
+    "main\n\n```ignis\nfunction add(left: i32, right: i32): i32\n```\n\n---\n\nAdds two numbers.\n\n*Defined in `main.ign`*",
+  );
+}
+
+/// After an edit, a position in the unchanged text before or after it finds
+/// the range the older index has there, moved by what the edit inserted or
+/// deleted before it.
+@test
+function hoverIndexFollowsTheTextAroundAnEdit(): void {
+  let file: HoverTestFile = hoverTestIndex("edited", HOVER_TEST_MAIN);
+  let call: u64 = offsetOf(&file.text, "add(1");
+
+  let appended: String = file.text.concat("function broken(\n");
+  assertEditedHover(&file, &appended, "add(1", 1, call, call + 3);
+
+  let prepended: String = spliced(&file.text, 0, "// note\n", 0);
+  assertEditedHover(&file, &prepended, "add(1", 2, call + 8, call + 11);
+
+  let doc: u64 = offsetOf(&file.text, "/// Adds");
+  let deleted: String = spliced(&file.text, doc, "", doc + 22);
+  assertEditedHover(&file, &deleted, "add(1", 3, call - 22, call - 19);
+}
+
+/// A position inside the edited region finds nothing, and neither does a
+/// name the edit extended past the range the older index has for it.
+@test
+function hoverIndexFindsNothingInsideAnEdit(): void {
+  let file: HoverTestFile = hoverTestIndex("inside_edit", HOVER_TEST_MAIN);
+  let call: u64 = offsetOf(&file.text, "add(1");
+
+  let inserted: String = spliced(&file.text, call, "zzz ", call);
+  Test::assert(file.index.hoverAtIn(&inserted, call + 1).isNone());
+
+  let renamed: String = spliced(&file.text, call + 3, "x", call + 3);
+  Test::assert(file.index.hoverAtIn(&renamed, call).isNone());
+}

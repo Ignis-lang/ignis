@@ -1,0 +1,1498 @@
+//! The hover index of one analyzed file: every range a hover can land on,
+//! innermost first, with the text shown for it.
+//!
+//! The index is built once per analysis, while the analyzer's stores are
+//! alive, and keeps only byte ranges and rendered texts, so the stores can be
+//! dropped. A lookup is a binary search plus a walk up the enclosing ranges.
+//!
+//! A range is an identifier or literal: a name where it is declared, a
+//! reference to a declaration or local, a member access, an import binding.
+//! The host server instead picks the smallest node of any kind
+//! (crates/ignis_lsp/src/server.rs:2482), which also answers on keywords,
+//! operators and whitespace inside a block; here those find nothing.
+
+import HashMap from "std::collections";
+import String from "std::string";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+import SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+
+import Doc from "../doc/mod";
+
+import definitionHoverText, localHoverText, typeHoverText from "./hover_text";
+
+/// Text keys: a kind in the high 32 bits, the raw id in the low ones.
+const HOVER_KEY_DEFINITION: u64 = 1;
+const HOVER_KEY_NAMESPACE: u64 = 2;
+const HOVER_KEY_LOCAL: u64 = 3;
+const HOVER_KEY_TYPE: u64 = 4;
+const HOVER_KEY_UNIT: u64 = 4294967296;
+
+/// One hoverable byte range, `start..=end` as the host compares them.
+/// `parent` is one plus the position of the innermost entry that contains
+/// this one, 0 when none does.
+record HoverEntry {
+  public start: u64;
+  public end: u64;
+  public parent: u64;
+  public text: u64;
+}
+
+/// What a hover found: the byte range it covers and its markdown.
+export record HoverHit {
+  public start: u64;
+  public end: u64;
+  public text: String;
+}
+
+/// The hover ranges of one file, sorted by start and, for equal starts,
+/// longest first, and the source they were built from.
+export record FileHoverIndex {
+  public path: String;
+  source: String;
+  entries: Vector<HoverEntry>;
+  texts: Vector<String>;
+
+  public entryCount(&self): u64 {
+    return self.entries.length();
+  }
+
+  /// The innermost range that contains `offset`, both ends included.
+  public hoverAt(&self, offset: u64): Option<HoverHit> {
+    let mut low: u64 = 0;
+    let mut high: u64 = self.entries.length();
+
+    while (low < high) {
+      let middle: u64 = low + (high - low) / 2;
+      let Option::SOME(entry) = self.entries.get(middle) else {
+        return Option::NONE;
+      };
+
+      if (entry.start <= offset) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+
+    let mut candidate: u64 = low;
+
+    while (candidate > 0) {
+      let Option::SOME(entry) = self.entries.get(candidate - 1) else {
+        return Option::NONE;
+      };
+
+      if (entry.end >= offset) {
+        let Option::SOME(text) = self.texts.get(entry.text) else {
+          return Option::NONE;
+        };
+
+        return Option::SOME(HoverHit { start: entry.start, end: entry.end, text: text.clone() });
+      }
+
+      candidate = entry.parent;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The innermost range that contains `offset` of `current`, the text the
+  /// client has now, with the range in `current`'s coordinates. When the
+  /// index was built from another text, only a position and a range outside
+  /// the edited region answer, and the name under the cursor has to lie
+  /// inside the range: an edit that extends the name makes it another one.
+  public hoverAtIn(&self, current: &String, offset: u64): Option<HoverHit> {
+    if (self.source.equals(current)) {
+      return self.hoverAt(offset);
+    }
+
+    let edit: TextEdit = textEditBetween(&self.source, current);
+
+    let Option::SOME(sourceOffset) = edit.sourceOffsetOf(offset) else {
+      return Option::NONE;
+    };
+    let Option::SOME(hit) = self.hoverAt(sourceOffset) else {
+      return Option::NONE;
+    };
+    let Option::SOME(start) = edit.currentStartOf(hit.start, hit.end) else {
+      return Option::NONE;
+    };
+
+    let end: u64 = start + (hit.end - hit.start);
+
+    if (identifierStart(current, offset) < start || identifierEnd(current, offset) > end) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(HoverHit { start: start, end: end, text: hit.text.clone() });
+  }
+}
+
+/// How the text an index was built from differs from the current one: the
+/// bytes both start with and, after those, the bytes both end with.
+record TextEdit {
+  public prefix: u64;
+  public suffix: u64;
+  public sourceLength: u64;
+  public currentLength: u64;
+
+  /// The offset in the source of `offset` in the current text, or `NONE`
+  /// inside the edited region.
+  public sourceOffsetOf(&self, offset: u64): Option<u64> {
+    if (offset <= self.prefix) {
+      return Option::SOME(offset);
+    }
+
+    if (offset >= self.currentLength - self.suffix) {
+      return Option::SOME(offset + self.sourceLength - self.currentLength);
+    }
+
+    return Option::NONE;
+  }
+
+  /// Where the source range `start..end` starts in the current text, or
+  /// `NONE` when it reaches into the edited region.
+  public currentStartOf(&self, start: u64, end: u64): Option<u64> {
+    if (end <= self.prefix) {
+      return Option::SOME(start);
+    }
+
+    if (start >= self.sourceLength - self.suffix) {
+      return Option::SOME(start + self.currentLength - self.sourceLength);
+    }
+
+    return Option::NONE;
+  }
+}
+
+/// The edit that turns `source` into `current`. The suffix never overlaps
+/// the prefix in either text.
+function textEditBetween(source: &String, current: &String): TextEdit {
+  let sourceLength: u64 = source.length();
+  let currentLength: u64 = current.length();
+  let shorter: u64 = sourceLength < currentLength ? sourceLength : currentLength;
+  let mut prefix: u64 = 0;
+
+  while (prefix < shorter && source.byteAt(prefix).unwrapOr(0) == current.byteAt(prefix).unwrapOr(1)) {
+    prefix += 1;
+  }
+
+  let mut suffix: u64 = 0;
+
+  while (suffix < shorter - prefix) {
+    let sourceByte: u8 = source.byteAt(sourceLength - suffix - 1).unwrapOr(0);
+
+    if (sourceByte != current.byteAt(currentLength - suffix - 1).unwrapOr(1)) {
+      break;
+    }
+
+    suffix += 1;
+  }
+
+  return TextEdit {
+    prefix: prefix,
+    suffix: suffix,
+    sourceLength: sourceLength,
+    currentLength: currentLength,
+  };
+}
+
+/// Where the identifier at or just before `offset` of `text` starts;
+/// `offset` itself when there is none.
+function identifierStart(text: &String, offset: u64): u64 {
+  let mut start: u64 = offset;
+
+  while (start > 0 && isIdentifierByte(text.byteAt(start - 1).unwrapOr(32))) {
+    start -= 1;
+  }
+
+  return start;
+}
+
+/// Where the identifier at `offset` of `text` ends; `offset` itself when
+/// there is none.
+function identifierEnd(text: &String, offset: u64): u64 {
+  let mut end: u64 = offset;
+
+  while (isIdentifierByte(text.byteAt(end).unwrapOr(32))) {
+    end += 1;
+  }
+
+  return end;
+}
+
+/// What every file's index reads besides its own module: the path of each
+/// module, indexed like the analysis records, and the placeholder records
+/// namespaces and extern blocks are bound to.
+export record HoverProgram {
+  public modulePaths: Vector<String>;
+  public namespaces: HashMap<u32, boolean>;
+}
+
+/// The binding site or use of a local, waiting to be paired: a use shows the
+/// binding that is in scope, which is the latest one before it with the same
+/// local slot.
+record LocalSite {
+  public start: u64;
+  public end: u64;
+  public slot: u64;
+  public pattern: u32;
+  public isBinding: boolean;
+}
+
+/// The per-module tables the collectors look entries up in, each built once.
+record ModuleHoverTables {
+  public exprTypes: HashMap<u32, Analyzer::TypeId>;
+  public callTargets: HashMap<u32, Analyzer::DefinitionId>;
+  /// Callee expression to the call expression it is called by.
+  public calleeCalls: HashMap<u32, u32>;
+  public localTypes: HashMap<u32, Analyzer::TypeId>;
+  public localMutable: HashMap<u32, boolean>;
+  /// Parameter patterns, with the declared type when the signature has one.
+  public parameters: HashMap<u32, Option<Analyzer::TypeId>>;
+}
+
+/// An index under construction.
+record HoverCollector {
+  public path: String;
+  public starts: Vector<u64>;
+  public ends: Vector<u64>;
+  public textIndexes: Vector<u64>;
+  public texts: Vector<String>;
+  public textByKey: HashMap<u64, u64>;
+  public locals: Vector<LocalSite>;
+}
+
+/// The placeholder records every namespace and extern block of `modules` is
+/// bound to, and the path of every module.
+export function hoverProgramOf(
+  modules: &Vector<Ast::Module>,
+  records: &Vector<Analyzer::ModuleAnalysisRecord>,
+): HoverProgram {
+  let mut program: HoverProgram = HoverProgram {
+    modulePaths: Vector::new<String>(),
+    namespaces: HashMap::new<u32, boolean>(),
+  };
+  let mut index: u64 = 0;
+
+  while (index < records.length()) {
+    let Option::SOME(analysisRecord) = records.get(index) else {
+      break;
+    };
+
+    program.modulePaths.push(analysisRecord.info.pathText.clone());
+
+    if (let Option::SOME(module) = modules.get(index)) {
+      collectNamespaceDefinitions(module, &analysisRecord.output, &module.roots, &mut program.namespaces);
+    }
+
+    index += 1;
+  }
+
+  return program;
+}
+function collectNamespaceDefinitions(
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemIds: &Vector<Ast::ItemId>,
+  namespaces: &mut HashMap<u32, boolean>,
+): void {
+  let mut namespacesRef: &mut HashMap<u32, boolean> = namespaces;
+  let mut index: u64 = 0;
+
+  while (index < itemIds.length()) {
+    let Option::SOME(itemId) = itemIds.get(index) else {
+      break;
+    };
+
+    match (module.items.get(*itemId)) {
+      Option::SOME(Ast::Item::Node::Namespace(namespaceItem)) -> {
+        if (let Option::SOME(defId) = Doc::itemDefinition(analysis, *itemId)) {
+          namespacesRef.insert(defId.raw(), true);
+        }
+
+        collectNamespaceDefinitions(module, analysis, &namespaceItem.items, namespacesRef);
+      },
+      Option::SOME(Ast::Item::Node::Extern(externItem)) -> {
+        if (let Option::SOME(defId) = Doc::itemDefinition(analysis, *itemId)) {
+          namespacesRef.insert(defId.raw(), true);
+        }
+
+        collectNamespaceDefinitions(module, analysis, &externItem.items, namespacesRef);
+      },
+      Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
+        if (let Option::SOME(innerId) = exportItem.declaration) {
+          let mut inner: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+          inner.push(innerId);
+          collectNamespaceDefinitions(module, analysis, &inner, namespacesRef);
+        }
+      },
+      _ -> {},
+    };
+
+    index += 1;
+  }
+}
+
+/// Builds the hover index of the module analyzed as `analysisRecord`, whose
+/// source is `text`.
+export function buildFileHoverIndex(
+  text: &String,
+  module: &Ast::Module,
+  analysisRecord: &Analyzer::ModuleAnalysisRecord,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): FileHoverIndex {
+  let analysis: &Analyzer::AnalyzerOutput = &analysisRecord.output;
+  let mut collector: HoverCollector = HoverCollector {
+    path: analysisRecord.info.pathText.clone(),
+    starts: Vector::new<u64>(),
+    ends: Vector::new<u64>(),
+    textIndexes: Vector::new<u64>(),
+    texts: Vector::new<String>(),
+    textByKey: HashMap::new<u64, u64>(),
+    locals: Vector::new<LocalSite>(),
+  };
+  let mut tables: ModuleHoverTables = moduleHoverTables(analysis);
+
+  collectItemHovers(&mut collector, &mut tables, text, module, analysis, &module.roots, program, defs, types, symbols);
+  collectImportHovers(&mut collector, &analysisRecord.imports, program, defs, types, symbols);
+  collectCallees(&mut tables, module);
+  collectPatternHovers(&mut collector, text, module, analysis, program, defs, types, symbols);
+  collectExpressionHovers(&mut collector, &tables, module, analysis, program, defs, types, symbols);
+  pairLocals(&mut collector, &tables, module, defs, types, symbols);
+
+  return finishIndex(collector, text.clone());
+}
+
+/// The typechecker's side tables as lookups. The last entry for a node wins,
+/// as it does in lowering's reverse scans.
+function moduleHoverTables(analysis: &Analyzer::AnalyzerOutput): ModuleHoverTables {
+  let typecheck: &Analyzer::Typecheck::TypecheckOutput = &analysis.typecheck;
+  let mut tables: ModuleHoverTables = ModuleHoverTables {
+    exprTypes: HashMap::new<u32, Analyzer::TypeId>(),
+    callTargets: HashMap::new<u32, Analyzer::DefinitionId>(),
+    calleeCalls: HashMap::new<u32, u32>(),
+    localTypes: HashMap::new<u32, Analyzer::TypeId>(),
+    localMutable: HashMap::new<u32, boolean>(),
+    parameters: HashMap::new<u32, Option<Analyzer::TypeId>>(),
+  };
+  let mut index: u64 = 0;
+
+  while (index < typecheck.exprTypes.nodeIds.length()) {
+    if (let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index)) {
+      if (let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index)) {
+        tables.exprTypes.insert(*nodeId, *typeId);
+      }
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < typecheck.callTargets.nodeIds.length()) {
+    if (let Option::SOME(nodeId) = typecheck.callTargets.nodeIds.get(index)) {
+      if (let Option::SOME(defId) = typecheck.callTargets.defIds.get(index)) {
+        tables.callTargets.insert(*nodeId, *defId);
+      }
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < typecheck.localTypes.patterns.length()) {
+    if (let Option::SOME(pattern) = typecheck.localTypes.patterns.get(index)) {
+      if (let Option::SOME(typeId) = typecheck.localTypes.typeIds.get(index)) {
+        tables.localTypes.insert(*pattern, *typeId);
+      }
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < typecheck.localUses.patterns.length()) {
+    if (let Option::SOME(pattern) = typecheck.localUses.patterns.get(index)) {
+      if (let Option::SOME(mutable) = typecheck.localUses.mutableFlags.get(index)) {
+        tables.localMutable.insert(*pattern, *mutable);
+      }
+    }
+
+    index += 1;
+  }
+
+  return tables;
+}
+
+/// The key an entry's text is shared under.
+function hoverKey(kind: u64, raw: u32): u64 {
+  return kind * HOVER_KEY_UNIT + (raw as u64);
+}
+
+/// Adds the range `start..=end` showing the text stored under `key`.
+/// Returns false when no text is stored under it yet.
+function addKeyedEntry(collector: &mut HoverCollector, start: u64, end: u64, key: u64): boolean {
+  let mut collectorRef: &mut HoverCollector = collector;
+
+  let Option::SOME(textIndex) = collectorRef.textByKey.get(&key) else {
+    return false;
+  };
+
+  let index: u64 = *textIndex;
+  collectorRef.starts.push(start);
+  collectorRef.ends.push(end);
+  collectorRef.textIndexes.push(index);
+  return true;
+}
+
+/// Stores `text` under `key` and adds the range showing it. An empty text
+/// adds nothing.
+function addTextEntry(
+  collector: &mut HoverCollector,
+  start: u64,
+  end: u64,
+  key: u64,
+  text: String
+): void {
+  let mut collectorRef: &mut HoverCollector = collector;
+
+  if (text.length() == 0) {
+    return;
+  }
+
+  let textIndex: u64 = collectorRef.texts.length();
+  collectorRef.texts.push(text);
+  collectorRef.textByKey.insert(key, textIndex);
+  addKeyedEntry(collectorRef, start, end, key);
+}
+
+function addDefinitionEntry(
+  collector: &mut HoverCollector,
+  start: u64,
+  end: u64,
+  defId: Analyzer::DefinitionId,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let raw: u32 = defId.raw();
+  let isNamespace: boolean = program.namespaces.get(&raw).isSome();
+  let key: u64 = hoverKey(isNamespace ? HOVER_KEY_NAMESPACE : HOVER_KEY_DEFINITION, raw);
+
+  if (addKeyedEntry(collector, start, end, key)) {
+    return;
+  }
+
+  let text: String = definitionHoverText(defId, isNamespace, defs, types, symbols, &program.modulePaths);
+  addTextEntry(collector, start, end, key, text);
+}
+
+function addTypeEntry(
+  collector: &mut HoverCollector,
+  start: u64,
+  end: u64,
+  typeId: Analyzer::TypeId,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let key: u64 = hoverKey(HOVER_KEY_TYPE, typeId.raw());
+
+  if (addKeyedEntry(collector, start, end, key)) {
+    return;
+  }
+
+  addTextEntry(collector, start, end, key, typeHoverText(typeId, defs, types, symbols));
+}
+
+/// True for a byte that can continue an identifier.
+function isIdentifierByte(byte: u8): boolean {
+  return (byte >= 'a' as u8 && byte <= 'z' as u8) || (byte >= 'A' as u8 && byte <= 'Z' as u8) || (byte >= '0' as u8 && byte <= '9' as u8) || byte == '_' as u8 || byte >= 128;
+}
+
+/// Where `name` is first written as a whole word in `text` between `start`
+/// and `end`, or `NONE`. Declarations keep only their whole span, and the
+/// name follows the keyword and modifiers.
+function findWord(text: &String, start: u64, end: u64, name: &String): Option<u64> {
+  let length: u64 = name.length();
+
+  if (length == 0 || end > text.length() || start + length > end) {
+    return Option::NONE;
+  }
+
+  let mut position: u64 = start;
+
+  while (position + length <= end) {
+    if (wordAt(text, position, name)) {
+      return Option::SOME(position);
+    }
+
+    position += 1;
+  }
+
+  return Option::NONE;
+}
+
+function wordAt(text: &String, position: u64, name: &String): boolean {
+  let length: u64 = name.length();
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    if (text.byteAt(position + index).unwrapOr(0) != name.byteAt(index).unwrapOr(1)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  if (position > 0 && isIdentifierByte(text.byteAt(position - 1).unwrapOr(32))) {
+    return false;
+  }
+
+  return !isIdentifierByte(text.byteAt(position + length).unwrapOr(32));
+}
+
+/// Adds a declaration's name, found inside `span`, as a hover of `defId`.
+function addDeclarationName(
+  collector: &mut HoverCollector,
+  text: &String,
+  span: SourceSpan,
+  name: &String,
+  defId: Analyzer::DefinitionId,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let Option::SOME(start) = findWord(text, span.start, span.end, name) else {
+    return;
+  };
+
+  addDefinitionEntry(collector, start, start + name.length(), defId, program, defs, types, symbols);
+}
+
+/// True when `span` points into the file being indexed. Trait default
+/// methods are copied into their implementers with the trait's spans.
+function spanInFile(path: &String, span: SourceSpan): boolean {
+  return path.equals(span.filePath);
+}
+
+/// Adds the names of the declarations `itemIds` lists, their members, and
+/// records the parameters of their functions.
+function collectItemHovers(
+  collector: &mut HoverCollector,
+  tables: &mut ModuleHoverTables,
+  text: &String,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemIds: &Vector<Ast::ItemId>,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let mut index: u64 = 0;
+
+  while (index < itemIds.length()) {
+    if (let Option::SOME(itemId) = itemIds.get(index)) {
+      collectItemHover(collector, tables, text, module, analysis, *itemId, program, defs, types, symbols);
+    }
+
+    index += 1;
+  }
+}
+
+function collectItemHover(
+  collector: &mut HoverCollector,
+  tables: &mut ModuleHoverTables,
+  text: &String,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  itemId: Ast::ItemId,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let Option::SOME(item) = module.items.get(itemId) else {
+    return;
+  };
+
+  let span: SourceSpan = itemSpanOf(item);
+
+  if (!spanInFile(&collector.path, span)) {
+    return;
+  }
+
+  let defId: Option<Analyzer::DefinitionId> = Doc::itemDefinition(analysis, itemId);
+
+  if (let Option::SOME(id) = defId) {
+    if (let Option::SOME(name) = itemNameOf(item)) {
+      addDeclarationName(collector, text, span, &name, id, program, defs, types, symbols);
+    }
+  }
+
+  match (item) {
+    Ast::Item::Node::Function(functionItem) -> {
+      recordParameters(tables, &functionItem.parameters, defId, defs);
+    },
+    Ast::Item::Node::Record(recordItem) -> {
+      collectMemberHovers(collector, text, module, &recordItem.fields, defId, program, defs, types, symbols);
+      collectItemHovers(collector, tables, text, module, analysis, &recordItem.methods, program, defs, types, symbols);
+    },
+    Ast::Item::Node::Enum(enumItem) -> {
+      collectMemberHovers(collector, text, module, &enumItem.variants, defId, program, defs, types, symbols);
+      collectItemHovers(collector, tables, text, module, analysis, &enumItem.methods, program, defs, types, symbols);
+    },
+    Ast::Item::Node::Trait(traitItem) -> {
+      collectItemHovers(collector, tables, text, module, analysis, &traitItem.methods, program, defs, types, symbols);
+    },
+    Ast::Item::Node::Namespace(namespaceItem) -> {
+      collectItemHovers(collector, tables, text, module, analysis, &namespaceItem.items, program, defs, types, symbols);
+    },
+    Ast::Item::Node::Extern(externItem) -> {
+      collectItemHovers(collector, tables, text, module, analysis, &externItem.items, program, defs, types, symbols);
+    },
+    Ast::Item::Node::Export(exportItem) -> {
+      if (let Option::SOME(innerId) = exportItem.declaration) {
+        collectItemHover(collector, tables, text, module, analysis, innerId, program, defs, types, symbols);
+      }
+    },
+    _ -> {},
+  };
+}
+
+function itemSpanOf(item: &Ast::Item::Node): SourceSpan {
+  return match (item) {
+    Ast::Item::Node::Function(node) -> node.span,
+    Ast::Item::Node::Record(node) -> node.span,
+    Ast::Item::Node::Enum(node) -> node.span,
+    Ast::Item::Node::Namespace(node) -> node.span,
+    Ast::Item::Node::Import(node) -> node.span,
+    Ast::Item::Node::Extern(node) -> node.span,
+    Ast::Item::Node::Constant(node) -> node.span,
+    Ast::Item::Node::Export(node) -> node.span,
+    Ast::Item::Node::TypeAlias(node) -> node.span,
+    Ast::Item::Node::Trait(node) -> node.span,
+  };
+}
+
+/// The name a declaration item is written with. A multi-segment namespace
+/// is bound under its last segment.
+function itemNameOf(item: &Ast::Item::Node): Option<String> {
+  return match (item) {
+    Ast::Item::Node::Function(node) -> Option::SOME(node.name.clone()),
+    Ast::Item::Node::Record(node) -> Option::SOME(node.name.clone()),
+    Ast::Item::Node::Enum(node) -> Option::SOME(node.name.clone()),
+    Ast::Item::Node::Namespace(node) -> Option::SOME(Doc::lastSegment(&node.name)),
+    Ast::Item::Node::Extern(node) -> Option::SOME(Doc::lastSegment(&node.name)),
+    Ast::Item::Node::Constant(node) -> Option::SOME(node.name.clone()),
+    Ast::Item::Node::TypeAlias(node) -> Option::SOME(node.name.clone()),
+    Ast::Item::Node::Trait(node) -> Option::SOME(node.name.clone()),
+    _ -> Option::NONE,
+  };
+}
+
+/// Marks a function's or method's parameter patterns as parameters, typed as
+/// its signature declares them. The written parameters line up with the
+/// definition's, the receiver included.
+function recordParameters(
+  tables: &mut ModuleHoverTables,
+  parameters: &Vector<Ast::PatternId>,
+  defId: Option<Analyzer::DefinitionId>,
+  defs: &Analyzer::DefinitionStore,
+): void {
+  let mut tablesRef: &mut ModuleHoverTables = tables;
+  let mut paramDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+  if (let Option::SOME(id) = defId) {
+    match (defs.get(id)) {
+      Option::SOME(Analyzer::Definition::Function(functionDef)) -> {
+        paramDefs = copyDefinitionIds(&functionDef.params);
+      },
+      Option::SOME(Analyzer::Definition::Method(methodDef)) -> {
+        paramDefs = copyDefinitionIds(&methodDef.params);
+      },
+      _ -> {},
+    };
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < parameters.length()) {
+    if (let Option::SOME(pattern) = parameters.get(index)) {
+      let mut declared: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (parameters.length() == paramDefs.length()) {
+        if (let Option::SOME(paramId) = paramDefs.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defs.get(*paramId)) {
+            declared = Option::SOME(variable.declaredType);
+          }
+        }
+      }
+
+      tablesRef.parameters.insert(pattern.raw(), declared);
+    }
+
+    index += 1;
+  }
+}
+
+function copyDefinitionIds(ids: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+  let mut copy: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut index: u64 = 0;
+
+  while (index < ids.length()) {
+    if (let Option::SOME(id) = ids.get(index)) {
+      copy.push(*id);
+    }
+
+    index += 1;
+  }
+
+  return copy;
+}
+
+/// Adds the field, variant and static field names of a record or enum.
+/// Members are matched to their definitions by name.
+function collectMemberHovers(
+  collector: &mut HoverCollector,
+  text: &String,
+  module: &Ast::Module,
+  members: &Vector<Ast::PatternId>,
+  ownerId: Option<Analyzer::DefinitionId>,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let Option::SOME(owner) = ownerId else {
+    return;
+  };
+
+  let memberDefs: Vector<Analyzer::DefinitionId> = memberDefinitions(owner, defs);
+  let mut index: u64 = 0;
+
+  while (index < members.length()) {
+    if (let Option::SOME(pattern) = members.get(index)) {
+      let span: SourceSpan = patternSpanOf(module, *pattern);
+
+      if (let Option::SOME(name) = memberNameOf(module, *pattern)) {
+        if (let Option::SOME(memberId) = definitionNamed(&memberDefs, &name, defs, symbols)) {
+          addDeclarationName(collector, text, span, &name, memberId, program, defs, types, symbols);
+        }
+      }
+    }
+
+    index += 1;
+  }
+}
+
+/// Every field, variant and static field of a record or enum.
+function memberDefinitions(
+  owner: Analyzer::DefinitionId,
+  defs: &Analyzer::DefinitionStore
+): Vector<Analyzer::DefinitionId> {
+  let mut all: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+  match (defs.get(owner)) {
+    Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+      appendDefinitionIds(&mut all, &recordDef.fields);
+      appendDefinitionIds(&mut all, &recordDef.staticFields);
+    },
+    Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+      appendDefinitionIds(&mut all, &enumDef.variants);
+      appendDefinitionIds(&mut all, &enumDef.staticFields);
+    },
+    _ -> {},
+  };
+
+  return all;
+}
+
+function appendDefinitionIds(
+  target: &mut Vector<Analyzer::DefinitionId>,
+  ids: &Vector<Analyzer::DefinitionId>
+): void {
+  let mut targetRef: &mut Vector<Analyzer::DefinitionId> = target;
+  let mut index: u64 = 0;
+
+  while (index < ids.length()) {
+    if (let Option::SOME(id) = ids.get(index)) {
+      targetRef.push(*id);
+    }
+
+    index += 1;
+  }
+}
+
+/// The first of `candidates` declaring `name`.
+function definitionNamed(
+  candidates: &Vector<Analyzer::DefinitionId>,
+  name: &String,
+  defs: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+): Option<Analyzer::DefinitionId> {
+  let mut index: u64 = 0;
+
+  while (index < candidates.length()) {
+    if (let Option::SOME(candidate) = candidates.get(index)) {
+      if (let Option::SOME(definition) = defs.get(*candidate)) {
+        if (name.equals(symbols.resolve(definition.name()).unwrapOr(""))) {
+          return Option::SOME(*candidate);
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+function patternSpanOf(module: &Ast::Module, pattern: Ast::PatternId): SourceSpan {
+  return match (module.patterns.get(pattern)) {
+    Option::SOME(Ast::Pattern::Node::Wildcard(node)) -> node.span,
+    Option::SOME(Ast::Pattern::Node::Binding(node)) -> node.span,
+    Option::SOME(Ast::Pattern::Node::Literal(node)) -> node.span,
+    Option::SOME(Ast::Pattern::Node::Path(node)) -> node.span,
+    Option::SOME(Ast::Pattern::Node::Tuple(node)) -> node.span,
+    Option::SOME(Ast::Pattern::Node::Or(node)) -> node.span,
+    Option::NONE -> SourceSpan::new("", 0, 0),
+  };
+}
+
+/// The name a field, variant or static field pattern declares.
+function memberNameOf(module: &Ast::Module, pattern: Ast::PatternId): Option<String> {
+  return match (module.patterns.get(pattern)) {
+    Option::SOME(Ast::Pattern::Node::Binding(node)) -> Option::SOME(node.name.clone()),
+    Option::SOME(Ast::Pattern::Node::Path(node)) -> lastSegmentOf(&node.segments),
+    _ -> Option::NONE,
+  };
+}
+
+function lastSegmentOf(segments: &Vector<String>): Option<String> {
+  if (segments.length() == 0) {
+    return Option::NONE;
+  }
+
+  return match (segments.get(segments.length() - 1)) {
+    Option::SOME(segment) -> Option::SOME(segment.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+/// Adds every name an import line binds, as a hover of what it imports.
+function collectImportHovers(
+  collector: &mut HoverCollector,
+  overlay: &Analyzer::Imports::ImportOverlay,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let mut index: u64 = 0;
+
+  while (index < overlay.defs.length()) {
+    let implicit: boolean = match (overlay.implicit.get(index)) {
+      Option::SOME(flag) -> *flag,
+      Option::NONE -> true,
+    };
+
+    if (!implicit) {
+      if (let Option::SOME(defId) = overlay.defs.get(index)) {
+        if (let Option::SOME(span) = overlay.spans.get(index)) {
+          if (spanInFile(&collector.path, *span)) {
+            addDefinitionEntry(collector, span.start, span.end, *defId, program, defs, types, symbols);
+          }
+        }
+      }
+    }
+
+    index += 1;
+  }
+}
+
+/// Maps each callee to the call it is called by, and marks lambda
+/// parameters as parameters.
+function collectCallees(tables: &mut ModuleHoverTables, module: &Ast::Module): void {
+  let mut tablesRef: &mut ModuleHoverTables = tables;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < module.expressions.length()) {
+    match (module.expressions.get(Id::fromRaw<Ast::ExpressionTag>(raw))) {
+      Option::SOME(Ast::Expression::Node::Call(call)) -> {
+        tablesRef.calleeCalls.insert(call.callee.raw(), raw);
+      },
+      Option::SOME(Ast::Expression::Node::Lambda(lambda)) -> {
+        let mut index: u64 = 0;
+
+        while (index < lambda.parameters.length()) {
+          if (let Option::SOME(pattern) = lambda.parameters.get(index)) {
+            let patternRaw: u32 = pattern.raw();
+
+            if (tablesRef.parameters.get(&patternRaw).isNone()) {
+              tablesRef.parameters.insert(patternRaw, Option::NONE);
+            }
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+
+    raw += 1;
+  }
+}
+
+/// The slot a local is resolved to: its function and its index there.
+/// Indices are reused by sibling scopes, so a slot names a binding only
+/// together with the position of the use.
+function localSlot(local: &Analyzer::ResolverBodies::LocalId): u64 {
+  return (local.enclosingFn.raw() as u64) * HOVER_KEY_UNIT + (local.index as u64);
+}
+
+/// Adds the local binding sites and the enum variants path patterns name.
+function collectPatternHovers(
+  collector: &mut HoverCollector,
+  text: &String,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let mut collectorRef: &mut HoverCollector = collector;
+  let bodies: &Analyzer::ResolverBodies::BodyResolutionMap = &analysis.resolvedBodies.bodyResolution;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < module.patterns.length()) {
+    let resolved: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(bodies, raw);
+
+    match (module.patterns.get(Id::fromRaw<Ast::PatternTag>(raw))) {
+      Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
+        if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(local)) = &resolved) {
+          if (spanInFile(&collectorRef.path, binding.span)) {
+            let start: u64 = findWord(text, binding.span.start, binding.span.end, &binding.name).unwrapOr(binding.span.start);
+
+            collectorRef.locals.push(LocalSite {
+              start: start,
+              end: start + binding.name.length(),
+              slot: localSlot(&local),
+              pattern: raw,
+              isBinding: true,
+            });
+          }
+        }
+      },
+      Option::SOME(Ast::Pattern::Node::Path(path)) -> {
+        if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = &resolved) {
+          if (spanInFile(&collectorRef.path, path.span)) {
+            let end: u64 = path.span.start + writtenPathLength(&path.segments);
+            addDefinitionEntry(collectorRef, path.span.start, end, defId, program, defs, types, symbols);
+          }
+        }
+      },
+      _ -> {},
+    };
+
+    raw += 1;
+  }
+}
+
+/// The length of `segments` written with `::` between them.
+function writtenPathLength(segments: &Vector<String>): u64 {
+  let mut length: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < segments.length()) {
+    if (let Option::SOME(segment) = segments.get(index)) {
+      if (index > 0) {
+        length += 2;
+      }
+
+      length += segment.length();
+    }
+
+    index += 1;
+  }
+
+  return length;
+}
+
+/// Adds the names, member accesses and literals of the module's
+/// expressions. A name that resolves to a local is left for `pairLocals`.
+function collectExpressionHovers(
+  collector: &mut HoverCollector,
+  tables: &ModuleHoverTables,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let collectorRef: &mut HoverCollector = collector;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < module.expressions.length()) {
+    match (module.expressions.get(Id::fromRaw<Ast::ExpressionTag>(raw))) {
+      Option::SOME(Ast::Expression::Node::Variable(variable)) -> {
+        collectNameHover(collectorRef, tables, analysis, raw, variable.span, program, defs, types, symbols);
+      },
+      Option::SOME(Ast::Expression::Node::Path(path)) -> {
+        collectNameHover(collectorRef, tables, analysis, raw, path.span, program, defs, types, symbols);
+      },
+      Option::SOME(Ast::Expression::Node::MemberAccess(access)) -> {
+        collectMemberAccessHover(collectorRef, tables, analysis, raw, &access, program, defs, types, symbols);
+      },
+      Option::SOME(Ast::Expression::Node::Literal(literal)) -> {
+        if (spanInFile(&collectorRef.path, literal.span)) {
+          if (let Option::SOME(typeId) = tables.exprTypes.get(&raw)) {
+            addTypeEntry(collectorRef, literal.span.start, literal.span.end, *typeId, defs, types, symbols);
+          }
+        }
+      },
+      _ -> {},
+    };
+
+    raw += 1;
+  }
+}
+
+/// The overload a call through `calleeRaw` selected, when the typechecker
+/// recorded one.
+function selectedCallTarget(
+  tables: &ModuleHoverTables,
+  calleeRaw: u32
+): Option<Analyzer::DefinitionId> {
+  let Option::SOME(callRaw) = tables.calleeCalls.get(&calleeRaw) else {
+    return Option::NONE;
+  };
+
+  return match (tables.callTargets.get(callRaw)) {
+    Option::SOME(defId) -> Option::SOME(*defId),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+/// A variable or path expression: the overload its call selected, else what
+/// it resolves to, else its type (server.rs:2551).
+function collectNameHover(
+  collector: &mut HoverCollector,
+  tables: &ModuleHoverTables,
+  analysis: &Analyzer::AnalyzerOutput,
+  raw: u32,
+  span: SourceSpan,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let mut collectorRef: &mut HoverCollector = collector;
+
+  if (!spanInFile(&collectorRef.path, span)) {
+    return;
+  }
+
+  if (let Option::SOME(selected) = selectedCallTarget(tables, raw)) {
+    addDefinitionEntry(collectorRef, span.start, span.end, selected, program, defs, types, symbols);
+    return;
+  }
+
+  match (Analyzer::ResolverBodies::findExprRef(&analysis.resolvedBodies.bodyResolution, raw)) {
+    Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) -> {
+      addDefinitionEntry(collectorRef, span.start, span.end, defId, program, defs, types, symbols);
+      return;
+    },
+    Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(local)) -> {
+      collectorRef.locals.push(LocalSite {
+        start: span.start,
+        end: span.end,
+        slot: localSlot(&local),
+        pattern: 0,
+        isBinding: false,
+      });
+      return;
+    },
+    _ -> {},
+  };
+
+  if (let Option::SOME(typeId) = tables.exprTypes.get(&raw)) {
+    addTypeEntry(collectorRef, span.start, span.end, *typeId, defs, types, symbols);
+  }
+}
+
+/// A member access: what the resolver bound it to, else the called method or
+/// the field it names on the object's type, else its type.
+function collectMemberAccessHover(
+  collector: &mut HoverCollector,
+  tables: &ModuleHoverTables,
+  analysis: &Analyzer::AnalyzerOutput,
+  raw: u32,
+  access: &Ast::Expression::MemberAccess,
+  program: &HoverProgram,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let collectorRef: &mut HoverCollector = collector;
+  let span: SourceSpan = access.span;
+
+  if (!spanInFile(&collectorRef.path, span)) {
+    return;
+  }
+
+  let mut target: Option<Analyzer::DefinitionId> = selectedCallTarget(tables, raw);
+
+  if (target.isNone()) {
+    if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = Analyzer::ResolverBodies::findExprRef(&analysis.resolvedBodies.bodyResolution, raw)) {
+      target = Option::SOME(defId);
+    }
+  }
+
+  if (target.isNone()) {
+    let objectRaw: u32 = access.object.raw();
+
+    if (let Option::SOME(objectType) = tables.exprTypes.get(&objectRaw)) {
+      let isCallee: boolean = tables.calleeCalls.get(&raw).isSome();
+      target = memberOfType(*objectType, &access.member, isCallee, defs, types, symbols);
+    }
+  }
+
+  if (let Option::SOME(defId) = target) {
+    addDefinitionEntry(collectorRef, span.start, span.end, defId, program, defs, types, symbols);
+    return;
+  }
+
+  if (let Option::SOME(typeId) = tables.exprTypes.get(&raw)) {
+    addTypeEntry(collectorRef, span.start, span.end, *typeId, defs, types, symbols);
+  }
+}
+
+/// The record or enum a value of `typeId` is, through references, pointers
+/// and aliases.
+function nominalOf(
+  typeId: Analyzer::TypeId,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore
+): Option<Analyzer::DefinitionId> {
+  let mut current: Analyzer::TypeId = typeId;
+  let mut depth: u64 = 0;
+
+  while (depth < 16) {
+    match (types.get(current)) {
+      Option::SOME(Analyzer::Type::Record(defId)) -> {
+        return Option::SOME(defId);
+      },
+      Option::SOME(Analyzer::Type::Enum(defId)) -> {
+        return Option::SOME(defId);
+      },
+      Option::SOME(Analyzer::Type::Instance(instance)) -> {
+        return Option::SOME(instance.definition);
+      },
+      Option::SOME(Analyzer::Type::Reference(reference)) -> {
+        current = reference.referent;
+      },
+      Option::SOME(Analyzer::Type::Pointer(pointer)) -> {
+        current = pointer.pointee;
+      },
+      Option::SOME(Analyzer::Type::Alias(aliasId)) -> {
+        let Option::SOME(Analyzer::Definition::TypeAlias(alias)) = defs.get(aliasId) else {
+          return Option::NONE;
+        };
+
+        current = alias.aliasedType;
+      },
+      _ -> {
+        return Option::NONE;
+      },
+    };
+
+    depth += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// The member `name` of the record or enum `objectType` is: a method first
+/// when the access is called, a field first otherwise.
+function memberOfType(
+  objectType: Analyzer::TypeId,
+  name: &String,
+  isCallee: boolean,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): Option<Analyzer::DefinitionId> {
+  let Option::SOME(owner) = nominalOf(objectType, defs, types) else {
+    return Option::NONE;
+  };
+
+  let methods: Vector<Analyzer::DefinitionId> = defs.methodsOwnedBy(owner);
+  let fields: Vector<Analyzer::DefinitionId> = memberDefinitions(owner, defs);
+
+  if (isCallee) {
+    if (let Option::SOME(method) = definitionNamed(&methods, name, defs, symbols)) {
+      return Option::SOME(method);
+    }
+  }
+
+  if (let Option::SOME(field) = definitionNamed(&fields, name, defs, symbols)) {
+    return Option::SOME(field);
+  }
+
+  return definitionNamed(&methods, name, defs, symbols);
+}
+
+/// Adds every local binding site and use. A use shows the binding site of
+/// its slot that comes last before it, which is the one in scope: a slot is
+/// only reused once the scope that held it has closed.
+function pairLocals(
+  collector: &mut HoverCollector,
+  tables: &ModuleHoverTables,
+  module: &Ast::Module,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let collectorRef: &mut HoverCollector = collector;
+  let mut keys: Vector<u64> = Vector::new<u64>();
+  let mut siteIndex: u64 = 0;
+
+  while (siteIndex < collectorRef.locals.length()) {
+    if (let Option::SOME(site) = collectorRef.locals.get(siteIndex)) {
+      keys.push(site.start);
+    }
+
+    siteIndex += 1;
+  }
+
+  let order: Vector<u64> = stableOrder(&keys);
+  let mut bindingOfSlot: HashMap<u64, u32> = HashMap::new<u64, u32>();
+  let mut orderIndex: u64 = 0;
+
+  while (orderIndex < order.length()) {
+    let position: u64 = u64At(&order, orderIndex);
+    orderIndex += 1;
+
+    let Option::SOME(site) = collectorRef.locals.get(position) else {
+      continue;
+    };
+
+    let start: u64 = site.start;
+    let end: u64 = site.end;
+    let slot: u64 = site.slot;
+    let isBinding: boolean = site.isBinding;
+    let mut pattern: u32 = site.pattern;
+
+    if (isBinding) {
+      bindingOfSlot.insert(slot, pattern);
+    } else {
+      let Option::SOME(bound) = bindingOfSlot.get(&slot) else {
+        continue;
+      };
+
+      pattern = *bound;
+    }
+
+    let key: u64 = hoverKey(HOVER_KEY_LOCAL, pattern);
+
+    if (!addKeyedEntry(collectorRef, start, end, key)) {
+      let text: String = localBindingText(&collectorRef.path, tables, module, pattern, defs, types, symbols);
+      addTextEntry(collectorRef, start, end, key, text);
+    }
+  }
+}
+
+/// The hover of the local bound by `pattern`.
+function localBindingText(
+  filePath: &String,
+  tables: &ModuleHoverTables,
+  module: &Ast::Module,
+  pattern: u32,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): String {
+  let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(Id::fromRaw<Ast::PatternTag>(pattern)) else {
+    return String::new();
+  };
+
+  let parameter: Option<&Option<Analyzer::TypeId>> = tables.parameters.get(&pattern);
+  let mut typeId: Option<Analyzer::TypeId> = Option::NONE;
+
+  if (let Option::SOME(settled) = tables.localTypes.get(&pattern)) {
+    typeId = Option::SOME(*settled);
+  } else if (let Option::SOME(Option::SOME(declared)) = parameter) {
+    typeId = Option::SOME(declared);
+  }
+
+  let mut typeText: String = String::new();
+
+  if (let Option::SOME(id) = typeId) {
+    typeText = Doc::renderType(id, defs, types, symbols);
+  }
+
+  let mutable: boolean = match (tables.localMutable.get(&pattern)) {
+    Option::SOME(flag) -> *flag,
+    Option::NONE -> false,
+  };
+  return localHoverText(&binding.name, &typeText, mutable, parameter.isSome(), filePath);
+}
+
+/// The positions of `keys` in ascending, stable order: a bottom-up merge sort.
+function stableOrder(keys: &Vector<u64>): Vector<u64> {
+  let count: u64 = keys.length();
+  let mut order: Vector<u64> = Vector::new<u64>();
+  let mut position: u64 = 0;
+
+  while (position < count) {
+    order.push(position);
+    position += 1;
+  }
+
+  let mut width: u64 = 1;
+
+  while (width < count) {
+    let mut merged: Vector<u64> = Vector::new<u64>();
+    let mut low: u64 = 0;
+
+    while (low < count) {
+      let middle: u64 = low + width < count ? low + width : count;
+      let high: u64 = middle + width < count ? middle + width : count;
+      mergeRuns(keys, &order, low, middle, high, &mut merged);
+      low = high;
+    }
+
+    order = merged;
+    width *= 2;
+  }
+
+  return order;
+}
+
+/// Appends `order[low..middle]` and `order[middle..high]`, both sorted by
+/// key, merged, the left run first on ties.
+function mergeRuns(
+  keys: &Vector<u64>,
+  order: &Vector<u64>,
+  low: u64,
+  middle: u64,
+  high: u64,
+  merged: &mut Vector<u64>,
+): void {
+  let mut mergedRef: &mut Vector<u64> = merged;
+  let mut left: u64 = low;
+  let mut right: u64 = middle;
+
+  while (left < middle || right < high) {
+    let leftPosition: u64 = u64At(order, left);
+    let rightPosition: u64 = u64At(order, right);
+    let mut takeLeft: boolean = right >= high;
+
+    if (left < middle && right < high) {
+      takeLeft = u64At(keys, leftPosition) <= u64At(keys, rightPosition);
+    }
+
+    if (takeLeft) {
+      mergedRef.push(leftPosition);
+      left += 1;
+    } else {
+      mergedRef.push(rightPosition);
+      right += 1;
+    }
+  }
+}
+
+/// Sorts the collected ranges, drops repeats of a range, and links each to
+/// the innermost range that contains it.
+function finishIndex(collector: HoverCollector, source: String): FileHoverIndex {
+  let mut keys: Vector<u64> = Vector::new<u64>();
+  let mut index: u64 = 0;
+
+  while (index < collector.starts.length()) {
+    let start: u64 = u64At(&collector.starts, index);
+    let end: u64 = u64At(&collector.ends, index);
+    let length: u64 = end > start ? end - start : 0;
+    let longestFirst: u64 = length < HOVER_KEY_UNIT ? HOVER_KEY_UNIT - 1 - length : 0;
+    keys.push(start * HOVER_KEY_UNIT + longestFirst);
+    index += 1;
+  }
+
+  let order: Vector<u64> = stableOrder(&keys);
+  let mut entries: Vector<HoverEntry> = Vector::new<HoverEntry>();
+  let mut open: Vector<u64> = Vector::new<u64>();
+  let mut orderIndex: u64 = 0;
+
+  while (orderIndex < order.length()) {
+    let position: u64 = u64At(&order, orderIndex);
+    let start: u64 = u64At(&collector.starts, position);
+    let end: u64 = u64At(&collector.ends, position);
+    let text: u64 = u64At(&collector.textIndexes, position);
+    orderIndex += 1;
+
+    if (entries.length() > 0) {
+      if (let Option::SOME(previous) = entries.get(entries.length() - 1)) {
+        if (previous.start == start && previous.end == end) {
+          continue;
+        }
+      }
+    }
+
+    let parent: u64 = enclosingEntry(&entries, &mut open, end);
+    open.push(entries.length());
+    entries.push(HoverEntry { start: start, end: end, parent: parent, text: text });
+  }
+
+  return FileHoverIndex {
+    path: collector.path,
+    source: source,
+    entries: entries,
+    texts: collector.texts,
+  };
+}
+
+/// Pops the open ranges that end before `end` and returns one plus the
+/// position of the one left on top, or 0.
+function enclosingEntry(entries: &Vector<HoverEntry>, open: &mut Vector<u64>, end: u64): u64 {
+  let mut openRef: &mut Vector<u64> = open;
+
+  while (openRef.length() > 0) {
+    let top: u64 = match (openRef.get(openRef.length() - 1)) {
+      Option::SOME(position) -> *position,
+      Option::NONE -> 0,
+    };
+
+    let Option::SOME(entry) = entries.get(top) else {
+      break;
+    };
+
+    if (entry.end >= end) {
+      return top + 1;
+    }
+
+    let _closed: Option<u64> = openRef.pop();
+  }
+
+  return 0;
+}
+
+function u64At(values: &Vector<u64>, index: u64): u64 {
+  return match (values.get(index)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> 0,
+  };
+}
