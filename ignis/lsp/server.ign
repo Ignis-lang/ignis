@@ -739,8 +739,8 @@ export record LspServer {
     return self.hoverIn(document, Text::Position { line: line as u64, character: character as u64 });
   }
 
-  /// The hover at `position` of the open `document`. The position is read
-  /// against the text the client has, even when the index is older.
+  /// The hover at `position` of the open `document`. The position and the
+  /// range are in the text the client has, even when the index is older.
   hoverIn(&self, document: &Document, position: Text::Position): JsonValue {
     let path: String = document.path.toString();
     let mut index: u64 = 0;
@@ -750,7 +750,7 @@ export record LspServer {
         if (hoverIndex.path.equals(&path)) {
           let lineIndex: Text::LineIndex = Text::LineIndex::create(document.text.clone());
 
-          return match (hoverIndex.hoverAt(lineIndex.offset(position))) {
+          return match (hoverIndex.hoverAtIn(&document.text, lineIndex.offset(position))) {
             Option::SOME(hit) -> hoverResult(&hit, &lineIndex),
             Option::NONE -> JsonValue::nullValue(),
           };

@@ -441,6 +441,34 @@ class LanguageServerTest(unittest.TestCase):
     self.server.notify("exit")
     self.assertEqual(self.server.wait(), 0)
 
+  def test_hovers_after_an_edit_before_them_move_with_the_text(self):
+    self.source_file("util.ign", HOVER_UTIL_SOURCE)
+    uri = self.source_file("main.ign", HOVER_SOURCE)
+    self.server.initialize(self.workspace)
+
+    self.server.notify("textDocument/didOpen", {
+      "textDocument": {"uri": uri, "languageId": "ignis", "version": 1, "text": HOVER_SOURCE},
+    })
+    self.assert_hover(2, uri, HOVER_SOURCE, "add(1", HOVER_ADD)
+
+    broken = "function broken(\n" + HOVER_SOURCE
+    self.server.notify("textDocument/didChange", {
+      "textDocument": {"uri": uri, "version": 2},
+      "contentChanges": [{"text": broken}],
+    })
+    moved = self.assert_hover(3, uri, broken, "add(1", HOVER_ADD, delta=1)
+    self.assertEqual(moved["range"], {
+      "start": position_of(broken, "add(1"),
+      "end": position_of(broken, "add(1", delta=3),
+    })
+    self.assertIsNone(self.server.hover(4, uri, position_of(broken, "broken", delta=2)))
+
+    self.server.request(5, "shutdown")
+    self.assertIsNone(self.server.response(5)["result"])
+
+    self.server.notify("exit")
+    self.assertEqual(self.server.wait(), 0)
+
   def test_errors_answer_bad_messages_and_exit_without_shutdown_fails(self):
     self.server.initialize(self.workspace)
 

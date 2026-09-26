@@ -49,9 +49,10 @@ export record HoverHit {
 }
 
 /// The hover ranges of one file, sorted by start and, for equal starts,
-/// longest first.
+/// longest first, and the source they were built from.
 export record FileHoverIndex {
   public path: String;
+  source: String;
   entries: Vector<HoverEntry>;
   texts: Vector<String>;
 
@@ -97,6 +98,130 @@ export record FileHoverIndex {
 
     return Option::NONE;
   }
+
+  /// The innermost range that contains `offset` of `current`, the text the
+  /// client has now, with the range in `current`'s coordinates. When the
+  /// index was built from another text, only a position and a range outside
+  /// the edited region answer, and the name under the cursor has to lie
+  /// inside the range: an edit that extends the name makes it another one.
+  public hoverAtIn(&self, current: &String, offset: u64): Option<HoverHit> {
+    if (self.source.equals(current)) {
+      return self.hoverAt(offset);
+    }
+
+    let edit: TextEdit = textEditBetween(&self.source, current);
+
+    let Option::SOME(sourceOffset) = edit.sourceOffsetOf(offset) else {
+      return Option::NONE;
+    };
+    let Option::SOME(hit) = self.hoverAt(sourceOffset) else {
+      return Option::NONE;
+    };
+    let Option::SOME(start) = edit.currentStartOf(hit.start, hit.end) else {
+      return Option::NONE;
+    };
+
+    let end: u64 = start + (hit.end - hit.start);
+
+    if (identifierStart(current, offset) < start || identifierEnd(current, offset) > end) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(HoverHit { start: start, end: end, text: hit.text.clone() });
+  }
+}
+
+/// How the text an index was built from differs from the current one: the
+/// bytes both start with and, after those, the bytes both end with.
+record TextEdit {
+  public prefix: u64;
+  public suffix: u64;
+  public sourceLength: u64;
+  public currentLength: u64;
+
+  /// The offset in the source of `offset` in the current text, or `NONE`
+  /// inside the edited region.
+  public sourceOffsetOf(&self, offset: u64): Option<u64> {
+    if (offset <= self.prefix) {
+      return Option::SOME(offset);
+    }
+
+    if (offset >= self.currentLength - self.suffix) {
+      return Option::SOME(offset + self.sourceLength - self.currentLength);
+    }
+
+    return Option::NONE;
+  }
+
+  /// Where the source range `start..end` starts in the current text, or
+  /// `NONE` when it reaches into the edited region.
+  public currentStartOf(&self, start: u64, end: u64): Option<u64> {
+    if (end <= self.prefix) {
+      return Option::SOME(start);
+    }
+
+    if (start >= self.sourceLength - self.suffix) {
+      return Option::SOME(start + self.currentLength - self.sourceLength);
+    }
+
+    return Option::NONE;
+  }
+}
+
+/// The edit that turns `source` into `current`. The suffix never overlaps
+/// the prefix in either text.
+function textEditBetween(source: &String, current: &String): TextEdit {
+  let sourceLength: u64 = source.length();
+  let currentLength: u64 = current.length();
+  let shorter: u64 = sourceLength < currentLength ? sourceLength : currentLength;
+  let mut prefix: u64 = 0;
+
+  while (prefix < shorter && source.byteAt(prefix).unwrapOr(0) == current.byteAt(prefix).unwrapOr(1)) {
+    prefix += 1;
+  }
+
+  let mut suffix: u64 = 0;
+
+  while (suffix < shorter - prefix) {
+    let sourceByte: u8 = source.byteAt(sourceLength - suffix - 1).unwrapOr(0);
+
+    if (sourceByte != current.byteAt(currentLength - suffix - 1).unwrapOr(1)) {
+      break;
+    }
+
+    suffix += 1;
+  }
+
+  return TextEdit {
+    prefix: prefix,
+    suffix: suffix,
+    sourceLength: sourceLength,
+    currentLength: currentLength,
+  };
+}
+
+/// Where the identifier at or just before `offset` of `text` starts;
+/// `offset` itself when there is none.
+function identifierStart(text: &String, offset: u64): u64 {
+  let mut start: u64 = offset;
+
+  while (start > 0 && isIdentifierByte(text.byteAt(start - 1).unwrapOr(32))) {
+    start -= 1;
+  }
+
+  return start;
+}
+
+/// Where the identifier at `offset` of `text` ends; `offset` itself when
+/// there is none.
+function identifierEnd(text: &String, offset: u64): u64 {
+  let mut end: u64 = offset;
+
+  while (isIdentifierByte(text.byteAt(end).unwrapOr(32))) {
+    end += 1;
+  }
+
+  return end;
 }
 
 /// What every file's index reads besides its own module: the path of each
@@ -242,7 +367,7 @@ export function buildFileHoverIndex(
   collectExpressionHovers(&mut collector, &tables, module, analysis, program, defs, types, symbols);
   pairLocals(&mut collector, &tables, module, defs, types, symbols);
 
-  return finishIndex(collector);
+  return finishIndex(collector, text.clone());
 }
 
 /// The typechecker's side tables as lookups. The last entry for a node wins,
@@ -1294,7 +1419,7 @@ function mergeRuns(
 
 /// Sorts the collected ranges, drops repeats of a range, and links each to
 /// the innermost range that contains it.
-function finishIndex(collector: HoverCollector): FileHoverIndex {
+function finishIndex(collector: HoverCollector, source: String): FileHoverIndex {
   let mut keys: Vector<u64> = Vector::new<u64>();
   let mut index: u64 = 0;
 
@@ -1332,7 +1457,12 @@ function finishIndex(collector: HoverCollector): FileHoverIndex {
     entries.push(HoverEntry { start: start, end: end, parent: parent, text: text });
   }
 
-  return FileHoverIndex { path: collector.path, entries: entries, texts: collector.texts };
+  return FileHoverIndex {
+    path: collector.path,
+    source: source,
+    entries: entries,
+    texts: collector.texts,
+  };
 }
 
 /// Pops the open ranges that end before `end` and returns one plus the

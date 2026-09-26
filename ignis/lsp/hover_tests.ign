@@ -180,3 +180,78 @@ function hoverIndexFindsNothingBetweenNames(): void {
   Test::assertEq<str>(hoverTextAt(&file, "record", 1, 2).toStr(), "<none>");
   Test::assertEq<str>(hoverTextAt(&file, "): i32 {\n  let", 1, 4).toStr(), "<none>");
 }
+
+/// The byte offset of the first `needle` in `text`.
+function offsetOf(text: &String, needle: str): u64 {
+  let wanted: String = String::create(needle);
+
+  let Option::SOME(offset) = text.indexOf(&wanted) else {
+    Test::fail();
+    return 0;
+  };
+
+  return offset;
+}
+
+/// `before`, then `inserted`, then `after` bytes of `text` from `resume`.
+function spliced(text: &String, before: u64, inserted: str, resume: u64): String {
+  let head: String = text.substringBytes(0, before);
+  let tail: String = text.substringBytes(resume, text.length());
+  return head.concat(inserted).concat(&tail);
+}
+
+/// Asserts the hover `delta` bytes into `needle` of `current` covers
+/// `start..end` of `current` and describes `add`.
+function assertEditedHover(
+  file: &HoverTestFile,
+  current: &String,
+  needle: str,
+  delta: u64,
+  start: u64,
+  end: u64
+): void {
+  let Option::SOME(hit) = file.index.hoverAtIn(current, offsetOf(current, needle) + delta) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(hit.start, start);
+  Test::assertEq<u64>(hit.end, end);
+  Test::assertEq<str>(
+    hit.text.toStr(),
+    "main\n\n```ignis\nfunction add(left: i32, right: i32): i32\n```\n\n---\n\nAdds two numbers.\n\n*Defined in `main.ign`*",
+  );
+}
+
+/// After an edit, a position in the unchanged text before or after it finds
+/// the range the older index has there, moved by what the edit inserted or
+/// deleted before it.
+@test
+function hoverIndexFollowsTheTextAroundAnEdit(): void {
+  let file: HoverTestFile = hoverTestIndex("edited", HOVER_TEST_MAIN);
+  let call: u64 = offsetOf(&file.text, "add(1");
+
+  let appended: String = file.text.concat("function broken(\n");
+  assertEditedHover(&file, &appended, "add(1", 1, call, call + 3);
+
+  let prepended: String = spliced(&file.text, 0, "// note\n", 0);
+  assertEditedHover(&file, &prepended, "add(1", 2, call + 8, call + 11);
+
+  let doc: u64 = offsetOf(&file.text, "/// Adds");
+  let deleted: String = spliced(&file.text, doc, "", doc + 22);
+  assertEditedHover(&file, &deleted, "add(1", 3, call - 22, call - 19);
+}
+
+/// A position inside the edited region finds nothing, and neither does a
+/// name the edit extended past the range the older index has for it.
+@test
+function hoverIndexFindsNothingInsideAnEdit(): void {
+  let file: HoverTestFile = hoverTestIndex("inside_edit", HOVER_TEST_MAIN);
+  let call: u64 = offsetOf(&file.text, "add(1");
+
+  let inserted: String = spliced(&file.text, call, "zzz ", call);
+  Test::assert(file.index.hoverAtIn(&inserted, call + 1).isNone());
+
+  let renamed: String = spliced(&file.text, call + 3, "x", call + 3);
+  Test::assert(file.index.hoverAtIn(&renamed, call).isNone());
+}
