@@ -5,8 +5,9 @@ Spawns the language server, speaks JSON-RPC with Content-Length framing, and
 checks the lifecycle (initialize, shutdown, exit and its exit code), the error
 responses, the diagnostics published for an open buffer (a type error
 reported at the right UTF-16 range, then cleared once the buffer is fixed or
-closed), the hovers answered for it, and go-to-definition, find-references
-and the document outline over a two-file project.
+closed), the hovers answered for it, go-to-definition, find-references and
+the document outline over a two-file project, and completion in each
+context the host completes, also while the buffer does not parse.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
 also proves analysis reads open documents instead of the disk.
 
@@ -392,6 +393,10 @@ class LanguageServer:
     })
     return self.response(request_id)["result"]
 
+  def completion(self, request_id, uri, position):
+    self.request(request_id, "textDocument/completion", {"textDocument": {"uri": uri}, "position": position})
+    return self.response(request_id)["result"]
+
   def document_symbols(self, request_id, uri):
     self.request(request_id, "textDocument/documentSymbol", {"textDocument": {"uri": uri}})
     return self.response(request_id)["result"]
@@ -592,7 +597,8 @@ class LanguageServerTest(unittest.TestCase):
     of `main.ign` and `util.ign`."""
     util_uri = self.source_file("util.ign", NAVIGATION_UTIL_SOURCE)
     uri = self.source_file("main.ign", NAVIGATION_SOURCE)
-    capabilities = self.server.initialize(self.workspace)["capabilities"]
+    self.server.initialize_result = self.server.initialize(self.workspace)
+    capabilities = self.server.initialize_result["capabilities"]
     self.assertTrue(capabilities["definitionProvider"])
     self.assertTrue(capabilities["referencesProvider"])
     self.assertIn("documentSymbolProvider", capabilities)
@@ -725,6 +731,103 @@ class LanguageServerTest(unittest.TestCase):
     )
 
     self.assertIsNone(self.server.definition(6, uri, position_of(broken, "broken", delta=2)))
+    self.finish(7)
+
+  def open_completion_project(self):
+    """Opens the navigation project and completes once in the text as
+    written, so the edits that follow find its analysis."""
+    uri, util_uri = self.open_navigation_project()
+    baseline = self.server.completion(90, uri, position_of(NAVIGATION_SOURCE, "  return point.x"))
+    self.assertIsInstance(baseline, list)
+    return uri, util_uri
+
+  def change(self, uri, version, text):
+    self.server.notify("textDocument/didChange", {
+      "textDocument": {"uri": uri, "version": version},
+      "contentChanges": [{"text": text}],
+    })
+
+  def complete_after(self, request_id, uri, version, inserted, before="  return point.x"):
+    """Writes `inserted` before `before` in the navigation source, as an
+    edit, and completes right after it."""
+    text = NAVIGATION_SOURCE.replace(before, inserted + before, 1)
+    self.change(uri, version, text)
+    items = self.server.completion(request_id, uri, position_of(text, inserted + before, delta=len(inserted)))
+    self.show("completion after %r" % inserted, items)
+    self.assertIsInstance(items, list, inserted)
+    return items
+
+  def labels(self, items):
+    return [item["label"] for item in items]
+
+  def by_label(self, items):
+    return {item["label"]: item for item in items}
+
+  def test_completion_lists_members_and_paths_while_the_buffer_does_not_parse(self):
+    uri, _ = self.open_completion_project()
+    capabilities = self.server.initialize_result["capabilities"]
+    self.assertEqual(sorted(capabilities["completionProvider"]["triggerCharacters"]), [".", ":"])
+
+    members = self.complete_after(2, uri, 2, "point.")
+    self.assertEqual(self.labels(members), ["x", "y", "length"])
+    self.assertEqual(self.by_label(members)["x"]["kind"], 5)
+    self.assertEqual(self.by_label(members)["x"]["detail"], "i32")
+    self.assertEqual(self.by_label(members)["length"]["kind"], 2)
+    self.assertEqual(self.by_label(members)["length"]["insertText"], "length($0)")
+    self.assertEqual(self.by_label(members)["length"]["insertTextFormat"], 2)
+
+    typed = self.complete_after(3, uri, 3, "point.le")
+    self.assertEqual(self.labels(typed), ["length"])
+
+    self.assertEqual(self.labels(self.complete_after(4, uri, 4, "Point::")), ["origin"])
+    self.assertEqual(sorted(self.labels(self.complete_after(5, uri, 5, "Mode::"))), ["FAST", "SLOW"])
+    self.assertEqual(sorted(self.labels(self.complete_after(6, uri, 6, "Shapes::"))), ["LIMIT", "area"])
+    self.assertIn("println", self.labels(self.complete_after(7, uri, 7, "Io::printl")))
+    self.finish(8)
+
+  def test_completion_after_non_ascii_text_on_the_same_line(self):
+    uri, _ = self.open_completion_project()
+    before = " let count: i32"
+    text = NAVIGATION_SOURCE.replace(before, " point." + before, 1)
+    self.change(uri, 2, text)
+
+    position = position_of(text, "😀\"; point.", delta=len("😀\"; point."))
+    line = text.split("\n")[position["line"]]
+    typed = line[:line.index("😀\"; point.") + len("😀\"; point.")]
+    self.assertNotEqual(position["character"], len(typed.encode("utf-8")))
+    items = self.server.completion(2, uri, position)
+    self.show("completion after non-ASCII text", items)
+    self.assertEqual(self.labels(items), ["x", "y", "length"])
+    self.finish(3)
+
+  def test_completion_lists_identifiers_record_fields_imports_and_at_items(self):
+    uri, _ = self.open_completion_project()
+
+    identifiers = self.by_label(self.complete_after(2, uri, 2, "dou"))
+    self.assertEqual(identifiers["double"]["kind"], 3)
+    self.assertEqual(identifiers["double"]["detail"], "function(value: i32): i32")
+    self.assertEqual(identifiers["double"]["insertText"], "double(${1:value})")
+    self.assertEqual(identifiers["double"]["insertTextFormat"], 2)
+
+    fields = self.complete_after(3, uri, 3, "let other: Point = Point { x: 1, ")
+    self.assertEqual(self.labels(fields), ["y"])
+    self.assertEqual(fields[0]["insertText"], "y: $0")
+
+    imports = self.complete_after(4, uri, 4, 'import Vector from "std::vec', before="const GREETING")
+    self.assertEqual(self.labels(imports), ["std::vector"])
+    self.assertEqual(imports[0]["kind"], 9)
+    self.assertEqual(imports[0]["insertText"], "vector")
+
+    at = self.complete_after(5, uri, 5, "@si")
+    self.assertEqual(self.labels(at), ["sizeOf"])
+    self.assertEqual(at[0]["insertText"], "sizeOf<${1:T}>()")
+
+    keywords = self.by_label(self.complete_after(6, uri, 6, ""))
+    for keyword in ("if", "let", "return", "while"):
+      self.assertEqual(keywords[keyword]["kind"], 14, keyword)
+
+    self.assertIn("count", keywords)
+    self.assertEqual(keywords["count"]["detail"], "(local)")
     self.finish(7)
 
   def test_errors_answer_bad_messages_and_exit_without_shutdown_fails(self):
