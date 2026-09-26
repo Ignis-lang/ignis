@@ -1,5 +1,5 @@
 //! `ignis lsp`: a sequential Language Server Protocol server over stdio that
-//! publishes diagnostics.
+//! publishes diagnostics and answers hovers.
 //!
 //! Messages are handled one at a time, in arrival order. Document changes
 //! only mark their analysis dirty. The analysis runs once no bytes of a
@@ -13,12 +13,20 @@ import Io, Stream from "std::io";
 import LibC from "std::libc";
 import Path from "std::path";
 import String from "std::string";
+import Text from "std::text";
 import Vector from "std::vector";
 
 import SourceOverrides from "../build/sources";
 
-import FileDiagnostics, LspDiagnostic, analysisKeyOf, analyzeForDiagnostics from "./analysis";
-import DocumentHandle, DocumentStore, isIgnisSourcePath from "./documents";
+import
+  FileDiagnostics,
+  LspAnalysis,
+  LspDiagnostic,
+  analysisKeyOf,
+  analyzeDocuments,
+from "./analysis";
+import Document, DocumentHandle, DocumentStore, isIgnisSourcePath from "./documents";
+import FileHoverIndex, HoverHit from "./hover_index";
 import
   DecodeError,
   LspErrorCode,
@@ -116,6 +124,31 @@ export function publishDiagnosticsParams(
   return JsonValue::object(entries);
 }
 
+/// A position in its LSP JSON form.
+function positionJson(position: Text::Position): JsonValue {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("line", JsonValue::unsignedValue(position.line)));
+  entries.push(JsonObjectEntry::create("character", JsonValue::unsignedValue(position.character)));
+  return JsonValue::object(entries);
+}
+
+/// A `Hover` result: the markdown and the range it describes, the shape the
+/// host answers with (crates/ignis_lsp/src/server.rs:2596).
+export function hoverResult(hit: &HoverHit, lineIndex: &Text::LineIndex): JsonValue {
+  let mut contents: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  contents.push(JsonObjectEntry::create("kind", JsonValue::stringValue("markdown")));
+  contents.push(JsonObjectEntry::create("value", JsonValue::fromString(hit.text.clone())));
+
+  let mut range: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  range.push(JsonObjectEntry::create("start", positionJson(lineIndex.position(hit.start))));
+  range.push(JsonObjectEntry::create("end", positionJson(lineIndex.position(hit.end))));
+
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("contents", JsonValue::object(contents)));
+  entries.push(JsonObjectEntry::create("range", JsonValue::object(range)));
+  return JsonValue::object(entries);
+}
+
 /// The error text for a skipped message of `length` bytes.
 function oversizedMessageText(length: u64): String {
   let limit: u64 = LSP_MAX_MESSAGE_BYTES;
@@ -203,6 +236,11 @@ export record LspServer {
   /// Documents changed since the last analysis, as their paths.
   dirty: Vector<Path::PathBuf>;
   published: Vector<PublishedSet>;
+  /// The hover index of each open document, from the last analysis that
+  /// reached the analyzer: an edit that breaks parsing keeps the previous
+  /// one, as the host keeps its last good analysis
+  /// (crates/ignis_lsp/src/state.rs:59).
+  hovers: Vector<FileHoverIndex>;
   /// `--std-path`, applied to every analysis.
   stdPath: Option<String>;
 
@@ -218,6 +256,7 @@ export record LspServer {
       documents: DocumentStore::create(),
       dirty: Vector::new<Path::PathBuf>(),
       published: Vector::new<PublishedSet>(),
+      hovers: Vector::new<FileHoverIndex>(),
       stdPath: stdPath,
     };
   }
@@ -368,6 +407,13 @@ export record LspServer {
       return LspStep::CONTINUE;
     }
 
+    if (request.method.equals("textDocument/hover")) {
+      let result: JsonValue = self.hover(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
     if (request.method.equals("shutdown")) {
       self.phase = LspPhase::SHUT_DOWN;
       let body: String = responseBody(request.id, JsonValue::nullValue());
@@ -462,6 +508,11 @@ export record LspServer {
       return;
     };
 
+    if (let Option::SOME(document) = self.documents.find(&uri)) {
+      let path: String = document.path.toString();
+      let _closed: Option<FileHoverIndex> = self.takeHoverIndex(&path);
+    }
+
     if (!self.documents.close(&uri)) {
       return;
     }
@@ -543,8 +594,9 @@ export record LspServer {
         break;
       };
 
-      let files: Vector<FileDiagnostics> = analyzeForDiagnostics(start, key, &self.stdPath, &sources);
-      self.publish(key, &files);
+      let analysis: LspAnalysis = analyzeDocuments(start, key, &self.stdPath, &sources);
+      self.publish(key, &analysis.diagnostics);
+      self.keepHoverIndexes(analysis.hovers);
       keyIndex += 1;
     }
   }
@@ -615,5 +667,99 @@ export record LspServer {
 
     self.published = kept;
     return taken;
+  }
+
+  /// Replaces the hover index of every file `indexes` covers.
+  keepHoverIndexes(&mut self, indexes: Vector<FileHoverIndex>): void {
+    let mut fresh: Vector<FileHoverIndex> = indexes;
+
+    while (fresh.length() > 0) {
+      let Option::SOME(index) = fresh.pop() else {
+        break;
+      };
+
+      let _replaced: Option<FileHoverIndex> = self.takeHoverIndex(&index.path);
+      self.hovers.push(index);
+    }
+  }
+
+  /// Removes and returns the hover index of the file at `path`.
+  takeHoverIndex(&mut self, path: &String): Option<FileHoverIndex> {
+    let mut kept: Vector<FileHoverIndex> = Vector::new<FileHoverIndex>();
+    let mut taken: Option<FileHoverIndex> = Option::NONE;
+
+    while (self.hovers.length() > 0) {
+      let Option::SOME(index) = self.hovers.pop() else {
+        break;
+      };
+
+      if (taken.isNone() && index.path.equals(path)) {
+        taken = Option::SOME(index);
+      } else {
+        kept.push(index);
+      }
+    }
+
+    self.hovers = kept;
+    return taken;
+  }
+
+  /// Answers `textDocument/hover`: the innermost hover range at the
+  /// position, or `null`. Pending changes are analyzed first, so a hover
+  /// right after an edit sees it.
+  hover(&mut self, message: &JsonValue): JsonValue {
+    if (self.dirty.length() > 0) {
+      self.analyzeDirty();
+    }
+
+    let Option::SOME(params) = jsonMember(message, "params") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(textDocument) = jsonMember(params, "textDocument") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(uri) = jsonStringMember(textDocument, "uri") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(position) = jsonMember(params, "position") else {
+      return JsonValue::nullValue();
+    };
+
+    let line: i64 = jsonIntegerMember(position, "line").unwrapOr(-1);
+    let character: i64 = jsonIntegerMember(position, "character").unwrapOr(-1);
+
+    if (line < 0 || character < 0) {
+      return JsonValue::nullValue();
+    }
+
+    let Option::SOME(document) = self.documents.find(&uri) else {
+      return JsonValue::nullValue();
+    };
+
+    return self.hoverIn(document, Text::Position { line: line as u64, character: character as u64 });
+  }
+
+  /// The hover at `position` of the open `document`. The position is read
+  /// against the text the client has, even when the index is older.
+  hoverIn(&self, document: &Document, position: Text::Position): JsonValue {
+    let path: String = document.path.toString();
+    let mut index: u64 = 0;
+
+    while (index < self.hovers.length()) {
+      if (let Option::SOME(hoverIndex) = self.hovers.get(index)) {
+        if (hoverIndex.path.equals(&path)) {
+          let lineIndex: Text::LineIndex = Text::LineIndex::create(document.text.clone());
+
+          return match (hoverIndex.hoverAt(lineIndex.offset(position))) {
+            Option::SOME(hit) -> hoverResult(&hit, &lineIndex),
+            Option::NONE -> JsonValue::nullValue(),
+          };
+        }
+      }
+
+      index += 1;
+    }
+
+    return JsonValue::nullValue();
   }
 }
