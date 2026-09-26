@@ -4,7 +4,8 @@
 Spawns the language server, speaks JSON-RPC with Content-Length framing, and
 checks the lifecycle (initialize, shutdown, exit and its exit code), the error
 responses, and the diagnostics published for an open buffer: a type error
-reported at the right UTF-16 range, then cleared once the buffer is fixed.
+reported at the right UTF-16 range, then cleared once the buffer is fixed or
+closed.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
 also proves analysis reads open documents instead of the disk.
 
@@ -283,6 +284,29 @@ class LanguageServerTest(unittest.TestCase):
       print("published after didChange: " + json.dumps(changed, ensure_ascii=False), file=sys.stderr)
 
     self.assertEqual(changed["diagnostics"], [])
+
+    self.server.request(2, "shutdown")
+    self.assertIsNone(self.server.response(2)["result"])
+
+    self.server.notify("exit")
+    self.assertEqual(self.server.wait(), 0)
+
+  def test_closing_a_document_clears_its_diagnostics(self):
+    uri = self.source_file("main.ign", FIXED_SOURCE)
+    self.server.initialize(self.workspace)
+
+    self.server.notify("textDocument/didOpen", {
+      "textDocument": {"uri": uri, "languageId": "ignis", "version": 1, "text": BROKEN_SOURCE},
+    })
+    opened = self.server.published(uri)
+    self.assertEqual(len(opened["diagnostics"]), 1, opened)
+
+    # The host clears a closed file's diagnostics too:
+    # crates/ignis_lsp/src/server.rs, `did_close`.
+    self.server.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+    closed = self.server.published(uri)
+    self.assertEqual(closed["diagnostics"], [])
+    self.assertNotIn("version", closed)
 
     self.server.request(2, "shutdown")
     self.assertIsNone(self.server.response(2)["result"])
