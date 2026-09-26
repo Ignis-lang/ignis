@@ -1,0 +1,117 @@
+import Fs from "std::fs";
+import Json, JsonValue from "std::json";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+
+import FormatterConfig from "../format/config";
+
+import documentFormattingEdits, formatterConfigForFile, formattingEditsWith from "./formatting";
+
+/// A scratch directory holding `ignisfmt.toml` with `config` when it is not
+/// empty, and the path of a `main.ign` in it.
+function formattingFixture(tag: str, config: str): Path::PathBuf {
+  let directory: String = `/tmp/ignis_lsp_formatting_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::fromString(&directory);
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&root)) {
+    Test::fail();
+  }
+
+  let configText: String = String::create(config);
+
+  let configPath: Path::PathBuf = root.join("ignisfmt.toml");
+
+  if (configText.length() > 0) {
+    if (let Result::ERROR(_) = Fs::writeString(&configPath, &configText)) {
+      Test::fail();
+    }
+  }
+
+  return root.join("main.ign");
+}
+
+/// The edits for `text` under the default configuration, as JSON text.
+function defaultEditsJson(source: str): String {
+  let text: String = String::create(source);
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(edits) = formattingEditsWith(&text, &config) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let value: JsonValue = JsonValue::array(edits);
+  return Json::toJsonString(&value);
+}
+
+@test
+function formattingReplacesTheWholeDocumentWithOneEdit(): void {
+  Test::assertEq<str>(
+    defaultEditsJson("function main(): void { return; }\n").toStr(),
+    "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":1,\"character\":0}},\"newText\":\"function main(): void {\\n  return;\\n}\\n\"}]",
+  );
+}
+
+@test
+function formattingAFormattedDocumentHasNoEdits(): void {
+  Test::assertEq<str>(defaultEditsJson("function main(): void {\n  return;\n}\n").toStr(), "[]");
+}
+
+@test
+function formattingEndsTheEditAtTheUtf16EndOfTheText(): void {
+  Test::assertEq<str>(
+    defaultEditsJson("function main(): str {  return \"héllo 😀\"; }").toStr(),
+    "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":44}},\"newText\":\"function main(): str {\\n  return \\\"héllo 😀\\\";\\n}\\n\"}]",
+  );
+}
+
+@test
+function formattingRefusesATextThatDoesNotParse(): void {
+  let text: String = String::create("function main(: void {\n");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::ERROR(_) = formattingEditsWith(&text, &config) else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function formattingReadsTheProjectFormatterConfig(): void {
+  let path: Path::PathBuf = formattingFixture("config", "indent_width = 4\n");
+
+  let Result::OK(config) = formatterConfigForFile(&path) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(config.indentWidth, 4);
+
+  let text: String = String::create("function main(): void { return; }\n");
+
+  let Result::OK(edits) = documentFormattingEdits(&text, &path) else {
+    Test::fail();
+    return;
+  };
+
+  let value: JsonValue = JsonValue::array(edits);
+  Test::assertEq<str>(
+    Json::toJsonString(&value).toStr(),
+    "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":1,\"character\":0}},\"newText\":\"function main(): void {\\n    return;\\n}\\n\"}]",
+  );
+}
+
+@test
+function formattingFailsOnAConfigTheProjectCannotLoad(): void {
+  let path: Path::PathBuf = formattingFixture("bad_config", "unknown_key = true\n");
+  let text: String = String::create("function main(): void { return; }\n");
+
+  let Result::ERROR(message) = documentFormattingEdits(&text, &path) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(message.startsWith("formatter configuration failed: "), true);
+}

@@ -7,7 +7,8 @@ responses, the diagnostics published for an open buffer (a type error
 reported at the right UTF-16 range, then cleared once the buffer is fixed or
 closed), the hovers answered for it, go-to-definition, find-references and
 the document outline over a two-file project, and completion in each
-context the host completes, also while the buffer does not parse.
+context the host completes, also while the buffer does not parse, and the
+formatting edits and quick fixes it offers.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
 also proves analysis reads open documents instead of the disk.
 
@@ -158,6 +159,26 @@ NAVIGATION_OUTLINE = [
   ("Mode", 10, [("FAST", 22, []), ("SLOW", 22, [])]),
   ("main", 12, []),
 ]
+
+
+# Formatting sources. The unformatted one ends without a line break after a
+# string holding a two-unit emoji and a two-byte letter, so the end of the
+# whole-document edit has a UTF-16 column (44) that differs from its byte
+# column.
+UNFORMATTED_SOURCE = 'function main(): str {  return "héllo 😀"; }'
+FORMATTED_SOURCE = 'function main(): str {\n  return "héllo 😀";\n}\n'
+UNPARSABLE_SOURCE = "function main(: void {\n"
+FORMATTING_OPTIONS = {"tabSize": 8, "insertSpaces": False}
+
+# An unused import on the line after a comment with non-ASCII text.
+CODE_ACTION_SOURCE = (
+  "// héllo 😀\n"
+  'import double from "./util";\n'
+  "\n"
+  "function main(): i32 {\n"
+  "  return 0;\n"
+  "}\n"
+)
 
 
 def position_of(text, needle, occurrence=1, delta=0):
@@ -399,6 +420,18 @@ class LanguageServer:
 
   def document_symbols(self, request_id, uri):
     self.request(request_id, "textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+    return self.response(request_id)["result"]
+
+  def formatting(self, request_id, uri):
+    self.request(request_id, "textDocument/formatting", {"textDocument": {"uri": uri}, "options": FORMATTING_OPTIONS})
+    return self.response(request_id)["result"]
+
+  def code_actions(self, request_id, uri, diagnostics):
+    self.request(request_id, "textDocument/codeAction", {
+      "textDocument": {"uri": uri},
+      "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+      "context": {"diagnostics": diagnostics},
+    })
     return self.response(request_id)["result"]
 
   def wait(self):
@@ -829,6 +862,78 @@ class LanguageServerTest(unittest.TestCase):
     self.assertIn("count", keywords)
     self.assertEqual(keywords["count"]["detail"], "(local)")
     self.finish(7)
+
+  def open_buffer(self, uri, text):
+    self.server.notify("textDocument/didOpen", {
+      "textDocument": {"uri": uri, "languageId": "ignis", "version": 1, "text": text},
+    })
+
+  def test_formatting_replaces_the_buffer_with_one_edit(self):
+    uri = self.source_file("main.ign", FORMATTED_SOURCE)
+    capabilities = self.server.initialize(self.workspace)["capabilities"]
+    self.assertTrue(capabilities["documentFormattingProvider"])
+    self.assertNotIn("documentRangeFormattingProvider", capabilities)
+
+    self.open_buffer(uri, UNFORMATTED_SOURCE)
+    edits = self.server.formatting(2, uri)
+    self.show("formatting an unformatted buffer", edits)
+    self.assertEqual(edits, [{
+      "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 44}},
+      "newText": FORMATTED_SOURCE,
+    }])
+
+    self.change(uri, 2, FORMATTED_SOURCE)
+    self.assertEqual(self.server.formatting(3, uri), [])
+
+    self.change(uri, 3, UNPARSABLE_SOURCE)
+    self.assertEqual(self.server.formatting(4, uri), [])
+
+    self.assertEqual(self.server.formatting(5, Path(self.workspace, "closed.ign").as_uri()), [])
+    self.finish(6)
+
+  def test_formatting_follows_the_project_formatter_config(self):
+    (Path(self.workspace) / "ignisfmt.toml").write_text("indent_width = 4\n", encoding="utf-8")
+    uri = self.source_file("main.ign", FORMATTED_SOURCE)
+    self.server.initialize(self.workspace)
+
+    self.open_buffer(uri, UNFORMATTED_SOURCE)
+    edits = self.server.formatting(2, uri)
+    self.assertEqual([edit["newText"] for edit in edits], [FORMATTED_SOURCE.replace("  return", "    return")])
+    self.finish(3)
+
+  def test_code_actions_remove_an_unused_import(self):
+    self.source_file("util.ign", HOVER_UTIL_SOURCE)
+    uri = self.source_file("main.ign", CODE_ACTION_SOURCE)
+    capabilities = self.server.initialize(self.workspace)["capabilities"]
+    self.assertEqual(capabilities["codeActionProvider"], {"codeActionKinds": ["quickfix"], "resolveProvider": False})
+
+    self.open_buffer(uri, CODE_ACTION_SOURCE)
+    diagnostics = self.server.published(uri)["diagnostics"]
+    unused = [diagnostic for diagnostic in diagnostics if diagnostic.get("code") == "A0123"]
+    self.assertEqual(len(unused), 1, diagnostics)
+
+    actions = self.server.code_actions(2, uri, diagnostics)
+    self.show("code actions", actions)
+    self.assertEqual(actions, [{
+      "title": "Remove unused import",
+      "kind": "quickfix",
+      "diagnostics": unused,
+      "edit": {"changes": {uri: [{
+        "range": {"start": {"line": 1, "character": 0}, "end": {"line": 2, "character": 0}},
+        "newText": "",
+      }]}},
+    }])
+
+    self.assertEqual(self.server.code_actions(3, uri, []), [])
+
+    multiple = CODE_ACTION_SOURCE.replace("import double", "import double, other")
+    self.change(uri, 2, multiple)
+    self.assertEqual(self.server.code_actions(4, uri, unused), [])
+
+    notes = Path(self.workspace, "notes.txt").as_uri()
+    self.open_buffer(notes, CODE_ACTION_SOURCE)
+    self.assertEqual(self.server.code_actions(5, notes, unused), [])
+    self.finish(6)
 
   def test_errors_answer_bad_messages_and_exit_without_shutdown_fails(self):
     self.server.initialize(self.workspace)

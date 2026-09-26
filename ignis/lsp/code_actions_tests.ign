@@ -1,0 +1,84 @@
+import Json, JsonValue from "std::json";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import codeActionsFor, unusedImportDeletion from "./code_actions";
+
+/// `start..end` of what the fix for a warning at `start..end` of `source`
+/// deletes, `-` when there is no fix.
+function deletionOf(source: str, start: u64, end: u64): String {
+  let text: String = String::create(source);
+
+  return match (unusedImportDeletion(&text, start, end)) {
+    Option::SOME(range) -> `${range.start}..${range.end}`,
+    Option::NONE -> String::create("-"),
+  };
+}
+
+/// The code actions for `diagnostics` in `source` under `uri`, as JSON text.
+function actionsJson(uri: str, source: str, diagnostics: str): String {
+  let uriText: String = String::create(uri);
+  let text: String = String::create(source);
+  let diagnosticsText: String = String::create(diagnostics);
+
+  let Result::OK(parsed) = Json::parse(&diagnosticsText) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let actions: Vector<JsonValue> = codeActionsFor(&uriText, &text, &parsed);
+  let value: JsonValue = JsonValue::array(actions);
+  return Json::toJsonString(&value);
+}
+
+@test
+function unusedImportDeletionTakesTheWholeLineOfASingleNameImport(): void {
+  let source: str = "import Foo from \"./foo\";\nfunction main(): void {}\n";
+
+  Test::assertEq<str>(deletionOf(source, 7, 10).toStr(), "0..25");
+  Test::assertEq<str>(deletionOf("  import Foo from \"./foo\";  ", 9, 12).toStr(), "0..28");
+  Test::assertEq<str>(deletionOf("x;\nimport Foo from \"./foo\";", 10, 13).toStr(), "3..27");
+}
+
+@test
+function unusedImportDeletionRefusesWhatIsNotOneSingleNameImport(): void {
+  Test::assertEq<str>(deletionOf("import Foo, Bar from \"./foo\";\n", 7, 10).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import { Foo } from \"./foo\";\n", 9, 12).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import Foo from \"./foo\"\n", 7, 10).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import Foo from \"./foo\" from \"x\";\n", 7, 10).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import from \"./foo\";\n", 7, 10).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import Foo from \"./foo\";\n", 7, 7).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import Foo from \"./foo\";\n", 7, 99).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import Foo from \"./foo\";\nfunction main(): void {}\n", 7, 30).toStr(), "-");
+  Test::assertEq<str>(deletionOf("import Foo from \"./foo\";  \n", 7, 26).toStr(), "-");
+}
+
+@test
+function codeActionsOfferToRemoveAnUnusedImport(): void {
+  Test::assertEq<str>(
+    actionsJson(
+      "file:///tmp/main.ign",
+      "let s: str = \"😀\";\nimport Foo from \"./foo\";\n",
+      "[{\"range\":{\"start\":{\"line\":1,\"character\":7},\"end\":{\"line\":1,\"character\":10}},\"severity\":2,\"code\":\"A0123\",\"message\":\"unused import\"}]",
+    ).toStr(),
+    "[{\"title\":\"Remove unused import\",\"kind\":\"quickfix\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":1,\"character\":7},\"end\":{\"line\":1,\"character\":10}},\"severity\":2,\"code\":\"A0123\",\"message\":\"unused import\"}],\"edit\":{\"changes\":{\"file:///tmp/main.ign\":[{\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":2,\"character\":0}},\"newText\":\"\"}]}}}]",
+  );
+}
+
+@test
+function codeActionsIgnoreOtherDiagnosticsAndOtherFiles(): void {
+  let source: str = "import Foo from \"./foo\";\n";
+  let unused: str = "[{\"range\":{\"start\":{\"line\":0,\"character\":7},\"end\":{\"line\":0,\"character\":10}},\"code\":\"A0123\",\"message\":\"unused import\"}]";
+
+  Test::assertEq<str>(actionsJson("file:///tmp/main.txt", source, unused).toStr(), "[]");
+  Test::assertEq<str>(actionsJson("file:///tmp/main.ign", source, "[]").toStr(), "[]");
+  Test::assertEq<str>(
+    actionsJson(
+      "file:///tmp/main.ign",
+      source,
+      "[{\"range\":{\"start\":{\"line\":0,\"character\":7},\"end\":{\"line\":0,\"character\":10}},\"code\":\"A0456\",\"message\":\"other\"}]",
+    ).toStr(),
+    "[]",
+  );
+}

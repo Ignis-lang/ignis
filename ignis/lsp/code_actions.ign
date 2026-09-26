@@ -1,0 +1,261 @@
+//! `textDocument/codeAction`: the quick fixes the host offers, which today is
+//! only the removal of an unused single-name import
+//! (crates/ignis_lsp/src/server.rs:538).
+
+import Json, JsonObjectEntry, JsonValue, JsonValueKind from "std::json";
+import String from "std::string";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import textEditJson from "./formatting";
+import ByteRange from "./hover_index";
+import jsonIntegerMember, jsonMember, jsonStringMember from "./protocol";
+import filePathFromUri from "./uri";
+
+/// The code of the unused-import warning the quick fix answers.
+const UNUSED_IMPORT_CODE: str = "A0123";
+
+/// The bytes of `import ` that open a statement.
+const IMPORT_PREFIX_LENGTH: u64 = 7;
+
+/// The bytes of ` from `.
+const FROM_SEPARATOR_LENGTH: u64 = 6;
+
+/// True for the bytes Rust's `str::trim` removes that are ASCII.
+function isWhitespaceByte(byte: u8): boolean {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 11 || byte == 12 || byte == 13;
+}
+
+/// True when the bytes of `text` from `index` read ` from `.
+function fromSeparatorAt(text: &String, index: u64): boolean {
+  if (index + FROM_SEPARATOR_LENGTH > text.length()) {
+    return false;
+  }
+
+  return text.substringBytes(index, index + FROM_SEPARATOR_LENGTH).equals(" from ");
+}
+
+/// Where the only ` from ` of `statement` starts, counting occurrences that
+/// do not overlap. `NONE` when there is none or more than one.
+function singleFromSeparator(statement: &String): Option<u64> {
+  let mut found: Option<u64> = Option::NONE;
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < statement.length()) {
+    if (fromSeparatorAt(statement, index)) {
+      found = Option::SOME(index);
+      count += 1;
+      index += FROM_SEPARATOR_LENGTH;
+    } else {
+      index += 1;
+    }
+  }
+
+  if (count != 1) {
+    return Option::NONE;
+  }
+
+  return found;
+}
+
+/// True when `name` is one import name: not empty, and without a comma, a
+/// brace or whitespace.
+function isSingleImportName(name: &String): boolean {
+  if (name.length() == 0) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < name.length()) {
+    let byte: u8 = name.byteAt(index).unwrapOr(0);
+
+    if (byte == 44 || byte == 123 || byte == 125 || isWhitespaceByte(byte)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// The bytes the quick fix for an unused-import warning at `start..end`
+/// deletes: the whole line holding the import, its line break included. The
+/// host offers the fix (crates/ignis_lsp/src/server.rs:563) only when that
+/// line, trimmed, is one `import Name from ...;` statement with a single name
+/// and the warning lies inside it; `NONE` otherwise.
+export function unusedImportDeletion(text: &String, start: u64, end: u64): Option<ByteRange> {
+  if (start >= end || end > text.length()) {
+    return Option::NONE;
+  }
+
+  let mut lineStart: u64 = start;
+
+  while (lineStart > 0 && text.byteAt(lineStart - 1).unwrapOr(0) != 10) {
+    lineStart -= 1;
+  }
+
+  let mut lineEnd: u64 = start;
+
+  while (lineEnd < text.length() && text.byteAt(lineEnd).unwrapOr(0) != 10) {
+    lineEnd += 1;
+  }
+
+  let deletionEnd: u64 = lineEnd < text.length() ? lineEnd + 1 : lineEnd;
+
+  if (end > deletionEnd) {
+    return Option::NONE;
+  }
+
+  let mut statementStart: u64 = lineStart;
+
+  while (statementStart < lineEnd && isWhitespaceByte(text.byteAt(statementStart).unwrapOr(0))) {
+    statementStart += 1;
+  }
+
+  let mut statementEnd: u64 = lineEnd;
+
+  while (statementEnd > statementStart && isWhitespaceByte(text.byteAt(statementEnd - 1).unwrapOr(0))) {
+    statementEnd -= 1;
+  }
+
+  let statement: String = text.substringBytes(statementStart, statementEnd);
+
+  if (!statement.startsWith("import ") || !statement.endsWith(";")) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(separator) = singleFromSeparator(&statement) else {
+    return Option::NONE;
+  };
+
+  // The host slices `import `..separator, which panics when ` from ` starts
+  // inside `import `; no fix is offered there.
+  if (separator < IMPORT_PREFIX_LENGTH) {
+    return Option::NONE;
+  }
+
+  let name: String = statement.substringBytes(IMPORT_PREFIX_LENGTH, separator).trimAsciiWhitespace();
+
+  if (!isSingleImportName(&name)) {
+    return Option::NONE;
+  }
+
+  if (start < statementStart || end > statementEnd) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(ByteRange { start: lineStart, end: deletionEnd });
+}
+
+/// The member `key` of `value` as an LSP position.
+function positionMember(value: &JsonValue, key: str): Option<Text::Position> {
+  let Option::SOME(position) = jsonMember(value, key) else {
+    return Option::NONE;
+  };
+
+  let line: i64 = jsonIntegerMember(position, "line").unwrapOr(-1);
+  let character: i64 = jsonIntegerMember(position, "character").unwrapOr(-1);
+
+  if (line < 0 || character < 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(Text::Position { line: line as u64, character: character as u64 });
+}
+
+/// A copy of `value`: `JsonValue` has no `Clone`.
+function copyJson(value: &JsonValue): JsonValue {
+  let text: String = Json::toJsonString(value);
+
+  return match (Json::parse(&text)) {
+    Result::OK(copy) -> copy,
+    Result::ERROR(_) -> JsonValue::nullValue(),
+  };
+}
+
+/// The "Remove unused import" quick fix for `diagnostic` in the document
+/// `text` under `uri`, or `NONE` when it is not an unused-import warning the
+/// fix applies to.
+function removeUnusedImportAction(
+  uri: &String,
+  text: &String,
+  lineIndex: &Text::LineIndex,
+  diagnostic: &JsonValue
+): Option<JsonValue> {
+  let Option::SOME(code) = jsonStringMember(diagnostic, "code") else {
+    return Option::NONE;
+  };
+
+  if (!code.equals(UNUSED_IMPORT_CODE)) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(range) = jsonMember(diagnostic, "range") else {
+    return Option::NONE;
+  };
+  let Option::SOME(start) = positionMember(range, "start") else {
+    return Option::NONE;
+  };
+  let Option::SOME(end) = positionMember(range, "end") else {
+    return Option::NONE;
+  };
+  let Option::SOME(deletion) = unusedImportDeletion(text, lineIndex.offset(start), lineIndex.offset(end)) else {
+    return Option::NONE;
+  };
+
+  let mut edits: Vector<JsonValue> = Vector::new<JsonValue>();
+  edits.push(textEditJson(lineIndex.position(deletion.start), lineIndex.position(deletion.end), String::new()));
+
+  let mut changes: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  changes.push(JsonObjectEntry { key: uri.clone(), value: JsonValue::array(edits) });
+
+  let mut edit: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  edit.push(JsonObjectEntry::create("changes", JsonValue::object(changes)));
+
+  let mut diagnostics: Vector<JsonValue> = Vector::new<JsonValue>();
+  diagnostics.push(copyJson(diagnostic));
+
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("title", JsonValue::stringValue("Remove unused import")));
+  entries.push(JsonObjectEntry::create("kind", JsonValue::stringValue("quickfix")));
+  entries.push(JsonObjectEntry::create("diagnostics", JsonValue::array(diagnostics)));
+  entries.push(JsonObjectEntry::create("edit", JsonValue::object(edit)));
+  return Option::SOME(JsonValue::object(entries));
+}
+
+/// The code actions for the open document `text` under `uri` and the
+/// `diagnostics` the request carries: one quick fix for each unused-import
+/// warning it applies to, and none at all outside an `.ign` file.
+export function codeActionsFor(uri: &String, text: &String, diagnostics: &JsonValue): Vector<JsonValue> {
+  let mut actions: Vector<JsonValue> = Vector::new<JsonValue>();
+
+  let Option::SOME(path) = filePathFromUri(uri) else {
+    return actions;
+  };
+
+  if (!path.endsWith(".ign")) {
+    return actions;
+  }
+
+  let JsonValueKind::ARRAY(items) = &diagnostics.kind else {
+    return actions;
+  };
+
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(text.clone());
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    if (let Option::SOME(diagnostic) = items.get(index)) {
+      if (let Option::SOME(action) = removeUnusedImportAction(uri, text, &lineIndex, diagnostic)) {
+        actions.push(action);
+      }
+    }
+
+    index += 1;
+  }
+
+  return actions;
+}
