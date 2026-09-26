@@ -1,0 +1,1204 @@
+//! Where a completion request stands, read from the tokens of the text the
+//! client has now, so a buffer that does not parse still gets an answer. It
+//! follows the host's token rules (crates/ignis_lsp/src/completion.rs:163):
+//! the context from the tokens around the cursor, and the scope, the locals
+//! and the parameters from a scan of the braces and declarations before it.
+
+import SourceFile from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import Keyword, LiteralKind, Punctuation, Token, TokenKind from "@compiler::syntax";
+
+import String from "std::string";
+import Vector from "std::vector";
+
+/// The tokens completion tells apart. Every other token is `OTHER`.
+export namespace TokenCode {
+  const OTHER: u64 = 0;
+  const COMMENT: u64 = 1;
+  const IDENTIFIER: u64 = 2;
+  const STRING: u64 = 3;
+  const DOT: u64 = 4;
+  const DOUBLE_COLON: u64 = 5;
+  const PIPE_FORWARD: u64 = 6;
+  const COMMA: u64 = 7;
+  const LEFT_BRACE: u64 = 8;
+  const RIGHT_BRACE: u64 = 9;
+  const LEFT_PAREN: u64 = 10;
+  const RIGHT_PAREN: u64 = 11;
+  const LEFT_BRACKET: u64 = 12;
+  const RIGHT_BRACKET: u64 = 13;
+  const AT: u64 = 14;
+  const COLON: u64 = 15;
+  const SEMICOLON: u64 = 16;
+  const EQUAL: u64 = 17;
+  const ARROW: u64 = 18;
+  const FROM: u64 = 19;
+  const ELSE: u64 = 20;
+  const LET: u64 = 21;
+  const CONST: u64 = 22;
+  const MUT: u64 = 23;
+  const RECORD: u64 = 24;
+  const ENUM: u64 = 25;
+  const FUNCTION: u64 = 26;
+  const IF: u64 = 27;
+  const WHILE: u64 = 28;
+  const FOR: u64 = 29;
+  const MATCH: u64 = 30;
+}
+
+/// What a completion request completes.
+export namespace ContextKind {
+  const IDENTIFIER: u64 = 0;
+  const AFTER_DOT: u64 = 1;
+  const AFTER_DOUBLE_COLON: u64 = 2;
+  const AFTER_PIPE: u64 = 3;
+  const IMPORT_PATH: u64 = 4;
+  const RECORD_INIT: u64 = 5;
+  const AFTER_AT: u64 = 6;
+}
+
+/// The kind of block the cursor is in, from the braces before it.
+export namespace CompletionScope {
+  const GLOBAL: u64 = 0;
+  const TYPE_BODY: u64 = 1;
+  const CALLABLE_BODY: u64 = 2;
+}
+
+/// One token of the text being completed.
+export record CompletionToken {
+  public code: u64;
+  public start: u64;
+  public end: u64;
+  public lexeme: String;
+}
+
+/// A completion context. `prefix` is what is typed of the name being
+/// completed. The other fields are filled only for the kinds that read them:
+/// `startOffset` for an identifier or a pipe target, `dotOffset` after a
+/// `.`, `segments` after a `::`, `recordName` and `assignedFields` in a
+/// record literal.
+export record CompletionContext {
+  public kind: u64;
+  public prefix: String;
+  public startOffset: u64;
+  public dotOffset: u64;
+  public segments: Vector<String>;
+  public recordName: String;
+  public assignedFields: Vector<String>;
+}
+
+/// The scope at a position, and where the innermost callable block starts
+/// when it is inside one.
+export record ScopeAt {
+  public scope: u64;
+  public localStart: Option<u64>;
+}
+
+function contextOf(kind: u64, prefix: String): CompletionContext {
+  return CompletionContext {
+    kind: kind,
+    prefix: prefix,
+    startOffset: 0,
+    dotOffset: 0,
+    segments: Vector::new<String>(),
+    recordName: String::new(),
+    assignedFields: Vector::new<String>(),
+  };
+}
+
+function keywordCode(keyword: Keyword): u64 {
+  return match (keyword) {
+    Keyword::FROM -> TokenCode::FROM,
+    Keyword::ELSE -> TokenCode::ELSE,
+    Keyword::LET -> TokenCode::LET,
+    Keyword::CONST -> TokenCode::CONST,
+    Keyword::MUT -> TokenCode::MUT,
+    Keyword::RECORD -> TokenCode::RECORD,
+    Keyword::ENUM -> TokenCode::ENUM,
+    Keyword::FUNCTION -> TokenCode::FUNCTION,
+    Keyword::IF -> TokenCode::IF,
+    Keyword::WHILE -> TokenCode::WHILE,
+    Keyword::FOR -> TokenCode::FOR,
+    Keyword::MATCH -> TokenCode::MATCH,
+    _ -> TokenCode::OTHER,
+  };
+}
+
+function punctuationCode(punctuation: Punctuation): u64 {
+  return match (punctuation) {
+    Punctuation::DOT -> TokenCode::DOT,
+    Punctuation::DOUBLE_COLON -> TokenCode::DOUBLE_COLON,
+    Punctuation::PIPE_FORWARD -> TokenCode::PIPE_FORWARD,
+    Punctuation::COMMA -> TokenCode::COMMA,
+    Punctuation::LEFT_BRACE -> TokenCode::LEFT_BRACE,
+    Punctuation::RIGHT_BRACE -> TokenCode::RIGHT_BRACE,
+    Punctuation::LEFT_PAREN -> TokenCode::LEFT_PAREN,
+    Punctuation::RIGHT_PAREN -> TokenCode::RIGHT_PAREN,
+    Punctuation::LEFT_BRACKET -> TokenCode::LEFT_BRACKET,
+    Punctuation::RIGHT_BRACKET -> TokenCode::RIGHT_BRACKET,
+    Punctuation::AT -> TokenCode::AT,
+    Punctuation::COLON -> TokenCode::COLON,
+    Punctuation::SEMICOLON -> TokenCode::SEMICOLON,
+    Punctuation::EQUAL -> TokenCode::EQUAL,
+    Punctuation::ARROW -> TokenCode::ARROW,
+    _ -> TokenCode::OTHER,
+  };
+}
+
+/// The code of `token`, or `NONE` for what the host's lexer emits nothing
+/// for: an invalid token and the end of input.
+function tokenCode(token: &Token): Option<u64> {
+  return match (token.kindValue()) {
+    TokenKind::IDENTIFIER -> Option::SOME(TokenCode::IDENTIFIER),
+    TokenKind::KEYWORD -> Option::SOME(keywordCode(token.keywordValue())),
+    TokenKind::PUNCTUATION -> Option::SOME(punctuationCode(token.punctuationValue())),
+    TokenKind::LITERAL -> {
+      if (token.literalKindValue() == LiteralKind::STRING) {
+        return Option::SOME(TokenCode::STRING);
+      }
+
+      return Option::SOME(TokenCode::OTHER);
+    },
+    TokenKind::LINE_COMMENT -> Option::SOME(TokenCode::COMMENT),
+    TokenKind::BLOCK_COMMENT -> Option::SOME(TokenCode::COMMENT),
+    TokenKind::OUTER_DOC_COMMENT -> Option::SOME(TokenCode::COMMENT),
+    TokenKind::INNER_DOC_COMMENT -> Option::SOME(TokenCode::COMMENT),
+    _ -> Option::NONE,
+  };
+}
+
+/// The tokens of `text`, comments included.
+export function completionTokens(text: &String): Vector<CompletionToken> {
+  let file: SourceFile = SourceFile::create("completion.ign", text.toStr());
+  let lexed: LexResult = Lexer::lex(&file);
+  let mut tokens: Vector<CompletionToken> = Vector::new<CompletionToken>();
+  let mut index: u64 = 0;
+
+  while (index < lexed.tokens.length()) {
+    if (let Option::SOME(token) = lexed.tokens.get(index)) {
+      if (let Option::SOME(code) = tokenCode(token)) {
+        tokens.push(CompletionToken {
+          code: code,
+          start: token.spanStart(),
+          end: token.spanEnd(),
+          lexeme: token.lexemeString(),
+        });
+      }
+    }
+
+    index += 1;
+  }
+
+  return tokens;
+}
+function copyToken(token: &CompletionToken): CompletionToken {
+  return CompletionToken {
+    code: token.code,
+    start: token.start,
+    end: token.end,
+    lexeme: token.lexeme.clone(),
+  };
+}
+
+/// `tokens` without comments.
+function meaningfulTokens(tokens: &Vector<CompletionToken>): Vector<CompletionToken> {
+  let mut meaningful: Vector<CompletionToken> = Vector::new<CompletionToken>();
+  let mut index: u64 = 0;
+
+  while (index < tokens.length()) {
+    if (let Option::SOME(token) = tokens.get(index)) {
+      if (token.code != TokenCode::COMMENT) {
+        meaningful.push(copyToken(token));
+      }
+    }
+
+    index += 1;
+  }
+
+  return meaningful;
+}
+
+function startAt(tokens: &Vector<CompletionToken>, index: u64): u64 {
+  return match (tokens.get(index)) {
+    Option::SOME(token) -> token.start,
+    Option::NONE -> 0,
+  };
+}
+
+function lastOf(values: &Vector<u64>): Option<u64> {
+  if (values.length() == 0) {
+    return Option::NONE;
+  }
+
+  return match (values.get(values.length() - 1)) {
+    Option::SOME(value) -> Option::SOME(*value),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function codeAt(tokens: &Vector<CompletionToken>, index: u64): u64 {
+  return match (tokens.get(index)) {
+    Option::SOME(token) -> token.code,
+    Option::NONE -> TokenCode::OTHER,
+  };
+}
+
+/// True when `offset` of `text` starts a character or ends the text.
+export function isCharBoundary(text: &String, offset: u64): boolean {
+  if (offset >= text.length()) {
+    return offset == text.length();
+  }
+
+  let byte: u8 = text.byteAt(offset).unwrapOr(0);
+  return (byte & 192) != 128;
+}
+
+/// The first character boundary at or after `offset`, at most three bytes
+/// on, as the host looks for it.
+export function nextCharBoundary(text: &String, offset: u64): u64 {
+  let length: u64 = text.length();
+
+  if (offset >= length) {
+    return length;
+  }
+
+  if (isCharBoundary(text, offset)) {
+    return offset;
+  }
+
+  let mut step: u64 = 1;
+
+  while (step <= 3) {
+    let next: u64 = offset + step;
+
+    if (next >= length || isCharBoundary(text, next)) {
+      return next < length ? next : length;
+    }
+
+    step += 1;
+  }
+
+  return length;
+}
+
+/// True when `name` starts with `prefix`, ignoring case. A prefix that ends
+/// in underscores also matches without them.
+export function matchesPrefix(name: &String, prefix: &String): boolean {
+  if (prefix.length() == 0) {
+    return true;
+  }
+
+  let nameLower: String = name.toLowerCase();
+  let prefixLower: String = prefix.toLowerCase();
+
+  if (nameLower.startsWith(prefixLower.toStr())) {
+    return true;
+  }
+
+  let mut trimmedLength: u64 = prefixLower.length();
+
+  while (trimmedLength > 0 && prefixLower.byteAt(trimmedLength - 1).unwrapOr(0) == '_' as u8) {
+    trimmedLength -= 1;
+  }
+
+  if (trimmedLength == prefixLower.length() || trimmedLength == 0) {
+    return false;
+  }
+
+  let normalized: String = prefixLower.substringBytes(0, trimmedLength);
+  return nameLower.startsWith(normalized.toStr());
+}
+
+/// The first `count` characters of `text`.
+function leadingChars(text: &String, count: u64): String {
+  let chars: Vector<char> = text.toChars();
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < count && index < chars.length()) {
+    if (let Option::SOME(value) = chars.get(index)) {
+      result.pushChar(*value);
+    }
+
+    index += 1;
+  }
+
+  return result;
+}
+
+/// What is typed of the identifier the cursor is inside: as many characters
+/// of it as bytes lie before the cursor, which is how the host takes them.
+function prefixAtCursor(current: Option<&CompletionToken>, cursor: u64): String {
+  let Option::SOME(token) = current else {
+    return String::new();
+  };
+
+  if (token.code != TokenCode::IDENTIFIER || token.start > cursor) {
+    return String::new();
+  }
+
+  return leadingChars(&token.lexeme, cursor - token.start);
+}
+
+/// The positions of the last token ending at or before `cursor` and of the
+/// token the cursor is inside.
+record AdjacentTokens {
+  public previous: Option<u64>;
+  public current: Option<u64>;
+}
+
+function adjacentTokens(tokens: &Vector<CompletionToken>, cursor: u64): AdjacentTokens {
+  let mut adjacent: AdjacentTokens = AdjacentTokens { previous: Option::NONE, current: Option::NONE };
+  let mut index: u64 = 0;
+
+  while (index < tokens.length()) {
+    let Option::SOME(token) = tokens.get(index) else {
+      break;
+    };
+
+    if (token.end <= cursor) {
+      adjacent.previous = Option::SOME(index);
+    } else if (token.start <= cursor && cursor <= token.end) {
+      adjacent.current = Option::SOME(index);
+      break;
+    } else {
+      break;
+    }
+
+    index += 1;
+  }
+
+  return adjacent;
+}
+
+/// The position of the last token that ends at or before `offset`.
+function tokenBefore(tokens: &Vector<CompletionToken>, offset: u64): Option<u64> {
+  let mut found: Option<u64> = Option::NONE;
+  let mut index: u64 = 0;
+
+  while (index < tokens.length()) {
+    let Option::SOME(token) = tokens.get(index) else {
+      break;
+    };
+
+    if (token.end > offset) {
+      break;
+    }
+
+    found = Option::SOME(index);
+    index += 1;
+  }
+
+  return found;
+}
+
+/// The identifiers of the path that ends at the `::` at `index`, in order:
+/// `Math`, `Linear` for `Math::Linear::`.
+function pathSegmentsBefore(tokens: &Vector<CompletionToken>, index: u64): Vector<String> {
+  let mut reversed: Vector<String> = Vector::new<String>();
+  let mut expectIdentifier: boolean = true;
+  let mut position: u64 = index;
+
+  while (position > 0) {
+    position -= 1;
+
+    let Option::SOME(token) = tokens.get(position) else {
+      break;
+    };
+
+    if (expectIdentifier) {
+      if (token.code != TokenCode::IDENTIFIER) {
+        break;
+      }
+
+      reversed.push(token.lexeme.clone());
+      expectIdentifier = false;
+    } else if (token.code == TokenCode::DOUBLE_COLON) {
+      expectIdentifier = true;
+    } else {
+      break;
+    }
+  }
+
+  let mut segments: Vector<String> = Vector::new<String>();
+
+  while (reversed.length() > 0) {
+    if (let Option::SOME(segment) = reversed.pop()) {
+      segments.push(segment);
+    }
+  }
+
+  return segments;
+}
+
+/// The import path the cursor is inside: the string after a `from`.
+function importPathContext(
+  tokens: &Vector<CompletionToken>,
+  cursor: u64,
+  text: &String
+): Option<CompletionContext> {
+  let length: u64 = text.length();
+  let mut index: u64 = 0;
+
+  while (index + 1 < tokens.length()) {
+    let Option::SOME(token) = tokens.get(index) else {
+      break;
+    };
+    let Option::SOME(pathToken) = tokens.get(index + 1) else {
+      break;
+    };
+
+    index += 1;
+
+    if (token.code != TokenCode::FROM || pathToken.code != TokenCode::STRING) {
+      continue;
+    }
+
+    let tokenStart: u64 = pathToken.start < length ? pathToken.start : length;
+    let tokenEnd: u64 = pathToken.end < length ? pathToken.end : length;
+    let clampedCursor: u64 = cursor < length ? cursor : length;
+
+    if (clampedCursor < tokenStart || clampedCursor > tokenEnd) {
+      continue;
+    }
+
+    let mut contentStart: u64 = tokenStart + 1 < tokenEnd ? tokenStart + 1 : tokenEnd;
+    let mut contentEnd: u64 = clampedCursor < contentStart ? contentStart : clampedCursor;
+    contentStart = nextCharBoundary(text, contentStart);
+    contentEnd = nextCharBoundary(text, contentEnd);
+
+    let prefix: String = contentEnd > contentStart ? text.substringBytes(contentStart, contentEnd) : String::new();
+    return Option::SOME(contextOf(ContextKind::IMPORT_PATH, prefix));
+  }
+
+  return Option::NONE;
+}
+
+/// Where `needle` last starts in `text`.
+function lastIndexOf(text: &String, needle: str): Option<u64> {
+  let wanted: String = String::create(needle);
+  let length: u64 = wanted.length();
+
+  if (length > text.length()) {
+    return Option::NONE;
+  }
+
+  let mut position: u64 = text.length() - length + 1;
+
+  while (position > 0) {
+    position -= 1;
+
+    if (text.substringBytes(position, position + length).equals(&wanted)) {
+      return Option::SOME(position);
+    }
+  }
+
+  return Option::NONE;
+}
+
+/// The import path the cursor is inside, read from the raw text, for an
+/// unclosed quote the lexer did not make a string of: the text after the
+/// last `from "` or `import "` of the 200 bytes before the cursor, unless a
+/// line ends in between.
+function importPathFallback(text: &String, cursor: u64): Option<CompletionContext> {
+  let end: u64 = cursor < text.length() ? cursor : text.length();
+
+  if (!isCharBoundary(text, end)) {
+    return Option::NONE;
+  }
+
+  let mut windowStart: u64 = end > 200 ? end - 200 : 0;
+  let mut step: u64 = 0;
+  let mut aligned: boolean = false;
+
+  while (step < 4 && !aligned) {
+    if (isCharBoundary(text, windowStart + step)) {
+      windowStart += step;
+      aligned = true;
+    }
+
+    step += 1;
+  }
+
+  if (!aligned) {
+    windowStart = end;
+  }
+
+  let window: String = text.substringBytes(windowStart, end);
+  let mut found: Option<u64> = lastIndexOf(&window, "from \"");
+  let mut patternLength: u64 = 6;
+
+  if (found.isNone()) {
+    found = lastIndexOf(&window, "import \"");
+    patternLength = 8;
+  }
+
+  let Option::SOME(position) = found else {
+    return Option::NONE;
+  };
+
+  let content: String = window.substringBytes(position + patternLength, window.length());
+
+  let newline: String = String::create("\n");
+
+  if (content.contains(&newline)) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(contextOf(ContextKind::IMPORT_PATH, content));
+}
+
+/// The record literal the cursor is inside, `Name { a: 1, | }`, found from
+/// the `,` or `{` before it: the name before the enclosing `{` and the fields
+/// written so far. A block after `)` or `else` is not one.
+function recordInitContext(
+  tokens: &Vector<CompletionToken>,
+  trigger: u64,
+  current: Option<&CompletionToken>,
+  cursor: u64
+): Option<CompletionContext> {
+  let mut depth: u64 = 0;
+  let mut open: Option<u64> = Option::NONE;
+  let mut position: u64 = trigger + 1;
+
+  while (position > 0 && open.isNone()) {
+    position -= 1;
+
+    let code: u64 = codeAt(tokens, position);
+
+    if (code == TokenCode::RIGHT_BRACE) {
+      depth += 1;
+    } else if (code == TokenCode::LEFT_BRACE) {
+      if (depth == 0) {
+        open = Option::SOME(position);
+      } else {
+        depth -= 1;
+      }
+    }
+  }
+
+  let Option::SOME(brace) = open else {
+    return Option::NONE;
+  };
+
+  if (brace == 0 || codeAt(tokens, brace - 1) != TokenCode::IDENTIFIER) {
+    return Option::NONE;
+  }
+
+  if (brace >= 2) {
+    let beforeName: u64 = codeAt(tokens, brace - 2);
+
+    if (beforeName == TokenCode::RIGHT_PAREN || beforeName == TokenCode::ELSE) {
+      return Option::NONE;
+    }
+  }
+
+  let Option::SOME(nameToken) = tokens.get(brace - 1) else {
+    return Option::NONE;
+  };
+
+  let mut context: CompletionContext = contextOf(ContextKind::RECORD_INIT, prefixAtCursor(current, cursor));
+  context.recordName = nameToken.lexeme.clone();
+
+  let mut index: u64 = brace + 1;
+
+  while (index < tokens.length()) {
+    let Option::SOME(token) = tokens.get(index) else {
+      break;
+    };
+
+    if (token.start >= cursor || token.code == TokenCode::RIGHT_BRACE) {
+      break;
+    }
+
+    if (token.code == TokenCode::IDENTIFIER && codeAt(tokens, index + 1) == TokenCode::COLON && index + 1 < tokens.length()) {
+      context.assignedFields.push(token.lexeme.clone());
+    }
+
+    index += 1;
+  }
+
+  return Option::SOME(context);
+}
+
+/// An `@` context when the `[` or `,` at `index` belongs to an `@[...]`
+/// attribute list.
+function atBracketListContext(
+  tokens: &Vector<CompletionToken>,
+  index: u64,
+  prefix: &String
+): Option<CompletionContext> {
+  let code: u64 = codeAt(tokens, index);
+
+  if (code == TokenCode::LEFT_BRACKET) {
+    if (index > 0 && codeAt(tokens, index - 1) == TokenCode::AT) {
+      return Option::SOME(contextOf(ContextKind::AFTER_AT, prefix.clone()));
+    }
+
+    return Option::NONE;
+  }
+
+  if (code != TokenCode::COMMA) {
+    return Option::NONE;
+  }
+
+  let mut depth: u64 = 0;
+  let mut position: u64 = index;
+
+  while (position > 0) {
+    position -= 1;
+
+    let current: u64 = codeAt(tokens, position);
+
+    if (current == TokenCode::RIGHT_BRACKET) {
+      depth += 1;
+    } else if (current == TokenCode::LEFT_BRACKET) {
+      if (depth == 0) {
+        if (position > 0 && codeAt(tokens, position - 1) == TokenCode::AT) {
+          return Option::SOME(contextOf(ContextKind::AFTER_AT, prefix.clone()));
+        }
+
+        return Option::NONE;
+      }
+
+      depth -= 1;
+    }
+  }
+
+  return Option::NONE;
+}
+
+/// An `@` context: right after `@`, in the name after it, or in an `@[...]`
+/// list.
+function atContext(
+  tokens: &Vector<CompletionToken>,
+  adjacent: &AdjacentTokens,
+  cursor: u64,
+  text: &String
+): Option<CompletionContext> {
+  let previous: Option<&CompletionToken> = match (adjacent.previous) {
+    Option::SOME(index) -> tokens.get(index),
+    Option::NONE -> Option::NONE,
+  };
+  let current: Option<&CompletionToken> = match (adjacent.current) {
+    Option::SOME(index) -> tokens.get(index),
+    Option::NONE -> Option::NONE,
+  };
+
+  if (let Option::SOME(token) = previous) {
+    if (token.code == TokenCode::AT) {
+      return Option::SOME(contextOf(ContextKind::AFTER_AT, prefixAtCursor(current, cursor)));
+    }
+  }
+
+  if (let Option::SOME(token) = current) {
+    if (token.code == TokenCode::IDENTIFIER) {
+      if (let Option::SOME(before) = tokenBefore(tokens, token.start)) {
+        if (codeAt(tokens, before) == TokenCode::AT) {
+          let end: u64 = cursor < token.end ? cursor : token.end;
+          return Option::SOME(contextOf(ContextKind::AFTER_AT, text.substringBytes(token.start, end)));
+        }
+      }
+    }
+  }
+
+  if (let Option::SOME(token) = previous) {
+    if (token.code == TokenCode::IDENTIFIER && token.end == cursor) {
+      if (let Option::SOME(before) = tokenBefore(tokens, token.start)) {
+        let beforeCode: u64 = codeAt(tokens, before);
+
+        if (beforeCode == TokenCode::AT) {
+          return Option::SOME(contextOf(ContextKind::AFTER_AT, token.lexeme.clone()));
+        }
+
+        if (beforeCode == TokenCode::LEFT_BRACKET || beforeCode == TokenCode::COMMA) {
+          if (let Option::SOME(context) = atBracketListContext(tokens, before, &token.lexeme)) {
+            return Option::SOME(context);
+          }
+        }
+      }
+    }
+  }
+
+  if (let Option::SOME(index) = adjacent.previous) {
+    let previousCode: u64 = codeAt(tokens, index);
+
+    if (previousCode == TokenCode::LEFT_BRACKET || previousCode == TokenCode::COMMA) {
+      let prefix: String = prefixAtCursor(current, cursor);
+      return atBracketListContext(tokens, index, &prefix);
+    }
+  }
+
+  return Option::NONE;
+}
+
+/// The context right after the token at `previous`: a `.`, a `::`, a `|>`,
+/// or the `,` or `{` of a record literal.
+function contextAfter(
+  tokens: &Vector<CompletionToken>,
+  previous: u64,
+  current: Option<&CompletionToken>,
+  cursor: u64
+): Option<CompletionContext> {
+  let Option::SOME(token) = tokens.get(previous) else {
+    return Option::NONE;
+  };
+
+  if (token.code == TokenCode::DOT) {
+    let mut context: CompletionContext = contextOf(ContextKind::AFTER_DOT, prefixAtCursor(current, cursor));
+    context.dotOffset = token.start;
+    return Option::SOME(context);
+  }
+
+  if (token.code == TokenCode::DOUBLE_COLON) {
+    let mut context: CompletionContext = contextOf(ContextKind::AFTER_DOUBLE_COLON, prefixAtCursor(current, cursor));
+    context.segments = pathSegmentsBefore(tokens, previous);
+    return Option::SOME(context);
+  }
+
+  if (token.code == TokenCode::PIPE_FORWARD) {
+    let mut context: CompletionContext = contextOf(ContextKind::AFTER_PIPE, prefixAtCursor(current, cursor));
+    context.startOffset = cursor;
+
+    if (let Option::SOME(currentToken) = current) {
+      if (currentToken.code == TokenCode::IDENTIFIER) {
+        context.startOffset = currentToken.start;
+      }
+    }
+
+    return Option::SOME(context);
+  }
+
+  if (token.code == TokenCode::COMMA || token.code == TokenCode::LEFT_BRACE) {
+    return recordInitContext(tokens, previous, current, cursor);
+  }
+
+  return Option::NONE;
+}
+
+/// The completion context at byte `cursor` of `text`, whose tokens are
+/// `tokens`. Every position has one: an identifier context when nothing more
+/// specific applies.
+export function detectContext(
+  tokens: &Vector<CompletionToken>,
+  cursor: u64,
+  text: &String
+): CompletionContext {
+  let meaningful: Vector<CompletionToken> = meaningfulTokens(tokens);
+
+  if (let Option::SOME(context) = importPathContext(&meaningful, cursor, text)) {
+    return context;
+  }
+
+  if (let Option::SOME(context) = importPathFallback(text, cursor)) {
+    return context;
+  }
+
+  let adjacent: AdjacentTokens = adjacentTokens(&meaningful, cursor);
+
+  if (let Option::SOME(context) = atContext(&meaningful, &adjacent, cursor, text)) {
+    return context;
+  }
+
+  let current: Option<&CompletionToken> = match (adjacent.current) {
+    Option::SOME(index) -> meaningful.get(index),
+    Option::NONE -> Option::NONE,
+  };
+
+  if (let Option::SOME(previous) = adjacent.previous) {
+    if (let Option::SOME(context) = contextAfter(&meaningful, previous, current, cursor)) {
+      return context;
+    }
+  }
+
+  return identifierContext(&meaningful, &adjacent, cursor, text);
+}
+
+/// The identifier being typed at `cursor`, which a `.`, `::` or `|>` before
+/// it still turns into their context.
+function identifierContext(
+  tokens: &Vector<CompletionToken>,
+  adjacent: &AdjacentTokens,
+  cursor: u64,
+  text: &String
+): CompletionContext {
+  let mut identifier: Option<u64> = Option::NONE;
+
+  if (let Option::SOME(index) = adjacent.current) {
+    if (codeAt(tokens, index) == TokenCode::IDENTIFIER) {
+      identifier = Option::SOME(index);
+    }
+  }
+
+  if (identifier.isNone()) {
+    if (let Option::SOME(index) = adjacent.previous) {
+      if (let Option::SOME(token) = tokens.get(index)) {
+        if (token.code == TokenCode::IDENTIFIER && token.end == cursor) {
+          identifier = Option::SOME(index);
+        }
+      }
+    }
+  }
+
+  let mut prefix: String = String::new();
+  let mut start: u64 = cursor;
+
+  if (let Option::SOME(index) = identifier) {
+    if (let Option::SOME(token) = tokens.get(index)) {
+      let end: u64 = cursor < token.end ? cursor : token.end;
+
+      if (end > token.start) {
+        prefix = text.substringBytes(token.start, end);
+        start = token.start;
+      }
+    }
+  }
+
+  if (prefix.length() > 0) {
+    if (let Option::SOME(before) = tokenBefore(tokens, start)) {
+      let code: u64 = codeAt(tokens, before);
+
+      if (code == TokenCode::DOT) {
+        let mut context: CompletionContext = contextOf(ContextKind::AFTER_DOT, prefix);
+        context.dotOffset = startAt(tokens, before);
+        return context;
+      }
+
+      if (code == TokenCode::DOUBLE_COLON) {
+        let mut context: CompletionContext = contextOf(ContextKind::AFTER_DOUBLE_COLON, prefix);
+        context.segments = pathSegmentsBefore(tokens, before);
+        return context;
+      }
+
+      if (code == TokenCode::PIPE_FORWARD) {
+        let mut context: CompletionContext = contextOf(ContextKind::AFTER_PIPE, prefix);
+        context.startOffset = start;
+        return context;
+      }
+    }
+  }
+
+  let mut context: CompletionContext = contextOf(ContextKind::IDENTIFIER, prefix);
+  context.startOffset = start;
+  return context;
+}
+
+/// The scope of the block the brace at `index` opens, from the tokens
+/// between it and the `;`, `{` or `}` before it.
+function braceScope(tokens: &Vector<CompletionToken>, index: u64, parent: Option<u64>): u64 {
+  let inherited: u64 = parent.unwrapOr(CompletionScope::GLOBAL);
+
+  if (inherited == CompletionScope::CALLABLE_BODY) {
+    return CompletionScope::CALLABLE_BODY;
+  }
+
+  let mut segmentStart: u64 = 0;
+  let mut position: u64 = index;
+
+  while (position > 0) {
+    position -= 1;
+
+    let code: u64 = codeAt(tokens, position);
+
+    if (code == TokenCode::SEMICOLON || code == TokenCode::LEFT_BRACE || code == TokenCode::RIGHT_BRACE) {
+      segmentStart = position + 1;
+      break;
+    }
+  }
+
+  let mut hasType: boolean = false;
+  let mut hasFunction: boolean = false;
+  let mut hasControl: boolean = false;
+  let mut hasRightParen: boolean = false;
+  let mut hasColon: boolean = false;
+  position = segmentStart;
+
+  while (position < index) {
+    let code: u64 = codeAt(tokens, position);
+    hasType = hasType || code == TokenCode::RECORD || code == TokenCode::ENUM;
+    hasFunction = hasFunction || code == TokenCode::FUNCTION;
+    hasControl = hasControl || code == TokenCode::IF || code == TokenCode::WHILE || code == TokenCode::FOR || code == TokenCode::ELSE || code == TokenCode::MATCH;
+    hasRightParen = hasRightParen || code == TokenCode::RIGHT_PAREN;
+    hasColon = hasColon || code == TokenCode::COLON;
+    position += 1;
+  }
+
+  if (hasType) {
+    return CompletionScope::TYPE_BODY;
+  }
+
+  if (hasFunction) {
+    return CompletionScope::CALLABLE_BODY;
+  }
+
+  if (hasControl) {
+    return inherited;
+  }
+
+  if (hasRightParen && hasColon) {
+    return CompletionScope::CALLABLE_BODY;
+  }
+
+  return inherited;
+}
+
+/// The scope at `cursor`: the kind of the innermost block open there and,
+/// inside a callable, where that innermost block starts.
+export function scopeAt(tokens: &Vector<CompletionToken>, cursor: u64): ScopeAt {
+  let meaningful: Vector<CompletionToken> = meaningfulTokens(tokens);
+  let mut scopes: Vector<u64> = Vector::new<u64>();
+  let mut starts: Vector<u64> = Vector::new<u64>();
+  let mut index: u64 = 0;
+
+  while (index < meaningful.length()) {
+    let Option::SOME(token) = meaningful.get(index) else {
+      break;
+    };
+
+    if (token.start >= cursor) {
+      break;
+    }
+
+    if (token.code == TokenCode::LEFT_BRACE) {
+      let parent: Option<u64> = lastOf(&scopes);
+      scopes.push(braceScope(&meaningful, index, parent));
+      starts.push(token.start);
+    } else if (token.code == TokenCode::RIGHT_BRACE) {
+      let _closedScope: Option<u64> = scopes.pop();
+      let _closedStart: Option<u64> = starts.pop();
+    }
+
+    index += 1;
+  }
+
+  let scope: u64 = lastOf(&scopes).unwrapOr(CompletionScope::GLOBAL);
+
+  if (scope != CompletionScope::CALLABLE_BODY) {
+    return ScopeAt { scope: scope, localStart: Option::NONE };
+  }
+
+  return ScopeAt { scope: scope, localStart: lastOf(&starts) };
+}
+
+/// The code of the last token before `startOffset` that is not a comment,
+/// skipping the identifier that starts there, or `NONE` at the start of the
+/// text.
+export function previousMeaningfulCode(tokens: &Vector<CompletionToken>, startOffset: u64): Option<u64> {
+  let mut position: u64 = 0;
+
+  while (position < tokens.length()) {
+    if (let Option::SOME(token) = tokens.get(position)) {
+      if (token.start >= startOffset) {
+        break;
+      }
+    }
+
+    position += 1;
+  }
+
+  while (position > 0) {
+    position -= 1;
+
+    let Option::SOME(token) = tokens.get(position) else {
+      break;
+    };
+
+    if (token.start == startOffset || token.code == TokenCode::COMMENT) {
+      continue;
+    }
+
+    return Option::SOME(token.code);
+  }
+
+  return Option::NONE;
+}
+
+/// True when the first token after `startOffset` is `(`.
+export function nextTokenIsParen(tokens: &Vector<CompletionToken>, startOffset: u64): boolean {
+  let mut index: u64 = 0;
+
+  while (index < tokens.length()) {
+    if (let Option::SOME(token) = tokens.get(index)) {
+      if (token.start > startOffset) {
+        return token.code == TokenCode::LEFT_PAREN;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+function containsName(names: &Vector<String>, name: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    if (let Option::SOME(candidate) = names.get(index)) {
+      if (candidate.equals(name)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// A local or parameter found by scanning the tokens, with the detail the
+/// host gives it.
+export record ScannedLocal {
+  public name: String;
+  public detail: str;
+}
+
+/// The locals declared with `let`, `let mut` or `const` before `cursor`,
+/// nearest first, then the parameters of the callable whose block starts at
+/// `localStart`. Names in `known` and names that do not match `prefix` are
+/// left out. The scan stops at `localStart`, and 500 tokens back.
+export function scannedLocals(
+  tokens: &Vector<CompletionToken>,
+  cursor: u64,
+  prefix: &String,
+  localStart: Option<u64>,
+  known: &Vector<String>,
+): Vector<ScannedLocal> {
+  let mut found: Vector<ScannedLocal> = Vector::new<ScannedLocal>();
+  let mut seen: Vector<String> = Vector::new<String>();
+  let mut cursorIndex: u64 = 0;
+
+  while (cursorIndex < tokens.length() && startAt(tokens, cursorIndex) < cursor) {
+    cursorIndex += 1;
+  }
+
+  let mut position: u64 = cursorIndex;
+
+  while (position > 0) {
+    position -= 1;
+
+    let Option::SOME(token) = tokens.get(position) else {
+      break;
+    };
+
+    if (let Option::SOME(start) = localStart) {
+      if (token.start < start) {
+        break;
+      }
+    }
+
+    if (token.code == TokenCode::IDENTIFIER) {
+      if (!matchesPrefix(&token.lexeme, prefix) || containsName(known, &token.lexeme)) {
+        continue;
+      }
+
+      let before: u64 = position > 0 ? codeAt(tokens, position - 1) : TokenCode::OTHER;
+      let mut declared: boolean = before == TokenCode::LET || before == TokenCode::CONST;
+
+      if (before == TokenCode::MUT && position > 1) {
+        declared = codeAt(tokens, position - 2) == TokenCode::LET;
+      }
+
+      if (declared && !containsName(&seen, &token.lexeme)) {
+        seen.push(token.lexeme.clone());
+        found.push(ScannedLocal { name: token.lexeme.clone(), detail: "(local)" });
+      }
+    }
+
+    if (cursorIndex - position > 500) {
+      break;
+    }
+  }
+
+  if (let Option::SOME(start) = localStart) {
+    let parameters: Vector<String> = parameterNames(tokens, start);
+    let mut index: u64 = 0;
+
+    while (index < parameters.length()) {
+      if (let Option::SOME(name) = parameters.get(index)) {
+        if (matchesPrefix(name, prefix) && !containsName(known, name) && !containsName(&seen, name)) {
+          seen.push(name.clone());
+          found.push(ScannedLocal { name: name.clone(), detail: "(param)" });
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  return found;
+}
+
+/// The names followed by `:` inside the last parenthesized list before the
+/// `{` at `blockStart`.
+function parameterNames(tokens: &Vector<CompletionToken>, blockStart: u64): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+  let mut brace: Option<u64> = Option::NONE;
+  let mut index: u64 = 0;
+
+  while (index < tokens.length() && brace.isNone()) {
+    if (let Option::SOME(token) = tokens.get(index)) {
+      if (token.code == TokenCode::LEFT_BRACE && token.start == blockStart) {
+        brace = Option::SOME(index);
+      }
+    }
+
+    index += 1;
+  }
+
+  let Option::SOME(braceIndex) = brace else {
+    return names;
+  };
+
+  let mut close: Option<u64> = Option::NONE;
+  let mut position: u64 = braceIndex;
+
+  while (position > 0 && close.isNone()) {
+    position -= 1;
+
+    if (codeAt(tokens, position) == TokenCode::RIGHT_PAREN) {
+      close = Option::SOME(position);
+    }
+  }
+
+  let Option::SOME(closeIndex) = close else {
+    return names;
+  };
+
+  let mut depth: u64 = 0;
+  let mut open: Option<u64> = Option::NONE;
+  position = closeIndex + 1;
+
+  while (position > 0 && open.isNone()) {
+    position -= 1;
+
+    let code: u64 = codeAt(tokens, position);
+
+    if (code == TokenCode::RIGHT_PAREN) {
+      depth += 1;
+    } else if (code == TokenCode::LEFT_PAREN) {
+      depth -= 1;
+
+      if (depth == 0) {
+        open = Option::SOME(position);
+      }
+    }
+  }
+
+  let Option::SOME(openIndex) = open else {
+    return names;
+  };
+
+  position = openIndex + 1;
+
+  while (position < closeIndex) {
+    if (let Option::SOME(token) = tokens.get(position)) {
+      if (token.code == TokenCode::IDENTIFIER && position + 1 < closeIndex && codeAt(tokens, position + 1) == TokenCode::COLON) {
+        names.push(token.lexeme.clone());
+      }
+    }
+
+    position += 1;
+  }
+
+  return names;
+}

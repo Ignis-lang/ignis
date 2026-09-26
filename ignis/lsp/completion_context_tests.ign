@@ -1,0 +1,231 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import
+  CompletionContext,
+  CompletionScope,
+  CompletionToken,
+  ContextKind,
+  ScannedLocal,
+  ScopeAt,
+  completionTokens,
+  detectContext,
+  matchesPrefix,
+  nextCharBoundary,
+  scannedLocals,
+  scopeAt,
+from "./completion_context";
+
+/// `kind:prefix`, plus the offset, segments or record fields the kind reads.
+function contextText(context: &CompletionContext): String {
+  let mut text: String = String::new();
+
+  if (context.kind == ContextKind::IDENTIFIER) {
+    text.pushStr("identifier");
+  } else if (context.kind == ContextKind::AFTER_DOT) {
+    text = `dot@${context.dotOffset}`;
+  } else if (context.kind == ContextKind::AFTER_DOUBLE_COLON) {
+    text.pushStr("path");
+  } else if (context.kind == ContextKind::AFTER_PIPE) {
+    text.pushStr("pipe");
+  } else if (context.kind == ContextKind::IMPORT_PATH) {
+    text.pushStr("import");
+  } else if (context.kind == ContextKind::RECORD_INIT) {
+    text = `record ${context.recordName.toStr()}`;
+  } else if (context.kind == ContextKind::AFTER_AT) {
+    text.pushStr("at");
+  }
+
+  text.pushStr(":");
+  text.push(&context.prefix);
+
+  let mut index: u64 = 0;
+
+  while (index < context.segments.length()) {
+    if (let Option::SOME(segment) = context.segments.get(index)) {
+      text.pushStr(index == 0 ? " in " : "::");
+      text.push(segment);
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < context.assignedFields.length()) {
+    if (let Option::SOME(field) = context.assignedFields.get(index)) {
+      text.pushStr(index == 0 ? " set " : ",");
+      text.push(field);
+    }
+
+    index += 1;
+  }
+
+  return text;
+}
+
+/// The context at byte `cursor` of `source`.
+function contextAt(source: str, cursor: u64): String {
+  let text: String = String::create(source);
+  let tokens: Vector<CompletionToken> = completionTokens(&text);
+  let context: CompletionContext = detectContext(&tokens, cursor, &text);
+  return contextText(&context);
+}
+
+/// The context at the end of `source`.
+function contextAtEnd(source: str): String {
+  return contextAt(source, String::create(source).length());
+}
+
+@test
+function contextAfterDotAndPath(): void {
+  Test::assertEq<str>(contextAtEnd("foo.").toStr(), "dot@3:");
+  Test::assertEq<str>(contextAtEnd("foo.t").toStr(), "dot@3:t");
+  Test::assertEq<str>(contextAt("println(foo.t)", 13).toStr(), "dot@11:t");
+  Test::assertEq<str>(contextAtEnd("Foo::").toStr(), "path: in Foo");
+  Test::assertEq<str>(contextAt("call(Foo::b)", 11).toStr(), "path:b in Foo");
+  Test::assertEq<str>(contextAtEnd("Math::Linear::").toStr(), "path: in Math::Linear");
+  Test::assertEq<str>(contextAtEnd("Math::Linear::Ve").toStr(), "path:Ve in Math::Linear");
+}
+
+@test
+function contextForIdentifiersAndPipes(): void {
+  Test::assertEq<str>(contextAtEnd("let x = fo").toStr(), "identifier:fo");
+  Test::assertEq<str>(contextAtEnd("value |> do").toStr(), "pipe:do");
+  Test::assertEq<str>(contextAtEnd("value |> ").toStr(), "pipe:");
+  Test::assertEq<str>(contextAtEnd("let x = ").toStr(), "identifier:");
+  Test::assertEq<str>(contextAt("let héllo = 1; ret", 19).toStr(), "identifier:ret");
+}
+
+@test
+function contextAfterAt(): void {
+  Test::assertEq<str>(contextAtEnd("@").toStr(), "at:");
+  Test::assertEq<str>(contextAtEnd("@pa").toStr(), "at:pa");
+  Test::assertEq<str>(contextAtEnd("@sizeOf").toStr(), "at:sizeOf");
+  Test::assertEq<str>(contextAt("@sizeOf", 3).toStr(), "at:si");
+  Test::assertEq<str>(contextAtEnd("@[fo").toStr(), "at:fo");
+  Test::assertEq<str>(contextAtEnd("@[foo, ba").toStr(), "at:ba");
+  Test::assertEq<str>(contextAtEnd("@[foo, ").toStr(), "at:");
+}
+
+@test
+function contextInsideRecordLiterals(): void {
+  Test::assertEq<str>(contextAtEnd("let p = Point { x: 1, ").toStr(), "record Point: set x");
+  Test::assertEq<str>(contextAtEnd("let p = Point { ").toStr(), "record Point:");
+  Test::assertEq<str>(contextAtEnd("if (ready) { ").toStr(), "identifier:");
+  Test::assertEq<str>(contextAtEnd("} else { ").toStr(), "identifier:");
+}
+
+@test
+function contextInsideImportPaths(): void {
+  Test::assertEq<str>(contextAt("import foo from \"std::io\"", 22).toStr(), "import:std::");
+  Test::assertEq<str>(contextAt("import foo from \"std::io\"", 16).toStr(), "import:");
+  Test::assertEq<str>(contextAtEnd("let msg = \"hello\"; import foo from \"std::s").toStr(), "import:std::s");
+  Test::assertEq<str>(contextAtEnd("import foo from \"std::\nio\"").toStr(), "identifier:");
+  Test::assertEq<str>(contextAtEnd("let emoji = \"🔥🚀\"; import foo from \"std::io").toStr(), "import:std::io");
+
+  let mut filler: String = String::create("import old from \"old_module\"; ");
+  let mut count: u64 = 0;
+
+  while (count < 250) {
+    filler.pushStr("x");
+    count += 1;
+  }
+
+  filler.pushStr(" import new from \"new::");
+  Test::assertEq<str>(contextAtEnd(filler.toStr()).toStr(), "import:new::");
+}
+
+function scopeText(source: str, cursor: u64): String {
+  let text: String = String::create(source);
+  let tokens: Vector<CompletionToken> = completionTokens(&text);
+  let scope: ScopeAt = scopeAt(&tokens, cursor);
+  let mut rendered: String = String::create("global");
+
+  if (scope.scope == CompletionScope::TYPE_BODY) {
+    rendered = String::create("type");
+  } else if (scope.scope == CompletionScope::CALLABLE_BODY) {
+    rendered = String::create("callable");
+  }
+
+  if (let Option::SOME(start) = scope.localStart) {
+    let suffix: String = `@${start}`;
+    rendered.push(&suffix);
+  }
+
+  return rendered;
+}
+
+@test
+function scopesFollowTheBracesBeforeTheCursor(): void {
+  Test::assertEq<str>(scopeText("record Rc {\n  \n}", 14).toStr(), "type");
+  Test::assertEq<str>(scopeText("function f(): void {\n  \n}", 23).toStr(), "callable@19");
+  Test::assertEq<str>(scopeText("const value: i32 = 1;\n", 22).toStr(), "global");
+  Test::assertEq<str>(scopeText("record Rc {\n  public get(&self): i32 {\n    \n  }\n}", 43).toStr(), "callable@37");
+  Test::assertEq<str>(scopeText("function f(): void {\n  if (x) {\n    \n  }\n}", 36).toStr(), "callable@30");
+}
+
+function localsText(source: str, cursor: u64, prefix: str): String {
+  let text: String = String::create(source);
+  let tokens: Vector<CompletionToken> = completionTokens(&text);
+  let scope: ScopeAt = scopeAt(&tokens, cursor);
+  let known: Vector<String> = Vector::new<String>();
+  let wanted: String = String::create(prefix);
+  let locals: Vector<ScannedLocal> = scannedLocals(&tokens, cursor, &wanted, scope.localStart, &known);
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < locals.length()) {
+    if (let Option::SOME(local) = locals.get(index)) {
+      if (index > 0) {
+        rendered.pushStr(" ");
+      }
+
+      rendered.push(&local.name);
+      rendered.pushStr(local.detail);
+    }
+
+    index += 1;
+  }
+
+  return rendered;
+}
+
+@test
+function scannedLocalsListLetsThenParameters(): void {
+  let source: str = "function main(count: i32, label: str): void {\n  let mut isSeparator: boolean = false;\n  const LIMIT: i32 = 2;\n  let other = 1;\n  if (!isSeparator_) {\n  }\n}";
+  let text: String = String::create(source);
+  let marker: String = String::create("isSeparator_");
+  let cursor: u64 = text.indexOf(&marker).unwrapOr(0) + marker.length();
+
+  Test::assertEq<str>(localsText(source, cursor, "isSeparator_").toStr(), "isSeparator(local)");
+  Test::assertEq<str>(localsText(source, cursor, "").toStr(), "other(local) LIMIT(local) isSeparator(local) count(param) label(param)");
+  Test::assertEq<str>(localsText(source, cursor, "LA").toStr(), "label(param)");
+}
+
+function prefixMatches(name: str, prefix: str): boolean {
+  let nameText: String = String::create(name);
+  let prefixText: String = String::create(prefix);
+  return matchesPrefix(&nameText, &prefixText);
+}
+
+@test
+function prefixesMatchIgnoringCaseAndTrailingUnderscores(): void {
+  Test::assert(prefixMatches("isSeparator", "isSeparator_"));
+  Test::assert(prefixMatches("Println", "pr"));
+  Test::assert(prefixMatches("anything", ""));
+  Test::assert(!prefixMatches("value", "_"));
+  Test::assert(!prefixMatches("value", "vx"));
+}
+
+@test
+function charBoundariesMoveForward(): void {
+  let text: String = String::create("hello 🔥 world");
+
+  Test::assertEq<u64>(nextCharBoundary(&text, 6), 6);
+  Test::assertEq<u64>(nextCharBoundary(&text, 7), 10);
+  Test::assertEq<u64>(nextCharBoundary(&text, 8), 10);
+  Test::assertEq<u64>(nextCharBoundary(&text, 10), 10);
+  Test::assertEq<u64>(nextCharBoundary(&text, 100), text.length());
+}
