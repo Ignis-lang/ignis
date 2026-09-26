@@ -30,7 +30,11 @@ fn extract_slice(
 #[test]
 fn preserves_real_import_order_while_formatting_directive_free_input() {
   let source = fs::read_to_string(workspace_root().join("std/io/mod.ign")).expect("read std/io source");
-  let import_block = source.lines().skip(56).take(5).collect::<Vec<_>>().join("\n") + "\n";
+  let first_import = source
+    .lines()
+    .position(|line| line.starts_with("import "))
+    .expect("std/io imports");
+  let import_block = source.lines().skip(first_import).take(5).collect::<Vec<_>>().join("\n") + "\n";
 
   let formatted = format_text(&import_block, &FormatOptions::default()).expect("format real import block");
 
