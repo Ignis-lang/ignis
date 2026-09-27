@@ -1,0 +1,298 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import SourceOverrides from "../build/sources";
+
+import LspAnalysis, analysisKeyOf, analyzeDocuments from "./analysis";
+import FileInlayHints, InlayHintKind, positionInRange from "./inlay_hints";
+
+/// Writes `source` as `main.ign` into a scratch directory, analyzes it as an
+/// open buffer and returns its hints. With `clean` the analysis has to report
+/// nothing.
+function inlayTestHints(tag: str, source: str, clean: boolean): FileInlayHints {
+  let directory: String = `/tmp/ignis_lsp_inlay_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::fromString(&directory);
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&root)) {
+    Test::fail();
+  }
+
+  let text: String = String::create(source);
+  let mainPath: Path::PathBuf = root.join("main.ign");
+
+  if (let Result::ERROR(_) = Fs::writeString(&mainPath, &text)) {
+    Test::fail();
+  }
+
+  let path: Path::PathBuf = match (Fs::canonicalize(&mainPath)) {
+    Result::OK(canonical) -> canonical,
+    Result::ERROR(_) -> mainPath,
+  };
+
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&path, &text);
+
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let stdPath: Option<String> = Option::SOME(workingDirectory.join("std").toString());
+  let key: String = analysisKeyOf(&path);
+  let analysis: LspAnalysis = analyzeDocuments(&path, &key, &stdPath, &sources);
+
+  Test::assertEq<boolean>(analysis.diagnostics.length() == 0, clean);
+
+  let Option::SOME(navigation) = analysis.navigation else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let mut inlays: Vector<FileInlayHints> = navigation.inlays;
+  Test::assertEq<u64>(inlays.length(), 1);
+
+  let Option::SOME(hints) = inlays.pop() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assertEq<str>(hints.path.toStr(), path.asStr());
+  return hints;
+}
+
+/// Where the first `name` of `source` ends.
+function nameEnd(source: str, name: str): u64 {
+  let text: String = String::create(source);
+  let wanted: String = String::create(name);
+
+  let Option::SOME(start) = text.indexOf(&wanted) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return start + wanted.length();
+}
+
+/// The label of the type hint at `offset`, or `<none>`.
+function typeHintAt(hints: &FileInlayHints, offset: u64): String {
+  let mut index: u64 = 0;
+
+  while (index < hints.hints.length()) {
+    if (let Option::SOME(hint) = hints.hints.get(index)) {
+      if (hint.kind == InlayHintKind::TYPE && hint.offset() == offset) {
+        return hint.label.clone();
+      }
+    }
+
+    index += 1;
+  }
+
+  return String::create("<none>");
+}
+
+/// The labels of the hints of `kind`, in offset order.
+function labelsOf(hints: &FileInlayHints, kind: u64): Vector<String> {
+  let mut labels: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < hints.hints.length()) {
+    if (let Option::SOME(hint) = hints.hints.get(index)) {
+      if (hint.kind == kind) {
+        labels.push(hint.label.clone());
+      }
+    }
+
+    index += 1;
+  }
+
+  return labels;
+}
+
+/// True when some hint is labeled `label`.
+function hasLabel(hints: &FileInlayHints, label: str): boolean {
+  let mut index: u64 = 0;
+
+  while (index < hints.hints.length()) {
+    if (let Option::SOME(hint) = hints.hints.get(index)) {
+      if (hint.label.equals(label)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+const INLAY_SIMPLE_LET: str = "function main(): i32 {\n    let value = 1;\n    return value;\n}\n";
+
+/// Scenario: a `let` without an annotation gets one type hint, after its
+/// name. Spec: inferred_simple_let_emits_type_hint
+/// (crates/ignis_lsp/src/inlay.rs:749).
+@test
+function inlayInferredLetGetsATypeHint(): void {
+  let hints: FileInlayHints = inlayTestHints("simple_let", INLAY_SIMPLE_LET, true);
+
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_SIMPLE_LET, "value")).toStr(), ": i32");
+  Test::assertEq<u64>(labelsOf(&hints, InlayHintKind::TYPE).length(), 1);
+}
+
+/// Scenario: an annotated `let` gets no type hint. Spec:
+/// explicit_annotation_suppresses_let_type_hint (inlay.rs:762).
+@test
+function inlayAnnotatedLetGetsNoTypeHint(): void {
+  let hints: FileInlayHints = inlayTestHints(
+    "explicit_let",
+    "function main(): i32 {\n    let value: i32 = 1;\n    return value;\n}\n",
+    true,
+  );
+
+  Test::assertEq<u64>(labelsOf(&hints, InlayHintKind::TYPE).length(), 0);
+}
+
+const INLAY_UTF16_LET: str = "function main(): i32 {\n    /* 𝄞 */ let value = 1;\n    return value;\n}\n";
+
+/// Scenario: a character outside the BMP before the name counts two UTF-16
+/// units, so the hint's column is not its byte column. Spec:
+/// let_type_hint_uses_utf16_positioning (inlay.rs:776).
+@test
+function inlayTypeHintColumnsCountUtf16Units(): void {
+  let hints: FileInlayHints = inlayTestHints("utf16_let", INLAY_UTF16_LET, true);
+  let offset: u64 = nameEnd(INLAY_UTF16_LET, "value");
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(String::create(INLAY_UTF16_LET));
+  let position: Text::Position = lineIndex.position(offset);
+
+  Test::assertEq<u64>(position.line, 1);
+  Test::assertEq<u64>(position.character, 22);
+  Test::assertEq<str>(typeHintAt(&hints, offset).toStr(), ": i32");
+}
+
+const INLAY_ERROR_LET: str = "function main(): i32 {\n    let value = undefinedName;\n    return 0;\n}\n";
+
+/// Scenario: a binding whose value does not resolve has no type to show.
+/// Spec: unresolved_error_type_is_skipped (inlay.rs:794).
+@test
+function inlayUnresolvedBindingGetsNoTypeHint(): void {
+  let hints: FileInlayHints = inlayTestHints("error_let", INLAY_ERROR_LET, false);
+
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_ERROR_LET, "value")).toStr(), "<none>");
+  Test::assertEq<boolean>(hasLabel(&hints, ": error"), false);
+}
+
+/// Scenario: each argument of a call gets its parameter's name. Spec:
+/// parameter_hints_non_regression (inlay.rs:817).
+@test
+function inlayCallArgumentsGetParameterNames(): void {
+  let hints: FileInlayHints = inlayTestHints(
+    "param_hints",
+    "function main(): i32 {\n    return add(2, 3);\n}\n\nfunction add(left: i32, right: i32): i32 {\n    return left + right;\n}\n",
+    true,
+  );
+  let labels: Vector<String> = labelsOf(&hints, InlayHintKind::PARAMETER);
+
+  Test::assertEq<u64>(labels.length(), 2);
+
+  if (let Option::SOME(first) = labels.get(0)) {
+    Test::assertEq<str>(first.toStr(), "left: ");
+  }
+
+  if (let Option::SOME(second) = labels.get(1)) {
+    Test::assertEq<str>(second.toStr(), "right: ");
+  }
+}
+
+const INLAY_SCRUTINEE: str = "function main(): i32 {\n    let value = 1;\n    return match (value) { 0 -> 0, _ -> value, };\n}\n";
+
+/// Scenario: a `match` scrutinee gets its type after it, padded on the left.
+/// Spec: match_scrutinee_hints_non_regression (inlay.rs:849).
+@test
+function inlayMatchScrutineeGetsItsType(): void {
+  let hints: FileInlayHints = inlayTestHints("scrutinee", INLAY_SCRUTINEE, true);
+  let offset: u64 = nameEnd(INLAY_SCRUTINEE, "match (value");
+
+  Test::assertEq<str>(typeHintAt(&hints, offset).toStr(), ": i32");
+
+  let mut padded: boolean = false;
+  let mut index: u64 = 0;
+
+  while (index < hints.hints.length()) {
+    if (let Option::SOME(hint) = hints.hints.get(index)) {
+      if (hint.offset() == offset) {
+        padded = hint.paddingLeft;
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<boolean>(padded, true);
+}
+
+/// Scenario: a range keeps the hints from its start up to, but not at, its
+/// end. Spec: filter_hints_by_range_boundaries (inlay.rs:870).
+@test
+function inlayRangeIncludesItsStartAndExcludesItsEnd(): void {
+  let start: Text::Position = Text::Position { line: 0, character: 5 };
+  let end: Text::Position = Text::Position { line: 3, character: 10 };
+
+  Test::assertEq<boolean>(positionInRange(Text::Position { line: 0, character: 0 }, start, end), false);
+  Test::assertEq<boolean>(positionInRange(Text::Position { line: 0, character: 5 }, start, end), true);
+  Test::assertEq<boolean>(positionInRange(Text::Position { line: 2, character: 0 }, start, end), true);
+  Test::assertEq<boolean>(positionInRange(Text::Position { line: 3, character: 10 }, start, end), false);
+  Test::assertEq<boolean>(positionInRange(Text::Position { line: 4, character: 0 }, start, end), false);
+}
+
+const INLAY_LET_ELSE_VARIANT: str = "enum Maybe {\n    SOME(i32),\n    NONE,\n}\n\nfunction main(): i32 {\n    let opt = Maybe::SOME(42);\n    let Maybe::SOME(value) = opt else {\n        return 1;\n    };\n    return value;\n}\n";
+
+/// Scenario: a `let ... else` whose variant pattern binds one name gets its
+/// type. Spec: let_else_single_binder_variant_emits_hint (inlay.rs:901).
+@test
+function inlayLetElseWithOneBinderGetsItsType(): void {
+  let hints: FileInlayHints = inlayTestHints("letelse_variant", INLAY_LET_ELSE_VARIANT, true);
+
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_VARIANT, "value")).toStr(), ": i32");
+}
+
+const INLAY_LET_ELSE_EXPLICIT: str = "@lang(try)\nenum Try {\n    OK(i32),\n    ERR(i32),\n}\n\nfunction main(): i32 {\n    let res = Try::OK(42);\n    let value: i32 = res else {\n        return 1;\n    };\n    return value;\n}\n";
+
+/// Scenario: the annotated shorthand `let name: T = value else` gets no type
+/// hint. Spec: let_else_explicit_binding_type_is_suppressed (inlay.rs:929).
+@test
+function inlayAnnotatedLetElseGetsNoTypeHint(): void {
+  let hints: FileInlayHints = inlayTestHints("letelse_explicit", INLAY_LET_ELSE_EXPLICIT, true);
+
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_EXPLICIT, "value")).toStr(), "<none>");
+  Test::assertEq<boolean>(hasLabel(&hints, ": i32"), false);
+}
+
+const INLAY_LET_ELSE_PAIR: str = "enum Pair {\n    P(i32, i32),\n    N,\n}\n\nfunction main(): i32 {\n    let p = Pair::P(1, 2);\n    let Pair::P(first, second) = p else {\n        return 1;\n    };\n    return first + second;\n}\n";
+
+/// Scenario: a `let ... else` that binds two names gets no type hint for
+/// either. Spec: let_else_multi_binder_emits_no_hint (inlay.rs:963).
+@test
+function inlayLetElseWithSeveralBindersGetsNoTypeHint(): void {
+  let hints: FileInlayHints = inlayTestHints("letelse_tuple", INLAY_LET_ELSE_PAIR, true);
+
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_PAIR, "first")).toStr(), "<none>");
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_PAIR, "second")).toStr(), "<none>");
+}
+
+const INLAY_LET_ELSE_WILDCARD: str = "enum Maybe {\n    SOME(i32),\n    NONE,\n}\n\nfunction main(): i32 {\n    let opt = Maybe::SOME(42);\n    let Maybe::SOME(_) = opt else {\n        return 1;\n    };\n    return 0;\n}\n";
+
+/// Scenario: a `let ... else` that binds nothing gets no type hint at its
+/// wildcard, while the `let` before it keeps its own. Spec:
+/// let_else_wildcard_payload_emits_no_hint (inlay.rs:995).
+@test
+function inlayLetElseWithAWildcardGetsNoTypeHint(): void {
+  let hints: FileInlayHints = inlayTestHints("letelse_wildcard", INLAY_LET_ELSE_WILDCARD, true);
+
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_WILDCARD, "opt")).toStr(), ": Maybe");
+  Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_WILDCARD, "SOME(_")).toStr(), "<none>");
+}
