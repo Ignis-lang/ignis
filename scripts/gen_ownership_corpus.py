@@ -8,7 +8,7 @@ matched, what the pattern bound and what the arm body did. Those four choices
 are independent, so the interesting space is their cartesian product, and a
 hand-written corpus samples it by accident. This script enumerates it.
 
-The four axes are:
+The four main axes are:
 
 - **scrutinee** — where the matched value comes from:
   `local` (an owned local), `field` (an owned record's field, `holder.kind`),
@@ -24,6 +24,16 @@ The four axes are:
   `moveOut` (the binding is moved into a consuming helper),
   `reassign` (the moved-from field is written back before it drops).
 
+A `while let` over a place adds two more, because its condition takes the
+place apart on every round and only the body can put a value back:
+
+- **refill** — where the body writes a fresh value into the place, relative to
+  the exit its `body` names: `none` (never, so the loop has to leave on its
+  first round), `beforeExit` (the place holds a value when the loop is left) or
+  `afterExit` (the place is still the moved-out husk the condition left).
+- **condition** — `single` (`while (let ... = place)`) or `conjunct`
+  (`while (seen < 100 && let ... = place)`, a boolean in front of the `let`).
+
 Each generated `ok` fixture counts constructions and drops in two `static mut`
 counters and returns the imbalance as its exit code, so 0 means every value was
 dropped exactly once. A double free shows up as a negative exit code or a crash,
@@ -38,10 +48,21 @@ A combination is emitted only when it is valid Ignis. The rules, and why:
 1. **Irrefutable patterns need a `match`.** `catchAll` and `wildcard` match
    everything, so `if let` / `while let` / `let ... else` have nothing to fall
    through to. They are generated for `match` only.
-2. **`while let` needs a draining scrutinee.** A `while let` over a fixed local,
-   field or reference either never terminates or moves the same value on every
-   iteration. Only the `call` scrutinee — a `Vector::pop()` that runs out — is
-   expressible, so `whileLet` is generated for `call` alone.
+2. **`while let` needs a draining scrutinee or a refill.** A `while let` over a
+   fixed local, field or reference either never terminates or moves the same
+   value on every iteration, unless the body refills the place. The `call`
+   scrutinee — a `Vector::pop()` that runs out — drains on its own and takes no
+   refill. The `local` and `field` places are generated with a refill, and only
+   with a body that leaves the loop (`blockBreak`, `blockReturn`,
+   `blockContinue`), because a refilled place never runs out on its own. The
+   exit is taken on the second round, so the condition consumes a refilled
+   place at least once, except for `none`, whose loop leaves on the first round
+   before anything could be refilled. A `continue` goes back to the condition,
+   which reads the place again, so it needs the refill in front of it: the
+   refill is the non-matching value that ends the loop, and `continue` is never
+   combined with `none` or `afterExit`. The `ref` scrutinee is not refilled: a
+   shared borrow cannot be written through, and writing to the referent itself
+   is what the `local` place already covers.
 3. **Collapsed bodies.** Only a `match` arm can be an expression, so `block` is
    generated for `match` only: every other construct's body is already a block
    and `expr` covers it. `let ... else` has no arm at all — its "body" is the
@@ -297,6 +318,28 @@ BODIES: tuple[Body, ...] = (
 CONSTRUCTS: tuple[str, ...] = ("match", "ifLet", "whileLet", "letElse")
 
 
+@dataclass(frozen=True)
+class Refill:
+  """Where a `while let` body writes a fresh value into the place it matches."""
+
+  key: str
+  description: str
+
+
+REFILLS: tuple[Refill, ...] = (
+  Refill("none", "never refilled, so the loop is left on its first round"),
+  Refill("beforeExit", "refilled before the exit, which leaves a live value in the place"),
+  Refill("afterExit", "refilled after the exit, which leaves the moved-out place behind"),
+)
+
+
+CONDITIONS: tuple[str, ...] = ("single", "conjunct")
+
+# The bodies that leave a `while let` over a place, the only ones a refill case
+# is generated for.
+EXIT_BODIES: tuple[str, ...] = ("blockBreak", "blockReturn", "blockContinue")
+
+
 @dataclass
 class Case:
   """One generated fixture."""
@@ -305,11 +348,19 @@ class Case:
   construct: str
   pattern: Pattern
   body: Body
+  # Set only for a `while let` over a place.
+  refill: Refill | None = None
+  condition: str = "single"
   lines: list[str] = field(default_factory=list)
 
   @property
   def name(self) -> str:
-    return f"{self.scrutinee.key}_{self.construct}_{self.pattern.key}_{self.body.key}"
+    base = f"{self.scrutinee.key}_{self.construct}_{self.pattern.key}_{self.body.key}"
+
+    if self.refill is None:
+      return base
+
+    return f"{base}_{self.refill.key}_{self.condition}"
 
 
 def is_valid(
@@ -317,6 +368,7 @@ def is_valid(
   construct: str,
   pattern: Pattern,
   body: Body,
+  refill: Refill | None = None,
 ) -> bool:
   """Applies the pruning rules documented in the module docstring."""
 
@@ -324,8 +376,19 @@ def is_valid(
   if pattern.irrefutable and construct != "match":
     return False
 
-  # 2. Only a draining call can be re-evaluated by a `while let`.
+  # 2. A `while let` is re-evaluated: a call drains on its own, and a place only
+  # through a refill, with a body that leaves the loop.
+  if construct == "whileLet" and scrutinee.from_call and refill is not None:
+    return False
+
   if construct == "whileLet" and not scrutinee.from_call:
+    if refill is None or scrutinee.from_ref or body.key not in EXIT_BODIES:
+      return False
+
+    if body.key == "blockContinue" and refill.key != "beforeExit":
+      return False
+
+  if refill is not None and construct != "whileLet":
     return False
 
   # 3. Only a `match` arm can be an expression; `let ... else` has no arm.
@@ -361,6 +424,13 @@ def enumerate_cases() -> list[Case]:
         for body in BODIES:
           if is_valid(scrutinee, construct, pattern, body):
             cases.append(Case(scrutinee, construct, pattern, body))
+
+          for refill in REFILLS:
+            if not is_valid(scrutinee, construct, pattern, body, refill):
+              continue
+
+            for condition in CONDITIONS:
+              cases.append(Case(scrutinee, construct, pattern, body, refill, condition))
 
   return cases
 
@@ -497,11 +567,74 @@ def render_while_let(case: Case) -> list[str]:
   ]
 
 
+def render_while_let_place(case: Case) -> list[str]:
+  """A `while let` over a local or field that the body refills.
+
+  The exit is taken on the second round, so the place the condition consumes
+  was refilled once, and `beforeExit`/`afterExit` decide whether it holds a
+  value again when the loop is left. `none` leaves on the first round.
+  """
+
+  pattern = case.pattern
+  body = case.body
+  refill = case.refill
+  place = case.scrutinee.expression()
+
+  if case.scrutinee.from_field:
+    setup = [f"let mut holder: Holder = Holder {{ kind: {pattern.build}, tag: 0 }};"]
+  else:
+    setup = [f"let mut kind: {pattern.value_type} = {pattern.build};"]
+
+  if case.condition == "conjunct":
+    condition = f"seen < 100 && let {pattern.text} = {place}"
+  else:
+    condition = f"let {pattern.text} = {place}"
+
+  refill_line = f"{place} = {pattern.build};"
+  exit_line = "return seen;" if body.key == "blockReturn" else "break;"
+
+  if refill.key == "none":
+    inner = [f"seen += {pattern.read};", exit_line]
+  elif body.key == "blockContinue":
+    # The refill in front of the `continue` is the value that ends the loop.
+    inner = [
+      "rounds += 1;",
+      f"seen += {pattern.read};",
+      "",
+      "if (rounds >= 2) {",
+      f"  {place} = {pattern.empty_value};",
+      "  continue;",
+      "}",
+      "",
+      refill_line,
+    ]
+  else:
+    leave = ["if (rounds >= 2) {", f"  {exit_line}", "}"]
+    before = [refill_line, ""] if refill.key == "beforeExit" else []
+    after = ["", refill_line] if refill.key == "afterExit" else []
+    inner = ["rounds += 1;", f"seen += {pattern.read};", "", *before, *leave, *after]
+
+  counter = [] if refill.key == "none" else ["let mut rounds: i32 = 0;"]
+
+  return [
+    *counter,
+    *setup,
+    "",
+    f"while ({condition}) {{",
+    *indent(inner, 1),
+    "}",
+  ]
+
+
 def expected_value(case: Case) -> int:
   """What `run()` must report when the arm ran and read the right payload."""
 
   pattern = case.pattern
   body = case.body
+
+  if case.refill is not None:
+    # A place is read once per round: two rounds, or one without a refill.
+    return pattern.expected if case.refill.key == "none" else pattern.expected * 2
 
   if case.construct == "whileLet":
     # The loop drains two elements unless the body leaves after the first.
@@ -520,7 +653,7 @@ def render_run(case: Case) -> list[str]:
   if case.construct == "whileLet":
     statements.append("let mut seen: i32 = 0;")
     statements.append("")
-    statements.extend(render_while_let(case))
+    statements.extend(render_while_let_place(case) if case.refill is not None else render_while_let(case))
     statements.append("")
     statements.append("return seen;")
 
@@ -591,8 +724,8 @@ def render_fixture(
   status: str,
 ) -> str:
   pattern = case.pattern
-  needs_vector = case.construct == "whileLet"
-  needs_option = pattern.needs_option or case.construct == "whileLet"
+  needs_vector = case.construct == "whileLet" and case.refill is None
+  needs_option = pattern.needs_option or needs_vector
   needs_holder = case.scrutinee.from_field
 
   header = ["// e2e: std"]
@@ -608,6 +741,11 @@ def render_fixture(
     f"// construct: {case.construct}",
     f"// pattern:   {pattern.description}",
     f"// body:      {case.body.description}",
+    *(
+      [f"// refill:    {case.refill.description}", f"// condition: {case.condition}"]
+      if case.refill is not None
+      else []
+    ),
     "//",
     "// The exit code is the construction/drop imbalance plus the difference between",
     "// what the arm read and what it had to read, so 0 means every Tracked was",
