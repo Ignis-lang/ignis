@@ -1638,3 +1638,15 @@ function testRunnerSummaryLinesReportsASkippedFixture(): void {
 
   Test::assertEq<str>(testRunnerJoinLines(&lines).toStr(), "2 total\n2 passed\n0 failed\n1 skipped");
 }
+
+/// An explicit `-j` count wins over `IGNIS_TEST_JOBS`, which still applies
+/// when the command line named none.
+@test
+function testRunnerJobLimitPrefersTheExplicitCount(): void {
+  Env::set("IGNIS_TEST_JOBS", "7");
+
+  Test::assertEq<u64>(TestRunner::jobLimit(Option::SOME(3)), 3);
+  Test::assertEq<u64>(TestRunner::jobLimit(Option::NONE), 7);
+
+  Env::unset("IGNIS_TEST_JOBS");
+}

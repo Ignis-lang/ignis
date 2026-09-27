@@ -386,10 +386,15 @@ function cliEndsWith(value: &String, suffix: str): boolean {
 }
 
 /// True for a flag `test-std` takes. The subcommand mirrors the host's
-/// `TestStdCommand`, which accepts nothing else: a std test run has no project
-/// file to override and always builds the whole standard library.
+/// `TestStdCommand` plus its global `-j`/`--jobs`, and accepts nothing else: a
+/// std test run has no project file to override and always builds the whole
+/// standard library.
 function cliTestStdAcceptsFlag(argument: &String): boolean {
   if (argument.equals("-o") || argument.equals("--output-dir") || argument.equals("--std-path")) {
+    return true;
+  }
+
+  if (argument.equals("-j") || argument.equals("--jobs") || argument.startsWith("-j") || argument.startsWith("--jobs=")) {
     return true;
   }
 
@@ -1835,7 +1840,7 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
-    if (options.isTestMode()) {
+    if (options.isTestMode() || options.isTestStdMode()) {
       match (matchValueFlag(arguments, argument, index, "--jobs", "-j")) {
         Result::ERROR(_) -> {
           return Result::ERROR(cliMissingValue(argument.toStr(), "a number of jobs"));
@@ -1936,7 +1941,7 @@ export function helpText(): String {
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
   text.pushStr("Without a path the project containing the current directory is used.\n");
   text.pushStr("`ignis test-std [FILTER]` takes a test-name filter instead of a path, and reads\n");
-  text.pushStr("only --std-path, -o/--output-dir, --feature, --features and --update-snapshots.\n");
+  text.pushStr("only --std-path, -o/--output-dir, -j/--jobs, --feature, --features and --update-snapshots.\n");
   text.pushStr("\n");
   text.pushStr("Options:\n");
   text.pushStr("  -o <PATH>                 Write the linked binary here, or the directory build-std fills\n");
@@ -1967,7 +1972,7 @@ export function helpText(): String {
   text.pushStr("      --fixtures <DIR>      Add a directory of program fixture cases (test only)\n");
   text.pushStr("      --partition <K/N>     Run only shard K of N, 1-based (test only)\n");
   text.pushStr("      --test-timeout <SECS> Wall-clock budget for one test process (test only)\n");
-  text.pushStr("  -j, --jobs <N>            Parallel test processes and C compiles (test only)\n");
+  text.pushStr("  -j, --jobs <N>            Parallel test processes and C compiles (test, test-std)\n");
   text.pushStr("      --project <DIR>       Explicit project directory (fmt, doc)\n");
   text.pushStr("      --output <FILE>       Write the JSON document here instead of stdout (doc only;\n");
   text.pushStr("                            -o works too)\n");
@@ -3492,4 +3497,27 @@ function cliRejectsAFlagWhereAnInitValueBelongs(): void {
   Test::assertEq<str>(valueOptions.init.description.toStr(), "--lib");
   Test::assertEq<str>(valueOptions.init.repository.toStr(), "-x");
   Test::assertEq<boolean>(valueOptions.init.lib, false);
+}
+
+/// `test-std` takes `-j` / `--jobs` too, the host's option being global.
+@test
+function cliParsesTheTestStdJobCount(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "test-std");
+  cliPush(&mut arguments, "-j");
+  cliPush(&mut arguments, "2");
+  cliPush(&mut arguments, "string");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<u64>(cliJobCount(&options), 2);
+  Test::assertEq<str>(options.filter.toStr(), "string");
+
+  let mut attached: Vector<String> = Vector::new<String>();
+  cliPush(&mut attached, "test-std");
+  cliPush(&mut attached, "--jobs=4");
+
+  let attachedOptions: CliOptions = cliParse(&attached);
+
+  Test::assertEq<u64>(cliJobCount(&attachedOptions), 4);
 }
