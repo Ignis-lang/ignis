@@ -23,42 +23,42 @@ jobs:
   build:
     name: Build linux-amd64
     runs-on: ubuntu-latest
+    # The nightly ladder job's budget: this job runs the same three
+    # self-compilations, and a hang in one would otherwise hold the runner for
+    # the six-hour default.
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v0-rust"
-          shared-key: "linux-amd64"
-          cache-targets: true
-          cache-on-failure: true
-
-      # `.cargo/config.toml` selects mold for the Linux targets, so the release build
-      # needs it just as CI does. This workflow never installed it.
-      - name: Install mold
-        timeout-minutes: 3
+      # The released compiler is the selfhost compiler built the way the nightly
+      # ladder builds it: stage0 is the promoted official binary while its
+      # promotion streak holds, else a compiler built from the C seed
+      # (scripts/resolve_official_stage0.sh), and stage2 is `ignis/` compiled
+      # by the stage1 that stage0 built. Unlike the rolling nightly, a release
+      # also requires the fixed point: `all` builds stage3 with stage2 and
+      # fails unless their emitted C is identical (G1).
+      - name: Resolve stage0
         env:
-          MOLD_VERSION: 2.42.0
-        run: |
-          curl -fsSL --retry 3 --retry-delay 2 \
-            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local
-          mold --version
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STAGE0_MODE: auto
+        run: scripts/resolve_official_stage0.sh
 
       - name: Build Ignis
-        run: cargo build --release --locked -p ignis
+        run: scripts/bootstrap.sh all
+
+      - name: Require the fixed point (G1)
+        run: |
+          set -euo pipefail
+          jq -r '"G1: \(.status) — \(.summary)"' build/bootstrap/gates/G1.json
+          jq -e '.status == "pass"' build/bootstrap/gates/G1.json >/dev/null
 
       - name: Create package
         run: |
           mkdir -p pkg/scripts
 
-          cp target/release/ignis pkg/ignis
+          cp build/bootstrap/stage2/ignis pkg/ignis
           chmod +x pkg/ignis
 
           cp -r std pkg/std
@@ -84,7 +84,7 @@ jobs:
 
           # The standard library has no single root module. Any std entry makes the driver
           # discover every module in the manifest, so documenting one documents all of them.
-          ./target/release/ignis doc std/io/mod.ign --std-path std --output docs-pkg/api.json
+          ./pkg/ignis doc std/io/mod.ign --std-path std --output docs-pkg/api.json
 
       - name: Create documentation archive
         run: tar -czf ignis-docs.tar.gz -C docs-pkg .
