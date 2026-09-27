@@ -1143,29 +1143,35 @@ run_gate_g3_stage2() { run_gate_g3_stage stage2; }
 #   $3  stage whose run of the same suite $1's has to match (optional)
 run_gate_g3_compare_for() {
   local stage="$1" gate_id="$2" reference="${3-}"
-  local paths=("$(gate_g3_log "$stage")" "$(gate_g3_status_file "$stage")")
+  local log status_file reference_log="" reference_status_file=""
+  log="$(gate_g3_log "$stage")"
+  status_file="$(gate_g3_status_file "$stage")"
+
+  local required=("$log" "$status_file")
 
   if [[ -n "$reference" ]]; then
-    paths+=("$(gate_g3_log "$reference")" "$(gate_g3_status_file "$reference")")
+    reference_log="$(gate_g3_log "$reference")"
+    reference_status_file="$(gate_g3_status_file "$reference")"
+    required+=("$reference_log" "$reference_status_file")
   fi
 
   mkdir -p "$GATES_DIR"
 
   local missing=()
   local path
-  for path in "${paths[@]}"; do
+  for path in "${required[@]}"; do
     [[ -f "$path" ]] || missing+=("$path")
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     write_gate "$gate_id" fail "the selfhost test runs left nothing to compare" \
-      "$(json_object "${stage}_log" "${paths[0]}" missing "${missing[*]}")"
+      "$(json_object "${stage}_log" "$log" missing "${missing[*]}")"
     return 0
   fi
 
   local fields status timeout_seconds
-  fields="$(read_gate_g3_status "${paths[1]}")" ||
-    fail "gate-g3: ${paths[1]} is not readable"
+  fields="$(read_gate_g3_status "$status_file")" ||
+    fail "gate-g3: ${status_file} is not readable"
 
   status="$(sed -n 1p <<<"$fields")"
   timeout_seconds="$(sed -n 2p <<<"$fields")"
@@ -1175,20 +1181,23 @@ run_gate_g3_compare_for() {
   local reference_arguments=()
 
   if [[ -n "$reference" ]]; then
-    local reference_fields
-    reference_fields="$(read_gate_g3_status "${paths[3]}")" ||
-      fail "gate-g3: ${paths[3]} is not readable"
+    local reference_fields reference_status
+    reference_fields="$(read_gate_g3_status "$reference_status_file")" ||
+      fail "gate-g3: ${reference_status_file} is not readable"
+
+    reference_status="$(sed -n 1p <<<"$reference_fields")"
 
     reference_arguments=(
-      --reference-log "${paths[2]}"
-      --reference-status "$(sed -n 1p <<<"$reference_fields")"
+      --reference-log "$reference_log"
+      --reference-status "$reference_status"
     )
   fi
 
+  # The `+` form keeps an empty array from tripping `set -u` on bash < 4.4.
   python3 "${SCRIPT_DIR}/bootstrap_report.py" gate-g3 \
-    --log "${paths[0]}" \
+    --log "$log" \
     --status "$status" \
-    "${reference_arguments[@]}" \
+    ${reference_arguments[@]+"${reference_arguments[@]}"} \
     --timeout-seconds "$timeout_seconds" \
     --label "$stage" \
     --gate-id "$gate_id" \

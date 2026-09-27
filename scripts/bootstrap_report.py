@@ -254,6 +254,9 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
 
     return fail(no_summary_reason(REFERENCE_LABEL, arguments.reference_status, timeout_seconds))
 
+  if arguments.reference_status != 0:
+    return fail(f"{REFERENCE_LABEL} exited non-zero (exit {arguments.reference_status})")
+
   run_skipped = skipped_names(run)
   reference_skipped = skipped_names(reference)
 

@@ -567,6 +567,16 @@ class GateG3Tests(unittest.TestCase):
     self.assertEqual(gate["status"], "fail", gate)
     self.assertIn("stage1 produced no test summary", gate["summary"])
 
+  def test_a_reference_that_exits_non_zero_with_a_clean_summary_fails(self) -> None:
+    stage2 = self.write_log("stage2.txt", suite_log(PASSING_RESULTS))
+    stage1 = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(stage2, reference_log=stage1, reference_status=1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("stage1", gate["summary"])
+    self.assertIn("exit 1", gate["summary"])
+
   def test_a_test_name_mismatch_with_stage1_fails(self) -> None:
     renamed = {
       "lexer::tokens": "ok",
