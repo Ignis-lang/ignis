@@ -1,0 +1,169 @@
+//! `textDocument/rename`: the host's conservative rename
+//! (crates/ignis_lsp/src/server.rs:1078), which renames only a local
+//! variable or parameter declared outside the standard library, to a name
+//! that is an identifier and not a keyword. Every other request is answered
+//! with `null`, as the host does (crates/ignis_lsp/src/server.rs:2825).
+//!
+//! The host's locals and parameters are definitions of their own; here they
+//! are the local targets of the file they are declared in, so every edit
+//! lands in the document the request names.
+
+import JsonObjectEntry, JsonValue from "std::json";
+import String from "std::string";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import Keyword from "@compiler::syntax";
+
+import textEditJson from "./formatting";
+import FileHoverIndex, TextEdit, isLocalTarget from "./hover_index";
+import NameSite, NavigationIndex from "./navigation";
+
+/// True when `name` can replace a local's name: an ASCII letter or `_`,
+/// then ASCII letters, digits or `_`, and not a keyword
+/// (crates/ignis_lsp/src/server.rs:1096).
+export function isValidRenameName(name: &String): boolean {
+  let Option::SOME(first) = name.byteAt(0) else {
+    return false;
+  };
+
+  if (!(first == '_' as u8 || isAsciiLetter(first))) {
+    return false;
+  }
+
+  let mut index: u64 = 1;
+
+  while (index < name.length()) {
+    let byte: u8 = name.byteAt(index).unwrapOr(0);
+
+    if (!(byte == '_' as u8 || isAsciiLetter(byte) || (byte >= '0' as u8 && byte <= '9' as u8))) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return Keyword::fromLexeme(name).isNone();
+}
+
+/// True for `a`..`z` and `A`..`Z`.
+function isAsciiLetter(byte: u8): boolean {
+  return (byte >= 'a' as u8 && byte <= 'z' as u8) || (byte >= 'A' as u8 && byte <= 'Z' as u8);
+}
+
+/// True for a virtual path, one that starts with `<`, or a path with a
+/// `std` component, which the host never renames in
+/// (crates/ignis_lsp/src/server.rs:1070).
+export function isStdOrVirtualPath(path: &String): boolean {
+  if (path.startsWith("<")) {
+    return true;
+  }
+
+  let mut componentStart: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= path.length()) {
+    if (index == path.length() || path.byteAt(index).unwrapOr(0) == '/' as u8) {
+      if (path.substringBytes(componentStart, index).equals("std")) {
+        return true;
+      }
+
+      componentStart = index + 1;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// Every place the local `target` of `file` is named, its declaration
+/// included, when the host would rename it: a local declared in a file
+/// outside the standard library, every place reading its name
+/// (crates/ignis_lsp/src/server.rs:1133). `NONE` for anything else.
+export function renameSites(
+  navigation: &NavigationIndex,
+  file: &FileHoverIndex,
+  target: u64
+): Option<Vector<NameSite>> {
+  if (!isLocalTarget(target) || isStdOrVirtualPath(&file.path)) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(declaration) = file.localDeclaration(target) else {
+    return Option::NONE;
+  };
+
+  if (declaration.nameEnd <= declaration.nameStart) {
+    return Option::NONE;
+  }
+
+  let name: String = file.source.substringBytes(declaration.nameStart, declaration.nameEnd);
+  let sites: Vector<NameSite> = navigation.referenceSites(file, target, true);
+  let mut index: u64 = 0;
+
+  while (index < sites.length()) {
+    let Option::SOME(site) = sites.get(index) else {
+      return Option::NONE;
+    };
+
+    if (!file.source.substringBytes(site.start, site.end).equals(&name)) {
+      return Option::NONE;
+    }
+
+    index += 1;
+  }
+
+  if (sites.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(sites);
+}
+
+/// The `WorkspaceEdit` that renames the local `target` of `file` to
+/// `newName`, in the host's shape (crates/ignis_lsp/src/server.rs:1159): one
+/// `changes` entry for `uri`, whose text the client has as `current`, with
+/// an edit per place in source order. `NONE` when the host would reject the
+/// rename, or when any place is no longer where it was analyzed: renaming
+/// only some of them would leave the program naming two locals.
+export function renameWorkspaceEdit(
+  navigation: &NavigationIndex,
+  file: &FileHoverIndex,
+  target: u64,
+  newName: &String,
+  uri: &String,
+  current: &String,
+): Option<JsonValue> {
+  if (!isValidRenameName(newName)) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(sites) = renameSites(navigation, file, target) else {
+    return Option::NONE;
+  };
+
+  let edit: TextEdit = file.editTo(current);
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(current.clone());
+  let mut edits: Vector<JsonValue> = Vector::new<JsonValue>();
+  let mut index: u64 = 0;
+
+  while (index < sites.length()) {
+    let Option::SOME(site) = sites.get(index) else {
+      return Option::NONE;
+    };
+    let Option::SOME(range) = file.currentNameRange(current, &edit, site.start, site.end) else {
+      return Option::NONE;
+    };
+
+    edits.push(textEditJson(lineIndex.position(range.start), lineIndex.position(range.end), newName.clone()));
+    index += 1;
+  }
+
+  let mut changes: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  changes.push(JsonObjectEntry { key: uri.clone(), value: JsonValue::array(edits) });
+
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("changes", JsonValue::object(changes)));
+  return Option::SOME(JsonValue::object(entries));
+}
