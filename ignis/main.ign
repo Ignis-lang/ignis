@@ -511,6 +511,7 @@ function relinkCachedBuild(
     profile,
     file,
     statusToStderr,
+    TestRunner::jobLimit(Option::NONE),
   );
 
   if (linkErrors > 0) {
@@ -598,6 +599,7 @@ function compileAndLinkUnits(
   profile: &BuildProfile,
   file: &SourceFile,
   statusToStderr: boolean,
+  jobs: u64,
 ): u64 {
   let cc: str = profile.cc.toStr();
   let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
@@ -639,7 +641,7 @@ function compileAndLinkUnits(
       objectPaths,
       &includeDirs,
       &extraFlags,
-      TestRunner::jobLimit(),
+      jobs,
     )) {
       renderBagToStderr(&compileBag, file);
       printStatus(String::create("  link: failed"), statusToStderr);
@@ -1597,6 +1599,7 @@ function runCompile(
           &profile,
           &file,
           statusToStderr,
+          TestRunner::jobLimit(Option::NONE),
         );
       }
     }
@@ -2174,7 +2177,9 @@ function linkTestBinary(
 
   let binaryPath: Path::PathBuf = Path::PathBuf::fromString(&outputPath);
 
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false) > 0) {
+  let jobs: u64 = TestRunner::jobLimit(options.jobs);
+
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false, jobs) > 0) {
     return Option::NONE;
   }
 
@@ -2263,7 +2268,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     &binaryPath,
     &selected,
     options.updateSnapshots,
-    TestRunner::jobLimit(),
+    TestRunner::jobLimit(options.jobs),
     timeoutSeconds,
   );
 
@@ -2371,7 +2376,7 @@ function runStdTests(options: &CliOptions): i32 {
     &binaryPath,
     &selected,
     options.updateSnapshots,
-    TestRunner::jobLimit(),
+    TestRunner::jobLimit(Option::NONE),
     TestRunner::resolvedTimeoutSeconds(Option::NONE),
   );
 

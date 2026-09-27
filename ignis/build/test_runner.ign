@@ -719,10 +719,14 @@ export namespace TestRunner {
 
   /// Number of harness processes and `gcc -c` invocations to keep in flight.
   ///
-  /// `IGNIS_TEST_JOBS` wins when it parses to a positive decimal number.
-  /// Anything else falls back to the host processor count, which is the same
-  /// default the host compiler uses.
-  function jobLimit(): u64 {
+  /// `-j` / `--jobs` wins, then `IGNIS_TEST_JOBS` when it parses to a positive
+  /// decimal number. Anything else falls back to the host processor count,
+  /// which is the same order and default the host compiler uses.
+  function jobLimit(explicit: Option<u64>): u64 {
+    if (let Option::SOME(jobs) = explicit) {
+      return jobs;
+    }
+
     let Option::SOME(raw) = Env::get("IGNIS_TEST_JOBS") else {
       return Process::availableParallelism();
     };

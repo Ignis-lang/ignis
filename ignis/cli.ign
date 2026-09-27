@@ -69,6 +69,9 @@ export record CliOptions {
   public partition: Option<PartitionSpec>;
   /// Wall-clock budget in seconds for a single test process.
   public testTimeout: Option<u64>;
+  /// Parallel workers for test processes and C compilation (test only);
+  /// absent leaves the choice to `IGNIS_TEST_JOBS` and the processor count.
+  public jobs: Option<u64>;
   /// Explicit files to format (fmt only); empty selects project discovery.
   public fmtFilePaths: Vector<String>;
   /// Explicit project directory to format (fmt only).
@@ -111,6 +114,7 @@ export record CliOptions {
       fixtureDirs: Vector::new<String>(),
       partition: Option::NONE,
       testTimeout: Option::NONE,
+      jobs: Option::NONE,
       fmtFilePaths: Vector::new<String>(),
       fmtProject: Option::NONE,
       fmtCheck: false,
@@ -1031,6 +1035,26 @@ function parseInitArgument(
   return Result::OK(index + 1);
 }
 
+/// Reads a `-j`/`--jobs` count: a whole number from 1 to the largest `u32`,
+/// the range the host's `clap` parser accepts.
+function parseJobCount(value: &String): Result<u64, String> {
+  let invalid: String = `error: invalid job count: ${value.toStr()}`;
+
+  if (value.length() > 10) {
+    return Result::ERROR(invalid);
+  }
+
+  let Option::SOME(count) = parseDecimal(value) else {
+    return Result::ERROR(invalid);
+  };
+
+  if (count == 0 || count > 4294967295) {
+    return Result::ERROR(invalid);
+  }
+
+  return Result::OK(count);
+}
+
 function applyDocValueFlag(options: &mut CliOptions, flag: &String, value: &String): void {
   let mut optionsRef: &mut CliOptions = options;
 
@@ -1682,6 +1706,27 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (options.isTestMode()) {
+      match (matchValueFlag(arguments, argument, index, "--jobs", "-j")) {
+        Result::ERROR(_) -> {
+          return Result::ERROR(cliMissingValue(argument.toStr(), "a number of jobs"));
+        },
+        Result::OK(matched) -> {
+          if (let Option::SOME(flag) = matched) {
+            match (parseJobCount(&flag.value)) {
+              Result::OK(count) -> options.jobs = Option::SOME(count),
+              Result::ERROR(message) -> {
+                return Result::ERROR(message);
+              },
+            };
+
+            index = flag.next;
+            continue;
+          }
+        },
+      };
+    }
+
     if (options.isFmtMode()) {
       match (tryParseFmtFlag(arguments, argument, index, &mut options, &mut fmtFlagState)) {
         Result::ERROR(message) -> {
@@ -1792,6 +1837,7 @@ export function helpText(): String {
   text.pushStr("      --fixtures <DIR>      Add a directory of program fixture cases (test only)\n");
   text.pushStr("      --partition <K/N>     Run only shard K of N, 1-based (test only)\n");
   text.pushStr("      --test-timeout <SECS> Wall-clock budget for one test process (test only)\n");
+  text.pushStr("  -j, --jobs <N>            Parallel test processes and C compiles (test only)\n");
   text.pushStr("      --project <DIR>       Explicit project directory (fmt, doc)\n");
   text.pushStr("      --output <FILE>       Write the JSON document here instead of stdout (doc only;\n");
   text.pushStr("                            -o works too)\n");
@@ -2953,6 +2999,14 @@ function cliJoined(values: &Vector<String>): String {
   return joined;
 }
 
+/// The job count a parse carried, 0 when it named none.
+function cliJobCount(options: &CliOptions): u64 {
+  return match (options.jobs) {
+    Option::SOME(count) -> count,
+    Option::NONE -> 0,
+  };
+}
+
 /// `init` with only a name keeps every default the host's `InitCommand`
 /// declares.
 @test
@@ -3119,4 +3173,73 @@ function cliRejectsWhatInitDoesNotTake(): void {
   cliPush(&mut buildFlag, "--cc");
   cliPush(&mut buildFlag, "clang");
   Test::assertEq<str>(cliParseError(&buildFlag).toStr(), "error: unknown argument: --cc");
+}
+
+/// `-j` / `--jobs` sizes a test run's pool in every spelling `clap` accepts,
+/// and stays unset when absent so `IGNIS_TEST_JOBS` still applies.
+@test
+function cliParsesTheTestJobCount(): void {
+  let mut absent: Vector<String> = Vector::new<String>();
+  cliPush(&mut absent, "test");
+  Test::assertEq<boolean>(cliParse(&absent).jobs.isNone(), true);
+
+  let mut shortForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortForm, "test");
+  cliPush(&mut shortForm, "-j");
+  cliPush(&mut shortForm, "2");
+  let shortFormOptions: CliOptions = cliParse(&shortForm);
+  Test::assertEq<u64>(cliJobCount(&shortFormOptions), 2);
+
+  let mut attached: Vector<String> = Vector::new<String>();
+  cliPush(&mut attached, "test");
+  cliPush(&mut attached, "-j3");
+  let attachedOptions: CliOptions = cliParse(&attached);
+  Test::assertEq<u64>(cliJobCount(&attachedOptions), 3);
+
+  let mut longForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut longForm, "test");
+  cliPush(&mut longForm, "--jobs");
+  cliPush(&mut longForm, "4");
+  cliPush(&mut longForm, "math");
+  let longOptions: CliOptions = cliParse(&longForm);
+  Test::assertEq<u64>(cliJobCount(&longOptions), 4);
+  Test::assertEq<str>(cliPathText(&longOptions).toStr(), "math");
+
+  let mut equalsForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut equalsForm, "test");
+  cliPush(&mut equalsForm, "--jobs=5");
+  let equalsFormOptions: CliOptions = cliParse(&equalsForm);
+  Test::assertEq<u64>(cliJobCount(&equalsFormOptions), 5);
+}
+
+/// A job count has to be a whole number from 1 up, and only `test` takes one.
+@test
+function cliRejectsAnInvalidJobCount(): void {
+  let mut zero: Vector<String> = Vector::new<String>();
+  cliPush(&mut zero, "test");
+  cliPush(&mut zero, "-j");
+  cliPush(&mut zero, "0");
+  Test::assertEq<str>(cliParseError(&zero).toStr(), "error: invalid job count: 0");
+
+  let mut word: Vector<String> = Vector::new<String>();
+  cliPush(&mut word, "test");
+  cliPush(&mut word, "--jobs=many");
+  Test::assertEq<str>(cliParseError(&word).toStr(), "error: invalid job count: many");
+
+  let mut tooLarge: Vector<String> = Vector::new<String>();
+  cliPush(&mut tooLarge, "test");
+  cliPush(&mut tooLarge, "-j");
+  cliPush(&mut tooLarge, "4294967296");
+  Test::assertEq<str>(cliParseError(&tooLarge).toStr(), "error: invalid job count: 4294967296");
+
+  let mut missing: Vector<String> = Vector::new<String>();
+  cliPush(&mut missing, "test");
+  cliPush(&mut missing, "-j");
+  Test::assertEq<str>(cliParseError(&missing).toStr(), "error: -j requires a number of jobs");
+
+  let mut build: Vector<String> = Vector::new<String>();
+  cliPush(&mut build, "build");
+  cliPush(&mut build, "-j");
+  cliPush(&mut build, "2");
+  Test::assertEq<str>(cliParseError(&build).toStr(), "error: unknown argument: -j");
 }
