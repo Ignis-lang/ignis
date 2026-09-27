@@ -1153,6 +1153,82 @@ export namespace Mono {
     return result;
   }
 
+  /// A copy of a closure's thunk or drop function for one instantiation of the
+  /// generic body the closure sits in. The environment parameter is cloned
+  /// under `subst`, the remaining parameters are `closureParams` (the clone's
+  /// own), and `bodyId` is the already cloned body, so the function reads the
+  /// same definitions as the closure it belongs to.
+  function instantiateClosureFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    outputHir: &mut Hir::HirStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    originalDef: Analyzer::DefinitionId,
+    closureParams: &Vector<Analyzer::DefinitionId>,
+    bodyId: Hir::HirId,
+  ): Analyzer::DefinitionId {
+    let mut name: Option<Analyzer::SymbolId> = Option::NONE;
+    let mut visibility: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
+    let mut envParam: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+    if (let Option::SOME(definition) = defStore.get(originalDef)) {
+      if (let Analyzer::Definition::Function(functionDef) = definition) {
+        name = Option::SOME(functionDef.name);
+        visibility = functionDef.visibility;
+        returnType = functionDef.returnType;
+
+        if (let Option::SOME(firstParam) = functionDef.params.get(0)) {
+          envParam = Option::SOME(*firstParam);
+        }
+      }
+    }
+
+    let Option::SOME(functionName) = name else {
+      return originalDef;
+    };
+
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(envDef) = envParam) {
+      params.push(Mono::cloneLocalDef(defStore, typeStore, symbols, state, subst, envDef));
+    }
+
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < closureParams.length()) {
+      if (let Option::SOME(paramDef) = closureParams.get(paramIndex)) {
+        params.push(*paramDef);
+      }
+
+      paramIndex += 1;
+    }
+
+    let substitutedReturn: Analyzer::TypeId = Mono::substituteType(defStore, typeStore, symbols, state, subst, returnType);
+
+    let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    let clonedDef: Analyzer::DefinitionId = defStoreRef.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+      name: functionName,
+      visibility: visibility,
+      typeParams: Vector::new<Analyzer::DefinitionId>(),
+      params: params,
+      returnType: substitutedReturn,
+      isDeprecated: false,
+      deprecatedMessage: Option::NONE,
+      extensionTarget: Option::NONE,
+      extensionMutable: false,
+      isExtern: false,
+      externName: Option::NONE,
+    }));
+
+    outputHir.functionBodies.set(clonedDef, bodyId);
+    outputHir.items.push(clonedDef);
+
+    return clonedDef;
+  }
+
   function copyCaptureOverrides(
     state: &mut MonoState,
     source: &Vector<Hir::HirCaptureOverride>,
@@ -2310,15 +2386,38 @@ export namespace Mono {
 
           let body: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, closureNode.body);
 
+          let mut thunkDef: Option<Analyzer::DefinitionId> = closureNode.thunkDef;
+          let mut dropDef: Option<Analyzer::DefinitionId> = closureNode.dropDef;
+
           // The thunk and the drop glue capture synthesized are ordinary
           // non-generic functions nothing calls by name, so the reachable
-          // walk only finds them through the closure that owns them.
-          if (let Option::SOME(thunkId) = closureNode.thunkDef) {
-            Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, thunkId);
-          }
+          // walk only finds them through the closure that owns them. Inside a
+          // generic body they read the type parameters too, so each
+          // instantiation gets its own copies, built from this clone's
+          // parameters and body rather than shared across instantiations.
+          if (subst.params.length() == 0) {
+            if (let Option::SOME(thunkId) = closureNode.thunkDef) {
+              Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, thunkId);
+            }
 
-          if (let Option::SOME(dropId) = closureNode.dropDef) {
-            Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, dropId);
+            if (let Option::SOME(dropId) = closureNode.dropDef) {
+              Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, dropId);
+            }
+          } else {
+            if (let Option::SOME(thunkId) = closureNode.thunkDef) {
+              thunkDef = Option::SOME(Mono::instantiateClosureFunction(defStore, typeStore, symbols, outputHir, state, subst, thunkId, &params, body));
+            }
+
+            if (let Option::SOME(dropId) = closureNode.dropDef) {
+              let noParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+              let mut dropBody: Hir::HirId = body;
+
+              if (let Option::SOME(inputDropBody) = inputHir.functionBodies.get(dropId)) {
+                dropBody = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, inputDropBody);
+              }
+
+              dropDef = Option::SOME(Mono::instantiateClosureFunction(defStore, typeStore, symbols, outputHir, state, subst, dropId, &noParams, dropBody));
+            }
           }
 
           clonedKind = Hir::HirKind::Closure(Hir::HirClosure {
@@ -2327,8 +2426,8 @@ export namespace Mono {
             body: body,
             captures: Mono::copyCaptures(defStore, typeStore, symbols, state, subst, &closureNode.captures),
             escapes: closureNode.escapes,
-            thunkDef: closureNode.thunkDef,
-            dropDef: closureNode.dropDef,
+            thunkDef: thunkDef,
+            dropDef: dropDef,
             captureOverrides: Mono::copyCaptureOverrides(state, &closureNode.captureOverrides),
           });
         },
