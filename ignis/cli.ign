@@ -23,6 +23,7 @@ export enum CliCommand {
   LSP,
   DOC,
   INIT,
+  CHECK_STD,
   HELP,
   VERSION,
 }
@@ -180,6 +181,14 @@ export record CliOptions {
 
   public isInitMode(&self): boolean {
     if (let CliCommand::INIT = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isCheckStdMode(&self): boolean {
+    if (let CliCommand::CHECK_STD = self.command) {
       return true;
     }
 
@@ -347,6 +356,10 @@ function cliSubcommandOf(argument: &String): Option<CliCommand> {
 
   if (argument.equals("init")) {
     return Option::SOME(CliCommand::INIT);
+  }
+
+  if (argument.equals("check-std")) {
+    return Option::SOME(CliCommand::CHECK_STD);
   }
 
   return Option::NONE;
@@ -1473,6 +1486,28 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       };
     }
 
+    // `check-std` takes only the host `CheckStdCommand`'s output directory.
+    if (options.isCheckStdMode()) {
+      match (matchValueFlag(arguments, argument, index, "--output-dir", "-o")) {
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+        Result::OK(matched) -> {
+          if (let Option::SOME(flag) = matched) {
+            options.outDir = Option::SOME(flag.value.clone());
+            index = flag.next;
+            continue;
+          }
+        },
+      };
+
+      if (argument.startsWith("-")) {
+        return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+      }
+
+      return Result::ERROR(`error: unexpected argument '${argument.toStr()}'`);
+    }
+
     if (options.isTestStdMode() && argument.startsWith("-") && !cliTestStdAcceptsFlag(argument)) {
       return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
     }
@@ -1802,6 +1837,7 @@ export function helpText(): String {
   text.pushStr("  lsp        Start the Language Server Protocol server on stdin and stdout\n");
   text.pushStr("  doc        Extract API documentation from doc comments\n");
   text.pushStr("  init       Initialize a new Ignis project\n");
+  text.pushStr("  check-std  Check the standard library up to C codegen without archiving\n");
   text.pushStr("\n");
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
   text.pushStr("Without a path the project containing the current directory is used.\n");
@@ -1913,6 +1949,7 @@ function cliCommandName(command: CliCommand): str {
     CliCommand::LSP -> "lsp",
     CliCommand::DOC -> "doc",
     CliCommand::INIT -> "init",
+    CliCommand::CHECK_STD -> "check-std",
     CliCommand::HELP -> "help",
     CliCommand::VERSION -> "version",
   };
@@ -3173,6 +3210,43 @@ function cliRejectsWhatInitDoesNotTake(): void {
   cliPush(&mut buildFlag, "--cc");
   cliPush(&mut buildFlag, "clang");
   Test::assertEq<str>(cliParseError(&buildFlag).toStr(), "error: unknown argument: --cc");
+}
+
+/// `check-std` reads only its output directory, as `-o` or `--output-dir`.
+@test
+function cliParsesCheckStdWithAnOutputDirectory(): void {
+  let mut bare: Vector<String> = Vector::new<String>();
+  cliPush(&mut bare, "check-std");
+
+  let bareOptions: CliOptions = cliParse(&bare);
+
+  Test::assertEq<str>(cliCommandName(bareOptions.command), "check-std");
+  Test::assertEq<boolean>(bareOptions.outDir.isNone(), true);
+
+  let mut shortForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortForm, "check-std");
+  cliPush(&mut shortForm, "-o");
+  cliPush(&mut shortForm, "out");
+  Test::assertEq<str>(cliOptionText(&cliParse(&shortForm).outDir).toStr(), "out");
+
+  let mut longForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut longForm, "check-std");
+  cliPush(&mut longForm, "--output-dir=checked");
+  Test::assertEq<str>(cliOptionText(&cliParse(&longForm).outDir).toStr(), "checked");
+}
+
+/// `check-std` takes no path and no build flag.
+@test
+function cliRejectsWhatCheckStdDoesNotTake(): void {
+  let mut path: Vector<String> = Vector::new<String>();
+  cliPush(&mut path, "check-std");
+  cliPush(&mut path, "std");
+  Test::assertEq<str>(cliParseError(&path).toStr(), "error: unexpected argument 'std'");
+
+  let mut buildFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut buildFlag, "check-std");
+  cliPush(&mut buildFlag, "--debug");
+  Test::assertEq<str>(cliParseError(&buildFlag).toStr(), "error: unknown argument: --debug");
 }
 
 /// `-j` / `--jobs` sizes a test run's pool in every spelling `clap` accepts,

@@ -3870,6 +3870,72 @@ function convertDocClosures(
   return errors == 0;
 }
 
+/// Check the standard library up to C codegen without compiling or archiving
+/// it, the way the host's `ignis check-std` does: the whole std graph is
+/// analyzed, lowered and emitted, and the emitted C is written to `-o` /
+/// `--output-dir`, `build` under the current directory by default.
+///
+/// The host writes one C file per std module plus an umbrella `ignis_std.h`;
+/// this compiler emits one translation unit for the whole library and no
+/// header, so the directory receives `ignis_std.c` alone. The std root is
+/// resolved the way `ignis build-std` resolves it here: a governing project
+/// file's `std_path` wins over `IGNIS_STD_PATH`, where the host reads only
+/// the variable.
+///
+/// Returns 0 when the library checks cleanly and 1 on any failure.
+function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): i32 {
+  Io::println(String::create("ignis selfhost check-std"));
+
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+  let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      let startFile: SourceFile = entrySourceFile(startPath);
+      reportDiscoveryFailure(&diagnostics, &startFile, false);
+      return 1;
+    },
+  };
+
+  Io::println(`  std: ${discovery.stdRoot.asStr()}`);
+
+  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let compileOptions: CompileOptions = stdCompileOptions();
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
+
+  if (compiled.errors > 0 || compiled.source.length() == 0) {
+    Io::println(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`);
+    return 1;
+  }
+
+  let outputDir: Path::PathBuf = match (&options.outDir) {
+    Option::SOME(value) -> Path::PathBuf::fromString(&value),
+    Option::NONE -> Path::PathBuf::create("build"),
+  };
+  let sourcePath: Path::PathBuf = outputDir.join("ignis_std.c");
+
+  if (!ensureParentDirectory(&sourcePath)) {
+    return 1;
+  }
+
+  if (let Result::ERROR(_) = Fs::writeString(&sourcePath, &compiled.source)) {
+    Io::eprintln(`error: could not write ${sourcePath.asStr()}`);
+    return 1;
+  }
+
+  Io::println(`  emit: ${sourcePath.asStr()}`);
+  Io::println(`  summary: 0 errors, ${compiled.warnings} warnings`);
+  return 0;
+}
+
+/// Check the standard library up to C codegen without archiving it.
+function runCheckStd(options: &CliOptions): i32 {
+  let Option::SOME(target) = resolveTarget(options) else {
+    return 1;
+  };
+
+  return checkStandardLibrary(&target.path, options);
+}
+
 /// Build the standard library into the archive a project links against.
 function runBuildStd(options: &CliOptions): i32 {
   let Option::SOME(target) = resolveTarget(options) else {
@@ -3881,8 +3947,8 @@ function runBuildStd(options: &CliOptions): i32 {
 
 /// CLI entry point.
 ///
-/// `ignis build [PATH]`, `ignis check [PATH]`, `ignis build-std` and
-/// `ignis test [PATH]` run against the project that contains `PATH`, which
+/// `ignis build [PATH]`, `ignis check [PATH]`, `ignis build-std`,
+/// `ignis check-std` and `ignis test [PATH]` run against the project that contains `PATH`, which
 /// defaults to the current directory. `ignis test-std [FILTER]` runs the
 /// standard library's own tests and reads no project file. The bare form `ignis <entry.ign>` is the
 /// build the bootstrap ladder and the parity harness call, and stays a build of
@@ -3921,6 +3987,10 @@ function main(): i32 {
 
   if (let CliCommand::BUILD_STD = options.command) {
     return runBuildStd(&options);
+  }
+
+  if (let CliCommand::CHECK_STD = options.command) {
+    return runCheckStd(&options);
   }
 
   if (let CliCommand::FMT = options.command) {
