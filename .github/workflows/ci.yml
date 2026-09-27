@@ -263,17 +263,8 @@ jobs:
       - name: Analyze the standard library and the selfhost compiler
         run: ignis check
 
-      # Captured to a log rather than just run, so the G3-stage1 comparison
-      # below can compare stage1's run against this exact host run instead of
-      # paying for a second, byte-identical `<host> test` invocation.
       - name: Run the selfhost test suite
-        run: |
-          set -uo pipefail
-          mkdir -p build/bootstrap/stage1-tests
-          status=0
-          timeout 10800 ignis test 2>&1 | tee build/bootstrap/stage1-tests/log-host.txt || status=${PIPESTATUS[0]}
-          scripts/bootstrap.sh gate-g3-record-host stage1 "$status" build/bootstrap/stage1-tests/log-host.txt
-          exit "$status"
+        run: ignis test
 
       # The standard library owns the string runtime the C smoke test used to
       # cover, so its own suite is the gate for it.
@@ -318,15 +309,13 @@ jobs:
           IGNIS_LSP_COMPILER: build/bootstrap/stage1/ignis
         run: python3 scripts/tests/test_selfhost_lsp.py -v
 
-      # The equivalent of the nightly's gate-g3-stage2/gate-g3-compare pair,
-      # run against stage1 instead of stage2: the host half was already
-      # recorded above by "Run the selfhost test suite", so this only runs
-      # stage1's half of the suite and compares it against that recorded run.
+      # The nightly's G3, run against stage1 instead of stage2: the suite has
+      # to pass outright under stage1, with no host run to compare against.
       # Writes gates/G3-STAGE1.json.
       - name: Run the selfhost test suite under stage1 (G3, stage1)
         run: scripts/bootstrap.sh gate-g3-stage1
 
-      - name: Check G3 (stage1 vs host)
+      - name: Check G3 (stage1)
         run: |
           set -euo pipefail
 
@@ -338,10 +327,10 @@ jobs:
 
           status="$(jq -r '.status' "$gate_file")"
           summary="$(jq -r '.summary' "$gate_file")"
-          echo "G3 (stage1 vs host): ${status} — ${summary}"
+          echo "G3 (stage1): ${status} — ${summary}"
 
           if [ "$status" != "pass" ]; then
-            echo "stage1's selfhost test summary differs from the host's; see ${gate_file}" >&2
+            echo "the selfhost test suite did not pass under stage1; see ${gate_file}" >&2
             exit 1
           fi
 
