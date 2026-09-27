@@ -3709,31 +3709,30 @@ export namespace LirLowering {
               span,
               borrowedAlias,
             );
-          } else if (let Option::SOME(elementLocal) = leafLocals.get(leafIndex)) {
-            if (let Option::SOME(elementType) = leafTypes.get(leafIndex)) {
-              let elementTemp: Lir::TempId = LirLowering::freshTemp(function_, *elementType, span);
+          } else {
+            let leaf: LirLowering::TupleLeaf = LirLowering::tupleLeafAt(leafLocals, leafTypes, leafIndex);
+            let elementTemp: Lir::TempId = LirLowering::freshTemp(function_, leaf.ty, span);
 
-              LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
-                dest: elementTemp,
-                source: *elementLocal,
-              }));
+            LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+              dest: elementTemp,
+              source: leaf.local,
+            }));
 
-              let elementOperand: Lir::Operand = Lir::Operand::Temp(elementTemp);
-              nested = LirLowering::lowerPatternCheck(
-                defStore,
-                typeStore,
-                hirStore,
-                dropSchedules,
-                function_,
-                state,
-                &elementOperand,
-                *elementType,
-                elementPattern,
-                span,
-                borrowedAlias,
-                Option::NONE,
-              );
-            }
+            let elementOperand: Lir::Operand = Lir::Operand::Temp(elementTemp);
+            nested = LirLowering::lowerPatternCheck(
+              defStore,
+              typeStore,
+              hirStore,
+              dropSchedules,
+              function_,
+              state,
+              &elementOperand,
+              leaf.ty,
+              elementPattern,
+              span,
+              borrowedAlias,
+              Option::NONE,
+            );
           }
 
           let andTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -3836,6 +3835,161 @@ export namespace LirLowering {
     }
 
     return count;
+  }
+
+  /// Frees what the chosen pattern leaves unowned in a tuple scrutinee's leaves.
+  ///
+  /// A tuple literal consumes its elements, so every leaf that owns its value
+  /// belongs to the construct until a pattern takes it. A leaf the pattern binds
+  /// keeps only the payload slots its bindings take, and the rest is freed here;
+  /// a leaf the pattern only tests, or skips with a wildcard, is freed whole.
+  function emitTupleLeafDrops(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    elementIds: &Vector<Hir::HirId>,
+    leafLocals: &Vector<Lir::LocalId>,
+    leafTypes: &Vector<Analyzer::TypeId>,
+    leafStart: u64,
+    pattern: &Hir::HirPattern,
+    span: SourceSpan,
+  ): void {
+    let Hir::HirPattern::Tuple(subpatterns) = pattern else {
+      LirLowering::dropOwnedTupleLeaves(defStore, typeStore, hirStore, dropSchedules, function_, state, elementIds, leafLocals, leafTypes, leafStart);
+      return;
+    };
+
+    let mut index: u64 = 0;
+    let mut leafIndex: u64 = leafStart;
+
+    while (index < elementIds.length()) {
+      let Option::SOME(elementId) = elementIds.get(index) else {
+        @panic("tuple scrutinee element missing: tuple leaf invariant broken");
+      };
+      let Option::SOME(subpattern) = subpatterns.get(index) else {
+        @panic("tuple pattern arity differs from its scrutinee: tuple leaf invariant broken");
+      };
+
+      if (let Option::SOME(innerIds) = LirLowering::tupleLiteralElements(hirStore, *elementId)) {
+        LirLowering::emitTupleLeafDrops(
+          defStore,
+          typeStore,
+          hirStore,
+          dropSchedules,
+          function_,
+          state,
+          &innerIds,
+          leafLocals,
+          leafTypes,
+          leafIndex,
+          subpattern,
+          span,
+        );
+      } else {
+        let leaf: LirLowering::TupleLeaf = LirLowering::tupleLeafAt(leafLocals, leafTypes, leafIndex);
+
+        if (LirLowering::tupleLeafIsOwned(defStore, typeStore, hirStore, dropSchedules, *elementId, leaf.ty)) {
+          if (Borrowck::patternMovesOwnedValue(defStore, typeStore, leaf.ty, subpattern)) {
+            let leafTemp: Lir::TempId = LirLowering::freshTemp(function_, leaf.ty, span);
+
+            LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+              dest: leafTemp,
+              source: leaf.local,
+            }));
+
+            let leafOperand: Lir::Operand = Lir::Operand::Temp(leafTemp);
+            LirLowering::emitUnboundPayloadDrops(defStore, typeStore, function_, state, &leafOperand, leaf.ty, subpattern, span);
+          } else {
+            LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+              local: leaf.local,
+            }));
+          }
+        }
+      }
+
+      leafIndex += LirLowering::tupleLeafCount(hirStore, *elementId);
+      index += 1;
+    }
+  }
+
+  /// Frees every leaf of a tuple scrutinee that owns its value.
+  function dropOwnedTupleLeaves(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    elementIds: &Vector<Hir::HirId>,
+    leafLocals: &Vector<Lir::LocalId>,
+    leafTypes: &Vector<Analyzer::TypeId>,
+    leafStart: u64,
+  ): void {
+    let mut index: u64 = 0;
+    let mut leafIndex: u64 = leafStart;
+
+    while (index < elementIds.length()) {
+      let Option::SOME(elementId) = elementIds.get(index) else {
+        @panic("tuple scrutinee element missing: tuple leaf invariant broken");
+      };
+
+      if (let Option::SOME(innerIds) = LirLowering::tupleLiteralElements(hirStore, *elementId)) {
+        LirLowering::dropOwnedTupleLeaves(defStore, typeStore, hirStore, dropSchedules, function_, state, &innerIds, leafLocals, leafTypes, leafIndex);
+      } else {
+        let leaf: LirLowering::TupleLeaf = LirLowering::tupleLeafAt(leafLocals, leafTypes, leafIndex);
+
+        if (LirLowering::tupleLeafIsOwned(defStore, typeStore, hirStore, dropSchedules, *elementId, leaf.ty)) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+            local: leaf.local,
+          }));
+        }
+      }
+
+      leafIndex += LirLowering::tupleLeafCount(hirStore, *elementId);
+      index += 1;
+    }
+  }
+
+  /// Whether a tuple scrutinee leaf holds a value the construct owns: a droppable
+  /// value that is not read out of storage someone else still drops.
+  function tupleLeafIsOwned(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    elementId: Hir::HirId,
+    leafType: Analyzer::TypeId,
+  ): boolean {
+    if (!Borrowck::needsDropType(defStore, typeStore, leafType)) {
+      return false;
+    }
+
+    return LirLowering::matchOwnsScrutinee(typeStore, hirStore, dropSchedules, elementId);
+  }
+
+  record TupleLeaf {
+    public local: Lir::LocalId;
+    public ty: Analyzer::TypeId;
+  }
+
+  /// The local and type of leaf `leafIndex`. Every leaf is evaluated before any
+  /// pattern is checked, so a missing one is a lowering bug, not a non-match.
+  function tupleLeafAt(
+    leafLocals: &Vector<Lir::LocalId>,
+    leafTypes: &Vector<Analyzer::TypeId>,
+    leafIndex: u64,
+  ): LirLowering::TupleLeaf {
+    let Option::SOME(local) = leafLocals.get(leafIndex) else {
+      @panic("tuple scrutinee leaf local missing: tuple leaf invariant broken");
+    };
+    let Option::SOME(ty) = leafTypes.get(leafIndex) else {
+      @panic("tuple scrutinee leaf type missing: tuple leaf invariant broken");
+    };
+
+    return LirLowering::TupleLeaf { local: *local, ty: *ty };
   }
 
   /// Evaluates the elements of a tuple scrutinee left to right into one local per
@@ -4386,6 +4540,25 @@ export namespace LirLowering {
 
       LirLowering::switchToBlock(state, armBlock);
 
+      // Arm entry is the one point every path out of the arm passes through
+      // exactly once, and nothing in the body can name a tuple scrutinee leaf.
+      if (isTupleScrutinee) {
+        LirLowering::emitTupleLeafDrops(
+          defStore,
+          typeStore,
+          hirStore,
+          dropSchedules,
+          function_,
+          state,
+          &tupleElements,
+          &elementLocals,
+          &elementTypes,
+          0,
+          &arm.pattern,
+          nodeSpan,
+        );
+      }
+
       // An arm that takes a payload is skipped by the whole-scrutinee drop below,
       // so the payload slots its pattern does not bind have no owner at all. Free
       // them here, before the body runs: the discarded slots are unnameable from
@@ -4529,7 +4702,36 @@ export namespace LirLowering {
         false,
       );
 
-      LirLowering::lowerLetElseBranches(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode, tupleMatches);
+      let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_ok");
+      let failBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_fail");
+
+      LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+        condition: tupleMatches,
+        thenBlock: continueBlock,
+        elseBlock: failBlock,
+      }));
+
+      // On failure no binding survives, so the construct still owns every leaf.
+      LirLowering::switchToBlock(state, failBlock);
+      LirLowering::dropOwnedTupleLeaves(defStore, typeStore, hirStore, dropSchedules, function_, state, &tupleElements, &leafLocals, &leafTypes, 0);
+      LirLowering::lowerLetElseFailure(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode);
+
+      LirLowering::switchToBlock(state, continueBlock);
+      LirLowering::emitTupleLeafDrops(
+        defStore,
+        typeStore,
+        hirStore,
+        dropSchedules,
+        function_,
+        state,
+        &tupleElements,
+        &leafLocals,
+        &leafTypes,
+        0,
+        &letElseNode.pattern,
+        nodeSpan,
+      );
+
       return;
     }
 
@@ -4615,13 +4817,26 @@ export namespace LirLowering {
     }));
 
     LirLowering::switchToBlock(state, failBlock);
+    LirLowering::lowerLetElseFailure(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode);
+
+    LirLowering::switchToBlock(state, continueBlock);
+  }
+
+  /// Lowers the diverging else block of a `let ... else` into the current block.
+  function lowerLetElseFailure(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    letElseNode: &Hir::HirLetElse,
+  ): void {
     let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode.elseBlock);
 
     if (!state.terminated) {
       LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
     }
-
-    LirLowering::switchToBlock(state, continueBlock);
   }
 
   /// Drop the payload slots of a matched variant that no binding takes.
