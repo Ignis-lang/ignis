@@ -194,7 +194,7 @@ function ownershipReportWideSource(): String {
   source.pushStr("\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n");
   source.pushStr("\nfunction readSlot(slot: &Slot): i32 {\n  match (slot) {\n    Slot::Filled(inner) -> {\n      return inner.value;\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n");
   source.pushStr("\nfunction makeCounter(start: i32): (i32) -> i32 {\n  let counter = (step: i32): i32 -> step + start;\n  let alias = counter;\n\n  return alias;\n}\n");
-  source.pushStr("\nfunction captureByMove(): i32 {\n  let held: Resource = Resource { value: 7 };\n  let read = (): i32 -> consume(@move held);\n\n  return read();\n}\n");
+  source.pushStr("\nfunction captureByMove(): i32 {\n  let held: Resource = Resource { value: 7 };\n  let read = (): i32 -> {\n    let _ = @move held;\n\n    return readValue(&held);\n  };\n\n  return read();\n}\n");
   source.pushStr("\nfunction makeSlot(value: i32): Slot {\n  return Slot::Filled(Resource { value: value });\n}\n");
   source.pushStr("\nfunction takeSlot(slot: Slot): i32 {\n  match (slot) {\n    Slot::Filled(inner) -> {\n      return inner.value;\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n");
   source.pushStr("\nfunction chainedConditions(flag: boolean): i32 {\n  let first: Slot = makeSlot(1);\n  let second: Slot = makeSlot(2);\n\n  if (let Slot::Filled(left) = first && let Slot::Filled(right) = second) {\n    return left.value + right.value;\n  }\n\n  return 0;\n}\n");

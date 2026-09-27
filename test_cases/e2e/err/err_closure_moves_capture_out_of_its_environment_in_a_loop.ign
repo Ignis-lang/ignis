@@ -1,0 +1,41 @@
+// e2e: err
+// A captured value moved out of the environment inside a loop of the closure
+// body would be moved again on the next round and again on the next call.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function consume(value: Tracked): i32 {
+  return value.id;
+}
+
+function makeConsumer(): () -> i32 {
+  let held: Tracked = Tracked { id: 4 };
+
+  return (): i32 -> {
+    let _ = @move held;
+    let mut total: i32 = 0;
+    let mut round: i32 = 0;
+
+    while (round < 2) {
+      {
+        total = total + consume(held);
+      }
+
+      round = round + 1;
+    }
+
+    return total;
+  };
+}
+
+function main(): i32 {
+  let consumer = makeConsumer();
+
+  return consumer();
+}

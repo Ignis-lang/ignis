@@ -1,0 +1,28 @@
+// e2e: err
+// A closure can be called any number of times and every call reads the same
+// environment, so its body cannot move a value the environment owns: the next
+// call would find it gone, and the environment's drop would free it again.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function consume(value: Tracked): i32 {
+  return value.id;
+}
+
+function makeConsumer(): () -> i32 {
+  let held: Tracked = Tracked { id: 4 };
+
+  return (): i32 -> consume(@move held);
+}
+
+function main(): i32 {
+  let consumer = makeConsumer();
+
+  return consumer();
+}
