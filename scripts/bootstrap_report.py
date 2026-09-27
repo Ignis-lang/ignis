@@ -43,7 +43,7 @@ GATE_TITLES = {
   "G2": "End-to-end parity under stage2",
   "G3": "Selfhost test suite under stage2",
   "G4": "Resource budget within 1.25x of stage1",
-  "G5": "Diagnostics equal or better than the host",
+  "G5": "Diagnostics keep every one the committed error corpus records",
   "G6": "Parse verdicts match the committed baselines",
   "G7": "Drop schedules match the committed baselines",
 }
@@ -369,15 +369,15 @@ def read_stage0(bootstrap_root: Path) -> dict:
   path = bootstrap_root / "stage0.json"
 
   # scripts/bootstrap.sh records every official or seed stage0 it builds with,
-  # so a missing or unreadable file means stage1 came from an explicit
-  # IGNIS_STAGE0 of no recorded kind.
+  # so a missing file means stage1 came from an explicit IGNIS_STAGE0 of no
+  # recorded kind. An unreadable one is reported as such, not as missing.
   if not path.is_file():
     return {}
 
   try:
     return json.loads(path.read_text(encoding="utf-8"))
   except (OSError, json.JSONDecodeError):
-    return {}
+    return {"unreadable": True}
 
 
 def format_stage0_line(stage0: dict) -> str:
@@ -393,6 +393,9 @@ def format_stage0_line(stage0: dict) -> str:
 
   if kind:
     return f"stage0: {kind}"
+
+  if stage0.get("unreadable"):
+    return "stage0: unknown (build/bootstrap/stage0.json is unreadable)"
 
   return "stage0: not recorded (no build/bootstrap/stage0.json)"
 

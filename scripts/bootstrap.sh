@@ -1065,6 +1065,12 @@ run_report() {
 # candidates publish a fresh official asset, provided the seed can still build
 # ignis/ (nightly.yml's `seed` job checks that; the `seed` command refreshes it).
 promotion_decide() {
+  if [[ $# -lt 1 || $# -gt 2 || ( "$1" != "true" && "$1" != "false" ) || ! "${2:-0}" =~ ^[0-9]+$ ]]; then
+    echo "usage: $(basename "$0") promotion-decide <candidate> [previous-streak]" >&2
+    echo "  <candidate> is true or false, [previous-streak] a non-negative integer (default 0)" >&2
+    exit 2
+  fi
+
   local candidate="$1" previous_streak="${2:-0}"
 
   if [[ "$candidate" == "true" ]]; then
@@ -1190,7 +1196,7 @@ counts = data["counts"]
 gate = {
   "gate": gate_id,
   "status": status,
-  "summary": "{}/{} error-corpus cases keep every diagnostic the host records".format(
+  "summary": "{}/{} error-corpus cases keep every diagnostic their snapshot records".format(
     counts.get("pass", 0), data["total"]
   ),
   "details": {
@@ -1644,7 +1650,8 @@ except BaseException:
 
 # The stage0 build/bootstrap/stage0.json records is the one later invocations
 # use, unless IGNIS_STAGE0 says otherwise: an official binary
-# scripts/resolve_official_stage0.sh downloaded, or a seed-built one, so
+# scripts/resolve_official_stage0.sh downloaded, a seed-built one, or a
+# `selfhost` one a developer recorded by hand, so
 # `stage2` or `stage3` run after `stage1-from-seed` stay on the seed lineage.
 # Only a binary that is actually here is adopted; a gate job that carries
 # stage0.json without the binary keeps $STAGE0 empty and relies on the
@@ -1659,7 +1666,7 @@ adopt_recorded_stage0() {
   recorded_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
 
   case "$recorded_kind" in
-    official | seed) : ;;
+    official | selfhost | seed) : ;;
     *) return 0 ;;
   esac
 
@@ -1717,7 +1724,10 @@ main() {
     gates) run_gates ;;
     seal-gates) seal_missing_gates ;;
     report) run_report ;;
-    promotion-decide) promotion_decide "${2-}" "${3-0}" ;;
+    promotion-decide)
+      shift
+      promotion_decide "$@"
+      ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
     -h|--help|help|"") usage ;;

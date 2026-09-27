@@ -718,6 +718,95 @@ test_promotion_decide() {
     || fail_test "not candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected false"
 }
 
+# A seed-built stage0 that cannot build stage1 says the seed needs a refresh,
+# not that the two-step rule was broken.
+test_seed_stage0_failure_asks_for_a_seed_refresh() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a failing seed stage0 asks for a seed refresh"
+
+  local root
+  root="$(make_sandbox)"
+  write_failing_official_compiler "$root/bin/ignis-seed"
+  write_stage0_json "$root" seed seed "$root/bin/ignis-seed"
+
+  local status=0
+  run_stage1 "$root" "" >"$root/run.log" 2>&1 || status=$?
+
+  [[ "$status" -ne 0 ]] && pass "stage1 exited non-zero (${status})" \
+    || fail_test "expected stage1 to fail, it exited 0, see ${root}/run.log"
+
+  if grep -q 'the compiler built from the C seed reported errors' "$root/run.log" \
+    && grep -q 'refresh the seed (scripts/bootstrap.sh seed' "$root/run.log"; then
+    pass "the failure asks for a seed refresh"
+  else
+    fail_test "the failure does not ask for a seed refresh, see ${root}/run.log"
+  fi
+
+  if grep -q 'two-step rule' "$root/run.log"; then
+    fail_test "a seed failure was reported as a two-step rule violation, see ${root}/run.log"
+  else
+    pass "the failure does not name the two-step rule"
+  fi
+
+  assert_path_ignis_unused "$root"
+
+  rm -rf "$root"
+}
+
+# A stage0.json of kind selfhost (written by hand for a developer's own
+# selfhost binary) is adopted like official and seed.
+test_recorded_selfhost_stage0_is_adopted() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a recorded selfhost stage0 whose binary exists is adopted without IGNIS_STAGE0"
+
+  local root
+  root="$(make_sandbox)"
+  write_working_official_compiler "$root/bin/ignis-dev"
+  write_stage0_json "$root" selfhost manual "$root/bin/ignis-dev"
+
+  local status=0
+  run_stage1 "$root" "" >"$root/run.log" 2>&1 || status=$?
+
+  [[ "$status" -eq 0 ]] && pass "stage1 exited 0" \
+    || fail_test "expected stage1 to succeed, exit ${status}, see ${root}/run.log"
+
+  if grep -q "with stage0 ${root}/bin/ignis-dev" "$root/run.log"; then
+    pass "stage1 was built with the recorded selfhost binary"
+  else
+    fail_test "stage1 was not built with the recorded selfhost binary, see ${root}/run.log"
+  fi
+
+  rm -rf "$root"
+}
+
+# promotion-decide takes <candidate> [previous-streak]. The old three-argument
+# form (<candidate> <fallback> <streak>) must fail instead of reading the
+# fallback flag as the streak.
+test_promotion_decide_rejects_bad_arguments() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: promotion-decide rejects a wrong argument count or shape"
+
+  local label status out
+  for label in "old-three-args:true false 2" "no-args:" "streak-not-a-number:true false" "candidate-not-a-bool:yes 2"; do
+    local name="${label%%:*}" arguments="${label#*:}"
+    status=0
+    # shellcheck disable=SC2086 # word splitting is the point: each case is an argument list.
+    out="$("$BOOTSTRAP_SH" promotion-decide $arguments 2>&1)" || status=$?
+
+    if [[ "$status" -eq 2 ]]; then
+      pass "${name}: exit 2"
+    else
+      fail_test "${name}: expected exit 2, got ${status} (${out})"
+    fi
+
+    if grep -q 'promotion-decide <candidate> \[previous-streak\]' <<<"$out"; then
+      pass "${name}: prints the usage"
+    else
+      fail_test "${name}: no usage line (${out})"
+    fi
+  done
+}
+
 test_auto_official_failure_is_terminal
 test_forced_official_failure_is_terminal
 test_repeated_official_failure_stays_terminal
@@ -733,6 +822,9 @@ test_forced_official_without_asset_fails
 test_host_mode_is_rejected
 test_unexpected_failure_emits_no_resolved_output
 test_promotion_decide
+test_seed_stage0_failure_asks_for_a_seed_refresh
+test_recorded_selfhost_stage0_is_adopted
+test_promotion_decide_rejects_bad_arguments
 
 echo
 echo "${TESTS_RUN} test(s) run, ${FAILURES} failure(s)"

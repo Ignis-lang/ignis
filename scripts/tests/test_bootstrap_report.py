@@ -693,13 +693,18 @@ class Stage0ReportTests(unittest.TestCase):
       "stage0: not recorded (no build/bootstrap/stage0.json)",
     )
 
-  def test_an_unreadable_stage0_json_is_reported_as_unrecorded(self) -> None:
+  def test_an_unreadable_stage0_json_is_reported_apart_from_a_missing_one(self) -> None:
     (self.root / "stage0.json").write_text("not json", encoding="utf-8")
 
     self.assertEqual(
       bootstrap_report.format_stage0_line(bootstrap_report.read_stage0(self.root)),
-      "stage0: not recorded (no build/bootstrap/stage0.json)",
+      "stage0: unknown (build/bootstrap/stage0.json is unreadable)",
     )
+
+  def test_no_gate_title_names_the_host(self) -> None:
+    for gate, title in bootstrap_report.GATE_TITLES.items():
+      with self.subTest(gate=gate):
+        self.assertNotIn("host", title.lower().split())
 
   def test_a_leftover_fallback_record_is_not_reported_as_a_fallback(self) -> None:
     self.write_stage0({"kind": "official", "sha256": "abc", "fallback": True, "used_kind": "host"})
