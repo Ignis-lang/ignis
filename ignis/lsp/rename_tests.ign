@@ -1,0 +1,257 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Json from "std::json";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+
+import SourceOverrides from "../build/sources";
+
+import LspAnalysis, analysisKeyOf, analyzeDocuments from "./analysis";
+import FileHoverIndex from "./hover_index";
+import NavigationIndex from "./navigation";
+import isStdOrVirtualPath, isValidRenameName, renameSites, renameWorkspaceEdit from "./rename";
+import uriFromFilePath from "./uri";
+
+/// An analyzed `main.ign`: its text, path and URI, and the navigation data.
+record RenameFixture {
+  public mainText: String;
+  public mainPath: String;
+  public mainUri: String;
+  public navigation: NavigationIndex;
+}
+
+/// Writes `main.ign`, and `helper.ign` when `helperSource` is not empty,
+/// into a scratch directory and analyzes them with `main.ign` open.
+function renameFixture(tag: str, mainSource: str, helperSource: str): RenameFixture {
+  let directory: String = `/tmp/ignis_lsp_rename_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::fromString(&directory);
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&root)) {
+    Test::fail();
+  }
+
+  let mainText: String = String::create(mainSource);
+  let helperText: String = String::create(helperSource);
+  let mainPath: Path::PathBuf = root.join("main.ign");
+
+  let helperPath: Path::PathBuf = root.join("helper.ign");
+
+  if (helperText.length() > 0) {
+    if (let Result::ERROR(_) = Fs::writeString(&helperPath, &helperText)) {
+      Test::fail();
+    }
+  }
+
+  if (let Result::ERROR(_) = Fs::writeString(&mainPath, &mainText)) {
+    Test::fail();
+  }
+
+  let path: Path::PathBuf = match (Fs::canonicalize(&mainPath)) {
+    Result::OK(canonical) -> canonical,
+    Result::ERROR(_) -> mainPath,
+  };
+
+  let mut sources: SourceOverrides = SourceOverrides::none();
+  sources.set(&path, &mainText);
+
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let stdPath: Option<String> = Option::SOME(workingDirectory.join("std").toString());
+  let key: String = analysisKeyOf(&path);
+  let analysis: LspAnalysis = analyzeDocuments(&path, &key, &stdPath, &sources);
+
+  Test::assertEq<u64>(analysis.diagnostics.length(), 0);
+
+  let Option::SOME(navigation) = analysis.navigation else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let pathText: String = path.toString();
+
+  return RenameFixture {
+    mainText: mainText,
+    mainPath: pathText.clone(),
+    mainUri: uriFromFilePath(&pathText),
+    navigation: navigation,
+  };
+}
+
+/// The target at the first `marker` of `current`, the text the client has,
+/// or 0.
+function renameTargetAt(fixture: &RenameFixture, current: &String, marker: str): u64 {
+  let Option::SOME(file) = fixture.navigation.fileOf(&fixture.mainPath) else {
+    Test::fail();
+    return 0;
+  };
+
+  let wanted: String = String::create(marker);
+
+  let Option::SOME(offset) = current.indexOf(&wanted) else {
+    Test::fail();
+    return 0;
+  };
+
+  return file.targetAtIn(current, offset).unwrapOr(0);
+}
+
+/// The rename of what the first `marker` of `current` names to `newName`,
+/// as JSON text, or `null`.
+function renameAtIn(fixture: &RenameFixture, current: &String, marker: str, newName: str): String {
+  let Option::SOME(file) = fixture.navigation.fileOf(&fixture.mainPath) else {
+    Test::fail();
+    return String::new();
+  };
+
+  let target: u64 = renameTargetAt(fixture, current, marker);
+  let name: String = String::create(newName);
+
+  return match (renameWorkspaceEdit(&fixture.navigation, file, target, &name, &fixture.mainUri, current)) {
+    Option::SOME(edit) -> Json::toJsonString(&edit),
+    Option::NONE -> String::create("null"),
+  };
+}
+
+function renameAt(fixture: &RenameFixture, marker: str, newName: str): String {
+  return renameAtIn(fixture, &fixture.mainText, marker, newName);
+}
+
+function validName(name: str): boolean {
+  let text: String = String::create(name);
+  return isValidRenameName(&text);
+}
+
+function stdOrVirtual(path: str): boolean {
+  let text: String = String::create(path);
+  return isStdOrVirtualPath(&text);
+}
+
+/// A one-line edit of `line`, `start..end`, to `newText`, as JSON text.
+function editJson(line: u64, start: u64, end: u64, newText: str): String {
+  return `{"range":{"start":{"line":${line},"character":${start}},"end":{"line":${line},"character":${end}}},"newText":"${newText}"}`;
+}
+
+/// The `WorkspaceEdit` of `edits` in the fixture's `main.ign`, as JSON text.
+function changesJson(fixture: &RenameFixture, edits: &String): String {
+  return `{"changes":{"${fixture.mainUri}":[${edits}]}}`;
+}
+
+@test
+function renameReturnsExactEditsForLocalVariablesAndParameters(): void {
+  let fixture: RenameFixture = renameFixture(
+    "locals",
+    "function add(value: i32): i32 {\n  let total: i32 = value + value;\n  return total;\n}\n",
+    "",
+  );
+
+  let localEdits: String = `${editJson(1, 6, 11, "sum")},${editJson(2, 9, 14, "sum")}`;
+  Test::assertEq<str>(renameAt(&fixture, "total;", "sum").toStr(), changesJson(&fixture, &localEdits).toStr());
+
+  let parameterEdits: String = `${editJson(0, 13, 18, "input")},${editJson(1, 19, 24, "input")},${editJson(1, 27, 32, "input")}`;
+  Test::assertEq<str>(renameAt(&fixture, "value +", "input").toStr(), changesJson(&fixture, &parameterEdits).toStr());
+}
+
+/// Asserts that the first `marker` of `main.ign` names something the rename
+/// policy rejects, and that renaming it answers `null`.
+function assertRenameRejected(fixture: &RenameFixture, file: &FileHoverIndex, marker: str): void {
+  let target: u64 = renameTargetAt(fixture, &fixture.mainText, marker);
+
+  Test::assertEq<boolean>(target != 0, true);
+  Test::assertEq<boolean>(renameSites(&fixture.navigation, file, target).isNone(), true);
+  Test::assertEq<str>(renameAt(fixture, marker, "renamed").toStr(), "null");
+}
+
+@test
+function renameRejectsUnsupportedTargetsWithoutEdits(): void {
+  let fixture: RenameFixture = renameFixture(
+    "unsupported",
+    "record User {\n  public name: i32;\n}\n\nenum Status {\n  READY,\n}\n\nexport function identity(value: i32): i32 {\n  return value;\n}\n",
+    "",
+  );
+
+  let Option::SOME(file) = fixture.navigation.fileOf(&fixture.mainPath) else {
+    Test::fail();
+    return;
+  };
+
+  assertRenameRejected(&fixture, file, "User");
+  assertRenameRejected(&fixture, file, "name");
+  assertRenameRejected(&fixture, file, "READY");
+  assertRenameRejected(&fixture, file, "identity");
+
+  Test::assertEq<str>(renameAt(&fixture, "record", "renamed").toStr(), "null");
+}
+
+@test
+function renameRejectsImportsAndStdSymbolsWithoutEdits(): void {
+  let imports: RenameFixture = renameFixture(
+    "imports",
+    "import helper from \"./helper\";\n\nfunction main(): i32 {\n  return helper(1);\n}\n",
+    "export function helper(value: i32): i32 {\n  return value;\n}\n",
+  );
+
+  Test::assertEq<str>(renameAt(&imports, "helper from", "renamed").toStr(), "null");
+
+  let standard: RenameFixture = renameFixture(
+    "std",
+    "import Io from \"std::io\";\n\nfunction main(): void {\n  Io::println(\"hello\");\n}\n",
+    "",
+  );
+
+  Test::assertEq<str>(renameAt(&standard, "Io from", "Output").toStr(), "null");
+  Test::assertEq<str>(renameAt(&standard, "println", "printLine").toStr(), "null");
+}
+
+@test
+function renameRejectsInvalidNamesAndLeavesSameSpellingSymbolsUnrelated(): void {
+  Test::assertEq<boolean>(validName("renamed_value"), true);
+
+  Test::assertEq<boolean>(validName(""), false);
+  Test::assertEq<boolean>(validName("1value"), false);
+  Test::assertEq<boolean>(validName("value-name"), false);
+  Test::assertEq<boolean>(validName("function"), false);
+
+  let fixture: RenameFixture = renameFixture(
+    "spelling",
+    "function first(value: i32): i32 {\n  return value;\n}\n\nfunction second(value: i32): i32 {\n  return value;\n}\n",
+    "",
+  );
+
+  let edits: String = `${editJson(0, 15, 20, "left")},${editJson(1, 9, 14, "left")}`;
+  Test::assertEq<str>(renameAt(&fixture, "value;\n}\n\nfunction", "left").toStr(), changesJson(&fixture, &edits).toStr());
+  Test::assertEq<str>(renameAt(&fixture, "value;\n}\n\nfunction", "1value").toStr(), "null");
+}
+
+@test
+function renameRejectsStdAndVirtualPaths(): void {
+  Test::assertEq<boolean>(stdOrVirtual("<stdin>"), true);
+  Test::assertEq<boolean>(stdOrVirtual("/work/std/io/mod.ign"), true);
+  Test::assertEq<boolean>(stdOrVirtual("std/io/mod.ign"), true);
+  Test::assertEq<boolean>(stdOrVirtual("/work/stdlib/main.ign"), false);
+  Test::assertEq<boolean>(stdOrVirtual("/work/project/main.ign"), false);
+}
+
+@test
+function renameMapsEditsThroughAnEditThatSparesEveryPlace(): void {
+  let fixture: RenameFixture = renameFixture(
+    "stale",
+    "function add(value: i32): i32 {\n  let total: i32 = value + value;\n  return total;\n}\n",
+    "",
+  );
+
+  let shifted: String = String::create(
+    "// é\nfunction add(value: i32): i32 {\n  let total: i32 = value + value;\n  return total;\n}\n",
+  );
+  let edits: String = `${editJson(2, 6, 11, "sum")},${editJson(3, 9, 14, "sum")}`;
+  Test::assertEq<str>(renameAtIn(&fixture, &shifted, "total;", "sum").toStr(), changesJson(&fixture, &edits).toStr());
+
+  let touched: String = String::create(
+    "function add(value: i32): i32 {\n  let totals: i32 = value + value;\n  return total;\n}\n",
+  );
+  Test::assertEq<str>(renameAtIn(&fixture, &touched, "total;", "sum").toStr(), "null");
+}
