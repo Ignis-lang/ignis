@@ -2,96 +2,95 @@ Guidelines for AI agents working on the Ignis compiler.
 
 ## Project Overview
 
-Ignis is a statically typed, general-purpose language that compiles to C and links native binaries via GCC. The compiler is written in Rust as a Cargo workspace.
+Ignis is a statically typed, general-purpose language that compiles to C and links native binaries via GCC. The compiler is written in Ignis itself (`ignis/`) and builds itself through the bootstrap ladder described in `BOOTSTRAP.md`. It is the only compiler that scripts, CI, the nightly and releases build or run, and it defines the language.
 
-**Workspace structure:**
+**`crates/` is frozen.** It holds the former Rust compiler, kept for reference only. Nothing builds, tests or runs it, and it must not be changed. See `crates/README.md`.
+
+**Repository layout:**
 
 ```
-crates/
-  ignis/              # CLI entry point (clap)
-  ignis_driver/       # Build pipeline orchestration, module discovery, linking
-  ignis_parser/       # Lexer + recursive-descent parser with Pratt precedence
-  ignis_analyzer/     # Binding, resolution, typechecking, borrowck, const eval, lints, HIR lowering
-  ignis_hir/          # High-level IR (tree-based, typed)
-  ignis_lir/          # Low-level IR (TAC / basic blocks), HIR->LIR lowering, verification
-  ignis_codegen_c/    # LIR -> C emission (structs, tagged unions, functions)
-  ignis_ast/          # AST node types (statements, expressions, types, attributes, patterns)
-  ignis_type/         # Type system (Type, TypeStore, Definition, DefinitionStore, SymbolTable)
-  ignis_token/        # Token types and lexer
-  ignis_data_type/    # Legacy data type enum (used by ignis_token)
-  ignis_config/       # Build configuration types (std manifest, linking info)
-  ignis_diagnostics/  # Diagnostic messages, severity, rendering
-  ignis_log/          # Build output macros (cmd_header!, phase_log!, cmd_ok!, cmd_fail!)
-  ignis_lsp/          # Language Server (tower-lsp): diagnostics, hover, goto-def, completions
+ignis/                # The compiler (Ignis sources, project file: ignis.toml)
+  main.ign            # Driver: command dispatch, compile pipeline, test runs, fmt, doc, lsp entry
+  cli.ign             # Command-line parsing and help text
+  lexer/              # Lexer
+  syntax/             # Tokens, token stream, cursor
+  parser/             # Recursive-descent parser with error recovery
+  ast/                # AST node types
+  analyzer/           # Binding, resolution, typechecking, const eval, checks, lints,
+                      # HIR lowering, capture/escape analysis, monomorphization, borrow/ownership checking
+  hir/                # High-level IR (typed, tree-based) and drop schedules
+  lir/                # Low-level IR (basic blocks), HIR->LIR lowering, verification
+  codegen/            # LIR -> C emission
+  build/              # Module discovery, build cache, C compiler/linker/archiver calls, test runner, fixtures
+  config/             # ignis.toml loading
+  diagnostics/        # Diagnostic codes, model, rendering
+  format/             # Formatter (ignis fmt)
+  doc/                # API documentation extraction (ignis doc)
+  lsp/                # Language server (ignis lsp)
+  ids/ indexing/ interning/ symbols/   # Shared id, index, interning and symbol utilities
 std/                  # Ignis standard library sources (.ign), runtime included
   manifest.toml       # Module registry and linking configuration
   runtime/            # ignis_rt.h: the emitted type prelude guard (the runtime itself is Ignis)
-  fs/                 # Filesystem: readToString, writeString, Dir, File, Metadata
-  ffi/                # FFI utilities: CString
-  path/               # Path manipulation
-  io/                 # Print functions + IoError types
   test/               # Test assertions and snapshot helpers (`std::test::Test`)
-  libc/               # C standard library wrappers (9 submodules)
-test_cases/           # Ignis fixture files for analyzer tests
+bootstrap/seed/       # The committed C seed: the whole compiler as one C file, rebuilt with gcc alone
+scripts/              # Bootstrap ladder, gates, parity harnesses, installer
+test_cases/           # Fixtures and committed baselines (e2e, parse verdicts, doc baselines, parser cases)
 example/              # Example Ignis programs
+crates/               # Frozen Rust compiler, reference only
 ```
 
 ## Build & Run Commands
 
+The ladder builds the compiler; there is no other build. Build outputs land in `build/bootstrap/<stage>/ignis`.
+
 ```bash
-# Compiler
-cargo check                                    # Fast type check (all crates)
-cargo build                                    # Debug build
-cargo build --release                          # Release build
-cargo install --path crates/ignis              # Install CLI
+# Build the compiler
+scripts/bootstrap.sh stage1-from-seed          # C seed -> stage0 -> stage1 (no prebuilt compiler needed)
+scripts/bootstrap.sh stage1                    # stage1 from the recorded stage0 (official binary or seed)
+scripts/bootstrap.sh stage2                    # stage2 = ignis/ compiled by stage1 (what a release ships)
+scripts/bootstrap.sh all                       # stage1 -> stage2 -> stage3 fixed-point gate (G1)
+scripts/bootstrap.sh all-from-seed             # the same, starting from the C seed
+scripts/bootstrap.sh status                    # which build/bootstrap/<stage>/ignis exist
+scripts/build_from_seed.sh                     # only rebuild stage0 from bootstrap/seed
+scripts/build_from_seed.sh --verify-only       # check the seed against its manifest, compile nothing
 
-# Formatting & linting
-cargo fmt --all                                # Format (2-space indent, 120 width)
-cargo clippy -- -D warnings                    # Lint
+# Checks CI runs on every pull request (with stage1 on PATH as `ignis`)
+ignis check                                    # Analyze the standard library and the compiler, no codegen
+ignis fmt --check <files...>                   # Canonical formatting of std/, ignis/ and example/
+ignis test-std --std-path std                  # Standard library test suite
+scripts/bootstrap.sh gate-g3-stage1            # The compiler's own test suite, fixtures included, under stage1
 
-# Testing
-cargo test                                     # All tests (unit + integration + e2e)
-cargo test -p ignis_driver                     # E2E tests (compile + run Ignis code)
-cargo test -p ignis_analyzer                   # Analyzer tests (semantic analysis)
-cargo test -p ignis_codegen_c                  # C codegen snapshot tests
-cargo test -p ignis_driver e2e_arithmetic_add  # Single test by name
-
-# Snapshot management (insta)
-cargo insta review                             # Interactive review of changed snapshots
-INSTA_UPDATE=always cargo test -p ignis_driver # Auto-accept all snapshot changes
+# Gates (see BOOTSTRAP.md for what each compares)
+scripts/bootstrap.sh parity                    # G2: e2e corpus through stage2 -> build/bootstrap/parity.md
+scripts/bootstrap.sh gate-g3                   # G3: test suite under stage2, compared with stage1's run
+scripts/bootstrap.sh gate-g4                   # G4: stage2 vs stage1 RSS/wall budget
+scripts/bootstrap.sh gate-g5                   # G5: error corpus through stage2 against committed snapshots
+scripts/bootstrap.sh gate-g6                   # G6: stage2 parse verdicts vs committed baselines
+scripts/bootstrap.sh gate-g6-baselines [bin]   # regenerate test_cases/__parse_verdicts__ (review the diff)
+scripts/bootstrap.sh gate-g7                   # G7: stage2 drop schedules vs committed baselines
+scripts/bootstrap.sh gate-g7-stage1            # same, against stage1 (what PR CI runs)
+scripts/bootstrap.sh gate-g7-baselines [bin]   # regenerate test_cases/e2e/ok/__drop_schedules__ (review the diff)
+scripts/bootstrap.sh stages                    # stage1 -> stage2 -> gate-g4 -> stage3 (the nightly's ladder job)
+scripts/bootstrap.sh gates                     # every stage and gate (G1..G7), then report
+scripts/bootstrap.sh seal-gates                # write a skipped placeholder for every gate that has no result yet
+scripts/bootstrap.sh report                    # gates/*.json -> build/bootstrap/report.md + promotion.json
+scripts/bootstrap.sh seed                      # refresh bootstrap/seed (deliberate, see BOOTSTRAP.md)
+scripts/selfhost_e2e_parity.py --compiler <bin> --report parity.md                 # G2 harness, any compiler binary
+scripts/selfhost_e2e_parity.py --compiler <bin> --corpus err --report parity-err.md  # G5 harness
+scripts/selfhost_syntax_parity.py --check-coverage          # every G6 case has a baseline (no compiler)
+scripts/selfhost_drop_schedule_parity.py --check-coverage   # every ok fixture has a G7 baseline (no compiler)
 
 # Compiling Ignis code
 ignis build                                    # Compile project (reads ignis.toml)
-ignis build path/to/file.ign                   # Compile single file
-ignis check                                    # Type-check only (no codegen)
+ignis build path/to/file.ign -o out            # Compile single file
+ignis check                                    # Type-check only (no codegen or linking)
 ignis build-std                                # Build standard library archive
-
-# Selfhost bootstrap ladder (stage1 = host-built selfhost, stage2 = built by stage1,
-# stage3 = built by stage2 and byte-compared with stage2's emitted C)
-scripts/bootstrap.sh all                       # stage1 -> stage2 -> stage3 fixed-point gate
-scripts/bootstrap.sh status                    # which build/bootstrap/<stage>/ignis exist
-scripts/bootstrap.sh parity                    # host e2e corpus through stage2 -> build/bootstrap/parity.md
-scripts/bootstrap.sh gate-g5                   # host error corpus through stage2 -> build/bootstrap/gates/G5.json
-scripts/bootstrap.sh gate-g6                   # stage2 parse verdicts vs committed baselines (host cross-check) -> build/bootstrap/gates/G6.json
-scripts/bootstrap.sh gate-g6-baselines [bin]   # regenerate test_cases/__parse_verdicts__ from stage2 (review the diff)
-scripts/bootstrap.sh gate-g7                   # stage2 drop schedules vs committed baselines -> build/bootstrap/gates/G7.json
-scripts/bootstrap.sh gate-g7-stage1            # same, against stage1 (what PR CI runs) -> gates/G7-STAGE1.json
-scripts/bootstrap.sh gate-g7-baselines [bin]   # regenerate test_cases/e2e/ok/__drop_schedules__ (review the diff)
-scripts/bootstrap.sh gate-g4                   # stage2 vs stage1 RSS/wall budget -> build/bootstrap/gates/G4.json
-scripts/bootstrap.sh stages                    # stage1 -> stage2 -> gate-g4 -> stage3 (what the nightly's ladder job runs)
-scripts/bootstrap.sh gates                     # every stage and gate (G1..G7) -> build/bootstrap/gates/, then report
-scripts/bootstrap.sh seal-gates                # write a skipped placeholder for every gate that has no result yet
-scripts/bootstrap.sh report                    # gates/*.json -> build/bootstrap/report.md + promotion.json (candidate verdict)
-scripts/selfhost_e2e_parity.py --compiler <bin> --report parity.md  # same harness, any selfhost binary
-scripts/selfhost_e2e_parity.py --compiler <bin> --corpus err --report parity-err.md  # diagnostics parity
-scripts/selfhost_syntax_parity.py --compiler <bin> --report parity-syntax.md  # parse-verdict parity, any selfhost binary
-scripts/selfhost_drop_schedule_parity.py --check-coverage  # every ok fixture has a drop-schedule baseline (no compiler)
-scripts/selfhost_drop_schedule_parity.py --compiler <bin> --write-baselines  # regenerate the G7 baselines
+ignis --help                                   # Every command and flag
 
 # Language-level tests
-ignis test                                     # Run project tests (tests and C units run through a job pool sized to the CPU count)
-ignis test -j 4                                # Cap the pool; IGNIS_TEST_JOBS is the env fallback
+ignis test                                     # Run project tests and fixtures
 ignis test path/to/file.ign                    # Run tests from a single file
+ignis test --filter <substring>                # Only tests whose name contains the substring
 ignis test --update-snapshots                  # Recreate selected snapshots
 
 # Formatter
@@ -105,34 +104,27 @@ ignis fmt --stdin-json                         # Batch stdin protocol (NDJSON)
 Formatter defaults: `indent_width = 2`, `line_width = 100`, `use_tabs = false`, `sort_imports = false`.
 Canonical formatter rules now include inline empty high-level blocks (`namespace Foo {}`), multiline trailing commas, and no trailing comma on single-line callable signatures or record initializers.
 
-## Rust Guidelines
+Commands that compile the compiler itself take minutes: one stage is about two minutes of a single core, and a full `ignis test` of the compiler is longer.
+
+## Working on `ignis/`
 
 ### General Principles
 
 - Prioritize correctness and clarity over speed.
-- Do not write comments that summarize code; only explain non-obvious "why".
+- Do not write comments that summarize code; only explain non-obvious "why". Document declarations with `///`.
 - Prefer implementing in existing files unless it's a new logical component.
 - Use full words for variable names (no abbreviations like `q` for `queue`).
+- Format every changed `.ign` file with `ignis fmt`; CI runs `ignis fmt --check` over `std/`, `ignis/` and `example/`.
 
-### Error Handling
+### The two-step rule
 
-- Avoid `unwrap()` and functions that panic; use `?` to propagate errors.
-- Be careful with indexing operations that may panic on out-of-bounds.
-- Driver/pipeline functions return `Result<(), ()>` and print errors via `eprintln!` + `colored`.
-- Diagnostics are collected in `Vec<Diagnostic>` and rendered via `ignis_diagnostics::render()`.
-- The LSP wraps analysis in `catch_unwind` to avoid crashing on panics.
+A language feature is safe to use in `ignis/` or `std/` only after compiler support for it has been promoted to the official selfhost binary. Landing support and its first use in the same PR breaks the official stage0. See `BOOTSTRAP.md`, "The two-step rule".
 
-### File Organization
+### The frozen Rust compiler
 
-- Never create `mod.rs` files; use `src/some_module.rs` instead.
-- Rustfmt keeps import order as written (`.rustfmt.toml` sets `reorder_imports = false`).
-- Imports are grouped: std, external, internal, separated by blank lines.
-
-### Formatting
-
-- 2-space indentation, `max_width = 120`.
-- Vertical function parameter layout (`fn_params_layout = "Vertical"`).
-- Match blocks with trailing commas.
+- Do not edit anything under `crates/`, and do not add Rust code anywhere.
+- Do not use `crates/` as the reference for what a program means. When the selfhost and `crates/` disagree, the selfhost is right unless it is wrong by its own rules; fix it in `ignis/`.
+- Comments in `ignis/` that mention "the host" describe behavior the selfhost was ported from. They are history, not a contract to keep in sync.
 
 ## Ignis Language Conventions
 
@@ -153,203 +145,108 @@ Canonical formatter rules now include inline empty high-level blocks (`namespace
 
 ## Compiler Pipeline
 
+The phase lines a build prints (`lex`, `parse`, `analyze`, `capture`, `mono`, `ownership`, `lower`, `lir`, `codegen`, `emit`, `link`) map to these steps, in execution order:
+
 ```
-CLI (crates/ignis/src/main.rs)
-  → resolve input (project ignis.toml or single file)
-  → build IgnisConfig with CLI overrides
+CLI (ignis/cli.ign)
+  → parseArguments(): command and options
 
-Driver (crates/ignis_driver/src/pipeline.rs)
-  → CompilationContext::discover_modules()     # Module graph discovery
-  → parse each file (lexer → parser → AST)
-  → ctx.compile() → AnalyzerOutput            # Full semantic analysis
+Driver (ignis/main.ign)
+  → discovery (ignis/build/resolver.ign, module_graph.ign)   # Project/single-file module graph, ignis.toml
+  → build cache check (ignis/build/stamp.ign, fingerprint.ign)
+  → lex + parse each module (ignis/lexer/, ignis/parser/)
+  → Analyzer::analyzeProgram (ignis/analyzer/mod.ign), per module:
+      1. binder.ign          predeclareRoots(), then completeRoots()   # two-pass binding
+      2. resolver.ign        type-level name resolution
+      3. resolver_bodies.ign body-level name resolution
+      4. typecheck*.ign      typechecking (bidirectional inference)
+      5. const_eval.ign      compile-time constant values
+      6. checks.ign          control flow and other post-typecheck checks
+      7. lint.ign            unused variables/imports/mut, deprecated calls
+  → lowering.ign         AST → HIR (ignis/hir/)
+  → capture.ign          closure captures (escape.ign: closure escape analysis)
+  → mono.ign             monomorphization; countRemainingGenerics() must reach 0
+  → borrowck.ign         fused borrow and ownership check, produces drop schedules
+  → ignis/lir/lowering.ign  HIR → LIR, then ignis/lir/verify.ign verifyProgram()
+  → ignis/codegen/mod.ign   emitProgram(): LIR → one C translation unit (selfhost_emit.c for the compiler itself)
 
-Analyzer (crates/ignis_analyzer/src/lib.rs)
-  1. bind_phase()        → DefinitionStore (two-pass: predeclare types, then complete)
-  2. resolve_phase()     → node_defs, scopes (name → DefinitionId)
-  3. typecheck_phase()   → node_types, TypeStore (bidirectional inference)
-  4. const_eval_phase()  → compile-time constant values
-  5. extra_checks_phase()→ control flow, never-typed expressions
-  6. lint_phase()        → unused variables/imports/mut, deprecated calls
-  7. lower_to_hir()      → HIR (includes capture analysis + escape analysis for closures)
-
-Post-analysis (crates/ignis_driver/src/pipeline.rs)
-  → Monomorphizer::run()              # Specialize generics to concrete types
-  → HirBorrowChecker::check()         # HIR-level borrow checking
-  → HirOwnershipChecker::check()      # Produce DropSchedules
-  → ignis_lir::lowering::lower_and_verify()  # HIR → LIR (basic blocks, TAC)
-  → ignis_codegen_c::emit_*()         # LIR → C source code
-  → main wrapper generation            # __ignis_user_main + C main() wrapper
-
-Linking (crates/ignis_driver/src/link.rs)
-  → gcc -c → object files (.o)
-  → ar rcs → archives (.a)
-  → gcc link → executable binary
+Build (ignis/build/)
+  → c_compiler.ign   gcc -c → object files
+  → archive.ign      ar → archives (build-std)
+  → linker.ign       gcc link → executable
 ```
-
-### Key Data Structures Between Phases
-
-| Structure | Crate | Purpose |
-| --- | --- | --- |
-| `ASTNode` (NodeId) | ignis_ast | Parsed syntax tree nodes |
-| `IgnisTypeSyntax` | ignis_ast | Syntactic type annotations (pre-resolution) |
-| `Type` (TypeId) | ignis_type | Semantic types (post-typechecking) |
-| `TypeStore` | ignis_type | Deduplicated type storage with creation methods |
-| `Definition` (DefinitionId) | ignis_type | Declarations (functions, records, enums, variables, fields, variants) |
-| `DefinitionStore` | ignis_type | All definitions indexed by DefinitionId |
-| `SymbolId` / `SymbolTable` | ignis_type | Interned identifiers for cheap comparisons |
-| `HIRNode` (HIRId) / `HIRKind` | ignis_hir | High-level IR (typed, resolved, tree-based) |
-| `HIRPattern` / `HIRMatchArm` | ignis_hir | Pattern matching in HIR (match, if let, let else) |
-| `HIRCapture` / `CaptureMode` | ignis_hir | Closure capture descriptors (by ref, by move, etc.) |
-| `DropSchedules` | ignis_hir | When/where to emit drop calls for owned types |
-| `Instr` / `Operand` / `Block` | ignis_lir | Low-level IR (TAC, basic blocks, terminators) |
-| `Terminator` | ignis_lir | Block exit: `Goto`, `Branch`, `Return`, `Unreachable` |
-| `FunctionLir` / `LirProgram` | ignis_lir | Per-function LIR with locals, temps, blocks |
-| `Diagnostic` | ignis_diagnostics | Errors/warnings with spans, labels, notes |
 
 ## Extending the Compiler
 
+Every step below is an edit under `ignis/`. After a change, build stage1 and run the checks in "Build & Run Commands"; `scripts/bootstrap.sh stage1` and `gate-g3-stage1` are the minimum.
+
 ### Adding a New AST Node
 
-1. **Define the struct** in `crates/ignis_ast/src/statements/` or `expressions/`:
-   - Fields use `NodeId` for child references, `Span` for source location.
-   - Derive `Debug, Clone, PartialEq, Hash, Eq`.
-
-2. **Add variant** to `ASTStatement` or `ASTExpression` enum in the corresponding `mod.rs`.
-
-3. **Implement `span()`** in the match arm of the parent enum.
-
-4. **Parse it** in `crates/ignis_parser/src/parser/` (`declarations.rs` for statements, `expression.rs` for expressions).
-
-5. **Handle in analyzer phases** (only the ones that apply):
-   - `binder.rs` — if the node creates a definition.
-   - `resolver.rs` — if the node needs name resolution.
-   - `typeck.rs` — if the node produces or consumes types.
-   - `lowering.rs` — convert to HIR.
-   - Post-HIR: `borrowck_hir.rs` — if the node affects ownership or borrowing.
-
-6. **Handle in LIR lowering** (`crates/ignis_lir/src/lowering/mod.rs`) — convert HIR to LIR instructions.
-
-7. **Handle in C codegen** (`crates/ignis_codegen_c/src/emit.rs`) — emit C code.
-
-8. **Add tests** — E2E in `crates/ignis_driver/tests/`, analyzer in `crates/ignis_analyzer/tests/`.
+1. Define the node in `ignis/ast/` (`items.ign`, `statements.ign`, `expressions.ign`, `types.ign` or `patterns.ign`), including its span.
+2. Parse it in `ignis/parser/` (`declarations.ign`, `statements.ign`, `expressions.ign`, `types.ign`, `patterns.ign`).
+3. Handle it in the analyzer phases that apply: `binder.ign`, `resolver.ign`/`resolver_bodies.ign`, `typecheck_items.ign`/`typecheck_stmts.ign`/`typecheck_exprs.ign`, `lowering.ign`, and `borrowck.ign` if it affects ownership.
+4. Handle it in `ignis/lir/lowering.ign` and `ignis/codegen/mod.ign` if it reaches them.
+5. Add it to the formatter (`ignis/format/`) and to `ignis/ast/serialize.ign` if they need to print it.
+6. Add tests: `@test` functions next to the code, and an e2e fixture under `test_cases/e2e/`.
 
 ### Adding a New Builtin
 
-Builtins use `@name(args)` or `@name<Type>(args)` syntax in Ignis source.
+Builtins use `@name(args)` or `@name<Type>(args)` syntax.
 
-1. **Parser** already handles `@` prefix — no changes needed.
+1. Typecheck it in `checkBuiltinCall()` (`ignis/analyzer/typecheck_exprs.ign`).
+2. Lower it to HIR in `lowerBuiltinCall()` (`ignis/analyzer/lowering.ign`), adding a `HirKind` variant (`ignis/hir/node.ign`) if needed.
+3. Lower the HIR to LIR in `ignis/lir/lowering.ign`, and emit C in `ignis/codegen/mod.ign`.
+4. Register it for the language server in `ignis/lsp/at_items.ign`.
 
-2. **Type-check** in `crates/ignis_analyzer/src/typeck.rs`:
-   - Add a branch in `typecheck_builtin_call()` matching the builtin name.
-   - Validate type args and regular args count/types.
-   - Return the appropriate `TypeId`.
-
-3. **Lower to HIR** in `crates/ignis_analyzer/src/lowering.rs`:
-   - Add a branch in `lower_builtin_call()`.
-   - Return an appropriate `HIRKind` variant (or create a new one in `ignis_hir`).
-
-4. **Lower to LIR** in `crates/ignis_lir/src/lowering/mod.rs`:
-   - Handle the new `HIRKind` variant.
-   - Emit LIR instructions.
-
-5. **Emit C** in `crates/ignis_codegen_c/src/emit.rs`:
-   - Handle the new LIR instruction or HIR-level construct.
-
-Existing builtins: `typeOf`, `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `sliceFromParts`, `read`, `write`, `dropInPlace`, `dropGlue`, `hash`, `eq`, `maxOf`, `minOf`, `compileError`, `panic`, `trap`, `unreachable`.
-
-`crates/ignis_type/src/at_items.rs` is the authority for this list — check it rather than this paragraph before deciding whether a name is a builtin. Note that `configFlag` is registered there as a *directive*, not a builtin, even though it is written like one in expression position.
+Existing builtins: `typeOf`, `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `sliceFromParts`, `read`, `write`, `dropInPlace`, `dropGlue`, `hash`, `eq`, `maxOf`, `minOf`, `compileError`, `panic`, `trap`, `unreachable`. `configFlag` is a directive, not a builtin, even though it is written like one in expression position; the parser handles it (`ignis/parser/expressions.ign`).
 
 ### Adding a New Pattern Form
 
 Patterns are used by `match`, `if let`, `while let`, and `let else`.
 
-1. **Add variant** to `ASTPattern` enum in `crates/ignis_ast/src/pattern.rs`.
-
-2. **Parse it** in `crates/ignis_parser/src/parser/expression.rs` in the pattern parsing methods.
-
-3. **Handle in typechecking** (`typeck.rs`) — validate the pattern against the scrutinee type.
-
-4. **Add variant** to `HIRPattern` in `crates/ignis_hir/src/pattern.rs`.
-
-5. **Lower AST pattern to HIR pattern** in `crates/ignis_analyzer/src/lowering.rs`.
-
-6. **Handle in LIR lowering** (`crates/ignis_lir/src/lowering/mod.rs`) — generate condition checks and bindings.
-
-AST patterns: `Wildcard`, `Literal`, `Path` (with optional destructure args), `Tuple`, `Or`.
-HIR patterns: `Wildcard`, `Literal`, `Binding`, `Variant` (with destructure), `Tuple`, `Or`, `Constant`.
+1. Add the AST form in `ignis/ast/patterns.ign` and parse it in `ignis/parser/patterns.ign`.
+2. Typecheck it against the scrutinee type (`ignis/analyzer/typecheck*.ign`; exhaustiveness lives in `typecheck_exhaustive.ign`).
+3. Add the `HirPattern` variant in `ignis/hir/pattern.ign` and lower to it in `ignis/analyzer/lowering.ign`.
+4. Generate the condition checks and bindings in `ignis/lir/lowering.ign`.
 
 ### Adding a New Lint
 
-1. **Add variant** to `LintId` enum in `crates/ignis_type/src/lint.rs`.
+1. Add a `LintKind` member in `ignis/analyzer/lint.ign`.
+2. Implement the check there and call it from `lintModule()`.
+3. Add its diagnostic code in `ignis/diagnostics/codes.ign`.
+4. `@allow`/`@warn`/`@deny` map attribute names to lints in the same file.
 
-2. **Implement checker** in `crates/ignis_analyzer/src/lint.rs`:
-   - Create a method like `lint_my_check(&mut self, roots: &[NodeId])`.
-   - Collect diagnostics via `self.add_diagnostic()`.
-
-3. **Call from `lint_phase()`** in the same file.
-
-4. **Add `DiagnosticMessage` variant** in `crates/ignis_diagnostics/src/message.rs` for the warning/error.
-
-5. **Support `@allow`/`@warn`/`@deny`** — the directive system already maps attribute names to `LintId`.
-
-Existing lints: `UnusedVariable`, `UnusedImport`, `UnusedMut`, `Deprecated`.
+Existing lints: unused variable, unused import, unused `mut`, deprecated call.
 
 ### Adding a New Type
 
-1. **Add variant** to `Type` enum in `crates/ignis_type/src/types.rs`.
-
-2. **Add cache + creation method** in `TypeStore` (e.g., `pub fn my_type(...) -> TypeId`).
-
-3. **Update type utility methods** in `TypeStore`:
-   - `is_copy()` — if the type has copy semantics.
-   - `is_owned()` — if the type owns heap resources.
-   - `contains_type_param()` — if it can contain type parameters.
-   - `substitute()` — if it contains inner types that need substitution.
-   - `format_type_name()` — for diagnostics and debugging.
-
-4. **Handle in typechecking** (`typeck.rs`) — inference, unification, cast rules.
-
-5. **Handle in codegen** (`emit.rs`) — C representation.
-
-### Adding a New Attribute
-
-Attributes use `@name` or `@name(args)` syntax on declarations.
-
-1. **Add variant** to the appropriate enum in `crates/ignis_type/src/attribute.rs`:
-   - `RecordAttr` for record-level attributes.
-   - `FunctionAttr` for function-level attributes.
-   - `FieldAttr` for field-level attributes.
-
-2. **Convert in binder** (`crates/ignis_analyzer/src/binder.rs`):
-   - Map from `ASTAttribute` to the typed attribute enum.
-   - Validate argument types and constraints.
-
-3. **Handle in codegen** (`crates/ignis_codegen_c/src/emit.rs`):
-   - Emit the appropriate C `__attribute__` or equivalent.
-
-Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `@deprecated`, `@deprecated("message")`, `@inline`, `@inline(always)`, `@inline(never)`, `@allow(lint)`, `@warn(lint)`, `@deny(lint)`, `@implements(Drop)`, `@implements(Clone)`, `@implements(Copy)`, `@implements(TraitName)`, `@extension(Type)`, `@extension(Type, mut)`, `@langHook("name")` (namespace attribute), `@lang(try)` (record attribute for Result/Option), `@takes` (parameter attribute), `@noescape` (parameter attribute for closures).
+1. Add the variant to `Type` in `ignis/analyzer/types.ign`, with its creation, copy/owned classification, substitution and name formatting.
+2. Handle it in typechecking (inference, unification, casts).
+3. Handle it in `ignis/codegen/mod.ign` (C representation).
 
 ## Testing
 
 ### Test Types
 
-| Type | Crate | What It Tests | Snapshot Dir |
-| --- | --- | --- | --- |
-| E2E (ok/err/warn fixtures) | ignis_driver (`ignis test`) | Full compile + run, or compile-only diagnostics/warnings, from `.ign` fixtures | `test_cases/e2e/{ok,err}/__snapshots__/` |
-| E2E (inline) | ignis_driver | Cases too specific to a hand-built `CompilationContext`/pipeline call for a fixture | `crates/ignis_driver/tests/snapshots/` |
-| Analyzer (golden) | ignis_analyzer | Diagnostics and HIR output | `crates/ignis_analyzer/tests/snapshots/` |
-| Analyzer (fixtures) | ignis_analyzer | `.ign` files from `test_cases/` | same |
-| Analyzer (diagnostics) | ignis_analyzer | Error codes at specific line numbers | N/A (assertions) |
-| Analyzer (properties) | ignis_analyzer | Property-based (proptest) fuzz testing | N/A |
-| Codegen (golden) | ignis_codegen_c | Generated C code snapshots | `crates/ignis_codegen_c/tests/snapshots/` |
-| Native test runner | ignis_driver / ignis | `ignis test`, generic assertions, snapshots, single-file mode | module-adjacent `__snapshots__/` |
+| Type | Where | Run with |
+| --- | --- | --- |
+| Compiler unit tests | `@test` functions in `tests.ign` / `*_tests.ign` modules next to the code in `ignis/` | `ignis test --filter <name>` from the repository root, or `scripts/bootstrap.sh gate-g3-stage1` for all of them |
+| E2E fixtures (ok/err/warn) | `test_cases/e2e/{ok,err}`, baselines in their `__snapshots__/` | the same `ignis test` run (`[test] fixtures` in `ignis.toml`), names `e2e::<path>` |
+| Standard library tests | `@test` functions under `std/` | `ignis test-std --std-path std` |
+| Drop-schedule baselines (G7) | `test_cases/e2e/ok/__drop_schedules__/` | `scripts/bootstrap.sh gate-g7-stage1` |
+| Parse-verdict baselines (G6) | `test_cases/__parse_verdicts__/` | `scripts/bootstrap.sh gate-g6` |
+| Doc baselines | `test_cases/doc/__doc_baselines__/` | `python3 scripts/selfhost_doc_parity.py --compiler <bin>` |
+| Language server protocol | `scripts/tests/test_selfhost_lsp.py` | `IGNIS_LSP_COMPILER=<bin> python3 scripts/tests/test_selfhost_lsp.py -v` |
+| Script tests | `scripts/tests/` | each script directly (see `.github/workflows/ci.yml`) |
+
+A test run of the compiler compiles the whole compiler with its test modules, so it takes minutes. `-o` names the test binary, and its directory has to exist.
 
 ### Adding an E2E Test
 
 The end-to-end corpus lives in Ignis source under `test_cases/e2e/{ok,err}`, one
 `.ign` file per case, run by `ignis test` as fixtures. A fixture's leading
 `// e2e: <option>` comment lines select its mode (see
-`crates/ignis_driver/src/fixture_tests.rs`):
+`ignis/build/fixture_tests.ign`):
 
 | Header | Mode |
 | --- | --- |
@@ -358,6 +255,7 @@ The end-to-end corpus lives in Ignis source under `test_cases/e2e/{ok,err}`, one
 | `// e2e: allow-leak` | Same as above, skipping leak checking. |
 | `// e2e: err` | Compile only; expects failure. The baseline holds the reported error diagnostics. |
 | `// e2e: warn` | Compile only; expects success with warnings. The baseline holds the reported warning diagnostics. |
+| `// e2e: skip <reason>` | Expected to fail for the stated reason; the run fails once the case passes, so the header gets removed. |
 
 ```
 // In test_cases/e2e/ok/my_feature.ign
@@ -366,125 +264,103 @@ function main(): i32 {
 }
 ```
 
-Run: `target-local/debug/ignis test e2e::my_feature`
-Accept snapshot: `target-local/debug/ignis test --update-snapshots e2e::my_feature`
-Run the whole e2e corpus: `target-local/debug/ignis test e2e::`
+With a built compiler at `build/bootstrap/stage1/ignis`, from the repository root:
 
-A case that needs a hand-built `CompilationContext` or drives the pipeline
-directly (not a plain `.ign` program) stays as an inline Rust test in
-`crates/ignis_driver/tests/e2e_ok.rs` / `e2e_err.rs` instead.
+```bash
+mkdir -p build/tests
+build/bootstrap/stage1/ignis test --filter e2e::my_feature -o build/tests/ignis-tests                     # run it
+build/bootstrap/stage1/ignis test --filter e2e::my_feature --update-snapshots -o build/tests/ignis-tests  # record its baseline
+scripts/bootstrap.sh gate-g7-baselines build/bootstrap/stage1/ignis                                        # an ok fixture also needs its G7 baseline
+```
 
-### Adding an Analyzer Test
+A new `.ign` file under `test_cases/`, `example/` or `std/` also needs its G6 parse-verdict baseline (`scripts/bootstrap.sh gate-g6-baselines`). PR CI rejects a missing one. Baseline diffs are semantic changes: read them before committing.
 
-```rust
-// In crates/ignis_analyzer/tests/golden_ok.rs
-#[test]
-fn my_semantic_check() {
-  let result = common::analyze(r#"
-    function main(): void {
-        return;
-    }
-  "#);
+### Adding a Compiler Unit Test
 
-  assert_snapshot!("my_semantic_check_diags", common::format_diagnostics(&result.output.diagnostics));
-  assert_snapshot!("my_semantic_check_hir", common::format_hir(&result));
+Add a `@test` function to the module's `tests.ign` or `*_tests.ign` file, next to the code it covers. For example, in `ignis/lexer/tests.ign`, which defines the `lexText` helper:
+
+```ignis
+@test
+function lexesAnEmptyFile(): void {
+  let result: LexResult = lexText("empty.ign", "");
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
 }
 ```
 
-### Adding a Fixture Test
-
-1. Create `test_cases/analyzer/<category>/my_test.ign`.
-2. Add to `crates/ignis_analyzer/tests/fixtures.rs`:
-   ```rust
-   #[test]
-   fn fixture_my_test() {
-     test_fixture("test_cases/analyzer/<category>/my_test.ign");
-   }
-   ```
-
-### Snapshot Workflow
-
-- First run creates `.snap.new` pending files.
-- `cargo insta review` opens interactive review.
-- `INSTA_UPDATE=always cargo test` auto-accepts all changes.
-- Snapshots are YAML with source reference, assertion line, and expression output.
+Snapshot assertions (`std::test::Test::assertSnapshot`) write to the `__snapshots__/` directory next to the module under test; `--update-snapshots` creates or replaces them.
 
 ## Common Pitfalls
 
-1. **Forgetting to handle a new AST variant in all analyzer phases.** The Rust compiler will not warn you about non-exhaustive matches if a catch-all `_` arm exists. Grep for existing variant names to find all match sites. Similarly for new `HIRKind` variants in LIR lowering and codegen.
+1. **Forgetting to handle a new AST variant in all analyzer phases.** A catch-all `_` arm hides the missing case. Search for an existing variant name to find every match site. The same goes for new `HirKind` variants in LIR lowering and codegen.
 
-2. **Forgetting to update `offset_ids()` in HIR.** When adding a new `HIRKind` variant that contains `HIRId` fields, update the `offset_ids()` method or monomorphization will silently produce wrong references.
+2. **Forgetting to offset a new `HirKind` variant's ids.** `offsetKind()` in `ignis/hir/node.ign` rewrites `HirId` fields when HIR stores are merged. A variant it does not handle keeps stale ids.
 
-3. **Type invariants after monomorphization.** Post-mono, no `Type::Param` or `Type::Instance` should exist. Debug builds verify this with `mono_output.verify_no_generics()`.
+3. **Type invariants after monomorphization.** Post-mono, no `Param` or `Instance` type may remain. The driver reports `countRemainingGenerics()` on the `mono:` line.
 
-4. **LIR verification failures.** After LIR lowering, `lower_and_verify()` checks well-formedness. If you add new instructions, ensure they satisfy the verifier's invariants.
+4. **LIR verification failures.** `verifyProgram()` checks LIR well-formedness after lowering. New instructions have to satisfy it.
 
-5. **Snapshot tests require GCC.** E2E and codegen tests compile C code with `gcc`. Ensure it's installed and in `PATH`.
+5. **Everything needs GCC.** Building a stage, running fixtures and running tests all compile C with `gcc`.
 
-6. **Language-level snapshots are source-adjacent.** `std::test::Test::assertSnapshot` and `assertFileSnapshot` write to `__snapshots__/` next to the module under test. Project-mode and single-file mode use different roots; do not assume they share one build directory.
+6. **Language-level snapshots are source-adjacent.** `std::test::Test::assertSnapshot` and `assertFileSnapshot` write to `__snapshots__/` next to the module under test. Project mode and single-file mode use different roots.
 
-7. **Import order matters.** `.rustfmt.toml` disables import reordering. Maintain the existing grouping: std, external, internal.
+7. **Canonical Eq is test-critical.** Generic `Test::assertEq<T>` / `assertNe<T>` route through canonical `std::hash::Eq` and builtin `@eq<T>`. Unsupported equality must be rejected in analysis; supported paths must not rely on codegen panics.
 
-8. **Two-pass binding.** Records/enums/type aliases are predeclared in pass 1, then fully bound in pass 2. This enables forward references. If you add a new declaration type that can be referenced before its definition, add it to the predeclaration pass.
+8. **Two-pass binding.** Records, enums and type aliases are predeclared in the first pass (`predeclareRoots()`), then fully bound (`completeRoots()`). A new declaration type that can be referenced before its definition belongs in the first pass.
 
-9. **Bidirectional type inference.** The typechecker propagates expected types downward via `InferContext`. When adding new expression types, consider whether they should propagate or consume type expectations.
+9. **Bidirectional type inference.** The typechecker propagates expected types downward. New expression forms have to decide whether they propagate or consume the expectation.
 
-10. **Canonical Eq is test-critical.** Generic `Test::assertEq<T>` / `assertNe<T>` route through canonical `std::hash::Eq` and builtin `@eq<T>`. Unsupported equality must be rejected in analysis; supported paths must not rely on codegen panics.
+10. **Drop schedules.** The ownership check produces the schedules LIR lowering uses to emit drops. New control flow has to schedule drops at every exit (normal exit, break, continue, return), and the G7 baselines will show the change.
 
-11. **Module classification in codegen.** `classify.rs` determines whether a definition belongs to User, Std, or Runtime code. If you add new definition kinds, ensure they classify correctly to avoid duplicate or missing emissions.
-
-12. **Drop schedules.** Ownership analysis produces `DropSchedules` that tell LIR lowering where to emit cleanup code. If you add new control flow constructs, ensure drops are scheduled at all exit points (normal exit, break, continue, return).
+11. **The two-step rule.** Using a language feature in `ignis/` or `std/` in the same PR that adds it breaks the official stage0.
 
 ## Key Files
 
 | File | Purpose |
 | --- | --- |
-| `crates/ignis/src/main.rs` | CLI entry, config resolution, subcommands |
-| `crates/ignis/src/cli.rs` | Clap CLI definition |
-| `crates/ignis/tests/test_command.rs` | CLI integration tests for `ignis test` |
-| `crates/ignis_driver/src/pipeline.rs` | Build pipeline: analysis → mono → LIR → codegen → link |
-| `crates/ignis_driver/src/context.rs` | Module discovery, import resolution, per-module parsing |
-| `crates/ignis_driver/src/link.rs` | GCC compilation, archive creation, executable linking |
-| `crates/ignis_driver/tests/native_test_runner.rs` | Project/single-file native test runner integration tests |
-| `crates/ignis_parser/src/parser/declarations.rs` | Top-level parsing (functions, records, enums, traits, imports) |
-| `crates/ignis_parser/src/parser/expression.rs` | Expression parsing with Pratt precedence |
-| `crates/ignis_parser/src/parser/statement.rs` | Statement parsing |
-| `crates/ignis_parser/src/parser/type_syntax.rs` | Type annotation parsing |
-| `crates/ignis_analyzer/src/lib.rs` | Analyzer struct, phase dispatch, `analyze_with_shared_stores()` |
-| `crates/ignis_analyzer/src/binder.rs` | Binding phase (two-pass: predecl + complete) |
-| `crates/ignis_analyzer/src/resolver.rs` | Name resolution phase |
-| `crates/ignis_analyzer/src/typeck.rs` | Type checking phase (bidirectional inference) |
-| `crates/ignis_analyzer/src/borrowck_hir.rs` | HIR-level borrow checking (replaces old AST-level borrowck) |
-| `crates/ignis_analyzer/src/lowering.rs` | AST → HIR lowering |
-| `crates/ignis_analyzer/src/mono.rs` | Monomorphization (generic specialization) |
-| `crates/ignis_analyzer/src/lint.rs` | Lint infrastructure and checks |
-| `crates/ignis_analyzer/src/scope.rs` | Scope tree management |
-| `crates/ignis_analyzer/src/capture.rs` | Closure capture analysis (determine what closures capture) |
-| `crates/ignis_analyzer/src/escape.rs` | Escape analysis (determine if closures outlive their defining scope) |
-| `crates/ignis_hir/src/lib.rs` | HIR types: HIRNode, HIRKind, HIR store |
-| `crates/ignis_hir/src/pattern.rs` | HIRPattern, HIRMatchArm for pattern matching |
-| `crates/ignis_hir/src/drop_schedule.rs` | Drop scheduling for ownership |
-| `crates/ignis_lir/src/instr.rs` | LIR instructions (Load, Store, BinOp, Call, etc.) |
-| `crates/ignis_lir/src/program.rs` | FunctionLir, LirProgram |
-| `crates/ignis_lir/src/lowering/mod.rs` | HIR → LIR lowering |
-| `crates/ignis_lir/src/verify.rs` | LIR verification |
-| `crates/ignis_codegen_c/src/emit.rs` | C code emission from LIR |
-| `crates/ignis_codegen_c/src/classify.rs` | Definition classification (User/Std/Runtime) |
-| `crates/ignis_ast/src/statements/mod.rs` | ASTStatement enum and all statement types |
-| `crates/ignis_ast/src/expressions/mod.rs` | ASTExpression enum and all expression types |
-| `crates/ignis_ast/src/type_.rs` | IgnisTypeSyntax (parsed type annotations) |
-| `crates/ignis_ast/src/pattern.rs` | ASTPattern (Wildcard, Literal, Path, Tuple, Or) |
-| `crates/ignis_ast/src/attribute.rs` | ASTAttribute (parsed `@` annotations) |
-| `crates/ignis_type/src/types.rs` | Type enum, TypeStore, Substitution |
-| `crates/ignis_type/src/definition.rs` | Definition, DefinitionKind, DefinitionStore |
-| `crates/ignis_type/src/attribute.rs` | RecordAttr, FunctionAttr, FieldAttr |
-| `crates/ignis_type/src/lint.rs` | LintId, LintLevel |
-| `crates/ignis_diagnostics/src/message.rs` | DiagnosticMessage variants (450+) |
-| `crates/ignis_diagnostics/src/diagnostic_report.rs` | Diagnostic, Severity, Label |
-| `crates/ignis_lsp/src/server.rs` | LSP request handlers (hover, goto-def, completions) |
-| `crates/ignis_lsp/src/completion.rs` | Token-based completion (works without valid AST) |
-| `crates/ignis_lsp/src/at_items.rs` | Registry of `@`-prefixed builtins and directives |
-| `crates/ignis_lsp/src/type_format.rs` | Type formatting for LSP hover/display |
+| `ignis.toml` | The compiler's own project file (entry, std path, test fixtures) |
+| `ignis/main.ign` | Driver: commands, compile pipeline, test and fixture runs, fmt/doc/lsp entry |
+| `ignis/cli.ign` | Command-line parsing, help and version text |
+| `ignis/build/resolver.ign` | Project and module discovery, test module selection |
+| `ignis/build/pipeline.ign` | Build pipeline helpers |
+| `ignis/build/test_runner.ign` | Test planning, partitioning, execution, reporting |
+| `ignis/build/fixture_tests.ign` | E2E fixture headers and baselines |
+| `ignis/build/c_compiler.ign` | C compilation |
+| `ignis/build/linker.ign` | Linking |
+| `ignis/config/project.ign` | `ignis.toml` loading |
+| `ignis/lexer/mod.ign` | Lexer |
+| `ignis/parser/declarations.ign` | Top-level parsing (functions, records, enums, traits, imports) |
+| `ignis/parser/expressions.ign` | Expression parsing |
+| `ignis/parser/statements.ign` | Statement parsing |
+| `ignis/parser/types.ign` | Type annotation parsing |
+| `ignis/analyzer/mod.ign` | Analyzer entry, phase order (`analyzeProgram`) |
+| `ignis/analyzer/binder.ign` | Binding (two-pass) |
+| `ignis/analyzer/resolver.ign` | Name resolution |
+| `ignis/analyzer/typecheck_exprs.ign` | Expression typechecking, builtins |
+| `ignis/analyzer/types.ign` | Semantic types and the type store |
+| `ignis/analyzer/definitions.ign` | Definitions and the definition store |
+| `ignis/analyzer/lowering.ign` | AST → HIR lowering |
+| `ignis/analyzer/capture.ign` | Closure capture analysis |
+| `ignis/analyzer/escape.ign` | Closure escape analysis |
+| `ignis/analyzer/mono.ign` | Monomorphization |
+| `ignis/analyzer/borrowck.ign` | Borrow and ownership checking, drop schedules |
+| `ignis/analyzer/lint.ign` | Lints |
+| `ignis/hir/node.ign` | HIR node kinds and store |
+| `ignis/hir/pattern.ign` | HIR patterns |
+| `ignis/hir/drop_schedule.ign` | Drop schedules |
+| `ignis/lir/instr.ign` | LIR instructions |
+| `ignis/lir/block.ign` | Basic blocks and terminators |
+| `ignis/lir/lowering.ign` | HIR → LIR lowering |
+| `ignis/lir/verify.ign` | LIR verification |
+| `ignis/codegen/mod.ign` | C emission |
+| `ignis/diagnostics/codes.ign` | Diagnostic codes |
+| `ignis/format/api.ign` | Formatter entry |
+| `ignis/doc/mod.ign` | `ignis doc` extraction |
+| `ignis/lsp/server.ign` | Language server request handling |
+| `ignis/lsp/at_items.ign` | Registry of `@`-prefixed builtins and directives for the language server |
+| `scripts/bootstrap.sh` | Bootstrap ladder and gates |
+| `scripts/build_from_seed.sh` | Rebuild stage0 from the C seed |
+| `scripts/resolve_official_stage0.sh` | Resolve the official stage0 binary |
+| `bootstrap/seed/manifest.json` | The C seed's source commit, checksums and gcc recipe |
 | `std/manifest.toml` | Std module registry and linking config |
 | `std/test/mod.ign` | `std::test::Test` namespace: assertions and snapshots |
 | `std/runtime/ignis_rt.h` | Runtime type prelude guard; the runtime is implemented in std (memory, string, process, fs) |
@@ -523,8 +399,8 @@ Supported signatures:
 
 Closures compile through a multi-stage pipeline:
 
-1. **Capture analysis** (`capture.rs`) — determines which outer variables a closure captures and the capture mode (by ref, by move, by ref-mut).
-2. **Escape analysis** (`escape.rs`) — determines if a closure outlives its defining scope. `@noescape` on parameters prevents escape propagation.
-3. **HIR lowering** — `HIRKind::Closure` carries captures, thunk/drop definition IDs, and an `escapes` flag.
-4. **LIR lowering** — emits `MakeClosure` (captures → env struct), `CallClosure` (indirect call through thunk), `DropClosure` (cleanup).
+1. **Capture analysis** (`ignis/analyzer/capture.ign`) — determines which outer variables a closure captures and the capture mode (by ref, by move, by ref-mut).
+2. **Escape analysis** (`ignis/analyzer/escape.ign`) — determines if a closure outlives its defining scope. `@noescape` on parameters prevents escape propagation.
+3. **HIR lowering** — the closure node carries its captures, thunk/drop definitions, and whether it escapes.
+4. **LIR lowering** — emits `MakeClosure` (captures → env struct), `CallClosure` (indirect call through thunk), `DropClosure` (cleanup), defined in `ignis/lir/instr.ign`.
 5. **C codegen** — non-escaping closures use stack-allocated env; escaping closures use heap-allocated env. Closure values are structs with `call` (thunk fn ptr), `drop` (optional drop fn ptr), and `env` (opaque `*u8`).

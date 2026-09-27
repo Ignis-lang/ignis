@@ -1,135 +1,62 @@
 ## Overview
 
-Ignis is a general-purpose, statically typed language that compiles Ignis source to C and links native binaries via GCC. The repository is a Rust workspace containing compiler crates, LSP support, standard library sources, and a C runtime.
+Ignis is a general-purpose, statically typed language that compiles Ignis source to C and links native binaries via GCC. The compiler is written in Ignis (`ignis/`) and builds itself through the bootstrap ladder described in `BOOTSTRAP.md`, starting from the promoted official binary or from the C seed committed under `bootstrap/seed/`.
+
+`crates/` holds the former Rust compiler. It is frozen, kept for reference only, and nothing builds or runs it (see `crates/README.md`).
 
 ## Tech Stack
 
-- **Languages:** Rust (compiler, LSP), Ignis (`.ign` sources, standard library), C (runtime, generated output).
-- **Tooling:** Cargo workspace, GCC for C compilation/linking, `ar` for static archives, `make` for runtime rebuilds.
-- **Testing:** `insta` for snapshot tests, `proptest` for property-based tests, `tempfile` for compilation sandboxes, native `ignis test` for language-level tests.
-- **LSP:** `tower-lsp` with Tokio async runtime.
-- **CLI:** `clap` with derive macros and typed subcommands.
+- **Languages:** Ignis (compiler, language server, standard library), C (generated output, the `ignis_rt.h` type header).
+- **Tooling:** GCC for C compilation/linking, `ar` for static archives, `scripts/bootstrap.sh` (bash, python3) for the bootstrap ladder and its gates.
+- **Testing:** native `ignis test` for the compiler's own `@test` functions and the e2e fixtures, `ignis test-std` for the standard library, committed baselines checked by the ladder's gates.
 
 ## Directory Structure
 
 ```
-crates/
-  ignis/                          # CLI entry point
-    src/main.rs                   # Subcommand routing, config resolution
-    src/cli.rs                    # Clap CLI definition
-    tests/test_command.rs         # CLI integration tests for `ignis test`
-  ignis_driver/                   # Build pipeline orchestration
-    src/pipeline.rs               # Full pipeline: analysis → mono → LIR → codegen → link
-    src/context.rs                # Module discovery, import resolution, per-module parsing
-    src/link.rs                   # GCC compilation, archive creation, executable linking
-    tests/native_test_runner.rs   # Project + single-file native test runner integration tests
-    tests/e2e_ok.rs               # E2E tests (compile + run)
-    tests/e2e_err.rs              # E2E error tests (runtime failures)
-    tests/common/mod.rs           # Shared test helpers
-  ignis_parser/                   # Lexer + parser
-    src/lexer/                    # Token scanner
-    src/parser/mod.rs             # Parser core, delimited list helpers
-    src/parser/declarations.rs    # Functions, records, enums, imports, attributes
-    src/parser/expression.rs      # Pratt-precedence expression parsing
-    src/parser/statement.rs       # Statement parsing
-    src/parser/type_syntax.rs     # Type annotation parsing
-    src/parser/recovery.rs        # Error recovery strategies
-  ignis_analyzer/                 # Semantic analysis (7 phases)
-    src/lib.rs                    # Analyzer struct, phase dispatch, entry points
-    src/binder.rs                 # Phase 1: definition creation (two-pass)
-    src/resolver.rs               # Phase 2: name resolution, scope building
-    src/typeck.rs                 # Phase 3: type inference and checking
-    src/const_eval.rs             # Phase 4: compile-time constant evaluation
-    src/checks.rs                 # Phase 5: extra semantic checks (control flow, etc.)
-    src/lint.rs                   # Phase 6: lint warnings
-    src/lowering.rs               # AST → HIR conversion
-    src/mono.rs                   # Monomorphization (generic specialization)
-    src/scope.rs                  # Scope tree (Global, Function, Block, Generic, Loop)
-    src/imports.rs                # Module import/export handling
-    src/modules.rs                # Module graph management, cycle detection
-    src/capture.rs                # Closure capture analysis (what closures capture and how)
-    src/escape.rs                 # Escape analysis (whether closures outlive their scope)
-    src/borrowck_hir.rs           # HIR-level borrow checking
-    src/ownership_hir.rs          # HirOwnershipChecker, drop schedule generation
-    src/dump.rs                   # Debug dump utilities for types and definitions
-    tests/golden_ok.rs            # Analyzer snapshot tests (valid programs)
-    tests/golden_err.rs           # Analyzer snapshot tests (error programs)
-    tests/golden_hir.rs           # HIR output snapshots
-    tests/fixtures.rs             # Tests from test_cases/ .ign files
-    tests/diagnostics.rs          # Error code + line number assertions
-    tests/properties.rs           # Property-based fuzz tests (proptest)
-  ignis_hir/                      # High-level IR
-    src/lib.rs                    # HIRNode, HIRKind, HIR store
-    src/pattern.rs                # HIRPattern, HIRMatchArm (match, if let, let else)
-    src/statement.rs              # Loop condition types
-    src/operation.rs              # BinaryOperation, UnaryOperation
-    src/drop_schedule.rs          # DropSchedules, ExitKey
-    src/display.rs                # HIR pretty printer
-  ignis_lir/                      # Low-level IR (TAC / basic blocks)
-    src/instr.rs                  # Instruction types (Load, Store, BinOp, Call, etc.)
-    src/operand.rs                # Operand types (Immediate, Temporary, Local, FunctionRef)
-    src/block.rs                  # Block, Terminator (Jump, CondJump, Return, Unreachable)
-    src/program.rs                # FunctionLir, LirProgram, LocalData, TempData
-    src/lowering/mod.rs           # LoweringContext: HIR → LIR conversion
-    src/lowering/builder.rs       # FunctionBuilder: block/instruction emission
-    src/verify.rs                 # LIR verification
-  ignis_codegen_c/                # C code generation
-    src/emit.rs                   # CEmitter: LIR → C source code
-    src/classify.rs               # Definition classification (User/Std/Runtime)
-    tests/golden_c.rs             # C codegen snapshot tests
-  ignis_ast/                      # AST node types
-    src/statements/mod.rs         # ASTStatement enum (Variable, Function, Record, Enum, Trait, LetElse, etc.)
-    src/expressions/mod.rs        # ASTExpression enum (Binary, Call, Match, LetCondition, etc.)
-    src/type_.rs                  # IgnisTypeSyntax (parsed type annotations)
-    src/pattern.rs                # ASTPattern (Wildcard, Literal, Path, Tuple, Or)
-    src/attribute.rs              # ASTAttribute, ASTAttributeArg
-    src/metadata.rs               # ASTMetadata bitflags (STATIC, MUTABLE, EXPORT, etc.)
-    src/generics.rs               # ASTGenericParams, ASTGenericParam
-  ignis_type/                     # Type system and definitions
-    src/types.rs                  # Type enum, TypeId, TypeStore, Substitution
-    src/definition.rs             # Definition, DefinitionKind (incl. Trait), DefinitionId, DefinitionStore
-    src/symbol.rs                 # SymbolId, SymbolTable (interned identifiers)
-    src/attribute.rs              # RecordAttr, FunctionAttr, FieldAttr, ParamAttr, NamespaceAttr
-    src/lint.rs                   # LintId, LintLevel
-    src/span.rs                   # Source locations
-    src/module.rs                 # ModuleId, ModulePath, ModuleStore
-    src/namespace.rs              # NamespaceId, NamespaceStore
-    src/value.rs                  # Literal values (IgnisLiteralValue)
-  ignis_token/                    # Token types
-    src/token_types.rs            # Token enum (keywords, punctuation, literals)
-  ignis_data_type/                # Legacy data type enum (used by ignis_token)
-  ignis_config/                   # Build configuration types
-    src/lib.rs                    # IgnisSTDManifest, CHeader, StdToolchainConfig, StdLinkingInfo
-  ignis_formatter/                # Canonical source formatter
-    src/api.rs                    # format_text/format_file entry points, safety + idempotence integration
-    src/config.rs                 # Formatter config loading, CLI override precedence
-    src/layout.rs                 # AST-guided layout engine + source-preserving fallbacks
-    src/printer.rs                # Final trivia-aware emission
-    src/safety.rs                 # Parse-back, token-shape, comment-ownership validation
-  ignis_diagnostics/              # Error reporting
-    src/message.rs                # DiagnosticMessage enum (450+ variants)
-    src/diagnostic_report.rs      # Diagnostic, Severity, Label
-  ignis_log/                      # Build output formatting
-    src/lib.rs                    # cmd_header!, phase_log!, cmd_ok!, cmd_fail! macros
-  ignis_lsp/                      # Language Server
-    src/lib.rs                    # Async server setup (Tokio + tower-lsp)
-    src/server.rs                 # LanguageServer trait impl (hover, goto-def, refs, etc.)
-    src/state.rs                  # Document state, project caching (RwLock)
-    src/completion.rs             # Token-based completion (works without valid AST)
-    src/at_items.rs               # Registry of @-prefixed builtins and directives
-    src/type_format.rs            # Type formatting for LSP hover/display
-    src/convert.rs                # UTF-16 position conversion
-    src/semantic.rs               # Semantic token classification
-    src/inlay.rs                  # Parameter name inlay hints
-    src/project.rs                # ignis.toml discovery and project caching
+ignis/                            # The compiler (project file: ignis.toml)
+  main.ign                        # Driver: command dispatch, compile pipeline, test runs, fmt/doc/lsp entry
+  cli.ign                         # Command-line parsing and help text
+  lexer/                          # Lexer
+  syntax/                         # Tokens, token stream, cursor
+  parser/                         # Recursive-descent parser with binding-power expression parsing
+    declarations.ign              # Functions, records, enums, traits, imports, attributes
+    expressions.ign               # Expression parsing
+    statements.ign                # Statement parsing
+    types.ign                     # Type annotation parsing
+    patterns.ign                  # Pattern parsing
+    recovery.ign                  # Error recovery
+  ast/                            # AST node types (items, statements, expressions, types, patterns, metadata)
+  analyzer/                       # Semantic analysis
+    mod.ign                       # Analyzer entry and phase order
+    binder.ign                    # Definition creation (two-pass)
+    resolver.ign                  # Type-level name resolution
+    resolver_bodies.ign           # Body-level name resolution
+    typecheck*.ign                # Type inference and checking, exhaustiveness
+    const_eval.ign                # Compile-time constant evaluation
+    checks.ign                    # Post-typecheck checks (control flow, etc.)
+    lint.ign                      # Lint warnings
+    imports.ign                   # Module import/export handling
+    types.ign                     # Semantic types and the type store
+    definitions.ign               # Definitions and the definition store
+    lowering.ign                  # AST → HIR conversion
+    capture.ign                   # Closure capture analysis
+    escape.ign                    # Closure escape analysis
+    mono.ign                      # Monomorphization
+    borrowck.ign                  # Borrow and ownership checking, drop schedules
+  hir/                            # High-level IR: node kinds, patterns, drop schedules, display
+  lir/                            # Low-level IR: instructions, blocks, program, HIR → LIR lowering, verification
+  codegen/                        # LIR → C emission
+  build/                          # Discovery, build cache, C compiler/archiver/linker calls, test runner, fixtures
+  config/                         # ignis.toml loading
+  diagnostics/                    # Diagnostic codes, model, rendering
+  format/                         # Canonical source formatter
+  doc/                            # API documentation extraction
+  lsp/                            # Language server
 std/                              # Ignis standard library
   manifest.toml                   # Module registry and linking configuration
   io/mod.ign                      # Print functions (println, print, eprintln, eprint) + IoError
-  io/error.ign                    # ErrorKind enum and IoError record
   string/mod.ign                  # String utilities (length, concat, forEach, map, etc.)
   memory/mod.ign                  # Allocation (allocate, free, reallocate, copy, move)
-  memory/align.ign                # Alignment utilities
-  memory/layout.ign               # Memory layout
   vector/mod.ign                  # Vector<T> (growable array with push, pop, at, etc.)
   math/mod.ign                    # Math functions (sin, cos, sqrt, pow, floor, ceil, etc.)
   number/mod.ign                  # Numeric helpers (abs, toFixed, round, floor, ceil)
@@ -137,7 +64,7 @@ std/                              # Ignis standard library
   option/mod.ign                  # Option<S> (SOME/NONE)
   result/mod.ign                  # Result<T, E> (OK/ERROR)
   rc/mod.ign                      # Rc<T> and Weak<T> (reference-counted pointers)
-  libc/mod.ign                    # C standard library wrappers (9 submodules)
+  libc/mod.ign                    # C standard library wrappers
   ptr/mod.ign                     # Pointer utilities
   ffi/mod.ign                     # FFI utilities (CString)
   fs/mod.ign                      # Filesystem (readToString, writeString, Dir, File, Metadata)
@@ -145,218 +72,165 @@ std/                              # Ignis standard library
   test/mod.ign                    # `std::test::Test` assertions and snapshot helpers
   runtime/
     ignis_rt.h                    # Base type header; no C is compiled any more
-test_cases/analyzer/              # Ignis fixture files organized by feature
-  borrows/                        # Borrow checking tests
-  casts/                          # Cast validation tests
-  extern/                         # Extern block tests
-  for_of/                         # For-of iteration tests
-  generics/                       # Generic type tests
-  lang_traits/                    # Drop, Clone, Copy trait validation
-  missing_return/                 # Return path analysis tests
-  mutability/                     # Mutability checks
-  overloads/                      # Function overloading tests
-  ownership/                      # Ownership transfer tests
-  type_errors/                    # Type error tests
-  unreachable/                    # Unreachable code tests
+bootstrap/seed/                   # The compiler as one C file (xz), its header and manifest
+scripts/                          # Bootstrap ladder, gates, parity harnesses, installer
+test_cases/                       # Fixtures and committed baselines
+  e2e/{ok,err}/                   # End-to-end fixtures and their snapshots
+  __parse_verdicts__/             # G6 parse-verdict baselines
+  doc/                            # ignis doc baselines
+  analyzer/ parser/ selfhost/     # Inputs read by the compiler's own tests
 example/                          # Example Ignis programs
 docs/                             # Language reference and ABI docs
+crates/                           # Frozen Rust compiler, reference only
 ```
 
 ## Core Components
 
 ### CLI
 
-**Entry:** `crates/ignis/src/main.rs`
+**Entry:** `ignis/cli.ign` → `parseArguments()`, dispatched by `ignis/main.ign`
 
-Parses commands via `clap`, resolves compile input (project `ignis.toml` or single file), and builds `IgnisConfig` with CLI overrides (`opt_level`, `debug`, `out_dir`, `std_path`, `cc`, `emit`).
+Parses the command line, then resolves the input (project `ignis.toml` or single file) and applies CLI overrides (`opt_level`, `debug`, `out_dir`, `std_path`, `cc`, target triple, features).
 
-Subcommands: `build`, `check`, `fmt`, `test`, `build-std`, `check-std`, `lsp`.
+Commands: `build`, `check`, `build-std`, `test`, `test-std`, `fmt`, `lsp`, `doc`. `ignis --help` lists every flag.
 
 ### Formatter
 
-**Entry:** `crates/ignis_formatter/src/api.rs` and `crates/ignis/src/main.rs` → `run_fmt()`
+**Entry:** `ignis/format/api.ign`, called from `ignis/main.ign` for `ignis fmt`
 
 The formatter is a parser-aware, safety-validated canonical rewriter for Ignis source.
 
 - Input modes: project, single file, multiple explicit files, and NDJSON batch stdin.
 - Canonical empty high-level blocks emit inline (`namespace Foo {}`).
 - Trailing commas are layout-driven: multiline call/initializer lists gain a final comma, single-line canonical output drops it.
-- `namespace` and `extern` bodies containing raw compile-time directives use source-preserving fallback instead of reparsing branch-selected AST.
-- Safety validation checks parse-back, token-shape stability, comment ownership, directive structure, trailing whitespace, final newline, and idempotence.
+- Safety validation (`ignis/format/safety.ign`) checks that the output parses back and is stable.
 - Import sorting is opt-in only via formatter config or `--sort-imports`.
 
 ### Driver Pipeline
 
-**Entry:** `crates/ignis_driver/src/pipeline.rs` → `compile_project()`
+**Entry:** `ignis/main.ign`
 
-Orchestrates the full compilation pipeline. Two codegen paths:
+Orchestrates discovery, parsing, analysis, the post-analysis passes, codegen and linking. A program is emitted as one C translation unit; `build-std` emits the standard library as one unit (`ignis_std.c`) and archives it.
 
-- **Module-based** (when precompiled std archive exists): per-module header generation, per-module C emission with fingerprint-based caching, user archive creation, final linking.
-- **Legacy single-file**: all code emitted to one C file, compiled directly.
-
-Caching uses stamp files with `BuildFingerprint` (compiler version + ABI version + source hashes) to skip recompilation of unchanged modules.
+Caching uses stamp files (`ignis/build/stamp.ign`) with a build fingerprint (`ignis/build/fingerprint.ign`) to skip rebuilding unchanged artifacts. `--force` bypasses it.
 
 ### Native Test Runner
 
-**Entries:** `crates/ignis_driver/src/pipeline.rs` → `run_project_tests()` / `run_single_file_tests()`
+**Entries:** `ignis/build/test_runner.ign` and `ignis/build/fixture_tests.ign`, driven by `ignis/main.ign`
 
-The native test runner reuses the normal analysis → mono → LIR → codegen → link pipeline, but swaps the normal entry wrapper for a generated test harness. The harness executes discovered `@test` functions one by one, preserves deterministic ordering, continues after failures, and forwards snapshot context through environment variables.
+The native test runner reuses the normal analysis → mono → LIR → codegen → link pipeline, but swaps the normal entry wrapper for a generated test harness. The harness executes discovered `@test` functions one by one, preserves deterministic ordering, continues after failures, and forwards snapshot context through environment variables. Test modules are `tests.ign` and files ending in `_tests.ign` (and a few other suffixes, see `ignis/build/resolver.ign`); a build leaves them out.
 
 Runner responsibilities:
 
 - discover `@test` functions from analyzed modules
 - build deterministic fully-qualified test names
 - support project-mode and single-file mode
-- execute tests through a harness binary
+- run the e2e fixtures listed under `[test] fixtures` in `ignis.toml`
+- execute tests through a harness binary, optionally sharded (`--partition`)
 - expose snapshot context (`IGNIS_TEST_NAME`, `IGNIS_TEST_SNAPSHOT_DIR`, `IGNIS_TEST_UPDATE_SNAPSHOTS`)
 - report failures with bounded stderr/stdout detail
 
 ### Module Discovery
 
-**Entry:** `crates/ignis_driver/src/context.rs` → `CompilationContext`
+**Entry:** `ignis/build/resolver.ign`, `ignis/build/module_graph.ign`
 
-- `discover_modules()` builds a module dependency graph starting from the entry file.
-- `discover_recursive()` follows imports to discover transitive dependencies.
-- `discover_std_module()` resolves `std::module_name` via `manifest.toml`.
-- `parse_file()` runs lexer → parser for each discovered file.
+- Builds the module graph starting from the entry file, following imports transitively.
+- Resolves `std::module_name` through `std/manifest.toml`.
 - Modules are analyzed in topological order (dependencies first).
 
 ### Parser
 
-**Entry:** `crates/ignis_parser/src/parser/`
+**Entry:** `ignis/parser/`
 
-Recursive-descent parser with Pratt-style operator precedence for expressions.
-
-- **Pratt parsing:** uses binding power tuples `(lbp, rbp)` where low = low precedence.
-- **Type argument disambiguation:** lookahead heuristic to distinguish `<` as comparison vs generic args.
-- **Attribute collection:** `@name` and `@name(args)` parsed into `pending_attrs`, consumed by the next declaration.
-- **Error recovery:** synchronizes to declaration boundaries on parse errors.
-- **Recursion safety:** `MAX_RECURSION_DEPTH = 500` prevents stack overflow.
+Recursive-descent parser. Expressions use binding powers (`bindingPower()` in `ignis/parser/expressions.ign`) for operator precedence. Errors are recovered from (`ignis/parser/recovery.ign`) so a file with parse errors still yields diagnostics for the rest.
 
 ### Analyzer
 
-**Entry:** `crates/ignis_analyzer/src/lib.rs` → `Analyzer::analyze_with_shared_stores()`
+**Entry:** `ignis/analyzer/mod.ign` → `analyzeProgram()`
 
-Seven sequential phases over the AST:
+Sequential phases over each module's AST:
 
 | Phase | File | Purpose |
 | --- | --- | --- |
-| 1. Binding | `binder.rs` | Two-pass: predeclare types (pass 1), then complete all definitions (pass 2). Enables forward references. |
-| 2. Resolution | `resolver.rs` | Resolve identifiers to `DefinitionId` via scope lookup. Build scope tree. |
-| 3. Type Checking | `typeck.rs` | Bidirectional type inference. Propagates expected types downward via `InferContext`. Handles overload resolution. |
-| 4. Const Eval | `const_eval.rs` | Evaluate constant expressions at compile time. Populate `ConstantDefinition::value`. |
-| 5. Extra Checks | `checks.rs` | Control flow analysis (missing returns, unreachable code, never-typed expressions). |
-| 6. Lints | `lint.rs` | `UnusedVariable`, `UnusedImport`, `UnusedMut`, `Deprecated`. Respects `@allow`/`@warn`/`@deny` directives. |
+| 1. Binding | `binder.ign` | Two-pass: predeclare types (`predeclareRoots()`), then complete all definitions (`completeRoots()`). Enables forward references. |
+| 2. Type resolution | `resolver.ign` | Resolve names in type positions and declarations. |
+| 3. Body resolution | `resolver_bodies.ign` | Resolve identifiers in function bodies. |
+| 4. Type checking | `typecheck*.ign` | Bidirectional type inference, overload resolution, exhaustiveness. |
+| 5. Const eval | `const_eval.ign` | Evaluate constant expressions at compile time. |
+| 6. Checks | `checks.ign` | Control flow analysis (missing returns, unreachable code) and other post-typecheck checks. |
+| 7. Lints | `lint.ign` | Unused variable, unused import, unused `mut`, deprecated call. Respects `@allow`/`@warn`/`@deny`. |
 
-After all phases, `lower_to_hir()` converts the typed AST into HIR. This stage also runs **capture analysis** (`capture.rs`) and **escape analysis** (`escape.rs`) for closures.
-
-**Output:** `AnalyzerOutput` containing `TypeStore`, `DefinitionStore`, `HIR`, diagnostics, and lookup maps (`node_defs`, `node_types`, `node_spans`, `resolved_calls`) used by the LSP.
+After analysis, `lowering.ign` converts the typed AST into HIR, and **capture analysis** (`capture.ign`) and **escape analysis** (`escape.ign`) run for closures.
 
 ### Monomorphization
 
-**Entry:** `crates/ignis_analyzer/src/mono.rs` → `Monomorphizer`
+**Entry:** `ignis/analyzer/mono.ign`
 
-Transforms generic HIR into concrete HIR with all type parameters resolved:
+Transforms generic HIR into concrete HIR with all type parameters resolved, repeating until no new instantiation is discovered.
 
-1. **Discovery** — scan HIR for generic instantiations (calls with type args, record inits, method calls).
-2. **Shell creation** — create `DefinitionId` entries with mangled names for each concrete instance.
-3. **Body substitution** — clone generic bodies, replacing `Type::Param` with concrete types via `Substitution`.
-4. **Fixpoint** — repeat until no new instantiations are discovered.
+**Invariant:** post-mono, no `Param` or `Instance` type may remain. The driver reports `countRemainingGenerics()` on its `mono:` line.
 
-**Invariant:** post-mono, no `Type::Param` or `Type::Instance` should exist. Debug builds verify with `verify_no_generics()`.
+### Borrow and Ownership Checking
 
-### Borrow Checking
+**Entry:** `ignis/analyzer/borrowck.ign`
 
-**Entry:** `crates/ignis_analyzer/src/borrowck_hir.rs` → `HirBorrowChecker`
-
-Runs on monomorphized HIR. Tracks borrow states per variable (None, Imm(count), Mut), validates that mutable borrows are exclusive, and detects use-after-move and conflicting borrows. Borrow lifetimes are scope-based.
-
-### Ownership Analysis
-
-**Entry:** `crates/ignis_analyzer/src/ownership_hir.rs` → `HirOwnershipChecker`
-
-Runs on monomorphized HIR after borrow checking. Validates move semantics and reference rules. Produces `DropSchedules` that map HIR nodes to their exit points where cleanup code should be emitted (end of block, break, continue, return).
+Runs on monomorphized HIR. One fused pass validates borrows and moves (exclusive mutable borrows, use-after-move, conflicting borrows) and produces the drop schedules (`ignis/hir/drop_schedule.ign`) that tell LIR lowering where cleanup code goes (end of block, break, continue, return). `--dump-drop-schedule` prints them, and `--dump-ownership-report` prints the checker's decisions as JSON Lines.
 
 ### HIR
 
-**Location:** `crates/ignis_hir/src/`
+**Location:** `ignis/hir/`
 
-Tree-based intermediate representation preserving program structure. Each `HIRNode` has a `HIRKind` (operation), `Span` (source location), and `TypeId` (inferred type). Uses `DefinitionId` references instead of names.
+Tree-based intermediate representation preserving program structure. Each HIR node has a kind, a source span and a type id, and refers to definitions by id instead of by name.
 
-Key `HIRKind` categories:
-- **Expressions:** `Literal`, `Variable`, `Binary`, `Unary`, `Call`, `CallClosure`, `Cast`, `BitCast`, `Reference`, `Dereference`, `Index`, `VectorLiteral`, `FieldAccess`, `MethodCall`, `EnumVariant`, `RecordInit`, `Match`, `StaticAccess`, `Closure`.
+Key `HirKind` categories (`ignis/hir/node.ign`):
+- **Expressions:** `Literal`, `Unit`, `Variable`, `Binary`, `Unary`, `Call`, `CallClosure`, `Closure`, `Cast`, `BitCast`, `Reference`, `Dereference`, `Index`, `VectorLiteral`, `TupleLiteral`, `MakeSlice`, `FieldAccess`, `MethodCall`, `EnumVariant`, `RecordInit`, `Match`, `StaticAccess`.
 - **Statements:** `Let`, `LetElse`, `Assign`, `Block`, `If`, `Loop`, `Break`, `Continue`, `Return`, `Defer`, `ExpressionStatement`.
-- **Patterns:** `HIRPattern` (Wildcard, Literal, Binding, Variant, Tuple, Or, Constant) used by `Match`, `LetElse`, and let-conditions in `If`/`Loop`.
-- **Builtins:** `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `Panic`, `Trap`, `BuiltinUnreachable`, `BuiltinLoad`, `BuiltinStore`, `BuiltinDropInPlace`, `BuiltinDropGlue`.
-- **Closures:** `HIRKind::Closure` carries params, captures (`HIRCapture`), thunk/drop definitions, escape flag, and capture mode overrides.
+- **Patterns:** `HirPattern` (`Wildcard`, `Literal`, `Binding`, `Variant`, `Tuple`, `Or`, `Constant`) used by `Match`, `LetElse`, and let-conditions in `If`/`Loop`.
+- **Builtins:** `TypeOf`, `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `Panic`, `Trap`, `BuiltinUnreachable`, `BuiltinLoad`, `BuiltinStore`, `BuiltinHash`, `BuiltinEq`, `BuiltinDropInPlace`, `BuiltinDropGlue`.
 
 ### LIR
 
-**Location:** `crates/ignis_lir/src/`
+**Location:** `ignis/lir/`
 
-Three-address code (TAC) with basic block structure. Each instruction has at most one operation with results stored in temporaries (`TempId`) or locals (`LocalId`).
+Three-address code with basic block structure. Each instruction performs at most one operation, with results stored in temporaries or locals.
 
-- **Instructions:** `Load`, `Store`, `LoadPtr`, `StorePtr`, `BuiltinLoad`, `BuiltinStore`, `Copy`, `BinOp`, `UnaryOp`, `Cast`, `BitCast`, `Call`, `RuntimeCall`, `GetElementPtr`, `InitVector`, `InitRecord`, `InitEnumVariant`, `EnumGetTag`, `EnumGetPayloadField`, `GetFieldPtr`, `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `AddrOfLocal`, `Drop`, `DropInPlace`, `DropGlue`, `Trap`, `PanicMessage`, `MakeClosure`, `CallClosure`, `DropClosure`, `TypeIdOf`, `Nop`.
-- **Terminators:** `Goto`, `Branch`, `Return`, `Unreachable`.
-- **Program structure:** `LirProgram` contains `HashMap<DefinitionId, FunctionLir>`. Each `FunctionLir` has an entry block, a store of `Block`s, `LocalData`, and `TempData`.
+- **Instructions** (`instr.ign`): `Load`, `Store`, `LoadPtr`, `StorePtr`, `BuiltinLoad`, `BuiltinStore`, `BuiltinHash`, `BuiltinEq`, `Copy`, `BinOp`, `UnaryOp`, `Call`, `Cast`, `BitCast`, `AddrOfLocal`, `AddrOfGlobal`, `GetElementPtr`, `MakeSlice`, `InitVector`, `Nop`, `RuntimeCall`, `TypeIdOf`, `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `Trap`, `PanicMessage`, `Drop`, `GetFieldPtr`, `InitRecord`, `InitEnumVariant`, `EnumGetTag`, `EnumGetPayloadField`, `EnumGetPayloadFieldPtr`, `DropInPlace`, `MarkMoved`, `DropGlue`, `MakeClosure`, `CallClosure`, `DropClosure`, `FreeEnv`.
+- **Terminators** (`block.ign`): `Goto`, `Branch`, `Return`, `Unreachable`.
 
-**Lowering:** `LoweringContext` (in `lowering/mod.rs`) converts HIR to LIR, managing block creation, control flow, drop scheduling, and temporary allocation. `FunctionBuilder` (in `lowering/builder.rs`) emits instructions into blocks.
+**Lowering:** `lowering.ign` converts HIR to LIR, managing block creation, control flow, drop scheduling, and temporary allocation.
 
-**Verification:** `verify.rs` checks LIR well-formedness after lowering.
+**Verification:** `verify.ign` → `verifyProgram()` checks LIR well-formedness after lowering.
 
 ### C Codegen
 
-**Entry:** `crates/ignis_codegen_c/src/emit.rs` → `CEmitter`
-
-Emission pipeline:
-1. `emit_implicit_headers()` — stdio, math, string as needed.
-2. `emit_headers()` — user-provided C headers from `LinkPlan`.
-3. `emit_type_forward_declarations()` — forward struct/enum declarations.
-4. `emit_type_definitions()` — full struct and tagged union definitions.
-5. `emit_static_constants()` — global constants.
-6. `emit_extern_declarations()` — external C function prototypes.
-7. `emit_forward_declarations()` — function prototypes.
-8. `emit_functions()` — function implementations.
+**Entry:** `ignis/codegen/mod.ign` → `emitProgram()`
 
 Type representation in C:
 - **Records** → named structs with mangled names.
-- **Enums** → tagged unions (tag field + payload union). Each variant gets a `#define TAG_VARIANT value`.
+- **Enums** → tagged unions (tag field + payload union).
 - **Generic types** → only fully monomorphized instances emitted.
-
-**Classification:** `classify.rs` determines whether a definition is User, Std, or Runtime code. Emission targets (`EmitTarget`) control which definitions are included: `User`, `StdModule(name)`, `UserModule(ModuleId)`, or `All`.
 
 Attribute mapping to C:
 - `@packed` → `__attribute__((packed))`
 - `@aligned(N)` → `__attribute__((aligned(N)))`
-- `@cold` → `__attribute__((cold))`
-- `@inline(always)` → `__attribute__((always_inline)) inline`
-- `@inline(never)` → `__attribute__((noinline))`
 - `@externName("name")` → uses the specified C symbol name.
 
 ### Linking
 
-**Entry:** `crates/ignis_driver/src/link.rs`
+**Entry:** `ignis/build/c_compiler.ign`, `ignis/build/archive.ign`, `ignis/build/linker.ign`
 
-Three stages:
-1. **Object compilation:** `gcc -c <input.c> -o <output.o> -I <include_dirs>`.
-2. **Archive creation:** `ar rcs <archive.a> <obj1.o> <obj2.o> ...`.
-3. **Executable linking:** `gcc <objects> <user.a> <std.a> <runtime_objects> -o binary -l<libs>`.
-
-Link order is critical: user objects → user archive → std archive → runtime objects → external libraries.
-
-`LinkPlan` carries headers, objects, archives, libs, and include dirs through the pipeline.
+1. **Object compilation:** `gcc -c <input.c> -o <output.o> -I <std>/runtime` with the profile's flags.
+2. **Archive creation** (`build-std`): `ar` over the standard library object.
+3. **Executable linking:** `gcc <flags> <objects> -o <binary> -l<libs>`.
 
 ### LSP
 
-**Entry:** `crates/ignis_lsp/src/`
+**Entry:** `ignis/lsp/server.ign`, started by `ignis lsp` over stdin/stdout
 
-Capabilities: diagnostics, hover (type info + docs), go-to-definition, find references, completions, semantic tokens, inlay hints (parameter names), workspace symbols, document symbols, file watching.
+Requests handled: diagnostics (`publishDiagnostics`), hover, go-to-definition, find references, rename, completions, document symbols, inlay hints, formatting, code actions.
 
-Key design decisions:
-- **Token-based completion** (`completion.rs`): detects context from tokens (after `.`, `::`, in imports, in record init) without requiring a valid AST. Works even when the file has parse errors.
-- **Panic safety:** analysis wrapped in `catch_unwind()` to prevent server crashes.
-- **Caching:** analysis results cached per document version. Last good analysis preserved for incomplete code.
-- **File overrides:** open file content collected from LSP state, overriding disk content for analysis.
+- **Completion** (`completion*.ign`) detects its context from tokens, so it works while the file has parse errors.
+- **Documents** (`documents.ign`) hold open buffers, which override disk content for analysis.
 
 ### Standard Library
 
@@ -383,9 +257,9 @@ Key modules:
 | `fs` | Filesystem: `readToString`, `writeString`, `Dir`, `File`, `Metadata` (returns `Result<T, Io::IoError>`) |
 | `path` | Path manipulation utilities |
 
-**Auto-loaded modules** (always available without explicit import): `string`, `number`, `vector`, `types`, `option`, `result`.
+**Auto-loaded modules** (always available without explicit import, `[auto_load]` in the manifest): `string`, `number`, `vector`, `types`, `option`, `result`, `format`, `process_runtime`.
 
-Std modules reach the host through `extern` blocks bound directly to libc.
+Std modules reach the operating system through `extern` blocks bound directly to libc.
 
 The canonical equality contract behind generic test assertions is `std::hash::Eq`. Generic `Test::assertEq<T>` / `assertNe<T>` route through builtin `@eq<T>` after analyzer validation, and unsupported equality must be rejected before codegen.
 
@@ -399,66 +273,53 @@ I/O and the filesystem syscall layer are Ignis, in `std/`, and link out of
 manifest names: the runtime type definitions under the `IGNIS_RT_TYPES_H`
 guard, plus the declaration of `ignis_runtime_init`.
 
-Both compilers emit that same guarded block into every translation unit they
-produce, so a unit that also includes the header keeps exactly one definition of
-each name. `RUNTIME_TYPE_PRELUDE` in `crates/ignis_codegen_c/src/emit.rs` and
-`CodegenC::emitTypePrelude` in `ignis/codegen/mod.ign` must stay byte-identical
-to it.
+The compiler emits that same guarded block into every translation unit it
+produces, so a unit that also includes the header keeps exactly one definition
+of each name. `CodegenC::emitTypePrelude` in `ignis/codegen/mod.ign` must stay
+byte-identical to it.
 
 ## Data Flow
 
 ```
-CLI args → IgnisConfig
+CLI args (ignis/cli.ign) → options
              ↓
-     CompilationContext
-       discover_modules()         → ModuleGraph + ParsedModules (AST per file)
+     discovery (ignis/build/resolver.ign)   → module graph, project settings
              ↓
-      Analyzer (per module, topological order)
-        bind_phase()               → DefinitionStore
-        resolve_phase()            → node_defs, ScopeTree
-        typecheck_phase()          → node_types, TypeStore
-        const_eval_phase()         → ConstantDefinition::value
-        extra_checks_phase()       → control flow diagnostics
-        lint_phase()               → lint diagnostics
-        lower_to_hir()             → HIR
-              ↓
-      AnalyzerOutput (types, defs, hir, diagnostics, lookup maps)
-              ↓
-      Monomorphizer::run()         → concrete HIR (no Type::Param/Instance)
-              ↓
-      HirBorrowChecker::check()    → borrow diagnostics
-              ↓
-      HirOwnershipChecker::check() → DropSchedules
+     lex + parse (ignis/lexer/, ignis/parser/) → AST per module
              ↓
-     lower_and_verify()           → LirProgram (basic blocks, TAC)
+     Analyzer (per module, topological order, ignis/analyzer/mod.ign)
+       binding → type resolution → body resolution → typecheck → const eval → checks → lints
              ↓
-     CEmitter::emit_*()           → C source (.c) + headers (.h)
+     lowering.ign                  → HIR (+ capture and escape analysis)
              ↓
-     gcc -c                       → object files (.o)
-     ar rcs                       → archives (.a)
-     gcc link                     → executable binary
+     mono.ign                      → concrete HIR (no Param/Instance types)
+             ↓
+     borrowck.ign                  → borrow/ownership diagnostics, drop schedules
+             ↓
+     ignis/lir/lowering.ign + verify.ign → LIR program (basic blocks, TAC)
+             ↓
+     ignis/codegen/mod.ign         → one C translation unit
+             ↓
+     gcc -c                        → object file (.o)
+     ar                            → archive (.a, build-std)
+     gcc link                      → executable binary
 ```
 
 ### Build Layout
 
 ```
-build/
-  bin/          # Linked executables
-  obj/          # Object files
-  c/            # Generated C source
+<out_dir>/                  # [build] out_dir, `build` by default
+  bin/<name>                # Linked executable (project mode)
+  user/src/<name>.c         # Generated C
+  user/obj/<name>.o         # Object file, with its build stamp and report
 
-build/std/      # Precompiled standard library (ignis build-std)
-  include/      # ignis_std.h + per-module .h files
-  lib/          # libignis_std.a
-  obj/          # Per-module .o files
-  src/          # Per-module .c files
-
-build/user/     # User modules (module-based compilation)
-  include/      # Per-module .h files
-  lib/          # libignis_user.a
-  obj/          # Per-module .o files
-  src/          # Per-module .c files
+build/std/                  # Standard library (ignis build-std)
+  src/ignis_std.c           # The whole library as one C file
+  obj/ignis_std.o
+  lib/libignis_std.a
 ```
+
+A single-file build (`ignis build file.ign`) writes `selfhost_emit.c` in the working directory and links `selfhost_out` unless `-o` names the binary.
 
 ### Main Wrapper
 
@@ -487,19 +348,18 @@ Char literals must resolve to exactly one Unicode scalar. Empty literals, multi-
 
 Closures compile through a multi-stage pipeline:
 
-1. **Capture analysis** (`capture.rs`) — determines which outer variables a closure captures and the capture mode (by ref, by move, by ref-mut).
-2. **Escape analysis** (`escape.rs`) — determines if a closure outlives its defining scope. `@noescape` on parameters prevents escape propagation.
-3. **HIR** — `HIRKind::Closure` carries captures, thunk/drop definition IDs, and an `escapes` flag.
-4. **LIR** — `MakeClosure` (captures → env struct), `CallClosure` (indirect call through thunk), `DropClosure` (cleanup).
+1. **Capture analysis** (`capture.ign`) — determines which outer variables a closure captures and the capture mode (by ref, by move, by ref-mut).
+2. **Escape analysis** (`escape.ign`) — determines if a closure outlives its defining scope. `@noescape` on parameters prevents escape propagation.
+3. **HIR** — the `Closure` node carries captures, thunk/drop definitions, and whether it escapes.
+4. **LIR** — `MakeClosure` (captures → env struct), `CallClosure` (indirect call through thunk), `DropClosure` (cleanup), `FreeEnv`.
 5. **C codegen** — non-escaping closures use stack-allocated env; escaping closures use heap-allocated env. Closure values are structs with `call` (thunk fn ptr), `drop` (optional drop fn ptr), and `env` (opaque `*u8`).
 
 ## Configuration
 
 | File | Purpose |
 | --- | --- |
-| `Cargo.toml` | Workspace members, shared dependencies |
-| `ignis.toml` | Project config: `std_path`, `source_dir`, `target`, `optimize`, `out_dir` |
+| `ignis.toml` | Project config: `[package]`, `[build]` (`source_dir`, `entry`, `out_dir`, `opt_level`, `cc`), `[ignis]` (`std`, `std_path`), `[test]` |
 | `std/manifest.toml` | Std module registry, linking config (headers, archives, `-l` flags) |
 | `IGNIS_STD_PATH` env | Overrides standard library root path |
-| `.rustfmt.toml` | 2-space indent, 120 width, no import reorder, vertical params |
+| `bootstrap/seed/manifest.json` | The C seed's source commit, checksums and gcc recipe |
 | `.editorconfig` | LF line endings, 2-space indent |
