@@ -671,7 +671,10 @@ class Stage0ReportTests(unittest.TestCase):
   def test_an_official_stage0_names_its_checksum(self) -> None:
     self.write_stage0({"kind": "official", "source": "/tmp/ignis", "sha256": "abc", "mode": "auto"})
 
-    self.assertEqual(bootstrap_report.format_stage0_line(bootstrap_report.read_stage0(self.root)), "stage0: official (sha abc)")
+    self.assertEqual(
+      bootstrap_report.format_stage0_line(bootstrap_report.read_stage0(self.root)),
+      "stage0: official (sha abc)",
+    )
 
   def test_a_seed_stage0_names_the_seed_it_came_from(self) -> None:
     self.write_stage0({"kind": "seed", "source": "/tmp/stage0-seed/ignis", "sha256": "def", "seed_xz_sha256": "123"})
@@ -685,7 +688,10 @@ class Stage0ReportTests(unittest.TestCase):
     stage0 = bootstrap_report.read_stage0(self.root)
 
     self.assertNotEqual(stage0.get("kind"), "host")
-    self.assertEqual(bootstrap_report.format_stage0_line(stage0), "stage0: not recorded (no build/bootstrap/stage0.json)")
+    self.assertEqual(
+      bootstrap_report.format_stage0_line(stage0),
+      "stage0: not recorded (no build/bootstrap/stage0.json)",
+    )
 
   def test_an_unreadable_stage0_json_is_reported_as_unrecorded(self) -> None:
     (self.root / "stage0.json").write_text("not json", encoding="utf-8")
