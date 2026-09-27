@@ -1,5 +1,6 @@
 //! The hover index of one analyzed file: every range a hover can land on,
-//! innermost first, with the text shown for it and what it names.
+//! innermost first, with the text shown for it, what it names and how its
+//! name is highlighted.
 //!
 //! The index is built once per analysis, while the analyzer's stores are
 //! alive, and keeps only byte ranges, rendered texts and target keys, so the
@@ -29,6 +30,14 @@ import Id from "@compiler::ids";
 import Doc from "../doc/mod";
 
 import definitionHoverText, localHoverText, typeHoverText from "./hover_text";
+import
+  IdentifierClass,
+  SemanticClass,
+  definitionClass,
+  localClass,
+  packClass,
+  unpackClass,
+from "./semantic_tokens";
 
 /// Text keys: a kind in the high 32 bits, the raw id in the low ones.
 const HOVER_KEY_DEFINITION: u64 = 1;
@@ -53,6 +62,8 @@ record HoverEntry {
   /// The name inside the range: `x` of `point.x`, `area` of `Shapes::area`.
   public nameStart: u64;
   public nameEnd: u64;
+  /// The semantic token class of the name, packed by `packClass`.
+  public class: u64;
 }
 
 /// A byte range `start..end`.
@@ -285,6 +296,32 @@ export record FileHoverIndex {
     };
   }
 
+  /// The semantic class of every classified name, keyed by where the name
+  /// starts in `current`. When the index was built from another text, only
+  /// the names outside the edited region that still read the same keep one.
+  public identifierClassesIn(&self, current: &String): HashMap<u64, IdentifierClass> {
+    let edit: TextEdit = textEditBetween(&self.source, current);
+    let mut classes: HashMap<u64, IdentifierClass> = HashMap::new<u64, IdentifierClass>();
+    let mut index: u64 = 0;
+
+    while (index < self.entries.length()) {
+      if (let Option::SOME(entry) = self.entries.get(index)) {
+        let class: Option<SemanticClass> = unpackClass(entry.class);
+        let name: Option<ByteRange> = self.currentNameRange(current, &edit, entry.nameStart, entry.nameEnd);
+
+        if (let Option::SOME(found) = class) {
+          if (let Option::SOME(range) = name) {
+            classes.insert(range.start, IdentifierClass { end: range.end, class: found });
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return classes;
+  }
+
   /// How the source differs from `current`.
   public editTo(&self, current: &String): TextEdit {
     return textEditBetween(&self.source, current);
@@ -482,6 +519,7 @@ record HoverCollector {
   public targets: Vector<u64>;
   public nameStarts: Vector<u64>;
   public nameEnds: Vector<u64>;
+  public classes: Vector<u64>;
   public texts: Vector<String>;
   public textByKey: HashMap<u64, u64>;
   public locals: Vector<LocalSite>;
@@ -585,6 +623,7 @@ export function buildFileHoverIndex(
     targets: Vector::new<u64>(),
     nameStarts: Vector::new<u64>(),
     nameEnds: Vector::new<u64>(),
+    classes: Vector::new<u64>(),
     texts: texts,
     textByKey: HashMap::new<u64, u64>(),
     locals: Vector::new<LocalSite>(),
@@ -674,7 +713,8 @@ function hoverKey(kind: u64, raw: u32): u64 {
 }
 
 /// Adds the range `start..=end` with the name `name` inside it, showing the
-/// text at `text` and naming `target`. A range that does neither is left out.
+/// text at `text`, naming `target` and highlighted as `class`. A range that
+/// neither shows a text nor names something is left out.
 function pushEntry(
   collector: &mut HoverCollector,
   start: u64,
@@ -682,6 +722,7 @@ function pushEntry(
   name: ByteRange,
   text: u64,
   target: u64,
+  class: u64,
 ): void {
   let mut collectorRef: &mut HoverCollector = collector;
 
@@ -695,6 +736,7 @@ function pushEntry(
   collectorRef.targets.push(target);
   collectorRef.nameStarts.push(name.start);
   collectorRef.nameEnds.push(name.end);
+  collectorRef.classes.push(class);
 }
 
 /// The position of the text stored under `key`, if one is.
@@ -721,11 +763,14 @@ function storeText(collector: &mut HoverCollector, key: u64, text: String): u64 
   return position;
 }
 
+/// Adds `start..end` as a name of `defId`, where it is declared when
+/// `isDeclaration`.
 function addDefinitionEntry(
   collector: &mut HoverCollector,
   start: u64,
   end: u64,
   defId: Analyzer::DefinitionId,
+  isDeclaration: boolean,
   program: &HoverProgram,
   defs: &Analyzer::DefinitionStore,
   types: &Analyzer::TypeStore,
@@ -747,7 +792,8 @@ function addDefinitionEntry(
     }
   }
 
-  pushEntry(collectorRef, start, end, name, text, hoverKey(HOVER_KEY_DEFINITION, raw));
+  let class: u64 = packClass(definitionClass(defId, isNamespace, isDeclaration, defs));
+  pushEntry(collectorRef, start, end, name, text, hoverKey(HOVER_KEY_DEFINITION, raw), class);
 }
 
 /// Where the name of `defId` is last written in `start..end` of `text`: the
@@ -797,7 +843,7 @@ function addTypeEntry(
     text = storeText(collectorRef, key, typeHoverText(typeId, defs, types, symbols));
   }
 
-  pushEntry(collectorRef, start, end, ByteRange { start: start, end: end }, text, 0);
+  pushEntry(collectorRef, start, end, ByteRange { start: start, end: end }, text, 0, 0);
 }
 
 /// True for a byte that can continue an identifier.
@@ -885,7 +931,7 @@ function addDeclarationName(
     return;
   };
 
-  addDefinitionEntry(collector, start, start + name.length(), defId, program, defs, types, symbols);
+  addDefinitionEntry(collector, start, start + name.length(), defId, true, program, defs, types, symbols);
 }
 
 /// True when `span` points into the file being indexed. Trait default
@@ -1217,7 +1263,7 @@ function collectImportHovers(
       if (let Option::SOME(defId) = overlay.defs.get(index)) {
         if (let Option::SOME(span) = overlay.spans.get(index)) {
           if (spanInFile(&collector.path, *span)) {
-            addDefinitionEntry(collector, span.start, span.end, *defId, program, defs, types, symbols);
+            addDefinitionEntry(collector, span.start, span.end, *defId, false, program, defs, types, symbols);
           }
         }
       }
@@ -1245,7 +1291,7 @@ function collectImportPaths(
 
         if (let Option::SOME(moduleIndex) = loaded) {
           if (spanInFile(&collectorRef.path, span)) {
-            pushEntry(collectorRef, span.start, span.end, range, 0, hoverKey(HOVER_KEY_MODULE, moduleIndex as u32));
+            pushEntry(collectorRef, span.start, span.end, range, 0, hoverKey(HOVER_KEY_MODULE, moduleIndex as u32), 0);
           }
         }
       }
@@ -1371,7 +1417,7 @@ function collectPatternHovers(
         if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = &resolved) {
           if (spanInFile(&collectorRef.path, path.span)) {
             let end: u64 = path.span.start + writtenPathLength(&path.segments);
-            addDefinitionEntry(collectorRef, path.span.start, end, defId, program, defs, types, symbols);
+            addDefinitionEntry(collectorRef, path.span.start, end, defId, false, program, defs, types, symbols);
           }
         }
       },
@@ -1481,13 +1527,13 @@ function collectNameHover(
   }
 
   if (let Option::SOME(selected) = selectedCallTarget(tables, raw)) {
-    addDefinitionEntry(collectorRef, span.start, span.end, selected, program, defs, types, symbols);
+    addDefinitionEntry(collectorRef, span.start, span.end, selected, false, program, defs, types, symbols);
     return;
   }
 
   match (Analyzer::ResolverBodies::findExprRef(&analysis.resolvedBodies.bodyResolution, raw)) {
     Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) -> {
-      addDefinitionEntry(collectorRef, span.start, span.end, defId, program, defs, types, symbols);
+      addDefinitionEntry(collectorRef, span.start, span.end, defId, false, program, defs, types, symbols);
       return;
     },
     Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(local)) -> {
@@ -1546,7 +1592,7 @@ function collectMemberAccessHover(
   }
 
   if (let Option::SOME(defId) = target) {
-    addDefinitionEntry(collectorRef, span.start, span.end, defId, program, defs, types, symbols);
+    addDefinitionEntry(collectorRef, span.start, span.end, defId, false, program, defs, types, symbols);
     return;
   }
 
@@ -1593,7 +1639,7 @@ function collectRecordInitHovers(
 
     if (let Option::SOME(start) = nameStart) {
       if (let Option::SOME(id) = fieldId) {
-        addDefinitionEntry(collectorRef, start, start + field.name.length(), id, program, defs, types, symbols);
+        addDefinitionEntry(collectorRef, start, start + field.name.length(), id, false, program, defs, types, symbols);
       }
     }
 
@@ -1748,7 +1794,13 @@ function pairLocals(
       }
     }
 
-    pushEntry(collectorRef, start, end, ByteRange { start: start, end: end }, text, key);
+    let isParameter: boolean = tables.parameters.get(&pattern).isSome();
+    let mutable: boolean = match (tables.localMutable.get(&pattern)) {
+      Option::SOME(flag) -> *flag,
+      Option::NONE -> false,
+    };
+    let class: u64 = packClass(Option::SOME(localClass(isParameter, isBinding, mutable)));
+    pushEntry(collectorRef, start, end, ByteRange { start: start, end: end }, text, key, class);
   }
 }
 
@@ -1916,6 +1968,7 @@ function finishIndex(collector: HoverCollector): FileHoverIndex {
       target: u64At(&collector.targets, position),
       nameStart: u64At(&collector.nameStarts, position),
       nameEnd: u64At(&collector.nameEnds, position),
+      class: u64At(&collector.classes, position),
     });
   }
 

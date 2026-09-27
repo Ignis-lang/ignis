@@ -11,6 +11,8 @@ import Vector from "std::vector";
 
 import IGNIS_VERSION from "../cli";
 
+import semanticTokensLegend from "./semantic_tokens";
+
 /// JSON-RPC and LSP error codes the server answers with.
 export namespace LspErrorCode {
   const PARSE_ERROR: i64 = -32700;
@@ -274,10 +276,11 @@ export function rangeJson(start: Text::Position, end: Text::Position): JsonValue
 }
 
 /// The `initialize` result: full-document sync, hover, definition,
-/// references, document symbols, completion, whole-document formatting and
-/// quick-fix code actions, which is everything this server implements. The
-/// outline, formatting and code-action options are the host's
-/// (crates/ignis_lsp/src/server.rs:427, :431 and :455).
+/// references, document symbols, completion, whole-document formatting,
+/// quick-fix code actions and full-document semantic tokens, which is
+/// everything this server implements. The outline, formatting, code-action
+/// and semantic-token options are the host's
+/// (crates/ignis_lsp/src/server.rs:427, :431, :438 and :455).
 export function initializeResult(): JsonValue {
   let mut capabilities: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   capabilities.push(JsonObjectEntry::create("textDocumentSync", JsonValue::integerValue(TEXT_DOCUMENT_SYNC_FULL)));
@@ -307,6 +310,11 @@ export function initializeResult(): JsonValue {
   completion.push(JsonObjectEntry::create("triggerCharacters", JsonValue::array(triggers)));
   completion.push(JsonObjectEntry::create("resolveProvider", JsonValue::boolValue(false)));
   capabilities.push(JsonObjectEntry::create("completionProvider", JsonValue::object(completion)));
+
+  let mut semanticTokens: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  semanticTokens.push(JsonObjectEntry::create("legend", semanticTokensLegend()));
+  semanticTokens.push(JsonObjectEntry::create("full", JsonValue::boolValue(true)));
+  capabilities.push(JsonObjectEntry::create("semanticTokensProvider", JsonValue::object(semanticTokens)));
 
   let mut serverInfo: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   serverInfo.push(JsonObjectEntry::create("name", JsonValue::stringValue("ignis-lsp")));
