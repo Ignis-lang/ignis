@@ -1,6 +1,5 @@
 {
   pkgs ? import <nixpkgs> { },
-  rustPlatform ? pkgs.rustPlatform,
   version ? "0.4.0",
 }:
 
@@ -13,39 +12,66 @@ let
 
   runtimeToolsPath = pkgs.lib.makeBinPath runtimeTools;
 
+  # Only top-level build outputs are excluded: `ignis/build/` is compiler
+  # source and must stay in.
   fullSrc = pkgs.lib.cleanSourceWith {
     src = ./.;
     filter = path: type:
-      (builtins.match ".*\\.git$" path) == null &&
-      (builtins.match ".*\\.direnv$" path) == null &&
-      (builtins.match ".*target$" path) == null &&
-      (builtins.match ".*build$" path) == null;
+      let
+        relative = pkgs.lib.removePrefix (toString ./. + "/") (toString path);
+      in
+      !(builtins.elem relative [ ".git" ".direnv" "build" "target" "target-local" "result" ]);
   };
 
-  package = rustPlatform.buildRustPackage {
+  # The compiler is built the way scripts/bootstrap.sh builds it, with no
+  # prebuilt compiler: stage0 from the C seed in bootstrap/seed, stage1 is
+  # ignis/main.ign compiled by stage0, and stage2, the binary a release ships,
+  # is the same sources compiled by stage1.
+  package = pkgs.stdenv.mkDerivation {
     pname = "ignis";
     inherit version;
     src = fullSrc;
 
-    cargoLock = {
-      lockFile = ./Cargo.lock;
-    };
-
     nativeBuildInputs = with pkgs; [
       makeWrapper
-      pkg-config
-      # `.cargo/config.toml` selects mold for the Linux targets, and that file
-      # applies to this build too. Shipping the linker is less brittle than
-      # patching the config away, and it speeds the release build up as well.
-      mold
+      xz
     ];
 
-    doCheck = false;
-    cargoBuildFlags = [ "-p" "ignis" ];
+    buildPhase = ''
+      runHook preBuild
 
-    postInstall = ''
-      mkdir -p $out/lib/ignis
-      mv $out/bin/ignis $out/lib/ignis/ignis-bin
+      patchShebangs scripts
+
+      root="$PWD"
+
+      # The selfhost driver writes its emitted C and object file into the
+      # working directory, so each stage runs in its own.
+      compileStage() {
+        mkdir -p "$root/stages/$2"
+        (
+          cd "$root/stages/$2"
+          IGNIS_STD_PATH="$root/std" "$1" "$root/ignis/main.ign" -o "$root/stages/$2/ignis"
+        )
+      }
+
+      stage0="$root/stages/stage0/ignis"
+      scripts/build_from_seed.sh -o "$stage0" >/dev/null
+
+      if [ ! -f "$stage0" ] || [ ! -x "$stage0" ]; then
+        echo "the C seed build produced no executable at $stage0" >&2
+        exit 1
+      fi
+
+      compileStage "$stage0" stage1
+      compileStage "$root/stages/stage1/ignis" stage2
+
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      runHook preInstall
+
+      install -Dm755 stages/stage2/ignis $out/lib/ignis/ignis-bin
 
       mkdir -p $out/share/ignis
       cp -r std $out/share/ignis/std
@@ -54,6 +80,36 @@ let
       makeWrapper $out/lib/ignis/ignis-bin $out/bin/ignis \
         --set-default IGNIS_STD_PATH "$out/share/ignis/std" \
         --prefix PATH : "${runtimeToolsPath}"
+
+      runHook postInstall
+    '';
+
+    doInstallCheck = true;
+
+    # Exercise the installed wrapper end to end: the shipped std, codegen, the
+    # C toolchain on its PATH, and the runtime of a linked program.
+    installCheckPhase = ''
+      runHook preInstallCheck
+
+      $out/bin/ignis --version
+
+      checkDir="$(mktemp -d)"
+      cat > "$checkDir/hello.ign" << 'EOF'
+      import Io from "std::io";
+
+      function main(): void {
+        Io::println("Hello, Ignis!");
+        return;
+      }
+      EOF
+
+      (
+        cd "$checkDir"
+        $out/bin/ignis build hello.ign -o hello
+        test "$(./hello)" = "Hello, Ignis!"
+      )
+
+      runHook postInstallCheck
     '';
 
     meta = with pkgs.lib; {
@@ -71,34 +127,18 @@ in
   shell = pkgs.mkShell {
     nativeBuildInputs = with pkgs; [
       git
-      rustup
-      rust-analyzer
-      pkg-config
+      xz
+      python3
       gdb
       lldb
       valgrind
     ] ++ runtimeTools;
 
     shellHook = ''
-      export CARGO_HOME="$HOME/.cargo"
-      export RUSTUP_HOME="$HOME/.rustup"
       export IGNIS_HOME="$PWD"
       export IGNIS_STD_PATH="$IGNIS_HOME/std"
-      export RUST_BACKTRACE=1
-
-      if command -v rustup >/dev/null 2>&1; then
-        rustup default nightly >/dev/null 2>&1 || true
-      fi
-
-      if command -v rustc >/dev/null 2>&1; then
-        rustRelease="$(rustc -vV | sed -n 's/^release: //p')"
-        if [ -n "$rustRelease" ]; then
-          export CARGO_TARGET_DIR="$PWD/target/$rustRelease"
-        fi
-      fi
 
       echo "Ignis development environment loaded"
-      echo "Rust toolchain is provided via rustup to keep cargo, rustc, and cargo-clippy aligned"
     '';
   };
 }

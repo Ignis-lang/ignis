@@ -12,30 +12,74 @@ depends=(
   'binutils'
   'make'
 )
-makedepends=(
-  'rust'
-  'cargo'
-  'git'
+# The release archive .github/workflows/release.yml publishes for the tag: the
+# compiler binary at ./ignis and the standard library at ./std. Nothing is
+# built here, beyond the C runtime of Rust-built archives (see build()).
+# The sums pin the v0.4.0 assets; prepare() also checks the archive against
+# the release's own .sha256. Update both sums when pkgver changes.
+source=(
+  "ignis-linux-amd64-${pkgver}.tar.gz::${url}/releases/download/v${pkgver}/ignis-linux-amd64.tar.gz"
+  "ignis-linux-amd64-${pkgver}.tar.gz.sha256::${url}/releases/download/v${pkgver}/ignis-linux-amd64.tar.gz.sha256"
 )
-source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=(
+  'f18d4eab303b8b4c3ffbd765758ff078054659343b8cde085ed9fd9f56cffc9c'
+  'c65495b6a1bf0805e4260473c78a17c0ef2bb1b94af9b4e94978650e8815f393'
+)
 
-build() {
-  cd "${pkgname}-${pkgver}"
-  cargo build --release --locked -p ignis
+prepare() {
+  local expected
+  expected="$(cut -d' ' -f1 "ignis-linux-amd64-${pkgver}.tar.gz.sha256")"
+
+  echo "${expected}  ignis-linux-amd64-${pkgver}.tar.gz" | sha256sum -c -
 }
 
+# Archives released by the Rust compiler (v0.4.0 and earlier) ship the C
+# runtime as sources and link std/runtime/libignis_rt.a, which they do not
+# contain. Selfhost archives have no C runtime and no Makefile there.
+build() {
+  if [[ -f "${srcdir}/std/runtime/Makefile" ]]; then
+    make -C "${srcdir}/std/runtime" libignis_rt.a
+  fi
+}
+
+# Builds and runs a one-file project with the packaged compiler and std, so
+# analysis, codegen, the C toolchain and the linked program's runtime are all
+# exercised. Project mode is used because it writes build/bin/<name> with both
+# the Rust-built and the selfhost archives.
 check() {
-  cd "${pkgname}-${pkgver}"
-  cargo test --locked -p ignis
+  rm -rf check_hello
+  mkdir -p check_hello/src
+
+  cat > check_hello/ignis.toml << 'EOF'
+[package]
+name = "hello"
+version = "0.1.0"
+
+[build]
+source_dir = "src"
+out_dir = "build"
+EOF
+
+  cat > check_hello/src/main.ign << 'EOF'
+import Io from "std::io";
+
+function main(): void {
+  Io::println("Hello, Ignis!");
+  return;
+}
+EOF
+
+  (
+    cd check_hello
+    IGNIS_STD_PATH="${srcdir}/std" "${srcdir}/ignis" build
+    test "$(./build/bin/hello)" = "Hello, Ignis!"
+  )
 }
 
 package() {
-  cd "${pkgname}-${pkgver}"
-
-  install -Dm755 "target/release/ignis" "${pkgdir}/usr/lib/ignis/ignis-bin"
+  install -Dm755 "${srcdir}/ignis" "${pkgdir}/usr/lib/ignis/ignis-bin"
   install -d "${pkgdir}/usr/share/ignis"
-  cp -r "std" "${pkgdir}/usr/share/ignis/std"
+  cp -r "${srcdir}/std" "${pkgdir}/usr/share/ignis/std"
 
   install -Dm755 /dev/null "${pkgdir}/usr/bin/ignis"
   cat > "${pkgdir}/usr/bin/ignis" << 'EOF'

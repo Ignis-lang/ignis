@@ -144,8 +144,8 @@ Example:
 
 ## Coverage notes
 
-- Canonical examples are pinned by snapshot tests in `crates/ignis_formatter/tests/canonical_layout.rs`.
-- CLI rewrite, `--check`, project traversal, invalid-input failure, and help text are covered in `crates/ignis/tests/test_command.rs`.
-- Real-file approval coverage is reviewed in `crates/ignis_formatter/tests/real_files.rs` and `crates/ignis_formatter/tests/readability_gate.rs` against `example/hello-world.ign`, `example/record.ign`, exact `example/allocator/src/heap_allocator.ign` windows, and many `std/` files.
-- Real-file approvals also pin the formatter's current trailing-whitespace policy, two-space default indentation, tab override behavior, preserved blank-line behavior, canonical empty-block output, and layout-driven trailing-comma policy.
+- Canonical layouts are pinned by the `@test` functions in `ignis/format/*_tests.ign` (`api_tests.ign`, `layout_items_tests.ign`, `layout_expressions_tests.ign`, `layout_statements_tests.ign`, `comments_tests.ign`, `config_tests.ign`, `safety_tests.ign` and others).
+- `ignis/format/corpus_tests.ign` formats the real files under `ignis/` and `std/` and requires each to come back byte for byte. Files under `test_cases/` and `example/` must format cleanly and stably, but not necessarily byte for byte.
+- CLI parsing for `fmt` (explicit files, `--project`, `--check`, style overrides) is covered in `ignis/cli.ign`, and config-error messages and the `--stdin-json` line protocol in `ignis/main_tests.ign`.
+- CI runs `ignis fmt --check` over `std/`, `ignis/` and `example/` (except `example/add.ign`).
 - Shipped CLI features today include project mode, single-file mode, multiple explicit file paths, `--check`, `--stdin-json`, `--emit diff`, and `--sort-imports`.

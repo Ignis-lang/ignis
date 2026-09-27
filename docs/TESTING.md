@@ -56,7 +56,7 @@ ignis test
 Optional substring filtering:
 
 ```bash
-ignis test string
+ignis test --filter string
 ```
 
 ### Single-file mode

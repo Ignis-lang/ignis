@@ -1,10 +1,14 @@
 # The bootstrap ladder
 
-The self-hosted Ignis compiler (`ignis/`, written in Ignis) is built by itself
-through a chain of stages, driven by `scripts/bootstrap.sh`. This document
-describes how the ladder works today, before the Rust host compiler is
-frozen, and the rule that keeps a PR from silently breaking the official
-selfhost lineage.
+The Ignis compiler (`ignis/`, written in Ignis) is built by itself through a
+chain of stages, driven by `scripts/bootstrap.sh`. It is the only compiler the
+scripts, CI, the nightly and releases use. The Rust compiler under `crates/` is
+frozen: it stays in the tree for reference, nothing builds or runs it, and it
+is not a stage0, a fallback or an oracle for any gate.
+
+This document describes the ladder, how to recover a compiler from nothing
+but the repository, and the rule that keeps a PR from silently breaking the
+official selfhost lineage.
 
 ## Stages
 
@@ -30,11 +34,30 @@ stage0 is resolved by `scripts/resolve_official_stage0.sh`:
 
 `scripts/bootstrap.sh stage1` uses `$IGNIS_STAGE0` when it is set, else the
 official or seed stage0 recorded in `build/bootstrap/stage0.json`, else a
-compiler built from the seed. It never uses whatever `ignis` is on PATH, and
-never the Rust host. A stage0 that cannot build stage1 is terminal: there is
+compiler built from the seed. It never uses whatever `ignis` is on PATH. A
+stage0 that cannot build stage1 is terminal: there is
 no fallback. An explicit `stage0=official` (a `workflow_dispatch` input, or
 `STAGE0_MODE=official` for the resolver) fails when no official asset is
 published instead of using the seed.
+
+## Recovering a compiler
+
+stage0 always comes from one of two sources, in this order:
+
+1. **The official binary.** `scripts/resolve_official_stage0.sh` downloads
+   `ignis-selfhost-linux-amd64` from the `nightly` release when a promotion
+   streak holds.
+2. **The C seed.** `scripts/build_from_seed.sh` rebuilds a compiler from
+   `bootstrap/seed/` with gcc alone. It needs no release asset and no
+   network, so it is the path back when the official binary is missing or
+   cannot be downloaded.
+
+```bash
+scripts/bootstrap.sh all-from-seed      # seed -> stage0 -> stage1 -> stage2 -> stage3 (G1)
+```
+
+`scripts/install.sh --build` and the Nix package build the same way (seed,
+then stage1, then stage2) without running the gates.
 
 ## C seed (A3)
 
@@ -42,8 +65,8 @@ published instead of using the seed.
 single C file a fixed-point stage2 emits (`selfhost_emit.c`, xz-compressed),
 a copy of every std/runtime header that C includes (today only
 `ignis_rt.h`), and `manifest.json`. It rebuilds the compiler with gcc alone,
-reading nothing else from the checkout, so the ladder can start without Rust,
-and without any release asset, once the host is frozen and deleted.
+reading nothing else from the checkout, so the ladder can start without any
+prebuilt compiler and without any release asset.
 
 The manifest records the source commit, the sha256 and size of both the
 archive and the uncompressed C (`xz_size`, `c_size`), the sha256 of each
@@ -81,7 +104,8 @@ checks and compiles nothing; pull-request CI runs that on every change.
 
 `stage1-from-seed` builds that binary (reused while the seed is unchanged),
 records it in `build/bootstrap/stage0.json` as kind `seed`, and builds
-stage1 with it; the point is to prove the ladder needs no Rust. Later
+stage1 with it; the point is to prove the ladder needs no prebuilt compiler.
+Later
 subcommands (`stage2`, `stage3`, the
 gates) keep using that stage0 until `clean` or an explicit `IGNIS_STAGE0`.
 `all-from-seed` continues through stage3, so it ends with G1.
@@ -106,18 +130,14 @@ the recorded source commit describes the seed. Commit the new
 
 Refreshing is deliberate, never automatic. The seed only has to build the
 current sources' stage1, the same contract the official binary has under the
-two-step rule below. Refresh it:
-
-- before the host is frozen, so the cut starts from a current seed;
-- after any change to ignis/ or std/ that must stay bootstrappable without
-  the host, typically when the nightly seed job fails because the sources
-  use something the seed's compiler cannot build.
+two-step rule below. Refresh it after any change to ignis/ or std/ that the
+seed's compiler cannot build, typically when the nightly seed job fails.
 
 ### Why it is committed
 
 The official selfhost binary lives only as a release asset. A deleted
 release, a lost account or an expired artifact would leave no way back to a
-working compiler once the host is gone. The seed travels with every clone,
+working compiler. The seed travels with every clone,
 is verified by checksum, and needs only a C compiler to come back to life.
 
 ## Gates
@@ -132,11 +152,11 @@ G5 | `gate-g5` | diagnostics: stage2 has to keep every diagnostic the committed 
 G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against committed baselines
 G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines
 
-G7 was the first gate whose verdict does not depend on the host. Its baselines
-were generated from the host while it still existed, verified byte-identical
-against the selfhost compiler, and committed under
-`test_cases/e2e/ok/__drop_schedules__/`. No gate runs the host any more. See
-"Drop-schedule baselines" below.
+Every gate compares against stage1 or against committed baselines. Some
+baselines, such as G7's under `test_cases/e2e/ok/__drop_schedules__/`, were
+first generated from the Rust compiler and verified byte-identical against the
+selfhost; they are ordinary baselines now. See "Drop-schedule baselines"
+below.
 
 `scripts/bootstrap.sh gates` runs every stage and gate locally, then
 `report` turns `build/bootstrap/gates/*.json` into `report.md` and
@@ -174,7 +194,7 @@ verdict diff as a parser change.
 
 ### Parser unit-test snippets
 
-About two hundred cases are the source strings the host parser's unit tests
+About two hundred cases are the source strings the Rust parser's unit tests
 parsed, wrapped the way each test helper wrapped them, committed byte for byte
 under `test_cases/parser/host_unit_tests/`. They are ordinary cases now: the
 Rust sources they came from are no longer read, and the baseline churn report
@@ -241,25 +261,21 @@ way to make a failing gate pass. Two things stand against that:
 
 ## Which compiler defines the language
 
-**The selfhost does.** When the Rust host and the selfhost disagree on what a
-program means, the selfhost's behavior is the language and the host's is the
-divergence.
-
-The reason is recovery: if the official binary and the host were both lost,
-the compiler would be rebuilt from the C seed, which is selfhost output. A
-rule the host enforces and the selfhost does not would not survive that.
-
-In practice:
+**The selfhost does.** It is the only compiler that is built, tested and
+shipped, and a compiler recovered from the C seed is selfhost output, so a
+rule only the Rust compiler enforced would not survive a recovery.
 
 | Situation | What to do |
 |-----------|------------|
 | The selfhost is wrong by its own rules (a crash, a miscompile, a check it forgot) | Fix the selfhost. |
-| The two differ and the selfhost's behavior is intended | Keep it. Close the host issue as a known divergence; the host is not changed to match. |
-| A bug both compilers share | Fix it in both while the host is still built. |
-| A fixture that exercises a known divergence | Its baselines record the selfhost's behavior; no gate runs the host to compare against. |
+| The selfhost's behavior is intended but differs from what `crates/` did | Keep it. `crates/` is frozen and is never changed to match. |
+| A fixture exercises such a difference | Its baselines record the selfhost's behavior. |
 
-Known divergences where the selfhost wins: #215 (a generic function used as a
-bare function value is rejected), #235 (unreferenced `@externName` exports are
+### Known divergences from the frozen Rust compiler
+
+These were decided in the selfhost's favor while both compilers were still
+built, and are kept as history: #215 (a generic function used as a bare
+function value is rejected), #235 (unreferenced `@externName` exports are
 kept), #257 (`-0x80` is a negation, `- N` reports A0046) and #253 (the
 mutability check also covers overloaded `&mut self` methods).
 
@@ -267,7 +283,7 @@ mutability check also covers overloaded `&mut self` methods).
 
 A language feature is not safe to use in the compiler's own sources
 (`ignis/`) or the standard library (`std/`) the moment support for it lands in
-`crates/`. It is only safe once that support has been **promoted to the
+`ignis/`. It is only safe once that support has been **promoted to the
 official selfhost binary** — otherwise the official binary cannot build its
 own sources, and the nightly ladder, which starts from it, fails: a stage0
 that cannot build stage1 is terminal.
@@ -281,10 +297,11 @@ the official binary.
 ### The incident this rule exists for
 
 A language change landed together with its first use in the compiler's own
-sources. The PR was green: the host compiler built everything. The nightly
-ladder was not — the still-unpromoted official binary could not compile
-`main` (`Error[A0014] ...`), and only the host fallback kept the ladder from
-failing outright. The violation was invisible until the nightly ran, hours
+sources, while the Rust compiler still built the PR. The PR was green: the
+Rust compiler built everything. The nightly ladder was not — the
+still-unpromoted official binary could not compile `main`
+(`Error[A0014] ...`), and only the fallback to the Rust compiler, since
+removed, kept the ladder from failing outright. The violation was invisible until the nightly ran, hours
 after the PR merged.
 
 ### The PR gate

@@ -2,6 +2,12 @@
 
 Direct selfhost AST/parser coverage tracker for `parser-complete-selfhost-ast`.
 
+> [!NOTE]
+> This matrix is a historical record from the port. The Rust compiler under `crates/` is now frozen
+> and kept for reference only; the selfhost parser in `ignis/parser/` is canonical and defines the
+> syntax (see `BOOTSTRAP.md`, "Which compiler defines the language"). The "Rust source of truth"
+> column names where each form was ported from, not what the language accepts today.
+
 ## Status legend
 - `Supported`: current selfhost AST + parser path exists and is exercised by real corpus/tests.
 - `Partial`: parsed today, but important structure is still collapsed, skipped, or not audited deeply enough.

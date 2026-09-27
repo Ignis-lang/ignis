@@ -49,7 +49,8 @@ Install Ignis on Linux.
 OPTIONS:
   --prefix PATH       Installation prefix (default: $DEFAULT_PREFIX)
   --version VERSION   Install a specific version tag (example: v0.3.0)
-  --build             Build from source instead of downloading release artifact
+  --build             Build from source (the committed C seed, then the compiler
+                      sources) instead of downloading a release artifact
   --dry-run           Show what would be done without changing files
   --help              Show this help message
 
@@ -164,8 +165,11 @@ check_requirements() {
   fi
 
   if [[ "$BUILD_FROM_SOURCE" == "true" ]]; then
-    if ! command -v cargo >/dev/null 2>&1; then
-      missing+=("cargo")
+    if ! command -v xz >/dev/null 2>&1; then
+      missing+=("xz")
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+      missing+=("sha256sum")
     fi
     if ! command -v git >/dev/null 2>&1; then
       missing+=("git")
@@ -280,12 +284,37 @@ download_release() {
   tar -xzf "$tar_path" -C "$tmp_dir/pkg"
 }
 
+# Compile the compiler sources (ignis/main.ign) with $2 into $3/ignis, the
+# way scripts/bootstrap.sh builds a stage. The selfhost driver writes its
+# emitted C and object file into the working directory, so each stage runs in
+# its own directory.
+compile_compiler_stage() {
+  local repo_dir="$1"
+  local compiler="$2"
+  local stage_dir="$3"
+
+  mkdir -p "$stage_dir"
+
+  if ! (
+    cd "$stage_dir"
+    IGNIS_STD_PATH="$repo_dir/std" "$compiler" "$repo_dir/ignis/main.ign" -o "$stage_dir/ignis" >"$stage_dir/log.txt" 2>&1
+  ) || [[ ! -x "$stage_dir/ignis" ]]; then
+    error "Compiling the compiler sources with $compiler failed:"
+    tail -n 20 "$stage_dir/log.txt" >&2
+    exit 1
+  fi
+}
+
+# Build the compiler from the C seed committed under bootstrap/seed, with no
+# prebuilt compiler: the seed gives a stage0, stage0 compiles the checked-out
+# sources into stage1, and stage1 compiles them again into stage2, which is the
+# binary a release ships.
 build_from_source() {
   local tmp_dir="$1"
   local version_tag="$2"
   local repo_dir="$tmp_dir/ignis"
 
-  if [[ -n "$PROJECT_ROOT" ]] && [[ -f "$PROJECT_ROOT/Cargo.toml" ]]; then
+  if [[ -n "$PROJECT_ROOT" ]] && [[ -f "$PROJECT_ROOT/bootstrap/seed/manifest.json" ]]; then
     repo_dir="$PROJECT_ROOT"
     info "Using local repository at $repo_dir"
   else
@@ -306,19 +335,38 @@ build_from_source() {
     fi
   fi
 
-  step "Building Ignis from source..."
+  local build_dir="$tmp_dir/bootstrap"
+  local stage0="$build_dir/stage0/ignis"
+
+  if [[ ! -f "$repo_dir/bootstrap/seed/manifest.json" ]]; then
+    error "No C seed at $repo_dir/bootstrap/seed: $version_tag cannot be built from source by this installer"
+    error "Install the release archive instead (omit --build)"
+    exit 1
+  fi
+
+  step "Building Ignis from the C seed (this takes several minutes)..."
   if [[ "$DRY_RUN" == "true" ]]; then
-    echo "[DRY-RUN] cargo build --release -p ignis --locked"
+    echo "[DRY-RUN] $repo_dir/scripts/build_from_seed.sh --seed $repo_dir/bootstrap/seed -o $stage0"
+    echo "[DRY-RUN] compile $repo_dir/ignis/main.ign with stage0 -> $build_dir/stage1/ignis"
+    echo "[DRY-RUN] compile $repo_dir/ignis/main.ign with stage1 -> $build_dir/stage2/ignis"
     return 0
   fi
 
-  (
-    cd "$repo_dir"
-    cargo build --release -p ignis --locked
-  )
+  "$repo_dir/scripts/build_from_seed.sh" --seed "$repo_dir/bootstrap/seed" -o "$stage0" >/dev/null
+
+  if [[ ! -f "$stage0" ]] || [[ ! -x "$stage0" ]]; then
+    error "The C seed build produced no executable at $stage0"
+    exit 1
+  fi
+
+  step "Compiling the compiler sources with the seed compiler (stage1)..."
+  compile_compiler_stage "$repo_dir" "$stage0" "$build_dir/stage1"
+
+  step "Compiling the compiler sources with stage1 (stage2)..."
+  compile_compiler_stage "$repo_dir" "$build_dir/stage1/ignis" "$build_dir/stage2"
 
   mkdir -p "$tmp_dir/pkg"
-  cp "$repo_dir/target/release/ignis" "$tmp_dir/pkg/ignis"
+  cp "$build_dir/stage2/ignis" "$tmp_dir/pkg/ignis"
   cp -r "$repo_dir/std" "$tmp_dir/pkg/std"
 }
 
@@ -367,6 +415,9 @@ exec "$PREFIX/lib/ignis/ignis-bin" "\$@"
 EOF
   chmod 755 "$PREFIX/bin/ignis"
 }
+
+# The binary `scripts/bootstrap.sh stage2` writes in a local checkout.
+LOCAL_LADDER_BIN="build/bootstrap/stage2/ignis"
 
 check_existing_installation() {
   if [[ -x "$PREFIX/bin/ignis" ]] && [[ -t 0 ]]; then
@@ -436,13 +487,13 @@ main() {
   elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/ignis" ]] && [[ -d "$PROJECT_ROOT/std" ]]; then
     info "Using local extracted release package"
     install_files "$PROJECT_ROOT"
-  elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/target/release/ignis" ]] && [[ -d "$PROJECT_ROOT/std" ]]; then
-    info "Using local repository build output"
+  elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/$LOCAL_LADDER_BIN" ]] && [[ -d "$PROJECT_ROOT/std" ]]; then
+    info "Using the local bootstrap ladder's stage2 build"
     mkdir -p "$tmp_dir/pkg"
-    cp "$PROJECT_ROOT/target/release/ignis" "$tmp_dir/pkg/ignis"
+    cp "$PROJECT_ROOT/$LOCAL_LADDER_BIN" "$tmp_dir/pkg/ignis"
     cp -r "$PROJECT_ROOT/std" "$tmp_dir/pkg/std"
     install_files "$tmp_dir/pkg"
-  elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/Cargo.toml" ]]; then
+  elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/bootstrap/seed/manifest.json" ]]; then
     info "No local release artifact found, building from source"
     build_from_source "$tmp_dir" "$VERSION"
     install_files "$tmp_dir/pkg"

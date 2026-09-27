@@ -34,19 +34,24 @@ curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/insta
 
 ## Build from source
 
-The compiler is a Cargo workspace. The installer can clone and build it for you:
+The compiler is written in Ignis. The repository carries a C seed (`bootstrap/seed/`) that GCC
+turns into a first compiler, which then builds the current sources, so no prebuilt compiler is
+needed. This also needs `xz`, `sha256sum` and `git`, and takes several minutes. The installer can
+clone and build it for you:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/install.sh | bash -s -- --build
 ```
 
-Or do it by hand, which is what you want if you plan to work on the compiler itself:
+Or do it by hand with the bootstrap ladder, which is what you want if you plan to work on the
+compiler itself. It also needs `python3`:
 
 ```bash
 git clone https://github.com/Ignis-lang/ignis.git
 cd ignis
-cargo build --release -p ignis
-./target/release/ignis --help
+scripts/bootstrap.sh stage1-from-seed
+scripts/bootstrap.sh stage2
+./build/bootstrap/stage2/ignis --help
 ```
 
 ## Verify

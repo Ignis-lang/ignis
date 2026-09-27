@@ -15,13 +15,18 @@ ignis <command> [options]
 Commands:
 
 - `build` - Compile a file or project.
-- `check` - Run analysis/codegen checks without linking.
+- `check` - Run analysis checks without codegen or linking.
 - `fmt` - Rewrite Ignis source to canonical formatting.
 - `test` - Run native Ignis tests.
+- `test-std` - Run the standard library's native tests.
+- `doc` - Extract API documentation from doc comments.
 - `init` - Create or initialize an Ignis project.
 - `build-std` - Build standard library artifacts.
 - `check-std` - Check standard library codegen output.
 - `lsp` - Start the language server.
+
+`ignis --help` lists every command and flag. Without a command, `ignis <path>`
+builds the path.
 
 ## `ignis init`
 
@@ -75,13 +80,13 @@ ignis build src/main.ign
 # Build current project
 ignis build
 
-# Build project from a specific directory
-ignis build --project ./my-app
+# Build the project in a specific directory
+ignis build ./my-app
 ```
 
 ## `ignis check`
 
-Same input modes as `build`, but without final linking.
+Same input modes as `build`, stopping after analysis: no code generation and no linking.
 
 Examples:
 
@@ -92,8 +97,6 @@ ignis check
 # Check single file
 ignis check src/main.ign
 
-# Analyzer-only pass (skip lowering/codegen)
-ignis check --analyze-only
 ```
 
 ## `ignis test`
@@ -112,7 +115,7 @@ Examples:
 ignis test
 
 # Run only tests whose fully-qualified name contains "string"
-ignis test string
+ignis test --filter string
 
 # Run tests from a single file
 ignis test src/example.ign
@@ -263,10 +266,8 @@ ignis check-std -o out
 
 `-o` / `--output-dir` names the directory the emitted C is written to (default `build`).
 
-The self-hosted compiler differs from the Rust host here:
-
-- It emits one translation unit for the whole library, `<dir>/ignis_std.c`, instead of one C file per std module, and writes no `ignis_std.h`.
-- It resolves the std root the way its `build-std` does: a governing `ignis.toml` `std_path` wins over `IGNIS_STD_PATH`. The host reads only `IGNIS_STD_PATH`, so the two differ only inside a project whose `std_path` points elsewhere.
+- It emits one translation unit for the whole library, `<dir>/ignis_std.c`, and writes no `ignis_std.h`.
+- It resolves the std root the way `build-std` does: a governing `ignis.toml` `std_path` wins over `IGNIS_STD_PATH`.
 
 ## `ignis lsp`
 
