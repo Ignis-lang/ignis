@@ -2,20 +2,20 @@
 #
 # Exercises scripts/bootstrap.sh's stage staleness stamps (IGN-210):
 # `ensure_stage` used to reuse an existing build/bootstrap/<stage>/ignis
-# unconditionally, even when the selfhost sources, std, or the stage0/host
+# unconditionally, even when the selfhost sources, std, or the stage0
 # compiler had changed since it was built, so a gate (gate-g7, gate-g5,
 # gate-g3-*) could silently report results for stale code.
 #
 # Each test runs scripts/bootstrap.sh in an isolated project root (a temp
 # directory with its own scripts/, ignis/, std/ and build/bootstrap), the
-# same sandbox style scripts/tests/test_stage0_fallback.sh uses, so nothing
+# same sandbox style scripts/tests/test_stage0.sh uses, so nothing
 # here touches the real repository's build/ directory or does a real
 # self-compilation. A fake "compiler" stands in for stage0/stage1/stage2: it
 # copies itself to whatever `-o` names, so a stage it produces is itself a
 # working fake compiler for the next stage, without ever running gcc or a
 # real Ignis compile.
 #
-# Wired into ci.yml's selfhost job, next to test_stage0_fallback.sh — it
+# Wired into ci.yml's selfhost job, next to test_stage0.sh — it
 # takes a few seconds.
 #
 # Usage: scripts/tests/test_stage_stamps.sh
@@ -54,9 +54,7 @@ binary_hash() {
 # Rather than compile anything, it copies itself to `-o`'s target, so the
 # binary it produces is itself a working fake compiler the next stage can
 # use the same way — enough to walk stage1 -> stage2 -> stage3 without a real
-# self-compilation. `--version` fails, so `stage0_is_selfhost` classifies it
-# as a selfhost-shaped stage0 and compiles it directly rather than through
-# `<bin> build`.
+# self-compilation.
 #
 # Appends a fresh marker line on every invocation: a plain self-copy of this
 # same, unchanging script would otherwise produce byte-identical output on
@@ -68,10 +66,6 @@ write_fake_compiler() {
   local path="$1"
   cat >"$path" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1-}" == "--version" ]]; then
-  exit 1
-fi
-
 out=""
 prev=""
 for arg in "$@"; do
@@ -628,9 +622,8 @@ test_stage0_kind_mismatch_override_proceeds() {
 # stage1/stage2 already built and stamped by that exact stage0 — reuses
 # cleanly: no rebuild, no lineage refusal. Second re-review blocker on
 # PR #222: without this recorded-identity fallback, `ensure_stage stage1`
-# in a real gate job (IGNIS_STAGE0 unset, so $STAGE0 falls back to whatever
-# "ignis" resolves to on PATH — the host binary there, not the official
-# asset that actually built stage1) misread *every single* official-stage0
+# in a real gate job (IGNIS_STAGE0 unset, and the official asset that
+# actually built stage1 absent) misread *every single* official-stage0
 # night — any promotion streak >= 3 — as "stage0 identity changed", which
 # then hit the lineage guard and aborted every gate (G2, G3-stage2, G5, G6,
 # G7) with no gate file, sealed as skipped, degrading promotion.
@@ -660,14 +653,11 @@ test_gate_job_reuses_with_recorded_stage0_identity() {
   printf '{"kind": "official", "source": "%s/does-not-exist/ignis-official", "sha256": "", "mode": "auto", "identity": "%s"}\n' \
     "$root" "$built_identity" >"$root/build/bootstrap/stage0.json"
 
-  # $STAGE0 itself resolves to something else entirely — a decoy standing in
-  # for the gate job's bare "ignis" -> host binary on PATH.
-  # current_stage0_identity must never even need it, since the recorded
-  # identity above already matches.
-  write_fake_compiler "$root/bin/ignis-decoy-host"
-
+  # IGNIS_STAGE0 is unset, as in the gate job: current_stage0_identity must
+  # never need a stage0 binary, since the recorded identity above already
+  # matches.
   local status=0
-  run_stage "$root" gate-g3-stage2 "$root/bin/ignis-decoy-host" >"$root/run3.log" 2>&1 || status=$?
+  run_stage "$root" gate-g3-stage2 "" >"$root/run3.log" 2>&1 || status=$?
 
   if [[ "$status" -ne 0 ]]; then
     fail_test "expected gate-g3-stage2 to succeed, exit ${status}, see ${root}/run3.log"
@@ -736,10 +726,8 @@ with open(path, "w", encoding="utf-8") as handle:
   handle.write("\n")
 PY
 
-  write_fake_compiler "$root/bin/ignis-decoy-host"
-
   local status=0
-  run_stage "$root" gate-g3-stage2 "$root/bin/ignis-decoy-host" >"$root/run3.log" 2>&1 || status=$?
+  run_stage "$root" gate-g3-stage2 "" >"$root/run3.log" 2>&1 || status=$?
 
   if [[ "$status" -eq 0 ]]; then
     fail_test "expected gate-g3-stage2 to fail on the genuine lineage mismatch, it exited 0, see ${root}/run3.log"

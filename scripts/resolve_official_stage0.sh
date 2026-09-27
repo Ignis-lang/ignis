@@ -1,44 +1,42 @@
 #!/usr/bin/env bash
 #
-# Resolves stage0 for the bootstrap ladder: either the officially promoted
-# selfhost binary published on the `nightly` release, or the host compiler.
-# Writes build/bootstrap/stage0.json in the format `ensure_stage`'s
-# `compiler_identity_of` / `stage0_is_selfhost` / `stage0_explicit_official`
-# read back (see scripts/bootstrap.sh).
+# Resolves stage0 for the bootstrap ladder: the officially promoted selfhost
+# binary published on the `nightly` release, or else the C seed committed
+# under bootstrap/seed. Writes build/bootstrap/stage0.json for an official
+# stage0 in the format scripts/bootstrap.sh reads back
+# (`adopt_recorded_stage0`, `current_stage0_identity`,
+# `stage0_rebuild_guard_reason`). For the seed it removes stage0.json instead:
+# bootstrap.sh with no stage0 recorded builds one from the seed itself and
+# records it (`build_stage1_from_seed`).
 #
-# This is the exact resolution nightly.yml's "Resolve stage0" step ran
-# inline; it is factored out here so ci.yml's "Official stage0 gate" job can
-# run the identical download/verify/streak logic without duplicating the
-# YAML. Nightly's behaviour is unchanged: every knob below defaults to
-# exactly what that step did before extraction.
+# Shared by nightly.yml's "Resolve stage0" step and ci.yml's "Official stage0
+# gate" job, so the download/verify/streak logic is not duplicated between the
+# two workflows.
 #
 # Env:
-#   STAGE0_MODE               auto | host | official (default: auto). Mirrors
+#   STAGE0_MODE               auto | official (default: auto). Mirrors
 #                              nightly's workflow_dispatch `stage0` input.
 #   STAGE0_UNAVAILABLE_ACTION What to do when the official asset cannot be
 #                              resolved (missing, unverifiable, or below the
 #                              promotion-streak threshold):
-#                                (unset)  default per STAGE0_MODE, i.e. the
-#                                         original nightly behaviour — `auto`
-#                                         falls back to the host, `official`
-#                                         fails outright.
-#                                skip     print a notice and exit 2, without
-#                                         attempting a host fallback. Used by
+#                                (unset)  default per STAGE0_MODE: `auto`
+#                                         resolves to the C seed (or fails
+#                                         when there is no seed either),
+#                                         `official` fails outright.
+#                                skip     print a notice and exit 2. Used by
 #                                         ci.yml's two-step-rule gate, which
-#                                         has no host build to fall back to.
-#   STAGE0_HOST_BIN            Path to the host-built compiler used for the
-#                              `host` mode / fallback identity (default:
-#                              "${GITHUB_WORKSPACE:-.}/target/ci/ignis").
+#                                         has nothing to check without an
+#                                         official asset.
 #   GH_TOKEN                   Forwarded to `gh release download`.
 #
 # Outputs (when $GITHUB_OUTPUT is set):
-#   resolved   true if a usable stage0 (official or host) was written, false
-#              on the `skip` path.
-#   kind       official | host | "" (on skip).
+#   resolved   true if a usable stage0 (official or seed) was resolved, false
+#              when it was not (skip, or nothing available).
+#   kind       official | seed | "" (when not resolved).
 #
-# Exit codes: 0 resolved (official or host); 1 official was required (mode
-# official, or STAGE0_UNAVAILABLE_ACTION unset in official mode) and is
-# unavailable; 2 the official asset is unavailable and
+# Exit codes: 0 resolved (official or seed); 1 nothing usable (official was
+# required and is unavailable, `auto` found neither an official asset nor a
+# seed, or an unknown STAGE0_MODE); 2 the official asset is unavailable and
 # STAGE0_UNAVAILABLE_ACTION=skip was requested.
 #
 # `-e` matters here specifically because this now runs as its own process
@@ -52,10 +50,10 @@
 set -euo pipefail
 
 STAGE0_MODE="${STAGE0_MODE:-auto}"
-WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 mkdir -p build/bootstrap
 STAGE0_JSON="build/bootstrap/stage0.json"
+SEED_MANIFEST="bootstrap/seed/manifest.json"
 
 # Same format `ensure_stage`'s `compiler_identity_of` computes and compares
 # against (scripts/bootstrap.sh): "sha256:<hex>:<size>", or "unknown" if the
@@ -78,14 +76,13 @@ emit_output() {
   return 0
 }
 
-write_host_stage0() {
-  local host_bin="${STAGE0_HOST_BIN:-${WORKSPACE}/target/ci/ignis}"
-  local identity
-  identity=$(compiler_identity_of "$host_bin")
-  jq -n --arg mode "$STAGE0_MODE" --arg identity "$identity" \
-    '{kind: "host", source: "target/ci/ignis", sha256: "", mode: $mode, identity: $identity}' >"$STAGE0_JSON"
+# No stage0.json is what tells scripts/bootstrap.sh to build stage0 from the
+# seed; a stale one from an earlier resolution would be adopted instead.
+use_seed_stage0() {
+  rm -f "$STAGE0_JSON"
+  echo "stage0: the C seed (${SEED_MANIFEST}); scripts/bootstrap.sh builds stage0 from it"
   emit_output resolved true
-  emit_output kind host
+  emit_output kind seed
 }
 
 # Called when the official asset cannot be resolved. `reason` is logged;
@@ -111,16 +108,26 @@ unavailable() {
     exit 1
   fi
 
-  echo "stage0: falling back to the host compiler"
-  write_host_stage0
+  if [ ! -f "$SEED_MANIFEST" ]; then
+    echo "stage0: no official asset and no C seed at ${SEED_MANIFEST}; nothing can build stage1"
+    emit_output resolved false
+    emit_output kind ""
+    exit 1
+  fi
+
+  use_seed_stage0
   exit 0
 }
 
-if [ "$STAGE0_MODE" = "host" ]; then
-  echo "stage0: host forced (STAGE0_MODE=host)"
-  write_host_stage0
-  exit 0
-fi
+case "$STAGE0_MODE" in
+  auto | official) : ;;
+  *)
+    echo "stage0: unknown STAGE0_MODE '${STAGE0_MODE}' (expected auto or official)" >&2
+    emit_output resolved false
+    emit_output kind ""
+    exit 1
+    ;;
+esac
 
 WORKDIR="${RUNNER_TEMP:-$(mktemp -d)}/stage0"
 mkdir -p "$WORKDIR"
