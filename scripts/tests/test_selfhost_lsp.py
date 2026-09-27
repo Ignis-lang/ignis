@@ -8,8 +8,8 @@ reported at the right UTF-16 range, then cleared once the buffer is fixed or
 closed), the hovers answered for it, go-to-definition, find-references,
 rename and the document outline over a two-file project, and completion in each
 context the host completes, also while the buffer does not parse, the
-formatting edits and quick fixes it offers, the inlay hints it shows and the
-semantic tokens of a buffer.
+formatting edits and quick fixes it offers, the inlay hints it shows, the
+semantic tokens of a buffer and the unknown-key warnings of `ignis.toml`.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
 also proves analysis reads open documents instead of the disk.
 
@@ -58,6 +58,18 @@ FIXED_SOURCE = BROKEN_SOURCE.replace("let count: i32 = label;", "let count: i32 
 EXPECTED_RANGE = {"start": {"line": 5, "character": 31}, "end": {"line": 5, "character": 54}}
 EXPECTED_CODE = "A0045"
 EXPECTED_MESSAGE = "Type mismatch: expected 'i32', found 'str'"
+
+# A project file whose `[package]` table misspells `name` on line 3.
+UNKNOWN_KEY_PROJECT = (
+  "[package]\n"
+  'name = "lsp-test"\n'
+  'version = "0.1.0"\n'
+  'nmae = "typo"\n'
+  "\n"
+  "[build]\n"
+  'source_dir = "src"\n'
+  'entry = "main.ign"\n'
+)
 
 # The hover sources: `main.ign` uses a record, a documented function and a
 # function imported from `util.ign`. `count` is declared after a string with
@@ -387,9 +399,12 @@ def read_frame(stream):
 class LanguageServer:
   """One `lsp` process and a thread that collects what it writes."""
 
-  def __init__(self, compiler, workspace):
+  def __init__(self, compiler, workspace, std_path=None):
     environment = dict(os.environ)
     environment.setdefault("IGNIS_STD_PATH", str(REPOSITORY_ROOT / "std"))
+
+    if std_path is not None:
+      environment["IGNIS_STD_PATH"] = str(std_path)
 
     self.stderr = tempfile.TemporaryFile()
     self.process = subprocess.Popen(
@@ -1265,6 +1280,75 @@ class LanguageServerTest(unittest.TestCase):
     self.show("inlay hints after an edit that breaks parsing", hints)
     self.assertEqual(in_position_order(hints), inlay_hints_of(broken))
     self.finish(4)
+
+  def test_unknown_project_keys_are_published_on_the_project_file(self):
+    # The build prints C1008 to stderr, which an editor never shows, so the
+    # server publishes it on ignis.toml. Editing that file analyzes the
+    # project again, and fixing the key clears the warning.
+    (Path(self.workspace) / "src").mkdir()
+    self.source_file("src/main.ign", FIXED_SOURCE)
+    main_uri = (Path(self.workspace) / "src" / "main.ign").resolve().as_uri()
+    project_uri = self.source_file("ignis.toml", UNKNOWN_KEY_PROJECT)
+    self.server.initialize(self.workspace)
+
+    self.open_buffer(main_uri, FIXED_SOURCE)
+    published = self.server.published(project_uri)
+    self.show("published for ignis.toml", published)
+    self.assertEqual(len(published["diagnostics"]), 1, published)
+
+    diagnostic = published["diagnostics"][0]
+    self.assertEqual(diagnostic["code"], "C1008")
+    self.assertEqual(diagnostic["severity"], 2)
+    self.assertEqual(diagnostic["message"], "unknown key 'nmae' in [package]; did you mean 'name'?")
+    self.assertEqual(diagnostic["range"], {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 4}})
+
+    self.server.notify("textDocument/didOpen", {
+      "textDocument": {"uri": project_uri, "languageId": "toml", "version": 1, "text": UNKNOWN_KEY_PROJECT},
+    })
+    self.assertEqual(len(self.server.published(project_uri)["diagnostics"]), 1)
+
+    self.server.notify("textDocument/didChange", {
+      "textDocument": {"uri": project_uri, "version": 2},
+      "contentChanges": [{"text": UNKNOWN_KEY_PROJECT.replace('nmae = "typo"\n', "")}],
+    })
+    self.assertEqual(self.server.published(project_uri)["diagnostics"], [])
+    self.finish(2)
+
+  def test_unknown_std_manifest_keys_are_published_on_the_manifest(self):
+    # The std manifest is read from disk, so fixing it clears the warning on
+    # the next analysis, which an edit to any Ignis file starts.
+    std_path = Path(self.workspace) / "std"
+    shutil.copytree(Path(os.environ.get("IGNIS_STD_PATH", REPOSITORY_ROOT / "std")), std_path)
+    manifest = std_path / "manifest.toml"
+    original = manifest.read_text(encoding="utf-8")
+    manifest.write_text("zzz_root_stray = 1\n" + original, encoding="utf-8")
+    manifest_uri = manifest.resolve().as_uri()
+
+    self.server.close()
+    self.server = LanguageServer(compiler_path(), self.workspace, std_path)
+    self.addCleanup(self.server.close)
+
+    uri = self.source_file("main.ign", FIXED_SOURCE)
+    self.server.initialize(self.workspace)
+
+    self.open_buffer(uri, FIXED_SOURCE)
+    published = self.server.published(manifest_uri)
+    self.show("published for manifest.toml", published)
+    self.assertEqual(len(published["diagnostics"]), 1, published)
+
+    diagnostic = published["diagnostics"][0]
+    self.assertEqual(diagnostic["code"], "B1004")
+    self.assertEqual(diagnostic["severity"], 2)
+    self.assertEqual(diagnostic["message"], "unknown key 'zzz_root_stray' in [top-level]")
+    self.assertEqual(diagnostic["range"]["start"], {"line": 0, "character": 0})
+
+    manifest.write_text(original, encoding="utf-8")
+    self.server.notify("textDocument/didChange", {
+      "textDocument": {"uri": uri, "version": 2},
+      "contentChanges": [{"text": FIXED_SOURCE}],
+    })
+    self.assertEqual(self.server.published(manifest_uri)["diagnostics"], [])
+    self.finish(2)
 
   def test_errors_answer_bad_messages_and_exit_without_shutdown_fails(self):
     self.server.initialize(self.workspace)

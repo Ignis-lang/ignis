@@ -11,16 +11,18 @@
 
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
-import Config from "@compiler::config";
+import Config, checkUnknownProjectKeys from "@compiler::config";
 import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
 import ParseOutput, Parser from "@compiler::parser";
 
 import Path from "std::path";
 import String from "std::string";
 import Text from "std::text";
+import Toml from "std::toml";
 import Vector from "std::vector";
 
 import analyzerModuleKind, mapImportSourcesToDiscoveryTargets from "../build/import_targets";
+import checkUnknownManifestKeys from "../build/manifest";
 import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
@@ -84,6 +86,15 @@ export function lspSeverity(severity: Severity): u64 {
     Severity::WARNING -> 2,
     Severity::INFO -> 3,
     Severity::HINT -> 4,
+  };
+}
+
+/// True when `path` names a project file, `ignis.toml`. Analysis starts from
+/// one too, and reads its open buffer for the unknown-key warnings.
+export function isProjectFilePath(path: &Path::PathBuf): boolean {
+  return match (path.fileName()) {
+    Option::SOME(name) -> name.equals("ignis.toml"),
+    Option::NONE -> false,
   };
 }
 
@@ -453,7 +464,14 @@ function discoveryFailureDiagnostics(
   let mut pending: Vector<PendingDiagnostic> = Vector::new<PendingDiagnostic>();
   files.push(SourceFile { path: startPath.clone(), text: startText });
 
-  let mut located: boolean = collectIfDiscoveryFailure(&files, 0, failure, true, &mut pending);
+  // A project file is not Ignis source: parsing it would only add noise, so
+  // discovery's diagnostics go to its start.
+  let mut located: boolean = false;
+
+  if (!isProjectFilePath(startPath)) {
+    located = collectIfDiscoveryFailure(&files, 0, failure, true, &mut pending);
+  }
+
   let startKey: String = startPath.toString();
   let mut sourceIndex: u64 = 0;
 
@@ -467,7 +485,7 @@ function discoveryFailureDiagnostics(
     let pathText: String = path.toString();
     let pathKey: String = analysisKeyOf(&path);
 
-    if (pathText.equals(&startKey) || !pathKey.equals(key)) {
+    if (pathText.equals(&startKey) || !pathKey.equals(key) || isProjectFilePath(&path)) {
       continue;
     }
 
@@ -539,14 +557,117 @@ export function analyzeDocuments(
   let discovery: DiscoveryResult = match (Resolver::discover(startPath, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(failure) -> {
-      return LspAnalysis {
-        diagnostics: discoveryFailureDiagnostics(&failure, startPath, key, sources),
-        navigation: Option::NONE,
-      };
+      let mut diagnostics: Vector<FileDiagnostics> = discoveryFailureDiagnostics(&failure, startPath, key, sources);
+      appendProjectFileWarnings(startPath, sources, &mut diagnostics);
+
+      return LspAnalysis { diagnostics: diagnostics, navigation: Option::NONE };
     },
   };
 
-  return analyzeDiscoveredDocuments(&discovery, startPath, sources);
+  let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(&discovery, startPath, sources);
+  appendProjectFileWarnings(startPath, sources, &mut analysis.diagnostics);
+  appendStdManifestWarnings(&discovery.stdRoot, &mut analysis.diagnostics);
+
+  return analysis;
+}
+
+/// Appends the unknown-key warnings of `manifest.toml` under `stdRoot`.
+///
+/// Every analysis that reaches the standard library loads this manifest, the
+/// build prints its warnings to stderr the same way, so they appear in every
+/// workspace, not only while the standard library itself is being edited. The
+/// manifest is read from disk: editing it does not start an analysis, so an
+/// open buffer of it would only be read when some Ignis file changes.
+function appendStdManifestWarnings(
+  stdRoot: &Path::PathBuf,
+  files: &mut Vector<FileDiagnostics>
+): void {
+  let manifestPath: Path::PathBuf = stdRoot.join("manifest.toml");
+
+  let Result::OK(manifestText) = Fs::readToString(&manifestPath) else {
+    return;
+  };
+
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&manifestText, &manifestPath);
+  appendTextDiagnostics(&warnings, &manifestPath, &manifestText, files);
+}
+
+/// Appends the unknown-key warnings of the project file that governs
+/// `startPath`, read from its open buffer when there is one. The build prints
+/// them to stderr, which an editor never shows, so the language server
+/// reports them on the project file itself. A project file that does not
+/// parse has no warnings here: discovery already reports it as an error.
+function appendProjectFileWarnings(
+  startPath: &Path::PathBuf,
+  sources: &SourceOverrides,
+  files: &mut Vector<FileDiagnostics>,
+): void {
+  let Option::SOME(projectFile) = Config::findProjectFile(startPath) else {
+    return;
+  };
+
+  let Result::OK(text) = sources.read(&projectFile) else {
+    return;
+  };
+
+  let Result::OK(document) = Toml::parse(&text) else {
+    return;
+  };
+
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &projectFile);
+  appendTextDiagnostics(&warnings, &projectFile, &text, files);
+}
+
+/// Appends every diagnostic of `bag`, whose byte offsets point into `text`, to
+/// the diagnostics of `path`, creating that entry when `files` has none yet.
+function appendTextDiagnostics(
+  bag: &DiagnosticBag,
+  path: &Path::PathBuf,
+  text: &String,
+  files: &mut Vector<FileDiagnostics>,
+): void {
+  if (bag.isEmpty()) {
+    return;
+  }
+
+  let mut filesRef: &mut Vector<FileDiagnostics> = files;
+  let pathText: String = path.toString();
+  let mut target: u64 = filesRef.length();
+  let mut fileIndex: u64 = 0;
+
+  while (fileIndex < filesRef.length()) {
+    if (let Option::SOME(file) = filesRef.get(fileIndex)) {
+      if (file.path.equals(&pathText)) {
+        target = fileIndex;
+        break;
+      }
+    }
+
+    fileIndex += 1;
+  }
+
+  if (target == filesRef.length()) {
+    filesRef.push(FileDiagnostics { path: pathText.clone(), diagnostics: Vector::new<LspDiagnostic>() });
+  }
+
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(text.clone());
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      if (let Option::SOME(file) = filesRef.getMut(target)) {
+        file.diagnostics.push(LspDiagnostic {
+          start: lineIndex.position(diagnostic.primarySpan.start),
+          end: lineIndex.position(diagnostic.primarySpan.end),
+          severity: lspSeverity(diagnostic.severity),
+          code: String::create(diagnostic.code),
+          message: diagnostic.message.clone(),
+        });
+      }
+    }
+
+    index += 1;
+  }
 }
 
 /// Parses and analyzes the modules `discovery` found, reading `sources`

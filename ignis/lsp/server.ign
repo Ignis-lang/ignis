@@ -27,6 +27,7 @@ import
   LspDiagnostic,
   analysisKeyOf,
   analyzeDocuments,
+  isProjectFilePath,
 from "./analysis";
 import codeActionsFor from "./code_actions";
 import
@@ -759,11 +760,10 @@ export record LspServer {
     self.send(&body);
   }
 
-  /// Queues the analysis of `path`. Only an Ignis source file starts one,
-  /// as in the host server, which never analyzes `ignis.toml` and reads only
-  /// `.ign` buffers.
+  /// Queues the analysis of `path`. An Ignis source file starts one, and so
+  /// does a project file, whose unknown keys the analysis reports on it.
   markDirty(&mut self, path: Path::PathBuf): void {
-    if (!isIgnisSourcePath(&path)) {
+    if (!isIgnisSourcePath(&path) && !isProjectFilePath(&path)) {
       return;
     }
 

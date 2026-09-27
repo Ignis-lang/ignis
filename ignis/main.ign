@@ -2125,6 +2125,10 @@ function linkTestBinary(
   let stampPath: Path::PathBuf = stampPathForObject(&programObjectPath);
   let fingerprint: BuildFingerprint = programBuildFingerprint(discovery, profile);
 
+  if (!prepareTestBinaryDirectory(&outputPath)) {
+    return Option::NONE;
+  }
+
   let mut guarded: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   guarded.push(programPath.clone());
   guarded.push(programObjectPath.clone());
@@ -2191,6 +2195,41 @@ function linkTestBinary(
   return Option::SOME(binaryPath);
 }
 
+/// The binary `ignis test` links: `-o` when it was given, else
+/// `<out>/bin/<name>-tests`, with no executable suffix. The program and harness
+/// C and object files are named after it, so they land next to it rather than
+/// in the current directory.
+export function testBinaryPath(
+  outDir: &Path::PathBuf,
+  name: &String,
+  outputPath: &Option<String>
+): String {
+  if (let Option::SOME(value) = outputPath) {
+    return value.clone();
+  }
+
+  let binaryName: String = `${name.toStr()}-tests`;
+  return outDir.join("bin").join(binaryName.toStr()).toString();
+}
+
+/// Creates the directory the test binary `binaryPath` goes in, printing an error
+/// and returning false when that fails. A bare file name has no directory to
+/// create: it links in the current one.
+export function prepareTestBinaryDirectory(binaryPath: &String): boolean {
+  let path: Path::PathBuf = Path::PathBuf::fromString(binaryPath);
+
+  let Option::SOME(directory) = path.parent() else {
+    return true;
+  };
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&directory)) {
+    Io::eprintln(`error: could not create ${directory.asStr()}`);
+    return false;
+  }
+
+  return true;
+}
+
 /// Build the project's test harness and run every selected test in its own
 /// process, reporting the way the host `ignis test` runner does.
 ///
@@ -2255,7 +2294,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     FixtureTests::prepareSnapshotDirectories(&selectedFixtures);
   }
 
-  let binaryPathText: String = options.outputPathOr("selfhost_tests");
+  let binaryPathText: String = testBinaryPath(&discovery.outDir, &discovery.name, &options.outputPath);
 
   let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected, &binaryPathText) else {
     Io::eprintln(String::create("error: test setup failed"));

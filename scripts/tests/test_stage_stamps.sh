@@ -901,6 +901,133 @@ test_source_change_detected_via_git_toplevel() {
   rm -rf "$root"
 }
 
+# Runs `gate-g4` in a sandbox. Its exit status is not checked: with a fake
+# compiler the measured ratios are noise, and what these tests assert is which
+# measurements G4 reused, not its verdict.
+run_gate_g4() {
+  local root="$1" stage0_bin="$2"
+  (
+    cd "$root"
+    IGNIS_STAGE0="$stage0_bin" scripts/bootstrap.sh gate-g4
+  ) || true
+}
+
+# Test 14: G4 compares stage2 with a stage1-measure baseline. A baseline
+# measured before the current stage2 was (IGN-244: hours earlier, under a
+# different machine load) is measured again instead of being reused.
+test_gate_g4_remeasures_a_baseline_older_than_stage2() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: gate-g4 remeasures a baseline older than stage2's measurement"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
+  run_gate_g4 "$root" "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1
+
+  local baseline="$root/build/bootstrap/stage1-measure/ignis"
+  if [[ ! -f "$baseline" ]]; then
+    fail_test "the first gate-g4 run did not build stage1-measure, see ${root}/run2.log"
+    rm -rf "$root"
+    return
+  fi
+
+  local before_hash
+  before_hash="$(binary_hash "$baseline")"
+
+  run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run3.log" 2>&1
+  run_gate_g4 "$root" "$root/bin/ignis-stage0" >"$root/run4.log" 2>&1
+
+  if grep -q 'stage1-measure: rebuilding, measured before stage2' "$root/run4.log"; then
+    pass "stage1-measure rebuilt with reason 'measured before stage2'"
+  else
+    fail_test "no 'stage1-measure: rebuilding, measured before stage2' line, see ${root}/run4.log"
+  fi
+
+  local after_hash
+  after_hash="$(binary_hash "$baseline")"
+  [[ "$before_hash" != "$after_hash" ]] && pass "stage1-measure was measured again" \
+    || fail_test "stage1-measure was reused although stage2 was measured after it"
+
+  [[ -f "$root/build/bootstrap/gates/G4.json" ]] && pass "G4.json was written" \
+    || fail_test "G4.json is missing, see ${root}/run4.log"
+
+  rm -rf "$root"
+}
+
+# Test 15: a baseline built by a previous stage1 does not measure the current
+# one. Rebuilding stage1 makes both stage2 and the baseline stale, and G4
+# rebuilds both instead of comparing two measurements of older compilers.
+test_gate_g4_rebuilds_a_baseline_from_another_stage1() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: gate-g4 rebuilds a baseline built by another stage1"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
+  run_gate_g4 "$root" "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1
+
+  local stage2_before
+  stage2_before="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run3.log" 2>&1
+  run_gate_g4 "$root" "$root/bin/ignis-stage0" >"$root/run4.log" 2>&1
+
+  if grep -q 'stage2: rebuilding, compiler identity changed' "$root/run4.log"; then
+    pass "stage2 rebuilt against the new stage1"
+  else
+    fail_test "no 'stage2: rebuilding, compiler identity changed' line, see ${root}/run4.log"
+  fi
+
+  local stage2_after
+  stage2_after="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
+  [[ "$stage2_before" != "$stage2_after" ]] && pass "stage2 was recreated" \
+    || fail_test "gate-g4 measured a stage2 built by the previous stage1"
+
+  if grep -q 'stage1-measure: rebuilding, compiler identity changed' "$root/run4.log"; then
+    pass "stage1-measure rebuilt with reason 'compiler identity changed'"
+  else
+    fail_test "no 'stage1-measure: rebuilding, compiler identity changed' line, see ${root}/run4.log"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 16: a gate-g4 rerun over an unchanged tree reuses both measurements,
+# which were taken back to back by the first run.
+test_gate_g4_reuses_a_current_baseline() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: gate-g4 reuses a baseline measured after the current stage2"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
+  run_gate_g4 "$root" "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1
+
+  local before_hash
+  before_hash="$(binary_hash "$root/build/bootstrap/stage1-measure/ignis")"
+
+  run_gate_g4 "$root" "$root/bin/ignis-stage0" >"$root/run3.log" 2>&1
+
+  if grep -q 'rebuilding' "$root/run3.log"; then
+    fail_test "an unchanged gate-g4 rerun rebuilt a stage, see ${root}/run3.log"
+  else
+    pass "nothing was rebuilt"
+  fi
+
+  local after_hash
+  after_hash="$(binary_hash "$root/build/bootstrap/stage1-measure/ignis")"
+  [[ "$before_hash" == "$after_hash" ]] && pass "stage1-measure was reused" \
+    || fail_test "stage1-measure was measured again on an unchanged tree"
+
+  rm -rf "$root"
+}
+
 test_fresh_build_writes_stamp
 test_unchanged_state_reuses
 test_source_change_rebuilds
@@ -914,6 +1041,9 @@ test_gate_job_reuses_with_recorded_stage0_identity
 test_gate_job_tampered_stamp_still_refuses
 test_source_change_detected_inside_an_outer_git_repo
 test_source_change_detected_via_git_toplevel
+test_gate_g4_remeasures_a_baseline_older_than_stage2
+test_gate_g4_rebuilds_a_baseline_from_another_stage1
+test_gate_g4_reuses_a_current_baseline
 
 echo
 echo "${TESTS_RUN} test(s) run, ${FAILURES} failure(s)"

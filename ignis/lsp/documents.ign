@@ -8,7 +8,7 @@ import Vector from "std::vector";
 
 import SourceOverrides from "../build/sources";
 
-import analysisKeyOf from "./analysis";
+import analysisKeyOf, isProjectFilePath from "./analysis";
 import filePathFromUri from "./uri";
 
 /// One open document.
@@ -38,8 +38,8 @@ export function documentPathFromUri(uri: &String): Option<Path::PathBuf> {
   };
 }
 
-/// True when `path` names an Ignis source file, the only kind of document
-/// analysis reads or starts from.
+/// True when `path` names an Ignis source file, which analysis reads and
+/// starts from.
 export function isIgnisSourcePath(path: &Path::PathBuf): boolean {
   let pathText: String = path.toString();
   return pathText.endsWith(".ign");
@@ -184,15 +184,15 @@ export record DocumentStore {
     return Option::NONE;
   }
 
-  /// The text of every open `.ign` document, keyed by its path, for analysis
-  /// to read instead of the disk.
+  /// The text of every open `.ign` document and project file, keyed by its
+  /// path, for analysis to read instead of the disk.
   public sourceOverrides(&self): SourceOverrides {
     let mut overrides: SourceOverrides = SourceOverrides::none();
     let mut index: u64 = 0;
 
     while (index < self.documents.length()) {
       if (let Option::SOME(document) = self.documents.get(index)) {
-        if (isIgnisSourcePath(&document.path)) {
+        if (isIgnisSourcePath(&document.path) || isProjectFilePath(&document.path)) {
           overrides.set(&document.path, &document.text);
         }
       }
