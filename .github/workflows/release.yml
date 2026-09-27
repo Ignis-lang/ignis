@@ -23,6 +23,10 @@ jobs:
   build:
     name: Build linux-amd64
     runs-on: ubuntu-latest
+    # The nightly ladder job's budget: this job runs the same three
+    # self-compilations, and a hang in one would otherwise hold the runner for
+    # the six-hour default.
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -32,7 +36,9 @@ jobs:
       # ladder builds it: stage0 is the promoted official binary while its
       # promotion streak holds, else a compiler built from the C seed
       # (scripts/resolve_official_stage0.sh), and stage2 is `ignis/` compiled
-      # by the stage1 that stage0 built.
+      # by the stage1 that stage0 built. Unlike the rolling nightly, a release
+      # also requires the fixed point: `all` builds stage3 with stage2 and
+      # fails unless their emitted C is identical (G1).
       - name: Resolve stage0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,7 +46,13 @@ jobs:
         run: scripts/resolve_official_stage0.sh
 
       - name: Build Ignis
-        run: scripts/bootstrap.sh stage2
+        run: scripts/bootstrap.sh all
+
+      - name: Require the fixed point (G1)
+        run: |
+          set -euo pipefail
+          jq -r '"G1: \(.status) — \(.summary)"' build/bootstrap/gates/G1.json
+          jq -e '.status == "pass"' build/bootstrap/gates/G1.json >/dev/null
 
       - name: Create package
         run: |
