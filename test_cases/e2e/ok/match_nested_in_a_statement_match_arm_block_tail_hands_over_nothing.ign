@@ -1,0 +1,34 @@
+// e2e: std
+//
+// The discarded result position of a statement-position match reaches through an arm's
+// block tail: a match that ends such a block is discarded too, so an arm of it naming an
+// owning parameter hands the value to nobody and the parameter keeps its drop.
+import String from "std::string";
+
+enum Tri {
+  A,
+  B,
+}
+
+function drain(outer: Tri, inner: Tri, one: String, two: String, three: String): void {
+  match (outer) {
+    Tri::A -> {
+      let depth: i32 = 1;
+      match (inner) {
+        Tri::A -> one,
+        Tri::B -> two,
+      }
+    },
+    Tri::B -> three,
+  };
+
+  return;
+}
+
+function main(): i32 {
+  drain(Tri::A, Tri::A, String::create("one"), String::create("two"), String::create("three"));
+  drain(Tri::A, Tri::B, String::create("one"), String::create("two"), String::create("three"));
+  drain(Tri::B, Tri::A, String::create("one"), String::create("two"), String::create("three"));
+
+  return 0;
+}
