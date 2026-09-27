@@ -96,9 +96,18 @@ function lexemeAt(source: &String, offset: u64): String {
 /// lexeme of each token, as the host's `classify_source` test helper does
 /// (crates/ignis_lsp/src/semantic.rs:576).
 function classifySource(source: str): Vector<ClassifiedToken> {
-  let text: String = String::create(source);
   let identifiers: HashMap<u64, IdentifierClass> = noIdentifiers();
-  let data: Vector<u64> = semanticTokenData(&text, &identifiers);
+  return classifySourceWith(source, &identifiers);
+}
+
+/// Classifies `source` with the identifier classes `identifiers` and returns
+/// the type and lexeme of each token.
+function classifySourceWith(
+  source: str,
+  identifiers: &HashMap<u64, IdentifierClass>
+): Vector<ClassifiedToken> {
+  let text: String = String::create(source);
+  let data: Vector<u64> = semanticTokenData(&text, identifiers);
   let lineIndex: Text::LineIndex = Text::LineIndex::create(text.clone());
   let mut result: Vector<ClassifiedToken> = Vector::new<ClassifiedToken>();
   let mut line: u64 = 0;
@@ -223,20 +232,35 @@ function atomTypeKeywordIsClassifiedAsAType(): void {
 
 @test
 function atClassificationDoesNotLeakToTheNextLine(): void {
-  let result: Vector<ClassifiedToken> = classifySource("@packed\nfoo");
+  let mut identifiers: HashMap<u64, IdentifierClass> = noIdentifiers();
+  let variable: SemanticClass = SemanticClass { tokenType: SEMANTIC_VARIABLE, modifiers: 0 };
+  identifiers.insert(8, IdentifierClass { end: 11, class: variable });
 
-  if (let Option::SOME(tokenType) = typeOfLexeme(&result, "foo")) {
-    Test::assertNe<u64>(tokenType, SEMANTIC_FUNCTION);
-  }
+  let result: Vector<ClassifiedToken> = classifySourceWith("@packed\nfoo", &identifiers);
+  Test::assertEq<u64>(typeOfLexeme(&result, "packed").unwrap(), SEMANTIC_KEYWORD);
+  Test::assertEq<u64>(typeOfLexeme(&result, "foo").unwrap(), SEMANTIC_VARIABLE);
 }
 
 @test
-function literalsTakeTheLengthOfTheHostLexeme(): void {
-  Test::assertEq<str>(encodedData("\"héllo 😀\"").toStr(), "0 0 8 15 0");
-  Test::assertEq<str>(encodedData("\"a\\nb\"").toStr(), "0 0 3 15 0");
-  Test::assertEq<str>(encodedData("'a'").toStr(), "0 0 2 16 0");
-  Test::assertEq<str>(encodedData("1_000").toStr(), "0 0 4 16 0");
+function literalsTakeTheLengthOfTheirSourceText(): void {
+  Test::assertEq<str>(encodedData("\"héllo 😀\"").toStr(), "0 0 10 15 0");
+  Test::assertEq<str>(encodedData("\"é€😀\"").toStr(), "0 0 6 15 0");
+  Test::assertEq<str>(encodedData("\"a\\nb\\u{20AC}\"").toStr(), "0 0 14 15 0");
+  Test::assertEq<str>(encodedData("'a'").toStr(), "0 0 3 16 0");
+  Test::assertEq<str>(encodedData("'€'").toStr(), "0 0 3 16 0");
+  Test::assertEq<str>(encodedData("1_000").toStr(), "0 0 5 16 0");
+  Test::assertEq<str>(encodedData("`a${x}b`").toStr(), "0 0 4 15 0|0 5 3 15 0");
+}
+
+@test
+function aSignedNumberIsOneTokenOverTheSignAndTheDigits(): void {
   Test::assertEq<str>(encodedData("x -1 - 2").toStr(), "0 2 2 16 0|0 3 1 17 0|0 2 1 16 0");
+  Test::assertEq<str>(encodedData("-1_000").toStr(), "0 0 6 16 0");
+}
+
+@test
+function aMultiLineTemplateIsOneTokenOverItsSourceText(): void {
+  Test::assertEq<str>(encodedData("`a\nbé`;\nlet").toStr(), "0 0 6 15 0|2 0 3 12 0");
 }
 
 @test

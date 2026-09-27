@@ -18,8 +18,6 @@ import SourceFile from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
 import Keyword, LiteralKind, Punctuation, Token, TokenKind from "@compiler::syntax";
 
-import ParserShared from "../parser/shared";
-
 import AtItem, allAtItems from "./at_items";
 
 /// Token type indices, in the order of the legend
@@ -304,69 +302,6 @@ function utf16Length(text: &String, start: u64, end: u64): u64 {
   return units;
 }
 
-function stringLength(text: &String): u64 {
-  return utf16Length(text, 0, text.length());
-}
-
-function decodedLength(text: String): u64 {
-  let decoded: String = ParserShared::decodeEscapes(text);
-  return stringLength(&decoded);
-}
-
-/// The number of digits of `value` in decimal.
-function decimalDigits(value: u64): u64 {
-  let mut digits: u64 = 1;
-  let mut rest: u64 = value / 10;
-
-  while (rest > 0) {
-    digits += 1;
-    rest = rest / 10;
-  }
-
-  return digits;
-}
-
-/// The number of bytes of `lexeme` that are not a `_` digit separator.
-function digitsLength(lexeme: &String): u64 {
-  let mut length: u64 = 0;
-  let mut index: u64 = 0;
-
-  while (index < lexeme.length()) {
-    if (lexeme.byteAt(index).unwrapOr(0) != '_' as u8) {
-      length += 1;
-    }
-
-    index += 1;
-  }
-
-  return length;
-}
-
-/// The length the host gives a literal: that of its lexeme, which is the
-/// decoded text of a string or template chunk, the decimal code point of a
-/// character, and a number without its `_` separators
-/// (crates/ignis_parser/src/lexer/mod.rs:728).
-function literalLength(token: &Token): u64 {
-  let lexeme: String = token.lexemeString();
-
-  return match (token.literalKindValue()) {
-    LiteralKind::STRING -> decodedLength(ParserShared::stripQuotes(&lexeme)),
-    LiteralKind::TEMPLATE_NO_SUBSTITUTION -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 1 as u64)),
-    LiteralKind::TEMPLATE_HEAD -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 2 as u64)),
-    LiteralKind::TEMPLATE_MIDDLE -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 2 as u64)),
-    LiteralKind::TEMPLATE_TAIL -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 1 as u64)),
-    LiteralKind::CHAR -> {
-      return match (ParserShared::parseCharacterLiteral(&lexeme)) {
-        Option::SOME(value) -> decimalDigits((value as u32) as u64),
-        Option::NONE -> stringLength(&lexeme),
-      };
-    },
-    LiteralKind::INTEGER -> digitsLength(&lexeme),
-    LiteralKind::FLOAT -> digitsLength(&lexeme),
-    _ -> stringLength(&lexeme),
-  };
-}
-
 function literalClass(literalKind: LiteralKind): SemanticClass {
   return match (literalKind) {
     LiteralKind::STRING -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
@@ -446,15 +381,11 @@ function tokenClass(
   };
 }
 
-/// The length the host gives `token`: that of its lexeme in UTF-16 units. A
-/// multi-line comment or string keeps one token over all of its lines.
-function tokenLength(token: &Token): u64 {
-  if (token.kindValue() == TokenKind::LITERAL) {
-    return literalLength(token);
-  }
-
-  let lexeme: String = token.lexemeString();
-  return stringLength(&lexeme);
+/// The length of `token` in `text`: that of its source text in UTF-16 units,
+/// quotes, escapes and `_` separators included. A multi-line comment or
+/// string keeps one token over all of its lines.
+function tokenLength(text: &String, token: &Token): u64 {
+  return utf16Length(text, token.spanStart(), token.spanEnd());
 }
 
 /// The classified tokens of `text`, in source order.
@@ -478,7 +409,7 @@ function classifyTokens(
     if (let Option::SOME(next) = lexed.tokens.get(index)) {
       if (isNumberSign(token, next)) {
         let number: SemanticClass = SemanticClass { tokenType: SEMANTIC_NUMBER, modifiers: 0 };
-        classified.push(AbsoluteToken { start: token.spanStart(), length: 1 + literalLength(next), class: number });
+        classified.push(AbsoluteToken { start: token.spanStart(), length: utf16Length(text, token.spanStart(), next.spanEnd()), class: number });
         afterAt = false;
         index += 1;
         continue;
@@ -492,7 +423,7 @@ function classifyTokens(
     }
 
     if (let Option::SOME(class) = tokenClass(token, afterAt, identifiers)) {
-      classified.push(AbsoluteToken { start: token.spanStart(), length: tokenLength(token), class: class });
+      classified.push(AbsoluteToken { start: token.spanStart(), length: tokenLength(text, token), class: class });
     }
 
     if (!isComment(kind)) {

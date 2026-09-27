@@ -1089,12 +1089,11 @@ class LanguageServerTest(unittest.TestCase):
     self.assert_token(tokens, source, "packed", 12)
     self.assert_token(tokens, source, "sizeOf", 10)
     self.assert_token(tokens, source, "<i64", 17, length=1)
-    # The host's length of a string is that of its decoded text, without the
-    # quotes, and of a character that of its decimal code point, 233.
-    self.assert_token(tokens, source, '"./util"', 15, length=6)
-    self.assert_token(tokens, source, '"héllo 😀"', 15, length=8)
-    self.assert_token(tokens, source, "`two", 15, length=9)
-    self.assert_token(tokens, source, "'é'", 16, length=3)
+    # A literal covers its source text, quotes included.
+    self.assert_token(tokens, source, '"./util"', 15)
+    self.assert_token(tokens, source, '"héllo 😀"', 15)
+    self.assert_token(tokens, source, "`two\nlines`", 15)
+    self.assert_token(tokens, source, "'é'", 16)
     self.assert_token(tokens, source, "-1", 16)
     self.assert_token(tokens, source, "0x1F", 16)
     self.assert_token(tokens, source, "+=", 17)
