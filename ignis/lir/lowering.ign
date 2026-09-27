@@ -1536,7 +1536,10 @@ export namespace LirLowering {
         // A discarded value of an owning type is nobody else's to free, and the
         // statement is the last point at which anything can own it.
         let innerValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
-        LirLowering::dropStatementValue(defStore, typeStore, function_, state, innerValue, innerType);
+
+        if (LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, innerId)) {
+          LirLowering::dropStatementValue(defStore, typeStore, function_, state, Lir::copyOperand(&innerValue), innerType);
+        }
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
@@ -3870,6 +3873,37 @@ export namespace LirLowering {
     return false;
   }
 
+  /// Whether the value `nodeId` evaluates to is this function's to free once it is
+  /// discarded. A block yields its tail. A dereference, an element or static read, a
+  /// field read through a reference or out of a borrowed pattern binding, and a borrowed
+  /// pattern binding itself all name storage whose owner still drops it.
+  function discardedValueIsOwned(
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    nodeId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hirStore.get(nodeId) else {
+      return true;
+    };
+
+    if (let Hir::HirKind::Block(block) = &node.kind) {
+      if (let Option::SOME(tail) = block.expression) {
+        return LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, tail);
+      }
+
+      return true;
+    }
+
+    if (let Option::SOME(root) = Borrowck::assignTargetRootLocal(hirStore, nodeId)) {
+      if (dropSchedules.isBorrowedPatternBinding(root)) {
+        return false;
+      }
+    }
+
+    return LirLowering::matchOwnsScrutinee(typeStore, hirStore, dropSchedules, nodeId);
+  }
+
   /// Whether the node names a pattern binding destructured out of a reference
   /// scrutinee. Its bytes are the referent's, so the borrow checker never
   /// consumes it and a match over it owns none of them. Mirrors
@@ -4182,7 +4216,7 @@ export namespace LirLowering {
       // A match that produces no value discards each arm's value, so an owned
       // temporary an arm evaluates to is freed here, the way an expression
       // statement frees its own. A named value is left to its schedule.
-      if (bodyLive && !hasResult) {
+      if (bodyLive && !hasResult && LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, arm.body)) {
         let mut bodyType: Analyzer::TypeId = nodeType;
 
         if (let Option::SOME(bodyNode) = hirStore.get(arm.body)) {
