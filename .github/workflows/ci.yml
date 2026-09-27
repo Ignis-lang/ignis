@@ -126,18 +126,17 @@ jobs:
           fetch-depth: 0
 
       # Pure bash/python against fake compiler binaries, so it needs neither
-      # Rust nor a built `ignis` — runs before either is set up. Covers
-      # scripts/bootstrap.sh's stage0 fallback (build_stage1 rebuilding stage1
-      # with the host compiler when an official/selfhost stage0 fails), which
-      # nightly.yml's ladder otherwise only exercises when a published
-      # selfhost binary actually goes stale, `ensure_stage`'s staleness stamps
-      # (IGN-210: a gate must not silently report results for a stage binary
-      # whose sources or stage0/host compiler changed since it was built),
-      # plus bootstrap_report.py's promotion `candidate` verdict (G7's own
-      # gate/report code path).
-      - name: Test the bootstrap stage0 fallback, stage stamps and promotion report
+      # Rust nor a built `ignis` — runs before either is set up. Covers how
+      # scripts/bootstrap.sh and scripts/resolve_official_stage0.sh pick
+      # stage0 (the official binary or the C seed, never the host, and a
+      # stage0 that cannot build stage1 is terminal), `ensure_stage`'s
+      # staleness stamps (IGN-210: a gate must not silently report results
+      # for a stage binary whose sources or stage0 changed since it was
+      # built), plus bootstrap_report.py's promotion `candidate` verdict
+      # (G7's own gate/report code path).
+      - name: Test the bootstrap stage0 selection, stage stamps and promotion report
         run: |
-          scripts/tests/test_stage0_fallback.sh
+          scripts/tests/test_stage0.sh
           scripts/tests/test_stage_stamps.sh
           scripts/tests/test_build_from_seed.sh
           scripts/tests/test_baseline_churn_report.sh
@@ -227,13 +226,6 @@ jobs:
       - name: Check every G6 case has a parse-verdict baseline
         run: python3 scripts/selfhost_syntax_parity.py --check-coverage
 
-      # The host parser unit-test snippets are committed under
-      # test_cases/parser/host_unit_tests because their Rust sources go away at
-      # the cut. Until then a parser test added or changed without
-      # re-materializing them would leave G6 checking stale sources.
-      - name: Check the committed parser unit-test snippets match the Rust sources
-        run: python3 scripts/selfhost_syntax_parity.py --check-parser-tests
-
       # Regenerating the baselines is one command, which makes it the easy way
       # to turn a red gate green, and nobody reads 700 generated files in a
       # diff. This puts the churn in the job summary, where the reviewer sees
@@ -246,7 +238,8 @@ jobs:
             "origin/${{ github.base_ref }}" \
             test_cases/e2e/ok/__drop_schedules__ \
             test_cases/__parse_verdicts__ \
-            test_cases/parser/host_unit_tests
+            test_cases/parser/host_unit_tests \
+            test_cases/doc/__doc_baselines__
 
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -275,25 +268,27 @@ jobs:
       # this job untouched and still broke the nightly ladder: the selfhost
       # test suite failed to even link under a selfhost-built binary (G3), and
       # stage2 panicked on two error-corpus cases (G5) — neither surfaced
-      # until the nightly ran hours later. stage1 (this binary compiling
+      # until the nightly ran hours later. stage1 (stage0 compiling
       # `ignis/main.ign` once) is the cheapest selfhost binary that exercises
       # the same code paths, so PRs get it instead of stage2/stage3 or the
       # rest of the ladder (G1/G2/G4/G6), which stay nightly-only. G7 joined
       # the PR set once its baselines were committed: it needs no host oracle
       # and no stage2, so stage1 answers it in about two minutes. G6 has
       # committed baselines too, but every one of its cases is a full compile
-      # and link, so only its compiler-free coverage and snippet checks run on
-      # PRs (above).
-      - name: Build stage1 with the host compiler
-        env:
-          IGNIS_STAGE0: ${{ github.workspace }}/target/ci/ignis
-        run: scripts/bootstrap.sh stage1
+      # and link, so only its compiler-free coverage check runs on PRs
+      # (above).
+      #
+      # stage0 is built from the committed C seed with gcc alone, so this
+      # stage1 never depends on the Rust host or on a network download. The
+      # official binary gets its own check in `official-stage0-gate` below.
+      - name: Build stage1 from the C seed
+        run: scripts/bootstrap.sh stage1-from-seed
 
       # `ignis doc` publishes the API package the release ships, so stage1's
-      # has to match the host's byte for byte on the release target, every std
-      # module entry and the doc_command.rs programs.
-      - name: Compare stage1's ignis doc output with the host's
-        run: python3 scripts/selfhost_doc_parity.py --compiler build/bootstrap/stage1/ignis --host "${GITHUB_WORKSPACE}/target/ci/ignis"
+      # has to match the committed baselines byte for byte on the release
+      # target and the former doc_command.rs programs.
+      - name: Compare stage1's ignis doc output with the committed baselines
+        run: python3 scripts/selfhost_doc_parity.py --compiler build/bootstrap/stage1/ignis
 
       # The same standard library suite as above, run by stage1, so the std
       # tests keep a runner once the host compiler is retired.
@@ -407,18 +402,18 @@ jobs:
 
   # The two-step rule: a language change may only be USED in ignis/ or std/
   # after compiler support for it has been promoted to the official selfhost
-  # binary. Today `scripts/bootstrap.sh`'s stage1 falls back from a failing
-  # official stage0 to the host compiler (build_stage1_with_host), so a PR
-  # that lands a language feature together with its first use in the
-  # compiler's own sources still passes `selfhost` above — the host always
-  # builds it — and the violation only surfaces on the nightly ladder, hours
-  # later, against the still-unpromoted official binary. See BOOTSTRAP.md.
+  # binary. `selfhost` above builds stage1 from the C seed, so a PR that lands
+  # a language feature together with its first use in the compiler's own
+  # sources can pass it while the official binary, which the nightly ladder
+  # starts from, cannot build that stage1. See BOOTSTRAP.md.
   #
   # This job reproduces exactly that one check on the PR itself: resolve the
   # current official asset (scripts/resolve_official_stage0.sh, the same
-  # logic nightly.yml's "Resolve stage0" step runs) and build stage1 with it
-  # alone, fallback disabled. It needs no Rust toolchain: the official binary
-  # already exists, and linking its output only needs the runner's gcc.
+  # logic nightly.yml's "Resolve stage0" step runs) and build stage1 with it.
+  # A failing official stage0 is terminal in scripts/bootstrap.sh, and its
+  # message names the two-step rule. It needs no Rust toolchain: the official
+  # binary already exists, and linking its output only needs the runner's
+  # gcc.
   #
   # A fresh fork or a repository whose promotion streak has not yet reached 3
   # has no official asset to check against — that is not a violation, it is
@@ -470,12 +465,10 @@ jobs:
       # the compiler (the official binary lacking a fix the sources now rely
       # on) only shows up when it runs. #264 passed the stage1-only gate and
       # broke the nightly exactly that way.
-      - name: Build stage1 with the official compiler, then stage2 with it (fallback disabled)
+      - name: Build stage1 with the official compiler, then stage2 with it
         id: build
         if: steps.stage0.outputs.resolved == 'true'
         continue-on-error: true
-        env:
-          IGNIS_STAGE0_NO_FALLBACK: "1"
         run: |
           scripts/bootstrap.sh stage1
           scripts/bootstrap.sh stage2
