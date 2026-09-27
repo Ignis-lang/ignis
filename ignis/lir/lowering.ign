@@ -4145,6 +4145,20 @@ export namespace LirLowering {
       let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, arm.body);
 
       let bodyLive: boolean = !state.terminated;
+
+      // A match that produces no value discards each arm's value, so an owned
+      // temporary an arm evaluates to is freed here, the way an expression
+      // statement frees its own. A named value is left to its schedule.
+      if (bodyLive && !hasResult) {
+        let mut bodyType: Analyzer::TypeId = nodeType;
+
+        if (let Option::SOME(bodyNode) = hirStore.get(arm.body)) {
+          bodyType = bodyNode.typeId;
+        }
+
+        LirLowering::dropStatementValue(defStore, typeStore, function_, state, Lir::copyOperand(&bodyValue), bodyType);
+      }
+
       LirLowering::storeResult(typeStore, function_, state, hasResult && bodyLive, resultSlot, bodyValue);
 
       if (bodyLive) {

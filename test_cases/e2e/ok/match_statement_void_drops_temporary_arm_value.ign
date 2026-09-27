@@ -1,0 +1,50 @@
+// e2e: std
+//
+// A match in statement position produces no value, so the value each arm evaluates to is
+// discarded. An owned temporary an arm builds, or the stored result of a match nested in
+// the arm, belongs to nobody else and is dropped at the arm end, the way an expression
+// statement drops its own. Discarding it without a drop leaked it.
+import Io from "std::io";
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function make(id: i32): Option<Tracked> {
+  return Option::SOME(Tracked { id: id });
+}
+
+function temporaryArm(source: Option<Tracked>, fallback: i32): void {
+  match (source) {
+    Option::SOME(tracked) -> tracked,
+    Option::NONE -> Tracked { id: fallback },
+  };
+
+  Io::println(`after temporary ${fallback}`.toStr());
+}
+
+function nestedArm(outer: boolean): void {
+  match (outer) {
+    true -> match (make(1)) {
+      Option::SOME(tracked) -> tracked,
+      Option::NONE -> Tracked { id: 10 },
+    },
+    false -> {},
+  };
+
+  Io::println("after nested");
+}
+
+function main(): i32 {
+  temporaryArm(Option::SOME(Tracked { id: 5 }), 50);
+  temporaryArm(Option::NONE, 60);
+  nestedArm(true);
+
+  return 0;
+}
