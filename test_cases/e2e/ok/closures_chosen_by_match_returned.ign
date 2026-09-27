@@ -1,0 +1,21 @@
+// A closure chosen by a `match` and returned through a binding leaves the frame
+// that built it, so every arm's environment is heap-allocated and owned by the
+// binding: its drop is cancelled on return and the caller's binding frees it.
+function pick(flag: boolean, a: i32, b: i32): (i32) -> i32 {
+    let chosen = match (flag) {
+        true -> (x: i32): i32 -> x + a,
+        false -> {
+            let scale: i32 = b * 2;
+            (x: i32): i32 -> x * scale
+        },
+    };
+
+    return chosen;
+}
+
+function main(): i32 {
+    let add = pick(true, 40, 7);
+    let double = pick(false, 9, 1);
+
+    return add(0) + double(1);
+}

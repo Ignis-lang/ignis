@@ -1,0 +1,42 @@
+// e2e: std
+// A comparator closure passed to `Vector::sort` captures a `&Vector<i32>`. The
+// capture's environment type names a generic instance, so monomorphization has
+// to concretize it like every other type in the closure.
+import Vector from "std::vector";
+
+function main(): i32 {
+    let mut order: Vector<i32> = Vector::new<i32>();
+    order.push(2);
+    order.push(0);
+    order.push(1);
+
+    let mut keys: Vector<i32> = Vector::new<i32>();
+    keys.push(30);
+    keys.push(10);
+    keys.push(20);
+
+    let keysRef: &Vector<i32> = &keys;
+
+    order.sort((a: &i32, b: &i32): i32 -> {
+        let Option::SOME(keyA) = keysRef.get(*a as u64) else {
+            return 0;
+        };
+        let Option::SOME(keyB) = keysRef.get(*b as u64) else {
+            return 0;
+        };
+
+        return *keyA - *keyB;
+    });
+
+    let Option::SOME(first) = order.get(0) else {
+        return 99;
+    };
+    let Option::SOME(middle) = order.get(1) else {
+        return 99;
+    };
+    let Option::SOME(last) = order.get(2) else {
+        return 99;
+    };
+
+    return *first * 100 + *middle * 10 + *last;
+}

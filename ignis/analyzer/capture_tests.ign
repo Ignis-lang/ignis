@@ -123,3 +123,113 @@ function captureAcceptsRefCaptureThroughANoescapeParameter(): void {
 
   Test::assertEq<u64>(captureCountErrors(&bag), 0);
 }
+
+/// Run `source` through parse, analysis, HIR lowering and capture analysis,
+/// then answer whether the `let` binding named `bindingName` owns the closure
+/// environment its initializer produces, as `Hir::bindingOwnsClosureEnv` decides.
+function captureLetOwnsClosureEnv(source: str, bindingName: str): boolean {
+  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(captureCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let captureBag: DiagnosticBag = Capture::populateClosureCaptures(&mut defStore, &mut typeStore, &mut symbols, &mut hir);
+  Test::assertEq<u64>(captureCountErrors(&captureBag), 0);
+
+  let expectedName: String = String::create(bindingName);
+  let mut nodeIndex: u64 = 0;
+
+  while (nodeIndex < hir.nodes.length()) {
+    let mut letName: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut letValue: Option<Hir::HirId> = Option::NONE;
+
+    if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+      if (let Hir::HirKind::Let(letNode) = &node.kind) {
+        letName = Option::SOME(letNode.name);
+        letValue = letNode.value;
+      }
+    }
+
+    if (let Option::SOME(nameDef) = letName) {
+      if (let Option::SOME(valueId) = letValue) {
+        let mut matchesName: boolean = false;
+        let mut valueType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(definition) = defStore.get(nameDef)) {
+          if (let Option::SOME(resolved) = symbols.resolve(definition.name())) {
+            matchesName = expectedName.equals(resolved);
+          }
+
+          if (let Analyzer::Definition::Variable(variableDef) = definition) {
+            valueType = Option::SOME(variableDef.declaredType);
+          }
+        }
+
+        if (matchesName) {
+          let Option::SOME(declaredType) = valueType else {
+            @panic("captureLetOwnsClosureEnv: the binding is not a variable");
+          };
+
+          return Hir::bindingOwnsClosureEnv(&hir, valueId, declaredType, &mut typeStore, &mut defStore);
+        }
+      }
+    }
+
+    nodeIndex += 1;
+  }
+
+  @panic("captureLetOwnsClosureEnv: no let binding with the expected name");
+}
+
+/// Scenario: every arm of the `match` is a closure literal, so the binding
+/// that receives the chosen closure owns its environment.
+@test
+function captureBindingOwnsClosureChosenByMatchOfLiterals(): void {
+  Test::assert(captureLetOwnsClosureEnv(
+    "function pick(flag: boolean, a: i32): (i32) -> i32 {\n  let chosen = match (flag) {\n    true -> (x: i32): i32 -> x + a,\n    false -> (x: i32): i32 -> x - a,\n  };\n  return chosen;\n}\n",
+    "chosen",
+  ));
+}
+
+/// Scenario: one arm diverges and the other is a closure literal. The
+/// diverging arm produces no value, so the binding still owns the environment.
+@test
+function captureBindingOwnsClosureChosenBesideADivergingArm(): void {
+  Test::assert(captureLetOwnsClosureEnv(
+    "function pick(flag: i32, a: i32): (i32) -> i32 {\n  let chosen = match (flag) {\n    0 -> (x: i32): i32 -> x + a,\n    _ -> {\n      return (x: i32): i32 -> x - a;\n    },\n  };\n  return chosen;\n}\n",
+    "chosen",
+  ));
+}
+
+/// Scenario: one arm yields an existing closure binding and the other a
+/// literal. The existing binding already owns its environment, so the chosen
+/// binding must not claim it too, which would free it twice.
+@test
+function captureBindingDoesNotOwnClosureMixedWithAnExistingBinding(): void {
+  Test::assert(!captureLetOwnsClosureEnv(
+    "function pick(flag: boolean, a: i32): (i32) -> i32 {\n  let existing = (x: i32): i32 -> x + a;\n  let chosen = match (flag) {\n    true -> existing,\n    false -> (x: i32): i32 -> x - a,\n  };\n  return chosen;\n}\n",
+    "chosen",
+  ));
+}

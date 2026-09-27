@@ -1122,9 +1122,16 @@ export namespace Mono {
   /// Carries a closure's environment layout across the clone. Capture analysis
   /// runs before monomorphization, so the cloned closure keeps the layout it
   /// was given, with every source definition remapped like the body that reads
-  /// it.
+  /// it. Each capture's environment type is substituted and concretized like
+  /// every other type the clone carries, so a generic instance it names, such
+  /// as the `Vector<T>` behind a captured `&Vector<T>`, reaches codegen as its
+  /// concrete record.
   function copyCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     state: &mut MonoState,
+    subst: &Mono::SubstTable,
     source: &Vector<Hir::HirCapture>,
   ): Vector<Hir::HirCapture> {
     let mut result: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
@@ -1136,7 +1143,7 @@ export namespace Mono {
           sourceDef: Mono::remapDef(state, capture.sourceDef),
           fieldIndex: capture.fieldIndex,
           mode: capture.mode,
-          typeInEnv: capture.typeInEnv,
+          typeInEnv: Mono::substituteType(defStore, typeStore, symbols, state, subst, capture.typeInEnv),
         });
       }
 
@@ -2318,7 +2325,7 @@ export namespace Mono {
             params: params,
             returnType: Mono::substituteType(defStore, typeStore, symbols, state, subst, closureNode.returnType),
             body: body,
-            captures: Mono::copyCaptures(state, &closureNode.captures),
+            captures: Mono::copyCaptures(defStore, typeStore, symbols, state, subst, &closureNode.captures),
             escapes: closureNode.escapes,
             thunkDef: closureNode.thunkDef,
             dropDef: closureNode.dropDef,
