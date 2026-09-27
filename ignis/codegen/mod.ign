@@ -39,6 +39,9 @@ export namespace CodegenC {
     public thunk: u32;
     /// Raw type id of each capture, in the order `MakeClosure` writes them.
     public captureTypes: Vector<u32>;
+    /// Raw definition id of the closure's drop function, which reads the
+    /// same environment as the thunk; `NONE` when the closure has none.
+    public dropFn: Option<u32>;
   }
 
   /// What the closure prepass found, so `formatCType` can tell a closure value
@@ -1418,7 +1421,9 @@ export namespace CodegenC {
   }
 
   /// The environment struct name of the function being emitted, when that
-  /// function is a thunk the closure prepass registered an environment for.
+  /// function is a thunk or a drop function the closure prepass registered an
+  /// environment for. A drop function reads the thunk's environment, so it is
+  /// named after the thunk.
   function currentEnvName(
     closures: &CodegenC::ClosureTables,
     defId: Analyzer::DefinitionId,
@@ -1429,6 +1434,12 @@ export namespace CodegenC {
       if (let Option::SOME(env) = closures.envs.get(index)) {
         if (env.thunk == defId.raw()) {
           return Option::SOME(CodegenC::closureEnvName(defId));
+        }
+
+        if (let Option::SOME(dropFnRaw) = env.dropFn) {
+          if (dropFnRaw == defId.raw()) {
+            return Option::SOME(CodegenC::closureEnvName(Id::fromRaw<Analyzer::DefinitionTag>(env.thunk)));
+          }
         }
       }
 
@@ -3047,9 +3058,16 @@ export namespace CodegenC {
                   signatureIndex += 1;
                 }
 
+                let mut dropFnRaw: Option<u32> = Option::NONE;
+
+                if (let Option::SOME(dropFn) = node.dropFn) {
+                  dropFnRaw = Option::SOME(dropFn.raw());
+                }
+
                 tables.envs.push(CodegenC::ClosureEnv {
                   thunk: node.thunk.raw(),
                   captureTypes: captureTypes,
+                  dropFn: dropFnRaw,
                 });
               }
 

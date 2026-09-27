@@ -1157,7 +1157,9 @@ export namespace Mono {
   /// generic body the closure sits in. The environment parameter is cloned
   /// under `subst`, the remaining parameters are `closureParams` (the clone's
   /// own), and `bodyId` is the already cloned body, so the function reads the
-  /// same definitions as the closure it belongs to.
+  /// same definitions as the closure it belongs to. The name carries the
+  /// substitution's mangled type arguments (`__closure_thunk_0__i32`), the
+  /// suffix the enclosing function's instantiation gets.
   function instantiateClosureFunction(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1186,9 +1188,21 @@ export namespace Mono {
       }
     }
 
-    let Option::SOME(functionName) = name else {
-      return originalDef;
+    let Option::SOME(baseName) = name else {
+      @panic("instantiateClosureFunction: closure thunk or drop definition is not a function — invariant broken");
     };
+
+    let mut baseText: String = String::new();
+
+    if (let Option::SOME(text) = symbols.resolve(baseName)) {
+      baseText = String::create(text);
+    }
+
+    let suffix: String = Mono::joinMangledTypes(defStore, typeStore, symbols, state, &subst.args, "__");
+    let mangled: String = baseText.concat("__").concat(suffix.toStr());
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let functionName: Analyzer::SymbolId = symbolsRef.intern(mangled.toStr());
 
     let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
 
@@ -2410,11 +2424,15 @@ export namespace Mono {
 
             if (let Option::SOME(dropId) = closureNode.dropDef) {
               let noParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-              let mut dropBody: Hir::HirId = body;
 
-              if (let Option::SOME(inputDropBody) = inputHir.functionBodies.get(dropId)) {
-                dropBody = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, inputDropBody);
-              }
+              // Capture analysis registers a body with every drop function it
+              // creates, so a missing one is a broken invariant rather than a
+              // closure without a drop function.
+              let Option::SOME(inputDropBody) = inputHir.functionBodies.get(dropId) else {
+                @panic("cloneHir: closure drop function has no body — invariant broken");
+              };
+
+              let dropBody: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, inputDropBody);
 
               dropDef = Option::SOME(Mono::instantiateClosureFunction(defStore, typeStore, symbols, outputHir, state, subst, dropId, &noParams, dropBody));
             }
