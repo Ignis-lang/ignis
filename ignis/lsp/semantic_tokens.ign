@@ -1,0 +1,572 @@
+//! Semantic highlighting: the tokens of a document classified by the host's
+//! legend (crates/ignis_lsp/src/semantic.rs), in the LSP relative encoding.
+//!
+//! Keywords, types, literals, comments and operators come from the lexer, as
+//! the host classifies them (crates/ignis_lsp/src/semantic.rs:152). An
+//! identifier after `@` is a builtin or a directive
+//! (crates/ignis_lsp/src/semantic.rs:290). Any other identifier is
+//! classified only when the caller knows what it names.
+
+import HashMap from "std::collections";
+import JsonObjectEntry, JsonValue from "std::json";
+import String from "std::string";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import SourceFile from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import Keyword, LiteralKind, Punctuation, Token, TokenKind from "@compiler::syntax";
+
+import ParserShared from "../parser/shared";
+
+import AtItem, allAtItems from "./at_items";
+
+/// Token type indices, in the order of the legend
+/// (crates/ignis_lsp/src/semantic.rs:20).
+export const SEMANTIC_NAMESPACE: u64 = 0;
+export const SEMANTIC_TYPE: u64 = 1;
+export const SEMANTIC_CLASS: u64 = 2;
+export const SEMANTIC_ENUM: u64 = 3;
+export const SEMANTIC_STRUCT: u64 = 4;
+export const SEMANTIC_TYPE_PARAMETER: u64 = 5;
+export const SEMANTIC_PARAMETER: u64 = 6;
+export const SEMANTIC_VARIABLE: u64 = 7;
+export const SEMANTIC_PROPERTY: u64 = 8;
+export const SEMANTIC_ENUM_MEMBER: u64 = 9;
+export const SEMANTIC_FUNCTION: u64 = 10;
+export const SEMANTIC_METHOD: u64 = 11;
+export const SEMANTIC_KEYWORD: u64 = 12;
+export const SEMANTIC_MODIFIER: u64 = 13;
+export const SEMANTIC_COMMENT: u64 = 14;
+export const SEMANTIC_STRING: u64 = 15;
+export const SEMANTIC_NUMBER: u64 = 16;
+export const SEMANTIC_OPERATOR: u64 = 17;
+
+/// Token modifier bits, in the order of the legend
+/// (crates/ignis_lsp/src/semantic.rs:44).
+export const MODIFIER_DECLARATION: u64 = 1;
+export const MODIFIER_DEFINITION: u64 = 2;
+export const MODIFIER_READONLY: u64 = 4;
+export const MODIFIER_STATIC: u64 = 8;
+export const MODIFIER_MODIFICATION: u64 = 16;
+export const MODIFIER_MUTABLE: u64 = 32;
+
+/// One more than the largest modifier set.
+const CLASS_KEY_UNIT: u64 = 64;
+
+/// A token type and its modifier bits.
+export record SemanticClass {
+  public tokenType: u64;
+  public modifiers: u64;
+}
+
+/// What an identifier of the document names, keyed by its start byte: the
+/// identifier has to end at `end` to take the class.
+export record IdentifierClass {
+  public end: u64;
+  public class: SemanticClass;
+}
+
+/// One classified token: its start byte and its length in UTF-16 units.
+record AbsoluteToken {
+  public start: u64;
+  public length: u64;
+  public class: SemanticClass;
+}
+
+/// The legend the `initialize` result announces.
+export function semanticTokensLegend(): JsonValue {
+  let mut types: Vector<JsonValue> = Vector::new<JsonValue>();
+  types.push(JsonValue::stringValue("namespace"));
+  types.push(JsonValue::stringValue("type"));
+  types.push(JsonValue::stringValue("class"));
+  types.push(JsonValue::stringValue("enum"));
+  types.push(JsonValue::stringValue("struct"));
+  types.push(JsonValue::stringValue("typeParameter"));
+  types.push(JsonValue::stringValue("parameter"));
+  types.push(JsonValue::stringValue("variable"));
+  types.push(JsonValue::stringValue("property"));
+  types.push(JsonValue::stringValue("enumMember"));
+  types.push(JsonValue::stringValue("function"));
+  types.push(JsonValue::stringValue("method"));
+  types.push(JsonValue::stringValue("keyword"));
+  types.push(JsonValue::stringValue("modifier"));
+  types.push(JsonValue::stringValue("comment"));
+  types.push(JsonValue::stringValue("string"));
+  types.push(JsonValue::stringValue("number"));
+  types.push(JsonValue::stringValue("operator"));
+
+  let mut modifiers: Vector<JsonValue> = Vector::new<JsonValue>();
+  modifiers.push(JsonValue::stringValue("declaration"));
+  modifiers.push(JsonValue::stringValue("definition"));
+  modifiers.push(JsonValue::stringValue("readonly"));
+  modifiers.push(JsonValue::stringValue("static"));
+  modifiers.push(JsonValue::stringValue("modification"));
+  modifiers.push(JsonValue::stringValue("mutable"));
+
+  let mut legend: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  legend.push(JsonObjectEntry::create("tokenTypes", JsonValue::array(types)));
+  legend.push(JsonObjectEntry::create("tokenModifiers", JsonValue::array(modifiers)));
+  return JsonValue::object(legend);
+}
+
+/// `class` as one number, 0 for none, for tables that hold only numbers.
+export function packClass(class: Option<SemanticClass>): u64 {
+  return match (class) {
+    Option::SOME(found) -> 1 + found.tokenType * CLASS_KEY_UNIT + found.modifiers,
+    Option::NONE -> 0,
+  };
+}
+
+/// The class `packClass` packed into `key`.
+export function unpackClass(key: u64): Option<SemanticClass> {
+  if (key == 0) {
+    return Option::NONE;
+  }
+
+  return classOf((key - 1) / CLASS_KEY_UNIT, (key - 1) % CLASS_KEY_UNIT);
+}
+
+/// The class `tokenType` with the modifier bits `modifiers`.
+function classOf(tokenType: u64, modifiers: u64): Option<SemanticClass> {
+  return Option::SOME(SemanticClass { tokenType: tokenType, modifiers: modifiers });
+}
+
+/// The class of a name of `defId`, as the host classifies a definition
+/// (crates/ignis_lsp/src/semantic.rs:337). `isDeclaration` is true where the
+/// name is declared. A variable definition that is not mutable is a
+/// constant or a static field, which the host binds as constants.
+export function definitionClass(
+  defId: Analyzer::DefinitionId,
+  isNamespace: boolean,
+  isDeclaration: boolean,
+  defs: &Analyzer::DefinitionStore,
+): Option<SemanticClass> {
+  if (isNamespace) {
+    return classOf(SEMANTIC_NAMESPACE, 0);
+  }
+
+  let declared: u64 = isDeclaration ? MODIFIER_DECLARATION : 0;
+  let defined: u64 = isDeclaration ? MODIFIER_DECLARATION + MODIFIER_DEFINITION : 0;
+
+  return match (defs.get(defId)) {
+    Option::SOME(Analyzer::Definition::Function(functionDef)) -> classOf(SEMANTIC_FUNCTION, defined + (functionDef.isExtern ? MODIFIER_READONLY : 0 as u64)),
+    Option::SOME(Analyzer::Definition::Method(methodDef)) -> classOf(SEMANTIC_METHOD, defined + (methodDef.isStatic ? MODIFIER_STATIC : 0 as u64)),
+    Option::SOME(Analyzer::Definition::Record(_)) -> classOf(SEMANTIC_STRUCT, defined),
+    Option::SOME(Analyzer::Definition::Enum(_)) -> classOf(SEMANTIC_ENUM, defined),
+    Option::SOME(Analyzer::Definition::Variable(variableDef)) -> {
+      if (variableDef.mutable) {
+        return classOf(SEMANTIC_VARIABLE, declared + MODIFIER_MUTABLE);
+      }
+
+      return classOf(SEMANTIC_VARIABLE, defined + MODIFIER_READONLY);
+    },
+    Option::SOME(Analyzer::Definition::Field(_)) -> classOf(SEMANTIC_PROPERTY, declared),
+    Option::SOME(Analyzer::Definition::Variant(_)) -> classOf(SEMANTIC_ENUM_MEMBER, declared),
+    Option::SOME(Analyzer::Definition::TypeParam(_)) -> classOf(SEMANTIC_TYPE_PARAMETER, declared),
+    Option::SOME(Analyzer::Definition::TypeAlias(_)) -> classOf(SEMANTIC_TYPE, defined),
+    Option::SOME(Analyzer::Definition::Trait(_)) -> classOf(SEMANTIC_TYPE, declared),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+/// The class of a name of a local: a parameter or a variable, readonly
+/// unless it is bound `mut` (crates/ignis_lsp/src/semantic.rs:382 and :403).
+export function localClass(isParameter: boolean, isDeclaration: boolean, mutable: boolean): SemanticClass {
+  let tokenType: u64 = isParameter ? SEMANTIC_PARAMETER : SEMANTIC_VARIABLE;
+  let declared: u64 = isDeclaration ? MODIFIER_DECLARATION : 0;
+
+  return SemanticClass {
+    tokenType: tokenType,
+    modifiers: declared + (mutable ? MODIFIER_MUTABLE : MODIFIER_READONLY),
+  };
+}
+
+/// The class of a keyword, or `NONE` for the ones the host leaves out:
+/// `trait`, `decorator`, `meta` and `defer`.
+function keywordClass(keyword: Keyword): Option<SemanticClass> {
+  return match (keyword) {
+    Keyword::LET -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::CONST -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::FUNCTION -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::IF -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::ELSE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::FOR -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::IN -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::OF -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::WHILE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::BREAK -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::CONTINUE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::RETURN -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::AS -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::IS -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::RECORD -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::ENUM -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::TYPE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::IMPORT -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::EXPORT -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::FROM -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::EXTERN -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::NAMESPACE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::MATCH -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::WHEN -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::DECLARE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::INLINE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::TRUE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::FALSE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::NULL -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::SELF_ -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::THIS -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::STATIC -> classOf(SEMANTIC_MODIFIER, 0),
+    Keyword::MUT -> classOf(SEMANTIC_MODIFIER, 0),
+    Keyword::PUBLIC -> classOf(SEMANTIC_MODIFIER, 0),
+    Keyword::PRIVATE -> classOf(SEMANTIC_MODIFIER, 0),
+    Keyword::VOID -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::STR_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::INT8_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::INT16_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::INT32_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::INT64_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::UINT8_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::UINT16_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::UINT32_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::UINT64_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::BOOLEAN_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::ATOM_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::FLOAT32_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::FLOAT64_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::CHAR_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::HEX_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    Keyword::BINARY_TYPE -> classOf(SEMANTIC_TYPE, MODIFIER_READONLY),
+    _ -> Option::NONE,
+  };
+}
+
+/// True for the punctuation the host highlights as an operator; brackets,
+/// `,`, `.`, `;`, `:` and `#` are left out.
+function isOperator(punctuation: Punctuation): boolean {
+  return match (punctuation) {
+    Punctuation::NONE -> false,
+    Punctuation::LEFT_PAREN -> false,
+    Punctuation::RIGHT_PAREN -> false,
+    Punctuation::LEFT_BRACE -> false,
+    Punctuation::RIGHT_BRACE -> false,
+    Punctuation::LEFT_BRACKET -> false,
+    Punctuation::RIGHT_BRACKET -> false,
+    Punctuation::COMMA -> false,
+    Punctuation::DOT -> false,
+    Punctuation::SEMICOLON -> false,
+    Punctuation::HASH -> false,
+    Punctuation::COLON -> false,
+    _ -> true,
+  };
+}
+
+/// The class of the identifier after `@`: a function for a builtin, a
+/// keyword for a directive or an unknown name.
+function atItemClass(name: &String): SemanticClass {
+  let items: Vector<AtItem> = allAtItems();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    if (let Option::SOME(item) = items.get(index)) {
+      if (item.isBuiltin && name.equals(item.name)) {
+        return SemanticClass { tokenType: SEMANTIC_FUNCTION, modifiers: 0 };
+      }
+    }
+
+    index += 1;
+  }
+
+  return SemanticClass { tokenType: SEMANTIC_KEYWORD, modifiers: 0 };
+}
+
+/// The number of UTF-16 units of the bytes `start..end` of `text`.
+function utf16Length(text: &String, start: u64, end: u64): u64 {
+  let mut units: u64 = 0;
+  let mut index: u64 = start;
+
+  while (index < end) {
+    let byte: u8 = text.byteAt(index).unwrapOr(0);
+
+    if (byte < 128 || byte >= 192) {
+      units += 1;
+    }
+
+    if (byte >= 240) {
+      units += 1;
+    }
+
+    index += 1;
+  }
+
+  return units;
+}
+
+function stringLength(text: &String): u64 {
+  return utf16Length(text, 0, text.length());
+}
+
+function decodedLength(text: String): u64 {
+  let decoded: String = ParserShared::decodeEscapes(text);
+  return stringLength(&decoded);
+}
+
+/// The number of digits of `value` in decimal.
+function decimalDigits(value: u64): u64 {
+  let mut digits: u64 = 1;
+  let mut rest: u64 = value / 10;
+
+  while (rest > 0) {
+    digits += 1;
+    rest = rest / 10;
+  }
+
+  return digits;
+}
+
+/// The number of bytes of `lexeme` that are not a `_` digit separator.
+function digitsLength(lexeme: &String): u64 {
+  let mut length: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < lexeme.length()) {
+    if (lexeme.byteAt(index).unwrapOr(0) != '_' as u8) {
+      length += 1;
+    }
+
+    index += 1;
+  }
+
+  return length;
+}
+
+/// The length the host gives a literal: that of its lexeme, which is the
+/// decoded text of a string or template chunk, the decimal code point of a
+/// character, and a number without its `_` separators
+/// (crates/ignis_parser/src/lexer/mod.rs:728).
+function literalLength(token: &Token): u64 {
+  let lexeme: String = token.lexemeString();
+
+  return match (token.literalKindValue()) {
+    LiteralKind::STRING -> decodedLength(ParserShared::stripQuotes(&lexeme)),
+    LiteralKind::TEMPLATE_NO_SUBSTITUTION -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 1 as u64)),
+    LiteralKind::TEMPLATE_HEAD -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 2 as u64)),
+    LiteralKind::TEMPLATE_MIDDLE -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 2 as u64)),
+    LiteralKind::TEMPLATE_TAIL -> decodedLength(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 1 as u64)),
+    LiteralKind::CHAR -> {
+      return match (ParserShared::parseCharacterLiteral(&lexeme)) {
+        Option::SOME(value) -> decimalDigits((value as u32) as u64),
+        Option::NONE -> stringLength(&lexeme),
+      };
+    },
+    LiteralKind::INTEGER -> digitsLength(&lexeme),
+    LiteralKind::FLOAT -> digitsLength(&lexeme),
+    _ -> stringLength(&lexeme),
+  };
+}
+
+function literalClass(literalKind: LiteralKind): SemanticClass {
+  return match (literalKind) {
+    LiteralKind::STRING -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::TEMPLATE_NO_SUBSTITUTION -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::TEMPLATE_HEAD -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::TEMPLATE_MIDDLE -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::TEMPLATE_TAIL -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    _ -> SemanticClass { tokenType: SEMANTIC_NUMBER, modifiers: 0 },
+  };
+}
+
+/// True when `sign` is a `+` or `-` written right before the decimal number
+/// `next`: the host lexes both as one signed number
+/// (crates/ignis_parser/src/lexer/mod.rs:129).
+function isNumberSign(sign: &Token, next: &Token): boolean {
+  let isSign: boolean = sign.punctuationValue() == Punctuation::MINUS || sign.punctuationValue() == Punctuation::PLUS;
+
+  if (sign.kindValue() != TokenKind::PUNCTUATION || !isSign || next.kindValue() != TokenKind::LITERAL) {
+    return false;
+  }
+
+  let isDecimal: boolean = next.literalKindValue() == LiteralKind::INTEGER || next.literalKindValue() == LiteralKind::FLOAT;
+  return isDecimal && sign.spanEnd() == next.spanStart();
+}
+
+function isComment(kind: TokenKind): boolean {
+  return kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT;
+}
+
+/// The class of an identifier the lexer cannot tell: a builtin or directive
+/// after `@`, otherwise what `identifiers` knows of it.
+function identifierClass(
+  token: &Token,
+  afterAt: boolean,
+  identifiers: &HashMap<u64, IdentifierClass>,
+): Option<SemanticClass> {
+  if (afterAt) {
+    let name: String = token.lexemeString();
+    return Option::SOME(atItemClass(&name));
+  }
+
+  let start: u64 = token.spanStart();
+
+  let Option::SOME(known) = identifiers.get(&start) else {
+    return Option::NONE;
+  };
+
+  if (known.end != token.spanEnd()) {
+    return Option::NONE;
+  }
+
+  return classOf(known.class.tokenType, known.class.modifiers);
+}
+
+/// The class of `token`, or `NONE` when the host highlights nothing there:
+/// `//!` and `/*!` comments included (crates/ignis_lsp/src/semantic.rs:223).
+function tokenClass(
+  token: &Token,
+  afterAt: boolean,
+  identifiers: &HashMap<u64, IdentifierClass>,
+): Option<SemanticClass> {
+  return match (token.kindValue()) {
+    TokenKind::IDENTIFIER -> identifierClass(token, afterAt, identifiers),
+    TokenKind::KEYWORD -> keywordClass(token.keywordValue()),
+    TokenKind::PUNCTUATION -> {
+      if (isOperator(token.punctuationValue())) {
+        return classOf(SEMANTIC_OPERATOR, 0);
+      }
+
+      return Option::NONE;
+    },
+    TokenKind::LITERAL -> Option::SOME(literalClass(token.literalKindValue())),
+    TokenKind::LINE_COMMENT -> classOf(SEMANTIC_COMMENT, 0),
+    TokenKind::BLOCK_COMMENT -> classOf(SEMANTIC_COMMENT, 0),
+    TokenKind::OUTER_DOC_COMMENT -> classOf(SEMANTIC_COMMENT, 0),
+    _ -> Option::NONE,
+  };
+}
+
+/// The length the host gives `token`: that of its lexeme in UTF-16 units. A
+/// multi-line comment or string keeps one token over all of its lines.
+function tokenLength(token: &Token): u64 {
+  if (token.kindValue() == TokenKind::LITERAL) {
+    return literalLength(token);
+  }
+
+  let lexeme: String = token.lexemeString();
+  return stringLength(&lexeme);
+}
+
+/// The classified tokens of `text`, in source order.
+function classifyTokens(
+  text: &String,
+  identifiers: &HashMap<u64, IdentifierClass>
+): Vector<AbsoluteToken> {
+  let file: SourceFile = SourceFile::create("semantic.ign", text.toStr());
+  let lexed: LexResult = Lexer::lex(&file);
+  let mut classified: Vector<AbsoluteToken> = Vector::new<AbsoluteToken>();
+  let mut afterAt: boolean = false;
+  let mut index: u64 = 0;
+
+  while (index < lexed.tokens.length()) {
+    let Option::SOME(token) = lexed.tokens.get(index) else {
+      break;
+    };
+
+    index += 1;
+
+    if (let Option::SOME(next) = lexed.tokens.get(index)) {
+      if (isNumberSign(token, next)) {
+        let number: SemanticClass = SemanticClass { tokenType: SEMANTIC_NUMBER, modifiers: 0 };
+        classified.push(AbsoluteToken { start: token.spanStart(), length: 1 + literalLength(next), class: number });
+        afterAt = false;
+        index += 1;
+        continue;
+      }
+    }
+
+    let kind: TokenKind = token.kindValue();
+
+    if (kind == TokenKind::BAD || kind == TokenKind::EOF || kind == TokenKind::WHITESPACE) {
+      continue;
+    }
+
+    if (let Option::SOME(class) = tokenClass(token, afterAt, identifiers)) {
+      classified.push(AbsoluteToken { start: token.spanStart(), length: tokenLength(token), class: class });
+    }
+
+    if (!isComment(kind)) {
+      afterAt = kind == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::AT;
+    }
+  }
+
+  return classified;
+}
+
+/// `tokens` in the relative encoding: each start is a line delta and, on
+/// the same line, a UTF-16 column delta from the previous token
+/// (crates/ignis_lsp/src/semantic.rs:463).
+function encodeTokens(text: &String, tokens: &Vector<AbsoluteToken>): Vector<u64> {
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(text.clone());
+  let mut data: Vector<u64> = Vector::new<u64>();
+  let mut previousLine: u64 = 0;
+  let mut previousCharacter: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < tokens.length()) {
+    let Option::SOME(token) = tokens.get(index) else {
+      break;
+    };
+
+    let position: Text::Position = lineIndex.position(token.start);
+    let deltaLine: u64 = position.line > previousLine ? position.line - previousLine : 0;
+    let mut deltaStart: u64 = position.character;
+
+    if (deltaLine == 0) {
+      deltaStart = position.character > previousCharacter ? position.character - previousCharacter : 0;
+    }
+
+    data.push(deltaLine);
+    data.push(deltaStart);
+    data.push(token.length);
+    data.push(token.class.tokenType);
+    data.push(token.class.modifiers);
+
+    previousLine = position.line;
+    previousCharacter = position.character;
+    index += 1;
+  }
+
+  return data;
+}
+
+/// The semantic tokens of `text`, five numbers per token: line delta, start
+/// delta, length, type and modifiers. `identifiers` classifies the
+/// identifiers that are neither keywords nor after `@`; the others are left
+/// out, as the host leaves out an identifier its analysis did not record
+/// (crates/ignis_lsp/src/semantic.rs:316).
+export function semanticTokenData(
+  text: &String,
+  identifiers: &HashMap<u64, IdentifierClass>
+): Vector<u64> {
+  let tokens: Vector<AbsoluteToken> = classifyTokens(text, identifiers);
+  return encodeTokens(text, &tokens);
+}
+
+/// The `SemanticTokens` result for `data`.
+export function semanticTokensJson(data: &Vector<u64>): JsonValue {
+  let mut values: Vector<JsonValue> = Vector::new<JsonValue>();
+  let mut index: u64 = 0;
+
+  while (index < data.length()) {
+    if (let Option::SOME(value) = data.get(index)) {
+      values.push(JsonValue::integerValue(*value as i64));
+    }
+
+    index += 1;
+  }
+
+  let mut result: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  result.push(JsonObjectEntry::create("data", JsonValue::array(values)));
+  return JsonValue::object(result);
+}

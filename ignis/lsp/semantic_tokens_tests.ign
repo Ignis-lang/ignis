@@ -1,0 +1,272 @@
+import HashMap from "std::collections";
+import Json, JsonValue from "std::json";
+import String from "std::string";
+import Test from "std::test";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import SourceFile from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+
+import
+  IdentifierClass,
+  MODIFIER_DECLARATION,
+  MODIFIER_DEFINITION,
+  MODIFIER_MODIFICATION,
+  MODIFIER_MUTABLE,
+  MODIFIER_READONLY,
+  MODIFIER_STATIC,
+  SEMANTIC_CLASS,
+  SEMANTIC_COMMENT,
+  SEMANTIC_ENUM,
+  SEMANTIC_ENUM_MEMBER,
+  SEMANTIC_FUNCTION,
+  SEMANTIC_KEYWORD,
+  SEMANTIC_METHOD,
+  SEMANTIC_MODIFIER,
+  SEMANTIC_NAMESPACE,
+  SEMANTIC_NUMBER,
+  SEMANTIC_OPERATOR,
+  SEMANTIC_PARAMETER,
+  SEMANTIC_PROPERTY,
+  SEMANTIC_STRING,
+  SEMANTIC_STRUCT,
+  SEMANTIC_TYPE,
+  SEMANTIC_TYPE_PARAMETER,
+  SEMANTIC_VARIABLE,
+  SemanticClass,
+  semanticTokenData,
+  semanticTokensJson,
+  semanticTokensLegend,
+from "./semantic_tokens";
+
+/// One decoded token: its type and the lexeme of the token that starts where
+/// it does, `?` when none does.
+record ClassifiedToken {
+  public tokenType: u64;
+  public lexeme: String;
+}
+
+function noIdentifiers(): HashMap<u64, IdentifierClass> {
+  return HashMap::new<u64, IdentifierClass>();
+}
+
+/// The data of `source` with no identifier classes, as five numbers per
+/// token joined by spaces, tokens by `|`.
+function encodedData(source: str): String {
+  let text: String = String::create(source);
+  let identifiers: HashMap<u64, IdentifierClass> = noIdentifiers();
+  let data: Vector<u64> = semanticTokenData(&text, &identifiers);
+  let mut encoded: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < data.length()) {
+    if (index > 0) {
+      encoded.pushStr(index % 5 == 0 ? "|" : " ");
+    }
+
+    let value: u64 = *data.get(index).unwrap();
+    encoded.pushStr(`${value}`.toStr());
+    index += 1;
+  }
+
+  return encoded;
+}
+
+/// The lexeme of the token of `source` that starts at `offset`.
+function lexemeAt(source: &String, offset: u64): String {
+  let file: SourceFile = SourceFile::create("semantic_test.ign", source.toStr());
+  let lexed: LexResult = Lexer::lex(&file);
+  let mut index: u64 = 0;
+
+  while (index < lexed.tokens.length()) {
+    if (let Option::SOME(token) = lexed.tokens.get(index)) {
+      if (token.spanStart() == offset && token.spanEnd() > offset) {
+        return token.lexemeString();
+      }
+    }
+
+    index += 1;
+  }
+
+  return String::create("?");
+}
+
+/// Classifies `source` with no identifier classes and returns the type and
+/// lexeme of each token, as the host's `classify_source` test helper does
+/// (crates/ignis_lsp/src/semantic.rs:576).
+function classifySource(source: str): Vector<ClassifiedToken> {
+  let text: String = String::create(source);
+  let identifiers: HashMap<u64, IdentifierClass> = noIdentifiers();
+  let data: Vector<u64> = semanticTokenData(&text, &identifiers);
+  let lineIndex: Text::LineIndex = Text::LineIndex::create(text.clone());
+  let mut result: Vector<ClassifiedToken> = Vector::new<ClassifiedToken>();
+  let mut line: u64 = 0;
+  let mut character: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index + 4 < data.length()) {
+    let deltaLine: u64 = *data.get(index).unwrap();
+    let deltaStart: u64 = *data.get(index + 1).unwrap();
+
+    if (deltaLine > 0) {
+      line += deltaLine;
+      character = deltaStart;
+    } else {
+      character += deltaStart;
+    }
+
+    let offset: u64 = lineIndex.offset(Text::Position { line: line, character: character });
+    result.push(ClassifiedToken { tokenType: *data.get(index + 3).unwrap(), lexeme: lexemeAt(&text, offset) });
+    index += 5;
+  }
+
+  return result;
+}
+
+/// The type of the first token whose lexeme is `lexeme`, or `NONE`.
+function typeOfLexeme(tokens: &Vector<ClassifiedToken>, lexeme: str): Option<u64> {
+  let mut index: u64 = 0;
+
+  while (index < tokens.length()) {
+    if (let Option::SOME(token) = tokens.get(index)) {
+      if (token.lexeme.equals(lexeme)) {
+        return Option::SOME(token.tokenType);
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+@test
+function modifierBitsFollowTheLegendOrder(): void {
+  Test::assertEq<u64>(MODIFIER_DECLARATION, 1);
+  Test::assertEq<u64>(MODIFIER_DEFINITION, 2);
+  Test::assertEq<u64>(MODIFIER_READONLY, 4);
+  Test::assertEq<u64>(MODIFIER_STATIC, 8);
+  Test::assertEq<u64>(MODIFIER_MODIFICATION, 16);
+  Test::assertEq<u64>(MODIFIER_MUTABLE, 32);
+}
+
+@test
+function modifierBitsCombine(): void {
+  Test::assertEq<u64>(MODIFIER_DECLARATION + MODIFIER_DEFINITION + MODIFIER_MUTABLE, 35);
+}
+
+@test
+function tokenTypeIndicesFollowTheLegendOrder(): void {
+  Test::assertEq<u64>(SEMANTIC_NAMESPACE, 0);
+  Test::assertEq<u64>(SEMANTIC_TYPE, 1);
+  Test::assertEq<u64>(SEMANTIC_CLASS, 2);
+  Test::assertEq<u64>(SEMANTIC_ENUM, 3);
+  Test::assertEq<u64>(SEMANTIC_STRUCT, 4);
+  Test::assertEq<u64>(SEMANTIC_TYPE_PARAMETER, 5);
+  Test::assertEq<u64>(SEMANTIC_PARAMETER, 6);
+  Test::assertEq<u64>(SEMANTIC_VARIABLE, 7);
+  Test::assertEq<u64>(SEMANTIC_PROPERTY, 8);
+  Test::assertEq<u64>(SEMANTIC_ENUM_MEMBER, 9);
+  Test::assertEq<u64>(SEMANTIC_FUNCTION, 10);
+  Test::assertEq<u64>(SEMANTIC_METHOD, 11);
+  Test::assertEq<u64>(SEMANTIC_KEYWORD, 12);
+  Test::assertEq<u64>(SEMANTIC_MODIFIER, 13);
+  Test::assertEq<u64>(SEMANTIC_COMMENT, 14);
+  Test::assertEq<u64>(SEMANTIC_STRING, 15);
+  Test::assertEq<u64>(SEMANTIC_NUMBER, 16);
+  Test::assertEq<u64>(SEMANTIC_OPERATOR, 17);
+}
+
+@test
+function atTokenIsClassifiedAsAnOperator(): void {
+  let result: Vector<ClassifiedToken> = classifySource("@sizeOf");
+  Test::assert(result.length() > 0);
+  Test::assertEq<u64>(result.get(0).unwrap().tokenType, SEMANTIC_OPERATOR);
+}
+
+@test
+function builtinAfterAtIsClassifiedAsAFunction(): void {
+  let result: Vector<ClassifiedToken> = classifySource("@sizeOf");
+  Test::assert(result.length() >= 2);
+
+  let builtin: &ClassifiedToken = result.get(1).unwrap();
+  Test::assertEq<str>(builtin.lexeme.toStr(), "sizeOf");
+  Test::assertEq<u64>(builtin.tokenType, SEMANTIC_FUNCTION);
+}
+
+@test
+function directiveAfterAtIsClassifiedAsAKeyword(): void {
+  let result: Vector<ClassifiedToken> = classifySource("@packed");
+  Test::assert(result.length() >= 2);
+
+  let directive: &ClassifiedToken = result.get(1).unwrap();
+  Test::assertEq<str>(directive.lexeme.toStr(), "packed");
+  Test::assertEq<u64>(directive.tokenType, SEMANTIC_KEYWORD);
+}
+
+@test
+function unknownAtItemDefaultsToAKeyword(): void {
+  let result: Vector<ClassifiedToken> = classifySource("@nonexistent");
+  Test::assert(result.length() >= 2);
+
+  let unknown: &ClassifiedToken = result.get(1).unwrap();
+  Test::assertEq<str>(unknown.lexeme.toStr(), "nonexistent");
+  Test::assertEq<u64>(unknown.tokenType, SEMANTIC_KEYWORD);
+}
+
+@test
+function atomTypeKeywordIsClassifiedAsAType(): void {
+  let result: Vector<ClassifiedToken> = classifySource("let value: atom = :ok;");
+  Test::assertEq<u64>(typeOfLexeme(&result, "atom").unwrap(), SEMANTIC_TYPE);
+}
+
+@test
+function atClassificationDoesNotLeakToTheNextLine(): void {
+  let result: Vector<ClassifiedToken> = classifySource("@packed\nfoo");
+
+  if (let Option::SOME(tokenType) = typeOfLexeme(&result, "foo")) {
+    Test::assertNe<u64>(tokenType, SEMANTIC_FUNCTION);
+  }
+}
+
+@test
+function literalsTakeTheLengthOfTheHostLexeme(): void {
+  Test::assertEq<str>(encodedData("\"héllo 😀\"").toStr(), "0 0 8 15 0");
+  Test::assertEq<str>(encodedData("\"a\\nb\"").toStr(), "0 0 3 15 0");
+  Test::assertEq<str>(encodedData("'a'").toStr(), "0 0 2 16 0");
+  Test::assertEq<str>(encodedData("1_000").toStr(), "0 0 4 16 0");
+  Test::assertEq<str>(encodedData("x -1 - 2").toStr(), "0 2 2 16 0|0 3 1 17 0|0 2 1 16 0");
+}
+
+@test
+function aMultiLineCommentIsOneTokenAndInnerDocCommentsAreLeftOut(): void {
+  Test::assertEq<str>(encodedData("/* a\n  é */\nlet").toStr(), "0 0 11 14 0|2 0 3 12 0");
+  Test::assertEq<str>(encodedData("//! inner\n/// outer").toStr(), "1 0 9 14 0");
+}
+
+@test
+function identifiersTakeTheClassTheyAreGiven(): void {
+  let text: String = String::create("let größe = total;");
+  let mut identifiers: HashMap<u64, IdentifierClass> = noIdentifiers();
+  let variable: SemanticClass = SemanticClass {
+    tokenType: SEMANTIC_VARIABLE,
+    modifiers: MODIFIER_DECLARATION + MODIFIER_READONLY,
+  };
+  identifiers.insert(4, IdentifierClass { end: 11, class: variable });
+  let misplaced: SemanticClass = SemanticClass { tokenType: SEMANTIC_FUNCTION, modifiers: 0 };
+  identifiers.insert(14, IdentifierClass { end: 16, class: misplaced });
+
+  let data: Vector<u64> = semanticTokenData(&text, &identifiers);
+  let result: JsonValue = semanticTokensJson(&data);
+  Test::assertEq<str>(Json::toJsonString(&result).toStr(), "{\"data\":[0,0,3,12,0,0,4,5,7,5,0,6,1,17,0]}");
+}
+
+@test
+function theLegendListsTheHostsTypesAndModifiersInOrder(): void {
+  let legend: JsonValue = semanticTokensLegend();
+  Test::assertEq<str>(
+    Json::toJsonString(&legend).toStr(),
+    "{\"tokenTypes\":[\"namespace\",\"type\",\"class\",\"enum\",\"struct\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"enumMember\",\"function\",\"method\",\"keyword\",\"modifier\",\"comment\",\"string\",\"number\",\"operator\"],\"tokenModifiers\":[\"declaration\",\"definition\",\"readonly\",\"static\",\"modification\",\"mutable\"]}",
+  );
+}
