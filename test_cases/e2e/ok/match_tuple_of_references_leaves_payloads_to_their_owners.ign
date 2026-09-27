@@ -1,0 +1,42 @@
+// e2e: std
+//
+// A tuple scrutinee built from references borrows each payload a pattern takes out of a
+// referenced element: the referent keeps the drop. Only the element that is an owned
+// value hands its payload to the arm binding, which drops it at the arm end. Treating
+// the whole tuple as owned scheduled arm-end drops for the borrowed payloads too.
+import Io from "std::io";
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function bothBorrowed(left: &Option<Tracked>, right: &Option<Tracked>): i32 {
+  return match ((left, right)) {
+    (Option::SOME(first), Option::SOME(second)) -> first.id + second.id,
+    _ -> 0,
+  };
+}
+
+function oneOwned(left: &Option<Tracked>, right: Option<Tracked>): i32 {
+  return match ((left, right)) {
+    (Option::SOME(first), Option::SOME(second)) -> first.id + second.id,
+    _ -> 0,
+  };
+}
+
+function main(): i32 {
+  let first: Option<Tracked> = Option::SOME(Tracked { id: 1 });
+  let second: Option<Tracked> = Option::SOME(Tracked { id: 2 });
+
+  Io::println(`both borrowed ${bothBorrowed(&first, &second)}`.toStr());
+  Io::println(`one owned ${oneOwned(&first, Option::SOME(Tracked { id: 3 }))}`.toStr());
+  Io::println("end");
+
+  return 0;
+}

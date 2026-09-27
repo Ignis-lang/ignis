@@ -1,0 +1,33 @@
+// e2e: err
+//
+// A payload destructured out of a referenced tuple element still lives in the referent,
+// so handing the binding on by value moves out of a borrow. Accepting it dropped the
+// payload twice: once in the callee and once when the owner went out of scope.
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function consume(tracked: Tracked): i32 {
+  return tracked.id;
+}
+
+function steal(left: &Option<Tracked>, right: &Option<Tracked>): i32 {
+  return match ((left, right)) {
+    (Option::SOME(first), _) -> consume(first),
+    _ -> 0,
+  };
+}
+
+function main(): i32 {
+  let first: Option<Tracked> = Option::SOME(Tracked { id: 1 });
+  let second: Option<Tracked> = Option::NONE;
+
+  return steal(&first, &second);
+}
