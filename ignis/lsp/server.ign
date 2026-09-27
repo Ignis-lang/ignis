@@ -1,7 +1,7 @@
 //! `ignis lsp`: a sequential Language Server Protocol server over stdio that
 //! publishes diagnostics and answers hovers, go-to-definition,
-//! find-references, document symbols, completion, formatting, code actions
-//! and semantic tokens.
+//! find-references, document symbols, completion, formatting, code actions,
+//! rename and semantic tokens.
 //!
 //! Messages are handled one at a time, in arrival order. Document changes
 //! only mark their analysis dirty. The analysis runs once no bytes of a
@@ -65,6 +65,7 @@ import
   rangeJson,
   responseBody,
 from "./protocol";
+import renameWorkspaceEdit from "./rename";
 import IdentifierClass, semanticTokenData, semanticTokensJson from "./semantic_tokens";
 import uriFromFilePath from "./uri";
 
@@ -545,6 +546,13 @@ export record LspServer {
 
     if (request.method.equals("textDocument/references")) {
       let result: JsonValue = self.references(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("textDocument/rename")) {
+      let result: JsonValue = self.rename(&request.message);
       let body: String = responseBody(request.id, result);
       self.send(&body);
       return LspStep::CONTINUE;
@@ -1193,6 +1201,44 @@ export record LspServer {
     };
 
     return self.declarationLocation(navigation, declaration, true);
+  }
+
+  /// Answers `textDocument/rename` with the `WorkspaceEdit` that renames the
+  /// local at the position to `newName`, or `null` when the host would
+  /// reject it (crates/ignis_lsp/src/server.rs:2825).
+  rename(&mut self, message: &JsonValue): JsonValue {
+    if (self.dirty.length() > 0) {
+      self.analyzeDirty();
+    }
+
+    let Option::SOME(request) = positionRequestOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(params) = jsonMember(message, "params") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(newName) = jsonStringMember(params, "newName") else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(target) = self.targetOf(&request) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(document) = self.documents.find(&request.uri) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      return JsonValue::nullValue();
+    };
+    let path: String = document.path.toString();
+
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return JsonValue::nullValue();
+    };
+
+    return match (renameWorkspaceEdit(navigation, file, target, &newName, &request.uri, &document.text)) {
+      Option::SOME(edit) -> edit,
+      Option::NONE -> JsonValue::nullValue(),
+    };
   }
 
   /// Answers `textDocument/completion` with the candidates at the position,
