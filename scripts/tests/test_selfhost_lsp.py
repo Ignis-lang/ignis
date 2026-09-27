@@ -8,7 +8,8 @@ reported at the right UTF-16 range, then cleared once the buffer is fixed or
 closed), the hovers answered for it, go-to-definition, find-references,
 rename and the document outline over a two-file project, and completion in each
 context the host completes, also while the buffer does not parse, the
-formatting edits and quick fixes it offers, and the inlay hints it shows.
+formatting edits and quick fixes it offers, the inlay hints it shows and the
+semantic tokens of a buffer.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
 also proves analysis reads open documents instead of the disk.
 
@@ -180,6 +181,52 @@ CODE_ACTION_SOURCE = (
   "}\n"
 )
 
+# The semantic-token source: every token class, a string and a character
+# with non-ASCII text, a comment and a template literal over two lines, and
+# a signed number, which the host lexes as one token.
+SEMANTIC_SOURCE = (
+  'import double from "./util";\n'
+  'import Io from "std::io";\n'
+  "\n"
+  "/* A comment over\n"
+  "   two lines, héllo 😀 */\n"
+  "/// The origin.\n"
+  "@packed\n"
+  "record Point {\n"
+  "  public x: i32;\n"
+  "\n"
+  "  public static origin(): Point {\n"
+  "    return Point { x: 0 };\n"
+  "  }\n"
+  "}\n"
+  "\n"
+  "enum Mode {\n"
+  "  FAST,\n"
+  "  SLOW,\n"
+  "}\n"
+  "\n"
+  "namespace Shapes {\n"
+  "  const LIMIT: i32 = 4;\n"
+  "}\n"
+  "\n"
+  "function twice(value: i32): i32 {\n"
+  "  return value * 2;\n"
+  "}\n"
+  "\n"
+  "function main(): i32 {\n"
+  "  let mut total: i32 = @sizeOf<i64>() as i32;\n"
+  '  let text: str = "héllo 😀";\n'
+  "  let banner = `two\n"
+  "lines`;\n"
+  "  let letter: char = 'é';\n"
+  "  total += -1 + 0x1F;\n"
+  "  Io::println(text);\n"
+  "  let mode: Mode = Mode::FAST;\n"
+  "  return total + Point::origin().x + double(Shapes::LIMIT) + twice(2);\n"
+  "}\n"
+)
+# A local named with non-ASCII letters: five UTF-16 units, seven bytes.
+SEMANTIC_UNICODE_SOURCE = "function main(): i32 {\n  let größe: i32 = 1;\n  return größe;\n}\n"
 # Every kind of inlay hint: the inferred types of `label`, `total` and `mode`,
 # the parameter names of `add(1, 2)` and the scrutinee's type after
 # `match (total`. A string holding a two-unit emoji and a two-byte letter
@@ -467,6 +514,10 @@ class LanguageServer:
 
   def formatting(self, request_id, uri):
     self.request(request_id, "textDocument/formatting", {"textDocument": {"uri": uri}, "options": FORMATTING_OPTIONS})
+    return self.response(request_id)["result"]
+
+  def semantic_tokens(self, request_id, uri):
+    self.request(request_id, "textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})
     return self.response(request_id)["result"]
 
   def code_actions(self, request_id, uri, diagnostics):
@@ -1000,6 +1051,148 @@ class LanguageServerTest(unittest.TestCase):
     edits = self.server.formatting(2, uri)
     self.assertEqual([edit["newText"] for edit in edits], [FORMATTED_SOURCE.replace("  return", "    return")])
     self.finish(3)
+
+  def semantic_tokens_at(self, uri, request_id):
+    """The semantic tokens of `uri` by (line, character), each as (length,
+    type, modifiers). Tokens come sorted and never overlap."""
+    result = self.server.semantic_tokens(request_id, uri)
+    self.show("semantic tokens", result)
+    data = result["data"]
+    self.assertEqual(len(data) % 5, 0)
+
+    tokens = {}
+    line = 0
+    character = 0
+    previous_end = None
+
+    for index in range(0, len(data), 5):
+      delta_line, delta_start, length, token_type, modifiers = data[index:index + 5]
+
+      if delta_line > 0:
+        line += delta_line
+        character = delta_start
+        previous_end = None
+      else:
+        character += delta_start
+
+      if previous_end is not None:
+        self.assertGreaterEqual(character, previous_end)
+
+      tokens[(line, character)] = (length, token_type, modifiers)
+      previous_end = character + length
+
+    return tokens
+
+  def assert_token(self, tokens, text, needle, token_type, modifiers=0, length=None, occurrence=1, delta=0):
+    position = position_of(text, needle, occurrence, delta)
+
+    if length is None:
+      length = len(needle[delta:].encode("utf-16-le")) // 2
+
+    self.assertEqual(tokens.get((position["line"], position["character"])), (length, token_type, modifiers), needle)
+
+  def assert_no_token(self, tokens, text, needle, occurrence=1):
+    position = position_of(text, needle, occurrence)
+    self.assertNotIn((position["line"], position["character"]), tokens, needle)
+
+  def test_semantic_tokens_classify_what_the_lexer_and_the_analysis_see(self):
+    self.source_file("util.ign", HOVER_UTIL_SOURCE)
+    uri = self.source_file("main.ign", SEMANTIC_SOURCE)
+    capabilities = self.server.initialize(self.workspace)["capabilities"]
+    self.assertEqual(capabilities["semanticTokensProvider"], {
+      "legend": {
+        "tokenTypes": [
+          "namespace", "type", "class", "enum", "struct", "typeParameter", "parameter", "variable", "property",
+          "enumMember", "function", "method", "keyword", "modifier", "comment", "string", "number", "operator",
+        ],
+        "tokenModifiers": ["declaration", "definition", "readonly", "static", "modification", "mutable"],
+      },
+      "full": True,
+    })
+
+    self.open_buffer(uri, SEMANTIC_SOURCE)
+    tokens = self.semantic_tokens_at(uri, 2)
+    source = SEMANTIC_SOURCE
+
+    self.assert_token(tokens, source, "import", 12)
+    self.assert_token(tokens, source, "record", 12)
+    self.assert_token(tokens, source, "public", 13)
+    self.assert_token(tokens, source, "static", 13)
+    self.assert_token(tokens, source, "mut", 13)
+    self.assert_token(tokens, source, "i32", 1, 4)
+    self.assert_token(tokens, source, "char", 1, 4)
+    self.assert_token(tokens, source, "/* A comment", 14, length=43)
+    self.assert_token(tokens, source, "/// The origin.", 14)
+    self.assert_token(tokens, source, "@packed", 17, length=1)
+    self.assert_token(tokens, source, "packed", 12)
+    self.assert_token(tokens, source, "sizeOf", 10)
+    self.assert_token(tokens, source, "<i64", 17, length=1)
+    # A literal covers its source text, quotes included.
+    self.assert_token(tokens, source, '"./util"', 15)
+    self.assert_token(tokens, source, '"héllo 😀"', 15)
+    self.assert_token(tokens, source, "`two\nlines`", 15)
+    self.assert_token(tokens, source, "'é'", 16)
+    self.assert_token(tokens, source, "-1", 16)
+    self.assert_token(tokens, source, "0x1F", 16)
+    self.assert_token(tokens, source, "+=", 17)
+    self.assert_token(tokens, source, "::println", 17, length=2)
+    self.assert_no_token(tokens, source, "{")
+    self.assert_no_token(tokens, source, ";")
+
+    self.assert_token(tokens, source, "double", 10)
+    self.assert_token(tokens, source, "Io", 0)
+    self.assert_token(tokens, source, "x: i32", 8, 1, length=1)
+    self.assert_token(tokens, source, "origin(): Point", 11, 1 | 2 | 8, length=6)
+    self.assert_token(tokens, source, "FAST,", 9, 1, length=4)
+    self.assert_token(tokens, source, "x: 0", 8, length=1)
+    self.assert_token(tokens, source, "FAST;", 9, length=4)
+    self.assert_token(tokens, source, "x + double", 8, length=1)
+    self.assert_token(tokens, source, "LIMIT)", 7, 4, length=5)
+    self.finish(3)
+
+  def test_semantic_tokens_classify_every_name_the_analysis_resolved(self):
+    # The host classifies only the names its typechecker recorded for hovers
+    # (crates/ignis_lsp/src/server.rs:2650), which leaves out declared
+    # records, enums, namespaces, locals and parameters, and rejects the
+    # non-ASCII identifier, so this test fails against it.
+    self.source_file("util.ign", HOVER_UTIL_SOURCE)
+    uri = self.source_file("main.ign", SEMANTIC_SOURCE)
+    self.server.initialize(self.workspace)
+    self.open_buffer(uri, SEMANTIC_SOURCE)
+    tokens = self.semantic_tokens_at(uri, 2)
+    source = SEMANTIC_SOURCE
+
+    self.assert_token(tokens, source, "Point {\n", 4, 1 | 2, length=5)
+    self.assert_token(tokens, source, "Mode {", 3, 1 | 2, length=4)
+    self.assert_token(tokens, source, "Shapes {", 0, length=6)
+    self.assert_token(tokens, source, "LIMIT:", 7, 1 | 2 | 4, length=5)
+    self.assert_token(tokens, source, "twice(value", 10, 1 | 2, length=5)
+    self.assert_token(tokens, source, "value:", 6, 1 | 4, length=5)
+    self.assert_token(tokens, source, "value *", 6, 4, length=5)
+    self.assert_token(tokens, source, "total:", 7, 1 | 32, length=5)
+    self.assert_token(tokens, source, "total +=", 7, 32, length=5)
+    self.assert_token(tokens, source, "println", 10)
+    self.assert_token(tokens, source, "text)", 7, 4, length=4)
+    self.assert_token(tokens, source, "origin().x", 11, 8, length=6)
+    self.assert_token(tokens, source, "twice(2", 10, length=5)
+
+    broken = "function broken(\n" + source
+    self.change(uri, 2, broken)
+    moved = self.semantic_tokens_at(uri, 3)
+    self.assert_token(moved, broken, "function", 12)
+    self.assert_token(moved, broken, "total +=", 7, 32, length=5)
+    self.assert_token(moved, broken, "twice(2", 10, length=5)
+    self.assert_no_token(moved, broken, "broken")
+
+    unicode_uri = self.source_file("unicode.ign", SEMANTIC_UNICODE_SOURCE)
+    self.open_buffer(unicode_uri, SEMANTIC_UNICODE_SOURCE)
+    unicode = self.semantic_tokens_at(unicode_uri, 4)
+    self.assert_token(unicode, SEMANTIC_UNICODE_SOURCE, "größe:", 7, 1 | 4, length=5)
+    self.assert_token(unicode, SEMANTIC_UNICODE_SOURCE, ": i32", 1, 4, length=3, delta=2)
+    self.assert_token(unicode, SEMANTIC_UNICODE_SOURCE, "größe;", 7, 4, length=5)
+
+    self.assertIsNone(self.server.semantic_tokens(5, Path(self.workspace, "closed.ign").as_uri()))
+    self.finish(6)
 
   def test_code_actions_remove_an_unused_import(self):
     self.source_file("util.ign", HOVER_UTIL_SOURCE)
