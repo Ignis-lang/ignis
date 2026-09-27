@@ -11,6 +11,7 @@ import
   fmtConfigErrorMessage,
   fmtConfigErrorMessageForPath,
   fmtStdinJsonValidateAndProcessLine,
+  testBinaryPath,
   validateUtf8From,
 from "./main";
 
@@ -205,4 +206,25 @@ function comparePathComponentsIsEqualForIdenticalPaths(): void {
   let right: String = String::create("a/b/c.ign");
 
   Test::assertEq<i32>(comparePathComponents(&left, &right), 0);
+}
+
+/// `ignis test` links its binary, and writes the C and object files named
+/// after it, under the out directory rather than the current directory.
+@test
+function testBinaryGoesUnderTheOutDirectory(): void {
+  let outDir: Path::PathBuf = Path::PathBuf::create("/work/project/build");
+  let name: String = String::create("ignis");
+  let noOutput: Option<String> = Option::NONE;
+
+  Test::assertEq<str>(testBinaryPath(&outDir, &name, &noOutput).toStr(), "/work/project/build/bin/ignis-tests");
+}
+
+/// An explicit `-o` still names the test binary itself.
+@test
+function testBinaryFollowsAnExplicitOutput(): void {
+  let outDir: Path::PathBuf = Path::PathBuf::create("/work/project/build");
+  let name: String = String::create("ignis");
+  let output: Option<String> = Option::SOME(String::create("build/bootstrap/stage1-tests/ignis-tests"));
+
+  Test::assertEq<str>(testBinaryPath(&outDir, &name, &output).toStr(), "build/bootstrap/stage1-tests/ignis-tests");
 }
