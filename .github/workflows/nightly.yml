@@ -60,6 +60,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: bootstrap-stages
+          path: build
 
       - name: Create package
         run: |
@@ -376,9 +377,11 @@ jobs:
       # download-artifact round trip unchanged), stage2's emitted C, and the
       # std objects a test run reuses. The ladder's
       # own results, G1 and G4 with the measurements behind them, travel with
-      # it for the report. Paths are relative to the workspace, so a gate job
-      # unpacks the artifact over its own checkout. The `release` job packages
-      # the same stage2 binary as the rolling nightly compiler.
+      # it for the report. upload-artifact stores the files relative to their
+      # deepest common directory, which is `build/` because every path below
+      # lives under it, so every download of this artifact unpacks into `build`.
+      # The `release` job packages the same stage2 binary as the rolling nightly
+      # compiler.
       - name: Upload the bootstrap stages
         if: always() && steps.stages.outputs.superseded != 'true'
         uses: actions/upload-artifact@v4
@@ -448,6 +451,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: bootstrap-stages
+          path: build
 
       # Artifacts carry no permission bits, and `ensure_stage` takes an existing
       # executable as the stage rather than rebuilding it.
@@ -574,6 +578,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: bootstrap-stages
+          path: build
 
       - name: Download the gate results
         if: steps.head.outputs.superseded != 'true'

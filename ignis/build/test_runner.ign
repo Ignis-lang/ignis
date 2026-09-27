@@ -719,10 +719,14 @@ export namespace TestRunner {
 
   /// Number of harness processes and `gcc -c` invocations to keep in flight.
   ///
-  /// `IGNIS_TEST_JOBS` wins when it parses to a positive decimal number.
-  /// Anything else falls back to the host processor count, which is the same
-  /// default the host compiler uses.
-  function jobLimit(): u64 {
+  /// `-j` / `--jobs` wins, then `IGNIS_TEST_JOBS` when it parses to a positive
+  /// decimal number. Anything else falls back to the host processor count,
+  /// which is the same order and default the host compiler uses.
+  function jobLimit(explicit: Option<u64>): u64 {
+    if (let Option::SOME(jobs) = explicit) {
+      return jobs;
+    }
+
     let Option::SOME(raw) = Env::get("IGNIS_TEST_JOBS") else {
       return Process::availableParallelism();
     };
@@ -1633,4 +1637,16 @@ function testRunnerSummaryLinesReportsASkippedFixture(): void {
   let lines: Vector<String> = TestRunner::summaryLines(&outcomes);
 
   Test::assertEq<str>(testRunnerJoinLines(&lines).toStr(), "2 total\n2 passed\n0 failed\n1 skipped");
+}
+
+/// An explicit `-j` count wins over `IGNIS_TEST_JOBS`, which still applies
+/// when the command line named none.
+@test
+function testRunnerJobLimitPrefersTheExplicitCount(): void {
+  Env::set("IGNIS_TEST_JOBS", "7");
+
+  Test::assertEq<u64>(TestRunner::jobLimit(Option::SOME(3)), 3);
+  Test::assertEq<u64>(TestRunner::jobLimit(Option::NONE), 7);
+
+  Env::unset("IGNIS_TEST_JOBS");
 }

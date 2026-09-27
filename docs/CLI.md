@@ -258,7 +258,15 @@ Run standard library checks up to C emission without archiving.
 
 ```bash
 ignis check-std
+ignis check-std -o out
 ```
+
+`-o` / `--output-dir` names the directory the emitted C is written to (default `build`).
+
+The self-hosted compiler differs from the Rust host here:
+
+- It emits one translation unit for the whole library, `<dir>/ignis_std.c`, instead of one C file per std module, and writes no `ignis_std.h`.
+- It resolves the std root the way its `build-std` does: a governing `ignis.toml` `std_path` wins over `IGNIS_STD_PATH`. The host reads only `IGNIS_STD_PATH`, so the two differ only inside a project whose `std_path` points elsewhere.
 
 ## `ignis lsp`
 
