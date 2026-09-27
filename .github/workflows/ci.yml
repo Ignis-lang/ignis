@@ -21,82 +21,7 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  # Pinned to the same nightly the development flake provides, so a green run
-  # here means the same thing as a green run on a developer machine. An
-  # unpinned channel already turned this workflow red on its first run over a
-  # lint that did not exist in the local toolchain — the code had not changed.
-  RUST_NIGHTLY: nightly-2026-04-22
-
 jobs:
-  rust:
-    name: Rust gates
-    runs-on: ubuntu-latest
-    # The test step alone has crossed 25 minutes on a slow runner three times
-    # in one day, cancelling green runs on branches that do not touch Rust.
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_NIGHTLY }}
-          components: rustfmt, clippy
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v0-rust"
-          shared-key: "ci-rust"
-          cache-targets: true
-          cache-on-failure: true
-
-      # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
-      # present before any cargo invocation links.
-      #
-      # This used to be `apt-get update && apt-get install -y mold`, which hung for
-      # 55 minutes on an unresponsive Ubuntu mirror and burned the job's budget before
-      # a single crate compiled. The upstream release tarball is one request to a host
-      # the workflow already depends on, and the version is pinned rather than being
-      # whatever the distribution happens to carry.
-      - name: Install mold
-        timeout-minutes: 3
-        env:
-          MOLD_VERSION: 2.42.0
-        run: |
-          curl -fsSL --retry 3 --retry-delay 2 \
-            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local
-          mold --version
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      # No clippy warning is acceptable in this workspace. Keeping this as a
-      # gate is the only thing that stops them accumulating again.
-      - name: Lint
-        run: cargo clippy --all-targets --workspace --locked -- -D warnings
-
-      - name: Install nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      # End-to-end and codegen tests compile generated C, so the runner's gcc is
-      # part of the contract. nextest runs one process per test and reports every
-      # failure, where `cargo test` stops at the first failing target — a run that
-      # aborted after two of twenty-six targets looks green at a glance.
-      - name: Test
-        run: cargo nextest run --workspace --locked --no-fail-fast
-
-      # nextest cannot run doctests, so they stay on the built-in harness.
-      - name: Doctests
-        run: cargo test --doc --workspace --locked
-
   selfhost:
     name: Selfhost gates
     runs-on: ubuntu-latest
@@ -113,7 +38,9 @@ jobs:
     # selfhost-built binary was never exercised on a PR at all) add stage1's
     # own build plus one more selfhost-test-suite run under it, roughly
     # doubling the job; 90 keeps this job's "roughly double the slowest
-    # observed run" convention against that ~45-minute expectation.
+    # observed run" convention against that ~45-minute expectation. Dropping
+    # the Rust build and the host's own suite run since then shortens the job,
+    # but no run without them has been measured yet, so the budget stays.
     timeout-minutes: 90
 
     steps:
@@ -125,8 +52,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Pure bash/python against fake compiler binaries, so it needs neither
-      # Rust nor a built `ignis` — runs before either is set up. Covers how
+      # Pure bash/python against fake compiler binaries, so it needs no built
+      # `ignis` and runs before stage1 is built. Covers how
       # scripts/bootstrap.sh and scripts/resolve_official_stage0.sh pick
       # stage0 (the official binary or the C seed, never the host, and a
       # stage0 that cannot build stage1 is terminal), `ensure_stage`'s
@@ -143,48 +70,6 @@ jobs:
           python3 scripts/tests/test_bootstrap_report.py
           python3 scripts/tests/test_selfhost_syntax_parity.py
           python3 scripts/tests/test_selfhost_doc_parity.py
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_NIGHTLY }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v0-rust"
-          # Suffixed with the profile: the job used to build target/debug and
-          # now builds target/ci, and a shared key across two different target
-          # subdirectories would only cost a one-time cache miss, but keeping
-          # them apart avoids ever mixing the two.
-          shared-key: "ci-selfhost-profile-ci"
-          cache-targets: true
-          cache-on-failure: true
-
-      # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
-      # present before any cargo invocation links.
-      #
-      # This used to be `apt-get update && apt-get install -y mold`, which hung for
-      # 55 minutes on an unresponsive Ubuntu mirror and burned the job's budget before
-      # a single crate compiled. The upstream release tarball is one request to a host
-      # the workflow already depends on, and the version is pinned rather than being
-      # whatever the distribution happens to carry.
-      - name: Install mold
-        timeout-minutes: 3
-        env:
-          MOLD_VERSION: 2.42.0
-        run: |
-          curl -fsSL --retry 3 --retry-delay 2 \
-            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local
-          mold --version
-
-      # Built with the `ci` profile rather than plain debug or `--release`: the
-      # selfhost gates rely on `debug_assert!` and
-      # `mono_output.verify_no_generics()`, which `--release` strips, while
-      # plain debug is too slow for this job's budget.
-      - name: Build Ignis
-        run: cargo build --locked --profile ci -p ignis
 
       # `git diff` alone would miss a fixture the generator newly *creates*,
       # since an untracked file is not a diff. `git status --porcelain` with
@@ -241,8 +126,24 @@ jobs:
             test_cases/parser/host_unit_tests \
             test_cases/doc/__doc_baselines__
 
-      - name: Add Ignis to PATH
-        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+      # Every step from here runs stage1: stage0 is built from the committed C
+      # seed with gcc alone, and compiles `ignis/main.ign` once. This job never
+      # depends on the Rust host or on a network download; the official binary
+      # gets its own check in `official-stage0-gate` below. stage1 is the
+      # cheapest selfhost binary that exercises the compiler under test, so
+      # PRs get it instead of stage2/stage3 or the rest of the ladder
+      # (G1/G2/G4/G6), which stay nightly-only. PR #201 is why this matters:
+      # it passed a job that only ran the host binary and still broke the
+      # nightly ladder (the selfhost test suite failed to link under a
+      # selfhost-built binary, G3, and stage2 panicked on two error-corpus
+      # cases, G5). G7 needs no stage2, so stage1 answers it in about two
+      # minutes. G6's cases are each a full compile and link, so only its
+      # compiler-free coverage check runs on PRs (above).
+      - name: Build stage1 from the C seed
+        run: scripts/bootstrap.sh stage1-from-seed
+
+      - name: Add stage1 to PATH
+        run: echo "${GITHUB_WORKSPACE}/build/bootstrap/stage1" >> "$GITHUB_PATH"
 
       # `ignis fmt --check` exits non-zero listing every file that is not in
       # canonical layout. `example/add.ign` is excluded because it hits the
@@ -256,42 +157,14 @@ jobs:
       - name: Analyze the standard library and the selfhost compiler
         run: ignis check
 
-      - name: Run the selfhost test suite
-        run: ignis test
-
-      # The standard library owns the string runtime the C smoke test used to
-      # cover, so its own suite is the gate for it.
-      - name: Run the standard library test suite
-        run: ignis test-std --std-path std
-
-      # Everything above only ever runs the host (Rust) binary. PR #201 passed
-      # this job untouched and still broke the nightly ladder: the selfhost
-      # test suite failed to even link under a selfhost-built binary (G3), and
-      # stage2 panicked on two error-corpus cases (G5) — neither surfaced
-      # until the nightly ran hours later. stage1 (stage0 compiling
-      # `ignis/main.ign` once) is the cheapest selfhost binary that exercises
-      # the same code paths, so PRs get it instead of stage2/stage3 or the
-      # rest of the ladder (G1/G2/G4/G6), which stay nightly-only. G7 joined
-      # the PR set once its baselines were committed: it needs no host oracle
-      # and no stage2, so stage1 answers it in about two minutes. G6 has
-      # committed baselines too, but every one of its cases is a full compile
-      # and link, so only its compiler-free coverage check runs on PRs
-      # (above).
-      #
-      # stage0 is built from the committed C seed with gcc alone, so this
-      # stage1 never depends on the Rust host or on a network download. The
-      # official binary gets its own check in `official-stage0-gate` below.
-      - name: Build stage1 from the C seed
-        run: scripts/bootstrap.sh stage1-from-seed
-
       # `ignis doc` publishes the API package the release ships, so stage1's
       # has to match the committed baselines byte for byte on the release
       # target and the former doc_command.rs programs.
       - name: Compare stage1's ignis doc output with the committed baselines
         run: python3 scripts/selfhost_doc_parity.py --compiler build/bootstrap/stage1/ignis
 
-      # The same standard library suite as above, run by stage1, so the std
-      # tests keep a runner once the host compiler is retired.
+      # The standard library owns the string runtime the C smoke test used to
+      # cover, so its own suite is the gate for it.
       - name: Run the standard library test suite under stage1
         run: build/bootstrap/stage1/ignis test-std --std-path std
 
@@ -305,7 +178,8 @@ jobs:
         run: python3 scripts/tests/test_selfhost_lsp.py -v
 
       # The nightly's G3, run against stage1 instead of stage2: the suite has
-      # to pass outright under stage1, with no host run to compare against.
+      # to pass outright under stage1. This is the job's only run of the
+      # selfhost test suite (the project's `ignis test`, fixtures included).
       # Writes gates/G3-STAGE1.json.
       - name: Run the selfhost test suite under stage1 (G3, stage1)
         run: scripts/bootstrap.sh gate-g3-stage1
@@ -411,14 +285,13 @@ jobs:
   # current official asset (scripts/resolve_official_stage0.sh, the same
   # logic nightly.yml's "Resolve stage0" step runs) and build stage1 with it.
   # A failing official stage0 is terminal in scripts/bootstrap.sh, and its
-  # message names the two-step rule. It needs no Rust toolchain: the official
-  # binary already exists, and linking its output only needs the runner's
-  # gcc.
+  # message names the two-step rule. The official binary already exists, and
+  # linking its output only needs the runner's gcc.
   #
   # A fresh fork or a repository whose promotion streak has not yet reached 3
   # has no official asset to check against — that is not a violation, it is
   # "nothing to check yet", so the job skips rather than fails (job summary
-  # notice, exit 0). Parallel to `rust` and `selfhost` so it does not lengthen
+  # notice, exit 0). Parallel to `selfhost` so it does not lengthen
   # the critical path.
   official-stage0-gate:
     name: Official stage0 gate
