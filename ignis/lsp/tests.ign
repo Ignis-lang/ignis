@@ -695,6 +695,125 @@ function serverOnlyAnalyzesIgnisDocuments(): void {
   lspTestClose(&harness);
 }
 
+/// The text of a project file whose `[package]` table misspells `name`.
+const LSP_TEST_UNKNOWN_KEY_PROJECT: str = "[package]\nname = \"lsp-test\"\nversion = \"0.1.0\"\nnmae = \"typo\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n";
+
+/// `LSP_TEST_UNKNOWN_KEY_PROJECT` escaped for a JSON string.
+const LSP_TEST_UNKNOWN_KEY_PROJECT_JSON: str = "[package]\\nname = \\\"lsp-test\\\"\\nversion = \\\"0.1.0\\\"\\nnmae = \\\"typo\\\"\\n\\n[build]\\nsource_dir = \\\"src\\\"\\nentry = \\\"main.ign\\\"\\n";
+
+/// The diagnostics `files` holds for `path`, which must be there once.
+function lspTestDiagnosticsOf(
+  files: &Vector<FileDiagnostics>,
+  path: &String
+): Vector<LspDiagnostic> {
+  let mut found: Vector<LspDiagnostic> = Vector::new<LspDiagnostic>();
+  let mut matches: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    if (let Option::SOME(file) = files.get(index)) {
+      if (file.path.equals(path)) {
+        matches += 1;
+        let mut diagnosticIndex: u64 = 0;
+
+        while (diagnosticIndex < file.diagnostics.length()) {
+          if (let Option::SOME(diagnostic) = file.diagnostics.get(diagnosticIndex)) {
+            found.push(LspDiagnostic {
+              start: diagnostic.start,
+              end: diagnostic.end,
+              severity: diagnostic.severity,
+              code: diagnostic.code.clone(),
+              message: diagnostic.message.clone(),
+            });
+          }
+
+          diagnosticIndex += 1;
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<u64>(matches, 1);
+  return found;
+}
+
+@test
+function analysisReportsUnknownProjectKeysOnTheProjectFile(): void {
+  let source: Path::PathBuf = lspTestProject("unknownkey");
+  let path: Path::PathBuf = lspTestWrite(&source, "main.ign", "function main(): i32 {\n  return 0;\n}\n");
+  let Option::SOME(root) = source.parent() else {
+    Test::fail();
+    return;
+  };
+  let projectFile: Path::PathBuf = lspTestWrite(&root, "ignis.toml", LSP_TEST_UNKNOWN_KEY_PROJECT);
+  let sources: SourceOverrides = SourceOverrides::none();
+
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let projectFileText: String = projectFile.toString();
+  let diagnostics: Vector<LspDiagnostic> = lspTestDiagnosticsOf(&files, &projectFileText);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = diagnostics.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "C1008");
+  Test::assertEq<u64>(diagnostic.severity, 2);
+  Test::assertEq<str>(diagnostic.message.toStr(), "unknown key 'nmae' in [package]; did you mean 'name'?");
+  Test::assertEq<u64>(diagnostic.start.line, 3);
+  Test::assertEq<u64>(diagnostic.start.character, 0);
+  Test::assertEq<u64>(diagnostic.end.line, 3);
+  Test::assertEq<u64>(diagnostic.end.character, 4);
+}
+
+@test
+function serverAnalyzesTheProjectFileWhenItIsOpened(): void {
+  let source: Path::PathBuf = lspTestProject("openproject");
+  lspTestWrite(&source, "main.ign", "function main(): i32 {\n  return 0;\n}\n");
+  let Option::SOME(root) = source.parent() else {
+    Test::fail();
+    return;
+  };
+  let projectFile: Path::PathBuf = lspTestWrite(&root, "ignis.toml", LSP_TEST_UNKNOWN_KEY_PROJECT);
+
+  let mut messages: Vector<String> = Vector::new<String>();
+  messages.push(String::create("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
+  messages.push(lspTestDidOpen(&projectFile, LSP_TEST_UNKNOWN_KEY_PROJECT_JSON));
+
+  // A request analyzes the pending documents before it is answered, so the
+  // publish comes first when opening the project file queued an analysis.
+  messages.push(lspTestDocumentMessage(
+    "{\"jsonrpc\":\"2.0\",\"id\":2,",
+    "textDocument/hover",
+    &projectFile,
+    ",\"position\":{\"line\":0,\"character\":0}",
+  ));
+
+  let mut harness: LspTestHarness = lspTestHarnessWith(&messages, lspTestStdPath());
+  Test::assertEq<i32>(harness.server.run(), 1);
+
+  let initialized: String = lspTestReply(&mut harness);
+  Test::assertEq<boolean>(initialized.startsWith("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":"), true);
+
+  let projectPath: String = projectFile.toString();
+  let projectUri: String = uriFromFilePath(&projectPath);
+  let expected: String = String::create("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"")
+    .concat(&projectUri);
+  let published: String = lspTestReply(&mut harness);
+  Test::assertEq<boolean>(published.startsWith(expected.toStr()), true);
+  let unknownKeyCode: String = String::create("\"code\":\"C1008\"");
+  Test::assertEq<boolean>(published.contains(&unknownKeyCode), true);
+
+  lspTestClose(&harness);
+}
+
 @test
 function documentStoreCloseForgetsOnlyTheClosedDocument(): void {
   let mut store: DocumentStore = DocumentStore::create();
