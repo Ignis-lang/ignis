@@ -296,3 +296,28 @@ function inlayLetElseWithAWildcardGetsNoTypeHint(): void {
   Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_WILDCARD, "opt")).toStr(), ": Maybe");
   Test::assertEq<str>(typeHintAt(&hints, nameEnd(INLAY_LET_ELSE_WILDCARD, "SOME(_")).toStr(), "<none>");
 }
+
+const INLAY_METHOD_CALLS: str = "record Counter {\n    public base: i32;\n\n    public static make(start: i32, step: i32): Counter {\n        return Counter { base: start + step };\n    }\n\n    public plus(&self, amount: i32): i32 {\n        return self.base + amount;\n    }\n}\n\nfunction main(): i32 {\n    let counter: Counter = Counter::make(1, 2);\n    return counter.plus(3);\n}\n";
+
+/// Scenario: a static method call names every argument, while a method called
+/// on a value skips its receiver, so its only argument gets `amount`. Spec:
+/// the receiver skip in crates/ignis_lsp/src/inlay.rs:487.
+@test
+function inlayMethodCallsSkipTheReceiver(): void {
+  let hints: FileInlayHints = inlayTestHints("method_calls", INLAY_METHOD_CALLS, true);
+  let labels: Vector<String> = labelsOf(&hints, InlayHintKind::PARAMETER);
+
+  Test::assertEq<u64>(labels.length(), 3);
+
+  if (let Option::SOME(first) = labels.get(0)) {
+    Test::assertEq<str>(first.toStr(), "start: ");
+  }
+
+  if (let Option::SOME(second) = labels.get(1)) {
+    Test::assertEq<str>(second.toStr(), "step: ");
+  }
+
+  if (let Option::SOME(third) = labels.get(2)) {
+    Test::assertEq<str>(third.toStr(), "amount: ");
+  }
+}
