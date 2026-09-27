@@ -190,9 +190,6 @@ class Settings:
   work_dir: Path
   gate_id: str = GATE_ID
 
-  def class_order(self) -> tuple[str, ...]:
-    return BASELINE_CLASS_ORDER
-
 
 # =============================================================================
 # Corpus: repository sources
@@ -583,7 +580,7 @@ def count_classes(
   results: list[CaseResult],
   settings: Settings,
 ) -> dict[str, int]:
-  counts = {classification: 0 for classification in settings.class_order()}
+  counts = {classification: 0 for classification in BASELINE_CLASS_ORDER}
 
   for result in results:
     counts[result.classification] = counts.get(result.classification, 0) + 1
@@ -777,7 +774,7 @@ def build_report(
     "| --- | --- | --- |",
   ]
 
-  for classification in settings.class_order():
+  for classification in BASELINE_CLASS_ORDER:
     lines.append(
       f"| {classification} | {counts.get(classification, 0)} | {BASELINE_CLASS_DESCRIPTIONS[classification]} |"
     )
@@ -801,7 +798,7 @@ def build_report(
 
   lines.append("")
 
-  for classification in settings.class_order():
+  for classification in BASELINE_CLASS_ORDER:
     if classification == CLASS_PASS:
       continue
 
@@ -896,7 +893,7 @@ def build_gate(
       "corpus": "syntax",
       "compared_against": source,
       "total": total,
-      "counts": {classification: counts.get(classification, 0) for classification in settings.class_order()},
+      "counts": {classification: counts.get(classification, 0) for classification in BASELINE_CLASS_ORDER},
       "stale_baselines": stale,
       "failing": failing_entries(results),
     },
@@ -1028,7 +1025,7 @@ def print_summary(
   print("")
   print("class            count")
 
-  for classification in settings.class_order():
+  for classification in BASELINE_CLASS_ORDER:
     print(f"{classification:<16} {counts.get(classification, 0)}")
 
   print(f"{'total':<16} {len(results)}")
