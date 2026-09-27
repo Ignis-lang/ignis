@@ -1,0 +1,650 @@
+//! `textDocument/inlayHint`: the hints the host shows
+//! (crates/ignis_lsp/src/inlay.rs): parameter names before call arguments,
+//! the type of a `match` scrutinee after it, and the inferred type after the
+//! name a `let` without an annotation binds.
+//!
+//! Hints are collected once per analysis, for open documents only, while the
+//! analyzer's stores are alive, and keep only byte ranges and labels. The
+//! host walks each module from its roots and skips the bodies of exported
+//! declarations and trait default methods (crates/ignis_lsp/src/inlay.rs:445);
+//! here every expression and statement of the module is visited, so those
+//! bodies get hints too.
+
+import HashMap from "std::collections";
+import JsonObjectEntry, JsonValue from "std::json";
+import String from "std::string";
+import Text from "std::text";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+import SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+
+import Doc from "../doc/mod";
+
+import
+  ByteRange,
+  FileHoverIndex,
+  TextEdit,
+  ascendingOrder,
+  findWord,
+  memberOfType,
+  spanInFile,
+  u64At,
+from "./hover_index";
+import positionJson from "./protocol";
+
+/// The LSP `InlayHintKind` of each hint.
+export namespace InlayHintKind {
+  const TYPE: u64 = 1;
+  const PARAMETER: u64 = 2;
+}
+
+/// One hint, written against an anchor of the text it was collected from: a
+/// name for a binding's type, the scrutinee for its type, the argument for a
+/// parameter name.
+export record InlayHint {
+  public label: String;
+  public kind: u64;
+  public paddingLeft: boolean;
+  public anchorStart: u64;
+  public anchorEnd: u64;
+  /// The anchor is a name, which has to read the same in the current text.
+  public anchorIsName: boolean;
+  /// The hint sits at the anchor's end, otherwise at its start.
+  public afterAnchor: boolean;
+
+  /// Where the hint sits in the text it was collected from.
+  public offset(&self): u64 {
+    return self.afterAnchor ? self.anchorEnd : self.anchorStart;
+  }
+}
+
+/// The hints of one file, sorted by offset.
+export record FileInlayHints {
+  public path: String;
+  public hints: Vector<InlayHint>;
+}
+
+/// The typechecker's side tables the hints read, as lookups.
+record InlayTables {
+  public exprTypes: HashMap<u32, Analyzer::TypeId>;
+  public callTargets: HashMap<u32, Analyzer::DefinitionId>;
+  public localTypes: HashMap<u32, Analyzer::TypeId>;
+}
+
+/// What collecting the hints of one module reads.
+record InlayScope {
+  public path: String;
+  public text: String;
+}
+
+/// Collects the hints of the module analyzed as `analysisRecord`, whose
+/// source is `text`.
+export function buildFileInlayHints(
+  text: &String,
+  module: &Ast::Module,
+  analysisRecord: &Analyzer::ModuleAnalysisRecord,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): FileInlayHints {
+  let analysis: &Analyzer::AnalyzerOutput = &analysisRecord.output;
+  let tables: InlayTables = inlayTables(analysis);
+  let scope: InlayScope = InlayScope { path: analysisRecord.info.pathText.clone(), text: text.clone() };
+  let mut hints: Vector<InlayHint> = Vector::new<InlayHint>();
+
+  collectExpressionHints(&mut hints, &scope, &tables, module, analysis, defs, types, symbols);
+  collectBindingHints(&mut hints, &scope, &tables, module, defs, types, symbols);
+
+  return FileInlayHints { path: scope.path, hints: sortedHints(hints) };
+}
+
+/// The last entry for a node wins, as in the hover index.
+function inlayTables(analysis: &Analyzer::AnalyzerOutput): InlayTables {
+  let typecheck: &Analyzer::Typecheck::TypecheckOutput = &analysis.typecheck;
+  let mut tables: InlayTables = InlayTables {
+    exprTypes: HashMap::new<u32, Analyzer::TypeId>(),
+    callTargets: HashMap::new<u32, Analyzer::DefinitionId>(),
+    localTypes: HashMap::new<u32, Analyzer::TypeId>(),
+  };
+  let mut index: u64 = 0;
+
+  while (index < typecheck.exprTypes.nodeIds.length()) {
+    if (let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index)) {
+      if (let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index)) {
+        tables.exprTypes.insert(*nodeId, *typeId);
+      }
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < typecheck.callTargets.nodeIds.length()) {
+    if (let Option::SOME(nodeId) = typecheck.callTargets.nodeIds.get(index)) {
+      if (let Option::SOME(defId) = typecheck.callTargets.defIds.get(index)) {
+        tables.callTargets.insert(*nodeId, *defId);
+      }
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < typecheck.localTypes.patterns.length()) {
+    if (let Option::SOME(pattern) = typecheck.localTypes.patterns.get(index)) {
+      if (let Option::SOME(typeId) = typecheck.localTypes.typeIds.get(index)) {
+        tables.localTypes.insert(*pattern, *typeId);
+      }
+    }
+
+    index += 1;
+  }
+
+  return tables;
+}
+
+/// Adds the parameter names of every call and the type of every `match`
+/// scrutinee.
+function collectExpressionHints(
+  hints: &mut Vector<InlayHint>,
+  scope: &InlayScope,
+  tables: &InlayTables,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let hintsRef: &mut Vector<InlayHint> = hints;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < module.expressions.length()) {
+    match (module.expressions.get(Id::fromRaw<Ast::ExpressionTag>(raw))) {
+      Option::SOME(Ast::Expression::Node::Call(call)) -> {
+        if (spanInFile(&scope.path, call.span)) {
+          collectParameterHints(hintsRef, tables, module, analysis, raw, &call, defs, types, symbols);
+        }
+      },
+      Option::SOME(Ast::Expression::Node::Match(matchExpression)) -> {
+        if (spanInFile(&scope.path, matchExpression.span)) {
+          collectScrutineeHint(hintsRef, tables, module, matchExpression.scrutinee, defs, types, symbols);
+        }
+      },
+      _ -> {},
+    };
+
+    raw += 1;
+  }
+}
+
+/// The function or method a call reaches: the overload the typechecker
+/// selected, else what the callee resolves to, else the method its object's
+/// type declares under the member name.
+function callTarget(
+  tables: &InlayTables,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  callRaw: u32,
+  call: &Ast::Expression::Call,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): Option<Analyzer::DefinitionId> {
+  if (let Option::SOME(selected) = tables.callTargets.get(&callRaw)) {
+    return Option::SOME(*selected);
+  }
+
+  let resolved: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findExprRef(&analysis.resolvedBodies.bodyResolution, call.callee.raw());
+
+  if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = resolved) {
+    return Option::SOME(defId);
+  }
+
+  let Option::SOME(Ast::Expression::Node::MemberAccess(access)) = module.expressions.get(call.callee) else {
+    return Option::NONE;
+  };
+  let objectRaw: u32 = access.object.raw();
+
+  let Option::SOME(objectType) = tables.exprTypes.get(&objectRaw) else {
+    return Option::NONE;
+  };
+
+  return memberOfType(*objectType, &access.member, true, defs, types, symbols);
+}
+
+/// The parameters a call's arguments line up with, from the first argument
+/// on: a method called on a value skips its receiver
+/// (crates/ignis_lsp/src/inlay.rs:487).
+function calleeParameters(
+  definition: Option<&Analyzer::Definition>,
+  isInstanceCall: boolean
+): Vector<Analyzer::DefinitionId> {
+  let mut parameters: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut first: u64 = 0;
+
+  match (definition) {
+    Option::SOME(Analyzer::Definition::Function(functionDef)) -> {
+      appendFrom(&mut parameters, &functionDef.params, 0);
+    },
+    Option::SOME(Analyzer::Definition::Method(methodDef)) -> {
+      if (!methodDef.isStatic && isInstanceCall) {
+        first = 1;
+      }
+
+      appendFrom(&mut parameters, &methodDef.params, first);
+    },
+    _ -> {},
+  };
+
+  return parameters;
+}
+
+function appendFrom(
+  target: &mut Vector<Analyzer::DefinitionId>,
+  ids: &Vector<Analyzer::DefinitionId>,
+  first: u64
+): void {
+  let mut targetRef: &mut Vector<Analyzer::DefinitionId> = target;
+  let mut index: u64 = first;
+
+  while (index < ids.length()) {
+    if (let Option::SOME(id) = ids.get(index)) {
+      targetRef.push(*id);
+    }
+
+    index += 1;
+  }
+}
+
+/// Adds `name: ` before each argument of a call, unless the parameter's name
+/// is one character long or starts with `_`, or the argument is a variable of
+/// the same name (crates/ignis_lsp/src/inlay.rs:475). Arguments past the last
+/// parameter, as a variadic call passes, get none.
+function collectParameterHints(
+  hints: &mut Vector<InlayHint>,
+  tables: &InlayTables,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+  callRaw: u32,
+  call: &Ast::Expression::Call,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let mut hintsRef: &mut Vector<InlayHint> = hints;
+
+  let Option::SOME(target) = callTarget(tables, module, analysis, callRaw, call, defs, types, symbols) else {
+    return;
+  };
+
+  let isInstanceCall: boolean = match (module.expressions.get(call.callee)) {
+    Option::SOME(Ast::Expression::Node::MemberAccess(access)) -> access.operator == Ast::Expression::AccessOperator::Dot,
+    _ -> false,
+  };
+  let parameters: Vector<Analyzer::DefinitionId> = calleeParameters(defs.get(target), isInstanceCall);
+  let mut index: u64 = 0;
+
+  while (index < call.arguments.length() && index < parameters.length()) {
+    let Option::SOME(argument) = call.arguments.get(index) else {
+      break;
+    };
+    let Option::SOME(parameter) = parameters.get(index) else {
+      break;
+    };
+
+    index += 1;
+
+    let Option::SOME(definition) = defs.get(*parameter) else {
+      continue;
+    };
+
+    let name: String = String::create(symbols.resolve(definition.name()).unwrapOr(""));
+
+    if (name.length() <= 1 || name.byteAt(0).unwrapOr(0) == '_' as u8) {
+      continue;
+    }
+
+    let sameName: boolean = match (module.expressions.get(*argument)) {
+      Option::SOME(Ast::Expression::Node::Variable(variable)) -> variable.name.equals(&name),
+      _ -> false,
+    };
+
+    if (sameName) {
+      continue;
+    }
+
+    let Option::SOME(node) = module.expressions.get(*argument) else {
+      continue;
+    };
+
+    let span: SourceSpan = Ast::Serializer::expressionSpan(node);
+
+    hintsRef.push(InlayHint {
+      label: `${name.toStr()}: `,
+      kind: InlayHintKind::PARAMETER,
+      paddingLeft: false,
+      anchorStart: span.start,
+      anchorEnd: span.end,
+      anchorIsName: false,
+      afterAnchor: false,
+    });
+  }
+}
+
+/// Adds `: Type` after a `match` scrutinee, padded on the left
+/// (crates/ignis_lsp/src/inlay.rs:545).
+function collectScrutineeHint(
+  hints: &mut Vector<InlayHint>,
+  tables: &InlayTables,
+  module: &Ast::Module,
+  scrutinee: Ast::ExpressionId,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let mut hintsRef: &mut Vector<InlayHint> = hints;
+
+  let scrutineeRaw: u32 = scrutinee.raw();
+
+  let Option::SOME(typeId) = tables.exprTypes.get(&scrutineeRaw) else {
+    return;
+  };
+  let Option::SOME(node) = module.expressions.get(scrutinee) else {
+    return;
+  };
+
+  let span: SourceSpan = Ast::Serializer::expressionSpan(node);
+  let typeText: String = Doc::renderType(*typeId, defs, types, symbols);
+
+  hintsRef.push(InlayHint {
+    label: `: ${typeText.toStr()}`,
+    kind: InlayHintKind::TYPE,
+    paddingLeft: true,
+    anchorStart: span.start,
+    anchorEnd: span.end,
+    anchorIsName: false,
+    afterAnchor: true,
+  });
+}
+
+/// Adds the inferred type after the name of every `let` and `let mut` that
+/// binds one name without an annotation, and of a refutable `let ... else`
+/// whose pattern binds exactly one name (crates/ignis_lsp/src/inlay.rs:127).
+/// `let name = value else` is the shorthand the host treats as annotated.
+function collectBindingHints(
+  hints: &mut Vector<InlayHint>,
+  scope: &InlayScope,
+  tables: &InlayTables,
+  module: &Ast::Module,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let hintsRef: &mut Vector<InlayHint> = hints;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < module.statements.length()) {
+    match (module.statements.get(Id::fromRaw<Ast::StatementTag>(raw))) {
+      Option::SOME(Ast::Statement::Node::Let(statement)) -> {
+        if (statement.annotation.isNone()) {
+          collectBindingHint(hintsRef, scope, tables, module, statement.pattern, defs, types, symbols);
+        }
+      },
+      Option::SOME(Ast::Statement::Node::Variable(statement)) -> {
+        if (statement.annotation.isNone()) {
+          collectBindingHint(hintsRef, scope, tables, module, statement.pattern, defs, types, symbols);
+        }
+      },
+      Option::SOME(Ast::Statement::Node::LetElse(statement)) -> {
+        if (statement.annotation.isNone()) {
+          if (let Option::SOME(binder) = singleVariantBinder(module, statement.pattern)) {
+            collectBindingHint(hintsRef, scope, tables, module, binder, defs, types, symbols);
+          }
+        }
+      },
+      _ -> {},
+    };
+
+    raw += 1;
+  }
+}
+
+/// Adds `: Type` after the name `pattern` binds, when it is a binding whose
+/// type the typechecker settled.
+function collectBindingHint(
+  hints: &mut Vector<InlayHint>,
+  scope: &InlayScope,
+  tables: &InlayTables,
+  module: &Ast::Module,
+  pattern: Ast::PatternId,
+  defs: &Analyzer::DefinitionStore,
+  types: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+): void {
+  let mut hintsRef: &mut Vector<InlayHint> = hints;
+
+  let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(pattern) else {
+    return;
+  };
+
+  if (!spanInFile(&scope.path, binding.span)) {
+    return;
+  }
+
+  let patternRaw: u32 = pattern.raw();
+
+  let Option::SOME(typeId) = tables.localTypes.get(&patternRaw) else {
+    return;
+  };
+  let Option::SOME(start) = findWord(&scope.text, binding.span.start, binding.span.end, &binding.name) else {
+    return;
+  };
+
+  let typeText: String = Doc::renderType(*typeId, defs, types, symbols);
+
+  hintsRef.push(InlayHint {
+    label: `: ${typeText.toStr()}`,
+    kind: InlayHintKind::TYPE,
+    paddingLeft: false,
+    anchorStart: start,
+    anchorEnd: start + binding.name.length(),
+    anchorIsName: true,
+    afterAnchor: true,
+  });
+}
+
+/// The one binding of an enum variant pattern such as `Option::SOME(value)`,
+/// or `NONE` when it binds none or several (crates/ignis_lsp/src/inlay.rs:187).
+function singleVariantBinder(
+  module: &Ast::Module,
+  pattern: Ast::PatternId
+): Option<Ast::PatternId> {
+  let Option::SOME(Ast::Pattern::Node::Path(path)) = module.patterns.get(pattern) else {
+    return Option::NONE;
+  };
+
+  let mut leaves: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut index: u64 = 0;
+
+  while (index < path.arguments.length()) {
+    if (let Option::SOME(argument) = path.arguments.get(index)) {
+      collectBinderLeaves(module, *argument, &mut leaves);
+    }
+
+    index += 1;
+  }
+
+  if (leaves.length() != 1) {
+    return Option::NONE;
+  }
+
+  return leaves.pop();
+}
+
+/// Appends every name `pattern` can bind: a binding, or a one-segment path
+/// without arguments, which the host counts too
+/// (crates/ignis_lsp/src/inlay.rs:203).
+function collectBinderLeaves(
+  module: &Ast::Module,
+  pattern: Ast::PatternId,
+  leaves: &mut Vector<Ast::PatternId>
+): void {
+  let mut leavesRef: &mut Vector<Ast::PatternId> = leaves;
+
+  match (module.patterns.get(pattern)) {
+    Option::SOME(Ast::Pattern::Node::Binding(_)) -> {
+      leavesRef.push(pattern);
+    },
+    Option::SOME(Ast::Pattern::Node::Path(path)) -> {
+      if (path.arguments.length() == 0 && path.segments.length() == 1) {
+        leavesRef.push(pattern);
+      } else {
+        collectEachLeaves(module, &path.arguments, leavesRef);
+      }
+    },
+    Option::SOME(Ast::Pattern::Node::Tuple(tuple)) -> {
+      collectEachLeaves(module, &tuple.elements, leavesRef);
+    },
+    Option::SOME(Ast::Pattern::Node::Or(alternatives)) -> {
+      collectEachLeaves(module, &alternatives.alternatives, leavesRef);
+    },
+    _ -> {},
+  };
+}
+
+function collectEachLeaves(
+  module: &Ast::Module,
+  patterns: &Vector<Ast::PatternId>,
+  leaves: &mut Vector<Ast::PatternId>
+): void {
+  let leavesRef: &mut Vector<Ast::PatternId> = leaves;
+  let mut index: u64 = 0;
+
+  while (index < patterns.length()) {
+    if (let Option::SOME(pattern) = patterns.get(index)) {
+      collectBinderLeaves(module, *pattern, leavesRef);
+    }
+
+    index += 1;
+  }
+}
+
+/// `hints` in ascending offset order.
+function sortedHints(hints: Vector<InlayHint>): Vector<InlayHint> {
+  let mut offsets: Vector<u64> = Vector::new<u64>();
+  let mut index: u64 = 0;
+
+  while (index < hints.length()) {
+    if (let Option::SOME(hint) = hints.get(index)) {
+      offsets.push(hint.offset());
+    }
+
+    index += 1;
+  }
+
+  let order: Vector<u64> = ascendingOrder(&offsets);
+  let mut sorted: Vector<InlayHint> = Vector::new<InlayHint>();
+  index = 0;
+
+  while (index < order.length()) {
+    if (let Option::SOME(hint) = hints.get(u64At(&order, index))) {
+      sorted.push(InlayHint {
+        label: hint.label.clone(),
+        kind: hint.kind,
+        paddingLeft: hint.paddingLeft,
+        anchorStart: hint.anchorStart,
+        anchorEnd: hint.anchorEnd,
+        anchorIsName: hint.anchorIsName,
+        afterAnchor: hint.afterAnchor,
+      });
+    }
+
+    index += 1;
+  }
+
+  return sorted;
+}
+
+/// True when `position` is at or after `start` and before `end`, the end
+/// excluded as in the host (crates/ignis_lsp/src/inlay.rs:624).
+export function positionInRange(
+  position: Text::Position,
+  start: Text::Position,
+  end: Text::Position
+): boolean {
+  let fromStart: boolean = position.line > start.line || (position.line == start.line && position.character >= start.character);
+  let beforeEnd: boolean = position.line < end.line || (position.line == end.line && position.character < end.character);
+  return fromStart && beforeEnd;
+}
+
+/// Where the anchor of `hint` is in `current`, which `edit` leads to: `NONE`
+/// when the edit reaches it, or a name there no longer reads the same.
+function currentAnchor(
+  hint: &InlayHint,
+  index: &FileHoverIndex,
+  current: &String,
+  edit: &TextEdit
+): Option<ByteRange> {
+  if (hint.anchorIsName) {
+    return index.currentNameRange(current, edit, hint.anchorStart, hint.anchorEnd);
+  }
+
+  let Option::SOME(start) = edit.currentStartOf(hint.anchorStart, hint.anchorEnd) else {
+    return Option::NONE;
+  };
+
+  return Option::SOME(ByteRange { start: start, end: start + (hint.anchorEnd - hint.anchorStart) });
+}
+
+/// The `InlayHint` results of `hints` that fall in `start..end` of `current`,
+/// the text the client has now, as the host answers them
+/// (crates/ignis_lsp/src/server.rs:2676). `index` is the file's index of the
+/// same analysis.
+export function inlayHintsJson(
+  hints: &FileInlayHints,
+  index: &FileHoverIndex,
+  current: &String,
+  edit: &TextEdit,
+  lineIndex: &Text::LineIndex,
+  start: Text::Position,
+  end: Text::Position,
+): Vector<JsonValue> {
+  let mut items: Vector<JsonValue> = Vector::new<JsonValue>();
+  let mut position: u64 = 0;
+
+  while (position < hints.hints.length()) {
+    let Option::SOME(hint) = hints.hints.get(position) else {
+      break;
+    };
+
+    position += 1;
+
+    let Option::SOME(anchor) = currentAnchor(hint, index, current, edit) else {
+      continue;
+    };
+
+    let at: Text::Position = lineIndex.position(hint.afterAnchor ? anchor.end : anchor.start);
+
+    if (!positionInRange(at, start, end)) {
+      continue;
+    }
+
+    let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+    entries.push(JsonObjectEntry::create("position", positionJson(at)));
+    entries.push(JsonObjectEntry::create("label", JsonValue::fromString(hint.label.clone())));
+    entries.push(JsonObjectEntry::create("kind", JsonValue::unsignedValue(hint.kind)));
+
+    if (hint.paddingLeft) {
+      entries.push(JsonObjectEntry::create("paddingLeft", JsonValue::boolValue(true)));
+    }
+
+    items.push(JsonValue::object(entries));
+  }
+
+  return items;
+}

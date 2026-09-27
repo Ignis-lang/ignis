@@ -1,7 +1,7 @@
 //! `ignis lsp`: a sequential Language Server Protocol server over stdio that
 //! publishes diagnostics and answers hovers, go-to-definition,
 //! find-references, document symbols, completion, formatting, code actions,
-//! rename and semantic tokens.
+//! rename, semantic tokens and inlay hints.
 //!
 //! Messages are handled one at a time, in arrival order. Document changes
 //! only mark their analysis dirty. The analysis runs once no bytes of a
@@ -47,6 +47,7 @@ import
   isLocalTarget,
   moduleOfTarget,
 from "./hover_index";
+import inlayHintsJson from "./inlay_hints";
 import DeclarationSite, NameSite, NavigationIndex from "./navigation";
 import
   DecodeError,
@@ -101,6 +102,12 @@ record NavigationSet {
 record PositionRequest {
   public uri: String;
   public position: Text::Position;
+}
+
+/// The range a request names.
+record RequestRange {
+  public start: Text::Position;
+  public end: Text::Position;
 }
 
 /// A file's text as the client has it, to turn byte ranges of the text it
@@ -271,6 +278,41 @@ function viewRange(
     Option::SOME(range) -> Option::SOME(rangeJson(view.lineIndex.position(range.start), view.lineIndex.position(range.end))),
     Option::NONE -> Option::NONE,
   };
+}
+
+/// The `range` in a request's params.
+function requestRangeOf(message: &JsonValue): Option<RequestRange> {
+  let Option::SOME(params) = jsonMember(message, "params") else {
+    return Option::NONE;
+  };
+  let Option::SOME(range) = jsonMember(params, "range") else {
+    return Option::NONE;
+  };
+
+  let Option::SOME(start) = positionOf(range, "start") else {
+    return Option::NONE;
+  };
+  let Option::SOME(end) = positionOf(range, "end") else {
+    return Option::NONE;
+  };
+
+  return Option::SOME(RequestRange { start: start, end: end });
+}
+
+/// The position at `key` of `value`.
+function positionOf(value: &JsonValue, key: str): Option<Text::Position> {
+  let Option::SOME(position) = jsonMember(value, key) else {
+    return Option::NONE;
+  };
+
+  let line: i64 = jsonIntegerMember(position, "line").unwrapOr(-1);
+  let character: i64 = jsonIntegerMember(position, "character").unwrapOr(-1);
+
+  if (line < 0 || character < 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(Text::Position { line: line as u64, character: character as u64 });
 }
 
 /// The error text for a skipped message of `length` bytes.
@@ -588,6 +630,13 @@ export record LspServer {
 
     if (request.method.equals("textDocument/semanticTokens/full")) {
       let result: JsonValue = self.semanticTokens(&request.message);
+      let body: String = responseBody(request.id, result);
+      self.send(&body);
+      return LspStep::CONTINUE;
+    }
+
+    if (request.method.equals("textDocument/inlayHint")) {
+      let result: JsonValue = self.inlayHints(&request.message);
       let body: String = responseBody(request.id, result);
       self.send(&body);
       return LspStep::CONTINUE;
@@ -1363,6 +1412,42 @@ export record LspServer {
     };
 
     return file.identifierClassesIn(&document.text);
+  }
+
+  /// Answers `textDocument/inlayHint` with the hints in the requested range,
+  /// as the host does (crates/ignis_lsp/src/server.rs:2676). They come from
+  /// the last analysis that reached the analyzer, moved to the text the client
+  /// has now; a hint the edit since then reaches is left out. `null` when the
+  /// document has not been analyzed.
+  inlayHints(&mut self, message: &JsonValue): JsonValue {
+    if (self.dirty.length() > 0) {
+      self.analyzeDirty();
+    }
+
+    let Option::SOME(uri) = textDocumentUriOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(range) = requestRangeOf(message) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(document) = self.documents.find(&uri) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(navigation) = self.navigationOf(document) else {
+      return JsonValue::nullValue();
+    };
+
+    let path: String = document.path.toString();
+
+    let Option::SOME(file) = navigation.fileOf(&path) else {
+      return JsonValue::nullValue();
+    };
+    let Option::SOME(hints) = navigation.inlaysOf(&path) else {
+      return JsonValue::nullValue();
+    };
+
+    let view: FileView = self.fileView(file);
+    return JsonValue::array(inlayHintsJson(hints, file, &view.current, &view.edit, &view.lineIndex, range.start, range.end));
   }
 
   /// Answers `textDocument/documentSymbol` with the outline of the document:
