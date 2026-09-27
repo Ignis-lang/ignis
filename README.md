@@ -48,16 +48,25 @@ curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/insta
 
 ### Build from Source
 
+The compiler is written in Ignis (`ignis/`). Building it from source needs no
+prebuilt compiler: the repository commits a C seed (`bootstrap/seed/`) that GCC
+turns into a first compiler, which then builds the current sources. Besides the
+requirements above, this needs `xz`, `sha256sum` and `git`, and takes several
+minutes.
+
 ```bash
 # Build from source with the installer
 curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/install.sh | bash -s -- --build
 
-# Or build manually
+# Or build manually with the bootstrap ladder (also needs python3)
 git clone https://github.com/Ignis-lang/ignis.git
 cd ignis
-cargo build --release -p ignis
-./target/release/ignis --help
+scripts/bootstrap.sh stage1-from-seed   # C seed -> stage0 -> stage1
+scripts/bootstrap.sh stage2             # stage1 -> stage2, the binary a release ships
+./build/bootstrap/stage2/ignis --help
 ```
+
+See [BOOTSTRAP.md](BOOTSTRAP.md) for the stages and the gates.
 
 ### Arch Linux
 
@@ -67,6 +76,8 @@ makepkg -si
 ```
 
 ### Nix
+
+The Nix package builds the compiler from the C seed, which takes several minutes.
 
 ```bash
 # Run from flake
@@ -82,7 +93,7 @@ nix develop github:Ignis-lang/ignis
 Or with traditional Nix:
 
 ```bash
-nix-build
+nix-build -A package
 ./result/bin/ignis --help
 ```
 
@@ -121,12 +132,8 @@ function main(): void {
 Build and run:
 
 ```bash
-# Build the standard library (first time only)
-ignis build-std
-
-# Compile and run
-ignis build hello.ign
-./build/hello
+ignis build hello.ign -o hello
+./hello
 ```
 
 ## Usage
@@ -141,13 +148,17 @@ ignis build
 # Build the standard library
 ignis build-std
 
+# Type-check without code generation or linking
+ignis check main.ign
+
 # Additional options
-ignis build main.ign --emit-c out.c          # Output generated C code
-ignis build main.ign --dump hir              # Dump HIR for debugging
-ignis build main.ign --dump hir --dump-hir main  # Dump HIR for a specific function
-ignis build main.ign --debug --debug-trace analyzer
-ignis build main.ign --debug                 # Enables -vv logs + debug traces
-ignis build main.ign -O                      # Enable optimizations
+ignis build main.ign -o main                 # Name the output binary
+ignis build main.ign -O 2                    # Set the C optimization level (0-3)
+ignis build main.ign --debug                 # Build with debug information
+ignis build main.ign --dump-drop-schedule    # Print the ownership drop schedules
+
+# Run the project's @test functions
+ignis test
 
 # Format one or more files canonically
 ignis fmt src/main.ign
@@ -192,6 +203,7 @@ function main(): void {
 For multi-file projects, create an `ignis.toml`:
 
 ```toml
+[package]
 name = "myproject"
 version = "0.1.0"
 
@@ -199,6 +211,8 @@ version = "0.1.0"
 source_dir = "src"
 out_dir = "build"
 ```
+
+`ignis build` in that directory writes the executable to `build/bin/myproject`.
 
 ## Contributions
 
