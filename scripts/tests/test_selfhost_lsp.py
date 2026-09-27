@@ -7,8 +7,8 @@ responses, the diagnostics published for an open buffer (a type error
 reported at the right UTF-16 range, then cleared once the buffer is fixed or
 closed), the hovers answered for it, go-to-definition, find-references,
 rename and the document outline over a two-file project, and completion in each
-context the host completes, also while the buffer does not parse, and the
-formatting edits and quick fixes it offers.
+context the host completes, also while the buffer does not parse, the
+formatting edits and quick fixes it offers, and the inlay hints it shows.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
 also proves analysis reads open documents instead of the disk.
 
@@ -179,6 +179,41 @@ CODE_ACTION_SOURCE = (
   "  return 0;\n"
   "}\n"
 )
+
+# Every kind of inlay hint: the inferred types of `label`, `total` and `mode`,
+# the parameter names of `add(1, 2)` and the scrutinee's type after
+# `match (total`. A string holding a two-unit emoji and a two-byte letter
+# sits before `total` and the arguments on the same line, so their UTF-16
+# columns differ from their byte columns.
+INLAY_SOURCE = (
+  "function add(left: i32, right: i32): i32 {\n"
+  "  return left + right;\n"
+  "}\n"
+  "\n"
+  "function main(): i32 {\n"
+  '  let label = "héllo 😀"; let total = add(1, 2);\n'
+  "  let mode = match (total) { 3 -> 1, _ -> 0, };\n"
+  "  return mode;\n"
+  "}\n"
+)
+WHOLE_DOCUMENT = {"start": {"line": 0, "character": 0}, "end": {"line": 100, "character": 0}}
+
+
+def inlay_hints_of(text):
+  """The inlay hints expected for `INLAY_SOURCE`, placed in `text`, in
+  position order."""
+  return [
+    {"position": position_of(text, "label", delta=5), "label": ": str", "kind": 1},
+    {"position": position_of(text, "total", delta=5), "label": ": i32", "kind": 1},
+    {"position": position_of(text, "add(1", delta=4), "label": "left: ", "kind": 2},
+    {"position": position_of(text, "add(1, 2", delta=7), "label": "right: ", "kind": 2},
+    {"position": position_of(text, "mode", delta=4), "label": ": i32", "kind": 1},
+    {"position": position_of(text, "match (total", delta=12), "label": ": i32", "kind": 1, "paddingLeft": True},
+  ]
+
+
+def in_position_order(hints):
+  return sorted(hints, key=lambda hint: (hint["position"]["line"], hint["position"]["character"], hint["label"]))
 
 
 def position_of(text, needle, occurrence=1, delta=0):
@@ -440,6 +475,10 @@ class LanguageServer:
       "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
       "context": {"diagnostics": diagnostics},
     })
+    return self.response(request_id)["result"]
+
+  def inlay_hints(self, request_id, uri, lsp_range):
+    self.request(request_id, "textDocument/inlayHint", {"textDocument": {"uri": uri}, "range": lsp_range})
     return self.response(request_id)["result"]
 
   def wait(self):
@@ -995,6 +1034,44 @@ class LanguageServerTest(unittest.TestCase):
     self.open_buffer(notes, CODE_ACTION_SOURCE)
     self.assertEqual(self.server.code_actions(5, notes, unused), [])
     self.finish(6)
+
+  def test_inlay_hints_show_parameter_names_and_inferred_types(self):
+    uri = self.source_file("main.ign", INLAY_SOURCE)
+    capabilities = self.server.initialize(self.workspace)["capabilities"]
+    self.assertEqual(capabilities["inlayHintProvider"], {"resolveProvider": False})
+
+    self.open_buffer(uri, INLAY_SOURCE)
+    hints = self.server.inlay_hints(2, uri, WHOLE_DOCUMENT)
+    self.show("inlay hints", hints)
+    expected = inlay_hints_of(INLAY_SOURCE)
+    self.assertEqual(in_position_order(hints), expected)
+
+    line = INLAY_SOURCE.split("\n")[5]
+    byte_column = len(line[:line.index("add(1") + 4].encode("utf-8"))
+    self.assertNotEqual(expected[2]["position"]["character"], byte_column)
+
+    calls = {"start": position_of(INLAY_SOURCE, "add(1"), "end": position_of(INLAY_SOURCE, "mode")}
+    self.assertEqual(in_position_order(self.server.inlay_hints(3, uri, calls)), expected[2:4])
+
+    before_first_argument = {"start": {"line": 0, "character": 0}, "end": expected[2]["position"]}
+    self.assertEqual(in_position_order(self.server.inlay_hints(4, uri, before_first_argument)), expected[:2])
+
+    self.assertIsNone(self.server.inlay_hints(5, Path(self.workspace, "closed.ign").as_uri(), WHOLE_DOCUMENT))
+    self.finish(6)
+
+  def test_inlay_hints_after_an_edit_that_breaks_parsing_move_with_the_text(self):
+    uri = self.source_file("main.ign", INLAY_SOURCE)
+    self.server.initialize(self.workspace)
+
+    self.open_buffer(uri, INLAY_SOURCE)
+    self.assertEqual(in_position_order(self.server.inlay_hints(2, uri, WHOLE_DOCUMENT)), inlay_hints_of(INLAY_SOURCE))
+
+    broken = "function broken(\n" + INLAY_SOURCE
+    self.change(uri, 2, broken)
+    hints = self.server.inlay_hints(3, uri, WHOLE_DOCUMENT)
+    self.show("inlay hints after an edit that breaks parsing", hints)
+    self.assertEqual(in_position_order(hints), inlay_hints_of(broken))
+    self.finish(4)
 
   def test_errors_answer_bad_messages_and_exit_without_shutdown_fails(self):
     self.server.initialize(self.workspace)
