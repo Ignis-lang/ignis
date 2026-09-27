@@ -1,0 +1,56 @@
+// e2e: std
+//
+// A nested tuple literal scrutinee borrows element by element at every level: a binding
+// taken out of a referenced element, however deep, names the referent's payload and its
+// owner keeps the drop. A binding taken out of an owned element, however deep, owns the
+// payload and drops it at the arm end, once. `let ... else` follows the same rule.
+import Io from "std::io";
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function allBorrowed(
+  first: &Option<Tracked>,
+  second: &Option<Tracked>,
+  third: &Option<Tracked>
+): i32 {
+  return match ((first, (second, third))) {
+    (Option::SOME(a), (Option::SOME(b), Option::SOME(c))) -> a.id + b.id + c.id,
+    _ -> 0,
+  };
+}
+
+function innerOwned(first: &Option<Tracked>, owned: Option<Tracked>): i32 {
+  return match ((first, (owned, 0))) {
+    (Option::SOME(a), (Option::SOME(b), _)) -> a.id + b.id,
+    _ -> 0,
+  };
+}
+
+function borrowedByLetElse(first: &Option<Tracked>, second: &Option<Tracked>): i32 {
+  let (Option::SOME(a), (Option::SOME(b), _)) = (first, (second, 0)) else {
+    return 0;
+  };
+
+  return a.id * b.id;
+}
+
+function main(): i32 {
+  let one: Option<Tracked> = Option::SOME(Tracked { id: 1 });
+  let two: Option<Tracked> = Option::SOME(Tracked { id: 2 });
+  let three: Option<Tracked> = Option::SOME(Tracked { id: 3 });
+
+  Io::println(`all borrowed ${allBorrowed(&one, &two, &three)}`.toStr());
+  Io::println(`inner owned ${innerOwned(&one, Option::SOME(Tracked { id: 40 }))}`.toStr());
+  Io::println(`let else ${borrowedByLetElse(&two, &three)}`.toStr());
+  Io::println("end");
+
+  return 0;
+}
