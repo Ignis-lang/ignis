@@ -45,6 +45,11 @@ export namespace LirLowering {
     /// a reference scrutinee, which names a place inside the referent and
     /// must outlive the match.
     public byrefCaptureRaws: Vector<u32>;
+    /// Locals whose address the function body takes (`&name`, `&mut name`, or a
+    /// field or element of one). A non-droppable pattern binding destructured out
+    /// of a reference scrutinee becomes a place, like a droppable one, only when
+    /// it is listed here: otherwise its copy is indistinguishable from the place.
+    public addressTakenDefRaws: Vector<u32>;
     /// Locals initialized from a closure literal, so a scheduled drop of one
     /// tears the environment down instead of dropping the value struct.
     /// Parallel to `closureLocalTypeRaws`.
@@ -72,6 +77,7 @@ export namespace LirLowering {
         syntheticFrameStarts: Vector::new<u64>(),
         loadAliasTempRaws: Vector::new<u32>(),
         byrefCaptureRaws: Vector::new<u32>(),
+        addressTakenDefRaws: Vector::new<u32>(),
         closureLocalDefRaws: Vector::new<u32>(),
         closureLocalTypeRaws: Vector::new<u32>(),
         readingFieldScrutineeByCopy: false,
@@ -798,6 +804,67 @@ export namespace LirLowering {
 
     while (index < state.byrefCaptureRaws.length()) {
       if (let Option::SOME(raw) = state.byrefCaptureRaws.get(index)) {
+        if (*raw == defId.raw()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Records in `state.addressTakenDefRaws` every local whose address `bodyId` takes.
+  /// Closure bodies are skipped: they are lowered as functions of their own, and a
+  /// name used there is a capture, not the local.
+  function collectAddressTakenLocals(
+    hirStore: &Hir::HirStore,
+    state: &mut LirLowering::LowerState,
+    bodyId: Hir::HirId,
+  ): void {
+    let mut pending: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    pending.push(bodyId);
+
+    while (let Option::SOME(current) = pending.pop()) {
+      let Option::SOME(node) = hirStore.get(current) else {
+        continue;
+      };
+
+      if (let Hir::HirKind::Closure(_) = &node.kind) {
+        continue;
+      }
+
+      if (let Hir::HirKind::Reference(reference) = &node.kind) {
+        if (let Option::SOME(root) = Borrowck::assignTargetRootLocal(hirStore, reference.expression)) {
+          if (!LirLowering::isAddressTakenLocal(state, root)) {
+            let mut stateRef: &mut LirLowering::LowerState = state;
+            stateRef.addressTakenDefRaws.push(root.raw());
+          }
+        }
+      }
+
+      let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+      let mut childIndex: u64 = 0;
+
+      while (childIndex < children.length()) {
+        if (let Option::SOME(child) = children.get(childIndex)) {
+          pending.push(*child);
+        }
+
+        childIndex += 1;
+      }
+    }
+  }
+
+  function isAddressTakenLocal(
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < state.addressTakenDefRaws.length()) {
+      if (let Option::SOME(raw) = state.addressTakenDefRaws.get(index)) {
         if (*raw == defId.raw()) {
           return true;
         }
@@ -3182,9 +3249,17 @@ export namespace LirLowering {
         // referent, not a copy of it: the local holds the address of that place so
         // `&binding` points into the referent and outlives the match, and every read,
         // write and borrow of the name goes through the pointer (`byrefCaptureRaws`).
+        // A non-droppable payload is bound the same way once its address is taken;
+        // until then a copy reads the same. A droppable one is a place only when the
+        // borrow checker says so, since it also decides whether the binding is dropped.
         let mut byrefPlace: Option<Lir::Operand> = Option::NONE;
+        let mut bindsPlace: boolean = dropSchedules.isBorrowedPatternBinding(defId);
 
-        if (aliased && dropSchedules.isBorrowedPatternBinding(defId)) {
+        if (!bindsPlace && LirLowering::isAddressTakenLocal(state, defId)) {
+          bindsPlace = !Borrowck::needsDropType(defStore, typeStore, valueType);
+        }
+
+        if (aliased && bindsPlace) {
           byrefPlace = LirLowering::copyPlace(&place);
         }
 
@@ -4705,6 +4780,7 @@ export namespace LirLowering {
       let mut state: LirLowering::LowerState = LirLowering::LowerState::init(constValues);
 
       LirLowering::registerParams(defStore, &mut function_, &mut state, &paramDefs);
+      LirLowering::collectAddressTakenLocals(hirStore, &mut state, bodyId);
 
       let thunkCaptures: Vector<Hir::HirCapture> = tables.thunkCapturesFor(itemDef.raw());
 
