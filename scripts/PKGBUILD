@@ -14,13 +14,17 @@ depends=(
 )
 # The release archive .github/workflows/release.yml publishes for the tag: the
 # compiler binary at ./ignis and the standard library at ./std. Nothing is
-# built here. The archive is checked against the release's own .sha256 in
-# prepare(), so the sums below stay SKIP.
+# built here, beyond the C runtime of Rust-built archives (see build()).
+# The sums pin the v0.4.0 assets; prepare() also checks the archive against
+# the release's own .sha256. Update both sums when pkgver changes.
 source=(
   "ignis-linux-amd64-${pkgver}.tar.gz::${url}/releases/download/v${pkgver}/ignis-linux-amd64.tar.gz"
   "ignis-linux-amd64-${pkgver}.tar.gz.sha256::${url}/releases/download/v${pkgver}/ignis-linux-amd64.tar.gz.sha256"
 )
-sha256sums=('SKIP' 'SKIP')
+sha256sums=(
+  'f18d4eab303b8b4c3ffbd765758ff078054659343b8cde085ed9fd9f56cffc9c'
+  'c65495b6a1bf0805e4260473c78a17c0ef2bb1b94af9b4e94978650e8815f393'
+)
 
 prepare() {
   local expected
@@ -38,8 +42,25 @@ build() {
   fi
 }
 
+# Builds and runs a one-file project with the packaged compiler and std, so
+# analysis, codegen, the C toolchain and the linked program's runtime are all
+# exercised. Project mode is used because it writes build/bin/<name> with both
+# the Rust-built and the selfhost archives.
 check() {
-  cat > check_hello.ign << 'EOF'
+  rm -rf check_hello
+  mkdir -p check_hello/src
+
+  cat > check_hello/ignis.toml << 'EOF'
+[package]
+name = "hello"
+version = "0.1.0"
+
+[build]
+source_dir = "src"
+out_dir = "build"
+EOF
+
+  cat > check_hello/src/main.ign << 'EOF'
 import Io from "std::io";
 
 function main(): void {
@@ -48,7 +69,11 @@ function main(): void {
 }
 EOF
 
-  IGNIS_STD_PATH="${srcdir}/std" "${srcdir}/ignis" check check_hello.ign
+  (
+    cd check_hello
+    IGNIS_STD_PATH="${srcdir}/std" "${srcdir}/ignis" build
+    test "$(./build/bin/hello)" = "Hello, Ignis!"
+  )
 }
 
 package() {
