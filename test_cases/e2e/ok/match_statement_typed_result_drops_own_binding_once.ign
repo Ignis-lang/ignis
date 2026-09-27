@@ -1,0 +1,33 @@
+// e2e: std
+//
+// A parenthesized match in statement position is still typed by its arms: its result is
+// stored and the statement drops it. An arm whose value is its own pattern binding hands
+// the binding to that result, so the payload is dropped once, by the statement, and never
+// again at the arm end. The arm that builds a temporary is dropped the same way.
+import Io from "std::io";
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function discard(source: Option<Tracked>, fallback: i32): void {
+  (match (source) {
+    Option::SOME(tracked) -> tracked,
+    Option::NONE -> Tracked { id: fallback },
+  });
+
+  Io::println(`after discard ${fallback}`.toStr());
+}
+
+function main(): i32 {
+  discard(Option::SOME(Tracked { id: 1 }), 10);
+  discard(Option::NONE, 20);
+
+  return 0;
+}
