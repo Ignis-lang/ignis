@@ -13,10 +13,11 @@ ignis <command> [options]
 | Command | What it does |
 | --- | --- |
 | `build` | Compile a file or a project and link the executable. |
-| `check` | Run the analysis and codegen checks without linking. |
+| `check` | Run the analysis checks without code generation or linking. |
 | `fmt` | Rewrite source to the canonical formatting. |
 | `doc` | Extract API documentation from doc comments. |
 | `test` | Run language-level tests. |
+| `test-std` | Run the standard library's tests. |
 | `init` | Create or initialize a project. |
 | `build-std` | Build the standard library artifacts. |
 | `check-std` | Check the standard library's codegen output. |
@@ -42,17 +43,17 @@ existing `ignis.toml` or entry file is never overwritten.
 ```bash
 ignis build src/main.ign      # single file
 ignis build                   # the project around the working directory
-ignis build --project ./app   # a project somewhere else
+ignis build ./app             # a project somewhere else
 ```
 
 ## check
 
-Same inputs as `build`, stopping before the link step. This is the fast loop while writing.
+Same inputs as `build`, stopping after analysis: no code generation and no link step. This is the
+fast loop while writing.
 
 ```bash
 ignis check
 ignis check src/main.ign
-ignis check --analyze-only    # analysis only, no lowering or codegen
 ```
 
 ## test
@@ -61,7 +62,7 @@ Runs the top-level functions annotated with `@test`.
 
 ```bash
 ignis test                    # every test in the project
-ignis test string             # only tests whose qualified name contains "string"
+ignis test --filter string    # only tests whose qualified name contains "string"
 ignis test src/example.ign    # tests from one file
 ignis test --update-snapshots # create or replace snapshot baselines
 ```
