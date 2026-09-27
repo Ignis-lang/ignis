@@ -3902,6 +3902,10 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let compileOptions: CompileOptions = stdCompileOptions();
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
+  if (compiled.errors == 0 && compiled.source.length() == 0) {
+    Io::eprintln(String::create("error: code generation produced no C for the standard library"));
+  }
+
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     Io::println(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`);
     return 1;
@@ -3925,6 +3929,91 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   Io::println(`  emit: ${sourcePath.asStr()}`);
   Io::println(`  summary: 0 errors, ${compiled.warnings} warnings`);
   return 0;
+}
+
+/// A fresh scratch directory for one `check-std` test, named after `label`.
+function checkStdScratchDir(label: str): Path::PathBuf {
+  let Result::OK(root) = Fs::tempDir() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let pid: u64 = Process::id() as u64;
+  let name: String = `ignis-check-std-${label}-${pid}`;
+  let dir: Path::PathBuf = root.join(name.toStr());
+  let _removed = Fs::removeDirAll(&dir);
+
+  let Result::OK(_) = Fs::createDirAll(&dir) else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  return dir;
+}
+
+/// `check-std` options naming `stdRoot` explicitly, so the check does not
+/// depend on a project file or `IGNIS_STD_PATH`.
+function checkStdOptions(stdRoot: &Path::PathBuf, outDir: Option<String>): CliOptions {
+  let mut options: CliOptions = CliOptions::create(CliCommand::CHECK_STD);
+  options.stdPath = Option::SOME(stdRoot.toString());
+  options.outDir = outDir;
+  return options;
+}
+
+/// The repository's `std`, tests running from the repository root.
+function checkStdRepositoryStd(): Path::PathBuf {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  return workingDirectory.join("std");
+}
+
+/// `-o` / `--output-dir` receives the emitted translation unit.
+@test
+function checkStdWritesTheLibraryIntoTheOutputDirectory(): void {
+  let scratch: Path::PathBuf = checkStdScratchDir("output");
+  let outDir: Path::PathBuf = scratch.join("out");
+  let stdRoot: Path::PathBuf = checkStdRepositoryStd();
+  let options: CliOptions = checkStdOptions(&stdRoot, Option::SOME(outDir.toString()));
+
+  Test::assertEq<i32>(checkStandardLibrary(&scratch, &options), 0);
+  Test::assertEq<boolean>(Fs::exists(outDir.join("ignis_std.c").asStr()), true);
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// Without `-o` the translation unit goes to `build` under the current
+/// directory, like the host's default output directory.
+@test
+function checkStdWritesTheLibraryIntoBuildByDefault(): void {
+  let stdRoot: Path::PathBuf = checkStdRepositoryStd();
+  let scratch: Path::PathBuf = checkStdScratchDir("default");
+
+  Test::assertEq<i32>(LibC::File::chdir(scratch.asStr() as *u8), 0);
+
+  let options: CliOptions = checkStdOptions(&stdRoot, Option::NONE);
+
+  Test::assertEq<i32>(checkStandardLibrary(&scratch, &options), 0);
+  Test::assertEq<boolean>(Fs::exists(scratch.join("build").join("ignis_std.c").asStr()), true);
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// A standard library root that does not exist fails the check and writes
+/// nothing.
+@test
+function checkStdFailsOnAMissingStandardLibrary(): void {
+  let scratch: Path::PathBuf = checkStdScratchDir("missing");
+  let outDir: Path::PathBuf = scratch.join("out");
+  let missingStd: Path::PathBuf = scratch.join("no-std");
+  let options: CliOptions = checkStdOptions(&missingStd, Option::SOME(outDir.toString()));
+
+  Test::assertEq<i32>(checkStandardLibrary(&scratch, &options), 1);
+  Test::assertEq<boolean>(Fs::exists(outDir.join("ignis_std.c").asStr()), false);
+
+  let _removed = Fs::removeDirAll(&scratch);
 }
 
 /// Check the standard library up to C codegen without archiving it.
