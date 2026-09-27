@@ -888,9 +888,17 @@ record FlagValue {
   public next: u64;
 }
 
+/// True for a separate argument `clap` never takes as a flag's value: one
+/// that starts with `-`, other than a lone `-`, since no flag here allows
+/// hyphen values.
+function looksLikeFlag(argument: &String): boolean {
+  return argument.startsWith("-") && !argument.equals("-");
+}
+
 /// Reads `longName` / `shortName` at `index` in every spelling `clap` accepts:
 /// `--name value`, `--name=value`, `-s value`, `-s=value` and `-svalue`.
-/// `NONE` when `argument` is neither flag.
+/// `NONE` when `argument` is neither flag. A separate value that looks like a
+/// flag leaves the value missing.
 function matchValueFlag(
   arguments: &Vector<String>,
   argument: &String,
@@ -902,6 +910,10 @@ function matchValueFlag(
     let Option::SOME(value) = arguments.get(index + 1) else {
       return Result::ERROR(cliMissingValue(longName, "a value"));
     };
+
+    if (looksLikeFlag(value)) {
+      return Result::ERROR(cliMissingValue(longName, "a value"));
+    }
 
     return Result::OK(Option::SOME(FlagValue { value: value.clone(), next: index + 2 }));
   }
@@ -982,30 +994,95 @@ function initFlagSpecTable(): Vector<InitFlagSpec> {
   return specs;
 }
 
+/// True for an argument `init` recognizes as a flag, in any spelling.
+function initIsKnownFlag(argument: &String, specs: &Vector<InitFlagSpec>): boolean {
+  if (argument.equals("--no-git") || argument.equals("--lib") || argument.equals("-q") || argument.equals("--quiet")) {
+    return true;
+  }
+
+  if (argument.equals("-h") || argument.equals("--help") || argument.equals("-V") || argument.equals("--version")) {
+    return true;
+  }
+
+  let mut specIndex: u64 = 0;
+
+  while (specIndex < specs.length()) {
+    if (let Option::SOME(spec) = specs.get(specIndex)) {
+      if (argument.equals(spec.longName) || argument.equals(spec.shortName)) {
+        return true;
+      }
+
+      if (let Option::SOME(_) = flagEqualsValue(argument, spec.longName)) {
+        return true;
+      }
+
+      if (!argument.startsWith("--")) {
+        if (let Option::SOME(_) = attachedShortValue(argument, spec.shortName)) {
+          return true;
+        }
+      }
+    }
+
+    specIndex += 1;
+  }
+
+  return false;
+}
+
+/// Records one occurrence of the `init` flag `longName`, failing on the second
+/// the way `clap` rejects a repeated argument that is not appendable.
+function initNoteFlag(seen: &mut Vector<String>, longName: str): Result<void, String> {
+  let mut seenRef: &mut Vector<String> = seen;
+  let mut index: u64 = 0;
+
+  while (index < seenRef.length()) {
+    if (let Option::SOME(name) = seenRef.get(index) && name.equals(longName)) {
+      return Result::ERROR(`error: the argument '${longName}' cannot be used multiple times`);
+    }
+
+    index += 1;
+  }
+
+  seenRef.push(String::create(longName));
+  return Result::OK(());
+}
+
 /// Parses one `init` argument, returning the index of the next one.
 ///
 /// `init` takes what the host's `InitCommand` takes: the project name, the
-/// `--no-git` and `--lib` switches, the value flags with their short forms
-/// (`--authors` and `--keywords` repeatable), and the global `-q`/`--quiet`.
+/// `--no-git` and `--lib` switches, the value flags with their short forms,
+/// and the global `-q`/`--quiet`. Every flag but `--authors` and `--keywords`
+/// may appear once; `seen` holds the ones already given.
 function parseInitArgument(
   arguments: &Vector<String>,
   argument: &String,
   index: u64,
   options: &mut CliOptions,
+  seen: &mut Vector<String>,
 ): Result<u64, String> {
   let mut optionsRef: &mut CliOptions = options;
+  let mut seenRef: &mut Vector<String> = seen;
 
   if (argument.equals("--no-git")) {
+    if (let Result::ERROR(message) = initNoteFlag(seenRef, "--no-git")) {
+      return Result::ERROR(message);
+    }
     optionsRef.init.noGit = true;
     return Result::OK(index + 1);
   }
 
   if (argument.equals("--lib")) {
+    if (let Result::ERROR(message) = initNoteFlag(seenRef, "--lib")) {
+      return Result::ERROR(message);
+    }
     optionsRef.init.lib = true;
     return Result::OK(index + 1);
   }
 
   if (argument.equals("-q") || argument.equals("--quiet")) {
+    if (let Result::ERROR(message) = initNoteFlag(seenRef, "--quiet")) {
+      return Result::ERROR(message);
+    }
     optionsRef.init.quiet = true;
     return Result::OK(index + 1);
   }
@@ -1018,12 +1095,28 @@ function parseInitArgument(
       break;
     };
 
+    // `clap` parses an unknown flag in the value's place as that flag, so
+    // it is reported as unknown rather than as a missing value.
+    if (argument.equals(spec.longName) || argument.equals(spec.shortName)) {
+      if (let Option::SOME(next) = arguments.get(index + 1)) {
+        if (looksLikeFlag(next) && !initIsKnownFlag(next, &specs)) {
+          return Result::ERROR(`error: unknown argument: ${next.toStr()}`);
+        }
+      }
+    }
+
     match (matchValueFlag(arguments, argument, index, spec.longName, spec.shortName)) {
       Result::ERROR(message) -> {
         return Result::ERROR(message);
       },
       Result::OK(matched) -> {
         if (let Option::SOME(flag) = matched) {
+          if (!String::create(spec.longName).equals("--authors") && !String::create(spec.longName).equals("--keywords")) {
+            if (let Result::ERROR(message) = initNoteFlag(seenRef, spec.longName)) {
+              return Result::ERROR(message);
+            }
+          }
+
           if (let Result::ERROR(message) = applyInitValueFlag(optionsRef, spec.longName, &flag.value)) {
             return Result::ERROR(message);
           }
@@ -1440,6 +1533,7 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
   }
 
   let mut options: CliOptions = CliOptions::create(command);
+  let mut initFlagsSeen: Vector<String> = Vector::new<String>();
   let mut fmtFlagState: FmtFlagState = FmtFlagState {
     useTabsSeen: false,
     spacesSeen: false,
@@ -1475,7 +1569,7 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     }
 
     if (options.isInitMode()) {
-      match (parseInitArgument(arguments, argument, index, &mut options)) {
+      match (parseInitArgument(arguments, argument, index, &mut options, &mut initFlagsSeen)) {
         Result::OK(next) -> {
           index = next;
           continue;
@@ -3316,4 +3410,86 @@ function cliRejectsAnInvalidJobCount(): void {
   cliPush(&mut build, "-j");
   cliPush(&mut build, "2");
   Test::assertEq<str>(cliParseError(&build).toStr(), "error: unknown argument: -j");
+}
+
+/// Every `init` flag except `--authors` and `--keywords` may appear once, the
+/// way `clap` rejects a repeated single-value argument or switch.
+@test
+function cliRejectsARepeatedInitFlag(): void {
+  let mut email: Vector<String> = Vector::new<String>();
+  cliPush(&mut email, "init");
+  cliPush(&mut email, "demo");
+  cliPush(&mut email, "-e");
+  cliPush(&mut email, "a@example.com");
+  cliPush(&mut email, "--email=b@example.com");
+  Test::assertEq<str>(cliParseError(&email).toStr(), "error: the argument '--email' cannot be used multiple times");
+
+  let mut lib: Vector<String> = Vector::new<String>();
+  cliPush(&mut lib, "init");
+  cliPush(&mut lib, "--lib");
+  cliPush(&mut lib, "demo");
+  cliPush(&mut lib, "--lib");
+  Test::assertEq<str>(cliParseError(&lib).toStr(), "error: the argument '--lib' cannot be used multiple times");
+
+  let mut quiet: Vector<String> = Vector::new<String>();
+  cliPush(&mut quiet, "init");
+  cliPush(&mut quiet, "demo");
+  cliPush(&mut quiet, "--quiet");
+  cliPush(&mut quiet, "-q");
+  Test::assertEq<str>(cliParseError(&quiet).toStr(), "error: the argument '--quiet' cannot be used multiple times");
+
+  let mut repeatable: Vector<String> = Vector::new<String>();
+  cliPush(&mut repeatable, "init");
+  cliPush(&mut repeatable, "demo");
+  cliPush(&mut repeatable, "-a");
+  cliPush(&mut repeatable, "Ann");
+  cliPush(&mut repeatable, "-a");
+  cliPush(&mut repeatable, "Bob");
+  cliPush(&mut repeatable, "-k");
+  cliPush(&mut repeatable, "x");
+  cliPush(&mut repeatable, "--keywords=y");
+  let repeatableOptions: CliOptions = cliParse(&repeatable);
+  Test::assertEq<str>(cliJoined(&repeatableOptions.init.authors).toStr(), "Ann,Bob");
+  Test::assertEq<str>(cliJoined(&repeatableOptions.init.keywords).toStr(), "x,y");
+}
+
+/// A separate value starting with `-` is never taken as a value, as in `clap`
+/// without `allow_hyphen_values`: a known flag there leaves the value missing,
+/// anything else is an unknown argument. A lone `-` and an attached value
+/// still count as values.
+@test
+function cliRejectsAFlagWhereAnInitValueBelongs(): void {
+  let mut knownFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut knownFlag, "init");
+  cliPush(&mut knownFlag, "demo");
+  cliPush(&mut knownFlag, "--email");
+  cliPush(&mut knownFlag, "--lib");
+  Test::assertEq<str>(cliParseError(&knownFlag).toStr(), "error: --email requires a value");
+
+  let mut knownShort: Vector<String> = Vector::new<String>();
+  cliPush(&mut knownShort, "init");
+  cliPush(&mut knownShort, "demo");
+  cliPush(&mut knownShort, "-a");
+  cliPush(&mut knownShort, "-eann@example.com");
+  Test::assertEq<str>(cliParseError(&knownShort).toStr(), "error: --authors requires a value");
+
+  let mut unknown: Vector<String> = Vector::new<String>();
+  cliPush(&mut unknown, "init");
+  cliPush(&mut unknown, "demo");
+  cliPush(&mut unknown, "-e");
+  cliPush(&mut unknown, "-5");
+  Test::assertEq<str>(cliParseError(&unknown).toStr(), "error: unknown argument: -5");
+
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "init");
+  cliPush(&mut values, "demo");
+  cliPush(&mut values, "--email");
+  cliPush(&mut values, "-");
+  cliPush(&mut values, "--description=--lib");
+  cliPush(&mut values, "-r-x");
+  let valueOptions: CliOptions = cliParse(&values);
+  Test::assertEq<str>(valueOptions.init.email.toStr(), "-");
+  Test::assertEq<str>(valueOptions.init.description.toStr(), "--lib");
+  Test::assertEq<str>(valueOptions.init.repository.toStr(), "-x");
+  Test::assertEq<boolean>(valueOptions.init.lib, false);
 }
