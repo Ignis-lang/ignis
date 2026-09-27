@@ -787,6 +787,9 @@ build_stage2() {
 # while it is produced. The G4 baseline is stage1 compiling the same corpus
 # every other stage compiles, in its own directory so it cannot disturb the
 # ladder.
+# The measurement compile_stage records next to a stage's binary.
+stage_measure_path() { echo "$(stage_dir "$1")/measure.json"; }
+
 build_stage1_measure() {
   ensure_stage stage1
   compile_stage "$STAGE1_MEASURE" "$(stage_bin stage1)"
@@ -799,8 +802,8 @@ build_stage1_measure() {
 # again. Expects stage2 to be current already.
 stage1_measure_stale_reason() {
   local baseline candidate
-  baseline="$(stage_dir "$STAGE1_MEASURE")/measure.json"
-  candidate="$(stage_dir stage2)/measure.json"
+  baseline="$(stage_measure_path "$STAGE1_MEASURE")"
+  candidate="$(stage_measure_path stage2)"
 
   [[ -f "$baseline" ]] || { echo "no measurement"; return 0; }
 
@@ -1378,10 +1381,14 @@ run_gate_g7_baselines() {
 # wall time.
 run_gate_g4() {
   local baseline candidate
-  baseline="$(stage_dir "$STAGE1_MEASURE")/measure.json"
-  candidate="$(stage_dir stage2)/measure.json"
+  baseline="$(stage_measure_path "$STAGE1_MEASURE")"
+  candidate="$(stage_measure_path stage2)"
 
   ensure_stage stage2
+
+  # ensure_stage keeps a current binary whose measurement is gone, e.g. one
+  # restored from an artifact without its measure.json, or any stage2 under
+  # IGNIS_BOOTSTRAP_TRUST_STAGES=1; G4 has nothing to compare without it.
   [[ -f "$candidate" ]] || build_stage2
 
   local reason
