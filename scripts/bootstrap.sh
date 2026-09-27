@@ -1062,7 +1062,8 @@ run_report() {
 # other run resets it to 0. A stale official asset needs no special case: the
 # night it cannot build stage1 is not a candidate, the reset streak makes the
 # next `auto` resolution build stage0 from the C seed instead, and three seed
-# candidates publish a fresh official asset.
+# candidates publish a fresh official asset, provided the seed can still build
+# ignis/ (nightly.yml's `seed` job checks that; the `seed` command refreshes it).
 promotion_decide() {
   local candidate="$1" previous_streak="${2:-0}"
 
