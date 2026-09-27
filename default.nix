@@ -40,7 +40,7 @@ let
     buildPhase = ''
       runHook preBuild
 
-      patchShebangs scripts/build_from_seed.sh
+      patchShebangs scripts
 
       root="$PWD"
 
@@ -54,7 +54,14 @@ let
         )
       }
 
-      stage0="$(scripts/build_from_seed.sh -o "$root/stages/stage0/ignis")"
+      stage0="$root/stages/stage0/ignis"
+      scripts/build_from_seed.sh -o "$stage0" >/dev/null
+
+      if [ ! -f "$stage0" ] || [ ! -x "$stage0" ]; then
+        echo "the C seed build produced no executable at $stage0" >&2
+        exit 1
+      fi
+
       compileStage "$stage0" stage1
       compileStage "$root/stages/stage1/ignis" stage2
 
@@ -75,6 +82,34 @@ let
         --prefix PATH : "${runtimeToolsPath}"
 
       runHook postInstall
+    '';
+
+    doInstallCheck = true;
+
+    # Exercise the installed wrapper end to end: the shipped std, codegen, the
+    # C toolchain on its PATH, and the runtime of a linked program.
+    installCheckPhase = ''
+      runHook preInstallCheck
+
+      $out/bin/ignis --version
+
+      checkDir="$(mktemp -d)"
+      cat > "$checkDir/hello.ign" << 'EOF'
+      import Io from "std::io";
+
+      function main(): void {
+        Io::println("Hello, Ignis!");
+        return;
+      }
+      EOF
+
+      (
+        cd "$checkDir"
+        $out/bin/ignis build hello.ign -o hello
+        test "$(./hello)" = "Hello, Ignis!"
+      )
+
+      runHook postInstallCheck
     '';
 
     meta = with pkgs.lib; {
