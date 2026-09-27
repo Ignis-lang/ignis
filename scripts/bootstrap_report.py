@@ -3,10 +3,11 @@
 
 Two commands, both driven by `scripts/bootstrap.sh`:
 
-  gate-g3   Compare a selfhost test run under a built stage with the same run
-            under the host compiler and write the gate result (default
+  gate-g3   Judge a selfhost test run under a built stage and write the gate
+            result: the run has to pass outright, and with --reference-log
+            it also has to match stage1's run of the same suite (default
             build/bootstrap/gates/G3.json for stage2; --label/--gate-id let a
-            caller run the same comparison for another stage, e.g. stage1).
+            caller judge another stage, e.g. stage1 on its own).
   report    Read build/bootstrap/gates/*.json and write build/bootstrap/report.md
             and build/bootstrap/promotion.json.
 
@@ -58,12 +59,15 @@ SUMMARY_HEADER = "Summary"
 
 ERROR_LINE_PATTERN = re.compile(r"^(Error\[|Error:|error(\[|:))")
 
+# The run G3 compares stage2's against. It used to be the host compiler's.
+REFERENCE_LABEL = "stage1"
+
 LOG_TAIL_LINES = 40
 LOG_ERROR_LINES = 20
 
 
 # =============================================================================
-# G3: selfhost test suite parity
+# G3: selfhost test suite
 # =============================================================================
 
 
@@ -149,131 +153,133 @@ def has_summary(parsed: dict) -> bool:
   return {"total", "passed", "failed"}.issubset(parsed["summary"])
 
 
+def read_test_log(path: Path) -> dict:
+  if not path.is_file():
+    return {"tests": {}, "summary": {}}
+
+  return parse_test_log(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def summary_counts(parsed: dict) -> tuple[int, int, int, int]:
+  summary = parsed["summary"]
+
+  return (summary["total"], summary["passed"], summary["failed"], summary.get("skipped", 0))
+
+
+def run_details(log: Path, exit_status: int, parsed: dict) -> dict:
+  return {
+    "log": str(log),
+    "exit_status": exit_status,
+    "summary": parsed["summary"],
+    "tests": len(parsed["tests"]),
+  }
+
+
+def no_summary_reason(label: str, exit_status: int, timeout_seconds: int) -> str:
+  if exit_status == 124:
+    return f"{label} timed out after {timeout_seconds}s"
+
+  return f"{label} produced no test summary (exit {exit_status})"
+
+
 def build_gate_g3(arguments: argparse.Namespace) -> dict:
-  # `label` names the built-compiler side of the comparison in the JSON
-  # details and summary text ("stage2" for the nightly matrix and a
-  # developer's local `gate-g3`; "stage1" for ci.yml's PR-only check, added to
-  # close the gap PR #201 left where CI never ran the selfhost test suite
-  # under a selfhost-built binary at all). `gate_id` names the JSON payload's
-  # "gate" field and the written file, so the two candidates never collide.
+  """Judge a built stage's run of the selfhost test suite.
+
+  The run has to pass outright: a summary, no failing test, and a zero exit.
+  When a reference run is given (the nightly's stage2 gate passes stage1's run
+  of the same suite), both runs also have to report the same test names, the
+  same skipped set and the same counts, so a stage that quietly loses or skips
+  tests cannot pass on a clean summary alone.
+
+  `label` names the judged run in the JSON details and summary text ("stage2"
+  for the promotion gate, "stage1" for ci.yml's PR-only check); `gate_id`
+  names the JSON payload's "gate" field, so the two never collide.
+  """
   label = arguments.label
   gate_id = arguments.gate_id
-  stage2_log = Path(arguments.stage2_log)
-  host_log = Path(arguments.host_log)
-
-  stage2 = parse_test_log(stage2_log.read_text(encoding="utf-8", errors="replace")) if stage2_log.is_file() else {
-    "tests": {},
-    "summary": {},
-  }
-  host = parse_test_log(host_log.read_text(encoding="utf-8", errors="replace")) if host_log.is_file() else {
-    "tests": {},
-    "summary": {},
-  }
-
-  stage2_failing = failing_names(stage2)
-  host_failing = failing_names(host)
-  stage2_skipped = skipped_names(stage2)
-  host_skipped = skipped_names(host)
+  timeout_seconds = arguments.timeout_seconds
+  log = Path(arguments.log)
+  run = read_test_log(log)
 
   details = {
-    label: {
-      "log": str(stage2_log),
-      "exit_status": arguments.stage2_status,
-      "summary": stage2["summary"],
-      "tests": len(stage2["tests"]),
-    },
-    "host": {
-      "log": str(host_log),
-      "exit_status": arguments.host_status,
-      "summary": host["summary"],
-      "tests": len(host["tests"]),
-    },
-    f"failing_only_under_{label}": sorted(stage2_failing - host_failing),
-    "failing_only_under_host": sorted(host_failing - stage2_failing),
-    f"missing_from_{label}": sorted(set(host["tests"]) - set(stage2["tests"])),
-    "missing_from_host": sorted(set(stage2["tests"]) - set(host["tests"])),
-    f"skipped_only_under_{label}": sorted(stage2_skipped - host_skipped),
-    "skipped_only_under_host": sorted(host_skipped - stage2_skipped),
-    "timeout_seconds": arguments.timeout_seconds,
+    label: run_details(log, arguments.status, run),
+    "failing": sorted(failing_names(run)),
+    "timeout_seconds": timeout_seconds,
   }
 
-  timed_out = [
-    name
-    for name, status in ((label, arguments.stage2_status), ("host", arguments.host_status))
-    if status == 124
-  ]
+  reference = None
+  reference_log = None
+
+  if arguments.reference_log is not None:
+    reference_log = Path(arguments.reference_log)
+    reference = read_test_log(reference_log)
+    details[REFERENCE_LABEL] = run_details(reference_log, arguments.reference_status, reference)
+
+  timed_out = [label] if arguments.status == 124 else []
+
+  if reference is not None and arguments.reference_status == 124:
+    timed_out.append(REFERENCE_LABEL)
 
   if timed_out:
     details["timed_out"] = timed_out
 
-  if not has_summary(stage2):
-    details[label]["errors"] = log_errors(stage2_log)
-    details[label]["log_tail"] = log_tail(stage2_log)
-
-    reason = (
-      f"{label} timed out after {arguments.timeout_seconds}s"
-      if arguments.stage2_status == 124
-      else f"{label} produced no test summary (exit {arguments.stage2_status})"
-    )
-
+  def fail(reason: str) -> dict:
     return {"gate": gate_id, "status": STATUS_FAIL, "summary": reason, "details": details}
 
-  if not has_summary(host):
-    details["host"]["errors"] = log_errors(host_log)
-    details["host"]["log_tail"] = log_tail(host_log)
+  if not has_summary(run):
+    details[label]["errors"] = log_errors(log)
+    details[label]["log_tail"] = log_tail(log)
 
-    reason = (
-      f"the host timed out after {arguments.timeout_seconds}s"
-      if arguments.host_status == 124
-      else f"the host produced no test summary (exit {arguments.host_status})"
+    return fail(no_summary_reason(label, arguments.status, timeout_seconds))
+
+  counts = summary_counts(run)
+  failed = max(counts[2], len(details["failing"]))
+
+  if failed:
+    noun = "test" if failed == 1 else "tests"
+
+    return fail(f"{failed} {noun} failed under {label}")
+
+  if arguments.status != 0:
+    return fail(f"{label} reported no failing test but exited non-zero (exit {arguments.status})")
+
+  passing = f"{counts[1]}/{counts[0]} passing ({counts[3]} skipped)"
+
+  if reference is None:
+    return {"gate": gate_id, "status": STATUS_PASS, "summary": f"{label}: {passing}", "details": details}
+
+  if not has_summary(reference):
+    details[REFERENCE_LABEL]["errors"] = log_errors(reference_log)
+    details[REFERENCE_LABEL]["log_tail"] = log_tail(reference_log)
+
+    return fail(no_summary_reason(REFERENCE_LABEL, arguments.reference_status, timeout_seconds))
+
+  run_skipped = skipped_names(run)
+  reference_skipped = skipped_names(reference)
+
+  details[f"missing_from_{label}"] = sorted(set(reference["tests"]) - set(run["tests"]))
+  details[f"missing_from_{REFERENCE_LABEL}"] = sorted(set(run["tests"]) - set(reference["tests"]))
+  details[f"skipped_only_under_{label}"] = sorted(run_skipped - reference_skipped)
+  details[f"skipped_only_under_{REFERENCE_LABEL}"] = sorted(reference_skipped - run_skipped)
+
+  reference_counts = summary_counts(reference)
+
+  if counts != reference_counts:
+    return fail(
+      f"{label} reported {counts[1]}/{counts[0]} passing ({counts[3]} skipped), "
+      f"{REFERENCE_LABEL} {reference_counts[1]}/{reference_counts[0]} ({reference_counts[3]} skipped)"
     )
 
-    return {"gate": gate_id, "status": STATUS_FAIL, "summary": reason, "details": details}
+  if set(run["tests"]) != set(reference["tests"]):
+    return fail(f"{label} and {REFERENCE_LABEL} report different test names")
 
-  stage2_counts = (
-    stage2["summary"]["total"],
-    stage2["summary"]["passed"],
-    stage2["summary"]["failed"],
-    stage2["summary"].get("skipped", 0),
-  )
-  host_counts = (
-    host["summary"]["total"],
-    host["summary"]["passed"],
-    host["summary"]["failed"],
-    host["summary"].get("skipped", 0),
-  )
-
-  if stage2_counts != host_counts:
-    return {
-      "gate": gate_id,
-      "status": STATUS_FAIL,
-      "summary": (
-        f"{label} reported {stage2_counts[1]}/{stage2_counts[0]} passing "
-        f"({stage2_counts[3]} skipped), "
-        f"the host {host_counts[1]}/{host_counts[0]} ({host_counts[3]} skipped)"
-      ),
-      "details": details,
-    }
-
-  if (
-    stage2_failing != host_failing
-    or stage2_skipped != host_skipped
-    or stage2["tests"] != host["tests"]
-  ):
-    return {
-      "gate": gate_id,
-      "status": STATUS_FAIL,
-      "summary": f"{label} and the host disagree on which tests fail or are skipped",
-      "details": details,
-    }
+  if run_skipped != reference_skipped:
+    return fail(f"{label} and {REFERENCE_LABEL} skip different tests")
 
   return {
     "gate": gate_id,
     "status": STATUS_PASS,
-    "summary": (
-      f"{label} matches the host: {stage2_counts[1]}/{stage2_counts[0]} passing "
-      f"({stage2_counts[3]} skipped)"
-    ),
+    "summary": f"{label} matches {REFERENCE_LABEL}: {passing}",
     "details": details,
   }
 
@@ -535,12 +541,14 @@ def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   subparsers = parser.add_subparsers(dest="command", required=True)
 
-  gate_g3 = subparsers.add_parser("gate-g3", help="compare a built-stage test run with the host's")
-  gate_g3.add_argument("--stage2-log", required=True, help="captured output of the built-stage test run")
-  gate_g3.add_argument("--host-log", required=True, help="captured output of the host test run")
-  gate_g3.add_argument("--stage2-status", type=int, default=0, help="exit status of the built-stage run")
-  gate_g3.add_argument("--host-status", type=int, default=0, help="exit status of the host run")
-  gate_g3.add_argument("--timeout-seconds", type=int, default=0, help="timeout both runs were given")
+  gate_g3 = subparsers.add_parser("gate-g3", help="judge a built stage's run of the selfhost test suite")
+  gate_g3.add_argument("--log", required=True, help="captured output of the built-stage test run")
+  gate_g3.add_argument("--status", type=int, default=0, help="exit status of the built-stage run")
+  gate_g3.add_argument(
+    "--reference-log", help="captured output of stage1's run of the same suite, to compare against (optional)"
+  )
+  gate_g3.add_argument("--reference-status", type=int, default=0, help="exit status of the reference run")
+  gate_g3.add_argument("--timeout-seconds", type=int, default=0, help="timeout the runs were given")
   gate_g3.add_argument("--output", required=True, help="path of the gate result")
   gate_g3.add_argument(
     "--label", default="stage2", help="name of the built-stage side in the JSON details (default: stage2)"
