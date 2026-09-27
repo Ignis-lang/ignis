@@ -792,6 +792,33 @@ build_stage1_measure() {
   compile_stage "$STAGE1_MEASURE" "$(stage_bin stage1)"
 }
 
+# Why the G4 baseline cannot be compared with stage2's current measurement, or
+# empty when it can. A baseline built by another stage1 (or over other sources)
+# measures a different compiler, and one measured before stage2 was measured
+# under whatever load the machine had then (IGN-244), so both are measured
+# again. Expects stage2 to be current already.
+stage1_measure_stale_reason() {
+  local baseline candidate
+  baseline="$(stage_dir "$STAGE1_MEASURE")/measure.json"
+  candidate="$(stage_dir stage2)/measure.json"
+
+  [[ -f "$baseline" ]] || { echo "no measurement"; return 0; }
+
+  local reason
+  reason="$(stage_stale_reason "$STAGE1_MEASURE" "$(stage_bin stage1)")"
+  if [[ -n "$reason" ]]; then
+    echo "$reason"
+    return 0
+  fi
+
+  if [[ "$candidate" -nt "$baseline" ]]; then
+    echo "measured before stage2"
+    return 0
+  fi
+
+  echo ""
+}
+
 gate_g1_details() {
   STAGE2_C="$1" \
   STAGE3_C="$2" \
@@ -1354,8 +1381,15 @@ run_gate_g4() {
   baseline="$(stage_dir "$STAGE1_MEASURE")/measure.json"
   candidate="$(stage_dir stage2)/measure.json"
 
+  ensure_stage stage2
   [[ -f "$candidate" ]] || build_stage2
-  [[ -f "$baseline" ]] || build_stage1_measure
+
+  local reason
+  reason="$(stage1_measure_stale_reason)"
+  if [[ -n "$reason" ]]; then
+    info "${STAGE1_MEASURE}: rebuilding, ${reason}"
+    build_stage1_measure
+  fi
 
   mkdir -p "$GATES_DIR"
 
