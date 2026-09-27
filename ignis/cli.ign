@@ -2,6 +2,8 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
+import InitOptions, initIsValidTarget from "./init";
+
 /// The version this compiler reports, kept equal to the host compiler's
 /// workspace version so `ignis --version` prints the same string whichever
 /// binary answers it.
@@ -20,6 +22,7 @@ export enum CliCommand {
   FMT,
   LSP,
   DOC,
+  INIT,
   HELP,
   VERSION,
 }
@@ -84,6 +87,8 @@ export record CliOptions {
   public fmtEmitDiff: boolean;
   /// Explicit project directory to document (doc only).
   public docProject: Option<String>;
+  /// What `ignis init` creates (init only).
+  public init: InitOptions;
 
   public static create(command: CliCommand): CliOptions {
     return CliOptions {
@@ -117,6 +122,7 @@ export record CliOptions {
       fmtStdinJson: false,
       fmtEmitDiff: false,
       docProject: Option::NONE,
+      init: InitOptions::create(),
     };
   }
 
@@ -162,6 +168,14 @@ export record CliOptions {
 
   public isDocMode(&self): boolean {
     if (let CliCommand::DOC = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isInitMode(&self): boolean {
+    if (let CliCommand::INIT = self.command) {
       return true;
     }
 
@@ -325,6 +339,10 @@ function cliSubcommandOf(argument: &String): Option<CliCommand> {
 
   if (argument.equals("doc")) {
     return Option::SOME(CliCommand::DOC);
+  }
+
+  if (argument.equals("init")) {
+    return Option::SOME(CliCommand::INIT);
   }
 
   return Option::NONE;
@@ -847,6 +865,172 @@ function attachedShortValue(argument: &String, flag: str): Option<String> {
   return Option::SOME(argument.substringBytes(start, argument.length()));
 }
 
+/// A value-taking flag's value and the index of the argument after it.
+record FlagValue {
+  public value: String;
+  public next: u64;
+}
+
+/// Reads `longName` / `shortName` at `index` in every spelling `clap` accepts:
+/// `--name value`, `--name=value`, `-s value`, `-s=value` and `-svalue`.
+/// `NONE` when `argument` is neither flag.
+function matchValueFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  longName: str,
+  shortName: str,
+): Result<Option<FlagValue>, String> {
+  if (argument.equals(longName) || argument.equals(shortName)) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue(longName, "a value"));
+    };
+
+    return Result::OK(Option::SOME(FlagValue { value: value.clone(), next: index + 2 }));
+  }
+
+  if (let Option::SOME(value) = flagEqualsValue(argument, longName)) {
+    return Result::OK(Option::SOME(FlagValue { value: value, next: index + 1 }));
+  }
+
+  if (!argument.startsWith("--")) {
+    if (let Option::SOME(value) = attachedShortValue(argument, shortName)) {
+      return Result::OK(Option::SOME(FlagValue { value: value, next: index + 1 }));
+    }
+  }
+
+  return Result::OK(Option::NONE);
+}
+
+/// Stores one `init` flag's value in `options`, by the flag's long name.
+function applyInitValueFlag(
+  options: &mut CliOptions,
+  longName: str,
+  value: &String
+): Result<void, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let name: String = String::create(longName);
+
+  if (name.equals("--authors")) {
+    optionsRef.init.authors.push(value.clone());
+  } else if (name.equals("--keywords")) {
+    optionsRef.init.keywords.push(value.clone());
+  } else if (name.equals("--email")) {
+    optionsRef.init.email = value.clone();
+  } else if (name.equals("--description")) {
+    optionsRef.init.description = value.clone();
+  } else if (name.equals("--license")) {
+    optionsRef.init.license = value.clone();
+  } else if (name.equals("--project-version")) {
+    optionsRef.init.projectVersion = value.clone();
+  } else if (name.equals("--target")) {
+    if (!initIsValidTarget(value)) {
+      return Result::ERROR(`error: invalid value '${value.toStr()}' for '--target': expected c, iir or none`);
+    }
+
+    optionsRef.init.target = value.clone();
+  } else if (name.equals("--main-file")) {
+    optionsRef.init.mainFile = Option::SOME(value.clone());
+  } else if (name.equals("--output-dir")) {
+    optionsRef.init.outputDir = value.clone();
+  } else if (name.equals("--source-dir")) {
+    optionsRef.init.sourceDir = value.clone();
+  } else {
+    optionsRef.init.repository = value.clone();
+  }
+
+  return Result::OK(());
+}
+
+/// One `init` flag that takes a value, in its long and short spellings.
+record InitFlagSpec {
+  public longName: str;
+  public shortName: str;
+}
+
+/// Every value-taking `init` flag, as the host's `InitCommand` declares them.
+function initFlagSpecTable(): Vector<InitFlagSpec> {
+  let mut specs: Vector<InitFlagSpec> = Vector::new<InitFlagSpec>();
+  specs.push(InitFlagSpec { longName: "--authors", shortName: "-a" });
+  specs.push(InitFlagSpec { longName: "--email", shortName: "-e" });
+  specs.push(InitFlagSpec { longName: "--description", shortName: "-d" });
+  specs.push(InitFlagSpec { longName: "--license", shortName: "-l" });
+  specs.push(InitFlagSpec { longName: "--project-version", shortName: "-p" });
+  specs.push(InitFlagSpec { longName: "--target", shortName: "-t" });
+  specs.push(InitFlagSpec { longName: "--main-file", shortName: "-m" });
+  specs.push(InitFlagSpec { longName: "--output-dir", shortName: "-o" });
+  specs.push(InitFlagSpec { longName: "--source-dir", shortName: "-s" });
+  specs.push(InitFlagSpec { longName: "--repository", shortName: "-r" });
+  specs.push(InitFlagSpec { longName: "--keywords", shortName: "-k" });
+  return specs;
+}
+
+/// Parses one `init` argument, returning the index of the next one.
+///
+/// `init` takes what the host's `InitCommand` takes: the project name, the
+/// `--no-git` and `--lib` switches, the value flags with their short forms
+/// (`--authors` and `--keywords` repeatable), and the global `-q`/`--quiet`.
+function parseInitArgument(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+): Result<u64, String> {
+  let mut optionsRef: &mut CliOptions = options;
+
+  if (argument.equals("--no-git")) {
+    optionsRef.init.noGit = true;
+    return Result::OK(index + 1);
+  }
+
+  if (argument.equals("--lib")) {
+    optionsRef.init.lib = true;
+    return Result::OK(index + 1);
+  }
+
+  if (argument.equals("-q") || argument.equals("--quiet")) {
+    optionsRef.init.quiet = true;
+    return Result::OK(index + 1);
+  }
+
+  let specs: Vector<InitFlagSpec> = initFlagSpecTable();
+  let mut specIndex: u64 = 0;
+
+  while (specIndex < specs.length()) {
+    let Option::SOME(spec) = specs.get(specIndex) else {
+      break;
+    };
+
+    match (matchValueFlag(arguments, argument, index, spec.longName, spec.shortName)) {
+      Result::ERROR(message) -> {
+        return Result::ERROR(message);
+      },
+      Result::OK(matched) -> {
+        if (let Option::SOME(flag) = matched) {
+          if (let Result::ERROR(message) = applyInitValueFlag(optionsRef, spec.longName, &flag.value)) {
+            return Result::ERROR(message);
+          }
+
+          return Result::OK(flag.next);
+        }
+      },
+    };
+
+    specIndex += 1;
+  }
+
+  if (argument.startsWith("-")) {
+    return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+  }
+
+  if (optionsRef.init.name.isSome()) {
+    return Result::ERROR(`error: unexpected argument '${argument.toStr()}'`);
+  }
+
+  optionsRef.init.name = Option::SOME(argument.clone());
+  return Result::OK(index + 1);
+}
+
 function applyDocValueFlag(options: &mut CliOptions, flag: &String, value: &String): void {
   let mut optionsRef: &mut CliOptions = options;
 
@@ -1253,6 +1437,18 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       };
     }
 
+    if (options.isInitMode()) {
+      match (parseInitArgument(arguments, argument, index, &mut options)) {
+        Result::OK(next) -> {
+          index = next;
+          continue;
+        },
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+      };
+    }
+
     if (options.isTestStdMode() && argument.startsWith("-") && !cliTestStdAcceptsFlag(argument)) {
       return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
     }
@@ -1537,6 +1733,10 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     index += 1;
   }
 
+  if (options.isInitMode() && options.init.name.isNone()) {
+    return Result::ERROR(String::create("error: init requires a project name"));
+  }
+
   return Result::OK(options);
 }
 
@@ -1556,6 +1756,7 @@ export function helpText(): String {
   text.pushStr("  fmt        Format Ignis source canonically with parse/reparse safety checks\n");
   text.pushStr("  lsp        Start the Language Server Protocol server on stdin and stdout\n");
   text.pushStr("  doc        Extract API documentation from doc comments\n");
+  text.pushStr("  init       Initialize a new Ignis project\n");
   text.pushStr("\n");
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
   text.pushStr("Without a path the project containing the current directory is used.\n");
@@ -1665,6 +1866,7 @@ function cliCommandName(command: CliCommand): str {
     CliCommand::FMT -> "fmt",
     CliCommand::LSP -> "lsp",
     CliCommand::DOC -> "doc",
+    CliCommand::INIT -> "init",
     CliCommand::HELP -> "help",
     CliCommand::VERSION -> "version",
   };
@@ -2730,4 +2932,191 @@ function cliRejectsADuplicateFlagBeforeAnUnrelatedConflict(): void {
     stripAnsi(&message).toStr(),
     "error: the argument '--check' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
   );
+}
+
+function cliJoined(values: &Vector<String>): String {
+  let mut joined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      if (index > 0) {
+        joined.pushStr(",");
+      }
+
+      joined.pushStr(value.toStr());
+    }
+
+    index += 1;
+  }
+
+  return joined;
+}
+
+/// `init` with only a name keeps every default the host's `InitCommand`
+/// declares.
+@test
+function cliParsesInitWithItsDefaults(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "init");
+  cliPush(&mut arguments, "demo");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "init");
+  Test::assertEq<str>(cliOptionText(&options.init.name).toStr(), "demo");
+  Test::assertEq<boolean>(options.init.noGit, false);
+  Test::assertEq<boolean>(options.init.lib, false);
+  Test::assertEq<boolean>(options.init.quiet, false);
+  Test::assertEq<str>(options.init.email.toStr(), "ignis@example.com");
+  Test::assertEq<str>(options.init.description.toStr(), "A Ignis project");
+  Test::assertEq<str>(options.init.license.toStr(), "MIT");
+  Test::assertEq<str>(options.init.projectVersion.toStr(), "0.1.0");
+  Test::assertEq<str>(options.init.target.toStr(), "c");
+  Test::assertEq<boolean>(options.init.mainFile.isNone(), true);
+  Test::assertEq<str>(options.init.outputDir.toStr(), "build");
+  Test::assertEq<str>(options.init.sourceDir.toStr(), "src");
+  Test::assertEq<str>(options.init.repository.toStr(), "");
+  Test::assertEq<u64>(options.init.authors.length(), 0);
+  Test::assertEq<u64>(options.init.keywords.length(), 0);
+}
+
+/// Every `init` flag in its long form, with the repeatable ones given twice.
+@test
+function cliParsesEveryInitLongFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "init");
+  cliPush(&mut arguments, "--no-git");
+  cliPush(&mut arguments, "--lib");
+  cliPush(&mut arguments, "--quiet");
+  cliPush(&mut arguments, "--authors");
+  cliPush(&mut arguments, "Ann");
+  cliPush(&mut arguments, "--authors=Bob");
+  cliPush(&mut arguments, "--email");
+  cliPush(&mut arguments, "ann@example.com");
+  cliPush(&mut arguments, "--description");
+  cliPush(&mut arguments, "A library");
+  cliPush(&mut arguments, "--license");
+  cliPush(&mut arguments, "GPL-3.0-only");
+  cliPush(&mut arguments, "--project-version");
+  cliPush(&mut arguments, "1.2.3");
+  cliPush(&mut arguments, "--target");
+  cliPush(&mut arguments, "iir");
+  cliPush(&mut arguments, "--main-file");
+  cliPush(&mut arguments, "entry.ign");
+  cliPush(&mut arguments, "--output-dir");
+  cliPush(&mut arguments, "out");
+  cliPush(&mut arguments, "--source-dir");
+  cliPush(&mut arguments, "source");
+  cliPush(&mut arguments, "--repository");
+  cliPush(&mut arguments, "https://example.com/repo");
+  cliPush(&mut arguments, "--keywords");
+  cliPush(&mut arguments, "a");
+  cliPush(&mut arguments, "--keywords");
+  cliPush(&mut arguments, "b");
+  cliPush(&mut arguments, "demo");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliOptionText(&options.init.name).toStr(), "demo");
+  Test::assertEq<boolean>(options.init.noGit, true);
+  Test::assertEq<boolean>(options.init.lib, true);
+  Test::assertEq<boolean>(options.init.quiet, true);
+  Test::assertEq<str>(cliJoined(&options.init.authors).toStr(), "Ann,Bob");
+  Test::assertEq<str>(options.init.email.toStr(), "ann@example.com");
+  Test::assertEq<str>(options.init.description.toStr(), "A library");
+  Test::assertEq<str>(options.init.license.toStr(), "GPL-3.0-only");
+  Test::assertEq<str>(options.init.projectVersion.toStr(), "1.2.3");
+  Test::assertEq<str>(options.init.target.toStr(), "iir");
+  Test::assertEq<str>(cliOptionText(&options.init.mainFile).toStr(), "entry.ign");
+  Test::assertEq<str>(options.init.outputDir.toStr(), "out");
+  Test::assertEq<str>(options.init.sourceDir.toStr(), "source");
+  Test::assertEq<str>(options.init.repository.toStr(), "https://example.com/repo");
+  Test::assertEq<str>(cliJoined(&options.init.keywords).toStr(), "a,b");
+}
+
+/// The short forms, including the attached `-svalue` and `-s=value` spellings
+/// `clap` accepts. `-o` names `init`'s output directory, not a binary.
+@test
+function cliParsesInitShortFlags(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "init");
+  cliPush(&mut arguments, "demo");
+  cliPush(&mut arguments, "-q");
+  cliPush(&mut arguments, "-a");
+  cliPush(&mut arguments, "Ann");
+  cliPush(&mut arguments, "-eann@example.com");
+  cliPush(&mut arguments, "-d=Tools");
+  cliPush(&mut arguments, "-l");
+  cliPush(&mut arguments, "Apache-2.0");
+  cliPush(&mut arguments, "-p");
+  cliPush(&mut arguments, "2.0.0");
+  cliPush(&mut arguments, "-t");
+  cliPush(&mut arguments, "none");
+  cliPush(&mut arguments, "-m");
+  cliPush(&mut arguments, "app.ign");
+  cliPush(&mut arguments, "-o");
+  cliPush(&mut arguments, "out");
+  cliPush(&mut arguments, "-s");
+  cliPush(&mut arguments, "lib");
+  cliPush(&mut arguments, "-r");
+  cliPush(&mut arguments, "repo");
+  cliPush(&mut arguments, "-k");
+  cliPush(&mut arguments, "cli");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliOptionText(&options.init.name).toStr(), "demo");
+  Test::assertEq<boolean>(options.init.quiet, true);
+  Test::assertEq<str>(cliJoined(&options.init.authors).toStr(), "Ann");
+  Test::assertEq<str>(options.init.email.toStr(), "ann@example.com");
+  Test::assertEq<str>(options.init.description.toStr(), "Tools");
+  Test::assertEq<str>(options.init.license.toStr(), "Apache-2.0");
+  Test::assertEq<str>(options.init.projectVersion.toStr(), "2.0.0");
+  Test::assertEq<str>(options.init.target.toStr(), "none");
+  Test::assertEq<str>(cliOptionText(&options.init.mainFile).toStr(), "app.ign");
+  Test::assertEq<str>(options.init.outputDir.toStr(), "out");
+  Test::assertEq<boolean>(options.outputPath.isNone(), true);
+  Test::assertEq<str>(options.init.sourceDir.toStr(), "lib");
+  Test::assertEq<str>(options.init.repository.toStr(), "repo");
+  Test::assertEq<str>(cliJoined(&options.init.keywords).toStr(), "cli");
+}
+
+/// `init` rejects a missing name, a second name, an unknown target, a flag
+/// missing its value, and flags that belong to other commands.
+@test
+function cliRejectsWhatInitDoesNotTake(): void {
+  let mut noName: Vector<String> = Vector::new<String>();
+  cliPush(&mut noName, "init");
+  cliPush(&mut noName, "--lib");
+  Test::assertEq<str>(cliParseError(&noName).toStr(), "error: init requires a project name");
+
+  let mut twoNames: Vector<String> = Vector::new<String>();
+  cliPush(&mut twoNames, "init");
+  cliPush(&mut twoNames, "a");
+  cliPush(&mut twoNames, "b");
+  Test::assertEq<str>(cliParseError(&twoNames).toStr(), "error: unexpected argument 'b'");
+
+  let mut badTarget: Vector<String> = Vector::new<String>();
+  cliPush(&mut badTarget, "init");
+  cliPush(&mut badTarget, "demo");
+  cliPush(&mut badTarget, "--target");
+  cliPush(&mut badTarget, "wasm");
+  Test::assertEq<str>(
+    cliParseError(&badTarget).toStr(),
+    "error: invalid value 'wasm' for '--target': expected c, iir or none",
+  );
+
+  let mut missingValue: Vector<String> = Vector::new<String>();
+  cliPush(&mut missingValue, "init");
+  cliPush(&mut missingValue, "demo");
+  cliPush(&mut missingValue, "-e");
+  Test::assertEq<str>(cliParseError(&missingValue).toStr(), "error: --email requires a value");
+
+  let mut buildFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut buildFlag, "init");
+  cliPush(&mut buildFlag, "demo");
+  cliPush(&mut buildFlag, "--cc");
+  cliPush(&mut buildFlag, "clang");
+  Test::assertEq<str>(cliParseError(&buildFlag).toStr(), "error: unknown argument: --cc");
 }
