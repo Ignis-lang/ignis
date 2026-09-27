@@ -1,0 +1,72 @@
+// e2e: std
+//
+// A match in statement position gives its arm's value to nobody, including an arm whose
+// value is one of its own pattern bindings. Consuming that binding as the arm result left
+// the payload with no owner, so it was never dropped; the binding keeps its drop at the
+// arm end instead.
+//
+// A `!` in statement position is the exception: its match still produces the payload,
+// and the statement drops that result, so its binding is handed over and must not also
+// be dropped at the arm end. Every payload below is dropped exactly once.
+import Io from "std::io";
+import Option from "std::option";
+import Result from "std::result";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function make(id: i32): Option<Tracked> {
+  return Option::SOME(Tracked { id: id });
+}
+
+function produce(id: i32): Result<Tracked, i32> {
+  return Result::OK(Tracked { id: id });
+}
+
+function bareArm(): void {
+  let source: Option<Tracked> = make(1);
+
+  match (source) {
+    Option::SOME(tracked) -> tracked,
+    Option::NONE -> {},
+  };
+
+  Io::println("after bare arm");
+}
+
+function blockArm(): void {
+  let source: Option<Tracked> = make(2);
+
+  match (source) {
+    Option::SOME(tracked) -> {
+      tracked
+    },
+    Option::NONE -> {},
+  };
+
+  Io::println("after block arm");
+}
+
+function tryStatement(): Result<i32, i32> {
+  produce(3)!;
+
+  Io::println("after try statement");
+
+  return Result::OK(0);
+}
+
+function main(): i32 {
+  bareArm();
+  blockArm();
+
+  return match (tryStatement()) {
+    Result::OK(value) -> value,
+    Result::ERROR(code) -> code,
+  };
+}

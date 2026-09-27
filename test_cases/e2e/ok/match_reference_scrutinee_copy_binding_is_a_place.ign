@@ -1,0 +1,69 @@
+// e2e: std
+//
+// A variant destructure over a reference scrutinee binds a place inside the referent,
+// including a payload that is not droppable. Binding a Copy payload by value made
+// `&binding` the address of an arm-local copy: the pointer fell outside the referent and
+// a write through it never reached the original.
+import Io from "std::io";
+
+enum Slot {
+  FILLED(i32, i64),
+  EMPTY,
+}
+
+function firstAddress(slot: &Slot): *i32 {
+  return match (slot) {
+    Slot::FILLED(first, _) -> (&first) as *i32,
+    Slot::EMPTY -> @pointerFromInteger<*i32>(0),
+  };
+}
+
+function secondAddress(slot: &mut Slot): *mut i64 {
+  if (let Slot::FILLED(_, second) = slot) {
+    return (&second) as *mut i64;
+  }
+
+  return @pointerFromInteger<*mut i64>(0);
+}
+
+function firstAddressByLetElse(slot: &Slot): *i32 {
+  let Slot::FILLED(first, _) = slot else {
+    return @pointerFromInteger<*i32>(0);
+  };
+
+  return (&first) as *i32;
+}
+
+function isInside(pointer: u64, slot: &Slot): boolean {
+  let base: u64 = @integerFromPointer((slot) as *Slot);
+
+  return pointer >= base && pointer < base + @sizeOf<Slot>();
+}
+
+function main(): i32 {
+  let mut slot: Slot = Slot::FILLED(7, 40);
+
+  let first: *i32 = firstAddress(&slot);
+  let second: *mut i64 = secondAddress(&mut slot);
+  let firstByLetElse: *i32 = firstAddressByLetElse(&slot);
+
+  if (!isInside(@integerFromPointer(first), &slot) || !isInside(@integerFromPointer(second), &slot)) {
+    Io::println("binding address outside the referent");
+    return 1;
+  }
+
+  if (@integerFromPointer(firstByLetElse) != @integerFromPointer(first)) {
+    Io::println("let-else binding address differs from the match binding");
+    return 1;
+  }
+
+  @write<i64>(second, 42);
+
+  return match (slot) {
+    Slot::FILLED(value, updated) -> {
+      Io::println(`first ${value} second ${updated}`.toStr());
+      0
+    },
+    Slot::EMPTY -> 2,
+  };
+}
