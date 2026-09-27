@@ -336,14 +336,7 @@ build_from_source() {
   fi
 
   local build_dir="$tmp_dir/bootstrap"
-
-  step "Building Ignis from the C seed (this takes several minutes)..."
-  if [[ "$DRY_RUN" == "true" ]]; then
-    echo "[DRY-RUN] $repo_dir/scripts/build_from_seed.sh --seed $repo_dir/bootstrap/seed -o $build_dir/stage0/ignis"
-    echo "[DRY-RUN] compile $repo_dir/ignis/main.ign with stage0 -> $build_dir/stage1/ignis"
-    echo "[DRY-RUN] compile $repo_dir/ignis/main.ign with stage1 -> $build_dir/stage2/ignis"
-    return 0
-  fi
+  local stage0="$build_dir/stage0/ignis"
 
   if [[ ! -f "$repo_dir/bootstrap/seed/manifest.json" ]]; then
     error "No C seed at $repo_dir/bootstrap/seed: $version_tag cannot be built from source by this installer"
@@ -351,8 +344,20 @@ build_from_source() {
     exit 1
   fi
 
-  local stage0
-  stage0="$("$repo_dir/scripts/build_from_seed.sh" --seed "$repo_dir/bootstrap/seed" -o "$build_dir/stage0/ignis")"
+  step "Building Ignis from the C seed (this takes several minutes)..."
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "[DRY-RUN] $repo_dir/scripts/build_from_seed.sh --seed $repo_dir/bootstrap/seed -o $stage0"
+    echo "[DRY-RUN] compile $repo_dir/ignis/main.ign with stage0 -> $build_dir/stage1/ignis"
+    echo "[DRY-RUN] compile $repo_dir/ignis/main.ign with stage1 -> $build_dir/stage2/ignis"
+    return 0
+  fi
+
+  "$repo_dir/scripts/build_from_seed.sh" --seed "$repo_dir/bootstrap/seed" -o "$stage0" >/dev/null
+
+  if [[ ! -f "$stage0" ]] || [[ ! -x "$stage0" ]]; then
+    error "The C seed build produced no executable at $stage0"
+    exit 1
+  fi
 
   step "Compiling the compiler sources with the seed compiler (stage1)..."
   compile_compiler_stage "$repo_dir" "$stage0" "$build_dir/stage1"
@@ -410,6 +415,9 @@ exec "$PREFIX/lib/ignis/ignis-bin" "\$@"
 EOF
   chmod 755 "$PREFIX/bin/ignis"
 }
+
+# The binary `scripts/bootstrap.sh stage2` writes in a local checkout.
+LOCAL_LADDER_BIN="build/bootstrap/stage2/ignis"
 
 check_existing_installation() {
   if [[ -x "$PREFIX/bin/ignis" ]] && [[ -t 0 ]]; then
@@ -479,10 +487,10 @@ main() {
   elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/ignis" ]] && [[ -d "$PROJECT_ROOT/std" ]]; then
     info "Using local extracted release package"
     install_files "$PROJECT_ROOT"
-  elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/build/bootstrap/stage2/ignis" ]] && [[ -d "$PROJECT_ROOT/std" ]]; then
+  elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/$LOCAL_LADDER_BIN" ]] && [[ -d "$PROJECT_ROOT/std" ]]; then
     info "Using the local bootstrap ladder's stage2 build"
     mkdir -p "$tmp_dir/pkg"
-    cp "$PROJECT_ROOT/build/bootstrap/stage2/ignis" "$tmp_dir/pkg/ignis"
+    cp "$PROJECT_ROOT/$LOCAL_LADDER_BIN" "$tmp_dir/pkg/ignis"
     cp -r "$PROJECT_ROOT/std" "$tmp_dir/pkg/std"
     install_files "$tmp_dir/pkg"
   elif [[ "$REMOTE_MODE" == "false" ]] && [[ -f "$PROJECT_ROOT/bootstrap/seed/manifest.json" ]]; then
