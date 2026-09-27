@@ -1,0 +1,24 @@
+// A closure chosen by a conditional expression and returned through a binding
+// leaves the frame that built it, so both branches' environments are
+// heap-allocated and owned by the binding. A binding that only calls its
+// closure locally keeps the environment on the stack.
+function pick(flag: boolean, a: i32, b: i32): (i32) -> i32 {
+    let chosen = flag ? (x: i32): i32 -> x + a : (x: i32): i32 -> x - b;
+
+    return chosen;
+}
+
+function applyLocally(flag: boolean, base: i32): i32 {
+    let local = flag ? (x: i32): i32 -> x + base : (x: i32): i32 -> x - base;
+
+    return local(1);
+}
+
+function main(): i32 {
+    let add = pick(true, 40, 5);
+    let addSmall = pick(true, 2, 5);
+    let subtract = pick(false, 3, 6);
+    let subtractMore = pick(false, 3, 8);
+
+    return add(0) + addSmall(0) + subtract(20) - subtractMore(20) - applyLocally(true, 1) + applyLocally(false, 1);
+}

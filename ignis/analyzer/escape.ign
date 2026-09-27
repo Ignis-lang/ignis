@@ -208,12 +208,19 @@ export namespace Escape {
         // A binding names a closure when it is initialized with one, and
         // equally when one is later assigned to it. Reading only the `let`
         // left a closure literal assigned to an existing binding unreachable
-        // from the name, so a later `return f` marked nothing.
+        // from the name, so a later `return f` marked nothing. The value may
+        // also choose its closure through a block tail, an `if` or a `match`,
+        // and the binding then names every closure literal it can choose.
         if (let Option::SOME(bound) = Escape::boundClosureTarget(hir, node)) {
-          if (let Option::SOME(valueNode) = hir.get(bound.valueId)) {
-            if (let Hir::HirKind::Closure(_) = &valueNode.kind) {
-              let _ = aliases.insert(bound.name, bound.valueId);
+          let literals: Vector<Hir::HirId> = Hir::valueClosureLiterals(&*hir, bound.valueId);
+          let mut literalIndex: u64 = 0;
+
+          while (literalIndex < literals.length()) {
+            if (let Option::SOME(literalId) = literals.get(literalIndex)) {
+              let _ = aliases.insert(bound.name, *literalId);
             }
+
+            literalIndex += 1;
           }
         }
       }

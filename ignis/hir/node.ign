@@ -1013,12 +1013,135 @@ export namespace Hir {
     };
   }
 
+  /// The expressions whose value `valueId` can evaluate to, pushed onto
+  /// `results`: the tail of a block, both branches of an `if`, and every arm
+  /// of a `match`, followed recursively. Any other node, a closure literal
+  /// included, is its own result. A block without a tail and an `if` without
+  /// an `else` contribute themselves, since their value is not a branch's.
+  function collectValueResults(
+    hir: &Hir::HirStore,
+    valueId: Hir::HirId,
+    results: &mut Vector<Hir::HirId>
+  ): void {
+    let Option::SOME(node) = hir.get(valueId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Block(blockNode) -> {
+        if (let Option::SOME(tailId) = blockNode.expression) {
+          Hir::collectValueResults(hir, tailId, results);
+          return;
+        }
+      },
+      Hir::HirKind::If(ifNode) -> {
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Hir::collectValueResults(hir, ifNode.thenBranch, results);
+          Hir::collectValueResults(hir, elseId, results);
+          return;
+        }
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            Hir::collectValueResults(hir, arm.body, results);
+          }
+
+          armIndex += 1;
+        }
+
+        return;
+      },
+      _ -> {},
+    };
+
+    let mut resultsRef: &mut Vector<Hir::HirId> = results;
+    resultsRef.push(valueId);
+  }
+
+  /// The closure literals `valueId` can evaluate to: the value itself when it
+  /// is one, or the closure literals among its block tail, `if` branches and
+  /// `match` arms. See `collectValueResults`.
+  function valueClosureLiterals(hir: &Hir::HirStore, valueId: Hir::HirId): Vector<Hir::HirId> {
+    let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Hir::collectValueResults(hir, valueId, &mut results);
+
+    let mut literals: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < results.length()) {
+      if (let Option::SOME(resultId) = results.get(index)) {
+        if (let Option::SOME(resultNode) = hir.get(*resultId)) {
+          if (let Hir::HirKind::Closure(_) = &resultNode.kind) {
+            literals.push(*resultId);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return literals;
+  }
+
+  /// Whether every value `valueId` can evaluate to is a closure literal, with
+  /// at least one of them: a branch that diverges produces no value and is
+  /// skipped. A branch yielding anything else, such as an existing closure
+  /// binding, already has an owner, so the result as a whole is not owned.
+  function valueIsOnlyClosureLiterals(
+    hir: &Hir::HirStore,
+    valueId: Hir::HirId,
+    typeStore: &mut Analyzer::TypeStore,
+  ): boolean {
+    let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Hir::collectValueResults(hir, valueId, &mut results);
+
+    let mut literalCount: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < results.length()) {
+      if (let Option::SOME(resultId) = results.get(index)) {
+        let Option::SOME(resultNode) = hir.get(*resultId) else {
+          return false;
+        };
+
+        if (let Hir::HirKind::Closure(_) = &resultNode.kind) {
+          literalCount += 1;
+        } else {
+          if (!Hir::typeIsNever(typeStore, resultNode.typeId)) {
+            return false;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return literalCount > 0;
+  }
+
+  /// Whether the type `typeId` is `never`.
+  function typeIsNever(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::NEVER -> true,
+      _ -> false,
+    };
+  }
+
   /// Whether a `let` whose initializer is `valueId` receives a closure
   /// value that owns its environment, and therefore has to drop it at
   /// scope exit. The port of `ignis_hir::binding_owns_closure_env`.
   ///
   /// Two initializers own one: a closure expression written in place, and
-  /// a closure value produced by a call. A closure can only reach a caller
+  /// a closure value produced by a call. A closure expression chosen by a
+  /// block tail, an `if`/`else` or a `match` counts as written in place when
+  /// every branch that produces a value is one. A closure can only reach a caller
   /// through a return with a heap environment or with none at all —
   /// escape analysis marks every closure that can reach a return as
   /// escaping — so the binding that receives it is the one responsible for
@@ -1041,7 +1164,7 @@ export namespace Hir {
       return false;
     };
 
-    if (let Hir::HirKind::Closure(_) = &node.kind) {
+    if (Hir::valueIsOnlyClosureLiterals(hir, valueId, typeStore)) {
       return true;
     }
 
