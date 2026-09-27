@@ -16,6 +16,7 @@ Ignis is a general-purpose, statically typed language that compiles Ignis source
 ignis/                            # The compiler (project file: ignis.toml)
   main.ign                        # Driver: command dispatch, compile pipeline, test runs, fmt/doc/lsp entry
   cli.ign                         # Command-line parsing and help text
+  init.ign                        # ignis init: project scaffolding
   lexer/                          # Lexer
   syntax/                         # Tokens, token stream, cursor
   parser/                         # Recursive-descent parser with binding-power expression parsing
@@ -92,7 +93,7 @@ crates/                           # Frozen Rust compiler, reference only
 
 Parses the command line, then resolves the input (project `ignis.toml` or single file) and applies CLI overrides (`opt_level`, `debug`, `out_dir`, `std_path`, `cc`, target triple, features).
 
-Commands: `build`, `check`, `build-std`, `test`, `test-std`, `fmt`, `lsp`, `doc`. `ignis --help` lists every flag.
+Commands: `build`, `check`, `build-std`, `check-std`, `test`, `test-std`, `fmt`, `lsp`, `doc`, `init`. `ignis --help` lists every flag.
 
 ### Formatter
 
@@ -227,7 +228,7 @@ Attribute mapping to C:
 
 **Entry:** `ignis/lsp/server.ign`, started by `ignis lsp` over stdin/stdout
 
-Requests handled: diagnostics (`publishDiagnostics`), hover, go-to-definition, find references, rename, completions, document symbols, inlay hints, formatting, code actions.
+Requests handled: diagnostics (`publishDiagnostics`), hover, go-to-definition, find references, rename, completions, document symbols, semantic tokens, inlay hints, formatting, code actions.
 
 - **Completion** (`completion*.ign`) detects its context from tokens, so it works while the file has parse errors.
 - **Documents** (`documents.ign`) hold open buffers, which override disk content for analysis.

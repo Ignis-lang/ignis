@@ -12,6 +12,7 @@ Ignis is a statically typed, general-purpose language that compiles to C and lin
 ignis/                # The compiler (Ignis sources, project file: ignis.toml)
   main.ign            # Driver: command dispatch, compile pipeline, test runs, fmt, doc, lsp entry
   cli.ign             # Command-line parsing and help text
+  init.ign            # ignis init: project scaffolding
   lexer/              # Lexer
   syntax/             # Tokens, token stream, cursor
   parser/             # Recursive-descent parser with error recovery
@@ -85,6 +86,8 @@ ignis build                                    # Compile project (reads ignis.to
 ignis build path/to/file.ign -o out            # Compile single file
 ignis check                                    # Type-check only (no codegen or linking)
 ignis build-std                                # Build standard library archive
+ignis check-std                                # Check the standard library up to C emission
+ignis init my-app                              # Create a project
 ignis --help                                   # Every command and flag
 
 # Language-level tests
@@ -92,6 +95,7 @@ ignis test                                     # Run project tests and fixtures
 ignis test path/to/file.ign                    # Run tests from a single file
 ignis test --filter <substring>                # Only tests whose name contains the substring
 ignis test --update-snapshots                  # Recreate selected snapshots
+ignis test -j 4                                # Cap parallel test processes and C compiles (default: CPU count)
 
 # Formatter
 ignis fmt src/main.ign                         # Format one file
