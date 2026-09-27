@@ -1,0 +1,698 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Io from "std::io";
+import LibC from "std::libc";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Vector from "std::vector";
+
+/// Everything `ignis init` reads from its command line, with the defaults the
+/// host's `InitCommand` declares.
+export record InitOptions {
+  public name: Option<String>;
+  public noGit: boolean;
+  public lib: boolean;
+  public authors: Vector<String>;
+  public email: String;
+  public description: String;
+  public license: String;
+  public projectVersion: String;
+  /// One of `c`, `iir` or `none`, already validated by the parser.
+  public target: String;
+  public mainFile: Option<String>;
+  public outputDir: String;
+  public sourceDir: String;
+  public repository: String;
+  public keywords: Vector<String>;
+  /// Suppresses the success line, mirroring the host's global `--quiet`.
+  public quiet: boolean;
+
+  public static create(): InitOptions {
+    return InitOptions {
+      name: Option::NONE,
+      noGit: false,
+      lib: false,
+      authors: Vector::new<String>(),
+      email: String::create("ignis@example.com"),
+      description: String::create("A Ignis project"),
+      license: String::create("MIT"),
+      projectVersion: String::create("0.1.0"),
+      target: String::create("c"),
+      mainFile: Option::NONE,
+      outputDir: String::create("build"),
+      sourceDir: String::create("src"),
+      repository: String::new(),
+      keywords: Vector::new<String>(),
+      quiet: false,
+    };
+  }
+}
+
+/// True for a value `--target` accepts, the host's `Target` value enum.
+export function initIsValidTarget(value: &String): boolean {
+  return value.equals("c") || value.equals("iir") || value.equals("none");
+}
+
+/// The entry file name: `--main-file` when given, else `main.ign`, or
+/// `lib.ign` for a library project.
+export function initEntryFileName(options: &InitOptions): String {
+  if (let Option::SOME(fileName) = &options.mainFile) {
+    return fileName.clone();
+  }
+
+  if (options.lib) {
+    return String::create("lib.ign");
+  }
+
+  return String::create("main.ign");
+}
+
+/// The source file a binary project starts with.
+export function initMainTemplate(): str {
+  return "import Io from \"std::io\";\n\nfunction main(): i32 {\n  Io::println(\"Hello, Ignis!\");\n  return 0;\n}\n";
+}
+
+/// The source file a library project starts with.
+export function initLibTemplate(): str {
+  return "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\n";
+}
+
+/// Rust's `char::is_whitespace()`, the Unicode `White_Space` property the
+/// host's `str::trim()` uses. Mirrors `isUnicodeWhitespace` in `ignis/main.ign`,
+/// which this module cannot import without an import cycle.
+function initIsUnicodeWhitespace(character: char): boolean {
+  let code: u32 = character as u32;
+
+  if (code == 0x09 || code == 0x0A || code == 0x0B || code == 0x0C || code == 0x0D || code == 0x20) {
+    return true;
+  }
+
+  if (code == 0x85 || code == 0xA0 || code == 0x1680) {
+    return true;
+  }
+
+  if (code >= 0x2000 && code <= 0x200A) {
+    return true;
+  }
+
+  return code == 0x2028 || code == 0x2029 || code == 0x202F || code == 0x205F || code == 0x3000;
+}
+
+/// Rust's `str::trim()`, trimming every Unicode `White_Space` character.
+export function initTrim(text: &String): String {
+  let length: u64 = text.length();
+  let mut startByte: u64 = length;
+  let mut cursor: u64 = 0;
+
+  while (cursor < length) {
+    let mut charEnd: u64 = cursor;
+    let Option::SOME(character) = text.charAt(cursor, &mut charEnd) else {
+      break;
+    };
+
+    if (!initIsUnicodeWhitespace(character)) {
+      startByte = cursor;
+      break;
+    }
+
+    cursor = charEnd;
+  }
+
+  if (startByte == length) {
+    return String::new();
+  }
+
+  let mut lastNonWhitespaceEnd: u64 = startByte;
+  let mut scanCursor: u64 = startByte;
+
+  while (scanCursor < length) {
+    let mut charEnd: u64 = scanCursor;
+    let Option::SOME(character) = text.charAt(scanCursor, &mut charEnd) else {
+      break;
+    };
+
+    if (!initIsUnicodeWhitespace(character)) {
+      lastNonWhitespaceEnd = charEnd;
+    }
+
+    scanCursor = charEnd;
+  }
+
+  return text.substringBytes(startByte, lastNonWhitespaceEnd);
+}
+
+/// Every value trimmed, dropping the ones left empty.
+export function initTrimAndFilter(values: &Vector<String>): Vector<String> {
+  let mut cleaned: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      let trimmed: String = initTrim(value);
+
+      if (trimmed.length() > 0) {
+        cleaned.push(trimmed.clone());
+      }
+    }
+
+    index += 1;
+  }
+
+  return cleaned;
+}
+
+/// The `authors` list: each author as `Name <email>`, or just the name when
+/// the email trims to nothing.
+export function initAuthors(authors: &Vector<String>, email: &String): Vector<String> {
+  let cleanedAuthors: Vector<String> = initTrimAndFilter(authors);
+  let cleanedEmail: String = initTrim(email);
+
+  if (cleanedAuthors.length() == 0 || cleanedEmail.length() == 0) {
+    return cleanedAuthors;
+  }
+
+  let mut formatted: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < cleanedAuthors.length()) {
+    if (let Option::SOME(author) = cleanedAuthors.get(index)) {
+      formatted.push(`${author.toStr()} <${cleanedEmail.toStr()}>`);
+    }
+
+    index += 1;
+  }
+
+  return formatted;
+}
+
+/// The package name Rust's `Path::file_name()` gives for `root`: the last
+/// component, skipping empty and `.` components, and nothing when that
+/// component is `..`. Trimmed, and nothing when it trims to empty.
+export function initPackageName(root: &Path::PathBuf): Option<String> {
+  let text: String = root.toString();
+  let mut lastComponent: String = String::new();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= text.length()) {
+    let mut atSeparator: boolean = index == text.length();
+
+    if (!atSeparator) {
+      if (let Option::SOME(byte) = text.byteAt(index)) {
+        atSeparator = byte == '/' as u8;
+      }
+    }
+
+    if (atSeparator) {
+      let component: String = text.substringBytes(start, index);
+
+      if (component.length() > 0 && !component.equals(".")) {
+        lastComponent = component.clone();
+      }
+
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  if (lastComponent.length() == 0 || lastComponent.equals("..")) {
+    return Option::NONE;
+  }
+
+  let name: String = initTrim(&lastComponent);
+
+  if (name.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(name);
+}
+
+/// How many consecutive bytes equal to `quote` the longest run in `value` has.
+function tomlLongestRun(value: &String, quote: u8): u64 {
+  let mut longest: u64 = 0;
+  let mut current: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < value.length()) {
+    let Option::SOME(byte) = value.byteAt(index) else {
+      break;
+    };
+
+    if (byte == quote) {
+      current += 1;
+
+      if (current > longest) {
+        longest = current;
+      }
+    } else {
+      current = 0;
+    }
+
+    index += 1;
+  }
+
+  return longest;
+}
+
+/// True when `value` holds an ASCII control byte other than tab and newline,
+/// which only a basic string can spell (as an escape).
+function tomlNeedsEscapeCodes(value: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < value.length()) {
+    let Option::SOME(byte) = value.byteAt(index) else {
+      break;
+    };
+
+    if (byte != 0x09 && byte != 0x0A && (byte <= 0x1F || byte == 0x7F)) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function tomlContainsByte(value: &String, wanted: u8): boolean {
+  let mut index: u64 = 0;
+
+  while (index < value.length()) {
+    if (let Option::SOME(byte) = value.byteAt(index) && byte == wanted) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function tomlPushUnicodeEscape(output: &mut String, byte: u8): void {
+  let mut outputRef: &mut String = output;
+  let digits: String = String::create("0123456789ABCDEF");
+
+  outputRef.pushStr("\\u00");
+
+  if (let Option::SOME(high) = digits.byteAt((byte / 16) as u64)) {
+    outputRef.pushByte(high);
+  }
+
+  if (let Option::SOME(low) = digits.byteAt((byte % 16) as u64)) {
+    outputRef.pushByte(low);
+  }
+}
+
+/// Writes `value` as the body of a basic string, single-line or multi-line.
+///
+/// Mirrors `toml_writer`'s encoder byte for byte: a multi-line string keeps
+/// runs of up to two double quotes and escapes the third (the run starts over
+/// after any escape), and keeps newlines raw.
+function tomlPushBasicBody(output: &mut String, value: &String, multiline: boolean): void {
+  let mut outputRef: &mut String = output;
+  let allowedQuotes: u64 = multiline ? 2 : 0;
+  let mut quoteRun: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < value.length()) {
+    let Option::SOME(byte) = value.byteAt(index) else {
+      break;
+    };
+
+    index += 1;
+
+    if (byte == 0x22) {
+      quoteRun += 1;
+
+      if (quoteRun > allowedQuotes) {
+        outputRef.pushStr("\\\"");
+        quoteRun = 0;
+        continue;
+      }
+
+      outputRef.pushByte(byte);
+      continue;
+    }
+
+    quoteRun = 0;
+
+    if (byte == 0x08) {
+      outputRef.pushStr("\\b");
+    } else if (byte == 0x09) {
+      outputRef.pushStr("\\t");
+    } else if (byte == 0x0A && !multiline) {
+      outputRef.pushStr("\\n");
+    } else if (byte == 0x0C) {
+      outputRef.pushStr("\\f");
+    } else if (byte == 0x0D) {
+      outputRef.pushStr("\\r");
+    } else if (byte == 0x5C) {
+      outputRef.pushStr("\\\\");
+    } else if (byte != 0x0A && (byte <= 0x1F || byte == 0x7F)) {
+      tomlPushUnicodeEscape(outputRef, byte);
+    } else {
+      outputRef.pushByte(byte);
+    }
+  }
+}
+
+/// `value` as a TOML string, in the form the host's `toml::to_string_pretty`
+/// picks: a plain basic string when nothing needs escaping, then a literal
+/// string, then the multi-line forms, and an escaped basic string last.
+export function tomlStringValue(value: &String): String {
+  let escapeCodes: boolean = tomlNeedsEscapeCodes(value);
+  let hasBackslash: boolean = tomlContainsByte(value, 0x5C);
+  let hasNewline: boolean = tomlContainsByte(value, 0x0A);
+  let singleQuotes: u64 = tomlLongestRun(value, 0x27);
+  let doubleQuotes: u64 = tomlLongestRun(value, 0x22);
+  let mut output: String = String::new();
+
+  if (!escapeCodes && !hasBackslash && doubleQuotes == 0 && !hasNewline) {
+    output.pushStr("\"");
+    output.pushStr(value.toStr());
+    output.pushStr("\"");
+    return output;
+  }
+
+  if (!escapeCodes && singleQuotes == 0 && !hasNewline) {
+    output.pushStr("'");
+    output.pushStr(value.toStr());
+    output.pushStr("'");
+    return output;
+  }
+
+  if (!escapeCodes && !hasBackslash && doubleQuotes <= 2) {
+    output.pushStr("\"\"\"");
+
+    if (hasNewline) {
+      output.pushStr("\n");
+    }
+
+    tomlPushBasicBody(&mut output, value, true);
+    output.pushStr("\"\"\"");
+    return output;
+  }
+
+  if (!escapeCodes && singleQuotes <= 2) {
+    output.pushStr("'''");
+
+    if (hasNewline) {
+      output.pushStr("\n");
+    }
+
+    output.pushStr(value.toStr());
+    output.pushStr("'''");
+    return output;
+  }
+
+  if (hasNewline) {
+    output.pushStr("\"\"\"\n");
+    tomlPushBasicBody(&mut output, value, true);
+    output.pushStr("\"\"\"");
+    return output;
+  }
+
+  output.pushStr("\"");
+  tomlPushBasicBody(&mut output, value, false);
+  output.pushStr("\"");
+  return output;
+}
+
+/// `values` as a TOML array the way the host's pretty serializer lays one
+/// out: inline up to one element, one element per line from two on.
+export function tomlStringArray(values: &Vector<String>): String {
+  let mut output: String = String::create("[");
+
+  if (values.length() == 1) {
+    if (let Option::SOME(value) = values.get(0)) {
+      output.pushStr(tomlStringValue(value).toStr());
+    }
+  } else if (values.length() > 1) {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(value) = values.get(index)) {
+        output.pushStr("\n    ");
+        output.pushStr(tomlStringValue(value).toStr());
+        output.pushStr(",");
+      }
+
+      index += 1;
+    }
+
+    output.pushStr("\n");
+  }
+
+  output.pushStr("]");
+  return output;
+}
+function tomlPushStringEntry(output: &mut String, key: str, value: &String): void {
+  let mut outputRef: &mut String = output;
+  outputRef.pushStr(key);
+  outputRef.pushStr(" = ");
+  outputRef.pushStr(tomlStringValue(value).toStr());
+  outputRef.pushStr("\n");
+}
+
+function tomlPushArrayEntry(output: &mut String, key: str, values: &Vector<String>): void {
+  let mut outputRef: &mut String = output;
+  outputRef.pushStr(key);
+  outputRef.pushStr(" = ");
+  outputRef.pushStr(tomlStringArray(values).toStr());
+  outputRef.pushStr("\n");
+}
+
+/// The `ignis.toml` a new project starts with, byte for byte what the host
+/// writes: its pretty-printed manifest followed by one extra blank line.
+export function initManifestText(
+  packageName: &String,
+  options: &InitOptions,
+  stdPath: &Option<String>
+): String {
+  let mut output: String = String::create("[package]\n");
+  tomlPushStringEntry(&mut output, "name", packageName);
+  tomlPushStringEntry(&mut output, "version", &options.projectVersion);
+  let authors: Vector<String> = initAuthors(&options.authors, &options.email);
+  let keywords: Vector<String> = initTrimAndFilter(&options.keywords);
+  let entryFile: String = initEntryFileName(options);
+
+  tomlPushArrayEntry(&mut output, "authors", &authors);
+  tomlPushStringEntry(&mut output, "description", &options.description);
+  tomlPushArrayEntry(&mut output, "keywords", &keywords);
+  tomlPushStringEntry(&mut output, "license", &options.license);
+  tomlPushStringEntry(&mut output, "repository", &options.repository);
+
+  output.pushStr("\n[ignis]\nstd = true\n");
+
+  if (let Option::SOME(path) = stdPath) {
+    tomlPushStringEntry(&mut output, "std_path", &path);
+  }
+
+  output.pushStr("\n[build]\n");
+  output.pushStr(options.lib ? "bin = false\n" : "bin = true\n");
+  tomlPushStringEntry(&mut output, "source_dir", &options.sourceDir);
+  tomlPushStringEntry(&mut output, "entry", &entryFile);
+  tomlPushStringEntry(&mut output, "out_dir", &options.outputDir);
+  output.pushStr("opt_level = 0\ndebug = false\n");
+  tomlPushStringEntry(&mut output, "target", &options.target);
+  output.pushStr("cc = \"cc\"\ncflags = []\nemit = []\n\n");
+  return output;
+}
+
+/// How the host's `Display` for `std::io::Error` spells an OS error.
+function initIoErrorText(error: &Io::IoError): String {
+  return `${error.errorMessage()} (os error ${error.rawCode()})`;
+}
+
+/// The directory the project goes in: `name` itself when absolute, else
+/// joined onto the current directory and canonicalized when it already exists.
+function initResolveProjectRoot(name: &String): Option<Path::PathBuf> {
+  let path: Path::PathBuf = Path::PathBuf::fromString(name);
+
+  if (path.isAbsolute()) {
+    return Option::SOME(path);
+  }
+
+  let currentDir: Path::PathBuf = match (Env::currentDir()) {
+    Result::OK(value) -> value,
+    Result::ERROR(error) -> {
+      Io::eprintln(`Error: Failed to resolve current directory: ${initIoErrorText(&error).toStr()}`);
+      return Option::NONE;
+    },
+  };
+
+  let root: Path::PathBuf = currentDir.join(name.toStr());
+
+  if (!Fs::exists(root.asStr())) {
+    return Option::SOME(root);
+  }
+
+  let canonical: Path::PathBuf = match (Fs::canonicalize(&root)) {
+    Result::OK(value) -> value,
+    Result::ERROR(error) -> {
+      Io::eprintln(`Error: Failed to canonicalize project path '${root.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      return Option::NONE;
+    },
+  };
+
+  return Option::SOME(canonical);
+}
+
+function initIsDirectory(path: &Path::PathBuf): boolean {
+  let Result::OK(metadata) = Fs::metadata(path) else {
+    return false;
+  };
+
+  return metadata.isDir();
+}
+
+/// The `std_path` a new project records: `IGNIS_STD_PATH` canonicalized when
+/// it names an existing path, else `../std` when the project sits beside a
+/// `std` directory, else nothing.
+function initDetectStdPath(projectRoot: &Path::PathBuf): Option<String> {
+  if (let Option::SOME(raw) = Env::get("IGNIS_STD_PATH")) {
+    let trimmed: String = initTrim(&raw);
+
+    if (trimmed.length() > 0 && Fs::exists(trimmed.toStr())) {
+      if (let Result::OK(canonical) = Fs::canonicalize(&trimmed)) {
+        return Option::SOME(canonical.toString());
+      }
+    }
+  }
+
+  if (let Option::SOME(parent) = projectRoot.parent()) {
+    let candidate: Path::PathBuf = parent.join("std");
+
+    if (initIsDirectory(&candidate)) {
+      return Option::SOME(String::create("../std"));
+    }
+  }
+
+  return Option::NONE;
+}
+
+/// Writes `content` to a file that must not exist yet, creating its parent
+/// directory first.
+function initWriteNewFile(path: &Path::PathBuf, content: &String): boolean {
+  if (let Option::SOME(parent) = path.parent()) {
+    if (let Result::ERROR(error) = Fs::createDirAll(&parent)) {
+      Io::eprintln(`Error: Failed to create parent directory for '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      return false;
+    }
+  }
+
+  if (Fs::exists(path.asStr())) {
+    let error: Io::IoError = Io::IoError::fromErrno(LibC::Errno::EEXIST);
+    Io::eprintln(`Error: Failed to create file '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
+    return false;
+  }
+
+  if (let Result::ERROR(error) = Fs::writeString(path, content)) {
+    Io::eprintln(`Error: Failed to create file '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
+    return false;
+  }
+
+  return true;
+}
+
+/// Runs `git init` in `projectRoot` unless it already holds a `.git`.
+function initGitRepository(projectRoot: &Path::PathBuf): boolean {
+  if (Fs::exists(projectRoot.join(".git").asStr())) {
+    return true;
+  }
+
+  let mut command: Process::Command = Process::Command::new("git");
+  command.arg("init");
+  command.cwd(projectRoot);
+
+  let status: Process::ExitStatus = match (command.run()) {
+    Result::OK(value) -> value,
+    Result::ERROR(error) -> {
+      Io::eprintln(`Error: Failed to initialize git repository at '${projectRoot.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      return false;
+    },
+  };
+
+  if (!status.success) {
+    Io::eprintln(`Error: 'git init' failed in '${projectRoot.asStr()}'`);
+    return false;
+  }
+
+  return true;
+}
+
+/// `ignis init`: creates a project directory holding `ignis.toml` and an entry
+/// source file, then a git repository unless `--no-git` was given, the way
+/// the host's `run_init` does.
+///
+/// Returns 0 on success and 1 on any failure, after printing why.
+export function runInit(options: &InitOptions): i32 {
+  let Option::SOME(name) = &options.name else {
+    Io::eprintln(String::create("error: init requires a project name"));
+    return 1;
+  };
+
+  let Option::SOME(projectRoot) = initResolveProjectRoot(&name) else {
+    return 1;
+  };
+
+  if (Fs::exists(projectRoot.asStr())) {
+    if (!initIsDirectory(&projectRoot)) {
+      Io::eprintln(`Error: Path exists but is not a directory: '${projectRoot.asStr()}'`);
+      return 1;
+    }
+  } else {
+    if (let Result::ERROR(error) = Fs::createDirAll(&projectRoot)) {
+      Io::eprintln(`Error: Failed to create project directory '${projectRoot.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      return 1;
+    }
+  }
+
+  let Option::SOME(packageName) = initPackageName(&projectRoot) else {
+    Io::eprintln(`Error: Could not determine project name from path '${projectRoot.asStr()}'`);
+    return 1;
+  };
+
+  let sourceDirPath: Path::PathBuf = projectRoot.join(options.sourceDir.toStr());
+
+  if (let Result::ERROR(error) = Fs::createDirAll(&sourceDirPath)) {
+    Io::eprintln(`Error: Failed to create source directory '${sourceDirPath.asStr()}': ${initIoErrorText(&error).toStr()}`);
+    return 1;
+  }
+
+  let entryFile: String = initEntryFileName(options);
+  let entryPath: Path::PathBuf = sourceDirPath.join(entryFile.toStr());
+  let manifestPath: Path::PathBuf = projectRoot.join("ignis.toml");
+
+  if (Fs::exists(manifestPath.asStr())) {
+    Io::eprintln(`Error: Refusing to overwrite existing file '${manifestPath.asStr()}'`);
+    return 1;
+  }
+
+  if (Fs::exists(entryPath.asStr())) {
+    Io::eprintln(`Error: Refusing to overwrite existing file '${entryPath.asStr()}'`);
+    return 1;
+  }
+
+  let stdPath: Option<String> = initDetectStdPath(&projectRoot);
+  let manifest: String = initManifestText(&packageName, options, &stdPath);
+  let source: String = String::create(options.lib ? initLibTemplate() : initMainTemplate());
+
+  if (!initWriteNewFile(&manifestPath, &manifest) || !initWriteNewFile(&entryPath, &source)) {
+    return 1;
+  }
+
+  if (!options.noGit && !initGitRepository(&projectRoot)) {
+    return 1;
+  }
+
+  if (!options.quiet) {
+    let kind: str = options.lib ? "library" : "binary";
+    Io::println(`Initialized Ignis ${kind} project '${packageName.toStr()}' at ${projectRoot.asStr()}`);
+  }
+
+  return 0;
+}

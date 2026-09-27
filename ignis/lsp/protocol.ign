@@ -11,6 +11,8 @@ import Vector from "std::vector";
 
 import IGNIS_VERSION from "../cli";
 
+import semanticTokensLegend from "./semantic_tokens";
+
 /// JSON-RPC and LSP error codes the server answers with.
 export namespace LspErrorCode {
   const PARSE_ERROR: i64 = -32700;
@@ -275,9 +277,10 @@ export function rangeJson(start: Text::Position, end: Text::Position): JsonValue
 
 /// The `initialize` result: full-document sync, hover, definition,
 /// references, rename, document symbols, completion, whole-document
-/// formatting and quick-fix code actions, which is everything this server
-/// implements. The outline, rename, formatting and code-action options are
-/// the host's (crates/ignis_lsp/src/server.rs:427, :466, :431 and :455).
+/// formatting, quick-fix code actions and full-document semantic tokens,
+/// which is everything this server implements. The outline, rename,
+/// formatting, code-action and semantic-token options are the host's
+/// (crates/ignis_lsp/src/server.rs:455, :466, :428, :431 and :438).
 export function initializeResult(): JsonValue {
   let mut capabilities: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   capabilities.push(JsonObjectEntry::create("textDocumentSync", JsonValue::integerValue(TEXT_DOCUMENT_SYNC_FULL)));
@@ -309,6 +312,10 @@ export function initializeResult(): JsonValue {
   completion.push(JsonObjectEntry::create("resolveProvider", JsonValue::boolValue(false)));
   capabilities.push(JsonObjectEntry::create("completionProvider", JsonValue::object(completion)));
 
+  let mut semanticTokens: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  semanticTokens.push(JsonObjectEntry::create("legend", semanticTokensLegend()));
+  semanticTokens.push(JsonObjectEntry::create("full", JsonValue::boolValue(true)));
+  capabilities.push(JsonObjectEntry::create("semanticTokensProvider", JsonValue::object(semanticTokens)));
   let mut inlayHint: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
   inlayHint.push(JsonObjectEntry::create("resolveProvider", JsonValue::boolValue(false)));
   capabilities.push(JsonObjectEntry::create("inlayHintProvider", JsonValue::object(inlayHint)));

@@ -2,6 +2,8 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
+import InitOptions, initIsValidTarget from "./init";
+
 /// The version this compiler reports, kept equal to the host compiler's
 /// workspace version so `ignis --version` prints the same string whichever
 /// binary answers it.
@@ -20,6 +22,8 @@ export enum CliCommand {
   FMT,
   LSP,
   DOC,
+  INIT,
+  CHECK_STD,
   HELP,
   VERSION,
 }
@@ -66,6 +70,9 @@ export record CliOptions {
   public partition: Option<PartitionSpec>;
   /// Wall-clock budget in seconds for a single test process.
   public testTimeout: Option<u64>;
+  /// Parallel workers for test processes and C compilation (test only);
+  /// absent leaves the choice to `IGNIS_TEST_JOBS` and the processor count.
+  public jobs: Option<u64>;
   /// Explicit files to format (fmt only); empty selects project discovery.
   public fmtFilePaths: Vector<String>;
   /// Explicit project directory to format (fmt only).
@@ -84,6 +91,8 @@ export record CliOptions {
   public fmtEmitDiff: boolean;
   /// Explicit project directory to document (doc only).
   public docProject: Option<String>;
+  /// What `ignis init` creates (init only).
+  public init: InitOptions;
 
   public static create(command: CliCommand): CliOptions {
     return CliOptions {
@@ -106,6 +115,7 @@ export record CliOptions {
       fixtureDirs: Vector::new<String>(),
       partition: Option::NONE,
       testTimeout: Option::NONE,
+      jobs: Option::NONE,
       fmtFilePaths: Vector::new<String>(),
       fmtProject: Option::NONE,
       fmtCheck: false,
@@ -117,6 +127,7 @@ export record CliOptions {
       fmtStdinJson: false,
       fmtEmitDiff: false,
       docProject: Option::NONE,
+      init: InitOptions::create(),
     };
   }
 
@@ -162,6 +173,22 @@ export record CliOptions {
 
   public isDocMode(&self): boolean {
     if (let CliCommand::DOC = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isInitMode(&self): boolean {
+    if (let CliCommand::INIT = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isCheckStdMode(&self): boolean {
+    if (let CliCommand::CHECK_STD = self.command) {
       return true;
     }
 
@@ -327,6 +354,14 @@ function cliSubcommandOf(argument: &String): Option<CliCommand> {
     return Option::SOME(CliCommand::DOC);
   }
 
+  if (argument.equals("init")) {
+    return Option::SOME(CliCommand::INIT);
+  }
+
+  if (argument.equals("check-std")) {
+    return Option::SOME(CliCommand::CHECK_STD);
+  }
+
   return Option::NONE;
 }
 
@@ -351,10 +386,15 @@ function cliEndsWith(value: &String, suffix: str): boolean {
 }
 
 /// True for a flag `test-std` takes. The subcommand mirrors the host's
-/// `TestStdCommand`, which accepts nothing else: a std test run has no project
-/// file to override and always builds the whole standard library.
+/// `TestStdCommand` plus its global `-j`/`--jobs`, and accepts nothing else: a
+/// std test run has no project file to override and always builds the whole
+/// standard library.
 function cliTestStdAcceptsFlag(argument: &String): boolean {
   if (argument.equals("-o") || argument.equals("--output-dir") || argument.equals("--std-path")) {
+    return true;
+  }
+
+  if (argument.equals("-j") || argument.equals("--jobs") || argument.startsWith("-j") || argument.startsWith("--jobs=")) {
     return true;
   }
 
@@ -847,6 +887,285 @@ function attachedShortValue(argument: &String, flag: str): Option<String> {
   return Option::SOME(argument.substringBytes(start, argument.length()));
 }
 
+/// A value-taking flag's value and the index of the argument after it.
+record FlagValue {
+  public value: String;
+  public next: u64;
+}
+
+/// True for a separate argument `clap` never takes as a flag's value: one
+/// that starts with `-`, other than a lone `-`, since no flag here allows
+/// hyphen values.
+function looksLikeFlag(argument: &String): boolean {
+  return argument.startsWith("-") && !argument.equals("-");
+}
+
+/// Reads `longName` / `shortName` at `index` in every spelling `clap` accepts:
+/// `--name value`, `--name=value`, `-s value`, `-s=value` and `-svalue`.
+/// `NONE` when `argument` is neither flag. A separate value that looks like a
+/// flag leaves the value missing.
+function matchValueFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  longName: str,
+  shortName: str,
+): Result<Option<FlagValue>, String> {
+  if (argument.equals(longName) || argument.equals(shortName)) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue(longName, "a value"));
+    };
+
+    if (looksLikeFlag(value)) {
+      return Result::ERROR(cliMissingValue(longName, "a value"));
+    }
+
+    return Result::OK(Option::SOME(FlagValue { value: value.clone(), next: index + 2 }));
+  }
+
+  if (let Option::SOME(value) = flagEqualsValue(argument, longName)) {
+    return Result::OK(Option::SOME(FlagValue { value: value, next: index + 1 }));
+  }
+
+  if (!argument.startsWith("--")) {
+    if (let Option::SOME(value) = attachedShortValue(argument, shortName)) {
+      return Result::OK(Option::SOME(FlagValue { value: value, next: index + 1 }));
+    }
+  }
+
+  return Result::OK(Option::NONE);
+}
+
+/// Stores one `init` flag's value in `options`, by the flag's long name.
+function applyInitValueFlag(
+  options: &mut CliOptions,
+  longName: str,
+  value: &String
+): Result<void, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let name: String = String::create(longName);
+
+  if (name.equals("--authors")) {
+    optionsRef.init.authors.push(value.clone());
+  } else if (name.equals("--keywords")) {
+    optionsRef.init.keywords.push(value.clone());
+  } else if (name.equals("--email")) {
+    optionsRef.init.email = value.clone();
+  } else if (name.equals("--description")) {
+    optionsRef.init.description = value.clone();
+  } else if (name.equals("--license")) {
+    optionsRef.init.license = value.clone();
+  } else if (name.equals("--project-version")) {
+    optionsRef.init.projectVersion = value.clone();
+  } else if (name.equals("--target")) {
+    if (!initIsValidTarget(value)) {
+      return Result::ERROR(`error: invalid value '${value.toStr()}' for '--target': expected c, iir or none`);
+    }
+
+    optionsRef.init.target = value.clone();
+  } else if (name.equals("--main-file")) {
+    optionsRef.init.mainFile = Option::SOME(value.clone());
+  } else if (name.equals("--output-dir")) {
+    optionsRef.init.outputDir = value.clone();
+  } else if (name.equals("--source-dir")) {
+    optionsRef.init.sourceDir = value.clone();
+  } else {
+    optionsRef.init.repository = value.clone();
+  }
+
+  return Result::OK(());
+}
+
+/// One `init` flag that takes a value, in its long and short spellings.
+record InitFlagSpec {
+  public longName: str;
+  public shortName: str;
+}
+
+/// Every value-taking `init` flag, as the host's `InitCommand` declares them.
+function initFlagSpecTable(): Vector<InitFlagSpec> {
+  let mut specs: Vector<InitFlagSpec> = Vector::new<InitFlagSpec>();
+  specs.push(InitFlagSpec { longName: "--authors", shortName: "-a" });
+  specs.push(InitFlagSpec { longName: "--email", shortName: "-e" });
+  specs.push(InitFlagSpec { longName: "--description", shortName: "-d" });
+  specs.push(InitFlagSpec { longName: "--license", shortName: "-l" });
+  specs.push(InitFlagSpec { longName: "--project-version", shortName: "-p" });
+  specs.push(InitFlagSpec { longName: "--target", shortName: "-t" });
+  specs.push(InitFlagSpec { longName: "--main-file", shortName: "-m" });
+  specs.push(InitFlagSpec { longName: "--output-dir", shortName: "-o" });
+  specs.push(InitFlagSpec { longName: "--source-dir", shortName: "-s" });
+  specs.push(InitFlagSpec { longName: "--repository", shortName: "-r" });
+  specs.push(InitFlagSpec { longName: "--keywords", shortName: "-k" });
+  return specs;
+}
+
+/// True for an argument `init` recognizes as a flag, in any spelling.
+function initIsKnownFlag(argument: &String, specs: &Vector<InitFlagSpec>): boolean {
+  if (argument.equals("--no-git") || argument.equals("--lib") || argument.equals("-q") || argument.equals("--quiet")) {
+    return true;
+  }
+
+  if (argument.equals("-h") || argument.equals("--help") || argument.equals("-V") || argument.equals("--version")) {
+    return true;
+  }
+
+  let mut specIndex: u64 = 0;
+
+  while (specIndex < specs.length()) {
+    if (let Option::SOME(spec) = specs.get(specIndex)) {
+      if (argument.equals(spec.longName) || argument.equals(spec.shortName)) {
+        return true;
+      }
+
+      if (let Option::SOME(_) = flagEqualsValue(argument, spec.longName)) {
+        return true;
+      }
+
+      if (!argument.startsWith("--")) {
+        if (let Option::SOME(_) = attachedShortValue(argument, spec.shortName)) {
+          return true;
+        }
+      }
+    }
+
+    specIndex += 1;
+  }
+
+  return false;
+}
+
+/// Records one occurrence of the `init` flag `longName`, failing on the second
+/// the way `clap` rejects a repeated argument that is not appendable.
+function initNoteFlag(seen: &mut Vector<String>, longName: str): Result<void, String> {
+  let mut seenRef: &mut Vector<String> = seen;
+  let mut index: u64 = 0;
+
+  while (index < seenRef.length()) {
+    if (let Option::SOME(name) = seenRef.get(index) && name.equals(longName)) {
+      return Result::ERROR(`error: the argument '${longName}' cannot be used multiple times`);
+    }
+
+    index += 1;
+  }
+
+  seenRef.push(String::create(longName));
+  return Result::OK(());
+}
+
+/// Parses one `init` argument, returning the index of the next one.
+///
+/// `init` takes what the host's `InitCommand` takes: the project name, the
+/// `--no-git` and `--lib` switches, the value flags with their short forms,
+/// and the global `-q`/`--quiet`. Every flag but `--authors` and `--keywords`
+/// may appear once; `seen` holds the ones already given.
+function parseInitArgument(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  seen: &mut Vector<String>,
+): Result<u64, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let mut seenRef: &mut Vector<String> = seen;
+
+  if (argument.equals("--no-git")) {
+    if (let Result::ERROR(message) = initNoteFlag(seenRef, "--no-git")) {
+      return Result::ERROR(message);
+    }
+    optionsRef.init.noGit = true;
+    return Result::OK(index + 1);
+  }
+
+  if (argument.equals("--lib")) {
+    if (let Result::ERROR(message) = initNoteFlag(seenRef, "--lib")) {
+      return Result::ERROR(message);
+    }
+    optionsRef.init.lib = true;
+    return Result::OK(index + 1);
+  }
+
+  if (argument.equals("-q") || argument.equals("--quiet")) {
+    if (let Result::ERROR(message) = initNoteFlag(seenRef, "--quiet")) {
+      return Result::ERROR(message);
+    }
+    optionsRef.init.quiet = true;
+    return Result::OK(index + 1);
+  }
+
+  let specs: Vector<InitFlagSpec> = initFlagSpecTable();
+  let mut specIndex: u64 = 0;
+
+  while (specIndex < specs.length()) {
+    let Option::SOME(spec) = specs.get(specIndex) else {
+      break;
+    };
+
+    // `clap` parses an unknown flag in the value's place as that flag, so
+    // it is reported as unknown rather than as a missing value.
+    if (argument.equals(spec.longName) || argument.equals(spec.shortName)) {
+      if (let Option::SOME(next) = arguments.get(index + 1)) {
+        if (looksLikeFlag(next) && !initIsKnownFlag(next, &specs)) {
+          return Result::ERROR(`error: unknown argument: ${next.toStr()}`);
+        }
+      }
+    }
+
+    match (matchValueFlag(arguments, argument, index, spec.longName, spec.shortName)) {
+      Result::ERROR(message) -> {
+        return Result::ERROR(message);
+      },
+      Result::OK(matched) -> {
+        if (let Option::SOME(flag) = matched) {
+          if (!String::create(spec.longName).equals("--authors") && !String::create(spec.longName).equals("--keywords")) {
+            if (let Result::ERROR(message) = initNoteFlag(seenRef, spec.longName)) {
+              return Result::ERROR(message);
+            }
+          }
+
+          if (let Result::ERROR(message) = applyInitValueFlag(optionsRef, spec.longName, &flag.value)) {
+            return Result::ERROR(message);
+          }
+
+          return Result::OK(flag.next);
+        }
+      },
+    };
+
+    specIndex += 1;
+  }
+
+  if (argument.startsWith("-")) {
+    return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+  }
+
+  if (optionsRef.init.name.isSome()) {
+    return Result::ERROR(`error: unexpected argument '${argument.toStr()}'`);
+  }
+
+  optionsRef.init.name = Option::SOME(argument.clone());
+  return Result::OK(index + 1);
+}
+
+/// Reads a `-j`/`--jobs` count: a whole number from 1 to the largest `u32`,
+/// the range the host's `clap` parser accepts.
+function parseJobCount(value: &String): Result<u64, String> {
+  let invalid: String = `error: invalid job count: ${value.toStr()}`;
+
+  if (value.length() > 10) {
+    return Result::ERROR(invalid);
+  }
+
+  let Option::SOME(count) = parseDecimal(value) else {
+    return Result::ERROR(invalid);
+  };
+
+  if (count == 0 || count > 4294967295) {
+    return Result::ERROR(invalid);
+  }
+
+  return Result::OK(count);
+}
+
 function applyDocValueFlag(options: &mut CliOptions, flag: &String, value: &String): void {
   let mut optionsRef: &mut CliOptions = options;
 
@@ -1219,6 +1538,7 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
   }
 
   let mut options: CliOptions = CliOptions::create(command);
+  let mut initFlagsSeen: Vector<String> = Vector::new<String>();
   let mut fmtFlagState: FmtFlagState = FmtFlagState {
     useTabsSeen: false,
     spacesSeen: false,
@@ -1251,6 +1571,40 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
           return Result::ERROR(message);
         },
       };
+    }
+
+    if (options.isInitMode()) {
+      match (parseInitArgument(arguments, argument, index, &mut options, &mut initFlagsSeen)) {
+        Result::OK(next) -> {
+          index = next;
+          continue;
+        },
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+      };
+    }
+
+    // `check-std` takes only the host `CheckStdCommand`'s output directory.
+    if (options.isCheckStdMode()) {
+      match (matchValueFlag(arguments, argument, index, "--output-dir", "-o")) {
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+        Result::OK(matched) -> {
+          if (let Option::SOME(flag) = matched) {
+            options.outDir = Option::SOME(flag.value.clone());
+            index = flag.next;
+            continue;
+          }
+        },
+      };
+
+      if (argument.startsWith("-")) {
+        return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+      }
+
+      return Result::ERROR(`error: unexpected argument '${argument.toStr()}'`);
     }
 
     if (options.isTestStdMode() && argument.startsWith("-") && !cliTestStdAcceptsFlag(argument)) {
@@ -1486,6 +1840,27 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (options.isTestMode() || options.isTestStdMode()) {
+      match (matchValueFlag(arguments, argument, index, "--jobs", "-j")) {
+        Result::ERROR(_) -> {
+          return Result::ERROR(cliMissingValue(argument.toStr(), "a number of jobs"));
+        },
+        Result::OK(matched) -> {
+          if (let Option::SOME(flag) = matched) {
+            match (parseJobCount(&flag.value)) {
+              Result::OK(count) -> options.jobs = Option::SOME(count),
+              Result::ERROR(message) -> {
+                return Result::ERROR(message);
+              },
+            };
+
+            index = flag.next;
+            continue;
+          }
+        },
+      };
+    }
+
     if (options.isFmtMode()) {
       match (tryParseFmtFlag(arguments, argument, index, &mut options, &mut fmtFlagState)) {
         Result::ERROR(message) -> {
@@ -1537,6 +1912,10 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     index += 1;
   }
 
+  if (options.isInitMode() && options.init.name.isNone()) {
+    return Result::ERROR(String::create("error: init requires a project name"));
+  }
+
   return Result::OK(options);
 }
 
@@ -1556,11 +1935,13 @@ export function helpText(): String {
   text.pushStr("  fmt        Format Ignis source canonically with parse/reparse safety checks\n");
   text.pushStr("  lsp        Start the Language Server Protocol server on stdin and stdout\n");
   text.pushStr("  doc        Extract API documentation from doc comments\n");
+  text.pushStr("  init       Initialize a new Ignis project\n");
+  text.pushStr("  check-std  Check the standard library up to C codegen without archiving\n");
   text.pushStr("\n");
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
   text.pushStr("Without a path the project containing the current directory is used.\n");
   text.pushStr("`ignis test-std [FILTER]` takes a test-name filter instead of a path, and reads\n");
-  text.pushStr("only --std-path, -o/--output-dir, --feature, --features and --update-snapshots.\n");
+  text.pushStr("only --std-path, -o/--output-dir, -j/--jobs, --feature, --features and --update-snapshots.\n");
   text.pushStr("\n");
   text.pushStr("Options:\n");
   text.pushStr("  -o <PATH>                 Write the linked binary here, or the directory build-std fills\n");
@@ -1591,6 +1972,7 @@ export function helpText(): String {
   text.pushStr("      --fixtures <DIR>      Add a directory of program fixture cases (test only)\n");
   text.pushStr("      --partition <K/N>     Run only shard K of N, 1-based (test only)\n");
   text.pushStr("      --test-timeout <SECS> Wall-clock budget for one test process (test only)\n");
+  text.pushStr("  -j, --jobs <N>            Parallel test processes and C compiles (test, test-std)\n");
   text.pushStr("      --project <DIR>       Explicit project directory (fmt, doc)\n");
   text.pushStr("      --output <FILE>       Write the JSON document here instead of stdout (doc only;\n");
   text.pushStr("                            -o works too)\n");
@@ -1665,6 +2047,8 @@ function cliCommandName(command: CliCommand): str {
     CliCommand::FMT -> "fmt",
     CliCommand::LSP -> "lsp",
     CliCommand::DOC -> "doc",
+    CliCommand::INIT -> "init",
+    CliCommand::CHECK_STD -> "check-std",
     CliCommand::HELP -> "help",
     CliCommand::VERSION -> "version",
   };
@@ -2730,4 +3114,410 @@ function cliRejectsADuplicateFlagBeforeAnUnrelatedConflict(): void {
     stripAnsi(&message).toStr(),
     "error: the argument '--check' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
   );
+}
+
+function cliJoined(values: &Vector<String>): String {
+  let mut joined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    if (let Option::SOME(value) = values.get(index)) {
+      if (index > 0) {
+        joined.pushStr(",");
+      }
+
+      joined.pushStr(value.toStr());
+    }
+
+    index += 1;
+  }
+
+  return joined;
+}
+
+/// The job count a parse carried, 0 when it named none.
+function cliJobCount(options: &CliOptions): u64 {
+  return match (options.jobs) {
+    Option::SOME(count) -> count,
+    Option::NONE -> 0,
+  };
+}
+
+/// `init` with only a name keeps every default the host's `InitCommand`
+/// declares.
+@test
+function cliParsesInitWithItsDefaults(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "init");
+  cliPush(&mut arguments, "demo");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "init");
+  Test::assertEq<str>(cliOptionText(&options.init.name).toStr(), "demo");
+  Test::assertEq<boolean>(options.init.noGit, false);
+  Test::assertEq<boolean>(options.init.lib, false);
+  Test::assertEq<boolean>(options.init.quiet, false);
+  Test::assertEq<str>(options.init.email.toStr(), "ignis@example.com");
+  Test::assertEq<str>(options.init.description.toStr(), "A Ignis project");
+  Test::assertEq<str>(options.init.license.toStr(), "MIT");
+  Test::assertEq<str>(options.init.projectVersion.toStr(), "0.1.0");
+  Test::assertEq<str>(options.init.target.toStr(), "c");
+  Test::assertEq<boolean>(options.init.mainFile.isNone(), true);
+  Test::assertEq<str>(options.init.outputDir.toStr(), "build");
+  Test::assertEq<str>(options.init.sourceDir.toStr(), "src");
+  Test::assertEq<str>(options.init.repository.toStr(), "");
+  Test::assertEq<u64>(options.init.authors.length(), 0);
+  Test::assertEq<u64>(options.init.keywords.length(), 0);
+}
+
+/// Every `init` flag in its long form, with the repeatable ones given twice.
+@test
+function cliParsesEveryInitLongFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "init");
+  cliPush(&mut arguments, "--no-git");
+  cliPush(&mut arguments, "--lib");
+  cliPush(&mut arguments, "--quiet");
+  cliPush(&mut arguments, "--authors");
+  cliPush(&mut arguments, "Ann");
+  cliPush(&mut arguments, "--authors=Bob");
+  cliPush(&mut arguments, "--email");
+  cliPush(&mut arguments, "ann@example.com");
+  cliPush(&mut arguments, "--description");
+  cliPush(&mut arguments, "A library");
+  cliPush(&mut arguments, "--license");
+  cliPush(&mut arguments, "GPL-3.0-only");
+  cliPush(&mut arguments, "--project-version");
+  cliPush(&mut arguments, "1.2.3");
+  cliPush(&mut arguments, "--target");
+  cliPush(&mut arguments, "iir");
+  cliPush(&mut arguments, "--main-file");
+  cliPush(&mut arguments, "entry.ign");
+  cliPush(&mut arguments, "--output-dir");
+  cliPush(&mut arguments, "out");
+  cliPush(&mut arguments, "--source-dir");
+  cliPush(&mut arguments, "source");
+  cliPush(&mut arguments, "--repository");
+  cliPush(&mut arguments, "https://example.com/repo");
+  cliPush(&mut arguments, "--keywords");
+  cliPush(&mut arguments, "a");
+  cliPush(&mut arguments, "--keywords");
+  cliPush(&mut arguments, "b");
+  cliPush(&mut arguments, "demo");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliOptionText(&options.init.name).toStr(), "demo");
+  Test::assertEq<boolean>(options.init.noGit, true);
+  Test::assertEq<boolean>(options.init.lib, true);
+  Test::assertEq<boolean>(options.init.quiet, true);
+  Test::assertEq<str>(cliJoined(&options.init.authors).toStr(), "Ann,Bob");
+  Test::assertEq<str>(options.init.email.toStr(), "ann@example.com");
+  Test::assertEq<str>(options.init.description.toStr(), "A library");
+  Test::assertEq<str>(options.init.license.toStr(), "GPL-3.0-only");
+  Test::assertEq<str>(options.init.projectVersion.toStr(), "1.2.3");
+  Test::assertEq<str>(options.init.target.toStr(), "iir");
+  Test::assertEq<str>(cliOptionText(&options.init.mainFile).toStr(), "entry.ign");
+  Test::assertEq<str>(options.init.outputDir.toStr(), "out");
+  Test::assertEq<str>(options.init.sourceDir.toStr(), "source");
+  Test::assertEq<str>(options.init.repository.toStr(), "https://example.com/repo");
+  Test::assertEq<str>(cliJoined(&options.init.keywords).toStr(), "a,b");
+}
+
+/// The short forms, including the attached `-svalue` and `-s=value` spellings
+/// `clap` accepts. `-o` names `init`'s output directory, not a binary.
+@test
+function cliParsesInitShortFlags(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "init");
+  cliPush(&mut arguments, "demo");
+  cliPush(&mut arguments, "-q");
+  cliPush(&mut arguments, "-a");
+  cliPush(&mut arguments, "Ann");
+  cliPush(&mut arguments, "-eann@example.com");
+  cliPush(&mut arguments, "-d=Tools");
+  cliPush(&mut arguments, "-l");
+  cliPush(&mut arguments, "Apache-2.0");
+  cliPush(&mut arguments, "-p");
+  cliPush(&mut arguments, "2.0.0");
+  cliPush(&mut arguments, "-t");
+  cliPush(&mut arguments, "none");
+  cliPush(&mut arguments, "-m");
+  cliPush(&mut arguments, "app.ign");
+  cliPush(&mut arguments, "-o");
+  cliPush(&mut arguments, "out");
+  cliPush(&mut arguments, "-s");
+  cliPush(&mut arguments, "lib");
+  cliPush(&mut arguments, "-r");
+  cliPush(&mut arguments, "repo");
+  cliPush(&mut arguments, "-k");
+  cliPush(&mut arguments, "cli");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliOptionText(&options.init.name).toStr(), "demo");
+  Test::assertEq<boolean>(options.init.quiet, true);
+  Test::assertEq<str>(cliJoined(&options.init.authors).toStr(), "Ann");
+  Test::assertEq<str>(options.init.email.toStr(), "ann@example.com");
+  Test::assertEq<str>(options.init.description.toStr(), "Tools");
+  Test::assertEq<str>(options.init.license.toStr(), "Apache-2.0");
+  Test::assertEq<str>(options.init.projectVersion.toStr(), "2.0.0");
+  Test::assertEq<str>(options.init.target.toStr(), "none");
+  Test::assertEq<str>(cliOptionText(&options.init.mainFile).toStr(), "app.ign");
+  Test::assertEq<str>(options.init.outputDir.toStr(), "out");
+  Test::assertEq<boolean>(options.outputPath.isNone(), true);
+  Test::assertEq<str>(options.init.sourceDir.toStr(), "lib");
+  Test::assertEq<str>(options.init.repository.toStr(), "repo");
+  Test::assertEq<str>(cliJoined(&options.init.keywords).toStr(), "cli");
+}
+
+/// `init` rejects a missing name, a second name, an unknown target, a flag
+/// missing its value, and flags that belong to other commands.
+@test
+function cliRejectsWhatInitDoesNotTake(): void {
+  let mut noName: Vector<String> = Vector::new<String>();
+  cliPush(&mut noName, "init");
+  cliPush(&mut noName, "--lib");
+  Test::assertEq<str>(cliParseError(&noName).toStr(), "error: init requires a project name");
+
+  let mut twoNames: Vector<String> = Vector::new<String>();
+  cliPush(&mut twoNames, "init");
+  cliPush(&mut twoNames, "a");
+  cliPush(&mut twoNames, "b");
+  Test::assertEq<str>(cliParseError(&twoNames).toStr(), "error: unexpected argument 'b'");
+
+  let mut badTarget: Vector<String> = Vector::new<String>();
+  cliPush(&mut badTarget, "init");
+  cliPush(&mut badTarget, "demo");
+  cliPush(&mut badTarget, "--target");
+  cliPush(&mut badTarget, "wasm");
+  Test::assertEq<str>(
+    cliParseError(&badTarget).toStr(),
+    "error: invalid value 'wasm' for '--target': expected c, iir or none",
+  );
+
+  let mut missingValue: Vector<String> = Vector::new<String>();
+  cliPush(&mut missingValue, "init");
+  cliPush(&mut missingValue, "demo");
+  cliPush(&mut missingValue, "-e");
+  Test::assertEq<str>(cliParseError(&missingValue).toStr(), "error: --email requires a value");
+
+  let mut buildFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut buildFlag, "init");
+  cliPush(&mut buildFlag, "demo");
+  cliPush(&mut buildFlag, "--cc");
+  cliPush(&mut buildFlag, "clang");
+  Test::assertEq<str>(cliParseError(&buildFlag).toStr(), "error: unknown argument: --cc");
+}
+
+/// `check-std` reads only its output directory, as `-o` or `--output-dir`.
+@test
+function cliParsesCheckStdWithAnOutputDirectory(): void {
+  let mut bare: Vector<String> = Vector::new<String>();
+  cliPush(&mut bare, "check-std");
+
+  let bareOptions: CliOptions = cliParse(&bare);
+
+  Test::assertEq<str>(cliCommandName(bareOptions.command), "check-std");
+  Test::assertEq<boolean>(bareOptions.outDir.isNone(), true);
+
+  let mut shortForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortForm, "check-std");
+  cliPush(&mut shortForm, "-o");
+  cliPush(&mut shortForm, "out");
+  Test::assertEq<str>(cliOptionText(&cliParse(&shortForm).outDir).toStr(), "out");
+
+  let mut longForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut longForm, "check-std");
+  cliPush(&mut longForm, "--output-dir=checked");
+  Test::assertEq<str>(cliOptionText(&cliParse(&longForm).outDir).toStr(), "checked");
+}
+
+/// `check-std` takes no path and no build flag.
+@test
+function cliRejectsWhatCheckStdDoesNotTake(): void {
+  let mut path: Vector<String> = Vector::new<String>();
+  cliPush(&mut path, "check-std");
+  cliPush(&mut path, "std");
+  Test::assertEq<str>(cliParseError(&path).toStr(), "error: unexpected argument 'std'");
+
+  let mut buildFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut buildFlag, "check-std");
+  cliPush(&mut buildFlag, "--debug");
+  Test::assertEq<str>(cliParseError(&buildFlag).toStr(), "error: unknown argument: --debug");
+}
+
+/// `-j` / `--jobs` sizes a test run's pool in every spelling `clap` accepts,
+/// and stays unset when absent so `IGNIS_TEST_JOBS` still applies.
+@test
+function cliParsesTheTestJobCount(): void {
+  let mut absent: Vector<String> = Vector::new<String>();
+  cliPush(&mut absent, "test");
+  Test::assertEq<boolean>(cliParse(&absent).jobs.isNone(), true);
+
+  let mut shortForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortForm, "test");
+  cliPush(&mut shortForm, "-j");
+  cliPush(&mut shortForm, "2");
+  let shortFormOptions: CliOptions = cliParse(&shortForm);
+  Test::assertEq<u64>(cliJobCount(&shortFormOptions), 2);
+
+  let mut attached: Vector<String> = Vector::new<String>();
+  cliPush(&mut attached, "test");
+  cliPush(&mut attached, "-j3");
+  let attachedOptions: CliOptions = cliParse(&attached);
+  Test::assertEq<u64>(cliJobCount(&attachedOptions), 3);
+
+  let mut longForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut longForm, "test");
+  cliPush(&mut longForm, "--jobs");
+  cliPush(&mut longForm, "4");
+  cliPush(&mut longForm, "math");
+  let longOptions: CliOptions = cliParse(&longForm);
+  Test::assertEq<u64>(cliJobCount(&longOptions), 4);
+  Test::assertEq<str>(cliPathText(&longOptions).toStr(), "math");
+
+  let mut equalsForm: Vector<String> = Vector::new<String>();
+  cliPush(&mut equalsForm, "test");
+  cliPush(&mut equalsForm, "--jobs=5");
+  let equalsFormOptions: CliOptions = cliParse(&equalsForm);
+  Test::assertEq<u64>(cliJobCount(&equalsFormOptions), 5);
+}
+
+/// A job count has to be a whole number from 1 up, and only `test` takes one.
+@test
+function cliRejectsAnInvalidJobCount(): void {
+  let mut zero: Vector<String> = Vector::new<String>();
+  cliPush(&mut zero, "test");
+  cliPush(&mut zero, "-j");
+  cliPush(&mut zero, "0");
+  Test::assertEq<str>(cliParseError(&zero).toStr(), "error: invalid job count: 0");
+
+  let mut word: Vector<String> = Vector::new<String>();
+  cliPush(&mut word, "test");
+  cliPush(&mut word, "--jobs=many");
+  Test::assertEq<str>(cliParseError(&word).toStr(), "error: invalid job count: many");
+
+  let mut tooLarge: Vector<String> = Vector::new<String>();
+  cliPush(&mut tooLarge, "test");
+  cliPush(&mut tooLarge, "-j");
+  cliPush(&mut tooLarge, "4294967296");
+  Test::assertEq<str>(cliParseError(&tooLarge).toStr(), "error: invalid job count: 4294967296");
+
+  let mut missing: Vector<String> = Vector::new<String>();
+  cliPush(&mut missing, "test");
+  cliPush(&mut missing, "-j");
+  Test::assertEq<str>(cliParseError(&missing).toStr(), "error: -j requires a number of jobs");
+
+  let mut build: Vector<String> = Vector::new<String>();
+  cliPush(&mut build, "build");
+  cliPush(&mut build, "-j");
+  cliPush(&mut build, "2");
+  Test::assertEq<str>(cliParseError(&build).toStr(), "error: unknown argument: -j");
+}
+
+/// Every `init` flag except `--authors` and `--keywords` may appear once, the
+/// way `clap` rejects a repeated single-value argument or switch.
+@test
+function cliRejectsARepeatedInitFlag(): void {
+  let mut email: Vector<String> = Vector::new<String>();
+  cliPush(&mut email, "init");
+  cliPush(&mut email, "demo");
+  cliPush(&mut email, "-e");
+  cliPush(&mut email, "a@example.com");
+  cliPush(&mut email, "--email=b@example.com");
+  Test::assertEq<str>(cliParseError(&email).toStr(), "error: the argument '--email' cannot be used multiple times");
+
+  let mut lib: Vector<String> = Vector::new<String>();
+  cliPush(&mut lib, "init");
+  cliPush(&mut lib, "--lib");
+  cliPush(&mut lib, "demo");
+  cliPush(&mut lib, "--lib");
+  Test::assertEq<str>(cliParseError(&lib).toStr(), "error: the argument '--lib' cannot be used multiple times");
+
+  let mut quiet: Vector<String> = Vector::new<String>();
+  cliPush(&mut quiet, "init");
+  cliPush(&mut quiet, "demo");
+  cliPush(&mut quiet, "--quiet");
+  cliPush(&mut quiet, "-q");
+  Test::assertEq<str>(cliParseError(&quiet).toStr(), "error: the argument '--quiet' cannot be used multiple times");
+
+  let mut repeatable: Vector<String> = Vector::new<String>();
+  cliPush(&mut repeatable, "init");
+  cliPush(&mut repeatable, "demo");
+  cliPush(&mut repeatable, "-a");
+  cliPush(&mut repeatable, "Ann");
+  cliPush(&mut repeatable, "-a");
+  cliPush(&mut repeatable, "Bob");
+  cliPush(&mut repeatable, "-k");
+  cliPush(&mut repeatable, "x");
+  cliPush(&mut repeatable, "--keywords=y");
+  let repeatableOptions: CliOptions = cliParse(&repeatable);
+  Test::assertEq<str>(cliJoined(&repeatableOptions.init.authors).toStr(), "Ann,Bob");
+  Test::assertEq<str>(cliJoined(&repeatableOptions.init.keywords).toStr(), "x,y");
+}
+
+/// A separate value starting with `-` is never taken as a value, as in `clap`
+/// without `allow_hyphen_values`: a known flag there leaves the value missing,
+/// anything else is an unknown argument. A lone `-` and an attached value
+/// still count as values.
+@test
+function cliRejectsAFlagWhereAnInitValueBelongs(): void {
+  let mut knownFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut knownFlag, "init");
+  cliPush(&mut knownFlag, "demo");
+  cliPush(&mut knownFlag, "--email");
+  cliPush(&mut knownFlag, "--lib");
+  Test::assertEq<str>(cliParseError(&knownFlag).toStr(), "error: --email requires a value");
+
+  let mut knownShort: Vector<String> = Vector::new<String>();
+  cliPush(&mut knownShort, "init");
+  cliPush(&mut knownShort, "demo");
+  cliPush(&mut knownShort, "-a");
+  cliPush(&mut knownShort, "-eann@example.com");
+  Test::assertEq<str>(cliParseError(&knownShort).toStr(), "error: --authors requires a value");
+
+  let mut unknown: Vector<String> = Vector::new<String>();
+  cliPush(&mut unknown, "init");
+  cliPush(&mut unknown, "demo");
+  cliPush(&mut unknown, "-e");
+  cliPush(&mut unknown, "-5");
+  Test::assertEq<str>(cliParseError(&unknown).toStr(), "error: unknown argument: -5");
+
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "init");
+  cliPush(&mut values, "demo");
+  cliPush(&mut values, "--email");
+  cliPush(&mut values, "-");
+  cliPush(&mut values, "--description=--lib");
+  cliPush(&mut values, "-r-x");
+  let valueOptions: CliOptions = cliParse(&values);
+  Test::assertEq<str>(valueOptions.init.email.toStr(), "-");
+  Test::assertEq<str>(valueOptions.init.description.toStr(), "--lib");
+  Test::assertEq<str>(valueOptions.init.repository.toStr(), "-x");
+  Test::assertEq<boolean>(valueOptions.init.lib, false);
+}
+
+/// `test-std` takes `-j` / `--jobs` too, the host's option being global.
+@test
+function cliParsesTheTestStdJobCount(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "test-std");
+  cliPush(&mut arguments, "-j");
+  cliPush(&mut arguments, "2");
+  cliPush(&mut arguments, "string");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<u64>(cliJobCount(&options), 2);
+  Test::assertEq<str>(options.filter.toStr(), "string");
+
+  let mut attached: Vector<String> = Vector::new<String>();
+  cliPush(&mut attached, "test-std");
+  cliPush(&mut attached, "--jobs=4");
+
+  let attachedOptions: CliOptions = cliParse(&attached);
+
+  Test::assertEq<u64>(cliJobCount(&attachedOptions), 4);
 }

@@ -1,0 +1,282 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import LibC from "std::libc";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Time from "std::time";
+import Vector from "std::vector";
+
+import
+  InitOptions,
+  initEntryFileName,
+  initLibTemplate,
+  initMainTemplate,
+  initManifestText,
+  initPackageName,
+  runInit,
+  tomlStringArray,
+  tomlStringValue,
+from "./init";
+
+function tomlOf(value: str): String {
+  let text: String = String::create(value);
+  return tomlStringValue(&text);
+}
+
+function words(first: str, second: str): Vector<String> {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(String::create(first));
+  values.push(String::create(second));
+  return values;
+}
+
+function packageNameText(path: str): String {
+  let root: Path::PathBuf = Path::PathBuf::create(path);
+
+  return match (initPackageName(&root)) {
+    Option::SOME(name) -> name,
+    Option::NONE -> String::create("<none>"),
+  };
+}
+
+function uniqueTempDir(label: str): Path::PathBuf {
+  let Result::OK(root) = Fs::tempDir() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let Result::OK(now) = Time::SystemTime::now() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let Result::OK(duration) = now.durationSinceUnixEpoch() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let pid: u64 = Process::id() as u64;
+  let nanos: u64 = duration.nanos as u64;
+  let name: String = `ignis-init-${label}-${pid}-${duration.secs}-${nanos}`;
+  let dir: Path::PathBuf = root.join(name.toStr());
+
+  let Result::OK(_) = Fs::createDirAll(&dir) else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  return dir;
+}
+
+function readText(path: &Path::PathBuf): String {
+  let Result::OK(text) = Fs::readToString(path) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return text;
+}
+
+/// A string with nothing to escape stays a plain basic string.
+@test
+function initTomlKeepsAPlainStringBasic(): void {
+  Test::assertEq<str>(tomlOf("demo").toStr(), "\"demo\"");
+  Test::assertEq<str>(tomlOf("").toStr(), "\"\"");
+  Test::assertEq<str>(tomlOf("it's").toStr(), "\"it's\"");
+}
+
+/// Double quotes or a backslash select a literal string while no single
+/// quote rules one out, as the host's `toml` serializer picks.
+@test
+function initTomlPrefersALiteralString(): void {
+  Test::assertEq<str>(tomlOf("say \"hi\"").toStr(), "'say \"hi\"'");
+  Test::assertEq<str>(tomlOf("a\\b").toStr(), "'a\\b'");
+}
+
+/// Both quote kinds, or a newline, move to the multi-line forms.
+@test
+function initTomlFallsBackToMultiLineStrings(): void {
+  Test::assertEq<str>(tomlOf("x\"y'z").toStr(), "\"\"\"x\"y'z\"\"\"");
+  Test::assertEq<str>(tomlOf("two\nlines").toStr(), "\"\"\"\ntwo\nlines\"\"\"");
+  Test::assertEq<str>(tomlOf("a\\b\nit's").toStr(), "'''\na\\b\nit's'''");
+  Test::assertEq<str>(tomlOf("q\"\"\"'").toStr(), "'''q\"\"\"''''");
+}
+
+/// Control bytes only a basic string can spell are escaped, the rest kept.
+@test
+function initTomlEscapesControlBytes(): void {
+  let mut value: String = String::create("a");
+  value.pushByte(0x09);
+  value.pushByte(0x01);
+  value.pushStr("\"");
+
+  Test::assertEq<str>(tomlStringValue(&value).toStr(), "\"a\\t\\u0001\\\"\"");
+
+  let mut multiLine: String = String::create("\"\"\"\"");
+  multiLine.pushByte(0x7F);
+  multiLine.pushStr("\n");
+
+  Test::assertEq<str>(tomlStringValue(&multiLine).toStr(), "\"\"\"\n\"\"\\\"\"\\u007F\n\"\"\"");
+}
+
+/// Arrays stay inline up to one element and go one per line from two on.
+@test
+function initTomlLaysOutArraysLikeTheHost(): void {
+  let empty: Vector<String> = Vector::new<String>();
+  Test::assertEq<str>(tomlStringArray(&empty).toStr(), "[]");
+
+  let mut single: Vector<String> = Vector::new<String>();
+  single.push(String::create("Ann"));
+  Test::assertEq<str>(tomlStringArray(&single).toStr(), "[\"Ann\"]");
+
+  let pair: Vector<String> = words("x", "y");
+  Test::assertEq<str>(tomlStringArray(&pair).toStr(), "[\n    \"x\",\n    \"y\",\n]");
+}
+
+/// The package name is the last path component Rust's `file_name` reports.
+@test
+function initPackageNameFollowsRustFileName(): void {
+  Test::assertEq<str>(packageNameText("/work/demo").toStr(), "demo");
+  Test::assertEq<str>(packageNameText("/work/demo/").toStr(), "demo");
+  Test::assertEq<str>(packageNameText("/work/demo/.").toStr(), "demo");
+  Test::assertEq<str>(packageNameText("/work/ demo ").toStr(), "demo");
+  Test::assertEq<str>(packageNameText("/work/..").toStr(), "<none>");
+  Test::assertEq<str>(packageNameText("/").toStr(), "<none>");
+  Test::assertEq<str>(packageNameText("/work/ ").toStr(), "<none>");
+}
+
+/// The entry file follows `--main-file`, then `--lib`.
+@test
+function initEntryFileNameFollowsTheFlags(): void {
+  let mut options: InitOptions = InitOptions::create();
+  Test::assertEq<str>(initEntryFileName(&options).toStr(), "main.ign");
+
+  options.lib = true;
+  Test::assertEq<str>(initEntryFileName(&options).toStr(), "lib.ign");
+
+  options.mainFile = Option::SOME(String::create("entry.ign"));
+  Test::assertEq<str>(initEntryFileName(&options).toStr(), "entry.ign");
+}
+
+/// The default manifest is byte for byte what the host writes.
+@test
+function initManifestMatchesTheHostDefaults(): void {
+  let options: InitOptions = InitOptions::create();
+  let name: String = String::create("demo");
+  let noStdPath: Option<String> = Option::NONE;
+
+  Test::assertEq<str>(
+    initManifestText(&name, &options, &noStdPath).toStr(),
+    "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"A Ignis project\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n\n",
+  );
+}
+
+/// A library manifest with authors, keywords and a detected std path, the
+/// authors and keywords trimmed and the empty ones dropped.
+@test
+function initManifestCarriesEveryFlag(): void {
+  let mut options: InitOptions = InitOptions::create();
+  options.lib = true;
+  options.authors = words(" Ann ", "Bob");
+  options.authors.push(String::create("  "));
+  options.keywords = words("x", "");
+  options.keywords.push(String::create(" y "));
+  options.repository = String::create("https://example.com/repo");
+  options.target = String::create("iir");
+
+  let name: String = String::create("lib2");
+  let stdPath: Option<String> = Option::SOME(String::create("../std"));
+
+  Test::assertEq<str>(
+    initManifestText(&name, &options, &stdPath).toStr(),
+    "[package]\nname = \"lib2\"\nversion = \"0.1.0\"\nauthors = [\n    \"Ann <ignis@example.com>\",\n    \"Bob <ignis@example.com>\",\n]\ndescription = \"A Ignis project\"\nkeywords = [\n    \"x\",\n    \"y\",\n]\nlicense = \"MIT\"\nrepository = \"https://example.com/repo\"\n\n[ignis]\nstd = true\nstd_path = \"../std\"\n\n[build]\nbin = false\nsource_dir = \"src\"\nentry = \"lib.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"iir\"\ncc = \"cc\"\ncflags = []\nemit = []\n\n",
+  );
+}
+
+/// An empty email leaves the author names bare.
+@test
+function initManifestLeavesAuthorsBareWithoutAnEmail(): void {
+  let mut options: InitOptions = InitOptions::create();
+  options.authors = words("Ann", "Bob");
+  options.email = String::create(" ");
+
+  let name: String = String::create("demo");
+  let noStdPath: Option<String> = Option::NONE;
+  let manifest: String = initManifestText(&name, &options, &noStdPath);
+
+  let expected: String = String::create("authors = [\n    \"Ann\",\n    \"Bob\",\n]\n");
+
+  Test::assertEq<boolean>(manifest.contains(&expected), true);
+}
+
+/// `runInit` writes the manifest and the entry file into a new directory, and
+/// refuses to run again over the manifest it wrote.
+@test
+function initRunCreatesTheProjectAndRefusesToOverwriteIt(): void {
+  let workDir: Path::PathBuf = uniqueTempDir("run");
+  let projectRoot: Path::PathBuf = workDir.join("demo");
+
+  let mut options: InitOptions = InitOptions::create();
+  options.name = Option::SOME(projectRoot.toString());
+  options.noGit = true;
+  options.quiet = true;
+
+  Test::assertEq<i32>(runInit(&options), 0);
+
+  let manifestPath: Path::PathBuf = projectRoot.join("ignis.toml");
+  let entryPath: Path::PathBuf = projectRoot.join("src").join("main.ign");
+  let manifest: String = readText(&manifestPath);
+  Test::assertEq<boolean>(manifest.startsWith("[package]\nname = \"demo\"\n"), true);
+  Test::assertEq<str>(readText(&entryPath).toStr(), initMainTemplate());
+  Test::assertEq<boolean>(Fs::exists(projectRoot.join(".git").asStr()), false);
+
+  Test::assertEq<i32>(runInit(&options), 1);
+
+  let libRoot: Path::PathBuf = workDir.join("lib");
+  options.name = Option::SOME(libRoot.toString());
+  options.lib = true;
+  options.sourceDir = String::create("source");
+
+  Test::assertEq<i32>(runInit(&options), 0);
+
+  let libEntryPath: Path::PathBuf = libRoot.join("source").join("lib.ign");
+  Test::assertEq<str>(readText(&libEntryPath).toStr(), initLibTemplate());
+
+  let _removed = Fs::removeDirAll(&workDir);
+}
+
+/// A relative name is created under the current directory, the package named
+/// after its last component, and a `./` spelling of the same directory finds
+/// the manifest already there.
+@test
+function initRunResolvesARelativeNameAgainstTheCurrentDirectory(): void {
+  let workDir: Path::PathBuf = uniqueTempDir("relative");
+
+  Test::assertEq<i32>(LibC::File::chdir(workDir.asStr() as *u8), 0);
+
+  let mut options: InitOptions = InitOptions::create();
+  options.name = Option::SOME(String::create("nested/app"));
+  options.noGit = true;
+  options.quiet = true;
+
+  Test::assertEq<i32>(runInit(&options), 0);
+
+  let Result::OK(currentDir) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let manifestPath: Path::PathBuf = currentDir.join("nested").join("app").join("ignis.toml");
+  let manifest: String = readText(&manifestPath);
+  Test::assertEq<boolean>(manifest.startsWith("[package]\nname = \"app\"\n"), true);
+
+  let entryPath: Path::PathBuf = currentDir.join("nested").join("app").join("src").join("main.ign");
+  Test::assertEq<str>(readText(&entryPath).toStr(), initMainTemplate());
+
+  options.name = Option::SOME(String::create("./nested/app/"));
+  Test::assertEq<i32>(runInit(&options), 1);
+
+  let _removed = Fs::removeDirAll(&workDir);
+}
