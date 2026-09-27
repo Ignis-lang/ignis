@@ -1,4 +1,6 @@
+import Fs from "std::fs";
 import Path from "std::path";
+import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
 
@@ -11,6 +13,7 @@ import
   fmtConfigErrorMessage,
   fmtConfigErrorMessageForPath,
   fmtStdinJsonValidateAndProcessLine,
+  prepareTestBinaryDirectory,
   testBinaryPath,
   validateUtf8From,
 from "./main";
@@ -216,7 +219,9 @@ function testBinaryGoesUnderTheOutDirectory(): void {
   let name: String = String::create("ignis");
   let noOutput: Option<String> = Option::NONE;
 
-  Test::assertEq<str>(testBinaryPath(&outDir, &name, &noOutput).toStr(), "/work/project/build/bin/ignis-tests");
+  let expected: String = outDir.join("bin").join("ignis-tests").toString();
+
+  Test::assertEq<str>(testBinaryPath(&outDir, &name, &noOutput).toStr(), expected.toStr());
 }
 
 /// An explicit `-o` still names the test binary itself.
@@ -227,4 +232,61 @@ function testBinaryFollowsAnExplicitOutput(): void {
   let output: Option<String> = Option::SOME(String::create("build/bootstrap/stage1-tests/ignis-tests"));
 
   Test::assertEq<str>(testBinaryPath(&outDir, &name, &output).toStr(), "build/bootstrap/stage1-tests/ignis-tests");
+}
+
+/// A fresh scratch directory for one test-binary directory test.
+function testBinaryScratch(label: str): Path::PathBuf {
+  let Result::OK(root) = Fs::tempDir() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let name: String = `ignis-test-binary-${label}-${Process::id()}`;
+  let scratch: Path::PathBuf = root.join(name.toStr());
+  let _removed = Fs::removeDirAll(&scratch);
+
+  let Result::OK(_) = Fs::createDirAll(&scratch) else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  return scratch;
+}
+
+/// A bare `-o name` has no directory to create and links in the current one.
+@test
+function testBinaryDirectoryAcceptsABareOutputName(): void {
+  let bare: String = String::create("mytests");
+  Test::assert(prepareTestBinaryDirectory(&bare));
+}
+
+/// The default `<out>/bin` does not exist before the first run.
+@test
+function testBinaryDirectoryIsCreatedUnderANewOutDirectory(): void {
+  let scratch: Path::PathBuf = testBinaryScratch("new");
+  let binaryPath: String = scratch.join("out").join("bin").join("ignis-tests").toString();
+
+  Test::assert(prepareTestBinaryDirectory(&binaryPath));
+  Test::assert(Fs::exists(scratch.join("out").join("bin").asStr()));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// A directory that cannot be created, here because a file is in the way,
+/// fails the setup instead of failing later in the toolchain.
+@test
+function testBinaryDirectoryFailsUnderAFile(): void {
+  let scratch: Path::PathBuf = testBinaryScratch("file");
+  let blocker: Path::PathBuf = scratch.join("out");
+  let content: String = String::create("not a directory");
+
+  let Result::OK(_) = Fs::writeString(&blocker, &content) else {
+    Test::fail();
+    return;
+  };
+
+  let binaryPath: String = blocker.join("bin").join("ignis-tests").toString();
+  Test::assert(!prepareTestBinaryDirectory(&binaryPath));
+
+  let _removed = Fs::removeDirAll(&scratch);
 }
