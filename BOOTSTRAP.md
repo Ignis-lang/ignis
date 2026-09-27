@@ -125,10 +125,10 @@ is verified by checksum, and needs only a C compiler to come back to life.
 Gate | Command | What it compares
 --- | --- | ---
 G1 | (part of `stage3`, no separate subcommand) | stage3's emitted C against stage2's — the fixed point
-G2 | `parity` | the host e2e corpus, run through stage2
+G2 | `parity` | the e2e corpus, run through stage2 against its committed snapshots
 G3 | `gate-g3` | the selfhost test suite under stage2: it has to pass outright and report the same test names, skipped set and counts as stage1's run of the same suite (`gate-g3-stage1`, which has to pass on its own and is the pull-request check)
 G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x
-G5 | `gate-g5` | diagnostics: stage2's error corpus output against the host's
+G5 | `gate-g5` | diagnostics: stage2 has to keep every diagnostic the committed error-corpus snapshots record
 G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against committed baselines
 G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines
 
