@@ -90,6 +90,15 @@ import LibC from "std::libc";
 import Memory from "std::memory";
 import Path from "std::path";
 
+/// True when `path` names a directory. A regular file at `path` is not one,
+/// which is what separates `createDirAll` from a plain existence check.
+function createDirAllIsDirectory(path: str): boolean {
+  return match (Fs::metadataRaw(path)) {
+    Result::OK(metadata) -> metadata.isDir(),
+    Result::ERROR(_) -> false,
+  };
+}
+
 /// Filesystem convenience APIs built on `Fs::Sys` and safe owned path handling.
 ///
 /// Overloads accepting owned `String` or `Path::PathBuf` reject interior NULs
@@ -436,13 +445,13 @@ export namespace Fs {
 
           current.push(&segment);
 
-          if (!Fs::exists(current.toStr())) {
+          if (!createDirAllIsDirectory(current.toStr())) {
             // Another process can create this same segment between the check
             // above and the call below. `mkdir -p` treats a directory that is
-            // already there as success, so the only failure worth reporting is
-            // one that left nothing behind.
+            // already there as success, so a failure is only reported when the
+            // segment is still not a directory: missing, or a file in the way.
             if (let Result::ERROR(error) = Fs::Sys::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE)) {
-              if (!Fs::exists(current.toStr())) {
+              if (!createDirAllIsDirectory(current.toStr())) {
                 return Result::ERROR(error);
               }
             }

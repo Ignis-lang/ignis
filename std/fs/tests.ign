@@ -621,6 +621,42 @@ function createDirAllSucceedsAgainOnAnExistingTree(): void {
 }
 
 @test
+function createDirAllFailsWhenAFileTakesThePlaceOfADirectory(): void {
+  let rootOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_create_dir_all_file`;
+  let root: str = rootOwned.toStr();
+  let filePathOwned: String = `${root}/file`;
+  let filePath: str = filePathOwned.toStr();
+  let belowFilePathOwned: String = `${filePath}/child`;
+
+  shellRemoveTree(`rm -rf ${root}`.toStr());
+
+  defer shellRemoveTree(`rm -rf ${root}`.toStr());
+
+  let Result::OK(_) = Fs::createDirAll(root) else {
+    Test::fail();
+    return;
+  };
+
+  let payload: String = String::create("not a directory");
+  let Result::OK(_) = Fs::writeString(filePath, &payload) else {
+    Test::fail();
+    return;
+  };
+
+  // `mkdir -p` rejects a regular file both as the last component and as an
+  // intermediate one, so neither may be reported as an existing directory.
+  match (Fs::createDirAll(filePath)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(_) -> {},
+  };
+
+  match (Fs::createDirAll(belowFilePathOwned.toStr())) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(_) -> {},
+  };
+}
+
+@test
 function walkYieldsDescendantsAndExcludesTheDirectoryItself(): void {
   let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_walk_empty`;
   let rootPath: str = rootPathOwned.toStr();
