@@ -2698,6 +2698,39 @@ export namespace LirLowering {
         byValue = true;
       }
 
+      // A slot that holds a pointer to the captured place already is the address a
+      // by-reference capture wants, and one hop short of the value a by-value one does.
+      if (LirLowering::isByrefCapture(state, capture.sourceDef)) {
+        let mut pointerType: Analyzer::TypeId = capture.typeInEnv;
+
+        if (let Option::SOME(slotType) = function_.localType(slot)) {
+          pointerType = slotType;
+        }
+
+        if (byValue) {
+          let pointerTemp: Lir::TempId = LirLowering::freshTemp(function_, pointerType, nodeSpan);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+            dest: pointerTemp,
+            source: slot,
+          }));
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+            dest: captureTemp,
+            ptr: Lir::Operand::Temp(pointerTemp),
+          }));
+        } else {
+          LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+            dest: captureTemp,
+            source: slot,
+          }));
+        }
+
+        captureOperands.push(Lir::Operand::Temp(captureTemp));
+        index += 1;
+        continue;
+      }
+
       if (byValue) {
         LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
           dest: captureTemp,

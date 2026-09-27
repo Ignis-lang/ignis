@@ -1,0 +1,46 @@
+// e2e: std
+//
+// A pattern binding destructured out of a reference scrutinee can hold the address of
+// its place instead of a value: always for a droppable payload, and for a Copy payload
+// whose address is taken. A closure capturing such a binding captures through that
+// address, by reference or by value. Capturing the slot itself handed the closure a
+// pointer where it expected the value, which the C compiler rejected.
+import Io from "std::io";
+import String from "std::string";
+import Option from "std::option";
+
+enum Slot {
+  FILLED(i32),
+  EMPTY,
+}
+
+function apply(@noescape reader: () -> u64): u64 {
+  return reader();
+}
+
+function lengthSeenByClosure(source: &Option<String>): u64 {
+  return match (source) {
+    Option::SOME(text) -> apply((): u64 -> text.length()),
+    Option::NONE -> 0,
+  };
+}
+
+function valueSeenByClosure(slot: &Slot): u64 {
+  return match (slot) {
+    Slot::FILLED(value) -> {
+      let address: *i32 = (&value) as *i32;
+      apply((): u64 -> value as u64) + (@read<i32>(address) as u64)
+    },
+    Slot::EMPTY -> 0,
+  };
+}
+
+function main(): i32 {
+  let source: Option<String> = Option::SOME(String::create("hello"));
+  let slot: Slot = Slot::FILLED(7);
+
+  Io::println(`length ${lengthSeenByClosure(&source)}`.toStr());
+  Io::println(`value ${valueSeenByClosure(&slot)}`.toStr());
+
+  return 0;
+}
