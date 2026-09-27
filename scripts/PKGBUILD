@@ -13,27 +13,46 @@ depends=(
   'make'
 )
 makedepends=(
-  'rust'
-  'cargo'
-  'git'
+  'xz'
 )
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
+# Compile the compiler sources with $1 into build/$2/ignis, the way
+# scripts/bootstrap.sh builds a stage. The selfhost driver writes its emitted C
+# and object file into the working directory, so each stage runs in its own.
+_compile_stage() {
+  local compiler="$1" stage_dir="$PWD/build/$2"
+
+  mkdir -p "$stage_dir"
+  (
+    cd "$stage_dir"
+    IGNIS_STD_PATH="${srcdir}/${pkgname}-${pkgver}/std" "$compiler" "${srcdir}/${pkgname}-${pkgver}/ignis/main.ign" -o "$stage_dir/ignis"
+  )
+}
+
+# stage0 comes from the C seed committed under bootstrap/seed, stage1 is the
+# sources compiled by stage0, and stage2, the binary a release ships, is the
+# sources compiled by stage1.
 build() {
   cd "${pkgname}-${pkgver}"
-  cargo build --release --locked -p ignis
+
+  local stage0
+  stage0="$(scripts/build_from_seed.sh -o "$PWD/build/stage0/ignis")"
+
+  _compile_stage "$stage0" stage1
+  _compile_stage "$PWD/build/stage1/ignis" stage2
 }
 
 check() {
   cd "${pkgname}-${pkgver}"
-  cargo test --locked -p ignis
+  build/stage2/ignis test-std --std-path std -o build/test-std
 }
 
 package() {
   cd "${pkgname}-${pkgver}"
 
-  install -Dm755 "target/release/ignis" "${pkgdir}/usr/lib/ignis/ignis-bin"
+  install -Dm755 "build/stage2/ignis" "${pkgdir}/usr/lib/ignis/ignis-bin"
   install -d "${pkgdir}/usr/share/ignis"
   cp -r "std" "${pkgdir}/usr/share/ignis/std"
 
