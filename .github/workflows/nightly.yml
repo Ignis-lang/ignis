@@ -31,20 +31,16 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  # Kept in step with the flake and with ci.yml. A floating channel makes a red
-  # run here mean something different from a red run on a developer machine.
-  RUST_NIGHTLY: nightly-2026-04-22
-
 jobs:
   release:
     name: Publish rolling nightly
-    # A failed or cancelled CI run publishes nothing. `workflow_dispatch` has no
+    # The published compiler is the stage2 binary `stages` built for this
+    # commit, so this job waits for the ladder and publishes nothing when it
+    # failed or was superseded. `stages` carries the event condition: a failed
+    # or cancelled CI run publishes nothing, and `workflow_dispatch` has no
     # originating run, so it is allowed through on its own.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+    needs: stages
+    if: needs.stages.outputs.superseded != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -60,33 +56,16 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Download the bootstrap stages
+        uses: actions/download-artifact@v4
         with:
-          toolchain: ${{ env.RUST_NIGHTLY }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: nightly-linux-amd64
-          cache-targets: true
-          cache-on-failure: true
-
-      # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
-      # present before any cargo invocation links.
-      - name: Install mold
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
-
-      - name: Build Ignis
-        run: cargo build --release --locked -p ignis
+          name: bootstrap-stages
 
       - name: Create package
         run: |
           mkdir -p pkg/scripts
 
-          cp target/release/ignis pkg/ignis
+          cp build/bootstrap/stage2/ignis pkg/ignis
           chmod +x pkg/ignis
 
           cp -r std pkg/std
@@ -112,7 +91,7 @@ jobs:
 
           # The standard library has no root module. Any std entry makes the driver
           # discover every module in the manifest, so documenting one documents all.
-          ./target/release/ignis doc std/io/mod.ign --std-path std --output docs-pkg/api.json
+          ./pkg/ignis doc std/io/mod.ign --std-path std --output docs-pkg/api.json
 
       - name: Create documentation archive
         run: tar -czf ignis-docs.tar.gz -C docs-pkg .
@@ -281,42 +260,6 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_NIGHTLY }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v0-rust"
-          # Suffixed with the profile, matching ci.yml's selfhost job: the
-          # target subdirectory moved from target/debug to target/ci.
-          shared-key: "ci-selfhost-profile-ci"
-          cache-targets: true
-          cache-on-failure: true
-
-      # Same pinned tarball as ci.yml: the distribution package hung on an
-      # unresponsive mirror once and burned the whole budget.
-      - name: Install mold
-        timeout-minutes: 3
-        env:
-          MOLD_VERSION: 2.42.0
-        run: |
-          curl -fsSL --retry 3 --retry-delay 2 \
-            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local
-          mold --version
-
-      # Built with the `ci` profile: the gates below rely on `debug_assert!`
-      # and `mono_output.verify_no_generics()`, which `--release` strips, while
-      # plain debug is too slow for the ladder's budget.
-      - name: Build Ignis
-        run: cargo build --locked --profile ci -p ignis
-
-      - name: Add Ignis to PATH
-        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
-
       # Once a selfhost binary has been promoted `official`, the ladder starts
       # stage1 from it, so the ladder measures the promoted selfhost lineage
       # compiling the current sources; until then (or after a streak reset)
@@ -434,7 +377,8 @@ jobs:
       # std objects a test run reuses. The ladder's
       # own results, G1 and G4 with the measurements behind them, travel with
       # it for the report. Paths are relative to the workspace, so a gate job
-      # unpacks the artifact over its own checkout.
+      # unpacks the artifact over its own checkout. The `release` job packages
+      # the same stage2 binary as the rolling nightly compiler.
       - name: Upload the bootstrap stages
         if: always() && steps.stages.outputs.superseded != 'true'
         uses: actions/upload-artifact@v4
