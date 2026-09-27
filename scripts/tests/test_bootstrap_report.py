@@ -23,7 +23,7 @@ removes a case from the gate otherwise.
 
 Each `bootstrap_report.py` test runs the real script as a subprocess against
 a throwaway `build/bootstrap`-shaped temp directory, the same black-box
-style scripts/tests/test_stage0_fallback.sh uses for scripts/bootstrap.sh, so
+style scripts/tests/test_stage0.sh uses for scripts/bootstrap.sh, so
 nothing here touches the real repository's build/ directory. The G7-specific
 tests instead import `build_gate` directly and feed it a tiny synthetic
 `DropResult`, so what they assert against is the real formatting code.
@@ -52,6 +52,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 # The module under test for the G7-specific fixtures below: real gate-summary
 # formatting, not prose retyped into this file, so a wording change to
 # build_gate is what these tests see change, not a copy of it.
+import bootstrap_report  # noqa: E402
 import selfhost_drop_schedule_parity as drop_parity  # noqa: E402
 from selfhost_drop_schedule_parity import (  # noqa: E402
   CLASS_BASELINE_MISSING,
@@ -396,9 +397,22 @@ class ArgumentCombinationTests(unittest.TestCase):
 
     self.assertEqual(raised.exception.code, 2)
 
-  def test_write_baselines_rejects_whole_dump_and_host_compare(self) -> None:
-    self.assert_rejected("--compiler", "ignis", "--write-baselines", "--all", "--host-compare", "--host", "ignis")
-    self.assert_rejected("--compiler", "ignis", "--write-baselines", "--host-compare", "--host", "ignis")
+  def test_the_host_and_whole_dump_options_are_gone(self) -> None:
+    for option, argv in {
+      "--host": ("--compiler", "ignis", "--host", "ignis"),
+      "--host-compare": ("--compiler", "ignis", "--host-compare"),
+      "--all": ("--compiler", "ignis", "--all"),
+    }.items():
+      with self.subTest(option=option):
+        completed = subprocess.run(
+          [sys.executable, str(SCRIPT_DIR / "selfhost_drop_schedule_parity.py"), *argv],
+          capture_output=True,
+          text=True,
+          check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn(f"unrecognized arguments: {option}", completed.stderr)
 
   def test_write_baselines_and_check_coverage_are_separate_runs(self) -> None:
     self.assert_rejected("--compiler", "ignis", "--write-baselines", "--check-coverage")
@@ -638,6 +652,67 @@ class GateG3Tests(unittest.TestCase):
 
     self.assertNotEqual(completed.returncode, 0)
     self.assertIn("--host-log", completed.stderr)
+
+
+
+class Stage0ReportTests(unittest.TestCase):
+  """What the report says built stage1, now that stage0 is never the host."""
+
+  def setUp(self) -> None:
+    self.temporary = tempfile.TemporaryDirectory()
+    self.root = Path(self.temporary.name)
+
+  def tearDown(self) -> None:
+    self.temporary.cleanup()
+
+  def write_stage0(self, payload: dict) -> None:
+    (self.root / "stage0.json").write_text(json.dumps(payload), encoding="utf-8")
+
+  def test_an_official_stage0_names_its_checksum(self) -> None:
+    self.write_stage0({"kind": "official", "source": "/tmp/ignis", "sha256": "abc", "mode": "auto"})
+
+    self.assertEqual(
+      bootstrap_report.format_stage0_line(bootstrap_report.read_stage0(self.root)),
+      "stage0: official (sha abc)",
+    )
+
+  def test_a_seed_stage0_names_the_seed_it_came_from(self) -> None:
+    self.write_stage0({"kind": "seed", "source": "/tmp/stage0-seed/ignis", "sha256": "def", "seed_xz_sha256": "123"})
+
+    self.assertEqual(
+      bootstrap_report.format_stage0_line(bootstrap_report.read_stage0(self.root)),
+      "stage0: seed (bootstrap/seed xz sha 123)",
+    )
+
+  def test_a_missing_stage0_json_is_reported_as_unrecorded_not_as_the_host(self) -> None:
+    stage0 = bootstrap_report.read_stage0(self.root)
+
+    self.assertNotEqual(stage0.get("kind"), "host")
+    self.assertEqual(
+      bootstrap_report.format_stage0_line(stage0),
+      "stage0: not recorded (no build/bootstrap/stage0.json)",
+    )
+
+  def test_an_unreadable_stage0_json_is_reported_apart_from_a_missing_one(self) -> None:
+    (self.root / "stage0.json").write_text("not json", encoding="utf-8")
+
+    self.assertEqual(
+      bootstrap_report.format_stage0_line(bootstrap_report.read_stage0(self.root)),
+      "stage0: unknown (build/bootstrap/stage0.json is unreadable)",
+    )
+
+  def test_no_gate_title_names_the_host(self) -> None:
+    for gate, title in bootstrap_report.GATE_TITLES.items():
+      with self.subTest(gate=gate):
+        self.assertNotIn("host", title.lower().split())
+
+  def test_a_leftover_fallback_record_is_not_reported_as_a_fallback(self) -> None:
+    self.write_stage0({"kind": "official", "sha256": "abc", "fallback": True, "used_kind": "host"})
+
+    line = bootstrap_report.format_stage0_line(bootstrap_report.read_stage0(self.root))
+
+    self.assertEqual(line, "stage0: official (sha abc)")
+    self.assertNotIn("host", line)
 
 
 if __name__ == "__main__":

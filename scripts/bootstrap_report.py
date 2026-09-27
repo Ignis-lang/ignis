@@ -42,9 +42,9 @@ GATE_TITLES = {
   "G1": "Fixed point (stage3 C identical to stage2)",
   "G2": "End-to-end parity under stage2",
   "G3": "Selfhost test suite under stage2",
-  "G4": "Resource budget within 1.25x of the host",
-  "G5": "Diagnostics equal or better than the host",
-  "G6": "Syntax parity with the host parser",
+  "G4": "Resource budget within 1.25x of stage1",
+  "G5": "Diagnostics keep every one the committed error corpus records",
+  "G6": "Parse verdicts match the committed baselines",
   "G7": "Drop schedules match the committed baselines",
 }
 
@@ -368,34 +368,36 @@ def read_commit(project_root: Path) -> str:
 def read_stage0(bootstrap_root: Path) -> dict:
   path = bootstrap_root / "stage0.json"
 
+  # scripts/bootstrap.sh records every official or seed stage0 it builds with,
+  # so a missing file means stage1 came from an explicit IGNIS_STAGE0 of no
+  # recorded kind. An unreadable one is reported as such, not as missing.
   if not path.is_file():
-    # No stage0.json means the ladder ran without the nightly's resolution
-    # step, e.g. a developer machine, which always starts stage1 from the host.
-    return {"kind": "host", "source": "ignis", "sha256": ""}
+    return {}
 
   try:
     return json.loads(path.read_text(encoding="utf-8"))
   except (OSError, json.JSONDecodeError):
-    return {"kind": "host", "source": "ignis", "sha256": ""}
+    return {"unreadable": True}
 
 
 def format_stage0_line(stage0: dict) -> str:
-  # Checked first: a fallback keeps `kind` as the resolved stage0 kind
-  # (`official`, usually), since scripts/bootstrap.sh's stage0_is_selfhost
-  # reads it back on a later build_stage1 call. What actually built stage1
-  # this run is `used_kind`, so the fallback has to be read off that before
-  # `kind` is read as if nothing had happened.
-  if stage0.get("fallback"):
-    reason = stage0.get("fallback_reason") or "the official stage0 compiler could not build stage1"
-    used_kind = stage0.get("used_kind", "host")
-    original_kind = stage0.get("original_kind", stage0.get("kind", "official"))
-    return f"stage0: {used_kind} (fallback from {original_kind} — {reason})"
+  kind = stage0.get("kind")
 
-  if stage0.get("kind") == "official":
+  if kind == "official":
     sha256 = stage0.get("sha256") or "unknown"
     return f"stage0: official (sha {sha256})"
 
-  return "stage0: host"
+  if kind == "seed":
+    seed_sha256 = stage0.get("seed_xz_sha256") or "unknown"
+    return f"stage0: seed (bootstrap/seed xz sha {seed_sha256})"
+
+  if kind:
+    return f"stage0: {kind}"
+
+  if stage0.get("unreadable"):
+    return "stage0: unknown (build/bootstrap/stage0.json is unreadable)"
+
+  return "stage0: not recorded (no build/bootstrap/stage0.json)"
 
 
 def collect_stage_logs(bootstrap_root: Path) -> list[dict]:

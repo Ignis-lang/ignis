@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """Exercises scripts/selfhost_syntax_parity.py (gate G6) without a real compiler.
 
-The host parser unit tests are the source of about two hundred G6 cases, and
-the Rust files they live in go away when the host is frozen. Their snippets are
-therefore committed under `test_cases/parser/host_unit_tests/`, and these tests
-pin the two operations that keep that directory honest: materializing it from
-the Rust sources, and detecting drift between the two. Both run against a
-throwaway repository root holding a synthetic Rust test file, so nothing here
-touches the real repository.
+About two hundred G6 cases are the former host parser unit-test snippets,
+committed under `test_cases/parser/host_unit_tests/`; the corpus test pins that
+they are read as ordinary committed files.
 
-The baseline tests below cover the gate itself: comparing against committed
-parse verdicts, cross-checking a host, writing baselines and checking their
-coverage. They drive fake compilers, shell scripts that print exactly the
-lines the harness parses, so no real compiler runs.
+The baseline tests cover the gate itself: comparing against committed parse
+verdicts, writing baselines and checking their coverage. They drive a fake
+compiler, a shell script that prints exactly the lines the harness parses, so
+no real compiler runs.
 
 Usage: python3 scripts/tests/test_selfhost_syntax_parity.py
 """
@@ -20,7 +16,6 @@ Usage: python3 scripts/tests/test_selfhost_syntax_parity.py
 import contextlib
 import io
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -36,360 +31,43 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from selfhost_syntax_parity import (  # noqa: E402
   CLASS_BASELINE_MALFORMED,
   CLASS_BASELINE_MISSING,
-  CLASS_HOST_DRIFT,
   CLASS_PASS,
   CLASS_SELFHOST_ACCEPTS,
   CLASS_SELFHOST_CRASH,
   CLASS_SELFHOST_REJECTS,
   ORIGIN_PARSER_TEST,
   ORIGIN_REPOSITORY,
-  PARSE_DIAGNOSTIC_CODES,
   PARSER_TEST_DIR,
   Case,
   Settings,
   collect_repository_cases,
   evaluate,
   format_baseline,
-  materialize_parser_tests,
-  parser_test_drift,
   run_case,
   run_coverage_check,
-  run_parser_test_check,
-  uncaptured_parser_test_calls,
   write_baselines,
 )
 
-SYNTHETIC_EXPRESSION_TESTS = r'''
-fn parse_expr(source: &str) -> Node {
-  todo()
-}
+class CorpusTests(unittest.TestCase):
+  def test_committed_parser_snippets_join_the_corpus_as_parser_test_cases(self) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+      repository_root = Path(directory)
+      snippet = repository_root / PARSER_TEST_DIR / "expression__parses_addition.ign"
+      snippet.parent.mkdir(parents=True)
+      snippet.write_bytes(b"function test(): void { 1 + 2; }")
+      ordinary = repository_root / "test_cases/e2e/ok/plain.ign"
+      ordinary.parent.mkdir(parents=True)
+      ordinary.write_text("function main(): void { }", encoding="utf-8")
 
-#[test]
-fn parses_addition() {
-  parse_expr("1 + 2");
-}
-
-#[test]
-fn parses_two_literals() {
-  parse_expr("true");
-  parse_expr(r#"
-"text"
-"#);
-}
-'''
-
-EXPECTED_FILES = {
-  "expression__parses_addition.ign": b"function test(): void { 1 + 2; }",
-  "expression__parses_two_literals.ign": b"function test(): void { true; }",
-  "expression__parses_two_literals__2.ign": b'function test(): void { \n"text"\n; }',
-}
-
-
-class ParserTestMaterializationTests(unittest.TestCase):
-  def setUp(self) -> None:
-    self._tmp = tempfile.TemporaryDirectory()
-    self.addCleanup(self._tmp.cleanup)
-    self.repository_root = Path(self._tmp.name)
-    self.rust_file = self.repository_root / "crates/ignis_parser/src/parser/expression.rs"
-    self.rust_file.parent.mkdir(parents=True)
-    self.rust_file.write_text(SYNTHETIC_EXPRESSION_TESTS, encoding="utf-8")
-    self.target_dir = self.repository_root / PARSER_TEST_DIR
-
-  def committed_files(self) -> dict[str, bytes]:
-    return {path.name: path.read_bytes() for path in self.target_dir.iterdir()}
-
-  def test_materializes_one_wrapped_byte_exact_file_per_snippet(self) -> None:
-    drift = materialize_parser_tests(self.repository_root, self.target_dir)
-
-    self.assertEqual(sorted(drift.missing), sorted(EXPECTED_FILES))
-    self.assertEqual(self.committed_files(), EXPECTED_FILES)
-
-  def test_a_second_materialization_changes_nothing(self) -> None:
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    before = {path.name: path.stat().st_mtime_ns for path in self.target_dir.iterdir()}
-
-    drift = materialize_parser_tests(self.repository_root, self.target_dir)
-
-    self.assertTrue(drift.is_empty(), drift)
-    self.assertEqual({path.name: path.stat().st_mtime_ns for path in self.target_dir.iterdir()}, before)
-    self.assertTrue(parser_test_drift(self.repository_root, self.target_dir).is_empty())
-
-  def test_detects_missing_extra_and_differing_snippets(self) -> None:
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    (self.target_dir / "expression__parses_addition.ign").unlink()
-    (self.target_dir / "expression__retired.ign").write_bytes(b"function test(): void { }")
-    (self.target_dir / "expression__parses_two_literals.ign").write_bytes(b"function test(): void { false; }")
-
-    drift = parser_test_drift(self.repository_root, self.target_dir)
-
-    self.assertEqual(drift.missing, ["expression__parses_addition.ign"])
-    self.assertEqual(drift.extra, ["expression__retired.ign"])
-    self.assertEqual(drift.differing, ["expression__parses_two_literals.ign"])
-
-  def test_materializing_repairs_every_kind_of_drift(self) -> None:
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    (self.target_dir / "expression__parses_addition.ign").unlink()
-    (self.target_dir / "expression__retired.ign").write_bytes(b"function test(): void { }")
-    (self.target_dir / "expression__parses_two_literals.ign").write_bytes(b"function test(): void { false; }")
-
-    materialize_parser_tests(self.repository_root, self.target_dir)
-
-    self.assertEqual(self.committed_files(), EXPECTED_FILES)
-
-  def test_a_changed_rust_test_is_drift(self) -> None:
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    self.rust_file.write_text(SYNTHETIC_EXPRESSION_TESTS.replace("1 + 2", "1 - 2"), encoding="utf-8")
-
-    drift = parser_test_drift(self.repository_root, self.target_dir)
-
-    self.assertEqual(drift.differing, ["expression__parses_addition.ign"])
-    self.assertEqual(drift.missing, [])
-    self.assertEqual(drift.extra, [])
-
-  def test_a_binding_resolves_only_inside_its_own_test(self) -> None:
-    self.rust_file.write_text(
-      SYNTHETIC_EXPRESSION_TESTS
-      + r'''
-#[test]
-fn parses_let_bound_source() {
-  let source = "a < b";
-  parse_expr(source);
-}
-
-#[test]
-fn parses_a_table_of_sources() {
-  let cases = [("a > b", 1), ("a == b", 2)];
-
-  for (source, _) in cases {
-    parse_expr(source);
-  }
-}
-''',
-      encoding="utf-8",
-    )
-
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    files = self.committed_files()
-
-    self.assertEqual(files["expression__parses_let_bound_source.ign"], b"function test(): void { a < b; }")
-    self.assertEqual(files["expression__parses_a_table_of_sources.ign"], b"function test(): void { a > b; }")
-    self.assertEqual(files["expression__parses_a_table_of_sources__2.ign"], b"function test(): void { a == b; }")
-
-  def test_an_empty_scrape_deletes_nothing(self) -> None:
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    self.rust_file.unlink()
-
-    drift = materialize_parser_tests(self.repository_root, self.target_dir)
-
-    self.assertTrue(drift.is_empty(), drift)
-    self.assertEqual(self.committed_files(), EXPECTED_FILES)
-
-  def test_materialized_snippets_join_the_corpus_as_parser_test_cases(self) -> None:
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    ordinary = self.repository_root / "test_cases/e2e/ok/plain.ign"
-    ordinary.parent.mkdir(parents=True)
-    ordinary.write_text("function main(): void { }", encoding="utf-8")
-
-    origins = {case.name: case.origin for case in collect_repository_cases(self.repository_root)}
-
-    self.assertEqual(origins["test_cases_e2e_ok_plain"], ORIGIN_REPOSITORY)
-    self.assertEqual(origins["test_cases_parser_host_unit_tests_expression_parses_addition"], ORIGIN_PARSER_TEST)
-    self.assertEqual(len(origins), len(EXPECTED_FILES) + 1)
-
-
-SYNTHETIC_DIRECT_PARSE_TESTS = r'''
-fn parse(source: &str) -> Node {
-  let mut sm = SourceMap::new();
-  let file_id = sm.add_file("test.ign", source.to_string());
-  todo()
-}
-
-#[test]
-fn rejects_an_inline_program() {
-  let mut sm = SourceMap::new();
-  let file_id = sm.add_file(
-    "test.ign",
-    "function bad<T>(): void { return; }".to_string(),
-  );
-}
-
-#[test]
-#[should_panic]
-/// A doc comment and another attribute sit between `#[test]` and the `fn`.
-fn registers_a_let_bound_program() {
-  let source = r#"record Counter {
-    mut total: i32;
-  }"#;
-  let mut sm = SourceMap::new();
-  let file_id = sm.add_file("test.ign", source.to_string());
-  parser.parse().expect_err("rejected");
-}
-'''
-
-SYNTHETIC_TABLE_TESTS = r'''
-#[test]
-fn parses_a_table_of_three_rows() {
-  let cases: [(&str, Operator); 3] = [
-    ("a < b", Operator::Less),
-    (r#"a == "(b)""#, Operator::Equal),
-    ("c\td", Operator::Other(')')),
-  ];
-
-  for (source, expected) in cases {
-    parse_expr(source);
-  }
-}
-
-#[test]
-fn parses_an_inline_table() {
-  for (source, _) in [("x + 1", 1), ("y - 2", 2)] {
-    parse_stmt(source);
-  }
-}
-'''
-
-
-class DirectParseAndTableTests(unittest.TestCase):
-  """Sources a test registers with `add_file` itself, or walks as rows of a table."""
-
-  def setUp(self) -> None:
-    self._tmp = tempfile.TemporaryDirectory()
-    self.addCleanup(self._tmp.cleanup)
-    self.repository_root = Path(self._tmp.name)
-    self.parser_dir = self.repository_root / "crates/ignis_parser/src/parser"
-    self.parser_dir.mkdir(parents=True)
-    self.target_dir = self.repository_root / PARSER_TEST_DIR
-
-  def write_rust(
-    self,
-    stem: str,
-    source: str,
-  ) -> None:
-    (self.parser_dir / f"{stem}.rs").write_text(source, encoding="utf-8")
-
-  def materialized(self) -> dict[str, bytes]:
-    materialize_parser_tests(self.repository_root, self.target_dir)
-
-    return {path.name: path.read_bytes() for path in self.target_dir.iterdir()}
-
-  def test_captures_an_inline_add_file_program(self) -> None:
-    self.write_rust("declarations", SYNTHETIC_DIRECT_PARSE_TESTS)
-
-    files = self.materialized()
+      origins = {case.name: case.origin for case in collect_repository_cases(repository_root)}
 
     self.assertEqual(
-      files["declarations__rejects_an_inline_program.ign"],
-      b"function bad<T>(): void { return; }",
-    )
-
-  def test_captures_an_add_file_program_bound_by_let(self) -> None:
-    self.write_rust("declarations", SYNTHETIC_DIRECT_PARSE_TESTS)
-
-    files = self.materialized()
-
-    self.assertEqual(
-      files["declarations__registers_a_let_bound_program.ign"],
-      b"record Counter {\n    mut total: i32;\n  }",
-    )
-
-  def test_an_add_file_inside_a_helper_is_neither_captured_nor_reported(self) -> None:
-    self.write_rust("declarations", SYNTHETIC_DIRECT_PARSE_TESTS)
-
-    files = self.materialized()
-
-    self.assertEqual(
-      sorted(files),
-      ["declarations__registers_a_let_bound_program.ign", "declarations__rejects_an_inline_program.ign"],
-    )
-    self.assertEqual(uncaptured_parser_test_calls(self.repository_root), [])
-
-  def test_captures_one_byte_exact_case_per_table_row_in_row_order(self) -> None:
-    self.write_rust("expression", SYNTHETIC_TABLE_TESTS)
-
-    files = self.materialized()
-
-    self.assertEqual(
-      files,
+      origins,
       {
-        "expression__parses_a_table_of_three_rows.ign": b"function test(): void { a < b; }",
-        "expression__parses_a_table_of_three_rows__2.ign": b'function test(): void { a == "(b)"; }',
-        "expression__parses_a_table_of_three_rows__3.ign": b"function test(): void { c\td; }",
-        "expression__parses_an_inline_table.ign": b"function test(): void { x + 1 }",
-        "expression__parses_an_inline_table__2.ign": b"function test(): void { y - 2 }",
+        "test_cases_e2e_ok_plain": ORIGIN_REPOSITORY,
+        "test_cases_parser_host_unit_tests_expression_parses_addition": ORIGIN_PARSER_TEST,
       },
     )
-    self.assertEqual(uncaptured_parser_test_calls(self.repository_root), [])
-
-  def test_an_unreadable_test_call_is_reported_and_fails_the_check(self) -> None:
-    source = (
-      SYNTHETIC_TABLE_TESTS
-      + r'''
-#[test]
-fn parses_a_formatted_source() {
-  let result = parse_expr(&format!("{} + 1", value));
-}
-'''
-    )
-    self.write_rust("expression", source)
-    materialize_parser_tests(self.repository_root, self.target_dir)
-    line = source.split("\n").index('  let result = parse_expr(&format!("{} + 1", value));') + 1
-    location = f"crates/ignis_parser/src/parser/expression.rs:{line} (parse_expr)"
-
-    uncaptured = uncaptured_parser_test_calls(self.repository_root)
-
-    self.assertEqual([call.location for call in uncaptured], [location])
-
-    stderr = io.StringIO()
-
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
-      exit_code = run_parser_test_check(self.repository_root)
-
-    self.assertEqual(exit_code, 1)
-    self.assertIn(f"uncaptured parser test call at {location}", stderr.getvalue())
-
-
-class RepositorySnippetTests(unittest.TestCase):
-  """The committed snippets in this repository, checked the way CI checks them."""
-
-  def test_the_committed_snippets_match_the_rust_sources(self) -> None:
-    completed = subprocess.run(
-      [sys.executable, str(PARITY_PY), "--check-parser-tests"],
-      capture_output=True,
-      text=True,
-      check=False,
-    )
-
-    self.assertEqual(completed.returncode, 0, completed.stderr)
-
-  def test_every_code_the_host_parser_raises_decides_a_parse_verdict(self) -> None:
-    """A parser code missing from PARSE_DIAGNOSTIC_CODES reads as "accepted" on the host side.
-
-    That is how the selfhost accepting `export _ from` (host M0006) went
-    unnoticed. A0111 is the one exception: the analyzer raises it too.
-    """
-    repository_root = SCRIPT_DIR.parent
-    parser_sources = repository_root / "crates/ignis_parser/src"
-
-    message_file = repository_root / "crates/ignis_diagnostics/src/message.rs"
-
-    if not parser_sources.is_dir() or not message_file.is_file():
-      self.skipTest("the host parser sources are gone")
-
-    messages = message_file.read_text(encoding="utf-8")
-    code_of = dict(
-      re.findall(r"DiagnosticMessage::(\w+)\s*(?:\{[^}]*\}|\([^)]*\))?\s*=>\s*\"([A-Z]\d{4})\"", messages)
-    )
-
-    self.assertTrue(code_of, "no diagnostic code mapping was read from message.rs")
-
-    raised: set[str] = set()
-
-    for path in parser_sources.rglob("*.rs"):
-      production = path.read_text(encoding="utf-8").split("#[cfg(test)]")[0]
-      raised |= {code_of[name] for name in re.findall(r"DiagnosticMessage::(\w+)", production) if name in code_of}
-
-    self.assertTrue(raised, "no diagnostic raised by the host parser was found")
-    self.assertEqual(sorted(raised - PARSE_DIAGNOSTIC_CODES - {"A0111"}), [])
 
 
 # A fake selfhost: it prints the phase report the harness reads, rejecting a
@@ -412,21 +90,6 @@ fi
 echo "lex: ok (0 errors, 0 warnings)"
 echo "parse: ok (0 errors, 0 warnings)"
 """
-
-# A fake host: `check --analyze-only --std-path <std> <file>`, rejecting a
-# source that mentions SYNTAX_ERROR or HOST_REJECTS.
-FAKE_HOST = """#!/bin/sh
-for case_file; do :; done
-
-if grep -q -e SYNTAX_ERROR -e HOST_REJECTS "$case_file"; then
-  echo "Error[I0021]: expected an expression"
-  echo "  --> $case_file:1:1"
-  exit 1
-fi
-
-echo "No errors found"
-"""
-
 
 def write_executable(
   path: Path,
@@ -460,21 +123,14 @@ class BaselineHarness(unittest.TestCase):
     (self.root / "std").mkdir()
     (self.root / "bin").mkdir()
     self.selfhost = write_executable(self.root / "bin/selfhost", FAKE_SELFHOST)
-    self.host = write_executable(self.root / "bin/host", FAKE_HOST)
 
-  def settings(
-    self,
-    with_host: bool = False,
-    host_compare: bool = False,
-  ) -> Settings:
+  def settings(self) -> Settings:
     return Settings(
       compiler=self.selfhost,
       std_path=self.root / "std",
       repository_root=self.root,
       baseline_dir=self.baseline_dir,
       work_dir=self.root / "work",
-      host=self.host if with_host or host_compare else None,
-      host_compare=host_compare,
     )
 
   def write_baseline(
@@ -508,7 +164,7 @@ class BaselineHarness(unittest.TestCase):
 
 
 class BaselineCompareTests(BaselineHarness):
-  def test_matching_verdicts_pass_without_a_host(self) -> None:
+  def test_matching_verdicts_pass(self) -> None:
     self.write_baseline(GOOD, format_baseline(True))
     self.write_baseline(BAD, format_baseline(False))
 
@@ -601,37 +257,6 @@ class BaselineCompareTests(BaselineHarness):
     self.assertEqual(stale, [])
     self.assertEqual(gate["status"], "pass")
 
-  def test_a_host_that_agrees_with_the_baselines_passes_the_cross_check(self) -> None:
-    self.write_baseline(GOOD, format_baseline(True))
-    self.write_baseline(BAD, format_baseline(False))
-
-    results, _, _, gate = evaluate(self.settings(with_host=True), [GOOD, BAD], jobs=2, filtered=False)
-
-    self.assertEqual([result.host_cross_check for result in results], [CLASS_PASS, CLASS_PASS])
-    self.assertEqual(gate["status"], "pass")
-    self.assertEqual(gate["details"]["host_cross_check"]["checked"], 2)
-
-  def test_a_host_drifting_from_the_baselines_fails_the_gate_apart_from_the_selfhost(self) -> None:
-    case = make_case("host_disagrees", "function main(): void { HOST_REJECTS }")
-    self.write_baseline(case, format_baseline(True))
-
-    results, counts, _, gate = evaluate(self.settings(with_host=True), [case], jobs=1, filtered=False)
-
-    self.assertEqual(results[0].classification, CLASS_PASS)
-    self.assertEqual(results[0].host_cross_check, CLASS_HOST_DRIFT)
-    self.assertEqual(counts[CLASS_PASS], 1)
-    self.assertEqual(gate["status"], "fail")
-    self.assertEqual(gate["details"]["host_cross_check"][CLASS_HOST_DRIFT][0]["case"], "host_disagrees")
-
-  def test_host_compare_uses_the_host_as_the_oracle_and_ignores_baselines(self) -> None:
-    case = make_case("host_disagrees", "function main(): void { HOST_REJECTS }")
-
-    results, _, stale, gate = evaluate(self.settings(host_compare=True), [GOOD, case], jobs=2, filtered=False)
-
-    self.assertEqual([result.classification for result in results], [CLASS_PASS, CLASS_SELFHOST_ACCEPTS])
-    self.assertEqual(stale, [])
-    self.assertEqual(gate["details"]["compared_against"], "host")
-
 
 class WriteBaselineTests(BaselineHarness):
   def test_writes_one_verdict_per_case_and_prunes_orphans(self) -> None:
@@ -656,21 +281,6 @@ class WriteBaselineTests(BaselineHarness):
     self.assertEqual(existing.read_text(encoding="utf-8"), format_baseline(False))
     self.assertFalse((self.baseline_dir / "crashes.txt").exists())
     self.assertIn("crashes", stderr)
-
-  def test_writes_nothing_when_the_host_disagrees_with_the_selfhost(self) -> None:
-    case = make_case("host_disagrees", "function main(): void { HOST_REJECTS }")
-
-    status, _, stderr = self.quietly(
-      write_baselines,
-      self.settings(with_host=True),
-      [GOOD, case],
-      2,
-      filtered=False,
-    )
-
-    self.assertEqual(status, 1)
-    self.assertFalse(self.baseline_dir.exists())
-    self.assertIn("host_disagrees", stderr)
 
   def test_a_filtered_write_never_prunes(self) -> None:
     orphan = self.write_orphan()
@@ -759,10 +369,6 @@ class ArgumentTests(unittest.TestCase):
   def test_conflicting_arguments_exit_with_an_argparse_error(self) -> None:
     conflicts = {
       "two modes": ["--write-baselines", "--check-coverage"],
-      "write under host-compare": ["--compiler", "c", "--host", "h", "--write-baselines", "--host-compare"],
-      "coverage and parser tests": ["--check-coverage", "--check-parser-tests"],
-      "write and materialize": ["--compiler", "c", "--write-baselines", "--materialize-parser-tests"],
-      "host-compare without a host": ["--compiler", "c", "--host-compare"],
       "compare without a compiler": [],
       "write without a compiler": ["--write-baselines"],
     }
@@ -773,6 +379,21 @@ class ArgumentTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 2, completed.stderr)
         self.assertIn("error:", completed.stderr)
+
+  def test_the_host_and_parser_scrape_options_are_gone(self) -> None:
+    removed = {
+      "--host": ["--compiler", "c", "--host", "h"],
+      "--host-compare": ["--compiler", "c", "--host-compare"],
+      "--check-parser-tests": ["--check-parser-tests"],
+      "--materialize-parser-tests": ["--materialize-parser-tests"],
+    }
+
+    for option, arguments in removed.items():
+      with self.subTest(option=option):
+        completed = self.run_script(*arguments)
+
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn(f"unrecognized arguments: {option}", completed.stderr)
 
 
 if __name__ == "__main__":

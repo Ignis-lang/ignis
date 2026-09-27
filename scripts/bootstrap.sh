@@ -2,7 +2,9 @@
 #
 # Bootstrap ladder for the self-hosted Ignis compiler.
 #
-#   stage0  the host compiler (Rust, `cargo build -p ignis`) — never built here
+#   stage0  the promoted official selfhost binary (scripts/resolve_official_stage0.sh)
+#           or a compiler built from the C seed (bootstrap/seed) — never built
+#           by this ladder from ignis/
 #   stage1  `ignis/` compiled by stage0          -> build/bootstrap/stage1/ignis
 #   stage2  `ignis/` compiled by stage1          -> build/bootstrap/stage2/ignis
 #   stage3  `ignis/` compiled by stage2, and its emitted C compared byte for
@@ -17,16 +19,15 @@
 # {"gate", "status", "summary", "details"}:
 #
 #   G1  fixed point: stage3's emitted C is identical to stage2's
-#   G2  e2e parity: the host corpus passes under stage2
+#   G2  e2e parity: the committed e2e corpus passes under stage2
 #   G3  the selfhost test suite passes under stage2 and matches stage1's run
-#   G4  resource budget: stage2 within 1.25x of the host
-#   G5  diagnostics: stage2's messages equal or better than the host's
+#   G4  resource budget: stage2 within 1.25x of stage1
+#   G5  diagnostics: stage2 keeps every diagnostic the committed error corpus
+#       records
 #   G6  syntax: stage2's parse verdicts match the committed baselines under
-#       test_cases/__parse_verdicts__, and until the host is removed the
-#       host is cross-checked against the same baselines
+#       test_cases/__parse_verdicts__
 #   G7  drop schedules: stage2's --dump-drop-schedule matches the committed
-#       baselines under test_cases/e2e/ok/__drop_schedules__, and until the
-#       host is removed stage0 is cross-checked against the same baselines
+#       baselines under test_cases/e2e/ok/__drop_schedules__
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
@@ -42,12 +43,11 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BOOTSTRAP_ROOT="${PROJECT_ROOT}/build/bootstrap"
 GATES_DIR="${BOOTSTRAP_ROOT}/gates"
 ENTRY="${PROJECT_ROOT}/ignis/main.ign"
-STAGE0="${IGNIS_STAGE0:-ignis}"
-# Host compiler used when stage1 falls back from a failing official/selfhost
-# stage0 (see build_stage1). The same binary `stage0=host` resolves to: the
-# nightly puts target/ci/ignis on PATH before either runs, so plain `ignis`
-# is right there too; a developer can point it elsewhere with this variable.
-HOST_STAGE0_FALLBACK="${IGNIS_STAGE0_HOST_FALLBACK:-ignis}"
+# The compiler that builds stage1: $IGNIS_STAGE0 when set, else the stage0
+# build/bootstrap/stage0.json records (official or seed) when its binary is
+# here (adopt_recorded_stage0), else empty, which build_stage1 reads as "build
+# stage0 from the C seed". Never whatever `ignis` happens to be on PATH.
+STAGE0="${IGNIS_STAGE0:-}"
 STAGE1_MEASURE="stage1-measure"
 G4_THRESHOLD="1.25"
 SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
@@ -80,10 +80,12 @@ usage() {
 Usage: $(basename "$0") <command>
 
 Commands:
-  stage1   Build stage1 with the host compiler (\$IGNIS_STAGE0, default: \`ignis\` on PATH).
-           Set IGNIS_STAGE0_NO_FALLBACK=1 to fail instead of falling back to
-           the host when an official/selfhost stage0 cannot build stage1 (the
-           two-step-rule PR gate; see BOOTSTRAP.md).
+  stage1   Build stage1 with stage0: \$IGNIS_STAGE0 when set, else the official
+           or seed stage0 build/bootstrap/stage0.json records
+           (scripts/resolve_official_stage0.sh writes it), else a stage0 built
+           from the C seed (see stage1-from-seed). A stage0 that cannot build
+           stage1 fails the command; an official one fails naming the
+           two-step rule (see BOOTSTRAP.md).
   stage2   Build stage2 with stage1 (builds stage1 first when missing).
   stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point, G1).
   all      stage1, stage2, stage3 in order.
@@ -94,12 +96,12 @@ Commands:
            Build stage0 from bootstrap/seed with gcc alone
            (scripts/build_from_seed.sh -> build/bootstrap/stage0-seed/ignis),
            record it in stage0.json as kind "seed", and build stage1 with it.
-           Never falls back to the host. Later commands keep using that
+           Later commands keep using that
            stage0 until \`clean\` or an explicit IGNIS_STAGE0.
   all-from-seed
            stage1-from-seed, stage2, stage3: the ladder with no Rust at all.
   stages   stage1, stage2, stage3, where only a stage3 failure is left to G1.
-  parity   Run the host e2e corpus through stage2 (builds stage2 first when missing, G2).
+  parity   Run the e2e corpus through stage2 (builds stage2 first when missing, G2).
   gate-g3  Run the selfhost test suite under stage2 and under stage1: stage2's
            run has to pass outright and match stage1's test for test (G3).
   gate-g3-stage2   Run only the stage2 suite and keep its log and exit status.
@@ -110,43 +112,35 @@ Commands:
                    run gate-g3-compare reads). A later local \`report\` lists
                    these as unscored G3-STAGE1/G5-STAGE1 rows; they never
                    affect the \`candidate\` verdict.
-  gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
+  gate-g5  Run the error corpus through stage2 and write gates/G5.json.
   gate-g5-stage1   G5 run against stage1 instead of stage2 -> gates/G5-STAGE1.json
                    (ci.yml's PR-only check; the promotion ladder still covers
                    stage2). Same unscored-row note as gate-g3-stage1 above.
   gate-g6  Check stage2's parse verdicts against the committed baselines
-           (test_cases/__parse_verdicts__) -> gates/G6.json. Until the cut
-           this run also cross-checks the Rust host
-           (\$IGNIS_STAGE0_HOST_FALLBACK, default \`ignis\` on PATH) against
-           the same baselines; a host that cannot be found fails the gate.
+           (test_cases/__parse_verdicts__) -> gates/G6.json.
   gate-g6-baselines [compiler]
            Regenerate the parse-verdict baselines from <compiler> (default:
-           stage2's binary; the compiler is run with the selfhost CLI). When
-           the host resolves it must agree on every case, or nothing is
-           written. Review the diff: it is a parser change.
+           stage2's binary; the compiler is run with the selfhost CLI).
+           Review the diff: it is a parser change.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gate-g7  Check stage2's drop schedules against the committed baselines
            (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. The
            selfhost compiler's own sources have no baseline and are compared
-           against stage1 instead. Until the cut this run also cross-checks the
-           Rust host (\$IGNIS_STAGE0_HOST_FALLBACK, default \`ignis\` on PATH)
-           against the same baselines, so regenerating them cannot turn a red
-           gate green on its own.
+           against stage1 instead.
   gate-g7-stage1   G7 run against stage1 instead of stage2 -> gates/G7-STAGE1.json
                    (ci.yml's PR-only check; the promotion ladder still covers
                    stage2). Same unscored-row note as gate-g3-stage1 above.
   gate-g7-baselines [compiler]
            Regenerate the drop-schedule baselines from <compiler> (default:
-           \$IGNIS_STAGE0). A deliberate developer step: the new dumps land in
+           stage2's binary). A deliberate developer step: the new dumps land in
            the pull request's diff, where a reviewer reads them as the
            semantic change they are.
   gates    Run every stage and gate in order, then write the promotion report.
   seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
-  promotion-decide <candidate> <fallback> [previous-streak]
-           Print the nightly's publish-step decision as JSON: whether to
-           write promotion-streak.json, publish stage2, and re-seed the
-           official lineage after a fallback candidate run.
+  promotion-decide <candidate> [previous-streak]
+           Print the nightly's publish-step decision as JSON: the streak to
+           write to promotion-streak.json and whether to publish stage2.
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
 
@@ -195,7 +189,7 @@ file_md5() {
 # `ensure_stage` reuses build/bootstrap/<stage>/ignis whenever it already
 # exists, so a stage rebuild is skipped by default. Without more, that means
 # a gate can silently report results for a stage binary compiled from
-# selfhost sources, std, or a stage0/host compiler that has since changed
+# selfhost sources, std, or a stage0 compiler that has since changed
 # (IGN-210) — the whole point of a gate is to say something about *current*
 # code.
 #
@@ -216,15 +210,14 @@ file_md5() {
 #     "compiler identity changed" and rebuild on every single gate job
 #     (IGN-210 follow-up). A content hash survives that round trip; the cost
 #     is one sha256 pass over the binary per check (measured: ~0.8-1s for a
-#     176MB unstripped debug host binary — the only large one in the chain,
-#     since stage1/stage2/stage3's own selfhost-emitted binaries are a few MB
+#     176MB binary, while the selfhost-emitted stage binaries are a few MB
 #     each and hash in well under 50ms), paid at most a couple of times per
 #     `ensure_stage` call (see the chain-check note below) — negligible next
 #     to a multi-minute self-compilation, and the only cost at all on the
 #     common "everything is fresh" path a gate job takes.
 #   - a content hash of the `ignis/` and `std/` sources it compiled, snapshot
-#     *before* compilation starts (compile_stage/build_stage1_with_host take
-#     it as a parameter) rather than recomputed after: a source edited while
+#     *before* compilation starts (compile_stage takes it as a parameter)
+#     rather than recomputed after: a source edited while
 #     a multi-minute self-compilation is still running must not be recorded
 #     as the hash of what was actually compiled.
 #   - STAMP_SCHEME_VERSION, so an older stamp this scheme cannot interpret is
@@ -280,24 +273,20 @@ compiler_identity_of() {
 #
 #   1. stage0.json's recorded "source" path, hashed directly, when that
 #      exact file exists here — the job that actually resolved stage0
-#      (where "source" is exactly what $STAGE0 is set to), a local rerun
-#      against the same paths, or a host-kind stage0.json anywhere
-#      target/ci/ignis has traveled (it ships in the nightly's
-#      bootstrap-stages artifact precisely so a gate job has it too).
+#      (where "source" is exactly what $STAGE0 is set to), or a local rerun
+#      against the same paths.
 #   2. stage0.json's own recorded "identity" field — a content sha256+size
-#      the nightly's "Resolve stage0" step computes once, when it actually
-#      has the asset in hand. Covers an official/selfhost stage0 in a gate
-#      job: that asset never travels there (multiple gigabytes of runner
-#      bandwidth for something every gate job would redundantly
-#      re-download and re-verify just to hash), but the identity computed
-#      once by the job that had it does, via stage0.json (IGN-210
-#      follow-up, PR #222 review) — without this, a gate job's bare
-#      `$STAGE0` (unset, so whatever "ignis" resolves to on PATH — the
-#      host binary there, not the official asset that actually built
-#      stage1) would misread every single official-stage0 night as
-#      "stage0 identity changed" and hit the lineage guard below.
-#   3. $STAGE0 resolved the same way build_stage1 resolves it — the bare
-#      case with no stage0.json at all (a plain local run).
+#      computed once by whoever had the binary in hand (the nightly's
+#      "Resolve stage0" step for an official stage0, build_stage1_from_seed
+#      for a seed one). Covers a gate job: the stage0 binary never travels
+#      there (every gate job would otherwise redundantly re-download and
+#      re-verify it just to hash it), but the identity does, via stage0.json
+#      (IGN-210 follow-up, PR #222 review) — without this, a gate job would
+#      misread every night as "stage0 identity changed" and hit the lineage
+#      guard below.
+#   3. $IGNIS_STAGE0 resolved the same way build_stage1 resolves it — the
+#      case with no stage0.json at all (a plain local run with an explicit
+#      stage0).
 #
 # "unknown" only when none of the above has anything to offer.
 current_stage0_identity() {
@@ -363,11 +352,10 @@ sources_hash() {
 # Write build/bootstrap/<stage>/stamp.json for a just-built stage binary.
 #
 #   $1  stage
-#   $2  compiler binary that actually built it — for stage1 this is stage0
-#       itself on the direct path, but the host fallback binary
-#       (IGNIS_STAGE0_HOST_FALLBACK) on the fallback path, which is why
-#       stage1's staleness check below reads the separate `stage0_identity`
-#       field instead: it always names $STAGE0, whichever path was taken.
+#   $2  compiler binary that actually built it. stage1's staleness check
+#       below reads the separate `stage0_identity` field instead, which
+#       current_stage0_identity resolves the same way in every job, whether
+#       or not the stage0 binary itself is present there.
 #   $3  sources_hash, snapshot by the caller *before* compilation started —
 #       never recomputed here, so a source edited mid-build is never recorded
 #       as the hash of what was actually compiled.
@@ -445,12 +433,10 @@ print(value if value is not None else "")
 # Why $1's existing binary is stale against $2 (the compiler that would
 # (re)build it) and the current sources, or empty if its stamp still holds.
 #
-# stage1 is checked against $STAGE0 itself (the `stage0_identity` field —
-# see write_stage_stamp), not $2: on the host-fallback path $2 above was the
-# fallback binary, not stage0, and stage0 might since have started working
-# again, or changed again itself, either of which has to be noticed the same
-# way. Every later stage is checked against $2, the previous stage's own
-# binary, which is a stable path whether or not *it* was built by fallback.
+# stage1 is checked against stage0's identity (the `stage0_identity` field —
+# see write_stage_stamp), not $2: a gate job has stage0.json's recorded
+# identity but not the stage0 binary. Every later stage is checked against
+# $2, the previous stage's own binary.
 stage_stale_reason() {
   local stage="$1" compiler_bin="$2"
 
@@ -493,9 +479,9 @@ stage_stale_reason() {
 }
 
 # Compiler that (re)building $1 would use, i.e. the same binary compile_stage
-# or build_stage1_with_host would be given — stage1's is stage0 ($STAGE0,
-# resolved the same way build_stage1 resolves it), and every later stage's is
-# the previous stage's own binary.
+# would be given — stage1's is stage0 ($STAGE0, empty when it would be built
+# from the C seed), and every later stage's is the previous stage's own
+# binary.
 stage_compiler_bin() {
   case "$1" in
     stage1) echo "$STAGE0" ;;
@@ -568,7 +554,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 #   $1  stage name (output directory under build/bootstrap)
 #   $2  compiler binary to run
 #   $3  "soft" (optional) — return 1 instead of exiting on failure, so a
-#       caller can decide what to do next (see build_stage1's fallback).
+#       caller can word the failure itself (see build_stage1).
 compile_stage() {
   local stage="$1"
   local compiler="$2"
@@ -609,8 +595,8 @@ compile_stage() {
 }
 
 # The most specific error line in a stage log, used to summarize a stage0
-# failure in one line for the fallback log message and
-# build/bootstrap/stage0.json, without dumping the whole log there. Preferred
+# failure in build_stage1's one-line failure message, without dumping the
+# whole log there. Preferred
 # in order: Ignis's own `Error[<code>]:` diagnostics, a linker/gcc `error:`
 # line, any case-insensitive "error", then the first non-blank line (banner
 # text from the compiler's phase report, as a last resort). ANSI color codes
@@ -632,19 +618,18 @@ first_error_line() {
   [[ -n "$line" ]] && echo "$line" || echo "see ${log}"
 }
 
-# Failure for build_stage1 when IGNIS_STAGE0_NO_FALLBACK=1 (the PR-time
-# two-step-rule gate; see BOOTSTRAP.md) — a factored-out message rather than
-# an inline `fail` call so it reads identically regardless of which of
-# build_stage1's two official/selfhost checks (explicit stage0=official, or
-# the ordinary auto-resolved-to-official path) reaches it first.
+# Failure for build_stage1 when an official stage0 cannot build stage1: the
+# two-step rule (see BOOTSTRAP.md) is the usual cause, so the message names it
+# and the PR-only override, whether ci.yml's "Official stage0 gate" or the
+# nightly's ladder is the one that hit it.
 fail_two_step_rule() {
   local first_error="$1"
   fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- two-step rule violated: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote to official, then use the feature in a follow-up), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label to override this gate."
 }
 
 # stage0's kind: IGNIS_STAGE0_KIND when set, else what stage0.json records
-# (host, official, selfhost, or seed for a compiler built from the C seed),
-# else empty.
+# (official, selfhost, or seed for a compiler built from the C seed), else
+# empty.
 stage0_recorded_kind() {
   local recorded_kind=""
 
@@ -655,52 +640,23 @@ stage0_recorded_kind() {
   echo "${IGNIS_STAGE0_KIND:-$recorded_kind}"
 }
 
-# stage0 is either the Rust host or a previously promoted selfhost binary
-# (`IGNIS_STAGE0` pointed at the nightly's official asset). The two take
-# different command forms: the host reads ignis.toml through `ignis build`,
-# while a selfhost binary is invoked directly like every other stage, on
-# `ignis/main.ign`. The nightly records which one it resolved in
-# `stage0.json`; a developer can say so with `IGNIS_STAGE0_KIND=selfhost|host`.
-# Only when neither is present does `--version` decide: the host's clap CLI
-# exits 0, while the selfhost CLI rejects the flag today. That probe stops
-# discriminating once the selfhost learns `--version`, which is why it is the
-# last resort and not the rule.
-stage0_is_selfhost() {
-  local bin="$1"
-  local recorded_kind=""
-
-  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
-    recorded_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
-  fi
-
-  case "${IGNIS_STAGE0_KIND:-$recorded_kind}" in
-    selfhost|official|seed) return 0 ;;
-    host) return 1 ;;
-  esac
-
-  "$bin" --version >/dev/null 2>&1 && return 1
-  return 0
-}
-
 # Refuses a stage1 rebuild that would silently start a *different* stage0
 # lineage than the one stage0.json describes, rather than the honest failure
 # it should be.
 #
 # Concretely: a nightly gate job downloads stage1's binary and stamp, but
-# never the original official/selfhost asset that built it (an ephemeral
-# runner-temp path from a separate ladder-build job on a different runner) —
-# IGNIS_STAGE0 is unset there, so $STAGE0 falls back to whatever "ignis"
-# resolves to on PATH in that job (the host compiler), while stage0.json
-# still records kind=official/selfhost from the job that actually built it.
-# If something then decided stage1 needed a rebuild there (current_stage0_
-# identity's recorded-"identity"-field fallback means the *ordinary* gate
-# job never reaches this at all anymore — see that function — so this is
-# defense in depth for whenever a rebuild is still decided, by a genuine
-# source/lineage change this job cannot safely act on, by mistake, or by a
-# future design change), `stage0_is_selfhost` would read that recorded kind
-# and try to compile directly with the host CLI as if it were a selfhost
-# binary — either a confusing failure, or, worse, a silent success against
-# the wrong compiler that reports gate results for it.
+# never the official or seed stage0 that built it (a path from a separate
+# ladder-build job on a different runner) — IGNIS_STAGE0 is unset there, so
+# adopt_recorded_stage0 finds nothing to adopt, while stage0.json still
+# records the kind from the job that actually built it. If something then
+# decided stage1 needed a rebuild there (current_stage0_identity's
+# recorded-"identity"-field fallback means the *ordinary* gate job never
+# reaches this at all anymore — see that function — so this is defense in
+# depth for whenever a rebuild is still decided, by a genuine source/lineage
+# change this job cannot safely act on, by mistake, or by a future design
+# change), build_stage1 would build a fresh stage0 from the C seed instead —
+# a silent success against a different compiler that reports gate results
+# for it.
 #
 # Deliberately does not accept stage0.json's recorded "identity" field on
 # its own as an escape: that field tells this job what stage0 *should* be,
@@ -738,190 +694,43 @@ stage0_rebuild_guard_reason() {
     return 0
   fi
 
-  echo "stage0.json records kind=${recorded_kind} (source ${recorded_source:-recorded but empty}), which is not available here; the currently available stage0 (${STAGE0}) would be used instead, silently switching lineage"
+  echo "stage0.json records kind=${recorded_kind} (source ${recorded_source:-recorded but empty}), which is not available here; ${STAGE0:-a stage0 built from the C seed} would be used instead, silently switching lineage"
 }
 
-# Whether stage0 was explicitly forced to `official` (`workflow_dispatch
-# stage0=official`, recorded as `"mode": "official"` in stage0.json, or a
-# developer's `IGNIS_STAGE0_MODE=official`) rather than resolved there by
-# `auto`. An explicit request exists to let a maintainer force and inspect
-# the official path, so it must fail outright rather than silently falling
-# back — only `auto` falls back to the host.
-stage0_explicit_official() {
-  local recorded_mode=""
-
-  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
-    recorded_mode="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("mode", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
-  fi
-
-  [[ "${IGNIS_STAGE0_MODE:-$recorded_mode}" == "official" ]]
-}
-
-# Record that stage1 fell back from the official/selfhost stage0 to the host
-# compiler, so `bootstrap_report.py report` can surface it in report.md and
-# promotion.json (`stage0.fallback: true`).
-#
-# `kind` (and `mode`) are left exactly as they were: `stage0_is_selfhost` and
-# `stage0_explicit_official` read them on every later `build_stage1` call
-# (e.g. a second `stage1` invocation, or `ensure_stage stage1` from `stage2`
-# when stage1 is missing), and overwriting `kind` to `host` here would make
-# that oracle believe stage0 itself changed kind, so a later call would try
-# to run the still-official stage0 binary in the host's `<bin> build` form
-# instead of retrying the fallback. What was actually used to build stage1
-# this run is recorded separately as `used_kind`.
-write_stage0_fallback() {
-  local host_bin="$1"
-  local reason="$2"
-  local existing='{"kind": "official", "source": "", "sha256": ""}'
-
-  mkdir -p "$BOOTSTRAP_ROOT"
-
-  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
-    existing="$(cat "${BOOTSTRAP_ROOT}/stage0.json")"
-  fi
-
-  # Written to a temp file and renamed into place: the nightly's supersede
-  # watcher can SIGTERM/SIGKILL this process group mid-run, and a half-written
-  # stage0.json would otherwise corrupt every later read of it (including the
-  # very next `stage0_is_selfhost` probe in this same run).
-  EXISTING_JSON="$existing" HOST_BIN="$host_bin" REASON="$reason" python3 -c '
-import json
-import os
-import sys
-import tempfile
-
-path = sys.argv[1]
-
-try:
-  payload = json.loads(os.environ["EXISTING_JSON"])
-except json.JSONDecodeError:
-  payload = {"kind": "official", "source": "", "sha256": ""}
-
-payload["fallback"] = True
-payload["fallback_reason"] = os.environ["REASON"]
-payload["original_kind"] = payload.get("kind", "official")
-payload["used_kind"] = "host"
-payload["used_source"] = os.environ["HOST_BIN"]
-
-directory = os.path.dirname(path) or "."
-fd, temp_path = tempfile.mkstemp(prefix=".stage0.", suffix=".json.tmp", dir=directory)
-try:
-  with os.fdopen(fd, "w", encoding="utf-8") as handle:
-    handle.write(json.dumps(payload, indent=2) + "\n")
-  os.replace(temp_path, path)
-except BaseException:
-  os.unlink(temp_path)
-  raise
-' "${BOOTSTRAP_ROOT}/stage0.json" || fail "stage1: could not record the stage0 fallback in ${BOOTSTRAP_ROOT}/stage0.json"
-
-  info "stage0: recorded the fallback in ${BOOTSTRAP_ROOT}/stage0.json"
-}
-
-# Build stage1 by driving a host-shaped compiler through `ignis build` against
-# ignis.toml. Used both for the direct host path (stage0 is the host) and for
-# the official-stage0 fallback below (stage0 is a selfhost binary that cannot
-# build stage1, so this rebuilds it with the same binary `stage0=host` uses).
-#
-#   $1  compiler binary to run
-#   $2  fallback reason (optional) — when set, stage0.json is rewritten to
-#       record the fallback so the report shows it.
-build_stage1_with_host() {
-  local host_bin="$1"
-  local fallback_reason="${2-}"
-  local dir
-  dir="$(stage_dir stage1)"
-
-  # A fallback rebuilds over the official/selfhost stage0's failed attempt.
-  # Its log is the only record of why the fallback happened, so it is copied
-  # aside before the directory is wiped rather than lost with it.
-  local preserved_official_log=""
-  if [[ -n "$fallback_reason" && -f "$dir/log.txt" ]]; then
-    preserved_official_log="$(mktemp)"
-    cp "$dir/log.txt" "$preserved_official_log"
-  fi
-
-  # Snapshot before the build starts — same reasoning as compile_stage.
-  local sources_snapshot
-  sources_snapshot="$(sources_hash)"
-
-  rm -rf "$dir"
-  mkdir -p "$dir"
-
-  if [[ -n "$preserved_official_log" ]]; then
-    mv "$preserved_official_log" "$dir/log-stage0-official.txt"
-  fi
-
-  info "stage1: building with ${host_bin}"
-
-  # The host compiler reads ignis.toml and writes build/selfhost/bin/ignis; the
-  # stage directory keeps a copy so later stages never depend on that path.
-  if ! (cd "$PROJECT_ROOT" && "$host_bin" build) 2>&1 | tee "$dir/log.txt"; then
-    fail "stage1: the host compiler reported errors, see ${dir}/log.txt"
-  fi
-
-  local host_out="${PROJECT_ROOT}/build/selfhost/bin/ignis"
-  [[ -x "$host_out" ]] || fail "stage1: ${host_out} was not produced"
-
-  cp "$host_out" "$dir/ignis"
-  write_stage_stamp stage1 "$host_bin" "$sources_snapshot"
-  info "stage1: ok -> ${dir}/ignis"
-
-  [[ -z "$fallback_reason" ]] || write_stage0_fallback "$host_bin" "$fallback_reason"
-}
-
+# Build stage1 with stage0, which is always a selfhost compiler and is invoked
+# the way every later stage is, on ignis/main.ign. With no stage0 resolved,
+# stage0 is built from the C seed first. A stage0 that cannot build stage1 is
+# terminal: there is no other compiler to fall back to.
 build_stage1() {
+  if [[ -z "$STAGE0" ]]; then
+    info "stage1: no stage0 resolved (IGNIS_STAGE0 unset, none recorded in stage0.json), building one from the C seed"
+    build_stage1_from_seed
+    return
+  fi
+
   local stage0_bin
   stage0_bin="$(command -v "$STAGE0" || true)"
   [[ -n "$stage0_bin" ]] || fail "stage0 compiler not found: ${STAGE0} (set IGNIS_STAGE0)"
 
-  if stage0_is_selfhost "$stage0_bin"; then
-    info "stage1: stage0 (${stage0_bin}) is a selfhost compiler, compiling ${ENTRY#"$PROJECT_ROOT/"} directly"
+  info "stage1: compiling ${ENTRY#"$PROJECT_ROOT/"} with stage0 ${stage0_bin}"
 
-    if IGNIS_STD_PATH="${PROJECT_ROOT}/std" compile_stage stage1 "$stage0_bin" soft; then
-      return
-    fi
-
-    local first_error
-    first_error="$(first_error_line "$(stage_dir stage1)/log.txt")"
-
-    # The PR-time two-step-rule gate (ci.yml's "Official stage0 gate") sets
-    # IGNIS_STAGE0_NO_FALLBACK=1 and STAGE0_MODE=official (so stage0.json's
-    # `mode` reads "official" too), which makes stage0_explicit_official()
-    # true below — this check must come first, or that gate's own failure
-    # would be swallowed by the plain "official stage0 compiler reported
-    # errors" message just below with no mention of the rule it exists to
-    # enforce.
-    if [[ "${IGNIS_STAGE0_NO_FALLBACK:-}" == "1" ]]; then
-      fail_two_step_rule "$first_error"
-    fi
-
-    # A seed-built stage0 exists to prove the ladder needs no Rust at all, so
-    # falling back to the host would defeat the only thing it checks.
-    if [[ "$(stage0_recorded_kind)" == "seed" ]]; then
-      fail "stage1: the compiler built from the C seed reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- ignis/ or std/ uses something the seed's compiler cannot build yet; refresh the seed (scripts/bootstrap.sh seed, see BOOTSTRAP.md)"
-    fi
-
-    if stage0_explicit_official; then
-      fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt"
-    fi
-
-    # A published selfhost binary can go stale against a link or runtime
-    # contract change on main (e.g. a std runtime archive it still passes to
-    # `ld` gets removed) well before its promotion streak resets. Falling
-    # back here keeps the ladder green on the host build CI already proved,
-    # instead of failing the whole nightly on a stage0 that is simply behind.
-    info "stage0: official binary cannot build stage1 (${first_error}), falling back to the host"
-
-    local host_bin
-    host_bin="$(command -v "$HOST_STAGE0_FALLBACK" || true)"
-    [[ -n "$host_bin" ]] ||
-      fail "stage1: official stage0 failed (${first_error}) and the host fallback (${HOST_STAGE0_FALLBACK}) was not found; set IGNIS_STAGE0_HOST_FALLBACK"
-
-    build_stage1_with_host "$host_bin" "official binary cannot build stage1 (${first_error})"
+  if IGNIS_STD_PATH="${PROJECT_ROOT}/std" compile_stage stage1 "$stage0_bin" soft; then
     return
   fi
 
-  build_stage1_with_host "$stage0_bin"
+  local first_error
+  first_error="$(first_error_line "$(stage_dir stage1)/log.txt")"
+
+  case "$(stage0_recorded_kind)" in
+    seed)
+      fail "stage1: the compiler built from the C seed reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- ignis/ or std/ uses something the seed's compiler cannot build yet; refresh the seed (scripts/bootstrap.sh seed, see BOOTSTRAP.md)"
+      ;;
+    official)
+      fail_two_step_rule "$first_error"
+      ;;
+  esac
+
+  fail "stage1: the stage0 compiler (${stage0_bin}) reported errors (${first_error}), see $(stage_dir stage1)/log.txt"
 }
 
 ensure_stage() {
@@ -974,9 +783,10 @@ build_stage2() {
   compile_stage stage2 "$(stage_bin stage1)"
 }
 
-# stage1 is a copy of the host build, so it is never measured while it is
-# produced. The G4 baseline is stage1 compiling the same corpus every other
-# stage compiles, in its own directory so it cannot disturb the ladder.
+# stage1's own build measures stage0, not stage1, so it is never measured
+# while it is produced. The G4 baseline is stage1 compiling the same corpus
+# every other stage compiles, in its own directory so it cannot disturb the
+# ladder.
 build_stage1_measure() {
   ensure_stage stage1
   compile_stage "$STAGE1_MEASURE" "$(stage_bin stage1)"
@@ -1034,7 +844,7 @@ run_parity() {
 
   local report="${BOOTSTRAP_ROOT}/parity.md"
 
-  info "parity: running the host e2e corpus through $(stage_bin stage2)"
+  info "parity: running the e2e corpus through $(stage_bin stage2)"
 
   mkdir -p "$GATES_DIR"
 
@@ -1237,51 +1047,40 @@ run_report() {
 
 # The nightly's "Publish the promotion state" step's decision logic, factored
 # out so it can be exercised without gh/network calls (see
-# scripts/tests/test_stage0_fallback.sh). Pure function of the promotion
-# verdict: prints one JSON line, never touches the filesystem or a release.
+# scripts/tests/test_stage0.sh). Pure function of the promotion verdict:
+# prints one JSON line, never touches the filesystem or a release.
 #
-# Args: $1 candidate ("true"/"false"), $2 stage0 fallback ("true"/"false"),
-#       $3 previous streak (integer, defaults to 0).
+# Args: $1 candidate ("true"/"false"), $2 previous streak (integer, defaults
+#       to 0).
 #
-# Output: {"streak": N, "write_streak": bool, "publish_binary": bool, "reseed": bool}
-#   streak         the streak value to persist (only meaningful when write_streak)
+# Output: {"streak": N, "write_streak": bool, "publish_binary": bool}
+#   streak         the streak value to persist
 #   write_streak   whether promotion-streak.json should be (re)written/uploaded
 #   publish_binary whether stage2 should be published as the official asset
-#   reseed         whether this is a fallback run re-seeding the official
-#                  lineage (for the log/::warning:: wording), never true
-#                  together with publish_binary=false
 #
-# A run whose stage0 fell back from official to host proves the host still
-# passes the ladder, which every run already assumes — it says nothing about
-# the official asset itself, *unless* the run is a promotion candidate: every
-# gate still passed against stage2 built the same way a manual
-# `workflow_dispatch stage0=host` seed would build it. Treating that the same
-# as a manual seed (publish stage2, reset the streak to 1) stops a stale
-# official asset from wedging every following nightly into the same fallback
-# until a maintainer notices and re-seeds it by hand. A fallback run with a
-# failing gate proves nothing, so it keeps today's behavior: the streak is
-# left exactly where it was and nothing is published.
+# A candidate extends the streak and publishes stage2 once it reaches 3; any
+# other run resets it to 0. A stale official asset needs no special case: the
+# night it cannot build stage1 is not a candidate, the reset streak makes the
+# next `auto` resolution build stage0 from the C seed instead, and three seed
+# candidates publish a fresh official asset, provided the seed can still build
+# ignis/ (nightly.yml's `seed` job checks that; the `seed` command refreshes it).
 promotion_decide() {
-  local candidate="$1" fallback="$2" previous_streak="${3:-0}"
-
-  if [[ "$fallback" == "true" ]]; then
-    if [[ "$candidate" == "true" ]]; then
-      jq -n '{streak: 1, write_streak: true, publish_binary: true, reseed: true}'
-    else
-      jq -n --argjson streak "$previous_streak" \
-        '{streak: $streak, write_streak: false, publish_binary: false, reseed: false}'
-    fi
-    return
+  if [[ $# -lt 1 || $# -gt 2 || ( "$1" != "true" && "$1" != "false" ) || ! "${2:-0}" =~ ^[0-9]+$ ]]; then
+    echo "usage: $(basename "$0") promotion-decide <candidate> [previous-streak]" >&2
+    echo "  <candidate> is true or false, [previous-streak] a non-negative integer (default 0)" >&2
+    exit 2
   fi
+
+  local candidate="$1" previous_streak="${2:-0}"
 
   if [[ "$candidate" == "true" ]]; then
     local streak=$((previous_streak + 1))
     local publish="false"
     [[ "$streak" -ge 3 ]] && publish="true"
     jq -n --argjson streak "$streak" --argjson publish "$publish" \
-      '{streak: $streak, write_streak: true, publish_binary: $publish, reseed: false}'
+      '{streak: $streak, write_streak: true, publish_binary: $publish}'
   else
-    jq -n '{streak: 0, write_streak: true, publish_binary: false, reseed: false}'
+    jq -n '{streak: 0, write_streak: true, publish_binary: false}'
   fi
 }
 
@@ -1338,8 +1137,9 @@ run_gates() {
   run_report
 }
 
-# G5: the selfhost's diagnostics must be equal or better than the host's over
-# the error corpus, so every diagnostic the host records has to appear.
+# G5: the selfhost's diagnostics must be equal or better than the ones the
+# error corpus's committed snapshots record (the host recorded them before it
+# was retired), so every recorded diagnostic has to appear.
 #
 #   $1  stage to replay the error corpus through ("stage2", "stage1")
 #   $2  gate id to write ("G5" for stage2, "G5-STAGE1" for ci.yml's PR-only
@@ -1365,7 +1165,7 @@ run_gate_g5_for() {
   mkdir -p "$gates_dir"
   rm -f "$counts"
 
-  info "gate-g5: replaying the host error corpus through $(stage_bin "$stage")"
+  info "gate-g5: replaying the error corpus through $(stage_bin "$stage")"
 
   local status="pass"
 
@@ -1396,7 +1196,7 @@ counts = data["counts"]
 gate = {
   "gate": gate_id,
   "status": status,
-  "summary": "{}/{} error-corpus cases keep every diagnostic the host records".format(
+  "summary": "{}/{} error-corpus cases keep every diagnostic their snapshot records".format(
     counts.get("pass", 0), data["total"]
   ),
   "details": {
@@ -1418,14 +1218,8 @@ run_gate_g5() { run_gate_g5_for stage2 G5; }
 
 # G6: every case's parse verdict under stage2 (accepted or rejected) must match
 # the one committed for it under test_cases/__parse_verdicts__. The baselines
-# were generated while the host still existed and are the reference now.
-#
-# Like gate-g7, the run also cross-checks the Rust host against the same
-# baselines until the cut, so regenerating them cannot turn a red gate green on
-# its own; host drift fails the gate. $HOST_STAGE0_FALLBACK rather than $STAGE0
-# for the reason run_gate_g7_for gives. A host that cannot be found fails the
-# gate as well, the way an unrunnable host fails G7's cross-check, instead of
-# quietly turning this into a host-free run.
+# are the reference; they change only through gate-g6-baselines, and that diff
+# is reviewed as the parser change it is.
 run_gate_g6() {
   ensure_stage stage2
 
@@ -1436,18 +1230,11 @@ run_gate_g6() {
   mkdir -p "$GATES_DIR"
   rm -f "$gate_file"
 
-  if ! command -v "$HOST_STAGE0_FALLBACK" >/dev/null 2>&1; then
-    write_gate G6 fail "the host cross-check compiler (${HOST_STAGE0_FALLBACK}) was not found; set IGNIS_STAGE0_HOST_FALLBACK" \
-      "$(json_object host "$HOST_STAGE0_FALLBACK")"
-    return 0
-  fi
-
   info "gate-g6: checking the parse verdicts of $(stage_bin stage2) against the committed baselines"
 
   # A non-zero exit only means some cases diverge; the gate file is the product.
   python3 "${SCRIPT_DIR}/selfhost_syntax_parity.py" \
     --compiler "$(stage_bin stage2)" \
-    --host "$HOST_STAGE0_FALLBACK" \
     --std "${PROJECT_ROOT}/std" \
     --work-dir "${BOOTSTRAP_ROOT}/parity-syntax" \
     --counts-json "$counts" \
@@ -1465,10 +1252,7 @@ run_gate_g6() {
 
 # Regenerate every parse-verdict baseline from one compiler. Deliberately a
 # manual step: the new verdicts land in the pull request's diff and a reviewer
-# reads them. The default is stage2's binary rather than $STAGE0 because the
-# compiler under test is invoked with the selfhost CLI, which the Rust host does
-# not accept. When the host resolves it guards the write: any case where it
-# disagrees with the compiler leaves every baseline untouched.
+# reads them. The default is stage2's binary.
 run_gate_g6_baselines() {
   local compiler="${1-}"
 
@@ -1477,27 +1261,18 @@ run_gate_g6_baselines() {
     compiler="$(stage_bin stage2)"
   fi
 
-  local -a host_arguments=()
-
-  if command -v "$HOST_STAGE0_FALLBACK" >/dev/null 2>&1; then
-    host_arguments=(--host "$HOST_STAGE0_FALLBACK")
-  else
-    info "gate-g6-baselines: the host (${HOST_STAGE0_FALLBACK}) was not found; writing without its agreement check"
-  fi
-
   info "gate-g6-baselines: regenerating the parse-verdict baselines from ${compiler}"
 
   python3 "${SCRIPT_DIR}/selfhost_syntax_parity.py" \
     --compiler "$compiler" \
     --std "${PROJECT_ROOT}/std" \
     --work-dir "${BOOTSTRAP_ROOT}/parity-syntax" \
-    "${host_arguments[@]}" \
     --write-baselines
 }
 
 # G7: every `ok` fixture's drop schedule must match the dump committed under
-# test_cases/e2e/ok/__drop_schedules__. The baselines were generated from the
-# host before the freeze and are the reference now; the host only cross-checks.
+# test_cases/e2e/ok/__drop_schedules__. The baselines are the reference; they
+# change only through gate-g7-baselines.
 #
 # The selfhost compiler compiling itself (`--project .`) deliberately has no
 # baseline — it would change with nearly every commit to `ignis/` — so it is
@@ -1523,24 +1298,8 @@ run_gate_g7_for() {
   # asking stage1 to be compared against itself would prove nothing, and the
   # pull-request run cannot afford a second self-compilation anyway.
   # `ensure_stage stage2` already verified and, if needed, rebuilt stage1.
-  #
-  # The nightly's stage2 run also cross-checks the Rust host against the same
-  # baselines. Nothing else stops a red gate from being turned green by
-  # regenerating the baselines, so while a compiler outside the selfhost
-  # lineage still exists, the gate keeps asking it. It costs what the old
-  # host-oracle gate-g7 already cost, and the flag goes away at the cut.
-  #
-  # $HOST_STAGE0_FALLBACK, not $STAGE0: stage0 may resolve to the promoted
-  # official selfhost asset, and cross-checking a selfhost binary against
-  # baselines one of its own ancestors produced proves nothing. The default is
-  # the same `ignis` on PATH, so the nightly (which never sets IGNIS_STAGE0
-  # and puts target/ci on PATH) is unchanged; this only pins what a local or
-  # workflow_dispatch run with IGNIS_STAGE0 set would otherwise get wrong.
-  #
-  # The pull-request run (stage1) stays host-free on purpose: it is the shape
-  # the gate has after the cut.
   if [[ "$stage" == "stage2" ]]; then
-    reference_arguments=(--reference "$(stage_bin stage1)" --project . --host "$HOST_STAGE0_FALLBACK")
+    reference_arguments=(--reference "$(stage_bin stage1)" --project .)
   fi
 
   mkdir -p "$GATES_DIR"
@@ -1552,7 +1311,7 @@ run_gate_g7_for() {
   python3 "${SCRIPT_DIR}/selfhost_drop_schedule_parity.py" \
     --compiler "$(stage_bin "$stage")" \
     --std "${PROJECT_ROOT}/std" \
-    "${reference_arguments[@]}" \
+    ${reference_arguments[@]+"${reference_arguments[@]}"} \
     --gate-id "$gate_id" \
     --counts-json "$counts" \
     --report "$report" \
@@ -1572,7 +1331,12 @@ run_gate_g7() { run_gate_g7_for stage2 G7; }
 # Regenerate every committed baseline from one compiler. Deliberately a manual
 # step: the new dumps land in the pull request's diff and a reviewer reads them.
 run_gate_g7_baselines() {
-  local compiler="${1:-$STAGE0}"
+  local compiler="${1-}"
+
+  if [[ -z "$compiler" ]]; then
+    ensure_stage stage2
+    compiler="$(stage_bin stage2)"
+  fi
 
   info "gate-g7-baselines: regenerating the drop-schedule baselines from ${compiler}"
 
@@ -1583,7 +1347,7 @@ run_gate_g7_baselines() {
 }
 
 # G4: the selfhost-built compiler (stage2) compiling the selfhost corpus must
-# stay within G4_THRESHOLD of the host-built compiler (stage1) in peak RSS and
+# stay within G4_THRESHOLD of the stage0-built compiler (stage1) in peak RSS and
 # wall time.
 run_gate_g4() {
   local baseline candidate
@@ -1828,8 +1592,7 @@ except BaseException:
 
 # Build stage0 from the committed seed with gcc alone, record it in
 # stage0.json as kind "seed", then build stage1 with it. The seed-built binary
-# is reused while the seed it came from is unchanged. A seed-built stage0
-# never falls back to the host (see build_stage1).
+# is reused while the seed it came from is unchanged.
 build_stage1_from_seed() {
   [[ -f "${SEED_DIR}/manifest.json" ]] ||
     fail "stage1-from-seed: no seed at ${SEED_DIR}; generate one with \`scripts/bootstrap.sh seed\`"
@@ -1885,11 +1648,16 @@ except BaseException:
   build_stage1
 }
 
-# Once stage0.json records a seed-built stage0, later invocations keep using
-# it unless IGNIS_STAGE0 says otherwise, so `stage2` or `stage3` run after
-# `stage1-from-seed` stay on the seed lineage, until an explicit IGNIS_STAGE0
-# overrides it or `clean` removes build/bootstrap, stage0.json included.
-adopt_seed_stage0() {
+# The stage0 build/bootstrap/stage0.json records is the one later invocations
+# use, unless IGNIS_STAGE0 says otherwise: an official binary
+# scripts/resolve_official_stage0.sh downloaded, a seed-built one, or a
+# `selfhost` one a developer recorded by hand, so
+# `stage2` or `stage3` run after `stage1-from-seed` stay on the seed lineage.
+# Only a binary that is actually here is adopted; a gate job that carries
+# stage0.json without the binary keeps $STAGE0 empty and relies on the
+# recorded identity (current_stage0_identity) and the rebuild guard
+# (stage0_rebuild_guard_reason) instead.
+adopt_recorded_stage0() {
   [[ -z "${IGNIS_STAGE0:-}" ]] || return 0
   [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]] || return 0
 
@@ -1897,7 +1665,12 @@ adopt_seed_stage0() {
   recorded_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
   recorded_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
 
-  if [[ "$recorded_kind" == "seed" && -n "$recorded_source" && -x "$recorded_source" ]]; then
+  case "$recorded_kind" in
+    official | selfhost | seed) : ;;
+    *) return 0 ;;
+  esac
+
+  if [[ -n "$recorded_source" && -f "$recorded_source" && -x "$recorded_source" ]]; then
     STAGE0="$recorded_source"
   fi
 }
@@ -1916,7 +1689,7 @@ show_status() {
 main() {
   local command="${1:-}"
 
-  adopt_seed_stage0
+  adopt_recorded_stage0
 
   case "$command" in
     stage1) build_stage1 ;;
@@ -1951,7 +1724,10 @@ main() {
     gates) run_gates ;;
     seal-gates) seal_missing_gates ;;
     report) run_report ;;
-    promotion-decide) promotion_decide "${2-}" "${3-}" "${4-0}" ;;
+    promotion-decide)
+      shift
+      promotion_decide "$@"
+      ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
     -h|--help|help|"") usage ;;

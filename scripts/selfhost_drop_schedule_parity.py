@@ -10,10 +10,9 @@ bytes as the one that produced the baselines, and this harness turns that into
 a gate: it runs the compiler under test over the `ok` end-to-end corpus and
 diffs each case's dump against `test_cases/e2e/ok/__drop_schedules__/<case>.txt`.
 
-The baselines are the reason this gate survives the host freeze. It used to
-run the Rust host compiler as a live oracle on every case; the baselines were
-generated from that host while it still existed, verified byte-identical
-against the selfhost compiler, and committed. From now on they change only
+The gate used to run the Rust host compiler as a live oracle on every case; the
+baselines were generated from that host before it was retired, verified
+byte-identical against the selfhost compiler, and committed. They change only
 when a developer regenerates them deliberately, and a baseline diff in a pull
 request is a semantic change a reviewer has to read.
 
@@ -29,11 +28,6 @@ would change with nearly every compiler commit, which makes it noise rather
 than evidence. Those cases are compared against a second compiler given with
 `--reference` instead — in the gate, stage2's dump of `ignis/` against
 stage1's, a self-consistency check on the same sources.
-
-`--host` stays available as a cross-check (does the host still agree with the
-baselines?) and `--host-compare` still performs the original direct
-host-vs-selfhost diff, so the move to baselines is reversible for as long as
-the host exists.
 
 The gate feeds the promotion `candidate` verdict: a differing case is a real
 ownership bug, not just a lead to follow.
@@ -158,9 +152,6 @@ class Settings:
   repository_root: Path
   baseline_dir: Path
   reference: Path | None = None
-  host: Path | None = None
-  host_compare: bool = False
-  compare_everything: bool = False
   # What the gate file calls itself. The pull-request run against stage1
   # writes `G7-STAGE1`, which the promotion report lists as an unscored row
   # instead of confusing it with the ladder's own G7.
@@ -180,9 +171,6 @@ class DropResult:
   # report can say how much of it the scoping removed.
   std_functions: int = 0
   reference_std_functions: int = 0
-  # Only set when `--host` asked for the cross-check: "pass", "differs", or a
-  # reason the host produced nothing.
-  host_cross_check: str | None = None
 
 
 def collect_cases(
@@ -317,9 +305,6 @@ def scoped_dump(
   std_prefix = f"{relative_to(settings.std_path, settings.repository_root)}/"
   scoped, std_functions = scope_to_own_code(lines, std_prefix)
 
-  if settings.compare_everything:
-    scoped = lines
-
   return scoped, std_functions, None
 
 
@@ -403,12 +388,6 @@ def expected_for(
 
   `source` names where the expectation came from, for the report.
   """
-  if settings.host_compare:
-    assert settings.host is not None
-    lines, std_functions, failure = scoped_dump(settings.host, case, settings)
-
-    return lines, std_functions, "host", failure
-
   if not case.has_baseline:
     if settings.reference is None:
       return None, 0, "reference", DumpFailure("no --reference compiler was given for a --project/--extra case")
@@ -460,7 +439,7 @@ def run_case(
 
   first_difference, diff_lines = compare(expected, actual)
 
-  result = DropResult(
+  return DropResult(
     case,
     CLASS_PASS if first_difference is None else CLASS_DIFFERS,
     expected_lines=len(expected),
@@ -470,36 +449,6 @@ def run_case(
     std_functions=std_functions,
     reference_std_functions=reference_std,
   )
-
-  if settings.host is not None and not settings.host_compare:
-    result.host_cross_check = cross_check_host(case, expected, settings)
-
-  return result
-
-
-def cross_check_host(
-  case: DropCase,
-  expected: list[str],
-  settings: Settings,
-) -> str:
-  """Does the host still agree with what this case is checked against?
-
-  For a fixture that is the committed baseline. For a `--project`/`--extra`
-  case it is the `--reference` compiler's dump, which the primary comparison
-  has just held the compiler under test to — so agreement here means all three
-  produce the same schedule. Without it a `--project` case would only ever be
-  compared against another selfhost stage, and a bug in `ignis/` itself would
-  sit identically in both and never show.
-  """
-  assert settings.host is not None
-  host_lines, _, failure = scoped_dump(settings.host, case, settings)
-
-  if host_lines is None:
-    return str(failure) if failure else "the host produced no dump"
-
-  first_difference, _ = compare(expected, host_lines)
-
-  return CLASS_PASS if first_difference is None else CLASS_DIFFERS
 
 
 def stale_baselines(
@@ -611,7 +560,7 @@ def warm_up(
   Both compilers build the standard library into the same `build/std` on first
   use; a cold pool would have every worker racing to write the same archive.
   """
-  for compiler in (settings.compiler, settings.reference, settings.host):
+  for compiler in (settings.compiler, settings.reference):
     if compiler is None:
       continue
 
@@ -625,16 +574,8 @@ def build_report(
   stale: list[str],
 ) -> str:
   total = len(results)
-  scope = (
-    "the whole dump, standard library included (`--all`)"
-    if settings.compare_everything
-    else "the code under test; standard-library functions are dropped from the dump first"
-  )
-  against = (
-    f"the host (`{settings.host}`), directly"
-    if settings.host_compare
-    else f"committed baselines under `{relative_to(settings.baseline_dir, settings.repository_root)}`"
-  )
+  scope = "the code under test; standard-library functions are dropped from the dump first"
+  against = f"committed baselines under `{relative_to(settings.baseline_dir, settings.repository_root)}`"
   lines = [
     "# Drop-schedule parity (gate G7)",
     "",
@@ -665,9 +606,8 @@ def build_report(
   for classification in CLASS_ORDER:
     lines.append(f"| {classification} | {counts.get(classification, 0)} |")
 
-  lines.extend(build_cross_check_section(results, settings))
   lines.extend(build_stale_section(stale))
-  lines.extend(build_std_section(results, settings))
+  lines.extend(build_std_section(results))
 
   diverging = [result for result in results if result.classification != CLASS_PASS]
 
@@ -724,45 +664,8 @@ def build_stale_section(stale: list[str]) -> list[str]:
   ]
 
 
-def build_cross_check_section(
-  results: list[DropResult],
-  settings: Settings,
-) -> list[str]:
-  """`--host`: does the host the baselines came from still agree with them?"""
-  checked = [result for result in results if result.host_cross_check is not None]
-
-  if not checked:
-    return []
-
-  disagreeing = [result for result in checked if result.host_cross_check != CLASS_PASS]
-
-  lines = [
-    "",
-    "## Host cross-check",
-    "",
-    f"`{settings.host}` was run over the same cases and its dump compared with the",
-    "committed baselines. This is not what the gate needs — the baselines are the",
-    "reference now — but while the host exists it shows they still describe it.",
-    "",
-    f"- cases cross-checked: {len(checked)}",
-    f"- cases where the host disagrees with its baseline: {len(disagreeing)}",
-    "",
-  ]
-
-  for result in disagreeing[:REPORTED_CASES]:
-    lines.append(f"- `{result.case.name}`: {result.host_cross_check}")
-
-  return lines
-
-
-def build_std_section(
-  results: list[DropResult],
-  settings: Settings,
-) -> list[str]:
+def build_std_section(results: list[DropResult]) -> list[str]:
   """How much of each dump the scoping removed — reported, not gated."""
-  if settings.compare_everything:
-    return []
-
   comparable = [result for result in results if result.std_functions]
 
   if not comparable:
@@ -808,8 +711,8 @@ def build_gate(
 ) -> dict:
   total = len(results)
   passed = counts.get(CLASS_PASS, 0)
-  scope = "whole-dump" if settings.compare_everything else "own-code"
-  source = "host" if settings.host_compare else "baseline"
+  scope = "own-code"
+  source = "baseline"
   # A timeout still fails the gate (it is real evidence something took too
   # long, not proof of a divergence), but a night where every timeout cleared
   # on retry looks identical in the counts to one where a case is
@@ -820,19 +723,12 @@ def build_gate(
   stale_plural = "s" if len(stale) != 1 else ""
   stale_note = f", {len(stale)} stale baseline{stale_plural}" if stale else ""
 
-  cross_checked = [result for result in results if result.host_cross_check is not None]
-  cross_check_failures = [result for result in cross_checked if result.host_cross_check != CLASS_PASS]
-
-  cross_note = ""
-  if cross_checked:
-    cross_note = f", host cross-check {len(cross_checked) - len(cross_check_failures)}/{len(cross_checked)}"
-
-  healthy = total > 0 and passed == total and not stale and not cross_check_failures
+  healthy = total > 0 and passed == total and not stale
 
   gate = {
     "gate": settings.gate_id,
     "status": "pass" if healthy else "fail",
-    "summary": f"drop-schedule parity {passed}/{total} {scope} vs {source}{stale_note}{cross_note}{retry_note}",
+    "summary": f"drop-schedule parity {passed}/{total} {scope} vs {source}{stale_note}{retry_note}",
     "details": {
       "scope": scope,
       "compared_against": source,
@@ -852,14 +748,6 @@ def build_gate(
       ],
     },
   }
-
-  if cross_checked:
-    gate["details"]["host_cross_check"] = {
-      "checked": len(cross_checked),
-      "disagreeing": [
-        {"case": result.case.name, "detail": result.host_cross_check} for result in cross_check_failures
-      ],
-    }
 
   return gate
 
@@ -903,16 +791,6 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
     type=Path,
     help="compiler the --project/--extra cases are compared against (they have no baseline)",
   )
-  parser.add_argument(
-    "--host",
-    type=Path,
-    help="also run this compiler and cross-check it against the baselines; with --host-compare, compare against it",
-  )
-  parser.add_argument(
-    "--host-compare",
-    action="store_true",
-    help="compare the compiler under test against --host directly, ignoring the baselines (the pre-freeze mode)",
-  )
   parser.add_argument("--std", type=Path, default=repository_root / "std", help="standard library directory")
   parser.add_argument(
     "--baselines",
@@ -946,12 +824,6 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
   )
   parser.add_argument("--filter", help="only run cases whose name contains this substring")
   parser.add_argument(
-    "--all",
-    dest="compare_everything",
-    action="store_true",
-    help="compare the whole dump, standard library included; only valid with --host-compare",
-  )
-  parser.add_argument(
     "--jobs",
     type=int,
     default=None,
@@ -974,24 +846,7 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
   if arguments.write_baselines and arguments.check_coverage:
     parser.error("--write-baselines and --check-coverage are separate runs; pick one")
 
-  # Baselines record the own-code section of the compiler's own dump. Written
-  # under either of these the files would be whole-dump or host-shaped, and
-  # every later own-code comparison against them would fail.
-  if arguments.write_baselines and arguments.compare_everything:
-    parser.error("--write-baselines records the own-code dump; --all would write baselines nothing can match")
-
-  if arguments.write_baselines and arguments.host_compare:
-    parser.error("--write-baselines records --compiler's dump; --host-compare has no baselines to write")
-
-  if arguments.host_compare and arguments.host is None:
-    parser.error("--host-compare needs a --host compiler to compare against")
-
-  if arguments.compare_everything and not arguments.host_compare:
-    # The baselines record the own-code section only, so a whole-dump run has
-    # nothing to compare against.
-    parser.error("--all compares the whole dump, which the baselines do not record; it needs --host-compare")
-
-  if (arguments.project or arguments.extra) and not (arguments.reference or arguments.host_compare):
+  if (arguments.project or arguments.extra) and not arguments.reference:
     parser.error("--project/--extra cases have no baseline; give a --reference compiler to compare them against")
 
   return arguments
@@ -1007,9 +862,6 @@ def main() -> int:
     repository_root=repository_root,
     baseline_dir=arguments.baselines,
     reference=arguments.reference,
-    host=arguments.host,
-    host_compare=arguments.host_compare,
-    compare_everything=arguments.compare_everything,
     gate_id=arguments.gate_id,
   )
 

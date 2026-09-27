@@ -8,38 +8,23 @@ decide a case, so a program rejected for a type error still counts as "parse
 accepted".
 
 The recorded verdicts live one per case under `test_cases/__parse_verdicts__/`,
-each file exactly `parse-verdict v1` followed by `accepted` or `rejected`. They
-are the reason this gate survives the host freeze: it used to run the Rust host
-compiler as a live oracle on every case, and the baselines were generated from
-that host while it still existed. From now on they change only when a
-developer regenerates them with `--write-baselines`, and a baseline diff in a
-pull request is a parser change a reviewer has to read. A case without a
-baseline, a baseline without a case, and a baseline that is neither verdict
-all fail the gate; `--check-coverage` finds the same problems, plus two cases
-whose paths flatten to the same case name, without running a compiler.
-
-The default run needs no host. `--host` is opt-in: it cross-checks the host's
-verdict against the baselines and reports `host-drift` or `host-error` apart
-from the selfhost's classes, and either fails the gate. `--host-compare` still
-performs the original direct host-vs-selfhost comparison, so the move to
-baselines is reversible for as long as the host exists.
+each file exactly `parse-verdict v1` followed by `accepted` or `rejected`. The
+gate used to run the Rust host compiler as a live oracle on every case, and the
+baselines were generated from that host before it was retired. They change
+only when a developer regenerates them with `--write-baselines`, and a baseline
+diff in a pull request is a parser change a reviewer has to read. A case
+without a baseline, a baseline without a case, and a baseline that is neither
+verdict all fail the gate; `--check-coverage` finds the same problems, plus two
+cases whose paths flatten to the same case name, without running a compiler.
 
 The corpus is every `.ign` file under `test_cases/`, `example/` and `std/`,
-parsed standalone. Parsing needs no import to resolve, and both compilers
-report a parse verdict for a file whose imports do not resolve, so a
+parsed standalone. Parsing needs no import to resolve, and the compiler
+reports a parse verdict for a file whose imports do not resolve, so a
 standalone file is still comparable.
 
-Part of that corpus comes from the host parser unit tests: every inline source
-string they pass to their `parse`, `parse_expr`, `parse_stmt` and `parse_type`
-helpers, wrapped the way each helper wraps it, and every whole program a test
-registers itself with `add_file`, is committed byte for byte under
-`test_cases/parser/host_unit_tests/`. A source is read from a string literal
-argument, from a `let` of one in the same test, or from the first column of a
-table of tuples a `for` in the same test walks, one case per row. The Rust
-sources go away when the host is frozen, so the snippets have to outlive them
-as files. `--materialize-parser-tests` (re)writes that directory from the Rust
-sources and `--check-parser-tests` reports any drift between the two, and any
-call in a `#[test]` fn whose source cannot be rebuilt; neither runs a compiler.
+Part of that corpus is the former host parser unit tests: every inline source
+they parsed, wrapped the way their helper wrapped it, is committed byte for
+byte under `test_cases/parser/host_unit_tests/` and read like any other case.
 
 Each case is materialised as a one-file Ignis project, because the selfhost
 driver resolves its module graph from an `ignis.toml`.
@@ -58,29 +43,11 @@ from pathlib import Path
 
 CORPUS_DIRECTORIES = ("test_cases", "example", "std")
 
-# The host parser unit tests and the helper each one calls. `parse` takes a
-# whole program; the other three wrap their argument, and the wrapper here is
-# copied from the helper so both compilers see exactly what the host test sees.
-HELPER_FILES = (
-  "crates/ignis_parser/src/parser/declarations.rs",
-  "crates/ignis_parser/src/parser/expression.rs",
-  "crates/ignis_parser/src/parser/statement.rs",
-  "crates/ignis_parser/src/parser/type_syntax.rs",
-  "crates/ignis_parser/src/parser/mod.rs",
-)
-
-HELPER_WRAPPERS = {
-  "parse": "{}",
-  "parse_expr": "function test(): void {{ {}; }}",
-  "parse_stmt": "function test(): void {{ {} }}",
-  "parse_type": "function test(): {} {{ }}",
-}
-
-# The codes either compiler's lexer or parser emits, taken from
-# `crates/ignis_diagnostics/src/message.rs` and `ignis/diagnostics/codes.ign`
-# and restricted to the codes their `lexer`/`parser` modules actually raise.
-# Besides the `I0xxx` family the host parser raises a few `A`/`M` codes of its
-# own (A0067, A0143, A0145, A0203, M0005, M0006), which only it raises.
+# The codes a lexer or parser emits, taken from the retired host's diagnostics
+# and `ignis/diagnostics/codes.ign` and restricted to the codes their
+# `lexer`/`parser` modules raise. Besides the `I0xxx` family the host parser
+# raised a few `A`/`M` codes of its own (A0067, A0143, A0145, A0203, M0005,
+# M0006), which the baselines were generated with.
 # Deliberately absent: the analyzer-only codes (I0031, I0033, I0041..I0043),
 # and A0111, which the parser shares with the analyzer's `@compileError`, so
 # it cannot tell a parse rejection from a later phase's.
@@ -116,7 +83,6 @@ PARSE_DIAGNOSTIC_CODES = frozenset(
   }
 )
 
-HOST_TIMEOUT_SECONDS = 120
 SELFHOST_TIMEOUT_SECONDS = 300
 
 OBSERVED_OUTPUT_LINES = 10
@@ -140,8 +106,6 @@ CLASS_SELFHOST_REJECTS = "selfhost-rejects"
 CLASS_SELFHOST_ACCEPTS = "selfhost-accepts"
 CLASS_BASELINE_MISSING = "baseline-missing"
 CLASS_BASELINE_MALFORMED = "baseline-malformed"
-CLASS_HOST_ERROR = "host-error"
-CLASS_HOST_DRIFT = "host-drift"
 CLASS_SELFHOST_CRASH = "selfhost-crash"
 CLASS_TIMEOUT = "timeout"
 
@@ -165,35 +129,13 @@ BASELINE_CLASS_DESCRIPTIONS = {
   CLASS_TIMEOUT: "the selfhost exceeded its time budget",
 }
 
-# `--host-compare`: the host is run live as the oracle, as before the baselines.
-HOST_COMPARE_CLASS_ORDER = (
-  CLASS_PASS,
-  CLASS_SELFHOST_REJECTS,
-  CLASS_SELFHOST_ACCEPTS,
-  CLASS_HOST_ERROR,
-  CLASS_SELFHOST_CRASH,
-  CLASS_TIMEOUT,
-)
-
-HOST_COMPARE_CLASS_DESCRIPTIONS = {
-  CLASS_PASS: "both compilers reach the same parse verdict",
-  CLASS_SELFHOST_REJECTS: "the host parses the case, the selfhost rejects it",
-  CLASS_SELFHOST_ACCEPTS: "the host rejects the case, the selfhost parses it",
-  CLASS_HOST_ERROR: "the host produced no parse verdict",
-  CLASS_SELFHOST_CRASH: "the selfhost produced no parse verdict",
-  CLASS_TIMEOUT: "a compiler exceeded its time budget",
-}
-
 ORIGIN_REPOSITORY = "repository"
 ORIGIN_PARSER_TEST = "parser-test"
 
-# Where the host parser unit-test snippets are committed, relative to the
-# repository root. It sits under `test_cases/`, so the repository walk picks the
-# files up as ordinary cases.
+# Where the former host parser unit-test snippets are committed, relative to
+# the repository root. It sits under `test_cases/`, so the repository walk picks
+# the files up as ordinary cases.
 PARSER_TEST_DIR = "test_cases/parser/host_unit_tests"
-PARSER_TEST_SUFFIX = ".ign"
-
-MATERIALIZE_HINT = "regenerate with `scripts/selfhost_syntax_parity.py --materialize-parser-tests`"
 
 
 @dataclass
@@ -235,13 +177,8 @@ class CaseResult:
   reason: str = ""
   # None when the case was decided without running the selfhost (no usable baseline).
   selfhost: Verdict | None = None
-  # The oracle under `--host-compare`, the cross-checked compiler under `--host`.
-  host: Verdict | None = None
-  # The committed verdict the case was compared with (baseline mode only).
+  # The committed verdict the case was compared with.
   baseline: bool | None = None
-  # Only set when `--host` asked for the cross-check: pass, host-drift or host-error.
-  host_cross_check: str | None = None
-  host_cross_check_reason: str = ""
 
 
 @dataclass
@@ -251,12 +188,7 @@ class Settings:
   repository_root: Path
   baseline_dir: Path
   work_dir: Path
-  host: Path | None = None
-  host_compare: bool = False
   gate_id: str = GATE_ID
-
-  def class_order(self) -> tuple[str, ...]:
-    return HOST_COMPARE_CLASS_ORDER if self.host_compare else BASELINE_CLASS_ORDER
 
 
 # =============================================================================
@@ -290,668 +222,6 @@ def collect_repository_cases(repository_root: Path) -> list[Case]:
 
 def case_name_from_path(relative: Path) -> str:
   return re.sub(r"[^A-Za-z0-9]+", "_", str(relative.with_suffix("")))
-
-
-# =============================================================================
-# Corpus: inline sources in the host parser unit tests
-# =============================================================================
-
-
-class SourceScanner:
-  """Minimal scanner over the Rust sources, sufficient for the call shapes used."""
-
-  def __init__(self, text: str):
-    self.text = text
-    self.position = 0
-
-  def skip_trivia(self) -> None:
-    while self.position < len(self.text):
-      character = self.text[self.position]
-
-      if character.isspace():
-        self.position += 1
-        continue
-
-      if self.text.startswith("//", self.position):
-        end = self.text.find("\n", self.position)
-        self.position = len(self.text) if end == -1 else end + 1
-        continue
-
-      break
-
-  def read_plain_string(self) -> str | None:
-    if self.position >= len(self.text) or self.text[self.position] != '"':
-      return None
-
-    self.position += 1
-    characters = []
-
-    while self.position < len(self.text):
-      character = self.text[self.position]
-
-      if character == "\\":
-        characters.append(self.text[self.position:self.position + 2])
-        self.position += 2
-        continue
-
-      if character == '"':
-        self.position += 1
-        return "".join(characters)
-
-      characters.append(character)
-      self.position += 1
-
-    return None
-
-  def read_raw_string(self) -> str | None:
-    if self.position >= len(self.text) or self.text[self.position] != "r":
-      return None
-
-    cursor = self.position + 1
-    hashes = 0
-
-    while cursor < len(self.text) and self.text[cursor] == "#":
-      hashes += 1
-      cursor += 1
-
-    if cursor >= len(self.text) or self.text[cursor] != '"':
-      return None
-
-    terminator = '"' + "#" * hashes
-    end = self.text.find(terminator, cursor + 1)
-
-    if end == -1:
-      return None
-
-    value = self.text[cursor + 1:end]
-    self.position = end + len(terminator)
-
-    return value
-
-
-def unescape_rust_string(value: str) -> str:
-  escapes = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
-  characters = []
-  index = 0
-
-  while index < len(value):
-    character = value[index]
-
-    if character == "\\" and index + 1 < len(value):
-      following = value[index + 1]
-
-      if following in escapes:
-        characters.append(escapes[following])
-        index += 2
-        continue
-
-    characters.append(character)
-    index += 1
-
-  return "".join(characters)
-
-
-# `sm.add_file("test.ign", source)` is how a direct-parse test hands its whole
-# program to the lexer without going through one of the helpers.
-SOURCE_MAP_CALL = "add_file"
-SOURCE_MAP_WRAPPER = "{}"
-
-PARSER_TEST_CALL_PATTERN = re.compile(
-  r"(?<![A-Za-z0-9_])(" + "|".join([*HELPER_WRAPPERS, SOURCE_MAP_CALL]) + r")\s*\("
-)
-TEST_FUNCTION_PATTERN = re.compile(r"(?<![A-Za-z0-9_])fn\s+([A-Za-z0-9_]+)\s*\(")
-
-
-IDENTIFIER_ARGUMENT_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\)")
-SOURCE_ARGUMENT_PATTERN = re.compile(r"&?\s*([A-Za-z_][A-Za-z0-9_]*)")
-ARGUMENT_CONVERSION_PATTERN = re.compile(r"\s*\.\s*(?:to_string|to_owned|clone|into)\s*\(\s*\)")
-TABLE_NAME_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)")
-CHARACTER_LITERAL_PATTERN = re.compile(r"'(?:\\[^'\n]+|[^\\'\n])'")
-
-
-def enclosing_test_name(text: str, position: int) -> str:
-  """The name of the `fn` the call sits in, used to name the case."""
-  last = None
-
-  for match in TEST_FUNCTION_PATTERN.finditer(text, 0, position):
-    last = match.group(1)
-
-  return last or "unknown"
-
-
-def read_literal(scanner: SourceScanner) -> str | None:
-  value = scanner.read_raw_string()
-
-  if value is not None:
-    return value
-
-  value = scanner.read_plain_string()
-
-  return unescape_rust_string(value) if value is not None else None
-
-
-def enclosing_function_start(text: str, position: int) -> int:
-  """Offset of the `fn` the call at `position` sits in, or 0 when there is none."""
-  start = 0
-
-  for match in TEST_FUNCTION_PATTERN.finditer(text, 0, position):
-    start = match.start()
-
-  return start
-
-
-def resolve_binding(text: str, name: str, position: int) -> str | None:
-  """The literal the last `let <name> = "..."` before `position` binds.
-
-  The search stops at the enclosing `fn`: a name bound some other way inside
-  the test (a `for` pattern over a table, a parameter) must resolve to nothing,
-  not to a `let` of the same name in an earlier test.
-  """
-  pattern = re.compile(r"(?<![A-Za-z0-9_])let\s+" + re.escape(name) + r"\s*(?::[^=;]+)?=\s*")
-  found = None
-
-  for match in pattern.finditer(text, enclosing_function_start(text, position), position):
-    scanner = SourceScanner(text)
-    scanner.position = match.end()
-    value = read_literal(scanner)
-
-    if value is not None:
-      found = value
-
-  return found
-
-
-def enclosing_function(text: str, position: int) -> re.Match | None:
-  """The `fn` header the call at `position` sits in, or None when there is none."""
-  last = None
-
-  for match in TEST_FUNCTION_PATTERN.finditer(text, 0, position):
-    last = match
-
-  return last
-
-
-def is_test_function(text: str, function_start: int) -> bool:
-  """Whether the `fn` at `function_start` carries `#[test]`.
-
-  Other attributes, comments and blank lines may sit between `#[test]` and the
-  `fn`, so the walk goes up line by line over those and stops at anything else.
-  """
-  line_start = text.rfind("\n", 0, function_start) + 1
-
-  if "#[test]" in text[line_start:function_start]:
-    return True
-
-  while line_start > 0:
-    previous_start = text.rfind("\n", 0, line_start - 1) + 1
-    line = text[previous_start:line_start - 1].strip()
-    line_start = previous_start
-
-    if line.startswith("#[test]"):
-      return True
-
-    if line == "" or line.startswith("//") or line.startswith("#["):
-      continue
-
-    return False
-
-  return False
-
-
-def skip_past_tuple_end(scanner: SourceScanner) -> bool:
-  """Move past the `)` closing the tuple the scanner is inside.
-
-  Nested groups and string or character literals are skipped whole, so a `)`
-  inside them never closes the tuple early.
-  """
-  text = scanner.text
-  depth = 0
-
-  while True:
-    scanner.skip_trivia()
-
-    if scanner.position >= len(text):
-      return False
-
-    character = text[scanner.position]
-
-    if character in "([{":
-      depth += 1
-      scanner.position += 1
-      continue
-
-    if character in ")]}":
-      if depth == 0:
-        scanner.position += 1
-        return character == ")"
-
-      depth -= 1
-      scanner.position += 1
-      continue
-
-    if character == '"':
-      if scanner.read_plain_string() is None:
-        return False
-
-      continue
-
-    if character == "r" and scanner.read_raw_string() is not None:
-      continue
-
-    if character == "'":
-      literal = CHARACTER_LITERAL_PATTERN.match(text, scanner.position)
-      scanner.position = literal.end() if literal else scanner.position + 1
-      continue
-
-    scanner.position += 1
-
-
-def read_table_rows(text: str, start: int) -> list[str] | None:
-  """The leading string literal of each tuple in the array literal opening at `start`.
-
-  None as soon as one row is not a tuple opening with a string literal: a
-  table read only in part would silently lose the rows it skipped.
-  """
-  scanner = SourceScanner(text)
-  scanner.position = start + 1
-  rows = []
-
-  while True:
-    scanner.skip_trivia()
-
-    if scanner.position >= len(text):
-      return None
-
-    if text[scanner.position] == "]":
-      return rows
-
-    if text[scanner.position] != "(":
-      return None
-
-    scanner.position += 1
-    scanner.skip_trivia()
-    value = read_literal(scanner)
-
-    if value is None or not skip_past_tuple_end(scanner):
-      return None
-
-    rows.append(value)
-
-    scanner.skip_trivia()
-
-    if text.startswith(",", scanner.position):
-      scanner.position += 1
-
-
-def resolve_table_rows(text: str, name: str, position: int) -> list[str] | None:
-  """The first-column literals of the table a `for (<name>, ...) in <table>` walks.
-
-  The loop has to sit in the call's own `fn`, before the call. The table is
-  either written inline after `in`, or bound by the last `let <table> = [...]`
-  (or `vec![...]`) before the loop in that same `fn`.
-  """
-  function_start = enclosing_function_start(text, position)
-  loop_pattern = re.compile(
-    r"(?<![A-Za-z0-9_])for\s*\(\s*" + re.escape(name) + r"\s*,[^)]*\)\s*in\s+(?:&\s*)?"
-  )
-  loop = None
-
-  for match in loop_pattern.finditer(text, function_start, position):
-    loop = match
-
-  if loop is None:
-    return None
-
-  if text.startswith("[", loop.end()):
-    return read_table_rows(text, loop.end())
-
-  table = TABLE_NAME_PATTERN.match(text, loop.end())
-
-  if table is None:
-    return None
-
-  binding_pattern = re.compile(
-    r"(?<![A-Za-z0-9_])let\s+(?:mut\s+)?" + re.escape(table.group(1)) + r"\s*(?::[^=]+)?=\s*(?:vec!\s*)?(?=\[)"
-  )
-  rows = None
-
-  for match in binding_pattern.finditer(text, function_start, loop.start()):
-    rows = read_table_rows(text, match.end())
-
-  return rows
-
-
-def resolve_identifier(text: str, name: str, position: int) -> tuple[list[str] | None, str | None]:
-  """The sources an identifier argument stands for, or None and why it stands for none."""
-  source = resolve_binding(text, name, position)
-
-  if source is not None:
-    return [source], None
-
-  rows = resolve_table_rows(text, name, position)
-
-  if rows:
-    return rows, None
-
-  return None, f"`{name}` is bound neither by a `let` of a string literal nor by a `for` over a table of them"
-
-
-def read_helper_call(text: str, arguments_start: int, call_start: int) -> tuple[list[str] | None, str | None]:
-  """The sources a `parse`/`parse_expr`/`parse_stmt`/`parse_type` call parses."""
-  scanner = SourceScanner(text)
-  scanner.position = arguments_start
-  scanner.skip_trivia()
-
-  source = read_literal(scanner)
-
-  if source is not None:
-    scanner.skip_trivia()
-
-    if scanner.position < len(text) and text[scanner.position] not in (")", ","):
-      return None, "the string literal argument continues into a larger expression"
-
-    return [source], None
-
-  # A `format!` or any other computed argument carries no literal to
-  # reconstruct the source from.
-  argument = IDENTIFIER_ARGUMENT_PATTERN.match(text, scanner.position)
-
-  if argument is None:
-    return None, "the argument is neither a string literal nor a plain identifier"
-
-  return resolve_identifier(text, argument.group(1), call_start)
-
-
-def read_source_map_call(text: str, arguments_start: int, call_start: int) -> tuple[list[str] | None, str | None]:
-  """The program an `add_file("<name>", <source>)` call registers."""
-  scanner = SourceScanner(text)
-  scanner.position = arguments_start
-  scanner.skip_trivia()
-
-  if read_literal(scanner) is None:
-    return None, "the file name argument is not a string literal"
-
-  scanner.skip_trivia()
-
-  if not text.startswith(",", scanner.position):
-    return None, "the call has no source argument"
-
-  scanner.position += 1
-  scanner.skip_trivia()
-
-  source = read_literal(scanner)
-  name = None
-
-  if source is None:
-    argument = SOURCE_ARGUMENT_PATTERN.match(text, scanner.position)
-
-    if argument is None:
-      return None, "the source argument is neither a string literal nor an identifier"
-
-    name = argument.group(1)
-    scanner.position = argument.end()
-
-  conversion = ARGUMENT_CONVERSION_PATTERN.match(text, scanner.position)
-
-  if conversion is not None:
-    scanner.position = conversion.end()
-
-  scanner.skip_trivia()
-
-  if text.startswith(",", scanner.position):
-    scanner.position += 1
-    scanner.skip_trivia()
-
-  if not text.startswith(")", scanner.position):
-    return None, "the source argument continues into a larger expression"
-
-  if source is not None:
-    return [source], None
-
-  return resolve_identifier(text, name, call_start)
-
-
-@dataclass
-class UncapturedCall:
-  """A call in a `#[test]` fn whose parsed source the scraper could not rebuild."""
-
-  location: str
-  reason: str
-
-
-def scrape_parser_test_file(
-  relative_path: str,
-  text: str,
-  used_names: dict[str, int],
-  cases: list[Case],
-  uncaptured: list[UncapturedCall],
-) -> None:
-  """Append one file's snippets to `cases` and its unreadable test calls to `uncaptured`.
-
-  Calls are visited in text order, helper and `add_file` alike, because the
-  `__N` suffix numbers the snippets of one test in the order they appear.
-  """
-  file_stem = Path(relative_path).stem
-
-  for match in PARSER_TEST_CALL_PATTERN.finditer(text):
-    callee = match.group(1)
-    line_start = text.rfind("\n", 0, match.start())
-
-    # `fn parse(` declares the helper instead of calling it.
-    if text[line_start + 1:match.start()].rstrip().endswith("fn"):
-      continue
-
-    function = enclosing_function(text, match.start())
-    in_test = function is not None and is_test_function(text, function.start())
-    line = text.count("\n", 0, match.start()) + 1
-    location = f"{relative_path}:{line} ({callee})"
-
-    if callee == SOURCE_MAP_CALL:
-      # A helper registers its own parameter; only a test's call names a source.
-      if not in_test:
-        continue
-
-      sources, reason = read_source_map_call(text, match.end(), match.start())
-      wrapper = SOURCE_MAP_WRAPPER
-    else:
-      sources, reason = read_helper_call(text, match.end(), match.start())
-      wrapper = HELPER_WRAPPERS[callee]
-
-    if sources is None:
-      # `parser.parse()` is the parser's own method, not the test helper.
-      is_method_call = callee != SOURCE_MAP_CALL and text[line_start + 1:match.start()].rstrip().endswith(".")
-
-      if in_test and not is_method_call:
-        uncaptured.append(UncapturedCall(location=location, reason=reason or "no source"))
-
-      continue
-
-    base_name = f"{file_stem}__{enclosing_test_name(text, match.start())}"
-
-    for source in sources:
-      occurrence = used_names.get(base_name, 0)
-      used_names[base_name] = occurrence + 1
-      name = base_name if occurrence == 0 else f"{base_name}__{occurrence + 1}"
-
-      cases.append(
-        Case(
-          name=name,
-          origin=ORIGIN_PARSER_TEST,
-          source=wrapper.format(source),
-          location=location,
-        )
-      )
-
-
-def scrape_parser_tests(repository_root: Path) -> tuple[list[Case], list[UncapturedCall]]:
-  """Every snippet the host parser unit tests parse, and every test call that yielded none."""
-  cases: list[Case] = []
-  uncaptured: list[UncapturedCall] = []
-  used_names: dict[str, int] = {}
-
-  for relative_path in HELPER_FILES:
-    path = repository_root / relative_path
-
-    if not path.is_file():
-      continue
-
-    scrape_parser_test_file(relative_path, path.read_text(encoding="utf-8"), used_names, cases, uncaptured)
-
-  return cases, uncaptured
-
-
-def collect_parser_test_cases(repository_root: Path) -> list[Case]:
-  return scrape_parser_tests(repository_root)[0]
-
-
-def uncaptured_parser_test_calls(repository_root: Path) -> list[UncapturedCall]:
-  """The `#[test]` calls whose source would be lost with the Rust files; calls in helpers never count."""
-  return scrape_parser_tests(repository_root)[1]
-
-
-def parser_test_files(repository_root: Path) -> dict[str, bytes]:
-  """File name -> exact bytes of every snippet the host parser unit tests parse."""
-  return {
-    f"{case.name}{PARSER_TEST_SUFFIX}": case.source.encode("utf-8")
-    for case in collect_parser_test_cases(repository_root)
-  }
-
-
-@dataclass
-class ParserTestDrift:
-  """How the committed snippet files differ from what the Rust sources scrape to."""
-
-  missing: list[str] = field(default_factory=list)
-  extra: list[str] = field(default_factory=list)
-  differing: list[str] = field(default_factory=list)
-
-  def is_empty(self) -> bool:
-    return not (self.missing or self.extra or self.differing)
-
-
-def parser_test_drift(
-  repository_root: Path,
-  target_dir: Path,
-) -> ParserTestDrift:
-  """Compare `target_dir` with the snippets scraped from `repository_root`, by name and bytes."""
-  expected = parser_test_files(repository_root)
-  present = (
-    {path.name: path for path in target_dir.glob(f"*{PARSER_TEST_SUFFIX}") if path.is_file()}
-    if target_dir.is_dir()
-    else {}
-  )
-
-  return ParserTestDrift(
-    missing=sorted(name for name in expected if name not in present),
-    extra=sorted(name for name in present if name not in expected),
-    differing=sorted(
-      name for name, content in expected.items() if name in present and present[name].read_bytes() != content
-    ),
-  )
-
-
-def materialize_parser_tests(
-  repository_root: Path,
-  target_dir: Path,
-) -> ParserTestDrift:
-  """Make `target_dir` hold exactly the scraped snippets, and return what that changed.
-
-  The files are written as bytes so nothing (newline translation, a trailing
-  newline added for style) separates them from the string the host test parses.
-
-  Scraping nothing changes nothing: once the Rust sources are gone the
-  committed files are the only copy, and an empty scrape must not delete them.
-  """
-  expected = parser_test_files(repository_root)
-
-  if not expected:
-    return ParserTestDrift()
-
-  drift = parser_test_drift(repository_root, target_dir)
-  target_dir.mkdir(parents=True, exist_ok=True)
-
-  for name in drift.missing + drift.differing:
-    (target_dir / name).write_bytes(expected[name])
-
-  for name in drift.extra:
-    (target_dir / name).unlink()
-
-  return drift
-
-
-def run_materialize_parser_tests(repository_root: Path) -> int:
-  target_dir = repository_root / PARSER_TEST_DIR
-  total = len(parser_test_files(repository_root))
-
-  if total == 0:
-    print("error: no parser unit-test snippets were found in the Rust sources; nothing was changed", file=sys.stderr)
-    return 1
-
-  drift = materialize_parser_tests(repository_root, target_dir)
-
-  for name in drift.missing:
-    print(f"added:   {PARSER_TEST_DIR}/{name}")
-
-  for name in drift.differing:
-    print(f"updated: {PARSER_TEST_DIR}/{name}")
-
-  for name in drift.extra:
-    print(f"removed: {PARSER_TEST_DIR}/{name}")
-
-  print(
-    f"[syntax] {total} parser unit-test snippets under {PARSER_TEST_DIR}: "
-    f"{len(drift.missing)} added, {len(drift.differing)} updated, {len(drift.extra)} removed"
-  )
-
-  for call in uncaptured_parser_test_calls(repository_root):
-    print(f"warning: uncaptured parser test call at {call.location}: {call.reason}", file=sys.stderr)
-
-  return 0
-
-
-def run_parser_test_check(repository_root: Path) -> int:
-  """Do the committed snippets still match the Rust sources? Runs no compiler."""
-  drift = parser_test_drift(repository_root, repository_root / PARSER_TEST_DIR)
-  total = len(parser_test_files(repository_root))
-
-  if total == 0:
-    print("error: no parser unit-test snippets were found in the Rust sources", file=sys.stderr)
-    return 1
-
-  for name in drift.missing:
-    print(f"missing snippet: {PARSER_TEST_DIR}/{name}", file=sys.stderr)
-
-  for name in drift.extra:
-    print(f"extra snippet: {PARSER_TEST_DIR}/{name}", file=sys.stderr)
-
-  for name in drift.differing:
-    print(f"differing snippet: {PARSER_TEST_DIR}/{name}", file=sys.stderr)
-
-  uncaptured = uncaptured_parser_test_calls(repository_root)
-
-  for call in uncaptured:
-    print(f"uncaptured parser test call at {call.location}: {call.reason}", file=sys.stderr)
-
-  if not drift.is_empty():
-    print(
-      f"{len(drift.missing)} missing, {len(drift.extra)} extra and {len(drift.differing)} differing "
-      f"snippets; {MATERIALIZE_HINT}",
-      file=sys.stderr,
-    )
-
-  if uncaptured:
-    print(
-      f"{len(uncaptured)} parser test calls parse a source the scraper cannot rebuild, and it would be lost "
-      "with the Rust sources; pass the source as a string literal, a `let` of one, or a table row",
-      file=sys.stderr,
-    )
-
-  if not drift.is_empty() or uncaptured:
-    return 1
-
-  print(f"parser unit-test snippets: {total} scraped, {total} committed, no drift")
-
-  return 0
 
 
 # =============================================================================
@@ -1042,42 +312,6 @@ def parse_error_codes(output: str, case_file: Path) -> list[str]:
     pending = None
 
   return codes
-
-
-def host_verdict(
-  host: Path,
-  case_file: Path,
-  std_path: Path,
-) -> Verdict:
-  try:
-    completed = subprocess.run(
-      [str(host), "check", "--analyze-only", "--std-path", str(std_path), str(case_file)],
-      cwd=case_file.parent,
-      capture_output=True,
-      text=True,
-      errors="replace",
-      timeout=HOST_TIMEOUT_SECONDS,
-    )
-  except subprocess.TimeoutExpired:
-    return Verdict(None, reason=f"the host exceeded {HOST_TIMEOUT_SECONDS}s", timed_out=True)
-  except OSError as error:
-    return Verdict(None, reason=f"the host could not be run: {error}")
-
-  output = completed.stdout + completed.stderr
-
-  if completed.returncode < 0:
-    return Verdict(
-      None,
-      reason=f"the host was killed by signal {-completed.returncode}",
-      output_tail=last_lines(output, OBSERVED_OUTPUT_LINES),
-    )
-
-  if "panicked at" in output:
-    return Verdict(None, reason="the host panicked", output_tail=last_lines(output, OBSERVED_OUTPUT_LINES))
-
-  codes = parse_error_codes(output, case_file)
-
-  return Verdict(not codes, codes, output_tail=last_lines(output, OBSERVED_OUTPUT_LINES))
 
 
 def selfhost_phase_errors(output: str) -> int | None:
@@ -1281,49 +515,6 @@ def classify_against_baseline(
   return CLASS_SELFHOST_ACCEPTS, "the baseline records a parse error, the selfhost parses this source"
 
 
-def classify_against_host(
-  host: Verdict,
-  selfhost: Verdict,
-) -> tuple[str, str]:
-  if host.timed_out:
-    return CLASS_TIMEOUT, host.reason
-
-  if selfhost.timed_out:
-    return CLASS_TIMEOUT, selfhost.reason
-
-  if host.accepted is None:
-    return CLASS_HOST_ERROR, host.reason
-
-  if selfhost.accepted is None:
-    return CLASS_SELFHOST_CRASH, selfhost.reason
-
-  if host.accepted == selfhost.accepted:
-    return CLASS_PASS, ""
-
-  if host.accepted:
-    return CLASS_SELFHOST_REJECTS, "the host parses this source, the selfhost reports {}".format(
-      ", ".join(selfhost.codes) or "a parse error"
-    )
-
-  return CLASS_SELFHOST_ACCEPTS, "the host reports {}, the selfhost parses this source".format(
-    ", ".join(host.codes) or "a parse error"
-  )
-
-
-def cross_check_host(
-  baseline: bool,
-  host: Verdict,
-) -> tuple[str, str]:
-  """Does the host still reach the verdict committed for this case?"""
-  if host.accepted is None:
-    return CLASS_HOST_ERROR, host.reason or "the host produced no parse verdict"
-
-  if host.accepted == baseline:
-    return CLASS_PASS, ""
-
-  return CLASS_HOST_DRIFT, f"the baseline records {describe_baseline(baseline)}, the host reports {host.describe()}"
-
-
 def case_file_for(
   case: Case,
   settings: Settings,
@@ -1339,15 +530,6 @@ def run_case(
   settings: Settings,
 ) -> CaseResult:
   assert settings.compiler is not None
-
-  if settings.host_compare:
-    assert settings.host is not None
-    case_file, case_dir = case_file_for(case, settings)
-    host = host_verdict(settings.host, case_file, settings.std_path)
-    selfhost = selfhost_verdict(settings.compiler, case_file, case_dir)
-    classification, reason = classify_against_host(host, selfhost)
-
-    return CaseResult(case, classification, reason, selfhost=selfhost, host=host)
 
   path = baseline_path(settings.baseline_dir, case)
   relative_path = relative_to(path, settings.repository_root)
@@ -1369,13 +551,8 @@ def run_case(
   case_file, case_dir = case_file_for(case, settings)
   selfhost = selfhost_verdict(settings.compiler, case_file, case_dir)
   classification, reason = classify_against_baseline(baseline, selfhost)
-  result = CaseResult(case, classification, reason, selfhost=selfhost, baseline=baseline)
 
-  if settings.host is not None:
-    result.host = host_verdict(settings.host, case_file, settings.std_path)
-    result.host_cross_check, result.host_cross_check_reason = cross_check_host(baseline, result.host)
-
-  return result
+  return CaseResult(case, classification, reason, selfhost=selfhost, baseline=baseline)
 
 
 def run_cases(
@@ -1396,9 +573,6 @@ def run_cases(
       if announce and result.classification != CLASS_PASS:
         print(f"[syntax] {index}/{len(cases)} {result.classification}: {result.case.name}")
 
-      if announce and result.host_cross_check not in (None, CLASS_PASS):
-        print(f"[syntax] {index}/{len(cases)} {result.host_cross_check}: {result.case.name}")
-
   return results
 
 
@@ -1406,7 +580,7 @@ def count_classes(
   results: list[CaseResult],
   settings: Settings,
 ) -> dict[str, int]:
-  counts = {classification: 0 for classification in settings.class_order()}
+  counts = {classification: 0 for classification in BASELINE_CLASS_ORDER}
 
   for result in results:
     counts[result.classification] = counts.get(result.classification, 0) + 1
@@ -1428,7 +602,7 @@ def evaluate(
   """
   results = run_cases(settings, cases, jobs, announce)
   counts = count_classes(results, settings)
-  stale = [] if filtered or settings.host_compare else stale_baselines(settings, cases)
+  stale = [] if filtered else stale_baselines(settings, cases)
 
   return results, counts, stale, build_gate(results, counts, settings, stale)
 
@@ -1441,14 +615,12 @@ def evaluate(
 def observe_case(
   case: Case,
   settings: Settings,
-) -> tuple[Case, Verdict, Verdict | None]:
-  """The selfhost's verdict on one case and, when `--host` is given, the host's."""
+) -> tuple[Case, Verdict]:
+  """The selfhost's verdict on one case."""
   assert settings.compiler is not None
   case_file, case_dir = case_file_for(case, settings)
-  selfhost = selfhost_verdict(settings.compiler, case_file, case_dir)
-  host = host_verdict(settings.host, case_file, settings.std_path) if settings.host is not None else None
 
-  return case, selfhost, host
+  return case, selfhost_verdict(settings.compiler, case_file, case_dir)
 
 
 def write_baselines(
@@ -1459,14 +631,12 @@ def write_baselines(
 ) -> int:
   """(Re)generate the baselines from `--compiler`'s verdicts.
 
-  Three rules keep a regeneration from quietly damaging the verdicts it is
+  Two rules keep a regeneration from quietly damaging the verdicts it is
   supposed to record:
 
   - Nothing is written unless every case produced a verdict. A compiler that
     fails on part of the corpus would otherwise leave a directory that is part
     old and part new, and the gate would read it as a set of parser changes.
-  - With `--host`, nothing is written unless the host reaches the same
-    verdict on every case, so a baseline never records a disagreement.
   - Pruning only happens over the whole corpus. Under `--filter` the cases
     this run did not ask about are out of scope, not orphaned, and deleting
     their baselines would shrink the corpus to whatever the filter matched.
@@ -1491,7 +661,7 @@ def write_baselines(
   with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
     observations = list(executor.map(lambda case: observe_case(case, settings), cases))
 
-  failed = [(case, selfhost) for case, selfhost, _ in observations if selfhost.accepted is None]
+  failed = [(case, selfhost) for case, selfhost in observations if selfhost.accepted is None]
 
   if failed:
     print(
@@ -1505,28 +675,10 @@ def write_baselines(
 
     return 1
 
-  disagreeing = [
-    (case, selfhost, host)
-    for case, selfhost, host in observations
-    if host is not None and host.accepted != selfhost.accepted
-  ]
-
-  if disagreeing:
-    print(
-      f"the host and the selfhost disagree on {len(disagreeing)} of {len(observations)} cases; "
-      "no baseline was written or removed",
-      file=sys.stderr,
-    )
-
-    for case, selfhost, host in disagreeing[:REPORTED_CASES]:
-      print(f"  {case.name}: host {host.describe()}, selfhost {selfhost.describe()}", file=sys.stderr)
-
-    return 1
-
   settings.baseline_dir.mkdir(parents=True, exist_ok=True)
   accepted = 0
 
-  for case, selfhost, _ in observations:
+  for case, selfhost in observations:
     assert selfhost.accepted is not None
     baseline_path(settings.baseline_dir, case).write_text(format_baseline(selfhost.accepted), encoding="utf-8")
 
@@ -1595,22 +747,8 @@ def run_coverage_check(
 # =============================================================================
 
 
-def class_descriptions(settings: Settings) -> dict[str, str]:
-  return HOST_COMPARE_CLASS_DESCRIPTIONS if settings.host_compare else BASELINE_CLASS_DESCRIPTIONS
-
-
-def cross_checked_results(results: list[CaseResult]) -> list[CaseResult]:
-  return [result for result in results if result.host_cross_check is not None]
-
-
-def expected_description(
-  result: CaseResult,
-  settings: Settings,
-) -> str:
+def expected_description(result: CaseResult) -> str:
   """What the case was held to, for the report and the failing entries."""
-  if settings.host_compare:
-    return f"host: {result.host.describe() if result.host else 'not run'}"
-
   if result.baseline is None:
     return "baseline: none"
 
@@ -1623,40 +761,25 @@ def build_report(
   settings: Settings,
   stale: list[str],
 ) -> str:
-  if settings.host_compare:
-    introduction = [
-      "The host is the oracle: for every case both compilers must reach the same",
-      "parse verdict. Only lexer and parser diagnostics reported against the case",
-      "file decide a verdict; later phases never do.",
-    ]
-  else:
-    introduction = [
-      "Every case is held to the parse verdict committed for it under",
-      f"`{relative_to(settings.baseline_dir, settings.repository_root)}`. Only lexer and parser",
-      "diagnostics reported against the case file decide a verdict; later phases never do.",
-    ]
-
   lines = [
     f"# Selfhost syntax parity report ({settings.gate_id})",
     "",
-    *introduction,
+    "Every case is held to the parse verdict committed for it under",
+    f"`{relative_to(settings.baseline_dir, settings.repository_root)}`. Only lexer and parser",
+    "diagnostics reported against the case file decide a verdict; later phases never do.",
     "",
-    "Wrappers used for the host parser unit tests:",
+    "## Summary",
     "",
+    "| class | count | meaning |",
+    "| --- | --- | --- |",
   ]
 
-  for helper, wrapper in HELPER_WRAPPERS.items():
-    shown = wrapper.replace("{}", "<source>").replace("{{", "{").replace("}}", "}")
-    lines.append(f"- `{helper}` -> `{shown}`")
-
-  lines.extend(["", "## Summary", "", "| class | count | meaning |", "| --- | --- | --- |"])
-  descriptions = class_descriptions(settings)
-
-  for classification in settings.class_order():
-    lines.append(f"| {classification} | {counts.get(classification, 0)} | {descriptions[classification]} |")
+  for classification in BASELINE_CLASS_ORDER:
+    lines.append(
+      f"| {classification} | {counts.get(classification, 0)} | {BASELINE_CLASS_DESCRIPTIONS[classification]} |"
+    )
 
   lines.extend(["", f"| total | {len(results)} |", ""])
-  lines.extend(build_cross_check_section(results, settings))
   lines.extend(build_stale_section(stale))
 
   origins: dict[str, dict[str, int]] = {}
@@ -1675,7 +798,7 @@ def build_report(
 
   lines.append("")
 
-  for classification in settings.class_order():
+  for classification in BASELINE_CLASS_ORDER:
     if classification == CLASS_PASS:
       continue
 
@@ -1687,20 +810,17 @@ def build_report(
     lines.extend([f"## {classification} ({len(selected)})", ""])
 
     for result in selected:
-      lines.extend(build_case_section(result, settings))
+      lines.extend(build_case_section(result))
 
   return "\n".join(lines) + "\n"
 
 
-def build_case_section(
-  result: CaseResult,
-  settings: Settings,
-) -> list[str]:
+def build_case_section(result: CaseResult) -> list[str]:
   lines = [
     f"### `{result.case.name}`",
     "",
     f"- origin: `{result.case.location}`",
-    f"- {expected_description(result, settings)}",
+    f"- {expected_description(result)}",
     f"- selfhost: {result.selfhost.describe() if result.selfhost else 'not run'}",
     "",
     result.reason or "(no reason recorded)",
@@ -1709,44 +829,6 @@ def build_case_section(
 
   if result.selfhost and result.selfhost.output_tail:
     lines.extend(["Selfhost printed:", "", "```", "\n".join(result.selfhost.output_tail), "```", ""])
-
-  if settings.host_compare and result.host and result.host.output_tail:
-    lines.extend(["The host printed:", "", "```", "\n".join(result.host.output_tail), "```", ""])
-
-  return lines
-
-
-def build_cross_check_section(
-  results: list[CaseResult],
-  settings: Settings,
-) -> list[str]:
-  """`--host`: does the host the baselines came from still agree with them?"""
-  checked = cross_checked_results(results)
-
-  if not checked:
-    return []
-
-  drift = [result for result in checked if result.host_cross_check == CLASS_HOST_DRIFT]
-  errors = [result for result in checked if result.host_cross_check == CLASS_HOST_ERROR]
-
-  lines = [
-    "## Host cross-check",
-    "",
-    f"`{settings.host}` was run over the same cases and its verdict compared with the",
-    "committed baselines. The baselines are the reference; this only shows whether",
-    "they still describe the host. Any drift or host error fails the gate.",
-    "",
-    f"- cases cross-checked: {len(checked)}",
-    f"- {CLASS_HOST_DRIFT}: {len(drift)}",
-    f"- {CLASS_HOST_ERROR}: {len(errors)}",
-    "",
-  ]
-
-  for result in (drift + errors)[:REPORTED_CASES]:
-    lines.append(f"- `{result.case.name}` ({result.host_cross_check}): {result.host_cross_check_reason}")
-
-  if drift or errors:
-    lines.append("")
 
   return lines
 
@@ -1766,10 +848,7 @@ def build_stale_section(stale: list[str]) -> list[str]:
   ]
 
 
-def failing_entries(
-  results: list[CaseResult],
-  settings: Settings,
-) -> list[dict]:
+def failing_entries(results: list[CaseResult]) -> list[dict]:
   entries = []
 
   for result in results:
@@ -1782,12 +861,8 @@ def failing_entries(
       "class": result.classification,
       "selfhost": result.selfhost.describe() if result.selfhost else "not run",
       "reason": result.reason,
+      "baseline": describe_baseline(result.baseline) if result.baseline is not None else "none",
     }
-
-    if settings.host_compare:
-      entry["host"] = result.host.describe() if result.host else "not run"
-    else:
-      entry["baseline"] = describe_baseline(result.baseline) if result.baseline is not None else "none"
 
     entries.append(entry)
 
@@ -1803,41 +878,26 @@ def build_gate(
   """Describe the run as a bootstrap gate result."""
   total = len(results)
   passed = counts.get(CLASS_PASS, 0)
-  source = "host" if settings.host_compare else "baseline"
-
-  checked = cross_checked_results(results)
-  drift = [result for result in checked if result.host_cross_check == CLASS_HOST_DRIFT]
-  errors = [result for result in checked if result.host_cross_check == CLASS_HOST_ERROR]
+  source = "baseline"
 
   stale_plural = "s" if len(stale) != 1 else ""
   stale_note = f", {len(stale)} orphaned baseline{stale_plural}" if stale else ""
-  cross_note = ""
 
-  if checked:
-    cross_note = f", host cross-check {len(checked) - len(drift) - len(errors)}/{len(checked)}"
-
-  healthy = total > 0 and passed == total and not stale and not drift and not errors
+  healthy = total > 0 and passed == total and not stale
 
   gate = {
     "gate": settings.gate_id,
     "status": "pass" if healthy else "fail",
-    "summary": f"syntax parity {passed}/{total} vs {source}{stale_note}{cross_note}",
+    "summary": f"syntax parity {passed}/{total} vs {source}{stale_note}",
     "details": {
       "corpus": "syntax",
       "compared_against": source,
       "total": total,
-      "counts": {classification: counts.get(classification, 0) for classification in settings.class_order()},
+      "counts": {classification: counts.get(classification, 0) for classification in BASELINE_CLASS_ORDER},
       "stale_baselines": stale,
-      "failing": failing_entries(results, settings),
+      "failing": failing_entries(results),
     },
   }
-
-  if checked:
-    gate["details"]["host_cross_check"] = {
-      "checked": len(checked),
-      CLASS_HOST_DRIFT: [{"case": result.case.name, "detail": result.host_cross_check_reason} for result in drift],
-      CLASS_HOST_ERROR: [{"case": result.case.name, "detail": result.host_cross_check_reason} for result in errors],
-    }
 
   return gate
 
@@ -1850,10 +910,6 @@ def build_gate(
 def parse_arguments(repository_root: Path) -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   parser.add_argument("--compiler", help="selfhost-built compiler binary under test")
-  parser.add_argument(
-    "--host",
-    help="host compiler binary; cross-checked against the baselines, or the oracle under --host-compare",
-  )
   parser.add_argument("--std", help="std directory (default: <repo>/std)")
   parser.add_argument(
     "--baselines",
@@ -1871,11 +927,6 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
 
   modes = parser.add_mutually_exclusive_group()
   modes.add_argument(
-    "--host-compare",
-    action="store_true",
-    help="compare --compiler against --host directly, ignoring the baselines (the pre-freeze mode)",
-  )
-  modes.add_argument(
     "--write-baselines",
     action="store_true",
     help="regenerate the baselines from --compiler and exit; review the diff, it is a parser change",
@@ -1885,39 +936,14 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
     action="store_true",
     help="only check that cases and baselines correspond and are well formed, running no compiler",
   )
-  modes.add_argument(
-    "--materialize-parser-tests",
-    action="store_true",
-    help=f"(re)write {PARSER_TEST_DIR} from the host parser unit tests and exit, running no compiler",
-  )
-  modes.add_argument(
-    "--check-parser-tests",
-    action="store_true",
-    help=(
-      f"only check that {PARSER_TEST_DIR} matches the host parser unit tests and that every test call "
-      "was scraped, running no compiler"
-    ),
-  )
-
   arguments = parser.parse_args()
-  compiler_free_mode = arguments.materialize_parser_tests or arguments.check_parser_tests or arguments.check_coverage
 
-  if not compiler_free_mode and arguments.compiler is None:
-    parser.error(
-      "--compiler is required unless --check-coverage, --materialize-parser-tests or --check-parser-tests is given"
-    )
+  if not arguments.check_coverage and arguments.compiler is None:
+    parser.error("--compiler is required unless --check-coverage is given")
 
-  # These modes act on every case or snippet: a filtered materialization would
-  # delete every snippet the filter did not match, and a filtered check would
-  # hide real gaps.
-  if compiler_free_mode and arguments.filter:
-    parser.error(
-      "--check-coverage, --materialize-parser-tests and --check-parser-tests cover the whole corpus; "
-      "--filter does not apply"
-    )
-
-  if arguments.host_compare and arguments.host is None:
-    parser.error("--host-compare needs a --host compiler to compare against")
+  # A filtered coverage check would hide real gaps.
+  if arguments.check_coverage and arguments.filter:
+    parser.error("--check-coverage covers the whole corpus; --filter does not apply")
 
   return arguments
 
@@ -1999,17 +1025,10 @@ def print_summary(
   print("")
   print("class            count")
 
-  for classification in settings.class_order():
+  for classification in BASELINE_CLASS_ORDER:
     print(f"{classification:<16} {counts.get(classification, 0)}")
 
   print(f"{'total':<16} {len(results)}")
-
-  checked = cross_checked_results(results)
-
-  if checked:
-    drift = sum(1 for result in checked if result.host_cross_check == CLASS_HOST_DRIFT)
-    errors = sum(1 for result in checked if result.host_cross_check == CLASS_HOST_ERROR)
-    print(f"host cross-check: {len(checked)} checked, {CLASS_HOST_DRIFT} {drift}, {CLASS_HOST_ERROR} {errors}")
 
   failing = [result for result in results if result.classification != CLASS_PASS]
 
@@ -2038,12 +1057,6 @@ def main() -> int:
   repository_root = Path(__file__).resolve().parent.parent
   arguments = parse_arguments(repository_root)
 
-  if arguments.materialize_parser_tests:
-    return run_materialize_parser_tests(repository_root)
-
-  if arguments.check_parser_tests:
-    return run_parser_test_check(repository_root)
-
   std_path = Path(arguments.std).resolve() if arguments.std else repository_root / "std"
   work_dir = Path(arguments.work_dir).resolve() if arguments.work_dir else repository_root / "build/parity-syntax"
 
@@ -2053,12 +1066,9 @@ def main() -> int:
     repository_root=repository_root,
     baseline_dir=arguments.baselines.resolve(),
     work_dir=work_dir,
-    host_compare=arguments.host_compare,
     gate_id=arguments.gate_id,
   )
 
-  # The parser unit-test snippets are part of this walk as committed files under
-  # PARSER_TEST_DIR; scraping the Rust sources here as well would run them twice.
   cases = collect_repository_cases(repository_root)
 
   if not cases:
@@ -2072,12 +1082,6 @@ def main() -> int:
 
   if settings.compiler is None:
     return 2
-
-  if arguments.host is not None:
-    settings.host = resolve_binary(arguments.host, "host compiler", search_path=True)
-
-    if settings.host is None:
-      return 2
 
   if not std_path.is_dir():
     print(f"error: std directory not found: {std_path}", file=sys.stderr)
@@ -2093,16 +1097,8 @@ def main() -> int:
   if arguments.write_baselines:
     return write_baselines(settings, cases, arguments.jobs, filtered)
 
-  if settings.host_compare:
-    against = f"the host {settings.host}, directly"
-  else:
-    against = f"baselines under {relative_to(settings.baseline_dir, repository_root)}"
-
   print(f"[syntax] compiler: {settings.compiler}")
-  print(f"[syntax] against:  {against}")
-
-  if settings.host is not None and not settings.host_compare:
-    print(f"[syntax] host cross-check: {settings.host}")
+  print(f"[syntax] against:  baselines under {relative_to(settings.baseline_dir, repository_root)}")
 
   print(f"[syntax] cases:    {len(cases)} (jobs: {arguments.jobs})")
 

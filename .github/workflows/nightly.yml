@@ -19,7 +19,6 @@ on:
         default: auto
         options:
           - auto
-          - host
           - official
 
 # Unlike CI, an in-flight nightly is left to finish. The run force-moves a tag
@@ -212,8 +211,8 @@ jobs:
 
           echo "Website build triggered."
 
-  # The bootstrap ladder is the selfhost fixed-point gate: stage2 (built by the
-  # host-built compiler) and stage3 (built by stage2) must emit the same C.
+  # The bootstrap ladder is the selfhost fixed-point gate: stage2 (built by
+  # stage1) and stage3 (built by stage2) must emit the same C.
   # Each self-compilation takes around fifteen minutes locally, so it runs here
   # once per green commit instead of on every pull request.
   #
@@ -245,25 +244,17 @@ jobs:
   # not a candidate resets the streak to zero and uploads no selfhost binary,
   # which leaves the last published one in place.
   #
-  # A run whose stage0 fell back from official to host (scripts/bootstrap.sh's
-  # build_stage1, `promotion.json`'s `stage0.fallback: true`) proves the host
-  # still passes the ladder, which every run already assumes — it says nothing
-  # about the official asset itself, *unless* the run is also a promotion
-  # candidate: every gate still passed against a stage2 built the same way a
-  # manual `workflow_dispatch stage0=host` seed would build it. That case is
-  # treated exactly like such a manual seed: stage2 is published as the new
-  # official asset and the streak is reset to 1, re-seeding the official
-  # lineage instead of leaving every following nightly to repeat the same
-  # fallback until a maintainer notices and runs `workflow_dispatch
-  # stage0=host` by hand. A fallback run with a failing gate proves nothing
-  # about the official asset, so it keeps the old behavior: the streak is
-  # left exactly as it found it (neither incremented nor reset) and no
-  # selfhost binary is published. Either way an explicit `stage0=official`
-  # dispatch still fails outright on the same fallback trigger (Resolve
-  # stage0's `fall_back_or_fail`) rather than reaching this job at all. The
-  # decision itself (streak value, whether to publish, whether to re-seed) is
-  # `scripts/bootstrap.sh promotion-decide`, so it can be unit-tested without
-  # a real gh/release round trip — see scripts/tests/test_stage0_fallback.sh.
+  # stage0 is the official asset while its streak is at least 3, else a
+  # compiler built from the C seed (scripts/resolve_official_stage0.sh), and
+  # a stage0 that cannot build stage1 fails the run. A stale official asset
+  # therefore needs no special case: that night is not a candidate, the
+  # streak resets to 0, the next `auto` run starts from the seed, and three
+  # seed-built candidates publish a fresh official asset — as long as the seed
+  # can still build ignis/, which the `seed` job below checks every night and
+  # `scripts/bootstrap.sh seed` refreshes. The decision itself
+  # (streak value, whether to publish) is `scripts/bootstrap.sh
+  # promotion-decide`, so it can be unit-tested without a real gh/release
+  # round trip — see scripts/tests/test_stage0.sh.
   #
   # Supersede
   # ---------
@@ -327,41 +318,30 @@ jobs:
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 
       # Once a selfhost binary has been promoted `official`, the ladder starts
-      # stage1 from it instead of the Rust host, so the ladder measures the
-      # selfhost lineage compiling itself rather than the host compiling it
-      # once more. The host stays the oracle for G5 and parity. G6
-      # and G7 compare against their committed baselines and use the host only
-      # as a cross-check, regardless of which binary builds stage1.
+      # stage1 from it, so the ladder measures the promoted selfhost lineage
+      # compiling the current sources; until then (or after a streak reset)
+      # it starts from a compiler built from the C seed. Never the Rust host.
       #
       # `promotion-streak.json` is the only record of whether the asset
       # currently on the release is still official: a later non-candidate run
       # resets its streak to zero without removing the asset, so the streak is
       # read fresh rather than assumed from the asset's mere presence.
-      # `mode` records the workflow_dispatch input (auto/host/official) so
-      # `scripts/bootstrap.sh stages` can tell an explicit `stage0=official`
-      # (must fail outright if the asset cannot build stage1) apart from an
-      # `auto` resolution that landed on official (may fall back to the host
-      # — see build_stage1's stage0_explicit_official()). `identity` is
-      # target/ci/ignis's own content identity — always hashable directly by
-      # every job (ladder or gate) once it is built, since it travels in the
-      # bootstrap-stages artifact too, but recorded here anyway for the same
-      # uniform lookup every kind gets.
+      # `mode` records the workflow_dispatch input (auto/official): an
+      # explicit `stage0=official` fails here when there is no official asset
+      # instead of starting from the seed.
       #
       # This is scripts/resolve_official_stage0.sh, shared with ci.yml's
       # "Official stage0 gate" job so the download/verify/streak logic is not
-      # duplicated between the two workflows. `identity` (unlike `source`) is
-      # exactly what every later gate job needs and can actually use: a gate
-      # job's own `ensure_stage stage1` reads it back from the downloaded
+      # duplicated between the two workflows. For an official stage0 it
+      # writes build/bootstrap/stage0.json with the asset's `identity`, which
+      # is exactly what every later gate job needs and can actually use: a
+      # gate job's own `ensure_stage stage1` reads it back from the downloaded
       # stage0.json to confirm stage1's stamp still matches this run's
-      # official asset, without ever needing the asset itself — and a gate
-      # job never gets the official/selfhost asset itself (an ephemeral
-      # ${RUNNER_TEMP}/stage0/... path that dies with this job): without a
-      # recorded identity to fall back on, `ensure_stage stage1` in every gate
-      # job would see a bare "ignis" resolve to the host on PATH instead, read
-      # that as "stage0 identity changed", and either rebuild against the
-      # wrong compiler or (correctly, but needlessly) refuse via its
-      # stage0-lineage guard — on any night the promotion streak is >= 3
-      # (IGN-210 follow-up, review blocker/should-fix from PR #222).
+      # stage0, without ever needing the asset itself (an ephemeral
+      # ${RUNNER_TEMP}/stage0/... path that dies with this job; IGN-210
+      # follow-up, review blocker/should-fix from PR #222). For the seed it
+      # removes stage0.json, and `bootstrap.sh stages` builds stage0 from the
+      # seed and records the same fields itself.
       - name: Resolve stage0
         id: stage0
         env:
@@ -450,8 +430,8 @@ jobs:
       # (IGN-210 — without these, ensure_stage sees no stamp at all and
       # rebuilds both stages in every single gate job; the stamp's compiler
       # identity is a content hash precisely so it survives this
-      # download-artifact round trip unchanged), stage2's emitted C, the host
-      # compiler, and the std objects the host test run reuses. The ladder's
+      # download-artifact round trip unchanged), stage2's emitted C, and the
+      # std objects a test run reuses. The ladder's
       # own results, G1 and G4 with the measurements behind them, travel with
       # it for the report. Paths are relative to the workspace, so a gate job
       # unpacks the artifact over its own checkout.
@@ -464,7 +444,6 @@ jobs:
             build/bootstrap/stage0.json
             build/bootstrap/stage1/ignis
             build/bootstrap/stage1/stamp.json
-            build/bootstrap/stage1/log-stage0-official.txt
             build/bootstrap/stage2/ignis
             build/bootstrap/stage2/stamp.json
             build/bootstrap/stage2/selfhost_emit.c
@@ -473,7 +452,6 @@ jobs:
             build/bootstrap/gates/G1.json
             build/bootstrap/gates/G4.json
             build/selfhost/std/**
-            target/ci/ignis
           if-no-files-found: ignore
 
   gate:
@@ -504,17 +482,14 @@ jobs:
             command: gate-g5
             result: G5.json
           # Checks stage2's parse verdicts against the baselines committed
-          # under test_cases/__parse_verdicts__. The host is only a
-          # cross-check against the same baselines; it is the `ignis` on
-          # PATH (target/ci, restored below), as for G7.
+          # under test_cases/__parse_verdicts__.
           - gate: G6
             command: gate-g6
             result: G6.json
           # Checks stage2's dumps against the baselines committed under
           # test_cases/e2e/ok/__drop_schedules__, and compares the selfhost
           # compiler's own sources against stage1 rather than against a
-          # baseline that would change with every commit to `ignis/`. The
-          # host is only a cross-check against the same baselines.
+          # baseline that would change with every commit to `ignis/`.
           - gate: G7
             command: gate-g7
             result: G7.json
@@ -536,8 +511,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          chmod +x build/bootstrap/stage1/ignis build/bootstrap/stage2/ignis target/ci/ignis
-          echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+          chmod +x build/bootstrap/stage1/ignis build/bootstrap/stage2/ignis
 
       # A gate is only worth its runner while its commit is still the head.
       - name: Check whether the head moved
@@ -693,7 +667,6 @@ jobs:
             build/bootstrap/parity.md
             build/bootstrap/gates/
             build/bootstrap/*/log.txt
-            build/bootstrap/stage1/log-stage0-official.txt
             build/bootstrap/stage2/ignis
           if-no-files-found: ignore
 
@@ -733,30 +706,15 @@ jobs:
 
           CANDIDATE=$(jq -r '.candidate' build/bootstrap/promotion.json)
           COMMIT=$(jq -r '.commit' build/bootstrap/promotion.json)
-          STAGE0_FALLBACK=$(jq -r '.stage0.fallback // false' build/bootstrap/promotion.json)
 
           # See the "Promotion flow" comment on the `stages` job: the streak
-          # value, whether to publish a binary, and whether this is a
-          # fallback re-seed are all decided by one pure, unit-tested
-          # function rather than inline here.
-          DECISION=$(scripts/bootstrap.sh promotion-decide "$CANDIDATE" "$STAGE0_FALLBACK" "${PREVIOUS_STREAK:-0}")
+          # value and whether to publish a binary are decided by one pure,
+          # unit-tested function rather than inline here.
+          DECISION=$(scripts/bootstrap.sh promotion-decide "$CANDIDATE" "${PREVIOUS_STREAK:-0}")
 
           STREAK=$(jq -r '.streak' <<<"$DECISION")
           WRITE_STREAK=$(jq -r '.write_streak' <<<"$DECISION")
           PUBLISH_BINARY=$(jq -r '.publish_binary' <<<"$DECISION")
-          RESEED=$(jq -r '.reseed' <<<"$DECISION")
-
-          if [ "$STAGE0_FALLBACK" = "true" ]; then
-            REASON=$(jq -r '.stage0.fallback_reason // "no reason recorded"' build/bootstrap/promotion.json)
-            echo "::warning::stage0 fell back to the host: ${REASON}"
-
-            if [ "$RESEED" = "true" ]; then
-              echo "stage0 fell back to the host, but every gate still passed: re-seeding the official lineage — stage2 is published as the new official asset and the promotion streak is reset to 1, the same as a manual workflow_dispatch stage0=host seed."
-            else
-              echo "stage0 fell back to the host; the promotion streak stays at ${PREVIOUS_STREAK:-0} and no selfhost binary is published."
-              exit 0
-            fi
-          fi
 
           echo "candidate=${CANDIDATE} streak=${STREAK}"
 
@@ -801,10 +759,6 @@ jobs:
 
           jq -r '.gates | to_entries[] | "\(.key): \(.value.status) — \(.value.summary)"' \
             build/bootstrap/promotion.json
-
-          if [ "$(jq -r '.stage0.fallback // false' build/bootstrap/promotion.json)" = "true" ]; then
-            echo "stage0: fell back to the host — $(jq -r '.stage0.fallback_reason // "no reason recorded"' build/bootstrap/promotion.json)"
-          fi
 
           if [ "$(jq -r '.candidate' build/bootstrap/promotion.json)" != "true" ]; then
             echo "Not a promotion candidate: at least one gate did not pass."
