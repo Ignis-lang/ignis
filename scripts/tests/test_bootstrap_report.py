@@ -397,9 +397,22 @@ class ArgumentCombinationTests(unittest.TestCase):
 
     self.assertEqual(raised.exception.code, 2)
 
-  def test_write_baselines_rejects_whole_dump_and_host_compare(self) -> None:
-    self.assert_rejected("--compiler", "ignis", "--write-baselines", "--all", "--host-compare", "--host", "ignis")
-    self.assert_rejected("--compiler", "ignis", "--write-baselines", "--host-compare", "--host", "ignis")
+  def test_the_host_and_whole_dump_options_are_gone(self) -> None:
+    for option, argv in {
+      "--host": ("--compiler", "ignis", "--host", "ignis"),
+      "--host-compare": ("--compiler", "ignis", "--host-compare"),
+      "--all": ("--compiler", "ignis", "--all"),
+    }.items():
+      with self.subTest(option=option):
+        completed = subprocess.run(
+          [sys.executable, str(SCRIPT_DIR / "selfhost_drop_schedule_parity.py"), *argv],
+          capture_output=True,
+          text=True,
+          check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn(f"unrecognized arguments: {option}", completed.stderr)
 
   def test_write_baselines_and_check_coverage_are_separate_runs(self) -> None:
     self.assert_rejected("--compiler", "ignis", "--write-baselines", "--check-coverage")
