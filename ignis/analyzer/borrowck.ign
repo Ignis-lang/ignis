@@ -2369,6 +2369,27 @@ export namespace Borrowck {
     };
   }
 
+  /// Whether `id` evaluates to a value LIR lowering materializes: anything but
+  /// `void` and `never`. Mirrors `LirLowering::producesNoValue`.
+  function nodeProducesValue(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    id: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hir.get(id) else {
+      return false;
+    };
+
+    let Option::SOME(type_) = typeStore.get(node.typeId) else {
+      return true;
+    };
+
+    return match (type_) {
+      Analyzer::Type::VOID | Analyzer::Type::NEVER -> false,
+      _ -> true,
+    };
+  }
+
   /// The binding a match arm hands to the match result, if its value is one
   /// directly. Mirrors `arm_result_binding`, including the walk through
   /// block tails.
@@ -5411,6 +5432,7 @@ export namespace Borrowck {
     // the name still owes its drop.
     let mut statementPositionRef: &mut Borrowck::State = state;
     let matchValueIsUsed: boolean = !statementPositionRef.isStatementPosition(matchId.raw());
+    let matchProducesValue: boolean = Borrowck::nodeProducesValue(typeStore, hir, matchId);
 
     // This arm's own reachability, parallel to `branches`, so the compensation pass
     // below can tell which arms actually reach their end and owe the compensating drop.
@@ -5500,8 +5522,16 @@ export namespace Borrowck {
           // A borrowed pattern binding names storage the match never owned; the
           // rejection above already reported it and consuming it would schedule a
           // drop for the referent.
+          //
+          // The arm's own binding is handed over only when LIR lowering stores the
+          // arm's value into the match result, which it does whenever the match
+          // produces a value: a `!` in statement position still does, and the
+          // statement drops that result. A match typed `void` stores nothing, so the
+          // binding stays owned and the arm-end schedule frees it.
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
-            Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
+            if (matchProducesValue) {
+              Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
+            }
           } else if (matchValueIsUsed && !resultIsBorrowed && state.isMoveValid(result.raw()) && resultOwnsValue) {
             Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
             let mut recordRef: &mut Borrowck::State = state;
