@@ -6,7 +6,7 @@
 //! keeps only paths, byte ranges and names. References are searched in the
 //! indexed files only, so a use inside the standard library is never listed;
 //! the host also lists those (crates/ignis_lsp/src/server.rs:956). The
-//! completion data of the same analysis rides along.
+//! completion data and inlay hints of the same analysis ride along.
 
 import HashMap from "std::collections";
 import String from "std::string";
@@ -20,6 +20,7 @@ import SourceFile, SourceSpan from "@compiler::diagnostics";
 import Doc from "../doc/mod";
 
 import CompletionIndex, buildCompletionIndex, emptyCompletionIndex from "./completion_index";
+import FileInlayHints, buildFileInlayHints from "./inlay_hints";
 
 import
   ByteRange,
@@ -99,6 +100,8 @@ export record NavigationIndex {
   /// The position of each definition's declaration, by raw definition id.
   public sites: HashMap<u32, u64>;
   public completion: CompletionIndex;
+  /// The inlay hints of every open document.
+  public inlays: Vector<FileInlayHints>;
 
   /// The index of the module at `path`.
   public moduleOf(&self, path: &String): Option<u64> {
@@ -116,6 +119,25 @@ export record NavigationIndex {
 
       if (file.path.equals(path)) {
         return self.files.get(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The inlay hints of the open document at `path`.
+  public inlaysOf(&self, path: &String): Option<&FileInlayHints> {
+    let mut index: u64 = 0;
+
+    while (index < self.inlays.length()) {
+      let Option::SOME(hints) = self.inlays.get(index) else {
+        break;
+      };
+
+      if (hints.path.equals(path)) {
+        return self.inlays.get(index);
       }
 
       index += 1;
@@ -398,6 +420,7 @@ export function buildNavigationIndex(
     declarations: Vector::new<DeclarationSite>(),
     sites: HashMap::new<u32, u64>(),
     completion: emptyCompletionIndex(),
+    inlays: Vector::new<FileInlayHints>(),
   };
   let mut moduleIndex: u64 = 0;
 
@@ -422,6 +445,10 @@ export function buildNavigationIndex(
     if (isOpen || isProject) {
       index.files.push(buildFileHoverIndex(&file.text, module, analysisRecord, &program, isOpen, defs, types, symbols));
       indexed.push(moduleIndex);
+    }
+
+    if (isOpen) {
+      index.inlays.push(buildFileInlayHints(&file.text, module, analysisRecord, defs, types, symbols));
     }
 
     let first: u64 = index.declarations.length();
