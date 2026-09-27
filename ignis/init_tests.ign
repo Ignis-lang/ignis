@@ -1,4 +1,6 @@
+import Env from "std::env";
 import Fs from "std::fs";
+import LibC from "std::libc";
 import Path from "std::path";
 import Process from "std::process";
 import String from "std::string";
@@ -241,6 +243,40 @@ function initRunCreatesTheProjectAndRefusesToOverwriteIt(): void {
 
   let libEntryPath: Path::PathBuf = libRoot.join("source").join("lib.ign");
   Test::assertEq<str>(readText(&libEntryPath).toStr(), initLibTemplate());
+
+  let _removed = Fs::removeDirAll(&workDir);
+}
+
+/// A relative name is created under the current directory, the package named
+/// after its last component, and a `./` spelling of the same directory finds
+/// the manifest already there.
+@test
+function initRunResolvesARelativeNameAgainstTheCurrentDirectory(): void {
+  let workDir: Path::PathBuf = uniqueTempDir("relative");
+
+  Test::assertEq<i32>(LibC::File::chdir(workDir.asStr() as *u8), 0);
+
+  let mut options: InitOptions = InitOptions::create();
+  options.name = Option::SOME(String::create("nested/app"));
+  options.noGit = true;
+  options.quiet = true;
+
+  Test::assertEq<i32>(runInit(&options), 0);
+
+  let Result::OK(currentDir) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let manifestPath: Path::PathBuf = currentDir.join("nested").join("app").join("ignis.toml");
+  let manifest: String = readText(&manifestPath);
+  Test::assertEq<boolean>(manifest.startsWith("[package]\nname = \"app\"\n"), true);
+
+  let entryPath: Path::PathBuf = currentDir.join("nested").join("app").join("src").join("main.ign");
+  Test::assertEq<str>(readText(&entryPath).toStr(), initMainTemplate());
+
+  options.name = Option::SOME(String::create("./nested/app/"));
+  Test::assertEq<i32>(runInit(&options), 1);
 
   let _removed = Fs::removeDirAll(&workDir);
 }
