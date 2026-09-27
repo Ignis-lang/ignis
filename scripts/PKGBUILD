@@ -12,49 +12,49 @@ depends=(
   'binutils'
   'make'
 )
-makedepends=(
-  'xz'
+# The release archive .github/workflows/release.yml publishes for the tag: the
+# compiler binary at ./ignis and the standard library at ./std. Nothing is
+# built here. The archive is checked against the release's own .sha256 in
+# prepare(), so the sums below stay SKIP.
+source=(
+  "ignis-linux-amd64-${pkgver}.tar.gz::${url}/releases/download/v${pkgver}/ignis-linux-amd64.tar.gz"
+  "ignis-linux-amd64-${pkgver}.tar.gz.sha256::${url}/releases/download/v${pkgver}/ignis-linux-amd64.tar.gz.sha256"
 )
-source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('SKIP' 'SKIP')
 
-# Compile the compiler sources with $1 into build/$2/ignis, the way
-# scripts/bootstrap.sh builds a stage. The selfhost driver writes its emitted C
-# and object file into the working directory, so each stage runs in its own.
-_compile_stage() {
-  local compiler="$1" stage_dir="$PWD/build/$2"
+prepare() {
+  local expected
+  expected="$(cut -d' ' -f1 "ignis-linux-amd64-${pkgver}.tar.gz.sha256")"
 
-  mkdir -p "$stage_dir"
-  (
-    cd "$stage_dir"
-    IGNIS_STD_PATH="${srcdir}/${pkgname}-${pkgver}/std" "$compiler" "${srcdir}/${pkgname}-${pkgver}/ignis/main.ign" -o "$stage_dir/ignis"
-  )
+  echo "${expected}  ignis-linux-amd64-${pkgver}.tar.gz" | sha256sum -c -
 }
 
-# stage0 comes from the C seed committed under bootstrap/seed, stage1 is the
-# sources compiled by stage0, and stage2, the binary a release ships, is the
-# sources compiled by stage1.
+# Archives released by the Rust compiler (v0.4.0 and earlier) ship the C
+# runtime as sources and link std/runtime/libignis_rt.a, which they do not
+# contain. Selfhost archives have no C runtime and no Makefile there.
 build() {
-  cd "${pkgname}-${pkgver}"
-
-  local stage0
-  stage0="$(scripts/build_from_seed.sh -o "$PWD/build/stage0/ignis")"
-
-  _compile_stage "$stage0" stage1
-  _compile_stage "$PWD/build/stage1/ignis" stage2
+  if [[ -f "${srcdir}/std/runtime/Makefile" ]]; then
+    make -C "${srcdir}/std/runtime" libignis_rt.a
+  fi
 }
 
 check() {
-  cd "${pkgname}-${pkgver}"
-  build/stage2/ignis test-std --std-path std -o build/test-std
+  cat > check_hello.ign << 'EOF'
+import Io from "std::io";
+
+function main(): void {
+  Io::println("Hello, Ignis!");
+  return;
+}
+EOF
+
+  IGNIS_STD_PATH="${srcdir}/std" "${srcdir}/ignis" check check_hello.ign
 }
 
 package() {
-  cd "${pkgname}-${pkgver}"
-
-  install -Dm755 "build/stage2/ignis" "${pkgdir}/usr/lib/ignis/ignis-bin"
+  install -Dm755 "${srcdir}/ignis" "${pkgdir}/usr/lib/ignis/ignis-bin"
   install -d "${pkgdir}/usr/share/ignis"
-  cp -r "std" "${pkgdir}/usr/share/ignis/std"
+  cp -r "${srcdir}/std" "${pkgdir}/usr/share/ignis/std"
 
   install -Dm755 /dev/null "${pkgdir}/usr/bin/ignis"
   cat > "${pkgdir}/usr/bin/ignis" << 'EOF'
