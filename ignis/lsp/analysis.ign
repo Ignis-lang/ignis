@@ -566,15 +566,30 @@ export function analyzeDocuments(
 
   let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(&discovery, startPath, sources);
   appendProjectFileWarnings(startPath, sources, &mut analysis.diagnostics);
-
-  let manifestPath: Path::PathBuf = discovery.stdRoot.join("manifest.toml");
-
-  if (let Result::OK(manifestText) = Fs::readToString(&manifestPath)) {
-    let warnings: DiagnosticBag = checkUnknownManifestKeys(&manifestText, &manifestPath);
-    appendTextDiagnostics(&warnings, &manifestPath, &manifestText, &mut analysis.diagnostics);
-  }
+  appendStdManifestWarnings(&discovery.stdRoot, &mut analysis.diagnostics);
 
   return analysis;
+}
+
+/// Appends the unknown-key warnings of `manifest.toml` under `stdRoot`.
+///
+/// Every analysis that reaches the standard library loads this manifest, the
+/// build prints its warnings to stderr the same way, so they appear in every
+/// workspace, not only while the standard library itself is being edited. The
+/// manifest is read from disk: editing it does not start an analysis, so an
+/// open buffer of it would only be read when some Ignis file changes.
+function appendStdManifestWarnings(
+  stdRoot: &Path::PathBuf,
+  files: &mut Vector<FileDiagnostics>
+): void {
+  let manifestPath: Path::PathBuf = stdRoot.join("manifest.toml");
+
+  let Result::OK(manifestText) = Fs::readToString(&manifestPath) else {
+    return;
+  };
+
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&manifestText, &manifestPath);
+  appendTextDiagnostics(&warnings, &manifestPath, &manifestText, files);
 }
 
 /// Appends the unknown-key warnings of the project file that governs

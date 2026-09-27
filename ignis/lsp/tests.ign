@@ -698,8 +698,13 @@ function serverOnlyAnalyzesIgnisDocuments(): void {
 /// The text of a project file whose `[package]` table misspells `name`.
 const LSP_TEST_UNKNOWN_KEY_PROJECT: str = "[package]\nname = \"lsp-test\"\nversion = \"0.1.0\"\nnmae = \"typo\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n";
 
-/// `LSP_TEST_UNKNOWN_KEY_PROJECT` escaped for a JSON string.
-const LSP_TEST_UNKNOWN_KEY_PROJECT_JSON: str = "[package]\\nname = \\\"lsp-test\\\"\\nversion = \\\"0.1.0\\\"\\nnmae = \\\"typo\\\"\\n\\n[build]\\nsource_dir = \\\"src\\\"\\nentry = \\\"main.ign\\\"\\n";
+/// `text` encoded as a JSON string without its quotes, to splice into a
+/// hand-built message body.
+function lspTestJsonStringBody(text: str): String {
+  let value: JsonValue = JsonValue::fromString(String::create(text));
+  let encoded: String = Json::toJsonString(&value);
+  return encoded.substringBytes(1, encoded.length() - 1);
+}
 
 /// The diagnostics `files` holds for `path`, which must be there once.
 function lspTestDiagnosticsOf(
@@ -774,6 +779,58 @@ function analysisReportsUnknownProjectKeysOnTheProjectFile(): void {
 }
 
 @test
+function analysisReportsUnknownStdManifestKeysOnTheManifest(): void {
+  let directory: Path::PathBuf = lspTestDirectory("manifestkey");
+  let path: Path::PathBuf = lspTestWrite(&directory, "main.ign", "function main(): i32 {\n  return 0;\n}\n");
+
+  let Option::SOME(realStd) = lspTestStdPath() else {
+    Test::fail();
+    return;
+  };
+
+  let stdCopy: Path::PathBuf = directory.join("std");
+  let copyCommand: String = `rm -rf ${stdCopy.asStr()} && cp -r ${realStd.toStr()} ${stdCopy.asStr()}`;
+  Test::assertEq<i32>(LibC::Process::system(copyCommand.toStr() as *u8), 0);
+
+  let realManifest: Path::PathBuf = Path::PathBuf::fromString(&realStd).join("manifest.toml");
+  let Result::OK(manifestText) = Fs::readToString(&realManifest) else {
+    Test::fail();
+    return;
+  };
+
+  let strayManifest: String = String::create("zzz_root_stray = 1\n").concat(&manifestText);
+  let manifestPath: Path::PathBuf = lspTestWrite(&stdCopy, "manifest.toml", strayManifest.toStr());
+  let manifestPathText: String = manifestPath.toString();
+
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = Option::SOME(stdCopy.toString());
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostics: Vector<LspDiagnostic> = lspTestDiagnosticsOf(&files, &manifestPathText);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = diagnostics.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "B1004");
+  Test::assertEq<u64>(diagnostic.severity, 2);
+  Test::assertEq<str>(diagnostic.message.toStr(), "unknown key 'zzz_root_stray' in [top-level]");
+  Test::assertEq<u64>(diagnostic.start.line, 0);
+  Test::assertEq<u64>(diagnostic.start.character, 0);
+
+  // The manifest is read from disk, so fixing the file clears the warning on
+  // the next analysis.
+  lspTestWrite(&stdCopy, "manifest.toml", manifestText.toStr());
+
+  let fixedFiles: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  Test::assertEq<u64>(fixedFiles.length(), 0);
+}
+
+@test
 function serverAnalyzesTheProjectFileWhenItIsOpened(): void {
   let source: Path::PathBuf = lspTestProject("openproject");
   lspTestWrite(&source, "main.ign", "function main(): i32 {\n  return 0;\n}\n");
@@ -785,7 +842,8 @@ function serverAnalyzesTheProjectFileWhenItIsOpened(): void {
 
   let mut messages: Vector<String> = Vector::new<String>();
   messages.push(String::create("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
-  messages.push(lspTestDidOpen(&projectFile, LSP_TEST_UNKNOWN_KEY_PROJECT_JSON));
+  let projectText: String = lspTestJsonStringBody(LSP_TEST_UNKNOWN_KEY_PROJECT);
+  messages.push(lspTestDidOpen(&projectFile, projectText.toStr()));
 
   // A request analyzes the pending documents before it is answered, so the
   // publish comes first when opening the project file queued an analysis.

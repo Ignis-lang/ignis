@@ -399,9 +399,12 @@ def read_frame(stream):
 class LanguageServer:
   """One `lsp` process and a thread that collects what it writes."""
 
-  def __init__(self, compiler, workspace):
+  def __init__(self, compiler, workspace, std_path=None):
     environment = dict(os.environ)
     environment.setdefault("IGNIS_STD_PATH", str(REPOSITORY_ROOT / "std"))
+
+    if std_path is not None:
+      environment["IGNIS_STD_PATH"] = str(std_path)
 
     self.stderr = tempfile.TemporaryFile()
     self.process = subprocess.Popen(
@@ -1309,6 +1312,42 @@ class LanguageServerTest(unittest.TestCase):
       "contentChanges": [{"text": UNKNOWN_KEY_PROJECT.replace('nmae = "typo"\n', "")}],
     })
     self.assertEqual(self.server.published(project_uri)["diagnostics"], [])
+    self.finish(2)
+
+  def test_unknown_std_manifest_keys_are_published_on_the_manifest(self):
+    # The std manifest is read from disk, so fixing it clears the warning on
+    # the next analysis, which an edit to any Ignis file starts.
+    std_path = Path(self.workspace) / "std"
+    shutil.copytree(Path(os.environ.get("IGNIS_STD_PATH", REPOSITORY_ROOT / "std")), std_path)
+    manifest = std_path / "manifest.toml"
+    original = manifest.read_text(encoding="utf-8")
+    manifest.write_text("zzz_root_stray = 1\n" + original, encoding="utf-8")
+    manifest_uri = manifest.resolve().as_uri()
+
+    self.server.close()
+    self.server = LanguageServer(compiler_path(), self.workspace, std_path)
+    self.addCleanup(self.server.close)
+
+    uri = self.source_file("main.ign", FIXED_SOURCE)
+    self.server.initialize(self.workspace)
+
+    self.open_buffer(uri, FIXED_SOURCE)
+    published = self.server.published(manifest_uri)
+    self.show("published for manifest.toml", published)
+    self.assertEqual(len(published["diagnostics"]), 1, published)
+
+    diagnostic = published["diagnostics"][0]
+    self.assertEqual(diagnostic["code"], "B1004")
+    self.assertEqual(diagnostic["severity"], 2)
+    self.assertEqual(diagnostic["message"], "unknown key 'zzz_root_stray' in [top-level]")
+    self.assertEqual(diagnostic["range"]["start"], {"line": 0, "character": 0})
+
+    manifest.write_text(original, encoding="utf-8")
+    self.server.notify("textDocument/didChange", {
+      "textDocument": {"uri": uri, "version": 2},
+      "contentChanges": [{"text": FIXED_SOURCE}],
+    })
+    self.assertEqual(self.server.published(manifest_uri)["diagnostics"], [])
     self.finish(2)
 
   def test_errors_answer_bad_messages_and_exit_without_shutdown_fails(self):
