@@ -657,6 +657,44 @@ function createDirAllFailsWhenAFileTakesThePlaceOfADirectory(): void {
 }
 
 @test
+function createDirAllFollowsASymlinkToADirectory(): void {
+  let rootOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_create_dir_all_link`;
+  let root: str = rootOwned.toStr();
+  let targetOwned: String = `${root}/target`;
+  let linkOwned: String = `${root}/link`;
+  let belowLinkOwned: String = `${root}/link/child`;
+  let throughTargetOwned: String = `${root}/target/child`;
+
+  shellRemoveTree(`rm -rf ${root}`.toStr());
+
+  defer shellRemoveTree(`rm -rf ${root}`.toStr());
+
+  let Result::OK(_) = Fs::createDirAll(targetOwned.toStr()) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i32>(LibC::Process::system(`ln -s ${targetOwned.toStr()} ${linkOwned.toStr()}`.toStr() as *u8), 0);
+
+  // `mkdir -p` follows a link to a directory, both as the last component and
+  // as an intermediate one.
+  match (Fs::createDirAll(linkOwned.toStr())) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (Fs::createDirAll(belowLinkOwned.toStr())) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (Fs::metadata(throughTargetOwned.toStr())) {
+    Result::OK(value) -> Test::assert(value.isDir()),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
 function walkYieldsDescendantsAndExcludesTheDirectoryItself(): void {
   let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_walk_empty`;
   let rootPath: str = rootPathOwned.toStr();
