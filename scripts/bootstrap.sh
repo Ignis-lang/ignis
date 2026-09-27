@@ -18,7 +18,7 @@
 #
 #   G1  fixed point: stage3's emitted C is identical to stage2's
 #   G2  e2e parity: the host corpus passes under stage2
-#   G3  the selfhost test suite under stage2 matches the host's result
+#   G3  the selfhost test suite passes under stage2 and matches stage1's run
 #   G4  resource budget: stage2 within 1.25x of the host
 #   G5  diagnostics: stage2's messages equal or better than the host's
 #   G6  syntax: stage2's parse verdicts match the committed baselines under
@@ -31,8 +31,9 @@
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
 # splits that same work across runners instead: `stages` on one, each gate
-# subcommand on its own — G3's two test runs on a runner each — then
-# `gate-g3-compare`, `seal-gates` and `report` over the collected gate files.
+# subcommand on its own — G3's stage2 and stage1 test runs on a runner each —
+# then `gate-g3-compare`, `seal-gates` and `report` over the collected gate
+# files.
 
 set -euo pipefail
 
@@ -99,21 +100,16 @@ Commands:
            stage1-from-seed, stage2, stage3: the ladder with no Rust at all.
   stages   stage1, stage2, stage3, where only a stage3 failure is left to G1.
   parity   Run the host e2e corpus through stage2 (builds stage2 first when missing, G2).
-  gate-g3  Run the selfhost test suite under stage2 and under the host and compare them (G3).
-  gate-g3-stage2   Run only the stage2 half of G3 and keep its log and exit status.
-  gate-g3-host     Run only the host half of G3 and keep its log and exit status.
-  gate-g3-compare  Compare the two G3 logs and write gates/G3.json.
-  gate-g3-stage1   G3 run against stage1 instead of stage2 -> gates/G3-STAGE1.json
-                   (ci.yml's PR-only check; the promotion ladder still covers
-                   stage2). Only runs the stage1 half and the compare: pass
-                   the host half's exit status and log to gate-g3-record-host
-                   instead of re-running the host suite. A later local
-                   \`report\` lists these as unscored G3-STAGE1/G5-STAGE1 rows;
-                   they never affect the \`candidate\` verdict.
-  gate-g3-record-host <stage> <exit-status> <log-path>
-                   Record a host run captured elsewhere (e.g. ci.yml's own
-                   "Run the selfhost test suite" step) as the host half of
-                   G3 for <stage>, instead of running the host suite again.
+  gate-g3  Run the selfhost test suite under stage2 and under stage1: stage2's
+           run has to pass outright and match stage1's test for test (G3).
+  gate-g3-stage2   Run only the stage2 suite and keep its log and exit status.
+  gate-g3-compare  Judge the kept stage2 run against the kept stage1 run and
+                   write gates/G3.json.
+  gate-g3-stage1   Run the suite under stage1, which has to pass on its own ->
+                   gates/G3-STAGE1.json (ci.yml's PR-only check, and the stage1
+                   run gate-g3-compare reads). A later local \`report\` lists
+                   these as unscored G3-STAGE1/G5-STAGE1 rows; they never
+                   affect the \`candidate\` verdict.
   gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
   gate-g5-stage1   G5 run against stage1 instead of stage2 -> gates/G5-STAGE1.json
                    (ci.yml's PR-only check; the promotion ladder still covers
@@ -1058,46 +1054,40 @@ run_parity() {
   fi
 }
 
-# G3: the selfhost test suite has to report the same result under a built
-# stage (stage2 for the promotion gate and the nightly matrix; stage1 for
-# ci.yml's PR-only `gate-g3-stage1`, added to close the gap PR #201 left where
-# CI never ran this suite under a selfhost-built binary at all) as it does
-# under the host compiler. Both runs write their output next to each other and
-# only the test lines and the summary block are compared, so the timings and
-# the phase reports around them do not matter.
+# G3: the selfhost test suite has to pass outright under a built stage (stage2
+# for the promotion gate and the nightly matrix; stage1 for ci.yml's PR-only
+# `gate-g3-stage1`, added to close the gap PR #201 left where CI never ran this
+# suite under a selfhost-built binary at all). The stage2 gate also compares
+# its run with stage1's run of the same suite: both have to report the same
+# test names, the same skipped set and the same counts, so a stage that loses
+# or skips tests cannot pass on a clean summary alone. Only the test lines and
+# the summary block are read, so the timings and the phase reports around them
+# do not matter. No host compiler is involved.
 #
-# The two runs are separate subcommands because each takes the better part of a
+# The runs are separate subcommands because each takes the better part of a
 # quarter of an hour and nothing connects them until the comparison: the nightly
 # gives each one its own runner and compares the collected logs afterwards.
-# `gate-g3` still runs the three steps in order for a developer machine.
+# `gate-g3` still runs the steps in order for a developer machine.
 #
 # The functions below take the built stage's name as their first argument
 # ("stage2", "stage1"), keyed to its own artifact directory
-# (build/bootstrap/<stage>-tests/) so two stages' runs never collide, and the
-# gate id to write ("G3" for stage2, "G3-STAGE1" for stage1) so their gate
-# files never collide either.
+# (build/bootstrap/<stage>-tests/) so two stages' runs never collide.
 gate_g3_dir() { echo "${BOOTSTRAP_ROOT}/$1-tests"; }
 
-gate_g3_log() {
-  case "$2" in
-    host) echo "$(gate_g3_dir "$1")/log-host.txt" ;;
-    *) echo "$(gate_g3_dir "$1")/log.txt" ;;
-  esac
-}
+gate_g3_log() { echo "$(gate_g3_dir "$1")/log.txt"; }
 
-gate_g3_status_file() { echo "$(gate_g3_dir "$1")/status-$2.json"; }
+gate_g3_status_file() { echo "$(gate_g3_dir "$1")/status-$1.json"; }
 
 # The exit status of a run and the budget it was given, kept next to its log so
 # the comparison can read both back on another machine.
 #
 #   $1  stage ("stage2", "stage1")
-#   $2  run ("$1" for the built-stage half, or "host")
-#   $3  exit status
+#   $2  exit status
 write_gate_g3_status() {
   json_object \
-    run "$2" \
-    exit_status "$3" \
-    timeout_seconds "$GATE_G3_TIMEOUT_SECONDS" >"$(gate_g3_status_file "$1" "$2")"
+    run "$1" \
+    exit_status "$2" \
+    timeout_seconds "$GATE_G3_TIMEOUT_SECONDS" >"$(gate_g3_status_file "$1")"
 }
 
 # Print the exit status on the first line and the timeout budget on the second.
@@ -1125,165 +1115,116 @@ run_gate_g3_stage() {
   ensure_stage "$stage"
 
   local log status=0
-  log="$(gate_g3_log "$stage" "$stage")"
+  log="$(gate_g3_log "$stage")"
 
   mkdir -p "$(gate_g3_dir "$stage")" "$GATES_DIR"
 
   info "gate-g3: running the selfhost test suite under ${stage}"
 
-  # The suite reads its fixtures relative to the working directory, so both
-  # runs start from the project root. In test mode every artifact the selfhost
+  # The suite reads its fixtures relative to the working directory, so every
+  # run starts from the project root. In test mode every artifact the selfhost
   # driver writes derives from `-o`, which has to name a file inside the run
   # directory.
   (cd "$PROJECT_ROOT" && timeout "$GATE_G3_TIMEOUT_SECONDS" \
     env IGNIS_STD_PATH="${PROJECT_ROOT}/std" \
     "$(stage_bin "$stage")" test "$ENTRY" -o "$(gate_g3_dir "$stage")/ignis-tests") >"$log" 2>&1 || status=$?
 
-  write_gate_g3_status "$stage" "$stage" "$status"
+  write_gate_g3_status "$stage" "$status"
 
   info "gate-g3: ${stage} run exited ${status} -> ${log}"
 }
 
 run_gate_g3_stage2() { run_gate_g3_stage stage2; }
 
-# Run the selfhost test suite under the host compiler, to compare against a
-# built stage's run above.
-#
-#   $1  stage whose artifact directory this host run is paired with
-#   $2  gate id to write if the host compiler cannot even be found (nothing to
-#       compare against, and no later step can say why, so the verdict is
-#       recorded here)
-run_gate_g3_host_for() {
-  local stage="$1" gate_id="$2"
-  local log host_bin status=0
-  log="$(gate_g3_log "$stage" host)"
-
-  mkdir -p "$(gate_g3_dir "$stage")" "$GATES_DIR"
-
-  host_bin="$(command -v "$STAGE0" || true)"
-
-  if [[ -z "$host_bin" ]]; then
-    write_gate "$gate_id" fail "host compiler not found: ${STAGE0}" \
-      "$(json_object "${stage}_log" "$(gate_g3_log "$stage" "$stage")" host_log "$log")"
-    return 0
-  fi
-
-  info "gate-g3: running the selfhost test suite under ${host_bin}"
-
-  # The host runs the suite in project mode. Its single-file mode reads no
-  # ignis.toml, so the `@compiler` alias the selfhost sources import through
-  # would not resolve and the run would end before any test.
-  (cd "$PROJECT_ROOT" && timeout "$GATE_G3_TIMEOUT_SECONDS" "$host_bin" test) \
-    >"$log" 2>&1 || status=$?
-
-  write_gate_g3_status "$stage" host "$status"
-
-  info "gate-g3: host run exited ${status} -> ${log}"
-}
-
-run_gate_g3_host() { run_gate_g3_host_for stage2 G3; }
-
-# Record a host run captured elsewhere instead of running the host suite a
-# second time. ci.yml's PR-only `gate-g3-stage1` used to call
-# `run_gate_g3_host_for` directly, but that re-runs `<host> test` byte-for-byte
-# identically to the job's own "Run the selfhost test suite" step a few
-# minutes earlier — this lets that step's own run feed the comparison instead.
-#
-#   $1  stage whose artifact directory this host run is paired with
-#   $2  the host run's exit status
-#   $3  path to the host run's already-captured log
-run_gate_g3_record_host() {
-  local stage="$1" status="$2" log="$3"
-  mkdir -p "$(gate_g3_dir "$stage")" "$GATES_DIR"
-  [[ "$log" -ef "$(gate_g3_log "$stage" host)" ]] || cp "$log" "$(gate_g3_log "$stage" host)"
-  write_gate_g3_status "$stage" host "$status"
-  info "gate-g3: recorded a host run that exited ${status} -> $(gate_g3_log "$stage" host)"
-}
-
-# Compare a built stage's run with the host's and write the gate result.
+# Judge a built stage's run and write the gate result.
 #
 #   $1  stage ("stage2", "stage1")
 #   $2  gate id to write ("G3", "G3-STAGE1")
-#   $3  label bootstrap_report.py uses for the built-stage side in the JSON
-#       details and summary text (defaults to $1)
+#   $3  stage whose run of the same suite $1's has to match (optional)
 run_gate_g3_compare_for() {
-  local stage="$1" gate_id="$2" label="${3:-$1}"
-  local stage_log host_log stage_status_file host_status_file
-  stage_log="$(gate_g3_log "$stage" "$stage")"
-  host_log="$(gate_g3_log "$stage" host)"
-  stage_status_file="$(gate_g3_status_file "$stage" "$stage")"
-  host_status_file="$(gate_g3_status_file "$stage" host)"
+  local stage="$1" gate_id="$2" reference="${3-}"
+  local log status_file reference_log="" reference_status_file=""
+  log="$(gate_g3_log "$stage")"
+  status_file="$(gate_g3_status_file "$stage")"
+
+  local required=("$log" "$status_file")
+
+  if [[ -n "$reference" ]]; then
+    reference_log="$(gate_g3_log "$reference")"
+    reference_status_file="$(gate_g3_status_file "$reference")"
+    required+=("$reference_log" "$reference_status_file")
+  fi
 
   mkdir -p "$GATES_DIR"
 
   local missing=()
   local path
-  for path in "$stage_log" "$host_log" "$stage_status_file" "$host_status_file"; do
+  for path in "${required[@]}"; do
     [[ -f "$path" ]] || missing+=("$path")
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
-    # One side never produced anything. Whichever side did run may already have
-    # recorded why, and that verdict says more than a missing file does.
-    if [[ -f "${GATES_DIR}/${gate_id}.json" ]]; then
-      info "gate-g3: missing ${missing[*]}, keeping the recorded ${gate_id} result"
-      return 0
-    fi
-
     write_gate "$gate_id" fail "the selfhost test runs left nothing to compare" \
-      "$(json_object "${stage}_log" "$stage_log" host_log "$host_log" missing "${missing[*]}")"
+      "$(json_object "${stage}_log" "$log" missing "${missing[*]}")"
     return 0
   fi
 
-  local stage_fields host_fields stage_status host_status timeout_seconds
-  stage_fields="$(read_gate_g3_status "$stage_status_file")" ||
-    fail "gate-g3: ${stage_status_file} is not readable"
-  host_fields="$(read_gate_g3_status "$host_status_file")" ||
-    fail "gate-g3: ${host_status_file} is not readable"
+  local fields status timeout_seconds
+  fields="$(read_gate_g3_status "$status_file")" ||
+    fail "gate-g3: ${status_file} is not readable"
 
-  stage_status="$(sed -n 1p <<<"$stage_fields")"
-  host_status="$(sed -n 1p <<<"$host_fields")"
-  timeout_seconds="$(sed -n 2p <<<"$stage_fields")"
+  status="$(sed -n 1p <<<"$fields")"
+  timeout_seconds="$(sed -n 2p <<<"$fields")"
 
   [[ -n "$timeout_seconds" ]] || timeout_seconds="$GATE_G3_TIMEOUT_SECONDS"
 
+  local reference_arguments=()
+
+  if [[ -n "$reference" ]]; then
+    local reference_fields reference_status
+    reference_fields="$(read_gate_g3_status "$reference_status_file")" ||
+      fail "gate-g3: ${reference_status_file} is not readable"
+
+    reference_status="$(sed -n 1p <<<"$reference_fields")"
+
+    reference_arguments=(
+      --reference-log "$reference_log"
+      --reference-status "$reference_status"
+    )
+  fi
+
+  # The `+` form keeps an empty array from tripping `set -u` on bash < 4.4.
   python3 "${SCRIPT_DIR}/bootstrap_report.py" gate-g3 \
-    --stage2-log "$stage_log" \
-    --host-log "$host_log" \
-    --stage2-status "$stage_status" \
-    --host-status "$host_status" \
+    --log "$log" \
+    --status "$status" \
+    ${reference_arguments[@]+"${reference_arguments[@]}"} \
     --timeout-seconds "$timeout_seconds" \
-    --label "$label" \
+    --label "$stage" \
     --gate-id "$gate_id" \
     --output "${GATES_DIR}/${gate_id}.json"
 
   info "gate-g3: result -> ${GATES_DIR}/${gate_id}.json"
 }
 
-run_gate_g3_compare() { run_gate_g3_compare_for stage2 G3 stage2; }
+run_gate_g3_compare() { run_gate_g3_compare_for stage2 G3 stage1; }
 
-# The whole gate on one machine. A failing half still leaves its log behind, so
+# ci.yml's PR-only check, and the nightly's reference run for G3: the selfhost
+# test suite under stage1, which has to pass on its own. Added to close the gap
+# PR #201 (merged on host-only CI) left: the selfhost test suite failed to even
+# link under stage1/stage2 (G3), and stage2 panicked on two error-corpus cases
+# (G5), and neither surfaced until the nightly ladder ran. Its log stays behind
+# in build/bootstrap/stage1-tests/ for `gate-g3-compare`.
+run_gate_g3_stage1() {
+  run_gate_g3_stage stage1
+  run_gate_g3_compare_for stage1 G3-STAGE1
+}
+
+# The whole gate on one machine. A failing run still leaves its log behind, so
 # the comparison always runs and holds the verdict.
 run_gate_g3() {
   run_gate_g3_stage2 || info "gate-g3: the stage2 run exited non-zero, continuing"
-  run_gate_g3_host || info "gate-g3: the host run exited non-zero, continuing"
+  run_gate_g3_stage1 || info "gate-g3: the stage1 run exited non-zero, continuing"
   run_gate_g3_compare
-}
-
-# ci.yml's PR-only check: the same G3 mechanics as above, run against stage1
-# instead of stage2. Added to close the gap PR #201 (merged on host-only CI)
-# left: the selfhost test suite failed to even link under stage1/stage2 (G3),
-# and stage2 panicked on two error-corpus cases (G5), and neither surfaced
-# until the nightly ladder ran. Kept out of `run_gate_g3`/`run_gates` because
-# the nightly ladder already covers stage2 through the promotion gates; this
-# only needs to run once, on the cheaper stage1, before a PR merges.
-#
-# No host half here: ci.yml already runs `<host> test` in its own "Run the
-# selfhost test suite" step and feeds that run into this comparison via
-# `gate-g3-record-host`, rather than paying for the same suite twice.
-run_gate_g3_stage1() {
-  run_gate_g3_stage stage1
-  run_gate_g3_compare_for stage1 G3-STAGE1 stage1
 }
 
 run_report() {
@@ -2005,10 +1946,8 @@ main() {
     gate-g7-baselines) run_gate_g7_baselines "${2-}" ;;
     gate-g3) run_gate_g3 ;;
     gate-g3-stage2) run_gate_g3_stage2 ;;
-    gate-g3-host) run_gate_g3_host ;;
     gate-g3-compare) run_gate_g3_compare ;;
     gate-g3-stage1) run_gate_g3_stage1 ;;
-    gate-g3-record-host) run_gate_g3_record_host "${2-}" "${3-}" "${4-}" ;;
     gates) run_gates ;;
     seal-gates) seal_missing_gates ;;
     report) run_report ;;

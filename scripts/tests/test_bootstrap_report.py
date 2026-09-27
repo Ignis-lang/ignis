@@ -28,6 +28,11 @@ nothing here touches the real repository's build/ directory. The G7-specific
 tests instead import `build_gate` directly and feed it a tiny synthetic
 `DropResult`, so what they assert against is the real formatting code.
 
+The last group covers `bootstrap_report.py gate-g3` once the host stopped
+being its reference: a built stage's run of the selfhost test suite has to pass
+outright, and the nightly's stage2 run has to agree with the stage1 run of the
+same suite on every test name, the skipped set and the counts.
+
 Usage: python3 scripts/tests/test_bootstrap_report.py
 """
 
@@ -400,6 +405,239 @@ class ArgumentCombinationTests(unittest.TestCase):
 
   def test_a_plain_regeneration_is_accepted(self) -> None:
     self.parse("--compiler", "ignis", "--write-baselines")
+
+
+def suite_log(results: dict[str, str], counts: dict[str, int] | None = None) -> str:
+  """A selfhost `ignis test` log in the shape the runner prints: one line per
+  test, then the `• Summary` block. `counts` overrides the summary derived
+  from `results`, and `None` values drop a count line entirely."""
+  lines = ["• Running tests", ""]
+
+  for name, status in results.items():
+    lines.append(f"  - {name} ... {status}")
+
+  derived = {
+    "total": len(results),
+    "passed": sum(1 for status in results.values() if status == "ok"),
+    "failed": sum(1 for status in results.values() if status == "FAILED"),
+    "skipped": sum(1 for status in results.values() if status.startswith("skip (")),
+  }
+  derived.update(counts or {})
+
+  lines += ["", "• Summary"]
+
+  for label in ("total", "passed", "failed", "skipped"):
+    if derived.get(label) is not None:
+      lines.append(f"  - {derived[label]} {label}")
+
+  return "\n".join(lines) + "\n"
+
+
+PASSING_RESULTS = {
+  "lexer::tokens": "ok",
+  "parser::records": "ok",
+  "fmt::layout": "skip (needs a terminal)",
+}
+
+
+class GateG3Tests(unittest.TestCase):
+  """G3 without the host: the suite under a built stage has to pass outright,
+  and the nightly's stage2 run has to match the stage1 run of the same suite
+  test for test and count for count."""
+
+  def setUp(self) -> None:
+    self._tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self._tmp.cleanup)
+    self.root = Path(self._tmp.name)
+
+  def write_log(self, name: str, text: str) -> Path:
+    path = self.root / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+  def run_gate(
+    self,
+    log: Path,
+    status: int = 0,
+    reference_log: Path | None = None,
+    reference_status: int = 0,
+    label: str = "stage2",
+    gate_id: str = "G3",
+  ) -> dict:
+    output = self.root / "gates" / f"{gate_id}.json"
+    argv = [
+      sys.executable,
+      str(BOOTSTRAP_REPORT_PY),
+      "gate-g3",
+      "--log",
+      str(log),
+      "--status",
+      str(status),
+      "--timeout-seconds",
+      "10800",
+      "--label",
+      label,
+      "--gate-id",
+      gate_id,
+      "--output",
+      str(output),
+    ]
+
+    if reference_log is not None:
+      argv += ["--reference-log", str(reference_log), "--reference-status", str(reference_status)]
+
+    completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+
+    self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    gate = json.loads(output.read_text(encoding="utf-8"))
+    self.assertEqual(gate["gate"], gate_id)
+
+    return gate
+
+  def test_a_passing_stage1_run_passes_on_its_own(self) -> None:
+    log = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(log, label="stage1", gate_id="G3-STAGE1")
+
+    self.assertEqual(gate["status"], "pass", gate)
+    self.assertNotIn("host", json.dumps(gate))
+
+  def test_stage2_matching_stage1_passes(self) -> None:
+    stage2 = self.write_log("stage2.txt", suite_log(PASSING_RESULTS))
+    stage1 = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(stage2, reference_log=stage1)
+
+    self.assertEqual(gate["status"], "pass", gate)
+    self.assertIn("stage1", gate["summary"])
+    self.assertNotIn("host", json.dumps(gate))
+
+  def test_a_failing_test_under_stage2_fails_even_when_stage1_agrees(self) -> None:
+    results = dict(PASSING_RESULTS, **{"parser::records": "FAILED"})
+    stage2 = self.write_log("stage2.txt", suite_log(results))
+    stage1 = self.write_log("stage1.txt", suite_log(results))
+
+    gate = self.run_gate(stage2, status=1, reference_log=stage1, reference_status=1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("parser::records", gate["details"]["failing"])
+    self.assertIn("1 test failed", gate["summary"])
+
+  def test_a_failed_count_without_a_failed_line_still_fails(self) -> None:
+    stage2 = self.write_log("stage2.txt", suite_log(PASSING_RESULTS, {"failed": 1}))
+
+    gate = self.run_gate(stage2, label="stage1", gate_id="G3-STAGE1")
+
+    self.assertEqual(gate["status"], "fail", gate)
+
+  def test_a_non_zero_exit_with_a_clean_summary_fails(self) -> None:
+    log = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(log, status=1, label="stage1", gate_id="G3-STAGE1")
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("exit 1", gate["summary"])
+
+  def test_a_timeout_fails(self) -> None:
+    log = self.write_log("stage2.txt", "• Running tests\n  - lexer::tokens ... ok\n")
+    stage1 = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(log, status=124, reference_log=stage1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("timed out", gate["summary"])
+    self.assertEqual(gate["details"]["timed_out"], ["stage2"])
+
+  def test_a_missing_summary_fails(self) -> None:
+    log = self.write_log("stage1.txt", "error: cannot link the test binary\n")
+
+    gate = self.run_gate(log, status=1, label="stage1", gate_id="G3-STAGE1")
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("no test summary", gate["summary"])
+    self.assertIn("error: cannot link the test binary", gate["details"]["stage1"]["errors"])
+
+  def test_a_reference_without_a_summary_fails(self) -> None:
+    stage2 = self.write_log("stage2.txt", suite_log(PASSING_RESULTS))
+    stage1 = self.write_log("stage1.txt", "error: cannot link the test binary\n")
+
+    gate = self.run_gate(stage2, reference_log=stage1, reference_status=1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("stage1 produced no test summary", gate["summary"])
+
+  def test_a_reference_that_exits_non_zero_with_a_clean_summary_fails(self) -> None:
+    stage2 = self.write_log("stage2.txt", suite_log(PASSING_RESULTS))
+    stage1 = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(stage2, reference_log=stage1, reference_status=1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("stage1", gate["summary"])
+    self.assertIn("exit 1", gate["summary"])
+
+  def test_a_test_name_mismatch_with_stage1_fails(self) -> None:
+    renamed = {
+      "lexer::tokens": "ok",
+      "parser::enums": "ok",
+      "fmt::layout": "skip (needs a terminal)",
+    }
+    stage2 = self.write_log("stage2.txt", suite_log(renamed))
+    stage1 = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(stage2, reference_log=stage1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertEqual(gate["details"]["missing_from_stage2"], ["parser::records"])
+    self.assertEqual(gate["details"]["missing_from_stage1"], ["parser::enums"])
+
+  def test_a_skipped_set_mismatch_with_stage1_fails(self) -> None:
+    skipped_elsewhere = {
+      "lexer::tokens": "skip (needs a terminal)",
+      "parser::records": "ok",
+      "fmt::layout": "ok",
+    }
+    stage2 = self.write_log("stage2.txt", suite_log(skipped_elsewhere))
+    stage1 = self.write_log("stage1.txt", suite_log(PASSING_RESULTS))
+
+    gate = self.run_gate(stage2, reference_log=stage1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertEqual(gate["details"]["skipped_only_under_stage2"], ["lexer::tokens"])
+    self.assertEqual(gate["details"]["skipped_only_under_stage1"], ["fmt::layout"])
+
+  def test_a_count_mismatch_with_stage1_fails(self) -> None:
+    stage2 = self.write_log("stage2.txt", suite_log(PASSING_RESULTS))
+    stage1 = self.write_log("stage1.txt", suite_log(PASSING_RESULTS, {"total": 4, "passed": 3}))
+
+    gate = self.run_gate(stage2, reference_log=stage1)
+
+    self.assertEqual(gate["status"], "fail", gate)
+    self.assertIn("stage1 3/4", gate["summary"])
+
+  def test_the_host_options_are_gone(self) -> None:
+    log = self.write_log("stage2.txt", suite_log(PASSING_RESULTS))
+
+    completed = subprocess.run(
+      [
+        sys.executable,
+        str(BOOTSTRAP_REPORT_PY),
+        "gate-g3",
+        "--log",
+        str(log),
+        "--host-log",
+        str(log),
+        "--output",
+        str(self.root / "G3.json"),
+      ],
+      capture_output=True,
+      text=True,
+      check=False,
+    )
+
+    self.assertNotEqual(completed.returncode, 0)
+    self.assertIn("--host-log", completed.stderr)
 
 
 if __name__ == "__main__":

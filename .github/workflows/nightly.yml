@@ -220,9 +220,10 @@ jobs:
   # Shape
   # -----
   # The ladder is built once in `stages` and published as one artifact; the gates
-  # that only read stage2 then run as a matrix against that artifact, so the wall
-  # time is the slowest gate rather than their sum. G3 is two full runs of the
-  # selfhost test suite, one under stage2 and one under the host, so it takes a
+  # that only read the built stages (stage2, and stage1 for the G3-stage1 row)
+  # then run as a matrix against that artifact, so the wall time is the slowest
+  # gate rather than their sum. G3 is two full runs of the
+  # selfhost test suite, one under stage2 and one under stage1, so it takes a
   # matrix entry per run and `report` compares the collected logs. G4 stays with
   # the ladder because it compares two measurements, which only means something
   # when both were taken on the same machine. `report` collects the gate files
@@ -328,7 +329,7 @@ jobs:
       # Once a selfhost binary has been promoted `official`, the ladder starts
       # stage1 from it instead of the Rust host, so the ladder measures the
       # selfhost lineage compiling itself rather than the host compiling it
-      # once more. The host stays the oracle for G3-host, G5 and parity. G6
+      # once more. The host stays the oracle for G5 and parity. G6
       # and G7 compare against their committed baselines and use the host only
       # as a cross-check, regardless of which binary builds stage1.
       #
@@ -489,15 +490,16 @@ jobs:
           - gate: G2
             command: parity
             result: G2.json
-          # Neither half decides anything on its own: they leave a log and an
-          # exit status behind and `report` runs the comparison. The only result
-          # file either can write is the one for a missing host compiler.
+          # The stage2 run leaves a log and an exit status behind and `report`
+          # compares it with the stage1 run's. The stage1 run also judges
+          # itself into G3-STAGE1.json, an unscored row in the report that says
+          # whether the reference itself passed.
           - gate: G3-stage2
             command: gate-g3-stage2
             result: G3.json
-          - gate: G3-host
-            command: gate-g3-host
-            result: G3.json
+          - gate: G3-stage1
+            command: gate-g3-stage1
+            result: G3-STAGE1.json
           - gate: G5
             command: gate-g5
             result: G5.json
@@ -583,13 +585,15 @@ jobs:
             fi
           done
 
-          # The log and the status file are the G3 halves' product; the test
+          # The log and the status file are the G3 runs' product; the test
           # binary next to them is not worth an artifact.
-          if [ -d build/bootstrap/stage2-tests ]; then
-            mkdir -p upload/stage2-tests
-            cp build/bootstrap/stage2-tests/log*.txt upload/stage2-tests/ || true
-            cp build/bootstrap/stage2-tests/status-*.json upload/stage2-tests/ || true
-          fi
+          for TESTS in stage2-tests stage1-tests; do
+            if [ -d "build/bootstrap/${TESTS}" ]; then
+              mkdir -p "upload/${TESTS}"
+              cp "build/bootstrap/${TESTS}"/log*.txt "upload/${TESTS}/" || true
+              cp "build/bootstrap/${TESTS}"/status-*.json "upload/${TESTS}/" || true
+            fi
+          done
 
       - name: Upload the gate result
         if: always() && steps.head.outputs.superseded != 'true'
@@ -662,9 +666,10 @@ jobs:
           merge-multiple: true
           path: build/bootstrap
 
-      # G3's two runs happened on a runner each and their logs only met here.
-      # A half that produced nothing leaves the comparison with nothing to read,
-      # which it records as a failed gate rather than a missing one.
+      # G3's stage2 and stage1 runs happened on a runner each and their logs
+      # only met here. A run that produced nothing leaves the comparison with
+      # nothing to read, which it records as a failed gate rather than a
+      # missing one.
       - name: Compare the G3 test runs
         if: steps.head.outputs.superseded != 'true'
         run: scripts/bootstrap.sh gate-g3-compare
@@ -688,7 +693,6 @@ jobs:
             build/bootstrap/parity.md
             build/bootstrap/gates/
             build/bootstrap/*/log.txt
-            build/bootstrap/*/log-host.txt
             build/bootstrap/stage1/log-stage0-official.txt
             build/bootstrap/stage2/ignis
           if-no-files-found: ignore
