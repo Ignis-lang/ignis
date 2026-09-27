@@ -5,8 +5,8 @@ Spawns the language server, speaks JSON-RPC with Content-Length framing, and
 checks the lifecycle (initialize, shutdown, exit and its exit code), the error
 responses, the diagnostics published for an open buffer (a type error
 reported at the right UTF-16 range, then cleared once the buffer is fixed or
-closed), the hovers answered for it, go-to-definition, find-references and
-the document outline over a two-file project, and completion in each
+closed), the hovers answered for it, go-to-definition, find-references,
+rename and the document outline over a two-file project, and completion in each
 context the host completes, also while the buffer does not parse, and the
 formatting edits and quick fixes it offers.
 The erroneous text only ever exists in the editor buffer, so the diagnostic
@@ -414,6 +414,14 @@ class LanguageServer:
     })
     return self.response(request_id)["result"]
 
+  def rename(self, request_id, uri, position, new_name):
+    self.request(request_id, "textDocument/rename", {
+      "textDocument": {"uri": uri},
+      "position": position,
+      "newName": new_name,
+    })
+    return self.response(request_id)["result"]
+
   def completion(self, request_id, uri, position):
     self.request(request_id, "textDocument/completion", {"textDocument": {"uri": uri}, "position": position})
     return self.response(request_id)["result"]
@@ -765,6 +773,59 @@ class LanguageServerTest(unittest.TestCase):
 
     self.assertIsNone(self.server.definition(6, uri, position_of(broken, "broken", delta=2)))
     self.finish(7)
+
+  def rename_edits(self, uri, text, new_name, *places):
+    """The `WorkspaceEdit` renaming to `new_name` the names at `places`,
+    each a `(needle, occurrence, length)` of `text`."""
+    return {"changes": {uri: [
+      {"range": range_of(text, needle, occurrence, length=length), "newText": new_name}
+      for needle, occurrence, length in places
+    ]}}
+
+  def test_rename_edits_every_place_of_a_local_or_a_parameter(self):
+    uri, _ = self.open_navigation_project()
+    source = NAVIGATION_SOURCE
+    self.assertIs(self.server.initialize_result["capabilities"]["renameProvider"], True)
+
+    local = self.server.rename(2, uri, position_of(source, "count)", delta=2), "total")
+    self.show("rename of a local", local)
+    self.assertEqual(local, self.rename_edits(uri, source, "total", ("count: i32", 1, 5), ("count)", 1, 5)))
+
+    parameter = self.server.rename(3, uri, position_of(source, "side: i32"), "edge")
+    self.show("rename of a parameter", parameter)
+    self.assertEqual(parameter, self.rename_edits(
+      uri, source, "edge", ("side: i32", 1, 4), ("side * side", 1, 4), ("side;", 1, 4)))
+    self.finish(4)
+
+  def test_rename_rejects_std_symbols_imports_members_and_invalid_names(self):
+    uri, _ = self.open_navigation_project()
+    source = NAVIGATION_SOURCE
+
+    self.assertIsNone(self.server.rename(2, uri, position_of(source, "Io::println", delta=6), "printLine"))
+    self.assertIsNone(self.server.rename(3, uri, position_of(source, "Io from", delta=1), "Output"))
+    self.assertIsNone(self.server.rename(4, uri, position_of(source, "double from", delta=1), "twice"))
+    self.assertIsNone(self.server.rename(5, uri, position_of(source, "point.x", delta=6), "left"))
+    self.assertIsNone(self.server.rename(6, uri, position_of(source, "SCALE)", delta=1), "FACTOR"))
+    self.assertIsNone(self.server.rename(7, uri, position_of(source, "count)"), "1count"))
+    self.assertIsNone(self.server.rename(8, uri, position_of(source, "count)"), "function"))
+    self.assertIsNone(self.server.rename(9, uri, position_of(source, "count)"), "cöunt"))
+    self.assertIsNone(self.server.rename(10, uri, position_of(source, "  let point", delta=1), "renamed"))
+    self.finish(11)
+
+  def test_rename_after_an_edit_that_breaks_parsing_moves_with_the_text(self):
+    uri, _ = self.open_navigation_project()
+    self.assertIsNotNone(self.server.rename(2, uri, position_of(NAVIGATION_SOURCE, "count)"), "total"))
+
+    broken = "function broken(\n" + NAVIGATION_SOURCE
+    self.change(uri, 2, broken)
+    moved = self.server.rename(3, uri, position_of(broken, "count)", delta=2), "total")
+    self.show("rename after a parse-breaking edit", moved)
+    self.assertEqual(moved, self.rename_edits(uri, broken, "total", ("count: i32", 1, 5), ("count)", 1, 5)))
+
+    split = NAVIGATION_SOURCE.replace("let count: i32", "let coun t: i32", 1)
+    self.change(uri, 3, split)
+    self.assertIsNone(self.server.rename(4, uri, position_of(split, "count)", delta=2), "total"))
+    self.finish(5)
 
   def open_completion_project(self):
     """Opens the navigation project and completes once in the text as
