@@ -10,7 +10,7 @@ selfhost lineage.
 
 | Stage | Built by | Command |
 | --- | --- | --- |
-| stage0 | never built here | the Rust host compiler, or the currently promoted official selfhost binary |
+| stage0 | never built from `ignis/` here | the currently promoted official selfhost binary, or a compiler built from the C seed |
 | stage1 | stage0 | `scripts/bootstrap.sh stage1` |
 | stage2 | stage1 | `scripts/bootstrap.sh stage2` |
 | stage3 | stage2 | `scripts/bootstrap.sh stage3` |
@@ -18,25 +18,23 @@ selfhost lineage.
 stage3 exists only to compare its emitted C against stage2's, byte for byte
 (gate G1, the fixed point). Every gate below runs against stage2.
 
-### stage0: official or host
+### stage0: official or seed
 
-stage0 is resolved once, by `scripts/resolve_official_stage0.sh`:
+stage0 is resolved by `scripts/resolve_official_stage0.sh`:
 
 - If a selfhost binary has been promoted (three consecutive candidate nightly
   runs — see below), that binary (`ignis-selfhost-linux-amd64` on the
   `nightly` release) becomes stage0.
-- Otherwise, or if that binary cannot build stage1, stage0 falls back to the
-  Rust host compiler (`build_stage1_with_host` in `scripts/bootstrap.sh`).
-  The fallback exists so a selfhost binary that has gone stale against a
-  link/runtime contract change on `main` does not take the whole nightly
-  ladder down with it — the host is already known to pass it.
+- Otherwise stage0 is a compiler built from the C seed (see below), which
+  `scripts/bootstrap.sh` builds itself when no stage0 is recorded.
 
-An explicit `stage0=official` (a `workflow_dispatch` input, or
-`IGNIS_STAGE0_MODE=official` locally) disables the fallback and fails outright
-instead, so a maintainer can force and inspect that path.
-
-Once the Rust host is frozen, this fallback goes away: stage0 will always be
-the official binary, and a build failure there is terminal, not a fallback.
+`scripts/bootstrap.sh stage1` uses `$IGNIS_STAGE0` when it is set, else the
+official or seed stage0 recorded in `build/bootstrap/stage0.json`, else a
+compiler built from the seed. It never uses whatever `ignis` is on PATH, and
+never the Rust host. A stage0 that cannot build stage1 is terminal: there is
+no fallback. An explicit `stage0=official` (a `workflow_dispatch` input, or
+`STAGE0_MODE=official` for the resolver) fails when no official asset is
+published instead of using the seed.
 
 ## C seed (A3)
 
@@ -83,8 +81,8 @@ checks and compiles nothing; pull-request CI runs that on every change.
 
 `stage1-from-seed` builds that binary (reused while the seed is unchanged),
 records it in `build/bootstrap/stage0.json` as kind `seed`, and builds
-stage1 with it. A seed-built stage0 never falls back to the host: the point is
-to prove the ladder needs no Rust. Later subcommands (`stage2`, `stage3`, the
+stage1 with it; the point is to prove the ladder needs no Rust. Later
+subcommands (`stage2`, `stage3`, the
 gates) keep using that stage0 until `clean` or an explicit `IGNIS_STAGE0`.
 `all-from-seed` continues through stage3, so it ends with G1.
 
@@ -131,16 +129,13 @@ G2 | `parity` | the host e2e corpus, run through stage2
 G3 | `gate-g3` | the selfhost test suite under stage2: it has to pass outright and report the same test names, skipped set and counts as stage1's run of the same suite (`gate-g3-stage1`, which has to pass on its own and is the pull-request check)
 G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x
 G5 | `gate-g5` | diagnostics: stage2's error corpus output against the host's
-G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against committed baselines (and, until the cut, the host against the same baselines)
-G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines (and, until the cut, stage0 against the same baselines)
+G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against committed baselines
+G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines
 
-G7 is the first gate whose verdict does not depend on the host. Its baselines
+G7 was the first gate whose verdict does not depend on the host. Its baselines
 were generated from the host while it still existed, verified byte-identical
 against the selfhost compiler, and committed under
-`test_cases/e2e/ok/__drop_schedules__/`. Until the host is removed the nightly
-run still cross-checks stage0 against those same baselines, so a regeneration
-cannot quietly turn a red gate green; the pull-request run (`gate-g7-stage1`)
-is already host-free, which is the shape the gate keeps after the cut. See
+`test_cases/e2e/ok/__drop_schedules__/`. No gate runs the host any more. See
 "Drop-schedule baselines" below.
 
 `scripts/bootstrap.sh gates` runs every stage and gate locally, then
@@ -171,39 +166,19 @@ flatten to the same case name, all fail it. To record or refresh them:
 ```bash
 scripts/bootstrap.sh gate-g6-baselines               # from stage2
 # or, with any selfhost binary:
-python3 scripts/selfhost_syntax_parity.py --compiler <bin> --write-baselines [--host ignis]
+python3 scripts/selfhost_syntax_parity.py --compiler <bin> --write-baselines
 ```
 
-The compiler is run with the selfhost CLI, which is why the default is stage2
-and not `$IGNIS_STAGE0`. The write rules are G7's (all or nothing, no pruning
-under `--filter`), plus one: with `--host`, which `gate-g6-baselines` passes
-whenever the host resolves, nothing is written if the host disagrees with the
-compiler on any case. Read a verdict diff as a parser change.
+The write rules are G7's (all or nothing, no pruning under `--filter`). Read a
+verdict diff as a parser change.
 
 ### Parser unit-test snippets
 
 About two hundred cases are the source strings the host parser's unit tests
-parse, wrapped the way each test helper wraps them. Their Rust sources go away
-at the cut, so they are committed byte for byte under
-`test_cases/parser/host_unit_tests/`. After adding or changing a parser unit
-test, re-materialize them and commit the result with its baselines:
-
-```bash
-python3 scripts/selfhost_syntax_parity.py --materialize-parser-tests
-```
-
-Pull-request CI runs `--check-parser-tests`, which reports any drift between
-the committed snippets and the Rust sources without running a compiler.
-
-### Host cross-check
-
-The nightly's `gate-g6` passes `--host` the Rust host
-(`$IGNIS_STAGE0_HOST_FALLBACK`) for the reasons given for G7 below. The host's
-verdict on each case is compared with the baseline, and `host-drift` or
-`host-error` is reported apart from the selfhost's result and fails the gate.
-A host that cannot be found fails the gate too. `--host-compare` still runs the
-original direct host-vs-selfhost comparison, and the baseline churn report and
-`.github/CODEOWNERS` cover both directories.
+parsed, wrapped the way each test helper wrapped them, committed byte for byte
+under `test_cases/parser/host_unit_tests/`. They are ordinary cases now: the
+Rust sources they came from are no longer read, and the baseline churn report
+and `.github/CODEOWNERS` cover the directory.
 
 ## Drop-schedule baselines (G7)
 
@@ -227,7 +202,7 @@ Add the `.ign` file under `test_cases/e2e/ok/` as usual, then record its
 baseline and commit both together:
 
 ```bash
-scripts/bootstrap.sh gate-g7-baselines               # from $IGNIS_STAGE0
+scripts/bootstrap.sh gate-g7-baselines               # from stage2
 # or, with any compiler:
 python3 scripts/selfhost_drop_schedule_parity.py --compiler <bin> --write-baselines
 ```
@@ -254,36 +229,15 @@ baselines" is not a reason to approve one.
 ### What stops a regeneration from hiding a bug
 
 Baselines are the gate's own expectations, so regenerating them is the easy
-way to make a failing gate pass. Three things stand against that:
+way to make a failing gate pass. Two things stand against that:
 
-1. **An independent oracle, until the cut.** The nightly's `gate-g7` passes
-   `--host` the Rust host (`$IGNIS_STAGE0_HOST_FALLBACK`, default `ignis` on
-   PATH) and cross-checks it against the same baselines. A baseline changed to
-   match a broken stage2 then fails there, and the gate reports
-   `host cross-check N-1/N` and fails. Deliberately not `$IGNIS_STAGE0`: that
-   can resolve to the promoted official selfhost asset, and asking a selfhost
-   binary to confirm baselines one of its own ancestors produced proves
-   nothing. This flag goes away when the host does.
-2. **The churn is reported where it is read.** Pull-request CI runs
+1. **The churn is reported where it is read.** Pull-request CI runs
    `scripts/baseline_churn_report.sh` and writes the added, changed and
    removed baselines into the job summary with the line above. Nobody reads
    700 generated files in a diff; everybody reads the summary.
-3. **`.github/CODEOWNERS`** assigns the directory to the repository owner.
+2. **`.github/CODEOWNERS`** assigns the directory to the repository owner.
    This has no effect until branch protection on `main` requires review from
    code owners — worth enabling, and worth knowing it is not enabled yet.
-
-### Cross-checking against the host by hand
-
-```bash
-python3 scripts/selfhost_drop_schedule_parity.py \
-  --compiler build/bootstrap/stage2/ignis --host ignis
-```
-
-`--host` also cross-checks the `--project`/`--extra` cases, which otherwise
-only ever see one selfhost stage compared against another: a bug in `ignis/`
-itself sits identically in both stages and is invisible without a third
-opinion. `--host-compare` still performs the original direct
-host-vs-selfhost diff, so the move to baselines is reversible.
 
 ## Which compiler defines the language
 
@@ -301,8 +255,8 @@ In practice:
 |-----------|------------|
 | The selfhost is wrong by its own rules (a crash, a miscompile, a check it forgot) | Fix the selfhost. |
 | The two differ and the selfhost's behavior is intended | Keep it. Close the host issue as a known divergence; the host is not changed to match. |
-| A bug both compilers share | Fix it in both while the host is still built, so the gates keep comparing like with like. |
-| A fixture that exercises a known divergence | It fails the nightly host cross-check (G6, G7), so it lands with the cut, not before. |
+| A bug both compilers share | Fix it in both while the host is still built. |
+| A fixture that exercises a known divergence | Its baselines record the selfhost's behavior; no gate runs the host to compare against. |
 
 Known divergences where the selfhost wins: #215 (a generic function used as a
 bare function value is rejected), #235 (unreferenced `@externName` exports are
@@ -315,13 +269,14 @@ A language feature is not safe to use in the compiler's own sources
 (`ignis/`) or the standard library (`std/`) the moment support for it lands in
 `crates/`. It is only safe once that support has been **promoted to the
 official selfhost binary** — otherwise the official binary cannot build its
-own sources, and the only thing standing between that and a broken nightly is
-the host fallback described above.
+own sources, and the nightly ladder, which starts from it, fails: a stage0
+that cannot build stage1 is terminal.
 
 **Rule:** a language change may only be *used* in `ignis/` or `std/` after
 compiler support for it has been promoted to the official binary. Landing the
-change and its first use in the same PR violates this, even if the PR itself
-is green — the host builds it either way.
+change and its first use in the same PR violates this, even if the rest of the
+PR's CI is green — the `selfhost` job builds stage1 from the C seed, not from
+the official binary.
 
 ### The incident this rule exists for
 
@@ -336,8 +291,9 @@ after the PR merged.
 
 `.github/workflows/ci.yml`'s `Official stage0 gate` job catches this on the
 PR itself: it resolves the current official asset
-(`scripts/resolve_official_stage0.sh`) and builds stage1 with it alone,
-fallback disabled (`IGNIS_STAGE0_NO_FALLBACK=1`). If no official asset exists
+(`scripts/resolve_official_stage0.sh`) and builds stage1 with it, then stage2
+with that stage1; a failing official stage0 is terminal and names the rule. If
+no official asset exists
 yet (a fresh fork, or a promotion streak that has never reached 3), the job
 skips — there is nothing to check yet.
 
