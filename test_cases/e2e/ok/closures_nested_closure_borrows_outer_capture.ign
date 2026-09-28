@@ -1,0 +1,43 @@
+// e2e: std
+// A closure built inside another closure's body may borrow a value the outer
+// environment holds by value. The outer closure can then be called any number
+// of times, and the value is dropped exactly once, with the outer closure.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function idOf(value: &Tracked): i32 {
+  return value.id;
+}
+
+function makeOuter(): () -> i32 {
+  let held: Tracked = Tracked { id: 4 };
+
+  return (): i32 -> {
+    let _ = @move held;
+    let inner = (): i32 -> idOf(&held) + 1;
+
+    return inner();
+  };
+}
+
+function main(): i32 {
+  {
+    let outer = makeOuter();
+    let first: i32 = outer();
+    let second: i32 = outer();
+
+    Io::println(`calls ${first} ${second}`.toStr());
+  }
+
+  Io::println("outer gone");
+
+  return 0;
+}

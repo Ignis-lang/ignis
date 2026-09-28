@@ -1,0 +1,36 @@
+// e2e: err
+// Returning a captured value from the closure body moves it out of the closure's
+// environment, which the next call would find gone.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+enum Slot {
+  FULL(Tracked),
+  EMPTY,
+}
+
+function consume(value: Tracked): i32 {
+  return value.id;
+}
+
+function makeGiver(): () -> Tracked {
+  let held: Tracked = Tracked { id: 4 };
+
+  return (): Tracked -> {
+    let _ = @move held;
+
+    return held;
+  };
+}
+
+function main(): i32 {
+  let giver = makeGiver();
+
+  return consume(giver());
+}

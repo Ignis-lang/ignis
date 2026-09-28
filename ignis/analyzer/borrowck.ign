@@ -3078,6 +3078,13 @@ export namespace Borrowck {
     span: SourceSpan,
     consumer: u32,
   ): void {
+    // A move out of a closure's environment is rejected where it happens, and
+    // the environment keeps the value, so there is no transition to record.
+    // Recording one would report every later use as a use after move.
+    if (state.isEnvironmentCapture(defId.raw())) {
+      return;
+    }
+
     if (let Option::SOME(value) = state.moveValue(defId.raw())) {
       if (value == Borrowck::MOVE_MOVED || value == Borrowck::MOVE_DROPPED || value == Borrowck::MOVE_FREED) {
         return;
@@ -4326,10 +4333,12 @@ export namespace Borrowck {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, returned);
 
           if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, returned)) {
-            Borrowck::noteMove(state, source, Borrowck::OwnershipReport::CONSUMER_RETURN, span);
+            if (!state.isEnvironmentCapture(source.raw())) {
+              Borrowck::noteMove(state, source, Borrowck::OwnershipReport::CONSUMER_RETURN, span);
 
-            let mut returnRef: &mut Borrowck::State = state;
-            returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
+              let mut returnRef: &mut Borrowck::State = state;
+              returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
+            }
           }
 
           // Returning a closure value hands its environment to the caller,
