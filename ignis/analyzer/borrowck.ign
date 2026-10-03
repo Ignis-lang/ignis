@@ -4194,6 +4194,7 @@ export namespace Borrowck {
           if (let Option::SOME(field) = init.fields.get(index)) {
             Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, field.value);
             Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, field.value);
+            Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, field.value);
 
             if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, field.value)) {
               Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_AGGREGATE);
@@ -4298,6 +4299,7 @@ export namespace Borrowck {
           }
 
           Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, returned);
+          Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, returned);
         }
 
         // A return unwinds every open scope back to the function root, so it
@@ -4531,6 +4533,7 @@ export namespace Borrowck {
       if (let Option::SOME(operand) = operands.get(index)) {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *operand);
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, *operand);
+        Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, *operand);
 
         if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, *operand)) {
           Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_AGGREGATE);
@@ -4696,6 +4699,7 @@ export namespace Borrowck {
       }
 
       Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, value);
+      Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, value);
       Borrowck::recordLetBorrow(defStore, symbols, hir, state, diagnostics, value, span);
       Borrowck::recordClosureCaptureBorrows(defStore, symbols, hir, state, diagnostics, value, span);
     }
@@ -4718,8 +4722,11 @@ export namespace Borrowck {
       }
 
       // A move-only owner handed over here, directly or as the result of a
-      // branch, gives this binding its environment.
-      if (!ownsClosureEnv && Borrowck::valueTakesClosureOwners(hir, state, typeStore, value)) {
+      // branch, gives this binding its environment, and so does a closure
+      // moved out of a field.
+      let movesClosureField: boolean = Borrowck::isFieldAccessNode(hir, value) && Borrowck::nodeIsFunction(typeStore, hir, value);
+
+      if (!ownsClosureEnv && (movesClosureField || Borrowck::valueTakesClosureOwners(hir, state, typeStore, value))) {
         ownsClosureEnv = true;
         moveOnly = true;
       }
@@ -5078,6 +5085,8 @@ export namespace Borrowck {
     if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, assign.value)) {
       Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_ASSIGNMENT);
     }
+
+    Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, assign.value);
   }
 
   function checkBlock(
@@ -6364,7 +6373,7 @@ export namespace Borrowck {
               if (let Option::SOME(targetType) = Borrowck::variableTypeOf(defStore, defId)) {
                 // Assigning another closure binding moves that binding's
                 // environment into this one.
-                let takesBinding: boolean = Hir::typeIsFunction(typeStore, targetType) && Borrowck::isVariableNode(hir, assignNode.value);
+                let takesBinding: boolean = Hir::typeIsFunction(typeStore, targetType) && (Borrowck::isVariableNode(hir, assignNode.value) || Borrowck::isFieldAccessNode(hir, assignNode.value));
 
                 if (takesBinding || Hir::bindingOwnsClosureEnv(hir, assignNode.value, targetType, typeStore, defStore)) {
                   if (!Borrowck::containsRaw(&mut result, defId.raw())) {
@@ -6381,6 +6390,29 @@ export namespace Borrowck {
     }
 
     return result;
+  }
+
+  function nodeIsFunction(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    nodeId: Hir::HirId
+  ): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    return Hir::typeIsFunction(typeStore, node.typeId);
+  }
+
+  function isFieldAccessNode(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::FieldAccess(_) -> true,
+      _ -> false,
+    };
   }
 
   function isVariableNode(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {

@@ -1,0 +1,49 @@
+// e2e: err
+// A binding, a return, a record initializer, an assignment and an enum payload
+// all take over the environment of the closure they receive, so reading the
+// closure out of a field reached through a `&mut` reference is a move out of
+// storage the reference does not own.
+record Holder {
+    public callback: () -> i32;
+}
+
+enum Slot {
+    FULL(() -> i32),
+    EMPTY,
+}
+
+function bind(holder: &mut Holder): i32 {
+    let call = holder.callback;
+
+    return call();
+}
+
+function take(holder: &mut Holder): () -> i32 {
+    return holder.callback;
+}
+
+function wrap(holder: &mut Holder): Holder {
+    return Holder { callback: holder.callback };
+}
+
+function store(holder: &mut Holder, target: &mut Holder): void {
+    target.callback = holder.callback;
+}
+
+function slot(holder: &mut Holder): Slot {
+    return Slot::FULL(holder.callback);
+}
+
+function main(): i32 {
+    let base: i32 = 40;
+    let mut holder = Holder { callback: (): i32 -> base + 2 };
+    let mut target = Holder { callback: (): i32 -> 0 };
+
+    let first: i32 = bind(&mut holder);
+    let taken = take(&mut holder);
+    let wrapped = wrap(&mut holder);
+    store(&mut holder, &mut target);
+    let filled = slot(&mut holder);
+
+    return first;
+}
