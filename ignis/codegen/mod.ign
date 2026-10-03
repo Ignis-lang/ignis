@@ -3895,8 +3895,10 @@ export namespace CodegenC {
   /// The C `main` around the program's entry point, as the host writes it:
   /// the runtime is initialised with the process arguments, then the user's
   /// `main` runs with no arguments or with `(argc, argv)`, and an `i32`
-  /// result becomes the exit code while a `void` one exits 0. A `Result`
-  /// entry point is outside what this emitter covers and returns 1.
+  /// result becomes the exit code while a `void` one exits 0. A `@lang(try)`
+  /// result carrying an `i32` exits with that code on success; on failure it
+  /// prints `Error: <message>` to stderr and exits 101, as a panic does. Any
+  /// other return type exits 1.
   ///
   /// With `--feature alloc-trace` on, the allocation summary runs after the
   /// user's `main` returns, on every path that leaves through this wrapper.
@@ -3941,6 +3943,15 @@ export namespace CodegenC {
       } else {
         body = `    return ${call.toStr()};\n`;
       }
+    } else if (let Option::SOME(layout) = CodegenC::entryTryLayout(defStore, typeStore, symbols, entry.returnType)) {
+      let resultType: String = CodegenC::structName(defStore, symbols, layout.enumDef);
+      let mut okReport: String = String::create("");
+
+      if (allocTrace) {
+        okReport = `        ${CodegenC::ALLOC_TRACE_REPORT_SYMBOL}();\n`;
+      }
+
+      body = `    struct ${resultType.toStr()} __ignis_main_result = ${call.toStr()};\n    if (__ignis_main_result.tag == ${layout.okTag}) {\n${okReport.toStr()}        return __ignis_main_result.payload.variant_${layout.okTag}.field_0;\n    }\n    fprintf(stderr, "Error: %s\\n", ${layout.errorMessage.toStr()});\n${report.toStr()}    exit(101);\n`;
     } else {
       body = `    (void)${call.toStr()};\n${report.toStr()}    return 1;\n`;
     }
@@ -3949,6 +3960,189 @@ export namespace CodegenC {
 
     let mut outputRef: &mut String = output;
     outputRef.pushStr(wrapper.toStr());
+  }
+
+  /// How the entry wrapper reads a `@lang(try)` result: the enum it is, the tag
+  /// whose `i32` payload is the exit code, and the C expression that renders the
+  /// failure as a string.
+  record EntryTryLayout {
+    public enumDef: Analyzer::DefinitionId;
+    public okTag: u32;
+    public errorMessage: String;
+  }
+
+  /// The layout of an entry point's `@lang(try)` return type, when its success
+  /// variant carries exactly one `i32`.
+  ///
+  /// The failure renders as the payload itself when it is a `str`, as its
+  /// `message` field when it is a record with a `message: str` field, and as
+  /// `(error)` otherwise.
+  function entryTryLayout(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    returnType: Analyzer::TypeId,
+  ): Option<CodegenC::EntryTryLayout> {
+    let mut enumDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+    let mut isEnum: boolean = false;
+
+    if (let Option::SOME(Analyzer::Type::Enum(defId)) = typeStore.get(returnType)) {
+      enumDefId = defId;
+      isEnum = true;
+    }
+
+    if (!isEnum) {
+      return Option::NONE;
+    }
+
+    let mut okTag: u32 = 0;
+    let mut errTag: u32 = 0;
+    let mut tryCapable: boolean = false;
+    let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(enumDefId)) {
+      if (let Option::SOME(capability) = &enumDef.tryCapable) {
+        okTag = capability.okVariant;
+        errTag = capability.errVariant;
+        tryCapable = true;
+      }
+
+      let mut variantIndex: u64 = 0;
+
+      while (variantIndex < enumDef.variants.length()) {
+        if (let Option::SOME(variantDefId) = enumDef.variants.get(variantIndex)) {
+          variants.push(*variantDefId);
+        }
+
+        variantIndex += 1;
+      }
+    }
+
+    if (!tryCapable) {
+      return Option::NONE;
+    }
+
+    let mut okPayload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut errPayload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variants.length()) {
+      if (let Option::SOME(variantDefId) = variants.get(variantIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantDefId)) {
+          let mut payloadIndex: u64 = 0;
+
+          while (payloadIndex < variantDef.payload.length()) {
+            if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+              if (variantDef.tagValue == okTag) {
+                okPayload.push(*payloadType);
+              } else if (variantDef.tagValue == errTag) {
+                errPayload.push(*payloadType);
+              }
+            }
+
+            payloadIndex += 1;
+          }
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    if (okPayload.length() != 1) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(okType) = okPayload.get(0) else {
+      return Option::NONE;
+    };
+
+    if (!CodegenC::isI32Type(typeStore, *okType)) {
+      return Option::NONE;
+    }
+
+    let errorAccess: String = `__ignis_main_result.payload.variant_${errTag}.field_0`;
+    let mut errorMessage: String = String::create("\"(error)\"");
+
+    if (errPayload.length() == 1) {
+      if (let Option::SOME(errType) = errPayload.get(0)) {
+        if (CodegenC::isStrType(typeStore, *errType)) {
+          errorMessage = errorAccess.clone();
+        } else if (let Option::SOME(fieldIndex) = CodegenC::recordMessageFieldIndex(defStore, typeStore, symbols, *errType)) {
+          errorMessage = `${errorAccess.toStr()}.field_${fieldIndex}`;
+        }
+      }
+    }
+
+    return Option::SOME(CodegenC::EntryTryLayout {
+      enumDef: enumDefId,
+      okTag: okTag,
+      errorMessage: errorMessage,
+    });
+  }
+
+  /// The index of a `message: str` field on the record `typeId` names, if any.
+  function recordMessageFieldIndex(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeId: Analyzer::TypeId,
+  ): Option<u32> {
+    let mut recordDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+    let mut isRecord: boolean = false;
+
+    if (let Option::SOME(Analyzer::Type::Record(defId)) = typeStore.get(typeId)) {
+      recordDefId = defId;
+      isRecord = true;
+    }
+
+    if (!isRecord) {
+      return Option::NONE;
+    }
+
+    let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordDefId)) {
+      let mut fieldIndex: u64 = 0;
+
+      while (fieldIndex < recordDef.fields.length()) {
+        if (let Option::SOME(fieldDefId) = recordDef.fields.get(fieldIndex)) {
+          fields.push(*fieldDefId);
+        }
+
+        fieldIndex += 1;
+      }
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < fields.length()) {
+      if (let Option::SOME(fieldDefId) = fields.get(index)) {
+        if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldDefId)) {
+          let named: boolean = match (symbols.resolve(fieldDef.name)) {
+            Option::SOME(text) -> text.equals("message"),
+            Option::NONE -> false,
+          };
+
+          if (named && CodegenC::isStrType(typeStore, fieldDef.fieldType)) {
+            return Option::SOME(fieldDef.index);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function isStrType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      if (let Analyzer::Type::STR = typeNode) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   function isI32Type(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
