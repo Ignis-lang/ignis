@@ -277,6 +277,13 @@ export namespace Borrowck {
     /// `bindings_assigned_closure_env`.
     bindingsAssignedClosureEnv: Vector<u32>;
 
+    /// Owners of a closure environment whose value cannot be copied: the
+    /// environment has a drop function, so a second copy would either free it
+    /// twice or outlive the free. Handing such a binding on by value moves it,
+    /// exactly like a value whose type needs a drop. An owner whose closure has
+    /// no drop function stays copyable.
+    moveOnlyClosureOwners: Vector<u32>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -346,6 +353,7 @@ export namespace Borrowck {
         closureEnvOwners: Vector::new<u32>(),
         envsCapturedByEscapingClosures: Vector::new<u32>(),
         bindingsAssignedClosureEnv: Vector::new<u32>(),
+        moveOnlyClosureOwners: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
         inDropMethod: false,
@@ -460,6 +468,18 @@ export namespace Borrowck {
     public recordClosureEnvOwner(&mut self, bindingRaw: u32, ownerRaw: u32): void {
       self.closureEnvBindings.push(bindingRaw);
       self.closureEnvOwners.push(ownerRaw);
+    }
+
+    /// Note that the closure environment owner `bindingRaw` is moved, not
+    /// copied, when it is handed on by value.
+    public markMoveOnlyClosureOwner(&mut self, bindingRaw: u32): void {
+      if (!Borrowck::containsRaw(&mut self.moveOnlyClosureOwners, bindingRaw)) {
+        self.moveOnlyClosureOwners.push(bindingRaw);
+      }
+    }
+
+    public isMoveOnlyClosureOwner(&mut self, bindingRaw: u32): boolean {
+      return Borrowck::containsRaw(&mut self.moveOnlyClosureOwners, bindingRaw);
     }
 
     /// The binding that owns the closure environment `bindingRaw` names.
@@ -1941,6 +1961,10 @@ export namespace Borrowck {
       }
 
       components = Borrowck::recordFieldTypes(defStore, defId);
+
+      if (Borrowck::anyFunctionType(typeStore, &components)) {
+        return true;
+      }
     }
 
     if (let Option::SOME(defId) = enumDefId) {
@@ -1949,6 +1973,10 @@ export namespace Borrowck {
       }
 
       components = Borrowck::enumPayloadTypes(defStore, defId);
+
+      if (Borrowck::anyFunctionType(typeStore, &components)) {
+        return true;
+      }
     }
 
     if (let Option::SOME(defId) = instanceDefId) {
@@ -1977,6 +2005,29 @@ export namespace Borrowck {
     let _discarded: Option<u32> = popRef.pop();
 
     return answer;
+  }
+
+  /// Whether any of `types` is a closure type. A record field or enum payload
+  /// holding a closure owns the closure's environment, so the aggregate needs
+  /// a drop even though a closure binding on its own is tracked by the closure
+  /// environment owners instead.
+  function anyFunctionType(
+    typeStore: &mut Analyzer::TypeStore,
+    types: &Vector<Analyzer::TypeId>
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < types.length()) {
+      if (let Option::SOME(typeId) = types.get(index)) {
+        if (Hir::typeIsFunction(typeStore, *typeId)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
   }
 
   function definitionNeedsDrop(
@@ -2038,6 +2089,46 @@ export namespace Borrowck {
     };
 
     if (!Borrowck::definitionNeedsDrop(defStore, typeStore, defId)) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(defId);
+  }
+
+  /// The local that handing `nodeId` on by value moves: a `movedVariable`, or
+  /// a binding that owns a closure environment that cannot be copied. A copy
+  /// of such a closure would share the environment with its owner, and either
+  /// one going out of scope would free it under the other.
+  function movedValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    if (let Option::SOME(defId) = Borrowck::movedVariable(defStore, typeStore, hir, nodeId)) {
+      return Option::SOME(defId);
+    }
+
+    return Borrowck::movedClosureOwner(hir, state, nodeId);
+  }
+
+  /// The move-only closure environment owner `nodeId` names, when it is a
+  /// variable naming one.
+  function movedClosureOwner(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    let Hir::HirKind::Variable(defId) = &node.kind else {
+      return Option::NONE;
+    };
+
+    if (!state.isMoveOnlyClosureOwner(defId.raw())) {
       return Option::NONE;
     }
 
@@ -4078,7 +4169,7 @@ export namespace Borrowck {
             Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, field.value);
             Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, field.value);
 
-            if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, field.value)) {
+            if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, field.value)) {
               Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_AGGREGATE);
             }
           }
@@ -4108,11 +4199,14 @@ export namespace Borrowck {
       },
 
       Hir::HirKind::Call(call) -> {
-        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
+        let callParams: Vector<Analyzer::DefinitionId> = Borrowck::callParamsOrEmpty(defStore, call.callee);
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, &callParams, 0, span);
       },
       Hir::HirKind::CallClosure(call) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, call.callee);
-        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
+
+        let noParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, &noParams, 0, span);
       },
       // The body is checked on its own as the thunk function, so walking into it
       // here would check it twice against the wrong scope. Mirrors the reference
@@ -4135,7 +4229,7 @@ export namespace Borrowck {
         Borrowck::checkBlock(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &block, nodeId);
       },
       Hir::HirKind::If(ifNode) -> {
-        Borrowck::checkIf(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &ifNode, span);
+        Borrowck::checkIf(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &ifNode, nodeId, span);
       },
       Hir::HirKind::LetElse(letElse) -> {
         Borrowck::checkLetElse(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &letElse, span);
@@ -4151,7 +4245,7 @@ export namespace Borrowck {
         if (let Option::SOME(returned) = value) {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, returned);
 
-          if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, returned)) {
+          if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, returned)) {
             Borrowck::noteMove(state, source, Borrowck::OwnershipReport::CONSUMER_RETURN, span);
 
             let mut returnRef: &mut Borrowck::State = state;
@@ -4343,7 +4437,27 @@ export namespace Borrowck {
       return;
     }
 
-    Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
+    let methodParams: Vector<Analyzer::DefinitionId> = Borrowck::callParamsOrEmpty(defStore, call.method);
+    let mut paramOffset: u64 = 0;
+
+    // `self` occupies the first parameter slot of an instance method.
+    if (call.receiver.isSome()) {
+      paramOffset = 1;
+    }
+
+    Borrowck::checkCallArguments(
+      defStore,
+      typeStore,
+      symbols,
+      hir,
+      state,
+      diagnostics,
+      schedules,
+      &call.args,
+      &methodParams,
+      paramOffset,
+      span,
+    );
   }
 
   /// Walks the arguments of a manual `.drop()`: checked and borrow-checked like
@@ -4392,7 +4506,7 @@ export namespace Borrowck {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *operand);
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, *operand);
 
-        if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *operand)) {
+        if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, *operand)) {
           Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_AGGREGATE);
         }
       }
@@ -4404,6 +4518,11 @@ export namespace Borrowck {
   /// Walks call arguments: each one is checked, its transient borrow is
   /// conflict-checked and released, and an argument passed by value out of an
   /// owning local consumes it.
+  ///
+  /// `params` are the callee's parameters when it is known, the argument at
+  /// `index` matching the parameter at `index + paramOffset`. A closure handed to a `@noescape` parameter is only lent for the
+  /// call, so it does not move its owner; every other closure parameter takes
+  /// the environment over.
   function checkCallArguments(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -4413,6 +4532,8 @@ export namespace Borrowck {
     diagnostics: &mut DiagnosticBag,
     schedules: &mut Hir::DropSchedules,
     args: &Vector<Hir::HirId>,
+    params: &Vector<Analyzer::DefinitionId>,
+    paramOffset: u64,
     span: SourceSpan,
   ): void {
     let mut index: u64 = 0;
@@ -4425,11 +4546,46 @@ export namespace Borrowck {
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *argument)) {
           Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_CALL_ARGUMENT);
+        } else if (!Borrowck::paramIsNoEscape(defStore, params, index + paramOffset)) {
+          if (let Option::SOME(owner) = Borrowck::movedClosureOwner(hir, state, *argument)) {
+            Borrowck::tryConsume(state, schedules, owner, span, Borrowck::OwnershipReport::CONSUMER_CALL_ARGUMENT);
+          }
         }
       }
 
       index += 1;
     }
+  }
+
+  /// The parameters of `callable`, or none when it is not a function or method.
+  function callParamsOrEmpty(
+    defStore: &mut Analyzer::DefinitionStore,
+    callable: Analyzer::DefinitionId,
+  ): Vector<Analyzer::DefinitionId> {
+    return match (Borrowck::callableParams(defStore, callable)) {
+      Option::SOME(params) -> params,
+      Option::NONE -> Vector::new<Analyzer::DefinitionId>(),
+    };
+  }
+
+  /// Whether the parameter at `index` carries `@noescape`.
+  function paramIsNoEscape(
+    defStore: &mut Analyzer::DefinitionStore,
+    params: &Vector<Analyzer::DefinitionId>,
+    index: u64,
+  ): boolean {
+    let Option::SOME(paramId) = params.get(index) else {
+      return false;
+    };
+
+    let Option::SOME(definition) = defStore.get(*paramId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Variable(variableDef) -> variableDef.noEscape,
+      _ -> false,
+    };
   }
 
   /// Conflict-checks the borrow an argument spelled `&x` / `&mut x` takes for
@@ -4507,7 +4663,7 @@ export namespace Borrowck {
     if (let Option::SOME(value) = letNode.value) {
       Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, value);
 
-      if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, value)) {
+      if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, value)) {
         Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_LET_INITIALIZER);
       }
 
@@ -4524,10 +4680,20 @@ export namespace Borrowck {
     // that can reach a return as escaping, so the binding is always the one
     // responsible for releasing it).
     let mut ownsClosureEnv: boolean = false;
+    let mut moveOnly: boolean = false;
 
     if (let Option::SOME(value) = letNode.value) {
       if (let Option::SOME(valueType) = Borrowck::variableTypeOf(defStore, letNode.name)) {
         ownsClosureEnv = Hir::bindingOwnsClosureEnv(hir, value, valueType, typeStore, defStore);
+        let copyable: boolean = Hir::valueIsOnlyClosureLiterals(hir, value, typeStore) && Hir::valueClosureLiteralsDropNothing(hir, value);
+        moveOnly = ownsClosureEnv && !copyable;
+      }
+
+      // A move-only owner handed over here, directly or as the result of a
+      // branch, gives this binding its environment.
+      if (!ownsClosureEnv && Borrowck::valueTakesClosureOwners(hir, state, typeStore, value)) {
+        ownsClosureEnv = true;
+        moveOnly = true;
       }
     }
 
@@ -4544,6 +4710,7 @@ export namespace Borrowck {
     // assignment happens to sit, so the decision is made here.
     if (assignedClosureEnv) {
       ownsClosureEnv = true;
+      moveOnly = true;
     }
 
     // A closure value moved into an escaping closure's environment leaves this
@@ -4558,6 +4725,10 @@ export namespace Borrowck {
 
       let mut ownerRef: &mut Borrowck::State = state;
       ownerRef.recordClosureEnvOwner(letNode.name.raw(), letNode.name.raw());
+
+      if (moveOnly) {
+        ownerRef.markMoveOnlyClosureOwner(letNode.name.raw());
+      }
     } else {
       if (let Option::SOME(value) = letNode.value) {
         if (let Option::SOME(owner) = Borrowck::closureEnvOwner(hir, state, value)) {
@@ -4572,6 +4743,47 @@ export namespace Borrowck {
     if (ownsClosureEnv || Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
       Borrowck::declareOwned(state, letNode.name);
     }
+  }
+
+  /// Whether every value `value` can evaluate to is a closure literal or a
+  /// move-only closure owner, with at least one owner among them. Each owner
+  /// is moved into the result on its own path (see `consumeBranchClosureOwner`),
+  /// so the binding that receives the result owns whichever environment
+  /// arrives.
+  function valueTakesClosureOwners(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    typeStore: &mut Analyzer::TypeStore,
+    value: Hir::HirId,
+  ): boolean {
+    let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Hir::collectValueResults(hir, value, &mut results);
+
+    let mut ownerCount: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < results.length()) {
+      if (let Option::SOME(resultId) = results.get(index)) {
+        let Option::SOME(resultNode) = hir.get(*resultId) else {
+          return false;
+        };
+
+        let isLiteral: boolean = match (&resultNode.kind) {
+          Hir::HirKind::Closure(_) -> true,
+          _ -> false,
+        };
+
+        if (Borrowck::movedClosureOwner(hir, state, *resultId).isSome()) {
+          ownerCount += 1;
+        } else if (!isLiteral && !Hir::typeIsNever(typeStore, resultNode.typeId)) {
+          return false;
+        }
+      }
+
+      index += 1;
+    }
+
+    return ownerCount > 0;
   }
 
   /// The binding that owns the heap closure environment `nodeId` evaluates to,
@@ -4835,7 +5047,7 @@ export namespace Borrowck {
 
     Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, assign.value);
 
-    if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, assign.value)) {
+    if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, assign.value)) {
       Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_ASSIGNMENT);
     }
   }
@@ -5220,9 +5432,13 @@ export namespace Borrowck {
     diagnostics: &mut DiagnosticBag,
     schedules: &mut Hir::DropSchedules,
     ifNode: &Hir::HirIf,
+    ifId: Hir::HirId,
     span: SourceSpan,
   ): void {
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, ifNode.condition);
+
+    let mut statementPositionRef: &mut Borrowck::State = state;
+    let ifValueIsUsed: boolean = !statementPositionRef.isStatementPosition(ifId.raw()) && Borrowck::nodeProducesValue(typeStore, hir, ifId);
 
     let conditionBindings: Vector<u32> = Borrowck::takeConditionBindings(hir, state, schedules, ifNode.condition);
 
@@ -5247,7 +5463,13 @@ export namespace Borrowck {
 
     Borrowck::forgetConditionBindings(state, &conditionBindings);
 
-    let thenMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+    let mut thenOwner: Option<u32> = Option::NONE;
+
+    if (ifValueIsUsed) {
+      thenOwner = Borrowck::consumeBranchClosureOwner(hir, state, schedules, ifNode.thenBranch, span);
+    }
+
+    let mut thenMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
     let thenBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
     let thenReachable: boolean = state.reachable;
 
@@ -5283,12 +5505,29 @@ export namespace Borrowck {
 
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, elseBranch);
 
-    let elseMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+    let mut elseOwner: Option<u32> = Option::NONE;
+
+    if (ifValueIsUsed) {
+      elseOwner = Borrowck::consumeBranchClosureOwner(hir, state, schedules, elseBranch, span);
+    }
+
+    let mut elseMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
     let elseReachable: boolean = state.reachable;
 
     let mut borrowRef: &mut Borrowck::State = state;
     borrowRef.mergeBorrowsWith(&thenBorrows);
     borrowRef.setReachable(thenReachable || elseReachable);
+
+    // A closure owner one branch hands to the result is still owned on the
+    // other branch, which is the last point where it is live: it is dropped
+    // at the end of that branch, and moved on every path afterwards.
+    if (let Option::SOME(owner) = thenOwner) {
+      Borrowck::dropUntakenBranchOwner(schedules, &mut elseMoves, elseBranch, elseReachable, owner);
+    }
+
+    if (let Option::SOME(owner) = elseOwner) {
+      Borrowck::dropUntakenBranchOwner(schedules, &mut thenMoves, ifNode.thenBranch, thenReachable, owner);
+    }
 
     if (thenReachable && elseReachable) {
       let mut branches: Vector<Borrowck::MoveSnapshot> = Vector::new<Borrowck::MoveSnapshot>();
@@ -5311,6 +5550,60 @@ export namespace Borrowck {
     // Neither branch reaches the join, so nothing downstream observes the
     // state; the oracle still keeps the most restrictive of the two.
     Borrowck::conservativeMergeMoves(state, &thenMoves);
+  }
+
+  /// Moves the move-only closure owner a branch of a used `if` produces as its
+  /// value into that value, returning the owner it moved.
+  function consumeBranchClosureOwner(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    branch: Hir::HirId,
+    span: SourceSpan,
+  ): Option<u32> {
+    if (!state.reachable) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(result) = Borrowck::armResultBinding(hir, branch) else {
+      return Option::NONE;
+    };
+
+    if (!state.isMoveOnlyClosureOwner(result.raw()) || !state.isMoveValid(result.raw())) {
+      return Option::NONE;
+    }
+
+    Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
+
+    return Option::SOME(result.raw());
+  }
+
+  /// Schedules the drop of `owner` at the end of `branch` when the other
+  /// branch moved it but this one still holds it.
+  function dropUntakenBranchOwner(
+    schedules: &mut Hir::DropSchedules,
+    branchMoves: &mut Borrowck::MoveSnapshot,
+    branch: Hir::HirId,
+    branchReachable: boolean,
+    owner: u32,
+  ): void {
+    let Option::SOME(value) = Borrowck::snapshotValue(&*branchMoves, owner) else {
+      return;
+    };
+
+    if (value != Borrowck::MOVE_VALID) {
+      return;
+    }
+
+    if (branchReachable) {
+      let mut dropped: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      dropped.push(Id::fromRaw<Analyzer::DefinitionTag>(owner));
+
+      let mut schedulesRef: &mut Hir::DropSchedules = schedules;
+      schedulesRef.appendMatchArmEnd(branch, dropped);
+    }
+
+    Borrowck::setSnapshotValue(branchMoves, owner, Borrowck::MOVE_MOVED);
   }
 
   function checkLetElse(
@@ -5591,7 +5884,7 @@ export namespace Borrowck {
           // rejection above never sees it; this walk does.
           let handedOnDirectly: boolean = Borrowck::isBorrowedBindingNode(hir, state, arm.body);
           let resultIsBorrowed: boolean = state.isBorrowedBinding(result.raw());
-          let resultOwnsValue: boolean = Borrowck::definitionNeedsDrop(defStore, typeStore, result);
+          let resultOwnsValue: boolean = Borrowck::definitionNeedsDrop(defStore, typeStore, result) || state.isMoveOnlyClosureOwner(result.raw());
 
           if (!handedOnDirectly && resultIsBorrowed && resultOwnsValue) {
             Borrowck::emitCannotMoveOutOfBorrow(state, diagnostics, Option::SOME(result), span);
@@ -6041,7 +6334,11 @@ export namespace Borrowck {
           if (let Option::SOME(targetNode) = hir.get(assignNode.target)) {
             if (let Hir::HirKind::Variable(defId) = &targetNode.kind) {
               if (let Option::SOME(targetType) = Borrowck::variableTypeOf(defStore, defId)) {
-                if (Hir::bindingOwnsClosureEnv(hir, assignNode.value, targetType, typeStore, defStore)) {
+                // Assigning another closure binding moves that binding's
+                // environment into this one.
+                let takesBinding: boolean = Hir::typeIsFunction(typeStore, targetType) && Borrowck::isVariableNode(hir, assignNode.value);
+
+                if (takesBinding || Hir::bindingOwnsClosureEnv(hir, assignNode.value, targetType, typeStore, defStore)) {
                   if (!Borrowck::containsRaw(&mut result, defId.raw())) {
                     result.push(defId.raw());
                   }
@@ -6056,6 +6353,17 @@ export namespace Borrowck {
     }
 
     return result;
+  }
+
+  function isVariableNode(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(_) -> true,
+      _ -> false,
+    };
   }
 
   /// The bindings an escaping closure captures by value, which is how a closure
@@ -6195,6 +6503,10 @@ export namespace Borrowck {
       if (let Option::SOME(paramId) = params.get(index)) {
         if (Borrowck::definitionNeedsDrop(defStore, typeStore, *paramId)) {
           Borrowck::declareOwned(&mut state, *paramId);
+        } else if (Borrowck::paramTakesClosureEnv(defStore, typeStore, &state, *paramId)) {
+          state.recordClosureEnvOwner(paramId.raw(), paramId.raw());
+          state.markMoveOnlyClosureOwner(paramId.raw());
+          Borrowck::declareOwned(&mut state, *paramId);
         }
       }
 
@@ -6224,6 +6536,38 @@ export namespace Borrowck {
         index += 1;
       }
     }
+  }
+
+  /// Whether the parameter `paramId` takes over the environment of the closure
+  /// passed to it. A closure argument moves into its parameter, which then
+  /// owns the environment like a local would; a `@noescape` parameter is only
+  /// lent the closure for the call and owns nothing.
+  function paramTakesClosureEnv(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &Borrowck::State,
+    paramId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(paramType) = Borrowck::variableTypeOf(defStore, paramId) else {
+      return false;
+    };
+
+    if (!Hir::typeIsFunction(typeStore, paramType)) {
+      return false;
+    }
+
+    if (state.envIsCapturedByEscapingClosure(paramId.raw())) {
+      return false;
+    }
+
+    let Option::SOME(definition) = defStore.get(paramId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Variable(variableDef) -> !variableDef.noEscape,
+      _ -> false,
+    };
   }
 
   /// Borrow-check entry point. Walks every function and method body the HIR

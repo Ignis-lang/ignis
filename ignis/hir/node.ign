@@ -1122,6 +1122,30 @@ export namespace Hir {
     return literalCount > 0;
   }
 
+  /// Whether none of the closure literals `valueId` can evaluate to has a drop
+  /// function, so copying the closure value never duplicates anything that
+  /// has to be released.
+  function valueClosureLiteralsDropNothing(hir: &Hir::HirStore, valueId: Hir::HirId): boolean {
+    let literals: Vector<Hir::HirId> = Hir::valueClosureLiterals(hir, valueId);
+    let mut index: u64 = 0;
+
+    while (index < literals.length()) {
+      if (let Option::SOME(literalId) = literals.get(index)) {
+        if (let Option::SOME(literalNode) = hir.get(*literalId)) {
+          if (let Hir::HirKind::Closure(closure) = &literalNode.kind) {
+            if (closure.dropDef.isSome()) {
+              return false;
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
   /// Whether the type `typeId` is `never`.
   function typeIsNever(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
     let Option::SOME(typeNode) = typeStore.get(typeId) else {

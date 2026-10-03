@@ -1470,10 +1470,15 @@ export namespace LirLowering {
 
         LirLowering::registerLocal(state, letNode.name, slot);
 
+        // A closure binding can own its environment through its initializer, a
+        // later assignment, a move from another binding or a branch result;
+        // the drop schedule decides whether it does, and every closure local
+        // drops through its drop function when it is scheduled.
+        if (Hir::typeIsFunction(typeStore, declaredType)) {
+          LirLowering::markClosureLocal(state, letNode.name, declaredType);
+        }
+
         if (let Option::SOME(valueId) = letNode.value) {
-          if (Hir::bindingOwnsClosureEnv(hirStore, valueId, declaredType, typeStore, defStore)) {
-            LirLowering::markClosureLocal(state, letNode.name, declaredType);
-          }
 
           let mut valueType: Analyzer::TypeId = declaredType;
           let mut valueSpan: SourceSpan = nodeSpan;
@@ -4528,7 +4533,10 @@ export namespace LirLowering {
     let thenLive: boolean = !state.terminated;
     LirLowering::storeResult(typeStore, function_, state, hasResult && thenLive, resultSlot, thenValue);
 
+    // A branch also drops a closure owner the other branch handed to the
+    // result, once its own value is stored.
     if (thenLive) {
+      LirLowering::emitMatchArmDrops(dropSchedules, function_, state, ifNode.thenBranch);
       LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
     }
 
@@ -4541,6 +4549,7 @@ export namespace LirLowering {
       LirLowering::storeResult(typeStore, function_, state, hasResult && elseLive, resultSlot, elseValue);
 
       if (elseLive) {
+        LirLowering::emitMatchArmDrops(dropSchedules, function_, state, elseId);
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
       }
     } else {
@@ -4712,6 +4721,7 @@ export namespace LirLowering {
   /// their own local slots at entry, the oracle's `lower_function` prologue.
   function registerParams(
     defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     paramDefs: &Vector<Analyzer::DefinitionId>,
@@ -4748,6 +4758,10 @@ export namespace LirLowering {
       });
 
       LirLowering::registerLocal(state, *paramDef, slot);
+
+      if (Hir::typeIsFunction(typeStore, paramType)) {
+        LirLowering::markClosureLocal(state, *paramDef, paramType);
+      }
 
       LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
         dest: slot,
@@ -4849,7 +4863,7 @@ export namespace LirLowering {
 
       let mut state: LirLowering::LowerState = LirLowering::LowerState::init(constValues);
 
-      LirLowering::registerParams(defStore, &mut function_, &mut state, &paramDefs);
+      LirLowering::registerParams(defStore, typeStore, &mut function_, &mut state, &paramDefs);
       LirLowering::collectAddressTakenLocals(hirStore, &mut state, bodyId);
 
       let thunkCaptures: Vector<Hir::HirCapture> = tables.thunkCapturesFor(itemDef.raw());

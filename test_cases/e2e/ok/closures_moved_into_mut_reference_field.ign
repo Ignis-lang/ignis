@@ -1,0 +1,20 @@
+// A closure assigned into a field reached through a `&mut` parameter moves into
+// that field, so the local binding's scope ending does not free the
+// environment the caller's record now holds.
+record Holder {
+    public callback: () -> i32;
+}
+
+function install(target: &mut Holder, base: i32): void {
+    let add = (): i32 -> base + 2;
+    target.callback = add;
+}
+
+function main(): i32 {
+    let mut holder = Holder { callback: (): i32 -> 0 };
+    install(&mut holder, 40);
+
+    let call = holder.callback;
+
+    return call();
+}

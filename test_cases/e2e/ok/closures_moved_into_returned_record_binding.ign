@@ -1,0 +1,26 @@
+// A closure bound to a local and stored in a record moves into the record, so
+// returning the record through a binding hands the environment to the caller,
+// which calls it two frames later and frees it with the record.
+record Holder {
+    public callback: () -> i32;
+}
+
+function wrap(base: i32): Holder {
+    let add = (): i32 -> base + 2;
+    let holder = Holder { callback: add };
+
+    return holder;
+}
+
+function relay(base: i32): Holder {
+    let holder = wrap(base);
+
+    return holder;
+}
+
+function main(): i32 {
+    let holder = relay(40);
+    let call = holder.callback;
+
+    return call();
+}

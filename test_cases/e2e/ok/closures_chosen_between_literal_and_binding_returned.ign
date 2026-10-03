@@ -1,0 +1,29 @@
+// A conditional or match choosing a closure literal in one branch and an
+// existing closure binding in another moves that binding into the result on
+// its own path, so the result owns whichever environment was chosen and the
+// binding is dropped on the paths that did not choose it.
+function pick(flag: boolean, base: i32): () -> i32 {
+    let existing = (): i32 -> base + 1;
+    let chosen = flag ? (): i32 -> base + 2 : existing;
+
+    return chosen;
+}
+
+function pickByMatch(selector: i32, base: i32): () -> i32 {
+    let existing = (): i32 -> base + 3;
+    let chosen = match (selector) {
+        0 -> (): i32 -> base + 4,
+        _ -> existing,
+    };
+
+    return chosen;
+}
+
+function main(): i32 {
+    let first = pick(true, 40);
+    let second = pick(false, 40);
+    let third = pickByMatch(0, 40);
+    let fourth = pickByMatch(1, 40);
+
+    return first() + second() + third() + fourth() - 128;
+}
