@@ -60,6 +60,9 @@ export namespace LirLowering {
     /// so the field read does not mark the field moved. See the `FieldAccess`
     /// lowering. Mirrors `reading_field_scrutinee_by_copy`.
     public readingFieldScrutineeByCopy: boolean;
+    /// Set while lowering a closure field passed to a parameter that takes the
+    /// environment over, so the read moves the closure out of its field.
+    public movingClosureField: boolean;
     /// Evaluated module constants, so a reference to one folds into a LIR
     /// constant instead of naming a global the emitter has no definition for.
     public constValues: Analyzer::ConstEval::ConstValueMap;
@@ -82,6 +85,7 @@ export namespace LirLowering {
         closureLocalDefRaws: Vector::new<u32>(),
         closureLocalTypeRaws: Vector::new<u32>(),
         readingFieldScrutineeByCopy: false,
+        movingClosureField: false,
         constValues: LirLowering::copyConstValueMap(constValues),
       };
     }
@@ -877,6 +881,36 @@ export namespace LirLowering {
     stateRef.byrefCaptureRaws.push(defId.raw());
   }
 
+  /// Lowers one call argument. A closure field handed to a parameter that is
+  /// not `@noescape` moves out of its field, matching the ownership check,
+  /// which moves the parameter's environment into the callee.
+  function lowerCallArgument(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    argId: Hir::HirId,
+    params: &Vector<Analyzer::DefinitionId>,
+    paramIndex: u64,
+  ): Lir::Operand {
+    let mut isField: boolean = false;
+
+    if (let Option::SOME(argNode) = hirStore.get(argId)) {
+      if (let Hir::HirKind::FieldAccess(_) = &argNode.kind) {
+        isField = true;
+      }
+    }
+
+    state.movingClosureField = isField && !Borrowck::paramIsNoEscape(defStore, params, paramIndex);
+
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, argId);
+    state.movingClosureField = false;
+
+    return value;
+  }
+
   /// Records that a local holds a closure value, with the environment layout
   /// a later drop of it needs.
   function markClosureLocal(
@@ -1411,6 +1445,7 @@ export namespace LirLowering {
       Hir::HirKind::Call(call) -> {
         let isExtern: boolean = LirLowering::calleeIsExtern(defStore, call.callee);
         let parameterTypes: Vector<Analyzer::TypeId> = LirLowering::calleeParameterTypes(defStore, call.callee);
+        let callParams: Vector<Analyzer::DefinitionId> = Borrowck::callParamsOrEmpty(defStore, call.callee);
         let mut args: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
         let mut argIndex: u64 = 0;
 
@@ -1424,7 +1459,7 @@ export namespace LirLowering {
               argSpan = argNode.span;
             }
 
-            let rawValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId);
+            let rawValue: Lir::Operand = LirLowering::lowerCallArgument(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId, &callParams, argIndex);
             let mut argValue: Lir::Operand = rawValue;
 
             if (let Option::SOME(parameterType) = parameterTypes.get(argIndex)) {
@@ -1894,8 +1929,11 @@ export namespace LirLowering {
         let readingScrutineeByCopy: boolean = state.readingFieldScrutineeByCopy;
         state.readingFieldScrutineeByCopy = false;
 
+        let movingClosure: boolean = state.movingClosureField && Hir::typeIsFunction(typeStore, nodeType);
+        state.movingClosureField = false;
+
         let baseIsBorrowed: boolean = LirLowering::baseIsBehindReference(typeStore, hirStore, fieldNode.base);
-        let fieldNeedsDrop: boolean = Borrowck::needsDropType(defStore, typeStore, nodeType);
+        let fieldNeedsDrop: boolean = Borrowck::needsDropType(defStore, typeStore, nodeType) || movingClosure;
         let marksFieldMoved: boolean = !readingScrutineeByCopy && !baseIsBorrowed && fieldNeedsDrop;
 
         let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, fieldNode.base);
@@ -2014,16 +2052,20 @@ export namespace LirLowering {
       },
       Hir::HirKind::MethodCall(methodNode) -> {
         let mut callArgs: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+        let methodParams: Vector<Analyzer::DefinitionId> = Borrowck::callParamsOrEmpty(defStore, methodNode.method);
+        let mut paramOffset: u64 = 0;
 
         if (let Option::SOME(receiverId) = methodNode.receiver) {
           callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, receiverId));
+          paramOffset = 1;
         }
 
         let mut argIndex: u64 = 0;
 
         while (argIndex < methodNode.args.length()) {
           if (let Option::SOME(argId) = methodNode.args.get(argIndex)) {
-            callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId));
+            let paramIndex: u64 = argIndex + paramOffset;
+            callArgs.push(LirLowering::lowerCallArgument(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId, &methodParams, paramIndex));
           }
 
           argIndex += 1;
@@ -2053,11 +2095,12 @@ export namespace LirLowering {
         let closure: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, closureCallNode.callee);
 
         let mut closureArgs: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+        let noParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
         let mut argIndex: u64 = 0;
 
         while (argIndex < closureCallNode.args.length()) {
           if (let Option::SOME(argId) = closureCallNode.args.get(argIndex)) {
-            closureArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId));
+            closureArgs.push(LirLowering::lowerCallArgument(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId, &noParams, argIndex));
           }
 
           argIndex += 1;

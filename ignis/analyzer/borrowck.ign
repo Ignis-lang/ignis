@@ -3493,6 +3493,32 @@ export namespace Borrowck {
     Borrowck::emitCannotMoveOutOfBorrow(state, diagnostics, Borrowck::extractRootVariable(hir, nodeId), span);
   }
 
+  /// Rejects handing a closure read out of borrowed storage to a parameter that
+  /// takes its environment over. The parameter would free an environment the
+  /// referent still owns, the same move out of a borrow `rejectMoveOutOfBorrow`
+  /// reports for values whose type needs a drop.
+  function rejectClosureMoveOutOfBorrow(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    nodeId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return;
+    };
+
+    if (!Hir::typeIsFunction(typeStore, node.typeId)) {
+      return;
+    }
+
+    if (!Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, nodeId) && !Borrowck::isBorrowedBindingNode(hir, state, nodeId)) {
+      return;
+    }
+
+    Borrowck::emitCannotMoveOutOfBorrow(state, diagnostics, Borrowck::extractRootVariable(hir, nodeId), node.span);
+  }
+
   /// The payload types variant `variantTag` carries at `valueType`, or `NONE`
   /// when the value is not that enum. Mirrors `variant_payload_types`: the
   /// value's own enum answers, because after monomorphization the pattern still
@@ -4549,6 +4575,8 @@ export namespace Borrowck {
         } else if (!Borrowck::paramIsNoEscape(defStore, params, index + paramOffset)) {
           if (let Option::SOME(owner) = Borrowck::movedClosureOwner(hir, state, *argument)) {
             Borrowck::tryConsume(state, schedules, owner, span, Borrowck::OwnershipReport::CONSUMER_CALL_ARGUMENT);
+          } else {
+            Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, *argument);
           }
         }
       }
