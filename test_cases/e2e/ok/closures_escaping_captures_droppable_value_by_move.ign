@@ -1,0 +1,41 @@
+// e2e: std
+// A returned closure takes a value with drop glue by `@move`. Its environment
+// drop function reads the captured field through the thunk's environment
+// struct and drops the value exactly once, after the last call.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function idOf(value: &Tracked): i32 {
+  return value.id;
+}
+
+/// `let _ = @move held` only selects the by-value capture: a discarded binding
+/// does not take the value, so the environment keeps owning it.
+function makeReader(): () -> i32 {
+  let held: Tracked = Tracked { id: 4 };
+  let read = (): i32 -> {
+    let seen: &Tracked = &held;
+    let _ = @move held;
+
+    return idOf(seen);
+  };
+
+  return read;
+}
+
+function main(): i32 {
+  let reader = makeReader();
+  let total: i32 = reader() + reader();
+
+  Io::println(`calls done ${total}`.toStr());
+
+  return 0;
+}

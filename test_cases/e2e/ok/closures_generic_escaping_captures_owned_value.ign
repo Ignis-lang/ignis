@@ -1,0 +1,73 @@
+// e2e: std
+// An escaping closure in a generic function takes ownership of a value of the
+// type parameter with `@move`, is returned and called twice. Each
+// instantiation has its own environment drop function, so the captured
+// `String`, `Vector<i32>` and `Tracked` are each dropped exactly once, when
+// the binding that owns the returned closure goes out of scope.
+import Io from "std::io";
+import String from "std::string";
+import Vector from "std::vector";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function weightOf<T>(value: &T, weight: i32): i32 {
+  if (@sizeOf<T>() == 0) {
+    return 0;
+  }
+
+  return weight;
+}
+
+/// `let _ = @move value` only selects the by-value capture: a discarded
+/// binding does not take the value, so the environment keeps owning it and
+/// every call reads it through a reference.
+function holder<T>(value: T, weight: i32): () -> i32 {
+  let held = (): i32 -> {
+    let seen: &T = &value;
+    let _ = @move value;
+
+    return weightOf<T>(seen, weight);
+  };
+
+  return held;
+}
+
+function holdString(): i32 {
+  let get = holder<String>(String::create("owned text"), 1);
+
+  return get() + get();
+}
+
+function holdVector(): i32 {
+  let mut numbers: Vector<i32> = Vector::new<i32>();
+  numbers.push(7);
+  numbers.push(8);
+
+  let get = holder<Vector<i32>>(numbers, 10);
+
+  return get() + get();
+}
+
+function holdTracked(): i32 {
+  let get = holder<Tracked>(Tracked { id: 3 }, 100);
+  let total: i32 = get() + get();
+
+  Io::println("tracked calls done");
+
+  return total;
+}
+
+function main(): i32 {
+  let total: i32 = holdString() + holdVector() + holdTracked();
+
+  Io::println(`total ${total}`.toStr());
+
+  return 0;
+}

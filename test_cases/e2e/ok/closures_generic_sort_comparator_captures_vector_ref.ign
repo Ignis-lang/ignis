@@ -1,0 +1,57 @@
+// e2e: std
+// A generic function sorts indices with a `Vector::sort` comparator that
+// captures the generic `&Vector<T>` and a `@noescape` ranking closure.
+import Vector from "std::vector";
+
+function orderByRank<T>(keys: &Vector<T>, @noescape rank: (&T) -> i32): Vector<u64> {
+    let mut order: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < keys.length()) {
+        order.push(index);
+        index += 1;
+    }
+
+    order.sort((a: &u64, b: &u64): i32 -> {
+        let Option::SOME(keyA) = keys.get(*a) else {
+            return 0;
+        };
+        let Option::SOME(keyB) = keys.get(*b) else {
+            return 0;
+        };
+
+        return rank(keyA) - rank(keyB);
+    });
+
+    return order;
+}
+
+function main(): i32 {
+    let mut keys: Vector<i32> = Vector::new<i32>();
+    keys.push(30);
+    keys.push(10);
+    keys.push(20);
+
+    let ascending: Vector<u64> = orderByRank<i32>(&keys, (key: &i32): i32 -> *key);
+
+    let mut flags: Vector<boolean> = Vector::new<boolean>();
+    flags.push(true);
+    flags.push(false);
+
+    let falseFirst: Vector<u64> = orderByRank<boolean>(&flags, (flag: &boolean): i32 -> *flag ? 1 : 0);
+
+    let Option::SOME(first) = ascending.get(0) else {
+        return 99;
+    };
+    let Option::SOME(middle) = ascending.get(1) else {
+        return 99;
+    };
+    let Option::SOME(last) = ascending.get(2) else {
+        return 99;
+    };
+    let Option::SOME(flagFirst) = falseFirst.get(0) else {
+        return 99;
+    };
+
+    return (*first * 100 + *middle * 10 + *last + *flagFirst * 5) as i32;
+}

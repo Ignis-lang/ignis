@@ -1,0 +1,30 @@
+// A closure inside a generic function captures a value of the type parameter,
+// once called in place and once returned. Each instantiation gets its own
+// thunk and, for the returned closure, its own environment drop function.
+function combineWith<T>(value: T, @noescape combine: (T, T) -> T): T {
+    let twice = (other: T): T -> combine(value, other);
+
+    return twice(value);
+}
+
+function keep<T>(value: T): () -> T {
+    let get = (): T -> @move value;
+
+    return get;
+}
+
+function main(): i32 {
+    let small: i32 = combineWith<i32>(10, (a: i32, b: i32): i32 -> a + b);
+    let large: i64 = combineWith<i64>(7, (a: i64, b: i64): i64 -> a * b);
+
+    let keptNumber = keep<i32>(3);
+    let keptFlag = keep<boolean>(true);
+
+    let mut result: i32 = small + large as i32 + keptNumber();
+
+    if (!keptFlag()) {
+        result = 0;
+    }
+
+    return result;
+}
