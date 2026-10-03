@@ -1,0 +1,113 @@
+// e2e: std
+//
+// A match that produces no value discards its arm values like an expression statement
+// discards its own, and both follow one rule: a discarded value is freed only when this
+// function owns it. A local declared outside the match, or a block whose tail names one,
+// keeps the drop its own schedule gives it. A field read out of an owned record is moved
+// out of the record and freed where it is discarded; the record skips it. A dereference
+// of a borrowed reference names the referent, whose owner frees it, so discarding it
+// frees nothing; freeing it there dropped the referent twice.
+import Io from "std::io";
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+record Holder {
+  public name: Tracked;
+  public tag: Tracked;
+}
+
+function outerLocal(source: Option<Tracked>): void {
+  let outer: Tracked = Tracked { id: 1 };
+
+  match (source) {
+    Option::SOME(tracked) -> tracked,
+    Option::NONE -> outer,
+  };
+
+  Io::println("end outer local");
+}
+
+function outerLocalStatement(): void {
+  let outer: Tracked = Tracked { id: 2 };
+  outer;
+  Io::println("end outer local statement");
+}
+
+function outerLocalInBlockTail(source: Option<Tracked>): void {
+  let outer: Tracked = Tracked { id: 3 };
+
+  match (source) {
+    Option::SOME(tracked) -> tracked,
+    Option::NONE -> {
+      outer
+    },
+  };
+
+  Io::println("end outer local in block tail");
+}
+
+function fieldProjection(source: Option<i32>): void {
+  let holder: Holder = Holder { name: Tracked { id: 4 }, tag: Tracked { id: 5 } };
+
+  match (source) {
+    Option::SOME(_) -> holder.name,
+    Option::NONE -> {},
+  };
+
+  Io::println("end field projection");
+}
+
+function fieldProjectionStatement(): void {
+  let holder: Holder = Holder { name: Tracked { id: 6 }, tag: Tracked { id: 7 } };
+  holder.name;
+  Io::println("end field projection statement");
+}
+
+function dereference(source: Option<i32>, borrowed: &Tracked): void {
+  match (source) {
+    Option::SOME(_) -> *borrowed,
+    Option::NONE -> {},
+  };
+
+  Io::println("end dereference");
+}
+
+function dereferenceInBlockTail(source: Option<i32>, borrowed: &Tracked): void {
+  match (source) {
+    Option::SOME(_) -> {
+      *borrowed
+    },
+    Option::NONE -> {},
+  };
+
+  Io::println("end dereference in block tail");
+}
+
+function dereferenceStatement(borrowed: &Tracked): void {
+  *borrowed;
+  Io::println("end dereference statement");
+}
+
+function main(): i32 {
+  outerLocal(Option::NONE);
+  outerLocalStatement();
+  outerLocalInBlockTail(Option::NONE);
+  fieldProjection(Option::SOME(0));
+  fieldProjectionStatement();
+
+  let owner: Tracked = Tracked { id: 8 };
+  dereference(Option::SOME(0), &owner);
+  dereferenceInBlockTail(Option::SOME(0), &owner);
+  dereferenceStatement(&owner);
+  Io::println("end main");
+
+  return 0;
+}

@@ -3287,6 +3287,61 @@ export namespace Borrowck {
     return Borrowck::isReferenceType(typeStore, innerNode.typeId);
   }
 
+  /// The droppable bindings `pattern` takes out of the borrowed elements of a tuple
+  /// literal scrutinee, one level of tuple at a time. `bindsBorrowedPayloads` sees
+  /// the tuple itself, which is an owned temporary even when every element is a
+  /// reference, so without this each element's payload would be scheduled for a drop
+  /// its referent still owes.
+  function collectBorrowedTupleElementBindings(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    scrutinee: Hir::HirId,
+    pattern: &Hir::HirPattern,
+    output: &mut Vector<u32>,
+  ): void {
+    let Option::SOME(node) = hir.get(scrutinee) else {
+      return;
+    };
+
+    let Hir::HirKind::TupleLiteral(elements) = &node.kind else {
+      return;
+    };
+
+    match (pattern) {
+      Hir::HirPattern::Tuple(subpatterns) -> {
+        let mut index: u64 = 0;
+
+        while (index < subpatterns.length() && index < elements.length()) {
+          if (let Option::SOME(subpattern) = subpatterns.get(index)) {
+            if (let Option::SOME(element) = elements.get(index)) {
+              if (Borrowck::bindsBorrowedPayloads(typeStore, hir, state, *element)) {
+                Borrowck::collectDroppableBindings(defStore, typeStore, subpattern, output);
+              } else {
+                Borrowck::collectBorrowedTupleElementBindings(defStore, typeStore, hir, state, *element, subpattern, output);
+              }
+            }
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Or(alternatives) -> {
+        let mut index: u64 = 0;
+
+        while (index < alternatives.length()) {
+          if (let Option::SOME(alternative) = alternatives.get(index)) {
+            Borrowck::collectBorrowedTupleElementBindings(defStore, typeStore, hir, state, scrutinee, alternative, output);
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+  }
+
   function isReferenceType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
     let Option::SOME(type_) = typeStore.get(typeId) else {
       return false;
@@ -5451,12 +5506,35 @@ export namespace Borrowck {
       let mut bindings: Vector<u32> = Vector::new<u32>();
       Borrowck::collectDroppableBindings(defStore, typeStore, &arm.pattern, &mut bindings);
 
+      // A tuple scrutinee borrows element by element: the bindings a pattern takes
+      // out of a borrowed element are borrowed, the others are owned as usual.
+      let mut borrowedElementBindings: Vector<u32> = Vector::new<u32>();
+
+      if (!bindsBorrowedPayloads) {
+        Borrowck::collectBorrowedTupleElementBindings(
+          defStore,
+          typeStore,
+          hir,
+          state,
+          matchNode.scrutinee,
+          &arm.pattern,
+          &mut borrowedElementBindings,
+        );
+      }
+
+      let mut ownedBindings: Vector<u32> = Vector::new<u32>();
       let borrowedMark: u64 = state.borrowedBindingCount();
       let mut bindingIndex: u64 = 0;
 
       while (bindingIndex < bindings.length()) {
         if (let Option::SOME(defRaw) = bindings.get(bindingIndex)) {
-          if (bindsBorrowedPayloads) {
+          let bindingIsBorrowed: boolean = bindsBorrowedPayloads || Borrowck::containsRaw(&mut borrowedElementBindings, *defRaw);
+
+          if (!bindingIsBorrowed) {
+            ownedBindings.push(*defRaw);
+          }
+
+          if (bindingIsBorrowed) {
             Borrowck::notePatternBinding(state, *defRaw, span);
           }
 
@@ -5465,7 +5543,7 @@ export namespace Borrowck {
 
           // Destructuring a reference leaves the payload where it was: the
           // binding names borrowed storage, and handing it on moves out of it.
-          if (bindsBorrowedPayloads) {
+          if (bindingIsBorrowed) {
             declareRef.markBorrowedBinding(*defRaw);
             let mut schedulesRef: &mut Hir::DropSchedules = schedules;
             schedulesRef.addBorrowedPatternBinding(Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
@@ -5488,8 +5566,8 @@ export namespace Borrowck {
 
         let mut ownedIndex: u64 = 0;
 
-        while (ownedIndex < bindings.length()) {
-          if (let Option::SOME(defRaw) = bindings.get(ownedIndex)) {
+        while (ownedIndex < ownedBindings.length()) {
+          if (let Option::SOME(defRaw) = ownedBindings.get(ownedIndex)) {
             armScopeRef.pushOwned(*defRaw);
           }
 
@@ -5548,7 +5626,7 @@ export namespace Borrowck {
         state,
         schedules,
         hir,
-        &bindings,
+        &ownedBindings,
         matchId,
         arm.body,
         aliasesExternalStorage,

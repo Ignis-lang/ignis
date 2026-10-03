@@ -1,0 +1,36 @@
+// e2e: std
+//
+// An or-pattern over a tuple scrutinee built from references tests the referenced
+// payloads without taking them: the referents keep their drops, and each is dropped once
+// when its owner goes out of scope. Or-patterns cannot bind, so every alternative only
+// inspects its element.
+import Io from "std::io";
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function exactlyOne(first: &Option<Tracked>, second: &Option<Tracked>): boolean {
+  return match ((first, second)) {
+    (Option::SOME(_), Option::NONE) | (Option::NONE, Option::SOME(_)) -> true,
+    _ -> false,
+  };
+}
+
+function main(): i32 {
+  let one: Option<Tracked> = Option::SOME(Tracked { id: 1 });
+  let two: Option<Tracked> = Option::SOME(Tracked { id: 2 });
+  let none: Option<Tracked> = Option::NONE;
+
+  Io::println(`one and none ${exactlyOne(&one, &none)}`.toStr());
+  Io::println(`one and two ${exactlyOne(&one, &two)}`.toStr());
+  Io::println("end");
+
+  return 0;
+}
