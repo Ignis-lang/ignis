@@ -1,0 +1,37 @@
+// A conditional branch or a match arm block ending in a closure field read
+// hands that closure to the result, so the read moves it out of the field and only the binding
+// that receives the result frees the environment.
+record Holder {
+    public callback: () -> i32;
+}
+
+function makeHolder(base: i32): Holder {
+    let add = (): i32 -> base + 2;
+
+    return Holder { callback: add };
+}
+
+function pick(flag: boolean, base: i32): () -> i32 {
+    let holder = makeHolder(base);
+    let fallback = (): i32 -> 0;
+    let chosen = flag ? holder.callback : fallback;
+
+    return chosen;
+}
+
+function pickByMatch(selector: i32, base: i32): () -> i32 {
+    let holder = makeHolder(base);
+    let chosen = match (selector) {
+        0 -> { holder.callback },
+        _ -> (): i32 -> 0,
+    };
+
+    return chosen;
+}
+
+function main(): i32 {
+    let first = pick(true, 40);
+    let second = pickByMatch(0, 40);
+
+    return first() + second() - 42;
+}

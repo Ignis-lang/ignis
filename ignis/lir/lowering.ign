@@ -63,6 +63,10 @@ export namespace LirLowering {
     /// Set while lowering a closure field read by a destination that takes the
     /// environment over, so the read moves the closure out of its field.
     public movingClosureField: boolean;
+    /// Set while lowering a block, `if` or `match` whose value a destination
+    /// takes over, so its block tail, branches or arm bodies are lowered as
+    /// moved values too.
+    public movingResult: boolean;
     /// Evaluated module constants, so a reference to one folds into a LIR
     /// constant instead of naming a global the emitter has no definition for.
     public constValues: Analyzer::ConstEval::ConstValueMap;
@@ -86,6 +90,7 @@ export namespace LirLowering {
         closureLocalTypeRaws: Vector::new<u32>(),
         readingFieldScrutineeByCopy: false,
         movingClosureField: false,
+        movingResult: false,
         constValues: LirLowering::copyConstValueMap(constValues),
       };
     }
@@ -914,15 +919,41 @@ export namespace LirLowering {
     valueId: Hir::HirId,
   ): Lir::Operand {
     if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
-      if (let Hir::HirKind::FieldAccess(_) = &valueNode.kind) {
-        state.movingClosureField = true;
-      }
+      match (&valueNode.kind) {
+        Hir::HirKind::FieldAccess(_) -> {
+          state.movingClosureField = true;
+        },
+        Hir::HirKind::Block(_) | Hir::HirKind::If(_) | Hir::HirKind::Match(_) -> {
+          state.movingResult = true;
+        },
+        _ -> {},
+      };
     }
 
     let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
     state.movingClosureField = false;
+    state.movingResult = false;
 
     return value;
+  }
+
+  /// Lowers a block tail, branch or arm body, as a moved value when the value
+  /// of the block, `if` or `match` it belongs to is.
+  function lowerResultValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    valueId: Hir::HirId,
+    moving: boolean,
+  ): Lir::Operand {
+    if (moving) {
+      return LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
+    }
+
+    return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
   }
 
   /// Records that a local holds a closure value, with the environment layout
@@ -1550,6 +1581,9 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::Block(block) -> {
+        let movingTail: boolean = state.movingResult;
+        state.movingResult = false;
+
         LirLowering::pushSyntheticFrame(state);
 
         let mut statementIndex: u64 = 0;
@@ -1565,7 +1599,7 @@ export namespace LirLowering {
         let mut blockValue: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
 
         if (let Option::SOME(valueId) = block.expression) {
-          blockValue = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
+          blockValue = LirLowering::lowerResultValue(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId, movingTail);
         }
 
         // An early exit already unwound this scope on its own path, so the
@@ -3993,6 +4027,9 @@ export namespace LirLowering {
     nodeType: Analyzer::TypeId,
     nodeSpan: SourceSpan,
   ): Lir::Operand {
+    let movingArms: boolean = state.movingResult;
+    state.movingResult = false;
+
     let mut tupleElements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     let mut isTupleScrutinee: boolean = false;
 
@@ -4271,7 +4308,7 @@ export namespace LirLowering {
         );
       }
 
-      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, arm.body);
+      let bodyValue: Lir::Operand = LirLowering::lowerResultValue(defStore, typeStore, hirStore, dropSchedules, function_, state, arm.body, movingArms);
 
       let bodyLive: boolean = !state.terminated;
 
@@ -4564,6 +4601,9 @@ export namespace LirLowering {
     nodeType: Analyzer::TypeId,
     nodeSpan: SourceSpan,
   ): Lir::Operand {
+    let movingBranches: boolean = state.movingResult;
+    state.movingResult = false;
+
     let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.condition);
 
     let thenBlock: Lir::BlockId = LirLowering::createBlock(function_, "then");
@@ -4585,7 +4625,7 @@ export namespace LirLowering {
     }));
 
     LirLowering::switchToBlock(state, thenBlock);
-    let thenValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.thenBranch);
+    let thenValue: Lir::Operand = LirLowering::lowerResultValue(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.thenBranch, movingBranches);
 
     let thenLive: boolean = !state.terminated;
     LirLowering::storeResult(typeStore, function_, state, hasResult && thenLive, resultSlot, thenValue);
@@ -4600,7 +4640,7 @@ export namespace LirLowering {
     LirLowering::switchToBlock(state, elseBlock);
 
     if (let Option::SOME(elseId) = ifNode.elseBranch) {
-      let elseValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, elseId);
+      let elseValue: Lir::Operand = LirLowering::lowerResultValue(defStore, typeStore, hirStore, dropSchedules, function_, state, elseId, movingBranches);
 
       let elseLive: boolean = !state.terminated;
       LirLowering::storeResult(typeStore, function_, state, hasResult && elseLive, resultSlot, elseValue);
@@ -4946,7 +4986,7 @@ export namespace LirLowering {
         );
       }
 
-      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);
+      let bodyValue: Lir::Operand = LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);
 
       // A body that falls off its end returns implicitly: nothing for a void
       // function, its value otherwise. The value is the block's tail, which

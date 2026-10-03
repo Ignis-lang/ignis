@@ -1,0 +1,42 @@
+// e2e: err
+// A closure body's final expression, a conditional branch and a match arm block
+// hand their value on like a return, so reading a closure field through a reference there is a move out of
+// borrowed storage.
+record Holder {
+    public callback: () -> i32;
+}
+
+function takeByClosure(holder: &Holder): i32 {
+    let read = (): () -> i32 -> {
+        let unused: i32 = 0;
+        holder.callback
+    };
+    let taken = read();
+
+    return taken();
+}
+
+function choose(selector: i32, holder: &Holder): () -> i32 {
+    let chosen = match (selector) {
+        0 -> { holder.callback },
+        _ -> (): i32 -> 0,
+    };
+
+    return chosen;
+}
+
+function pick(flag: boolean, holder: &Holder): () -> i32 {
+    let chosen = flag ? holder.callback : (): i32 -> 0;
+
+    return chosen;
+}
+
+function main(): i32 {
+    let base: i32 = 40;
+    let holder = Holder { callback: (): i32 -> base + 2 };
+    let picked = pick(true, &holder);
+    let chosen = choose(0, &holder);
+    let viaClosure: i32 = takeByClosure(&holder);
+
+    return picked() + chosen() + viaClosure - 84;
+}

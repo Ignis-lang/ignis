@@ -1176,7 +1176,7 @@ export namespace Hir {
   /// that environment. Claiming ownership again would free it twice, so a
   /// result whose callee could be passing one of its own arguments through
   /// is left unowned. An indirect closure call has no parameter list to
-  /// read and is treated the same way.
+  /// read, so it is left unowned only when one of its arguments is a closure.
   function bindingOwnsClosureEnv(
     hir: &Hir::HirStore,
     valueId: Hir::HirId,
@@ -1202,6 +1202,10 @@ export namespace Hir {
       callable = Option::SOME(methodNode.method);
     }
 
+    if (let Hir::HirKind::CallClosure(closureCall) = &node.kind) {
+      return Hir::typeIsFunction(typeStore, valueType) && !Hir::anyFunctionTypedNode(hir, typeStore, &closureCall.args);
+    }
+
     let Option::SOME(callableId) = callable else {
       return false;
     };
@@ -1211,6 +1215,29 @@ export namespace Hir {
     }
 
     return !Hir::takesAClosure(typeStore, defStore, callableId);
+  }
+
+  /// Whether any of `nodes` evaluates to a closure.
+  function anyFunctionTypedNode(
+    hir: &Hir::HirStore,
+    typeStore: &mut Analyzer::TypeStore,
+    nodes: &Vector<Hir::HirId>,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < nodes.length()) {
+      if (let Option::SOME(nodeId) = nodes.get(index)) {
+        if (let Option::SOME(argument) = hir.get(*nodeId)) {
+          if (Hir::typeIsFunction(typeStore, argument.typeId)) {
+            return true;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
   }
 
   /// Whether any parameter of `callable` is itself of function type.

@@ -3504,19 +3504,24 @@ export namespace Borrowck {
     diagnostics: &mut DiagnosticBag,
     nodeId: Hir::HirId,
   ): void {
-    let Option::SOME(node) = hir.get(nodeId) else {
-      return;
-    };
+    let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Hir::collectValueResults(hir, nodeId, &mut results);
 
-    if (!Hir::typeIsFunction(typeStore, node.typeId)) {
-      return;
+    let mut index: u64 = 0;
+
+    while (index < results.length()) {
+      if (let Option::SOME(resultId) = results.get(index)) {
+        if (let Option::SOME(node) = hir.get(*resultId)) {
+          let throughReference: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, *resultId) || Borrowck::isBorrowedBindingNode(hir, state, *resultId);
+
+          if (Hir::typeIsFunction(typeStore, node.typeId) && throughReference) {
+            Borrowck::emitCannotMoveOutOfBorrow(state, diagnostics, Borrowck::extractRootVariable(hir, *resultId), node.span);
+          }
+        }
+      }
+
+      index += 1;
     }
-
-    if (!Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, nodeId) && !Borrowck::isBorrowedBindingNode(hir, state, nodeId)) {
-      return;
-    }
-
-    Borrowck::emitCannotMoveOutOfBorrow(state, diagnostics, Borrowck::extractRootVariable(hir, nodeId), node.span);
   }
 
   /// The payload types variant `variantTag` carries at `valueType`, or `NONE`
@@ -4721,12 +4726,9 @@ export namespace Borrowck {
         moveOnly = ownsClosureEnv && !copyable;
       }
 
-      // A move-only owner handed over here, directly or as the result of a
-      // branch, gives this binding its environment, and so does a closure
-      // moved out of a field.
-      let movesClosureField: boolean = Borrowck::isFieldAccessNode(hir, value) && Borrowck::nodeIsFunction(typeStore, hir, value);
-
-      if (!ownsClosureEnv && (movesClosureField || Borrowck::valueTakesClosureOwners(hir, state, typeStore, value))) {
+      // A move-only owner or a closure field handed over here, directly or as
+      // the result of a branch, gives this binding its environment.
+      if (!ownsClosureEnv && Borrowck::valueTakesClosureOwners(hir, state, typeStore, value)) {
         ownsClosureEnv = true;
         moveOnly = true;
       }
@@ -4780,11 +4782,12 @@ export namespace Borrowck {
     }
   }
 
-  /// Whether every value `value` can evaluate to is a closure literal or a
-  /// move-only closure owner, with at least one owner among them. Each owner
-  /// is moved into the result on its own path (see `consumeBranchClosureOwner`),
-  /// so the binding that receives the result owns whichever environment
-  /// arrives.
+  /// Whether every value `value` can evaluate to is a closure literal, a
+  /// move-only closure owner or a closure field, with at least one owner or
+  /// field among them. Each owner is moved into the result on its own path
+  /// (see `consumeBranchClosureOwner`) and each field is moved out of its
+  /// record, so the binding that receives the result owns whichever
+  /// environment arrives.
   function valueTakesClosureOwners(
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
@@ -4808,7 +4811,9 @@ export namespace Borrowck {
           _ -> false,
         };
 
-        if (Borrowck::movedClosureOwner(hir, state, *resultId).isSome()) {
+        let isClosureField: boolean = Borrowck::isFieldAccessNode(hir, *resultId) && Hir::typeIsFunction(typeStore, resultNode.typeId);
+
+        if (isClosureField || Borrowck::movedClosureOwner(hir, state, *resultId).isSome()) {
           ownerCount += 1;
         } else if (!isLiteral && !Hir::typeIsNever(typeStore, resultNode.typeId)) {
           return false;
@@ -6392,18 +6397,6 @@ export namespace Borrowck {
     return result;
   }
 
-  function nodeIsFunction(
-    typeStore: &mut Analyzer::TypeStore,
-    hir: &Hir::HirStore,
-    nodeId: Hir::HirId
-  ): boolean {
-    let Option::SOME(node) = hir.get(nodeId) else {
-      return false;
-    };
-
-    return Hir::typeIsFunction(typeStore, node.typeId);
-  }
-
   function isFieldAccessNode(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
     let Option::SOME(node) = hir.get(nodeId) else {
       return false;
@@ -6574,6 +6567,10 @@ export namespace Borrowck {
     }
 
     Borrowck::checkNode(defStore, typeStore, symbols, hir, &mut state, diagnostics, schedules, bodyId);
+
+    // A body's final expression is its result, handed to the caller like a
+    // returned value.
+    Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, &mut state, diagnostics, bodyId);
 
     // The synthetic return at the end of the body unwinds everything still
     // open, which by now is the root scope alone. Mirrors the `FnEnd` block of
