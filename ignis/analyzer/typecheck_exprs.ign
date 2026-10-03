@@ -2864,6 +2864,35 @@ export namespace Analyzer {
         argIndex += 1;
       }
 
+      return Analyzer::Typecheck::selectMethodOverloadByTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        owner,
+        candidates,
+        &argTypes,
+        span,
+        memberName,
+      );
+    }
+
+    /// Pick one method among same-name candidates for arguments already typed.
+    ///
+    /// The cost rules and diagnostics are those of `selectMethodOverload`. A pipe
+    /// comes here directly: its only argument is the piped value, typed before the
+    /// right side is looked at.
+    function selectMethodOverloadByTypes(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      owner: &Analyzer::Typecheck::RequiredMethodOwner,
+      candidates: &Vector<Analyzer::DefinitionId>,
+      argTypes: &Vector<Analyzer::TypeId>,
+      span: SourceSpan,
+      memberName: str,
+    ): Option<Analyzer::DefinitionId> {
       let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut bestCost: u64 = 0;
       let mut candidateIndex: u64 = 0;
@@ -2892,7 +2921,7 @@ export namespace Analyzer {
           span,
           *candidateDefId,
           &paramTypes,
-          &argTypes,
+          argTypes,
         );
 
         if (let Option::SOME(cost) = costOpt) {
@@ -2909,7 +2938,7 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
         let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
         let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
@@ -2917,7 +2946,7 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
         let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
         let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
@@ -7561,7 +7590,11 @@ export namespace Analyzer {
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      span: SourceSpan,
+      callExprId: Ast::ExpressionId,
       ma: &Ast::Expression::MemberAccess,
+      extraArgs: &Vector<Ast::ExpressionId>,
+      leftType: Analyzer::TypeId,
     ): Option<Analyzer::Typecheck::PipeCallee> {
       let objectType: Analyzer::TypeId = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, ma.object)!;
 
@@ -7580,7 +7613,62 @@ export namespace Analyzer {
 
       let memberName: str = ma.member.toStr();
 
-      let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &owner.instanceMethods, memberName, symbols) else {
+      let candidateSet: Vector<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(
+        defStore,
+        &owner.instanceMethods,
+        memberName,
+        symbols,
+      );
+
+      let mut instanceOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (candidateSet.length() > 1) {
+        // The piped value is the first argument, ahead of the ones written at the call
+        // site. They are typed again against the selected signature afterwards, as the
+        // direct call path does.
+        let mut argTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        argTypes.push(leftType);
+
+        let mut argIndex: u64 = 0;
+
+        while (argIndex < extraArgs.length()) {
+          let Option::SOME(argExprId) = extraArgs.get(argIndex) else {
+            argIndex += 1;
+            continue;
+          };
+
+          let Option::SOME(argType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId) else {
+            return Option::NONE;
+          };
+
+          argTypes.push(argType);
+          argIndex += 1;
+        }
+
+        let Option::SOME(selected) = Analyzer::Typecheck::selectMethodOverloadByTypes(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          &owner,
+          &candidateSet,
+          &argTypes,
+          span,
+          memberName,
+        ) else {
+          return Option::NONE;
+        };
+
+        instanceOpt = Option::SOME(selected);
+
+        // Without a recorded target, lowering looks the method up by name and
+        // finds the first overload instead of the one selected here.
+        Analyzer::Typecheck::recordCallTarget(state, callExprId, selected);
+      } else if (let Option::SOME(single) = candidateSet.get(0)) {
+        instanceOpt = Option::SOME(*single);
+      }
+
+      let Option::SOME(methodDefId) = instanceOpt else {
         let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
           defStore,
           &owner.staticMethods,
@@ -7649,14 +7737,28 @@ export namespace Analyzer {
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       span: SourceSpan,
+      callExprId: Ast::ExpressionId,
       calleeExprId: Ast::ExpressionId,
       typeArgumentIds: &Vector<Ast::TypeId>,
+      extraArgs: &Vector<Ast::ExpressionId>,
       leftType: Analyzer::TypeId,
     ): Option<Analyzer::Typecheck::PipeCallee> {
       if (let Option::SOME(calleeExpr) = module.expressions.get(calleeExprId)) {
         if (let Ast::Expression::Node::MemberAccess(ma) = calleeExpr) {
           if (ma.operator == Ast::Expression::AccessOperator::Dot) {
-            return Analyzer::Typecheck::pipeMethodCallee(state, defStore, typeStore, symbols, module, resolvedBodies, &ma);
+            return Analyzer::Typecheck::pipeMethodCallee(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              span,
+              callExprId,
+              &ma,
+              extraArgs,
+              leftType,
+            );
           }
         }
       }
@@ -7863,8 +7965,10 @@ export namespace Analyzer {
         module,
         resolvedBodies,
         pipe.span,
+        Analyzer::Typecheck::unwrapGroupedExpr(module, pipe.right),
         calleeExprId,
         typeArgumentIds,
+        extraArgs,
         leftType,
       ) else {
         return Option::NONE;
@@ -8060,7 +8164,44 @@ export namespace Analyzer {
 
       let memberName: str = ma.member.toStr();
 
-      let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &owner.instanceMethods, memberName, symbols) else {
+      let candidateSet: Vector<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(
+        defStore,
+        &owner.instanceMethods,
+        memberName,
+        symbols,
+      );
+
+      let mut instanceOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (candidateSet.length() > 1) {
+        let mut pipedArgTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        pipedArgTypes.push(leftType);
+
+        let Option::SOME(selected) = Analyzer::Typecheck::selectMethodOverloadByTypes(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          &owner,
+          &candidateSet,
+          &pipedArgTypes,
+          pipe.span,
+          memberName,
+        ) else {
+          return Option::NONE;
+        };
+
+        instanceOpt = Option::SOME(selected);
+
+        // Without a recorded target, lowering looks the method up by name and
+        // finds the first overload instead of the one selected here.
+        let rightExprId: Ast::ExpressionId = Analyzer::Typecheck::unwrapGroupedExpr(module, pipe.right);
+        Analyzer::Typecheck::recordCallTarget(state, rightExprId, selected);
+      } else if (let Option::SOME(single) = candidateSet.get(0)) {
+        instanceOpt = Option::SOME(*single);
+      }
+
+      let Option::SOME(methodDefId) = instanceOpt else {
         let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
           defStore,
           &owner.staticMethods,
