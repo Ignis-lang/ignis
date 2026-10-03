@@ -1,0 +1,22 @@
+// Passing a closure read out of a local record's field to a parameter that is
+// not `@noescape` moves it out of the field: the parameter frees the
+// environment, and the record's drop skips the field it no longer holds.
+record Holder {
+    public callback: () -> i32;
+}
+
+function apply(f: () -> i32): i32 {
+    return f();
+}
+
+function makeHolder(base: i32): Holder {
+    let add = (): i32 -> base + 2;
+
+    return Holder { callback: add };
+}
+
+function main(): i32 {
+    let holder = makeHolder(40);
+
+    return apply(holder.callback);
+}

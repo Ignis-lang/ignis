@@ -1,0 +1,22 @@
+// e2e: std
+// Pushing a closure read out of a local record's field into a vector moves it
+// out of the field, so only the vector frees the environment.
+import Vector from "std::vector";
+
+record Holder {
+    public callback: () -> i32;
+}
+
+function makeHolder(base: i32): Holder {
+    let add = (): i32 -> base + 2;
+
+    return Holder { callback: add };
+}
+
+function main(): i32 {
+    let holder = makeHolder(40);
+    let mut callbacks: Vector<() -> i32> = Vector::new<() -> i32>();
+    callbacks.push(holder.callback);
+
+    return (callbacks.length() as i32) + 41;
+}

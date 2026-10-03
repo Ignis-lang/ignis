@@ -928,6 +928,16 @@ export namespace CodegenC {
       return;
     };
 
+    // A closure held by an aggregate owns its environment, and its drop
+    // function knows how to release it.
+    if (let Analyzer::Type::Function(_) = typeNode) {
+      let guard: String = `    if ((${expression.toStr()}).drop_fn) (${expression.toStr()}).drop_fn((${expression.toStr()}).env);\n`;
+      let mut guardRef: &mut String = output;
+      guardRef.pushStr(guard.toStr());
+
+      return;
+    }
+
     let mut nominal: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
     let mut isRecord: boolean = false;
     let mut isEnum: boolean = false;
@@ -1008,7 +1018,7 @@ export namespace CodegenC {
       let fieldType: Analyzer::TypeId = fieldDef.fieldType;
       let index: u32 = fieldDef.index;
 
-      if (Borrowck::needsDropType(defStore, typeStore, fieldType)) {
+      if (Borrowck::needsDropType(defStore, typeStore, fieldType) || Hir::typeIsFunction(typeStore, fieldType)) {
         let access: String = `${expression.toStr()}.field_${index}`;
         CodegenC::emitFieldDrops(defStore, typeStore, symbols, output, closures, &access, fieldType);
       }
@@ -1066,7 +1076,7 @@ export namespace CodegenC {
           continue;
         };
 
-        if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
+        if (Borrowck::needsDropType(defStore, typeStore, *payloadType) || Hir::typeIsFunction(typeStore, *payloadType)) {
           let access: String = `${expression.toStr()}.payload.variant_${tag}.field_${payloadIndex}`;
           CodegenC::emitFieldDrops(defStore, typeStore, symbols, &mut arm, closures, &access, *payloadType);
         }
@@ -2373,7 +2383,7 @@ export namespace CodegenC {
       Lir::Instr::DropInPlace(node) -> {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
 
-        if (!Borrowck::needsDropType(defStore, typeStore, node.ty)) {
+        if (!Borrowck::needsDropType(defStore, typeStore, node.ty) && !Hir::typeIsFunction(typeStore, node.ty)) {
           let line: String = `    (void)${pointer.toStr()}; /* drop_in_place: no-op */\n`;
           let mut skipRef: &mut String = output;
           skipRef.pushStr(line.toStr());
@@ -2395,6 +2405,18 @@ export namespace CodegenC {
       },
       Lir::Instr::MarkMoved(node) -> {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
+
+        // A closure moved out of its place leaves nothing behind for the
+        // owner's drop to free, and a later call through it faults on the null
+        // `call` instead of reading a freed environment.
+        if (Hir::typeIsFunction(typeStore, node.ty)) {
+          let closureType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
+          let line: String = `    *(${closureType.toStr()}*)${pointer.toStr()} = (${closureType.toStr()}){0};\n`;
+          let mut clearRef: &mut String = output;
+          clearRef.pushStr(line.toStr());
+
+          return;
+        }
 
         if (!Borrowck::needsDropType(defStore, typeStore, node.ty)) {
           let line: String = `    (void)${pointer.toStr()}; /* mark_moved: no-op */\n`;

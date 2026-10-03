@@ -1,0 +1,22 @@
+// e2e: err
+// A closure parameter that is not `@noescape` takes the environment over, so
+// passing a closure field reached through a reference would move out of
+// storage the reference does not own.
+record Holder {
+    public callback: () -> i32;
+}
+
+function apply(f: () -> i32): i32 {
+    return f();
+}
+
+function callThrough(holder: &Holder): i32 {
+    return apply(holder.callback);
+}
+
+function main(): i32 {
+    let base: i32 = 40;
+    let holder = Holder { callback: (): i32 -> base + 2 };
+
+    return callThrough(&holder);
+}

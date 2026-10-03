@@ -1,0 +1,21 @@
+// e2e: err
+// The same move out of a closure field is rejected through a `&mut` reference:
+// the caller's record still owns the environment and still frees it.
+record Holder {
+    public callback: () -> i32;
+}
+
+function apply(f: () -> i32): i32 {
+    return f();
+}
+
+function callThrough(holder: &mut Holder): i32 {
+    return apply(holder.callback);
+}
+
+function main(): i32 {
+    let base: i32 = 40;
+    let mut holder = Holder { callback: (): i32 -> base + 2 };
+
+    return callThrough(&mut holder);
+}

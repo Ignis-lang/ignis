@@ -240,21 +240,34 @@ export namespace Escape {
       while (aliasIndex < hir.nodes.length()) {
         if (let Option::SOME(node) = hir.nodes.get(aliasIndex)) {
           if (let Option::SOME(bound) = Escape::boundClosureTarget(hir, node)) {
-            if (let Option::SOME(valueNode) = hir.get(bound.valueId)) {
-              if (let Hir::HirKind::Variable(sourceDef) = &valueNode.kind) {
-                let sources: Vector<Hir::HirId> = aliases.lookupAll(sourceDef);
-                let mut sourceIndex: u64 = 0;
+            // A binding chosen by a branch names every closure its branches
+            // can hand over, existing bindings included.
+            let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+            Hir::collectValueResults(&*hir, bound.valueId, &mut results);
 
-                while (sourceIndex < sources.length()) {
-                  if (let Option::SOME(closureId) = sources.get(sourceIndex)) {
-                    if (aliases.insert(bound.name, *closureId)) {
-                      changed = true;
+            let mut resultIndex: u64 = 0;
+
+            while (resultIndex < results.length()) {
+              if (let Option::SOME(resultId) = results.get(resultIndex)) {
+                if (let Option::SOME(valueNode) = hir.get(*resultId)) {
+                  if (let Hir::HirKind::Variable(sourceDef) = &valueNode.kind) {
+                    let sources: Vector<Hir::HirId> = aliases.lookupAll(sourceDef);
+                    let mut sourceIndex: u64 = 0;
+
+                    while (sourceIndex < sources.length()) {
+                      if (let Option::SOME(closureId) = sources.get(sourceIndex)) {
+                        if (aliases.insert(bound.name, *closureId)) {
+                          changed = true;
+                        }
+                      }
+
+                      sourceIndex += 1;
                     }
                   }
-
-                  sourceIndex += 1;
                 }
               }
+
+              resultIndex += 1;
             }
           }
         }
