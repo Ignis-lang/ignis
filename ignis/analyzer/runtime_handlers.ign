@@ -1,0 +1,432 @@
+import Vector from "std::vector";
+
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticCode,
+  LabelKind,
+  Severity,
+  SourceSpan,
+from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+
+/// The functions a freestanding build routes runtime services through.
+///
+/// A hosted build reports a panic with `fprintf` and `exit` and allocates a
+/// closure environment with `malloc`. A freestanding build (`std = false`) has
+/// no libc to call, so the program names its own functions instead:
+/// `@panicHandler` receives every panic, and `@allocHandler` with
+/// `@freeHandler` provide the heap environments of escaping closures.
+export namespace RuntimeHandlers {
+  const PANIC: str = "panicHandler";
+  const ALLOC: str = "allocHandler";
+  const FREE: str = "freeHandler";
+
+  /// One function a runtime handler attribute is on.
+  record Handler {
+    public defId: Analyzer::DefinitionId;
+    /// The attribute, which every diagnostic about the handler points at.
+    public span: SourceSpan;
+  }
+
+  /// The runtime handlers a program declares, at most one of each kind.
+  record HandlerSet {
+    public panicHandler: Option<RuntimeHandlers::Handler>;
+    public allocHandler: Option<RuntimeHandlers::Handler>;
+    public freeHandler: Option<RuntimeHandlers::Handler>;
+
+    public static empty(): HandlerSet {
+      return HandlerSet {
+        panicHandler: Option::NONE,
+        allocHandler: Option::NONE,
+        freeHandler: Option::NONE,
+      };
+    }
+
+    /// Raw ids of every declared handler. Generated code is their only
+    /// caller, so monomorphization has to keep them and the emitter has to
+    /// leave them externally visible.
+    public definitionIds(&self): Vector<u32> {
+      let mut ids: Vector<u32> = Vector::new<u32>();
+
+      if (let Option::SOME(handler) = &self.panicHandler) {
+        ids.push(handler.defId.raw());
+      }
+
+      if (let Option::SOME(handler) = &self.allocHandler) {
+        ids.push(handler.defId.raw());
+      }
+
+      if (let Option::SOME(handler) = &self.freeHandler) {
+        ids.push(handler.defId.raw());
+      }
+
+      return ids;
+    }
+  }
+
+  /// Record the runtime handlers one module declares into `handlers`, and
+  /// report every one that is misplaced, malformed or a second of its kind.
+  ///
+  /// In a hosted build every handler attribute is an error: the hosted
+  /// runtime already owns panics and allocation.
+  function collectModule(
+    defStore: &Analyzer::DefinitionStore,
+    typeStore: &Analyzer::TypeStore,
+    module: &Ast::Module,
+    pass2: &Analyzer::Binder::BinderOutput,
+    freestanding: boolean,
+    handlers: &mut RuntimeHandlers::HandlerSet,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < module.roots.length()) {
+      if (let Option::SOME(rootId) = module.roots.get(rootIndex)) {
+        RuntimeHandlers::collectItem(defStore, typeStore, module, pass2, *rootId, false, freestanding, handlers, diagnostics);
+      }
+
+      rootIndex += 1;
+    }
+  }
+
+  /// Report an allocation handler declared without its counterpart, once
+  /// every module was collected: the environment one allocates, the other
+  /// releases.
+  function checkAllocatorPair(
+    handlers: &RuntimeHandlers::HandlerSet,
+    diagnostics: &mut DiagnosticBag
+  ): void {
+    if (let Option::SOME(handler) = &handlers.allocHandler) {
+      if (handlers.freeHandler.isNone()) {
+        RuntimeHandlers::report(diagnostics, DiagnosticCode::INCOMPLETE_ALLOCATOR_HANDLERS, "'@allocHandler' requires a '@freeHandler' function", handler.span);
+      }
+    }
+
+    if (let Option::SOME(handler) = &handlers.freeHandler) {
+      if (handlers.allocHandler.isNone()) {
+        RuntimeHandlers::report(diagnostics, DiagnosticCode::INCOMPLETE_ALLOCATOR_HANDLERS, "'@freeHandler' requires an '@allocHandler' function", handler.span);
+      }
+    }
+  }
+
+  /// The error for a freestanding build whose generated code panics with no
+  /// `@panicHandler` function to report through, pointing at its first panic.
+  function missingPanicHandler(site: SourceSpan, sites: u64): Diagnostic {
+    let mut diagnostic: Diagnostic = Diagnostic::new(
+      Severity::ERROR,
+      DiagnosticCode::MISSING_PANIC_HANDLER,
+      "freestanding build can panic but declares no '@panicHandler' function",
+      site,
+    );
+    diagnostic.addLabel(LabelKind::PRIMARY, site, "this can panic");
+
+    if (sites > 1) {
+      let note: String = `${sites} sites can panic in this build`;
+      diagnostic.addNote(note.toStr());
+    }
+
+    return diagnostic;
+  }
+
+  function collectItem(
+    defStore: &Analyzer::DefinitionStore,
+    typeStore: &Analyzer::TypeStore,
+    module: &Ast::Module,
+    pass2: &Analyzer::Binder::BinderOutput,
+    itemId: Ast::ItemId,
+    insideExtern: boolean,
+    freestanding: boolean,
+    handlers: &mut RuntimeHandlers::HandlerSet,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return;
+    };
+
+    match (node) {
+      Ast::Item::Node::Function(functionItem) -> {
+        let kinds: Vector<str> = RuntimeHandlers::kinds();
+        let mut kindIndex: u64 = 0;
+
+        while (kindIndex < kinds.length()) {
+          if (let Option::SOME(kind) = kinds.get(kindIndex)) {
+            if (let Option::SOME(attributeSpan) = RuntimeHandlers::attributeSpan(&functionItem.metadata, *kind)) {
+              RuntimeHandlers::collectHandler(defStore, typeStore, pass2, itemId, *kind, attributeSpan, insideExtern, freestanding, handlers, diagnostics);
+            }
+          }
+
+          kindIndex += 1;
+        }
+      },
+      Ast::Item::Node::Namespace(namespaceItem) -> {
+        RuntimeHandlers::collectItems(defStore, typeStore, module, pass2, &namespaceItem.items, insideExtern, freestanding, handlers, diagnostics);
+      },
+      Ast::Item::Node::Extern(externItem) -> {
+        RuntimeHandlers::collectItems(defStore, typeStore, module, pass2, &externItem.items, true, freestanding, handlers, diagnostics);
+      },
+      Ast::Item::Node::Export(exportItem) -> {
+        if (let Option::SOME(innerId) = exportItem.declaration) {
+          RuntimeHandlers::collectItem(defStore, typeStore, module, pass2, innerId, insideExtern, freestanding, handlers, diagnostics);
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  function collectItems(
+    defStore: &Analyzer::DefinitionStore,
+    typeStore: &Analyzer::TypeStore,
+    module: &Ast::Module,
+    pass2: &Analyzer::Binder::BinderOutput,
+    itemIds: &Vector<Ast::ItemId>,
+    insideExtern: boolean,
+    freestanding: boolean,
+    handlers: &mut RuntimeHandlers::HandlerSet,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      if (let Option::SOME(childId) = itemIds.get(index)) {
+        RuntimeHandlers::collectItem(defStore, typeStore, module, pass2, *childId, insideExtern, freestanding, handlers, diagnostics);
+      }
+
+      index += 1;
+    }
+  }
+
+  function kinds(): Vector<str> {
+    let mut names: Vector<str> = Vector::new<str>();
+    names.push(RuntimeHandlers::PANIC);
+    names.push(RuntimeHandlers::ALLOC);
+    names.push(RuntimeHandlers::FREE);
+
+    return names;
+  }
+
+  /// The span of the attribute named `name`, when `metadata` carries it.
+  function attributeSpan(metadata: &Ast::Metadata, name: str): Option<SourceSpan> {
+    let mut index: u64 = 0;
+
+    while (index < metadata.attributes.length()) {
+      if (let Option::SOME(attribute) = metadata.attributes.get(index)) {
+        if (attribute.name.equals(name)) {
+          return Option::SOME(attribute.span);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function collectHandler(
+    defStore: &Analyzer::DefinitionStore,
+    typeStore: &Analyzer::TypeStore,
+    pass2: &Analyzer::Binder::BinderOutput,
+    itemId: Ast::ItemId,
+    kind: str,
+    span: SourceSpan,
+    insideExtern: boolean,
+    freestanding: boolean,
+    handlers: &mut RuntimeHandlers::HandlerSet,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    if (!freestanding) {
+      let message: String = `'@${kind}' requires a freestanding build ([ignis] std = false)`;
+      RuntimeHandlers::report(diagnostics, DiagnosticCode::RUNTIME_HANDLER_IN_HOSTED_BUILD, message.toStr(), span);
+      return;
+    }
+
+    // A function the binder skipped (an unmet `@configFlag`, a duplicate)
+    // has no definition, and the binder already said why.
+    let Option::SOME(defId) = Analyzer::Binder::findDef(pass2, itemId.raw()) else {
+      return;
+    };
+
+    if (insideExtern) {
+      let message: String = `'@${kind}' must be on a function definition, not an extern declaration`;
+      RuntimeHandlers::report(diagnostics, DiagnosticCode::RUNTIME_HANDLER_SIGNATURE, message.toStr(), span);
+      return;
+    }
+
+    if (!RuntimeHandlers::signatureMatches(defStore, typeStore, defId, kind)) {
+      let expected: str = RuntimeHandlers::expectedSignature(kind);
+      let message: String = `'@${kind}' function must have the signature ${expected}`;
+      RuntimeHandlers::report(diagnostics, DiagnosticCode::RUNTIME_HANDLER_SIGNATURE, message.toStr(), span);
+      return;
+    }
+
+    let existing: Option<SourceSpan> = RuntimeHandlers::declaredSpan(&*handlers, kind);
+
+    if (let Option::SOME(firstSpan) = existing) {
+      let message: String = `'@${kind}' is already declared on another function`;
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::DUPLICATE_RUNTIME_HANDLER, message.toStr(), span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, "second handler");
+      diagnostic.addLabel(LabelKind::SECONDARY, firstSpan, "first handler");
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
+      return;
+    }
+
+    let handler: RuntimeHandlers::Handler = RuntimeHandlers::Handler {
+      defId: defId,
+      span: span,
+    };
+    let mut handlersRef: &mut RuntimeHandlers::HandlerSet = handlers;
+    let kindName: String = String::create(kind);
+
+    if (kindName.equals(RuntimeHandlers::PANIC)) {
+      handlersRef.panicHandler = Option::SOME(handler);
+    } else if (kindName.equals(RuntimeHandlers::ALLOC)) {
+      handlersRef.allocHandler = Option::SOME(handler);
+    } else {
+      handlersRef.freeHandler = Option::SOME(handler);
+    }
+  }
+
+  /// The span of the handler of `kind` already recorded, if any.
+  function declaredSpan(handlers: &RuntimeHandlers::HandlerSet, kind: str): Option<SourceSpan> {
+    let kindName: String = String::create(kind);
+
+    if (kindName.equals(RuntimeHandlers::PANIC)) {
+      return RuntimeHandlers::handlerSpan(&handlers.panicHandler);
+    }
+
+    if (kindName.equals(RuntimeHandlers::ALLOC)) {
+      return RuntimeHandlers::handlerSpan(&handlers.allocHandler);
+    }
+
+    return RuntimeHandlers::handlerSpan(&handlers.freeHandler);
+  }
+
+  function handlerSpan(handler: &Option<RuntimeHandlers::Handler>): Option<SourceSpan> {
+    if (let Option::SOME(declared) = handler) {
+      return Option::SOME(declared.span);
+    }
+
+    return Option::NONE;
+  }
+
+  /// The signature a handler of `kind` has to have, spelled the way
+  /// `signatureSpelling` spells a declared one.
+  function expectedSignature(kind: str): str {
+    let kindName: String = String::create(kind);
+
+    if (kindName.equals(RuntimeHandlers::PANIC)) {
+      return "(message: str, file: str, line: u32): void";
+    }
+
+    if (kindName.equals(RuntimeHandlers::ALLOC)) {
+      return "(size: u64, align: u64): *mut u8";
+    }
+
+    return "(pointer: *mut u8): void";
+  }
+
+  /// Whether the function `defId` has the signature a handler of `kind`
+  /// needs. A panic handler may also return `never`, since it never returns.
+  function signatureMatches(
+    defStore: &Analyzer::DefinitionStore,
+    typeStore: &Analyzer::TypeStore,
+    defId: Analyzer::DefinitionId,
+    kind: str,
+  ): boolean {
+    let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId) else {
+      return false;
+    };
+
+    if (functionDef.typeParams.length() > 0) {
+      return false;
+    }
+
+    let mut parameters: String = String::new();
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < functionDef.params.length()) {
+      let Option::SOME(paramId) = functionDef.params.get(paramIndex) else {
+        return false;
+      };
+      let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(*paramId) else {
+        return false;
+      };
+
+      if (paramIndex > 0) {
+        parameters.pushStr(", ");
+      }
+
+      let spelling: String = RuntimeHandlers::typeSpelling(typeStore, variableDef.declaredType);
+      parameters.push(&spelling);
+      paramIndex += 1;
+    }
+
+    let returned: String = RuntimeHandlers::typeSpelling(typeStore, functionDef.returnType);
+    let kindName: String = String::create(kind);
+
+    if (kindName.equals(RuntimeHandlers::PANIC)) {
+      let returnsNothing: boolean = returned.equals("void") || returned.equals("never");
+
+      return returnsNothing && parameters.equals("str, str, u32");
+    }
+
+    if (kindName.equals(RuntimeHandlers::ALLOC)) {
+      return returned.equals("*mut u8") && parameters.equals("u64, u64");
+    }
+
+    return returned.equals("void") && parameters.equals("*mut u8");
+  }
+
+  /// How the handler signatures spell `typeId`: a primitive by its name and a
+  /// mutable byte pointer as `*mut u8`. Any other type spells as nothing a
+  /// handler signature asks for.
+  function typeSpelling(typeStore: &Analyzer::TypeStore, typeId: Analyzer::TypeId): String {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return String::new();
+    };
+
+    if (let Analyzer::Type::Pointer(pointer) = type_) {
+      let pointee: String = RuntimeHandlers::typeSpelling(typeStore, pointer.pointee);
+
+      if (pointer.mutable && pointee.equals("u8")) {
+        return String::create("*mut u8");
+      }
+
+      return String::new();
+    }
+
+    if (RuntimeHandlers::isPrimitive(type_)) {
+      return String::create(type_.name());
+    }
+
+    return String::new();
+  }
+
+  function isPrimitive(type_: &Analyzer::Type): boolean {
+    return match (type_) {
+      Analyzer::Type::U8 -> true,
+      Analyzer::Type::U32 -> true,
+      Analyzer::Type::U64 -> true,
+      Analyzer::Type::STR -> true,
+      Analyzer::Type::VOID -> true,
+      Analyzer::Type::NEVER -> true,
+      _ -> false,
+    };
+  }
+
+  function report(
+    diagnostics: &mut DiagnosticBag,
+    code: str,
+    message: str,
+    span: SourceSpan
+  ): void {
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, message);
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+  }
+}

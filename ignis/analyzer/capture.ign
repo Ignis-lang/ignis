@@ -1842,4 +1842,40 @@ export namespace Capture {
 
     return diagnostics;
   }
+
+  /// Report every closure that escapes with a heap environment, for a
+  /// freestanding build that declares no `@allocHandler` and `@freeHandler`.
+  ///
+  /// Escape marking in `populateClosureCaptures` sets `escapes` on exactly the
+  /// capturing closures that need a heap environment, and such a build has
+  /// nothing to allocate it with. This runs once over the whole program
+  /// instead of inside `populateClosureCaptures`, which revisits the closures
+  /// of every earlier module each time it runs.
+  function reportEscapingEnvironmentsWithoutAllocator(hir: &Hir::HirStore): DiagnosticBag {
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut nodeIndex: u64 = 0;
+
+    while (nodeIndex < hir.nodes.length()) {
+      if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+          if (closureNode.escapes) {
+            let mut diagnostic: Diagnostic = Diagnostic::new(
+              Severity::ERROR,
+              DiagnosticCode::CLOSURE_ESCAPES_WITHOUT_ALLOCATOR,
+              "escaping closure needs a heap environment, but no '@allocHandler' and '@freeHandler' functions are declared",
+              node.span,
+            );
+            diagnostic.addLabel(LabelKind::PRIMARY, node.span, "closure defined here");
+
+            let mut bag: &mut DiagnosticBag = &mut diagnostics;
+            bag.push(diagnostic);
+          }
+        }
+      }
+
+      nodeIndex += 1;
+    }
+
+    return diagnostics;
+  }
 }

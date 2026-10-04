@@ -6,6 +6,7 @@ import Analyzer from "@compiler::analyzer";
 import Borrowck from "@compiler::analyzer::borrowck";
 import Hir from "@compiler::hir";
 import Lir from "@compiler::lir";
+import SourceFile, SourceSpan from "@compiler::diagnostics";
 import CodegenReserved from "./reserved";
 
 /// LIR -> C emission for the Ignis selfhost compiler.
@@ -31,6 +32,34 @@ export namespace CodegenC {
     public unsupported: u64;
     /// Function bodies written out, extern declarations excluded.
     public functions: u64;
+  }
+
+  /// The runtime services a unit's generated code calls.
+  ///
+  /// A hosted unit reports a panic with `fprintf` and `exit` and allocates a
+  /// heap closure environment with `malloc`. A freestanding unit calls the
+  /// program's own `@panicHandler`, `@allocHandler` and `@freeHandler`
+  /// functions instead, and records every panic it has no handler for in
+  /// `unhandledPanics`, which the caller reports as an error.
+  record RuntimeHooks {
+    public freestanding: boolean;
+    public panicHandler: Option<Analyzer::DefinitionId>;
+    public allocHandler: Option<Analyzer::DefinitionId>;
+    public freeHandler: Option<Analyzer::DefinitionId>;
+    /// The program's sources, which a panic's line is read from.
+    public sources: Vector<SourceFile>;
+    public unhandledPanics: Vector<SourceSpan>;
+
+    public static hosted(): RuntimeHooks {
+      return RuntimeHooks {
+        freestanding: false,
+        panicHandler: Option::NONE,
+        allocHandler: Option::NONE,
+        freeHandler: Option::NONE,
+        sources: Vector::new<SourceFile>(),
+        unhandledPanics: Vector::new<SourceSpan>(),
+      };
+    }
   }
 
   /// The environment struct one closure thunk reads its captures out of.
@@ -721,6 +750,8 @@ export namespace CodegenC {
     symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     closures: &CodegenC::ClosureTables,
+    hooks: &mut CodegenC::RuntimeHooks,
+    function_: &Lir::FunctionLir,
     callee: Analyzer::DefinitionId,
     args: &Vector<Lir::Operand>,
   ): void {
@@ -748,8 +779,9 @@ export namespace CodegenC {
 
     let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, receiver);
     let access: String = `(${value.toStr()})->`;
+    let site: SourceSpan = CodegenC::operandSpan(function_, receiver);
 
-    CodegenC::emitDropStateGuard(output, &access);
+    CodegenC::emitDropStateGuard(defStore, symbols, output, hooks, &access, site);
   }
 
   /// Trap before a field is reached through a base whose nominal was already
@@ -757,6 +789,8 @@ export namespace CodegenC {
   function emitFieldPointerDropGuard(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hooks: &mut CodegenC::RuntimeHooks,
     function_: &Lir::FunctionLir,
     output: &mut String,
     base: &String,
@@ -776,16 +810,96 @@ export namespace CodegenC {
       access = `(${base.toStr()})->`;
     }
 
-    CodegenC::emitDropStateGuard(output, &access);
+    let site: SourceSpan = CodegenC::operandSpan(function_, operand);
+
+    CodegenC::emitDropStateGuard(defStore, symbols, output, hooks, &access, site);
   }
 
   /// The shared body of both drop guards: read the drop state byte reached by
   /// `access` and panic when it is set.
-  function emitDropStateGuard(output: &mut String, access: &String): void {
-    let line: String = `    if (${access.toStr()}__ignis_drop_state) { fprintf(stderr, "panic: use of dropped value\\n"); exit(101); }\n`;
+  function emitDropStateGuard(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    hooks: &mut CodegenC::RuntimeHooks,
+    access: &String,
+    site: SourceSpan,
+  ): void {
+    let mut report: String = String::create("fprintf(stderr, \"panic: use of dropped value\\n\"); exit(101);");
+
+    if (hooks.freestanding) {
+      let message: String = String::create("use of dropped value");
+      report = CodegenC::freestandingPanic(defStore, symbols, hooks, &message, site);
+    }
+
+    let line: String = `    if (${access.toStr()}__ignis_drop_state) { ${report.toStr()} }\n`;
 
     let mut outputRef: &mut String = output;
     outputRef.pushStr(line.toStr());
+  }
+
+  /// Where a guard on `operand` reports its panic: the span of the
+  /// temporary it reads, or the function's own span for anything else.
+  function operandSpan(function_: &Lir::FunctionLir, operand: &Lir::Operand): SourceSpan {
+    if (let Lir::Operand::Temp(temp) = operand) {
+      if (let Option::SOME(data) = function_.temps.get(temp.raw() as u64)) {
+        return data.span;
+      }
+    }
+
+    return function_.span;
+  }
+
+  /// The statement a freestanding unit panics with: a call to the
+  /// `@panicHandler` function with `message` and the file and line of `site`,
+  /// which never returns.
+  ///
+  /// Without a handler the site is recorded as unhandled for the caller to
+  /// report, and the unit traps there so it stays valid C.
+  function freestandingPanic(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hooks: &mut CodegenC::RuntimeHooks,
+    message: &String,
+    site: SourceSpan,
+  ): String {
+    if (hooks.panicHandler.isNone()) {
+      let mut hooksRef: &mut CodegenC::RuntimeHooks = hooks;
+      hooksRef.unhandledPanics.push(site);
+
+      return String::create("__builtin_trap();");
+    }
+
+    let Option::SOME(handler) = &hooks.panicHandler else {
+      return String::create("__builtin_trap();");
+    };
+
+    let handlerName: String = CodegenC::mangledName(defStore, symbols, handler);
+    let escapedMessage: String = CodegenC::escapeStringLiteral(message);
+    let filePath: String = String::create(site.filePath);
+    let escapedFile: String = CodegenC::escapeStringLiteral(&filePath);
+    let line: u32 = CodegenC::sourceLine(&hooks.sources, site);
+
+    return `${handlerName.toStr()}("${escapedMessage.toStr()}", "${escapedFile.toStr()}", ${line}); __builtin_unreachable();`;
+  }
+
+  /// The 1-based line `site` starts on, 0 when no source holds its file.
+  function sourceLine(sources: &Vector<SourceFile>, site: SourceSpan): u32 {
+    let mut index: u64 = 0;
+
+    while (index < sources.length()) {
+      if (let Option::SOME(file) = sources.get(index)) {
+        let path: String = file.path.toString();
+
+        if (path.equals(site.filePath)) {
+          return file.lineIndexAt(site.start) + 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return 0;
   }
 
   /// The user-written `drop` method of a nominal, if it declares one.
@@ -1746,6 +1860,7 @@ export namespace CodegenC {
     output: &mut String,
     unsupported: &mut u64,
     closures: &CodegenC::ClosureTables,
+    hooks: &mut CodegenC::RuntimeHooks,
     function_: &Lir::FunctionLir,
     instruction: &Lir::Instr,
   ): void {
@@ -1849,7 +1964,7 @@ export namespace CodegenC {
       Lir::Instr::GetFieldPtr(node) -> {
         let base: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.base);
 
-        CodegenC::emitFieldPointerDropGuard(defStore, typeStore, function_, output, &base, &node.base);
+        CodegenC::emitFieldPointerDropGuard(defStore, typeStore, symbols, hooks, function_, output, &base, &node.base);
 
         let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->field_${node.fieldIndex});\n`;
 
@@ -1964,7 +2079,7 @@ export namespace CodegenC {
         CodegenC::emitInitializedDropState(defStore, typeStore, output, &destination, node.recordType);
       },
       Lir::Instr::Call(node) -> {
-        CodegenC::emitMethodReceiverDropGuard(defStore, typeStore, symbols, output, closures, node.callee, &node.args);
+        CodegenC::emitMethodReceiverDropGuard(defStore, typeStore, symbols, output, closures, hooks, function_, node.callee, &node.args);
 
         let callee: String = CodegenC::mangledName(defStore, symbols, node.callee);
         let calleeIsExtern: boolean = CodegenC::isExternFunction(defStore, node.callee);
@@ -2011,8 +2126,16 @@ export namespace CodegenC {
         outputRef.pushStr(call.toStr());
       },
       Lir::Instr::PanicMessage(node) -> {
-        let escaped: String = CodegenC::escapeStringLiteral(&node.message);
-        let line: String = `    fprintf(stderr, "panic: %s\\n", "${escaped.toStr()}");\n    exit(101);\n`;
+        let mut line: String = String::new();
+
+        if (hooks.freestanding) {
+          let report: String = CodegenC::freestandingPanic(defStore, symbols, hooks, &node.message, node.span);
+          line = `    ${report.toStr()}\n`;
+        } else {
+          let escaped: String = CodegenC::escapeStringLiteral(&node.message);
+          line = `    fprintf(stderr, "panic: %s\\n", "${escaped.toStr()}");\n    exit(101);\n`;
+        }
+
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2137,7 +2260,14 @@ export namespace CodegenC {
         let mut envPointer: String = String::create("");
 
         if (node.heapAllocate) {
-          let allocation: String = `    struct ${envName.toStr()}* __envp_t${node.dest.raw()} = (struct ${envName.toStr()}*)malloc(sizeof(struct ${envName.toStr()}));\n`;
+          let mut allocate: String = `malloc(sizeof(struct ${envName.toStr()}))`;
+
+          if (let Option::SOME(allocHandler) = &hooks.allocHandler) {
+            let handlerName: String = CodegenC::mangledName(defStore, symbols, allocHandler);
+            allocate = `${handlerName.toStr()}(sizeof(struct ${envName.toStr()}), _Alignof(struct ${envName.toStr()}))`;
+          }
+
+          let allocation: String = `    struct ${envName.toStr()}* __envp_t${node.dest.raw()} = (struct ${envName.toStr()}*)${allocate.toStr()};\n`;
 
           let mut allocationRef: &mut String = output;
           allocationRef.pushStr(allocation.toStr());
@@ -2266,7 +2396,12 @@ export namespace CodegenC {
       Lir::Instr::FreeEnv(node) -> {
         let ptr: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.env);
 
-        let release: String = `    if (${ptr.toStr()}) free(${ptr.toStr()});\n`;
+        let mut release: String = `    if (${ptr.toStr()}) free(${ptr.toStr()});\n`;
+
+        if (let Option::SOME(freeHandler) = &hooks.freeHandler) {
+          let handlerName: String = CodegenC::mangledName(defStore, symbols, freeHandler);
+          release = `    if (${ptr.toStr()}) ${handlerName.toStr()}((u8*)${ptr.toStr()});\n`;
+        }
 
         let mut releaseRef: &mut String = output;
         releaseRef.pushStr(release.toStr());
@@ -2869,6 +3004,7 @@ export namespace CodegenC {
     output: &mut String,
     unsupported: &mut u64,
     closures: &CodegenC::ClosureTables,
+    hooks: &mut CodegenC::RuntimeHooks,
     externalSymbols: &Vector<u32>,
     function_: &Lir::FunctionLir,
   ): void {
@@ -2943,7 +3079,7 @@ export namespace CodegenC {
 
       while (instructionIndex < block.instructions.length()) {
         if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
-          CodegenC::emitInstruction(defStore, typeStore, symbols, output, unsupported, closures, function_, instruction);
+          CodegenC::emitInstruction(defStore, typeStore, symbols, output, unsupported, closures, hooks, function_, instruction);
         }
 
         instructionIndex += 1;
@@ -3682,9 +3818,11 @@ export namespace CodegenC {
 
   /// Emits the whole program as one C translation unit.
   ///
-  /// `freestanding` is set for a `std = false` build: the unit then carries
-  /// only the type prelude, with no `ignis_rt.h`, no hosted libc or POSIX
-  /// headers and no C `main` wrapper, so it compiles under `-ffreestanding`.
+  /// `hooks.freestanding` is set for a `std = false` build: the unit then
+  /// carries only the type prelude, with no `ignis_rt.h`, no hosted libc or
+  /// POSIX headers and no C `main` wrapper, so it compiles under
+  /// `-ffreestanding`, and its panics and heap closure environments go through
+  /// the program's runtime handlers.
   function emitProgram(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3692,7 +3830,7 @@ export namespace CodegenC {
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
     moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
-    freestanding: boolean,
+    hooks: &mut CodegenC::RuntimeHooks,
   ): CodegenC::EmitOutput {
     let mut source: String = String::create("");
     let mut unsupported: u64 = 0;
@@ -3700,7 +3838,7 @@ export namespace CodegenC {
 
     CodegenC::emitTypePrelude(&mut source);
 
-    if (!freestanding) {
+    if (!hooks.freestanding) {
       source.pushStr("#include \"ignis_rt.h\"\n");
 
       // The host includes the headers each linked std module names in
@@ -3813,6 +3951,7 @@ export namespace CodegenC {
         &mut source,
         &mut unsupported,
         closures,
+        hooks,
         externalSymbols,
         function_,
       );
@@ -3821,7 +3960,7 @@ export namespace CodegenC {
       bodyIndex += 1;
     }
 
-    if (!freestanding) {
+    if (!hooks.freestanding) {
       CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program, moduleInfos);
     }
 

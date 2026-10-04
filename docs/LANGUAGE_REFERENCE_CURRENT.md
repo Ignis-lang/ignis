@@ -695,6 +695,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@extension(Type)` / `@extension(Type, mut)` -- extension methods
 - `@lang(try)` -- mark an enum as try-capable for use with the `!` operator
 - `@test` -- mark a top-level function as a native test case
+- `@panicHandler`, `@allocHandler`, `@freeHandler` -- runtime handlers of a freestanding (`std = false`) build, which replace libc for panics and escaping closure environments (see `docs/PROJECT.md`)
 
 ### Parameter attributes
 

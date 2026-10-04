@@ -10,6 +10,8 @@ import BuildModuleKind, DiscoveryResult, Resolver from "@compiler::build";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
 import Borrowck from "@compiler::analyzer::borrowck";
+import Capture from "@compiler::analyzer::capture";
+import RuntimeHandlers from "@compiler::analyzer::runtime_handlers";
 import Lowering from "@compiler::analyzer::lowering";
 import Mono from "@compiler::analyzer::mono";
 import LirLowering from "@compiler::lir::lowering";
@@ -114,7 +116,8 @@ function codegenEmitFreestanding(source: str): CodegenEmission {
 }
 
 /// The pipeline behind `codegenEmit` and its variants, with the emitter told
-/// whether the unit is freestanding.
+/// whether the unit is freestanding and handed the runtime handlers the
+/// source declares.
 function codegenEmitWith(
   source: str,
   externalNames: &Vector<String>,
@@ -139,7 +142,22 @@ function codegenEmitWith(
 
   Test::assertEq<u64>(codegenCountErrors(&output.diagnostics), 0);
 
-  let hir: Hir::HirStore = Lowering::lowerModule(
+  let mut handlers: RuntimeHandlers::HandlerSet = RuntimeHandlers::HandlerSet::empty();
+  let mut handlerDiagnostics: DiagnosticBag = DiagnosticBag::init();
+  RuntimeHandlers::collectModule(
+    &defStore,
+    &typeStore,
+    &parsed.module,
+    &output.pass2,
+    freestanding,
+    &mut handlers,
+    &mut handlerDiagnostics,
+  );
+  RuntimeHandlers::checkAllocatorPair(&handlers, &mut handlerDiagnostics);
+
+  Test::assertEq<u64>(codegenCountErrors(&handlerDiagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -147,7 +165,12 @@ function codegenEmitWith(
     &output,
   );
 
-  let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &hir);
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(&mut defStore, &mut typeStore, &mut symbols, &mut hir);
+
+  Test::assertEq<u64>(codegenCountErrors(&captureDiagnostics), 0);
+
+  let handlerIds: Vector<u32> = handlers.definitionIds();
+  let monoResult: Mono::MonoOutput = Mono::runWithRoots(&mut defStore, &mut typeStore, &mut symbols, &hir, false, &handlerIds);
 
   let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
     &mut defStore,
@@ -171,8 +194,33 @@ function codegenEmitWith(
     constValues,
   );
 
-  let externalSymbols: Vector<u32> = codegenFunctionDefIds(&mut defStore, &mut symbols, externalNames);
+  let mut externalSymbols: Vector<u32> = codegenFunctionDefIds(&mut defStore, &mut symbols, externalNames);
+  let mut handlerIndex: u64 = 0;
+
+  while (handlerIndex < handlerIds.length()) {
+    if (let Option::SOME(handlerId) = handlerIds.get(handlerIndex)) {
+      externalSymbols.push(*handlerId);
+    }
+
+    handlerIndex += 1;
+  }
+
   let moduleInfos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  let mut hooks: CodegenC::RuntimeHooks = CodegenC::RuntimeHooks::hosted();
+  hooks.freestanding = freestanding;
+  hooks.sources.push(SourceFile::create("codegen_tests.ign", source));
+
+  if (let Option::SOME(handler) = &handlers.panicHandler) {
+    hooks.panicHandler = Option::SOME(handler.defId);
+  }
+
+  if (let Option::SOME(handler) = &handlers.allocHandler) {
+    hooks.allocHandler = Option::SOME(handler.defId);
+  }
+
+  if (let Option::SOME(handler) = &handlers.freeHandler) {
+    hooks.freeHandler = Option::SOME(handler.defId);
+  }
 
   let emitted: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
@@ -181,8 +229,10 @@ function codegenEmitWith(
     &lowered.program,
     &externalSymbols,
     &moduleInfos,
-    freestanding,
+    &mut hooks,
   );
+
+  Test::assertEq<u64>(hooks.unhandledPanics.length(), 0);
 
   return CodegenEmission {
     source: emitted.source,
@@ -911,4 +961,54 @@ function codegenHostedUnitKeepsTheRuntimeAFreestandingUnitDrops(): void {
   Test::assert(codegenContains(&emission.source, "#include <stdio.h>"));
   Test::assert(codegenContains(&emission.source, "#include <stdlib.h>"));
   Test::assert(codegenContains(&emission.source, "int main(int argc, char** argv)"));
+}
+
+/// A freestanding `@panic` reports through the `@panicHandler` function with
+/// the panic's file and line, and never reaches `fprintf` or `exit`.
+@test
+function codegenFreestandingRuntimeHandlerReceivesPanics(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(
+    "@panicHandler\n@externName(\"kernel_panic\")\nfunction onPanic(message: str, file: str, line: u32): void {\n  return;\n}\n\nfunction main(): i32 {\n  let value: i32 = @panic(\"boom\");\n\n  return value;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "    kernel_panic(\"boom\", \"codegen_tests.ign\", 8); __builtin_unreachable();\n"));
+  Test::assert(!codegenContains(&emission.source, "fprintf"));
+  Test::assert(!codegenContains(&emission.source, "exit("));
+}
+
+/// A freestanding drop state guard reports a use of a dropped value through
+/// the `@panicHandler` function as well.
+@test
+function codegenFreestandingRuntimeHandlerReceivesDropGuards(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(
+    "@panicHandler\n@externName(\"kernel_panic\")\nfunction onPanic(message: str, file: str, line: u32): void {\n  return;\n}\n\n@implements(Drop)\nrecord Payload {\n  public value: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n\n  public peek(&self): i32 {\n    return 7;\n  }\n}\n\nfunction main(): i32 {\n  let payload: Payload = Payload { value: 1 };\n\n  return payload.peek();\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "__ignis_drop_state) { kernel_panic(\"use of dropped value\", \"codegen_tests.ign\", "));
+  Test::assert(!codegenContains(&emission.source, "fprintf"));
+  Test::assert(!codegenContains(&emission.source, "exit("));
+}
+
+/// A freestanding escaping closure takes its heap environment from the
+/// `@allocHandler` function and returns it to the `@freeHandler` function.
+@test
+function codegenFreestandingRuntimeHandlersAllocateEscapingEnvironments(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(
+    "@allocHandler\n@externName(\"kernel_alloc\")\nfunction allocate(size: u64, align: u64): *mut u8 {\n  return @pointerFromInteger<*mut u8>(size + align);\n}\n\n@freeHandler\n@externName(\"kernel_release\")\nfunction release(pointer: *mut u8): void {\n  return;\n}\n\nfunction makeAdder(base: i32): (i32) -> i32 {\n  return (value: i32): i32 -> value + base;\n}\n\nfunction main(): i32 {\n  let add = makeAdder(40);\n\n  return add(2);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "kernel_alloc(sizeof(struct "));
+  Test::assert(codegenContains(&emission.source, "kernel_release((u8*)"));
+  Test::assert(!codegenContains(&emission.source, "malloc("));
+  Test::assert(!codegenContains(&emission.source, "free("));
+}
+
+/// A hosted `@panic` keeps reporting through `fprintf` and `exit`.
+@test
+function codegenHostedPanicWithoutRuntimeHandlerKeepsLibc(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let value: i32 = @panic(\"boom\");\n\n  return value;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "    fprintf(stderr, \"panic: %s\\n\", \"boom\");\n    exit(101);\n"));
 }

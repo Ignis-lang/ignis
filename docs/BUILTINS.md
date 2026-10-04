@@ -391,6 +391,8 @@ function divide(a: i32, b: i32): i32 {
 The return type is `Never`, so the compiler knows execution does not continue past a `@panic` call.
 
 Emits `fprintf(stderr, "panic: %s\n", message); exit(101);` in the C backend.
+A freestanding build (`std = false`) calls the program's `@panicHandler`
+function with the message, file and line instead (see `docs/PROJECT.md`).
 
 ---
 

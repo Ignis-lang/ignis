@@ -74,9 +74,44 @@ the runtime include directory is not passed, and nothing links `libm`. With
 `bin = false` the build compiles the unit into `<out_dir>/user/obj/<name>.o` with
 `cc` and `cflags` instead of only writing the C source.
 
-Panics, drop guards and escaping capturing closures still emit libc calls
-(`fprintf`, `exit`, `malloc`, `free`) in this mode, so freestanding code must
-avoid them for now.
+The services a hosted build takes from libc come from the program's own
+runtime handlers instead. Each is a function marked with an attribute, at most
+one of each kind per program, and each attribute is an error in a hosted build:
+
+| Attribute | Signature | Replaces |
+| --- | --- | --- |
+| `@panicHandler` | `(message: str, file: str, line: u32): void` (or `never`) | `fprintf` and `exit` for `@panic`, match exhaustion and drop state guards |
+| `@allocHandler` | `(size: u64, align: u64): *mut u8` | `malloc` for the heap environment of an escaping capturing closure |
+| `@freeHandler` | `(pointer: *mut u8): void` | `free` for that environment |
+
+```ignis
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  while (true) {}
+}
+```
+
+- A panic calls the handler with its message and the file and line of the
+  panic site, then reaches `__builtin_unreachable()`, so the handler must not
+  return. The file is the source path the compiler read. A drop state guard
+  reports the site of the value it reads, or file `""` and line `0` when no
+  site is known.
+- A build that can panic without a `@panicHandler` is an error (`A0211`).
+  Every `match` lowers with an exhaustion panic and every use of an
+  `@implements(Drop)` value is guarded, so most programs need one. The check
+  runs when the build emits C, so `ignis check` does not report it.
+- `@allocHandler` and `@freeHandler` come as a pair (`A0210`). A capturing
+  closure that escapes its scope without them is an error (`A0206`). A closure
+  with no captures never allocates and needs neither.
+- A handler with the wrong signature, or on an `extern` declaration, is
+  `A0209`. A second handler of one kind is `A0208`. A handler in a hosted
+  build is `A0207`.
+
+The handlers keep external linkage in the emitted unit.
+
+C compilers may still emit calls to `memcpy` and `memset` on their own, for
+example for array and record copies, bit casts, and the zeroing of enum and
+droppable locals. A freestanding program provides both symbols at link time.
 
 ### `[build]`
 
