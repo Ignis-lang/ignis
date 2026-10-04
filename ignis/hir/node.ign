@@ -1077,6 +1077,29 @@ export namespace Hir {
     return typeStoreRef.rawFunctionType(params, returnType);
   }
 
+  /// The type a field declared `fieldType` of record `recordId` is stored as.
+  /// A C-layout record is read by C, so a function-typed field holds the C
+  /// function pointer `cFacingType` names; every other field holds its
+  /// declared type.
+  function recordFieldStorageType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordId: Analyzer::DefinitionId,
+    fieldType: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let mut cLayout: boolean = false;
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordId)) {
+      cLayout = recordDef.cLayout;
+    }
+
+    if (!cLayout) {
+      return fieldType;
+    }
+
+    return Hir::cFacingType(defStore, typeStore, fieldType);
+  }
+
   /// The expressions whose value `valueId` can evaluate to, pushed onto
   /// `results`: the tail of a block, both branches of an `if`, and every arm
   /// of a `match`, followed recursively. Any other node, a closure literal

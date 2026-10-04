@@ -651,10 +651,13 @@ export namespace Lowering {
     return empty;
   }
 
-  /// Position and declared type of one field of a record type.
+  /// Position, declared type and storage type of one field of a record type.
+  /// The storage type differs from the declared one only for a function-typed
+  /// field of a C-layout record, which holds a C function pointer.
   record RecordFieldLocation {
     public index: u32;
     public fieldType: Analyzer::TypeId;
+    public storageType: Analyzer::TypeId;
   }
 
   function recordFieldLocation(
@@ -689,15 +692,26 @@ export namespace Lowering {
         continue;
       };
 
+      let mut matched: Option<Lowering::RecordFieldLocation> = Option::NONE;
+
       if (let Option::SOME(definition) = defStore.get(*fieldDefId)) {
         if (let Analyzer::Definition::Field(field) = definition) {
           if (field.name.raw() == targetSym.raw()) {
-            return Option::SOME(Lowering::RecordFieldLocation {
+            matched = Option::SOME(Lowering::RecordFieldLocation {
               index: field.index,
               fieldType: field.fieldType,
+              storageType: field.fieldType,
             });
           }
         }
+      }
+
+      if (let Option::SOME(location) = matched) {
+        return Option::SOME(Lowering::RecordFieldLocation {
+          index: location.index,
+          fieldType: location.fieldType,
+          storageType: Hir::recordFieldStorageType(defStore, typeStore, recordDef, location.fieldType),
+        });
       }
 
       index += 1;
@@ -1352,7 +1366,7 @@ export namespace Lowering {
         });
       },
       Ast::Expression::Node::Assignment(assignment) -> {
-        let loweredTarget: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.target);
+        let loweredTarget: Hir::HirId = Lowering::lowerAssignmentTarget(defStore, typeStore, symbols, module, output, locals, hir, assignment.target);
         let target: Hir::HirId = Lowering::implicitMutRefAssignmentTarget(
           defStore,
           typeStore,
@@ -1361,7 +1375,19 @@ export namespace Lowering {
           assignment.target,
           loweredTarget,
         );
-        let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value);
+
+        let mut rawTargetType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(targetNode) = hir.get(target)) {
+          if (Lowering::isRawFunctionType(typeStore, targetNode.typeId)) {
+            rawTargetType = Option::SOME(targetNode.typeId);
+          }
+        }
+
+        let value: Hir::HirId = match (rawTargetType) {
+          Option::SOME(rawType) -> Lowering::lowerCFacingValue(defStore, typeStore, symbols, module, output, locals, hir, assignment.value, rawType),
+          Option::NONE -> Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value),
+        };
         let assignType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
 
         let mut hirRef: &mut Hir::HirStore = hir;
@@ -2197,39 +2223,68 @@ export namespace Lowering {
     let mut index: u64 = 0;
 
     while (index < arguments.length()) {
-      let Option::SOME(argumentId) = arguments.get(index) else {
-        index += 1;
-        continue;
-      };
-
-      let Option::SOME(functionDef) = Lowering::namedFunctionArgument(defStore, module, output, *argumentId) else {
-        lowered.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *argumentId));
-        index += 1;
-        continue;
-      };
-
-      let functionType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, *argumentId);
-      let mut span: SourceSpan = SourceSpan::new("", 0, 0);
-
-      if (let Option::SOME(Ast::Expression::Node::Variable(variable)) = module.expressions.get(*argumentId)) {
-        span = variable.span;
+      if (let Option::SOME(argumentId) = arguments.get(index)) {
+        lowered.push(Lowering::lowerRawFunctionOperand(defStore, typeStore, symbols, module, output, locals, hir, *argumentId));
       }
-
-      if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(*argumentId)) {
-        span = path.span;
-      }
-
-      let mut hirRef: &mut Hir::HirStore = hir;
-      lowered.push(hirRef.alloc(Hir::HirNode {
-        kind: Hir::HirKind::Variable(functionDef),
-        span: span,
-        typeId: functionType,
-      }));
 
       index += 1;
     }
 
     return lowered;
+  }
+
+  /// Lowers `expressionId` where a C function pointer may be taken from it.
+  /// A bare function name becomes a `Variable` naming the function itself
+  /// instead of a closure that forwards to it; anything else lowers as usual.
+  function lowerRawFunctionOperand(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    expressionId: Ast::ExpressionId,
+  ): Hir::HirId {
+    let Option::SOME(functionDef) = Lowering::namedFunctionArgument(defStore, module, output, expressionId) else {
+      return Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, expressionId);
+    };
+
+    let functionType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, expressionId);
+    let mut span: SourceSpan = SourceSpan::new("", 0, 0);
+
+    if (let Option::SOME(Ast::Expression::Node::Variable(variable)) = module.expressions.get(expressionId)) {
+      span = variable.span;
+    }
+
+    if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(expressionId)) {
+      span = path.span;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(functionDef),
+      span: span,
+      typeId: functionType,
+    });
+  }
+
+  /// `expressionId` as the C function pointer of type `rawType` a C-facing
+  /// place stores, such as a function-typed field of a C-layout record.
+  function lowerCFacingValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    expressionId: Ast::ExpressionId,
+    rawType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let value: Hir::HirId = Lowering::lowerRawFunctionOperand(defStore, typeStore, symbols, module, output, locals, hir, expressionId);
+
+    return Lowering::toCFacing(hir, value, rawType);
   }
 
   /// `argumentId` as the C function pointer of type `rawType`. A value that
@@ -2583,7 +2638,52 @@ export namespace Lowering {
   /// `Path` expression, so `MemberAccess` always carries `Dot` and the
   /// oracle's static-access branch (`StaticAccess`, unit `EnumVariant`) has no
   /// reachable form to lower.
+  ///
+  /// A function-typed field of a C-layout record holds a C function pointer,
+  /// so reading it as a value converts the pointer back to a function value
+  /// with `FromRawFunction`.
   function lowerMemberAccess(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    memberAccess: &Ast::Expression::MemberAccess,
+  ): Hir::HirId {
+    let place: Hir::HirId = Lowering::lowerMemberAccessPlace(defStore, typeStore, symbols, module, output, locals, hir, exprId, memberAccess);
+
+    let mut placeType: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut span: SourceSpan = memberAccess.span;
+
+    if (let Option::SOME(placeNode) = hir.get(place)) {
+      placeType = placeNode.typeId;
+      span = placeNode.span;
+    }
+
+    let valueType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+      Option::SOME(typeId) -> typeId,
+      Option::NONE -> placeType,
+    };
+
+    if (!Lowering::isRawFunctionType(typeStore, placeType)) {
+      return place;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FromRawFunction(place),
+      span: span,
+      typeId: valueType,
+    });
+  }
+
+  /// `obj.field` as the place it names, typed by what the field stores: a
+  /// function-typed field of a C-layout record is the C function pointer
+  /// itself, which an assignment stores into directly.
+  function lowerMemberAccessPlace(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -2625,10 +2725,14 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, memberAccess.span);
     };
 
-    let fieldType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+    let mut fieldType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
       Option::SOME(typeId) -> typeId,
       Option::NONE -> field.fieldType,
     };
+
+    if (field.storageType.raw() != field.fieldType.raw()) {
+      fieldType = field.storageType;
+    }
 
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {
@@ -2639,6 +2743,55 @@ export namespace Lowering {
       span: memberAccess.span,
       typeId: fieldType,
     });
+  }
+
+  function isRawFunctionType(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::RawFunction(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// The target of `target = value`. A field is lowered as the place it
+  /// names, so a function-typed field of a C-layout record is assigned the C
+  /// function pointer itself rather than a function value read out of it.
+  function lowerAssignmentTarget(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    targetId: Ast::ExpressionId,
+  ): Hir::HirId {
+    let mut current: Ast::ExpressionId = targetId;
+
+    while (true) {
+      let Option::SOME(expression) = module.expressions.get(current) else {
+        break;
+      };
+
+      if (let Ast::Expression::Node::Grouped(grouped) = expression) {
+        current = grouped.expression;
+        continue;
+      }
+
+      if (let Ast::Expression::Node::MemberAccess(memberAccess) = expression) {
+        return Lowering::lowerMemberAccessPlace(defStore, typeStore, symbols, module, output, locals, hir, current, &memberAccess);
+      }
+
+      break;
+    }
+
+    return Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, targetId);
   }
 
   /// Lowers `expr as T` to `HirKind::Cast`. The target type is resolved from
@@ -2736,7 +2889,12 @@ export namespace Lowering {
       };
 
       fieldIndexes.push(location.index);
-      fieldValues.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, field.value));
+
+      if (location.storageType.raw() != location.fieldType.raw()) {
+        fieldValues.push(Lowering::lowerCFacingValue(defStore, typeStore, symbols, module, output, locals, hir, field.value, location.storageType));
+      } else {
+        fieldValues.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, field.value));
+      }
 
       index += 1;
     }

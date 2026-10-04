@@ -1,0 +1,58 @@
+// Function-typed fields of C-layout records hold C function pointers: a
+// named function or a lambda without captures goes in, a callable function
+// value comes back out, and one field copies into another as the pointer.
+extern Native {
+  record Handler {
+    public apply: (i32) -> i32;
+    public bias: i32;
+  }
+}
+
+@cLayout
+record Table {
+  public first: (i32) -> i32;
+  public second: (i32) -> i32;
+}
+
+function addOne(value: i32): i32 {
+  return value + 1;
+}
+
+function triple(value: i32): i32 {
+  return value * 3;
+}
+
+function main(): i32 {
+  let mut handler: Native::Handler = Native::Handler { apply: addOne, bias: 2 };
+  let named: (i32) -> i32 = handler.apply;
+
+  if (named(handler.bias) != 3) {
+    return 1;
+  }
+
+  handler.apply = (value: i32): i32 -> value * 10;
+  let lambda: (i32) -> i32 = handler.apply;
+
+  if (lambda(handler.bias) != 20) {
+    return 2;
+  }
+
+  let mut table: Table = Table { first: (value: i32): i32 -> value - 1, second: triple };
+  let first: (i32) -> i32 = table.first;
+  let second: (i32) -> i32 = table.second;
+
+  if (first(10) != 9 || second(3) != 9) {
+    return 3;
+  }
+
+  table.first = handler.apply;
+  table.second = addOne;
+  let copied: (i32) -> i32 = table.first;
+  let replaced: (i32) -> i32 = table.second;
+
+  if (copied(4) != 40 || replaced(1) != 2) {
+    return 4;
+  }
+
+  return 42;
+}

@@ -736,6 +736,37 @@ function codegenTypesDropGlueAsACFunctionPointer(): void {
   Test::assert(!codegenContains(&emission.source, "(void*)ignis_drop_glue_t"));
 }
 
+/// A function-typed field of a C-layout record is a typed C function pointer:
+/// the struct member is spelled by the signature's typedef, and a named
+/// function stored into it is cast to that typedef with no closure around it.
+@test
+function codegenStoresCLayoutFunctionFieldsAsTypedFunctionPointers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Native {\n  record Handler {\n    public apply: (i32) -> i32;\n    public bias: i32;\n  }\n}\n\nfunction twice(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  let mut handler: Native::Handler = Native::Handler { apply: twice, bias: 1 };\n\n  handler.apply = twice;\n\n  return handler.bias;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, "struct Handler {\n    ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, " apply;\n    i32 bias;\n};\n"));
+  Test::assert(codegenContains(&emission.source, ")twice_"));
+  Test::assert(!codegenContains(&emission.source, "struct __ignis_closure_t"));
+}
+
+/// Reading a function-typed field of a C-layout record yields a closure that
+/// calls the stored pointer through the signature's trampoline; a lambda
+/// without captures is stored through its `_raw` wrapper.
+@test
+function codegenReadsCLayoutFunctionFieldsThroughTheTrampoline(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "@cLayout\nrecord Table {\n  public apply: (i32) -> i32;\n}\n\nfunction main(): i32 {\n  let table: Table = Table { apply: (value: i32): i32 -> value + 1 };\n  let apply: (i32) -> i32 = table.apply;\n\n  return apply(41);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "_raw(i32 a0) {\n"));
+  Test::assert(codegenContains(&emission.source, "->apply);\n"));
+  Test::assert(codegenContains(&emission.source, "{ ignis_raw_tramp_"));
+  Test::assert(codegenContains(&emission.source, "static i32 ignis_raw_tramp_"));
+}
+
 /// A record without a C layout keeps its index-named fields.
 @test
 function codegenKeepsIndexNamedFieldsOnPlainRecords(): void {

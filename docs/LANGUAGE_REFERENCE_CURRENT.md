@@ -459,6 +459,28 @@ An extern record cannot be generic and cannot declare methods, static fields or 
 
 A record outside an extern block gets the same field layout with `@cLayout` (see [Attributes](#7-attributes)).
 
+A function-typed field of an extern or `@cLayout` record is a plain C function pointer, as a function-typed extern parameter is. A value stored into it, by initialization or assignment, must be capture-free: a function named directly, or a closure literal that captures nothing. Reading the field yields an ordinary function value.
+
+```ignis
+extern Device {
+    record Handler {
+        public apply: (i32) -> i32;
+    }
+}
+
+function twice(value: i32): i32 {
+    return value * 2;
+}
+
+function run(): i32 {
+    let mut handler: Device::Handler = Device::Handler { apply: twice };
+    handler.apply = (value: i32): i32 -> value + 1;
+
+    let apply: (i32) -> i32 = handler.apply;
+    return apply(41);
+}
+```
+
 #### Side-Effect Imports
 
 `import _ from "..."` loads a module purely for its side effects (e.g., namespace contributions) without binding any name into the importing scope.

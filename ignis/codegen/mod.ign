@@ -1286,6 +1286,12 @@ export namespace CodegenC {
       let fieldType: Analyzer::TypeId = fieldDef.fieldType;
       let index: u32 = fieldDef.index;
 
+      // A C function pointer field owns nothing to drop.
+      if (Hir::recordFieldStorageType(defStore, typeStore, nominal, fieldType).raw() != fieldType.raw()) {
+        fieldIndex += 1;
+        continue;
+      }
+
       if (Borrowck::needsDropType(defStore, typeStore, fieldType) || Hir::typeIsFunction(typeStore, fieldType)) {
         let member: String = CodegenC::recordFieldMember(defStore, symbols, nominal, index as u64);
         let access: String = `${expression.toStr()}.${member.toStr()}`;
@@ -2969,7 +2975,8 @@ export namespace CodegenC {
 
         if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
           if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
-            let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, fieldDef.fieldType);
+            let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, defId, fieldDef.fieldType);
+            let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, storageType);
             let fieldAttributes: String = CodegenC::fieldLayoutAttributes(fieldDef.alignment);
             let member: String = CodegenC::recordFieldMember(defStore, symbols, defId, fieldDef.index as u64);
             let line: String = `    ${fieldType.toStr()} ${member.toStr()}${fieldAttributes.toStr()};\n`;
@@ -3732,6 +3739,54 @@ export namespace CodegenC {
     }
   }
 
+  /// Creates the C function pointer type of every function-typed field of a
+  /// C-layout record in `typeDefs`, so the field's typedef is emitted even
+  /// when no code reads or writes the field.
+  function internRecordFieldStorageTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeDefs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut definitionIndex: u64 = 0;
+
+    while (definitionIndex < typeDefs.length()) {
+      let Option::SOME(defId) = typeDefs.get(definitionIndex) else {
+        definitionIndex += 1;
+        continue;
+      };
+
+      let mut fieldTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(*defId)) {
+        if (recordDef.cLayout) {
+          let mut fieldIndex: u64 = 0;
+
+          while (fieldIndex < recordDef.fields.length()) {
+            if (let Option::SOME(fieldId) = recordDef.fields.get(fieldIndex)) {
+              if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+                fieldTypes.push(fieldDef.fieldType);
+              }
+            }
+
+            fieldIndex += 1;
+          }
+        }
+      }
+
+      let mut typeIndex: u64 = 0;
+
+      while (typeIndex < fieldTypes.length()) {
+        if (let Option::SOME(fieldType) = fieldTypes.get(typeIndex)) {
+          let _ = Hir::recordFieldStorageType(defStore, typeStore, *defId, *fieldType);
+        }
+
+        typeIndex += 1;
+      }
+
+      definitionIndex += 1;
+    }
+  }
+
   /// One `ignis_fn_<id>` typedef per C function pointer signature, in type id
   /// order. Every `RawFunction` in the store gets one: lowering creates them
   /// only at extern boundaries, and a typedef nothing names costs nothing.
@@ -4386,6 +4441,8 @@ export namespace CodegenC {
     // struct to be a *complete* type by the time the record's own definition
     // is emitted — the reverse order left that field incomplete.
     CodegenC::emitClosureSignatureStructs(defStore, typeStore, symbols, &mut source, closures);
+
+    CodegenC::internRecordFieldStorageTypes(defStore, typeStore, &typeDefs);
 
     // After the closure structs: a C function pointer may take a closure by
     // value, which a declarator can name only once the struct is declared.

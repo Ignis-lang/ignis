@@ -61,7 +61,7 @@ typedef void* null;
 | `&mut T` | `T*` |
 | `T[N]` | `T[N]` (stack allocated) |
 | `(T1, T2, ...)` | `void*` |
-| `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries |
+| `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries and in C-layout record fields |
 
 References and pointers both compile to C pointers. The distinction between `*T` and `*mut T`, and between `&T` and `&mut T`, is enforced at compile time only.
 
@@ -127,7 +127,22 @@ struct Counter_12 {
 };
 ```
 
-Field access, record initialization and drop paths use the written field name for these records, so a field named by a C keyword is rejected (A0218). Neither kind can be generic or carry a drop state byte. Function-typed fields are currently emitted with the closure representation every function value has.
+Field access, record initialization and drop paths use the written field name for these records, so a field named by a C keyword is rejected (A0218). Neither kind can be generic or carry a drop state byte.
+
+A function-typed field of a C-layout record is a typed C function pointer, spelled by its signature's `ignis_fn_<id>` typedef (see C Function Pointers), so C code can call it. Storing into the field, by initialization or assignment, takes a capture-free value exactly as a function-typed extern parameter does, and anything else is A0217. Reading the field yields a closure through the signature's trampoline. Copying one such field into another copies the pointer. The field owns nothing, so the record's drop skips it.
+
+```c
+struct Handler {
+    ignis_fn_328 apply;
+    i32 bias;
+};
+
+t0 = (ignis_fn_328)addOne_1696;
+(t1)->apply = t0;
+t4 = &((t3)->apply);
+t5 = *t4;
+t6 = (struct __ignis_closure_t164){ ignis_raw_tramp_328, NULL, (u8*)t5 };
+```
 
 ### Record Attributes
 
