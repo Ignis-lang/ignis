@@ -4213,9 +4213,9 @@ export namespace Analyzer {
     /// Only a record or an enum answers: those are what `Type::Instance` instantiates.
     /// A parameterized type alias resolves to nothing here, so an annotation written
     /// over one stays unresolved rather than producing an instance of the alias itself.
-    /// Like the `Path` arm of `resolveLocalAnnotation`, a qualified path is matched on
-    /// its last segment alone — TODO(namespace-path-validation), the same debt tracked
-    /// at `resolvePathTail` in resolver_bodies.ign.
+    /// Like the `Path` arm of `resolveLocalAnnotation`, a qualified path answers only
+    /// with a declaration whose stamped path the written segments match, so a namespace
+    /// prefix that names no declaration resolves to nothing.
     function lookupAnnotationBaseDefinition(
       defStore: &mut Analyzer::DefinitionStore,
       symbols: &mut Analyzer::SymbolTable,
@@ -4242,6 +4242,10 @@ export namespace Analyzer {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let symbol: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
 
+      if (path.segments.length() > 1) {
+        return Analyzer::Typecheck::findQualifiedTypeDefinition(defStore, symbol, &path);
+      }
+
       // The store holds every module's declarations, so a plain first-hit scan
       // hands a name the prelude also publishes to the prelude. A declaration
       // in the module being analyzed shadows it.
@@ -4250,6 +4254,64 @@ export namespace Analyzer {
       }
 
       return Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, false);
+    }
+
+    /// The record or enum named `symbol` whose stamped qualified path the written
+    /// `path` names, either in full or as a trailing run of its segments.
+    function findQualifiedTypeDefinition(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbol: Analyzer::SymbolId,
+      path: &Ast::Type::Path,
+    ): Option<Analyzer::DefinitionId> {
+      let mut writtenPath: String = String::create("");
+      let mut segmentIndex: u64 = 0;
+      while (segmentIndex < path.segments.length()) {
+        if (let Option::SOME(segment) = path.segments.get(segmentIndex)) {
+          if (segmentIndex > 0) {
+            writtenPath.pushStr("::");
+          }
+          writtenPath.pushStr(segment.toStr());
+        }
+        segmentIndex += 1;
+      }
+      let writtenSuffix: String = `::${writtenPath.toStr()}`;
+
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsWithPathSuffix(writtenPath.toStr());
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        let Option::SOME(candidate) = candidates.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let defId: Analyzer::DefinitionId = *candidate;
+        let mut pathMatches: boolean = false;
+        if (let Option::SOME(storedQualified) = defStore.qualifiedNameOf(defId)) {
+          pathMatches = storedQualified.equals(writtenPath.toStr()) || Analyzer::Imports::programPathEndsWith(storedQualified, &writtenSuffix);
+        }
+
+        let Option::SOME(def) = defStore.get(defId) else {
+          index += 1;
+          continue;
+        };
+
+        if (pathMatches && def.name().raw() == symbol.raw()) {
+          match (def) {
+            Analyzer::Definition::Record(_) -> {
+              return Option::SOME(defId);
+            },
+            Analyzer::Definition::Enum(_) -> {
+              return Option::SOME(defId);
+            },
+            _ -> {},
+          };
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
     }
 
     /// First record or enum in the store named `symbol`. When `activeModuleOnly`
@@ -4447,10 +4509,9 @@ export namespace Analyzer {
             return Option::NONE;
           }
 
-          // N >= 2 segments (ADR D11): the leading segments form an
-          // unvalidated namespace-qualifier prefix — TODO(namespace-path-validation),
-          // the same debt tracked at `resolvePathTail` in resolver_bodies.ign.
-          // Only the last segment is resolved, and only against
+          // N >= 2 segments (ADR D11): the leading segments form a namespace
+          // qualifier the resolver has already validated (`resolvePath` in
+          // resolver.ign). Only the last segment is resolved, and only against
           // Record/Enum/TypeAlias names — deliberately narrower than the
           // 1-segment scan below, which also matches functions/variables/etc.
           if (path.segments.length() >= 2) {
@@ -4532,38 +4593,6 @@ export namespace Analyzer {
               };
 
               qualifiedIndex += 1;
-            }
-
-            // No stamped path matched — fall back to the bare last-segment
-            // scan (ADR D11's unvalidated-prefix leniency), which also covers
-            // single-module analysis, where no qualified name is stamped.
-            let bareCandidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(lastSymbol);
-            let mut bareIndex: u64 = 0;
-            while (bareIndex < bareCandidates.length()) {
-              let Option::SOME(bareCandidate) = bareCandidates.get(bareIndex) else {
-                bareIndex += 1;
-                continue;
-              };
-
-              let Option::SOME(bareDef) = defStore.get(*bareCandidate) else {
-                bareIndex += 1;
-                continue;
-              };
-
-              match (bareDef) {
-                Analyzer::Definition::Record(record_) -> {
-                  return Option::SOME(record_.typeId);
-                },
-                Analyzer::Definition::Enum(enum_) -> {
-                  return Option::SOME(enum_.typeId);
-                },
-                Analyzer::Definition::TypeAlias(alias_) -> {
-                  return Option::SOME(alias_.typeId);
-                },
-                _ -> {},
-              };
-
-              bareIndex += 1;
             }
 
             return Option::NONE;

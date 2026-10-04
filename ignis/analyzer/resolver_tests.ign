@@ -1655,9 +1655,8 @@ function resolveEmitsUnknownTypeDiagnostic(): void {
   Test::assertEq<u32>(fdX.fieldType.raw(), voidId.raw());
 }
 
-/// Scenario: a field typed `Foo::Bar`, where nothing declares `Bar`. A
-/// qualified path resolves on its last segment, so this reports the unknown
-/// name rather than refusing the shape.
+/// Scenario: a field typed `Foo::Bar`, where nothing declares `Bar`. The
+/// qualified path names no declaration, so this reports it as an undefined type.
 @test
 function resolveEmitsUnknownNameForQualifiedPath(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -1726,18 +1725,18 @@ function resolveEmitsUnknownNameForQualifiedPath(): void {
   Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
 }
 
-/// Scenario: a field typed `Ast::Type::Path`, whose last segment names a
-/// declared record. The namespace qualifier is carried but not validated, so
-/// the field resolves to that record's type.
+/// Scenario: a field typed `Outer::Inner::Target`, whose last segment names a
+/// top-level record but whose qualifier names no namespace. The prefix is
+/// validated, so this is 1 UNDEFINED_TYPE diagnostic and the slot stays VOID.
 @test
-function resolveQualifiedPathResolvesOnLastSegment(): void {
+function resolveQualifiedPathRejectsUnknownNamespacePrefix(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut module: Ast::Module = Ast::Module::init();
 
   let mut targetFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
-  let targetId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
     span: resolverDummySpan(),
     name: String::create("Target"),
     genericParameters: Vector::new<Ast::GenericParam>(),
@@ -1795,14 +1794,17 @@ function resolveQualifiedPathResolvesOnLastSegment(): void {
     &pass2,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
 
-  let fieldDef: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
-  let Option::SOME(targetDefId) = Analyzer::Binder::findDef(&pass1, targetId.raw()) else {
-    @panic("expected a definition for the target record");
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
   };
+  Test::assertEq<str>(diag.code, DiagnosticCode::UNDEFINED_TYPE);
+  Test::assertEq<str>(diag.messageText(), "Undefined type 'Outer::Inner::Target'");
 
-  Test::assertEq<u32>(fieldDef.fieldType.raw(), typeStore.intern(Analyzer::Type::Record(targetDefId)).raw());
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+  let fieldDef: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+  Test::assertEq<u32>(fieldDef.fieldType.raw(), voidId.raw());
 }
 
 /// Scenario: Vector<i32, str> where Vector<T> expects 1 arg — 1 GENERIC_ARITY_MISMATCH diagnostic.

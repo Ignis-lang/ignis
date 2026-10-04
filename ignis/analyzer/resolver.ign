@@ -1165,12 +1165,8 @@ export namespace Analyzer {
       }
     }
 
-    /// The program-index declaration a written qualified type path names.
-    function programLookupForPath(
-      state: &mut Analyzer::Resolver::ResolverState,
-      sym: Analyzer::SymbolId,
-      p: &Ast::Type::Path,
-    ): Option<Analyzer::DefinitionId> {
+    /// The segments of a type path joined with `::`, as written.
+    function qualifiedPathText(p: &Ast::Type::Path): String {
       let mut writtenPath: String = String::create("");
       let mut segIndex: u64 = 0;
 
@@ -1187,6 +1183,16 @@ export namespace Analyzer {
         segIndex += 1;
       }
 
+      return writtenPath;
+    }
+
+    /// The program-index declaration a written qualified type path names.
+    function programLookupForPath(
+      state: &mut Analyzer::Resolver::ResolverState,
+      sym: Analyzer::SymbolId,
+      p: &Ast::Type::Path,
+    ): Option<Analyzer::DefinitionId> {
+      let writtenPath: String = qualifiedPathText(p);
       let suffix: String = `::${writtenPath.toStr()}`;
       let mut i: u64 = 0;
 
@@ -1298,8 +1304,9 @@ export namespace Analyzer {
     ///   5. Import overlay (linear scan).
     ///   6. Unknown: emit UNDEFINED_TYPE + return VOID.
     ///
-    /// A multi-segment path resolves on its last segment; the leading segments
-    /// are an unvalidated namespace qualifier (TODO(namespace-path-validation)).
+    /// A multi-segment path resolves only through the program-wide qualified
+    /// index, so every leading namespace segment has to match the namespace the
+    /// type is declared in; a path that matches no declaration is UNDEFINED_TYPE.
     function resolvePath(
       state: &mut Analyzer::Resolver::ResolverState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1316,9 +1323,7 @@ export namespace Analyzer {
       }
 
       // A qualified path names its type in the last segment; the leading ones
-      // are the namespace it lives in. They are not validated here — the same
-      // TODO(namespace-path-validation) the typechecker's annotation reader
-      // carries — but the name they qualify resolves like any other.
+      // are the namespace it lives in.
       let qualified: boolean = p.segments.length() > 1;
 
       let Option::SOME(nameStr) = p.segments.get(p.segments.length() - 1) else {
@@ -1351,10 +1356,10 @@ export namespace Analyzer {
         }
       }
 
-      // 3. A qualified path picks its declaration by written path first — the
-      // program-wide index validates the prefix — so `Analyzer::TypeId` and
-      // `Ast::TypeId` stay apart even though both end in `TypeId`. Bare-name
-      // lookups only decide when no qualified candidate matches.
+      // 3. A qualified path resolves by written path alone — the program-wide
+      // index validates the prefix — so `Analyzer::TypeId` and `Ast::TypeId`
+      // stay apart even though both end in `TypeId`. Falling back to the bare
+      // last segment would accept any prefix, including one naming no namespace.
       if (qualified) {
         let programFirstOpt: Option<Analyzer::DefinitionId> = programLookupForPath(state, sym, p);
 
@@ -1370,6 +1375,11 @@ export namespace Analyzer {
             return nominalTypeFor(defStore, typeStore, defId);
           }
         }
+
+        let message: String = `Undefined type '${qualifiedPathText(p).toStr()}'`;
+        emitUndefinedType(state, p.span, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
+        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+        return tsRef.intern(Analyzer::Type::VOID);
       }
 
       // 4. The namespaces this annotation is written inside, innermost first.
@@ -1418,26 +1428,7 @@ export namespace Analyzer {
         return nominalTypeFor(defStore, typeStore, defId);
       }
 
-      // 4. Program-wide qualified index — a qualified path only, mirroring
-      // the host's shared namespace store.
-      if (qualified) {
-        let programOpt: Option<Analyzer::DefinitionId> = programLookupForPath(state, sym, p);
-
-        if (let Option::SOME(defId) = programOpt) {
-          if (isTraitDef(defStore, defId)) {
-            let message: String = `Expected a type, but '${nameStr.toStr()}' refers to a trait`;
-            emitUndefinedType(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
-            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
-            return tsRef.intern(Analyzer::Type::VOID);
-          }
-
-          if (isTypeNameDef(defStore, defId)) {
-            return nominalTypeFor(defStore, typeStore, defId);
-          }
-        }
-      }
-
-      // 5. Unknown.
+      // 6. Unknown.
       let message: String = `Undefined type '${nameStr.toStr()}'`;
       emitUndefinedType(state, p.span, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
       let mut tsRef: &mut Analyzer::TypeStore = typeStore;
