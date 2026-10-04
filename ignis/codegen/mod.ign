@@ -3680,6 +3680,11 @@ export namespace CodegenC {
     }
   }
 
+  /// Emits the whole program as one C translation unit.
+  ///
+  /// `freestanding` is set for a `std = false` build: the unit then carries
+  /// only the type prelude, with no `ignis_rt.h`, no hosted libc or POSIX
+  /// headers and no C `main` wrapper, so it compiles under `-ffreestanding`.
   function emitProgram(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3687,6 +3692,7 @@ export namespace CodegenC {
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
     moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
+    freestanding: boolean,
   ): CodegenC::EmitOutput {
     let mut source: String = String::create("");
     let mut unsupported: u64 = 0;
@@ -3694,14 +3700,16 @@ export namespace CodegenC {
 
     CodegenC::emitTypePrelude(&mut source);
 
-    source.pushStr("#include \"ignis_rt.h\"\n");
+    if (!freestanding) {
+      source.pushStr("#include \"ignis_rt.h\"\n");
 
-    // The host includes the headers each linked std module names in
-    // `std/manifest.toml`; this is that list for `libc` and `math`, which every
-    // program pulls through the prelude. An extern function is then declared
-    // by its header, never by the emitter, since a second declaration with the
-    // emitter's spelling of the parameter types conflicts with the header's.
-    CodegenC::emitStdHeaders(&mut source);
+      // The host includes the headers each linked std module names in
+      // `std/manifest.toml`; this is that list for `libc` and `math`, which every
+      // program pulls through the prelude. An extern function is then declared
+      // by its header, never by the emitter, since a second declaration with the
+      // emitter's spelling of the parameter types conflicts with the header's.
+      CodegenC::emitStdHeaders(&mut source);
+    }
 
     let tables: CodegenC::ClosureTables = CodegenC::collectClosureTables(defStore, typeStore, program);
     let closures: &CodegenC::ClosureTables = &tables;
@@ -3813,7 +3821,9 @@ export namespace CodegenC {
       bodyIndex += 1;
     }
 
-    CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program, moduleInfos);
+    if (!freestanding) {
+      CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program, moduleInfos);
+    }
 
     return CodegenC::EmitOutput {
       source: source,

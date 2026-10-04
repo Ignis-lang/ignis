@@ -84,6 +84,13 @@ ignis build
 ignis build ./my-app
 ```
 
+A project with `[ignis] std = false` builds in freestanding mode (see
+`docs/PROJECT.md`): the emitted C has no runtime header, no hosted libc or
+POSIX headers and no C `main` wrapper, every unit is compiled with
+`-ffreestanding`, and nothing links `libm`. With `[build] bin = false` the build
+writes an object file (`<name>.o`) instead of only the C source. `--std-path`
+names the official standard library, so a freestanding build ignores it.
+
 ## `ignis check`
 
 Same input modes as `build`, stopping after analysis: no code generation and no linking.

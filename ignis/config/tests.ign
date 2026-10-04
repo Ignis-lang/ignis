@@ -366,3 +366,45 @@ function unknownProjectKeyWarningsSortByPositionAcrossAReopenedTable(): void {
   Test::assertEq<str>(first.messageText(), "unknown key 'zebra_unknown' in [build]");
   Test::assertEq<str>(second.messageText(), "unknown key 'extra' in [package]");
 }
+
+/// `std = false` with `std_path` names a user standard library, so the std
+/// root and its manifest resolve from that path.
+@test
+function projectLoaderResolvesAFreestandingUserStdPath(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/freestanding/user_std");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> {
+      Test::assert(!project.stdEnabled);
+
+      let Option::SOME(stdRootText) = project.stdRootText() else {
+        Test::fail();
+        return;
+      };
+      let Option::SOME(manifestPathText) = project.stdManifestPathText() else {
+        Test::fail();
+        return;
+      };
+
+      assertEndsWith(&stdRootText, "/test_cases/freestanding/user_std/kstd");
+      assertEndsWith(&manifestPathText, "/test_cases/freestanding/user_std/kstd/manifest.toml");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+/// `std = false` without `std_path` has no std root at all: the official
+/// standard library is never consulted.
+@test
+function projectLoaderLeavesTheFreestandingStdRootUnsetWithoutAStdPath(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/freestanding/no_std");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> {
+      Test::assert(!project.stdEnabled);
+      Test::assert(project.stdRootText().isNone());
+      Test::assert(project.stdManifestPathText().isNone());
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}

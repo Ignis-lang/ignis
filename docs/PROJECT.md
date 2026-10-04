@@ -51,8 +51,32 @@ sort_imports = false
 
 ### `[ignis]`
 
-- `std` - Enable standard library support.
-- `std_path` - Optional path to std root.
+- `std` - Enable standard library support. `false` builds in freestanding mode
+  (see below).
+- `std_path` - Optional path to std root. With `std = false` it names a user
+  standard library instead of the official one.
+
+#### Freestanding mode (`std = false`)
+
+A project with `std = false` neither requires nor loads the official standard
+library. `IGNIS_STD_PATH` and `--std-path` are ignored.
+
+- Without `std_path` there is no standard library: no prelude is auto-loaded and
+  a `std::` import is an unresolved module.
+- With `std_path`, the directory is a user standard library with its own
+  `manifest.toml` in the same format as `std/manifest.toml`. Its `[modules]`
+  table resolves `std::` imports and its `[auto_load]` list is the prelude.
+
+The emitted C carries only the type prelude (`stdbool.h`, `stddef.h`,
+`stdint.h`): no `ignis_rt.h`, no hosted libc or POSIX headers and no C `main`
+wrapper. Every unit is compiled with `-ffreestanding` ahead of `[build] cflags`,
+the runtime include directory is not passed, and nothing links `libm`. With
+`bin = false` the build compiles the unit into `<out_dir>/user/obj/<name>.o` with
+`cc` and `cflags` instead of only writing the C source.
+
+Panics, drop guards and escaping capturing closures still emit libc calls
+(`fprintf`, `exit`, `malloc`, `free`) in this mode, so freestanding code must
+avoid them for now.
 
 ### `[build]`
 
@@ -134,6 +158,9 @@ Library project:
 bin = false
 entry = "lib.ign"
 ```
+
+A hosted library project writes the C translation unit only. A freestanding
+one (`[ignis] std = false`) also compiles it into an object file.
 
 ## `ignis init` Generation Rules
 

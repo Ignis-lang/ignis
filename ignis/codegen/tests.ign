@@ -103,6 +103,23 @@ function codegenEmit(source: str): CodegenEmission {
 /// `codegenEmit`, with the functions `externalNames` names kept externally
 /// visible the way the test harness unit needs its `@test` functions.
 function codegenEmitExposing(source: str, externalNames: &Vector<String>): CodegenEmission {
+  return codegenEmitWith(source, externalNames, false);
+}
+
+/// `codegenEmit` for a `std = false` build, which emits a freestanding unit.
+function codegenEmitFreestanding(source: str): CodegenEmission {
+  let externalNames: Vector<String> = Vector::new<String>();
+
+  return codegenEmitWith(source, &externalNames, true);
+}
+
+/// The pipeline behind `codegenEmit` and its variants, with the emitter told
+/// whether the unit is freestanding.
+function codegenEmitWith(
+  source: str,
+  externalNames: &Vector<String>,
+  freestanding: boolean,
+): CodegenEmission {
   let file: SourceFile = SourceFile::create("codegen_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
@@ -164,6 +181,7 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
     &lowered.program,
     &externalSymbols,
     &moduleInfos,
+    freestanding,
   );
 
   return CodegenEmission {
@@ -857,4 +875,40 @@ function codegenAllocTraceReportIsDecidedByRealDiscoveryNotAHandBuiltModuleInfo(
 
   Test::assert(CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, hook));
   Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, decoy));
+}
+
+/// The program every freestanding emission test compiles: an entry point plus
+/// an exported function that writes through a volatile pointer.
+const CODEGEN_FREESTANDING_SOURCE: str = "@externName(\"freestanding_poke\")\nfunction poke(address: u64, value: u32): void {\n  let target: *mut u32 = @pointerFromInteger<*mut u32>(address);\n  @writeVolatile<u32>(target, value);\n}\n\nfunction main(): i32 {\n  poke(4096, 7);\n\n  return 0;\n}\n";
+
+/// A `std = false` unit compiles under `-ffreestanding`: it keeps the type
+/// prelude and its freestanding headers, and drops `ignis_rt.h`, every hosted
+/// libc or POSIX header and the C `main` wrapper.
+@test
+function codegenFreestandingUnitOmitsTheHostedRuntime(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(CODEGEN_FREESTANDING_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "#include <stdint.h>"));
+  Test::assert(codegenContains(&emission.source, "#include <stddef.h>"));
+  Test::assert(codegenContains(&emission.source, "#include <stdbool.h>"));
+  Test::assert(codegenContains(&emission.source, "freestanding_poke("));
+  Test::assert(!codegenContains(&emission.source, "ignis_rt.h"));
+  Test::assert(!codegenContains(&emission.source, "#include <stdio.h>"));
+  Test::assert(!codegenContains(&emission.source, "#include <stdlib.h>"));
+  Test::assert(!codegenContains(&emission.source, "#include <unistd.h>"));
+  Test::assert(!codegenContains(&emission.source, "int main("));
+  Test::assert(!codegenContains(&emission.source, "ignis_runtime_init"));
+}
+
+/// A hosted unit keeps the runtime header, the hosted headers and the C
+/// `main` wrapper.
+@test
+function codegenHostedUnitKeepsTheRuntimeAFreestandingUnitDrops(): void {
+  let emission: CodegenEmission = codegenEmit(CODEGEN_FREESTANDING_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "#include <stdint.h>"));
+  Test::assert(codegenContains(&emission.source, "#include \"ignis_rt.h\""));
+  Test::assert(codegenContains(&emission.source, "#include <stdio.h>"));
+  Test::assert(codegenContains(&emission.source, "#include <stdlib.h>"));
+  Test::assert(codegenContains(&emission.source, "int main(int argc, char** argv)"));
 }
