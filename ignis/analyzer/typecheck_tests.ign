@@ -5961,7 +5961,7 @@ function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
 /// variant declared with one payload slot. `resolvePatternPathVariantArity`
 /// compares against the variant's declared payload arity, so the body
 /// resolver rejects the pattern before typecheck ever sees a variant behind
-/// it; typecheck then reports the pattern as an unresolved constructor.
+/// it; typecheck then reports nothing more for the pattern.
 /// Spec: selfhost-match-exhaustiveness — enum coverage prerequisite.
 @test
 function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
@@ -6021,17 +6021,11 @@ function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
   // the variant's real payload arity.
   assertContainsDiagnosticCodeInBag(&output.resolvedBodies.diagnostics, DiagnosticCode::PATTERN_ARITY_MISMATCH);
 
-  // With the pattern left unresolved, typecheck falls back to its record
-  // destructure path (which rejects the enum scrutinee) and the arm credits
-  // no variant toward coverage, so `E::B` is reported as missing.
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
-  let Option::SOME(patternDiagnostic) = output.typecheck.diagnostics.get(0) else {
-    @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing pattern diagnostic");
-  };
-  Test::assertEq<str>(patternDiagnostic.code, DiagnosticCode::PATTERN_TYPE_MISMATCH);
-  Test::assertEq<str>(patternDiagnostic.messageText(), "record destructure annotation must be a non-generic record");
-
-  let Option::SOME(coverageDiagnostic) = output.typecheck.diagnostics.get(1) else {
+  // With the pattern left unresolved, typecheck adds nothing to the
+  // resolver's error, and the arm credits no variant toward coverage, so
+  // `E::B` is reported as missing.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(coverageDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing coverage diagnostic");
   };
   Test::assertEq<str>(coverageDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
