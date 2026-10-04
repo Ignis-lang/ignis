@@ -1,0 +1,47 @@
+// e2e: err
+// A closure built inside another closure's body that takes one of the outer
+// environment's values by value moves it out of that environment, which the
+// next call of the outer closure would find gone. The inner closure only reads
+// the value, so the move into its environment is the only one.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+enum Slot {
+  FULL(Tracked),
+  EMPTY,
+}
+
+function consume(value: Tracked): i32 {
+  return value.id;
+}
+
+function idOf(value: &Tracked): i32 {
+  return value.id;
+}
+
+function makeOuter(): () -> i32 {
+  let held: Tracked = Tracked { id: 4 };
+
+  return (): i32 -> {
+    let _ = @move held;
+    let inner = (): i32 -> {
+      let _ = @move held;
+
+      return idOf(&held);
+    };
+
+    return inner();
+  };
+}
+
+function main(): i32 {
+  let outer = makeOuter();
+
+  return outer();
+}

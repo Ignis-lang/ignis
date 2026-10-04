@@ -1255,10 +1255,22 @@ function borrowckAcceptsAssignWhileClosureReadsCapture(): void {
 @test
 function borrowckAcceptsAssignAfterClosureByValueCapture(): void {
   let diagnostics: DiagnosticBag = borrowckDiagnostics(
-    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  let read = (): u32 -> {\n    let taken: Owned = value;\n\n    return taken.id;\n  };\n  value = Owned { id: 2 };\n\n  return read();\n}\n",
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  let read = (): u32 -> {\n    let _ = @move value;\n\n    return value.id;\n  };\n  value = Owned { id: 2 };\n\n  return read();\n}\n",
   );
 
   Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a closure body moves a value its environment holds by value. The
+/// closure can be called again, so the environment has to keep the value.
+@test
+function borrowckReportsMoveOfACaptureOutOfItsEnvironment(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  let read = (): u32 -> {\n    let taken: Owned = value;\n\n    return taken.id;\n  };\n  value = Owned { id: 2 };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
 }
 
 /// Scenario: the capture borrow ends with the scope that holds the closure, so
@@ -1279,7 +1291,7 @@ function borrowckAcceptsAssignAfterClosureScopeEnds(): void {
 @test
 function borrowckReportsClosureCaptureOfBorrowedBinding(): void {
   let diagnostics: DiagnosticBag = borrowckDiagnostics(
-    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nfunction run(node: &Node): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  let read = (): u32 -> {\n    let taken: Owned = item;\n\n    return taken.id;\n  };\n\n  return read();\n}\n",
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nfunction run(node: &Node): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  let read = (): u32 -> {\n    let _ = @move item;\n\n    return item.id;\n  };\n\n  return read();\n}\n",
   );
 
   Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);

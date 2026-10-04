@@ -1,0 +1,36 @@
+// e2e: err
+// Moving a captured value out of the environment on only one path is still a
+// move out of it: a later call that takes the other path, or the environment's
+// drop, would find the value gone.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function consume(value: Tracked): i32 {
+  return value.id;
+}
+
+function makeConsumer(): (boolean) -> i32 {
+  let held: Tracked = Tracked { id: 4 };
+
+  return (flag: boolean): i32 -> {
+    let _ = @move held;
+
+    if (flag) {
+      return consume(held);
+    }
+
+    return 0;
+  };
+}
+
+function main(): i32 {
+  let consumer = makeConsumer();
+
+  return consumer(true);
+}

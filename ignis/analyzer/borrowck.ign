@@ -215,6 +215,11 @@ export namespace Borrowck {
     /// these is what the oracle reports as a move out of a borrowed value.
     borrowedBindings: Vector<u32>;
 
+    /// While a closure's thunk is walked, the owning values its environment
+    /// holds by value. They are borrowed bindings too, and this list only
+    /// selects the diagnostic that explains why.
+    environmentCaptures: Vector<u32>;
+
     /// One frame per match currently being checked, holding the values its
     /// arms handed to the match result. A match nested in an arm of another
     /// drains its frame into the enclosing one when it finishes, because a
@@ -343,6 +348,7 @@ export namespace Borrowck {
         loopScrutineeStarts: Vector::new<u64>(),
         loopScrutinees: Vector::new<u32>(),
         borrowedBindings: Vector::new<u32>(),
+        environmentCaptures: Vector::new<u32>(),
         armResultMoveFrames: Vector::new<Vector<u32>>(),
         statementPositionNodes: Vector::new<u32>(),
         letConditionMatches: Vector::new<u32>(),
@@ -592,6 +598,29 @@ export namespace Borrowck {
     /// bound it is being walked.
     public markBorrowedBinding(&mut self, defRaw: u32): void {
       self.borrowedBindings.push(defRaw);
+    }
+
+    /// Mark `defRaw` as a value the environment of the closure being walked
+    /// owns: the body may read it and borrow it, never move it out.
+    public markEnvironmentCapture(&mut self, defRaw: u32): void {
+      self.borrowedBindings.push(defRaw);
+      self.environmentCaptures.push(defRaw);
+    }
+
+    public isEnvironmentCapture(&self, defRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.environmentCaptures.length()) {
+        if (let Option::SOME(entry) = self.environmentCaptures.get(index)) {
+          if (*entry == defRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     public borrowedBindingCount(&self): u64 {
@@ -3006,6 +3035,25 @@ export namespace Borrowck {
     defId: Option<Analyzer::DefinitionId>,
     span: SourceSpan,
   ): void {
+    // A closure can be called any number of times, and every call reads the
+    // same environment, so a value moved out by one call would be missing, or
+    // freed a second time, on the next.
+    if (let Option::SOME(captured) = defId) {
+      if (state.isEnvironmentCapture(captured.raw())) {
+        Borrowck::emitOwnershipError(
+          state,
+          diagnostics,
+          span,
+          DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW,
+          "cannot move a captured value out of its closure's environment",
+          "the closure can be called again, so its environment keeps this value",
+          defId,
+        );
+
+        return;
+      }
+    }
+
     Borrowck::emitOwnershipError(
       state,
       diagnostics,
@@ -3030,6 +3078,13 @@ export namespace Borrowck {
     span: SourceSpan,
     consumer: u32,
   ): void {
+    // A move out of a closure's environment is rejected where it happens, and
+    // the environment keeps the value, so there is no transition to record.
+    // Recording one would report every later use as a use after move.
+    if (state.isEnvironmentCapture(defId.raw())) {
+      return;
+    }
+
     if (let Option::SOME(value) = state.moveValue(defId.raw())) {
       if (value == Borrowck::MOVE_MOVED || value == Borrowck::MOVE_DROPPED || value == Borrowck::MOVE_FREED) {
         return;
@@ -4278,10 +4333,12 @@ export namespace Borrowck {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, returned);
 
           if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, returned)) {
-            Borrowck::noteMove(state, source, Borrowck::OwnershipReport::CONSUMER_RETURN, span);
+            if (!state.isEnvironmentCapture(source.raw())) {
+              Borrowck::noteMove(state, source, Borrowck::OwnershipReport::CONSUMER_RETURN, span);
 
-            let mut returnRef: &mut Borrowck::State = state;
-            returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
+              let mut returnRef: &mut Borrowck::State = state;
+              returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
+            }
           }
 
           // Returning a closure value hands its environment to the caller,
@@ -6363,6 +6420,79 @@ export namespace Borrowck {
     return Option::SOME(params);
   }
 
+  /// The owning values each closure's environment holds by value, keyed by the
+  /// closure's thunk: `values[i]` lists the raw definitions for `thunks[i]`.
+  record ThunkCaptures {
+    public thunks: Vector<u32>;
+    public values: Vector<Vector<u32>>;
+  }
+
+  /// Collects, for every closure in the store, the by-value captures whose type
+  /// needs a drop. The thunk walks its body with these as borrowed bindings,
+  /// because the environment keeps owning them between calls.
+  function collectThunkCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+  ): Borrowck::ThunkCaptures {
+    let mut result: Borrowck::ThunkCaptures = Borrowck::ThunkCaptures {
+      thunks: Vector::new<u32>(),
+      values: Vector::new<Vector<u32>>(),
+    };
+    let mut nodeIndex: u64 = 0;
+
+    while (nodeIndex < hir.nodes.length()) {
+      if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+          if (let Option::SOME(thunk) = closureNode.thunkDef) {
+            let mut owned: Vector<u32> = Vector::new<u32>();
+            let mut captureIndex: u64 = 0;
+
+            while (captureIndex < closureNode.captures.length()) {
+              if (let Option::SOME(capture) = closureNode.captures.get(captureIndex)) {
+                if (Borrowck::captureIsByValue(&capture.mode) && Borrowck::needsDropType(defStore, typeStore, capture.typeInEnv)) {
+                  owned.push(capture.sourceDef.raw());
+                }
+              }
+
+              captureIndex += 1;
+            }
+
+            result.thunks.push(thunk.raw());
+            result.values.push(owned);
+          }
+        }
+      }
+
+      nodeIndex += 1;
+    }
+
+    return result;
+  }
+
+  /// The by-value captures the thunk `functionId` walks as borrowed, or none
+  /// when the function is not a closure thunk.
+  function environmentCapturesOf(
+    captures: &Borrowck::ThunkCaptures,
+    functionId: Analyzer::DefinitionId,
+  ): Vector<u32> {
+    let mut index: u64 = 0;
+
+    while (index < captures.thunks.length()) {
+      if (let Option::SOME(thunk) = captures.thunks.get(index)) {
+        if (*thunk == functionId.raw()) {
+          if (let Option::SOME(values) = captures.values.get(index)) {
+            return Borrowck::copyU32Vector(values);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Vector::new<u32>();
+  }
+
   /// Every node that appears directly in a block's statement list, and
   /// therefore in a position whose value is discarded.
   ///
@@ -6553,6 +6683,7 @@ export namespace Borrowck {
     statementPositionNodes: &Vector<u32>,
     envsCapturedByEscapingClosures: &Vector<u32>,
     bindingsAssignedClosureEnv: &Vector<u32>,
+    environmentCaptures: &Vector<u32>,
     reportEnabled: boolean,
     reportEvents: &mut Vector<Borrowck::OwnershipEvent>,
   ): void {
@@ -6564,6 +6695,16 @@ export namespace Borrowck {
     state.pushScopeEnding(0, false, false, Borrowck::closingSpanOf(hir, bodyId));
     state.setInDropMethod(Borrowck::isInstanceDropMethod(defStore, symbols, functionId));
     state.setCurrentFunction(functionId);
+
+    let mut captureIndex: u64 = 0;
+
+    while (captureIndex < environmentCaptures.length()) {
+      if (let Option::SOME(captureRaw) = environmentCaptures.get(captureIndex)) {
+        state.markEnvironmentCapture(*captureRaw);
+      }
+
+      captureIndex += 1;
+    }
 
     let mut index: u64 = 0;
 
@@ -6673,6 +6814,7 @@ export namespace Borrowck {
     let statementPositionNodes: Vector<u32> = Borrowck::collectStatementPositionNodes(hir);
     let envsCapturedByEscapingClosures: Vector<u32> = Borrowck::collectEnvsCapturedByEscapingClosures(hir);
     let bindingsAssignedClosureEnv: Vector<u32> = Borrowck::collectBindingsAssignedClosureEnv(defStore, typeStore, hir);
+    let thunkCaptures: Borrowck::ThunkCaptures = Borrowck::collectThunkCaptures(defStore, typeStore, hir);
     let mut index: u64 = 0;
 
     while (index < hir.items.length()) {
@@ -6691,6 +6833,8 @@ export namespace Borrowck {
         continue;
       };
 
+      let environmentCaptures: Vector<u32> = Borrowck::environmentCapturesOf(&thunkCaptures, *itemId);
+
       Borrowck::checkFunction(
         defStore,
         typeStore,
@@ -6704,6 +6848,7 @@ export namespace Borrowck {
         &statementPositionNodes,
         &envsCapturedByEscapingClosures,
         &bindingsAssignedClosureEnv,
+        &environmentCaptures,
         reportEnabled,
         &mut reportEvents,
       );

@@ -32,7 +32,8 @@ function main(): i32 {
 ```
 
 After `let r2 = r`, reading `r.id` is an error. Passing a non-copy value to a function moves it the
-same way. Assigning to a moved variable makes it valid again:
+same way. A closure that owns its environment moves too; see
+[closures](/docs/language/closures). Assigning to a moved variable makes it valid again:
 
 ```ignis
 @implements(Drop)
