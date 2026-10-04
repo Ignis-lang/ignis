@@ -2657,6 +2657,7 @@ export namespace Analyzer {
       itemId: Ast::ItemId,
       fn_: &Ast::Item::Function,
       scopeKey: u64,
+      pass1: &Analyzer::Binder::BinderOutput,
     ): void {
       Analyzer::Binder::validateAttributes(state, &fn_.metadata, "function");
 
@@ -2667,6 +2668,19 @@ export namespace Analyzer {
       // redefinition: every signature binds its own definition, and the call
       // site picks among them by arity and argument types.
       let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+
+      if (Analyzer::Binder::scopeHasNonFunctionNamed(state, defStore, pass1, scopeKey, sym)) {
+        let message: String = `Function '${fn_.name.toStr()}' is already defined`;
+        let mut diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          DiagnosticCode::FUNCTION_ALREADY_DEFINED,
+          message.toStr(),
+          fn_.span,
+        );
+        diag.addLabel(LabelKind::PRIMARY, fn_.span, "second declaration here");
+        let mut diagStateRef: &mut Analyzer::Binder::BinderState = state;
+        diagStateRef.diagnostics.push(diag);
+      }
 
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
@@ -2736,6 +2750,91 @@ export namespace Analyzer {
       stateRef.nodeIds.push(itemId.raw());
       stateRef.defIds.push(defId);
       stateRef.declScopeKeys.push(scopeKey);
+    }
+
+    /// Whether `sym` already names a non-function at exactly `scopeKey`: a
+    /// pass-1 declaration or a constant bound earlier in pass 2. Methods share
+    /// their owner's `declScopeKeys` entry but live in the owner's own scope,
+    /// so they never collide here. Every
+    /// function of that name then collides with it, mirroring the host, whose
+    /// scope keeps the first non-function entry, rather than grouping the
+    /// later functions as overloads of one another.
+    function scopeHasNonFunctionNamed(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      pass1: &Analyzer::Binder::BinderOutput,
+      scopeKey: u64,
+      sym: Analyzer::SymbolId,
+    ): boolean {
+      let mut passOneIndex: u64 = 0;
+
+      while (passOneIndex < pass1.defIds.length()) {
+        if (let Option::SOME(declScopeKey) = pass1.declScopeKeys.get(passOneIndex)) {
+          if (let Option::SOME(defId) = pass1.defIds.get(passOneIndex)) {
+            if (let Option::SOME(definition) = defStore.get(*defId)) {
+              if (*declScopeKey == scopeKey && definition.name().raw() == sym.raw()) {
+                return true;
+              }
+            }
+          }
+        }
+        passOneIndex += 1;
+      }
+
+      let candidates: Vector<Analyzer::DefinitionId> = findScopedDefinitionsNamed(state, defStore, scopeKey, sym);
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        if (let Option::SOME(candidateId) = candidates.get(index)) {
+          if (let Option::SOME(candidate) = defStore.get(*candidateId)) {
+            match (candidate) {
+              Analyzer::Definition::Variable(_) -> {
+                return true;
+              },
+              _ -> {},
+            };
+          }
+        }
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Register every name pass 1 declared, under the scope it was declared
+    /// in, so a function or constant bound in pass 2 collides with a record,
+    /// enum, type alias, trait, namespace or extern block of the same name.
+    function seedPassOneScopeEntries(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      ast: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < pass1.nodeIds.length()) {
+        let Option::SOME(rawItemId) = pass1.nodeIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(defId) = pass1.defIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(scopeKey) = pass1.declScopeKeys.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Option::SOME(definition) = defStore.get(*defId)) {
+          let span: SourceSpan = Analyzer::itemSpanOrEmpty(ast, *rawItemId);
+          recordScopeEntry(state, *scopeKey, definition.name(), span);
+        }
+
+        index += 1;
+      }
     }
 
     /// Bind a `Definition::Variable` (with `mutable = false`) for a module-level constant.
@@ -2967,7 +3066,7 @@ export namespace Analyzer {
             completeTrait(state, defStore, typeStore, symbols, ast, itemId, &t, scopeKey, pass1);
           },
           Ast::Item::Node::Function(f) -> {
-            bindFunction(state, defStore, typeStore, symbols, ast, itemId, &f, scopeKey);
+            bindFunction(state, defStore, typeStore, symbols, ast, itemId, &f, scopeKey, pass1);
           },
           Ast::Item::Node::Constant(c) -> {
             bindConstant(state, defStore, typeStore, symbols, itemId, &c, scopeKey);
@@ -3173,11 +3272,6 @@ export namespace Analyzer {
       ast: &Ast::Module,
       pass1: &Analyzer::Binder::BinderOutput,
     ): Analyzer::Binder::BinderOutput {
-      // TODO(cross-pass-duplicates): pass-2 starts with an empty scope, so a
-      // function whose name collides with a pass-1 Record/Enum/TypeAlias/Trait
-      // is NOT flagged as a duplicate. Resolver slice should either close this
-      // gap or document the contract that name-collision across passes is the
-      // resolver's responsibility.
       let nodeIds: Vector<u32> = Vector::new<u32>();
       let defIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let declScopeKeys: Vector<u64> = Vector::new<u64>();
@@ -3199,6 +3293,8 @@ export namespace Analyzer {
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
       };
+
+      Analyzer::Binder::seedPassOneScopeEntries(&mut state, defStore, ast, pass1);
 
       let mut index: u64 = 0;
 
