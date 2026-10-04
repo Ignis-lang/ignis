@@ -1937,7 +1937,7 @@ export namespace Analyzer {
     /// with `Dot`. Resolves the receiver's owner via `requireMethodOwner`,
     /// looks the member up in `instanceMethods` (falling back to `staticMethods`
     /// for the static-through-instance diagnostic, ADR D10), enforces the
-    /// mut-self check (ADR D7, Local-only), then typechecks the call arguments
+    /// mut-self check on the receiver place, then typechecks the call arguments
     /// against the method signature with `self` excluded (`firstParamIndex = 1`).
     /// The `MemberAccess` node itself records a receiver-less function type
     /// (ADR D9) — never reaches `checkMemberAccessExpr`.
@@ -2092,29 +2092,9 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
-        } else {
-          let receiverRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object);
-
-          if (let Option::SOME(receiverRef) = receiverRefOpt) {
-            match (receiverRef) {
-              Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
-                let bindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
-
-                if (let Option::SOME(binding) = bindingOpt) {
-                  if (!binding.mutable) {
-                    Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
-                    return Option::NONE;
-                  }
-                }
-              },
-              // TODO(receiver-place-mutability): non-Local receiver places (record
-              // fields, call results, etc.) are not checked for mutability here —
-              // accepted debt for this slice (ADR D7).
-              Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {},
-              Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {},
-              Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {},
-            };
-          }
+        } else if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
+          Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
+          return Option::NONE;
         }
       }
 
@@ -3076,8 +3056,8 @@ export namespace Analyzer {
 
     /// Reject `@extension(T, mut)` reached through an immutable binding.
     ///
-    /// Only a local binding is checked, the way the direct method path does:
-    /// other receiver places carry the same accepted debt.
+    /// Only a local binding is checked here; `mut self` method calls check the
+    /// whole receiver place through `isMutablePlaceExpr`.
     function checkExtensionReceiverMutability(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -3157,6 +3137,20 @@ export namespace Analyzer {
           };
 
           return last.clone();
+        },
+        Ast::Expression::Node::MemberAccess(memberAccess) -> {
+          let baseName: String = Analyzer::Typecheck::receiverBindingName(module, memberAccess.object);
+          return `${baseName.toStr()}.${memberAccess.member.toStr()}`;
+        },
+        Ast::Expression::Node::Dereference(deref) -> {
+          let operandName: String = Analyzer::Typecheck::receiverBindingName(module, deref.operand);
+          return `(*${operandName.toStr()})`;
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::receiverBindingName(module, grouped.expression);
+        },
+        Ast::Expression::Node::VectorAccess(_) -> {
+          return String::create("<vector element>");
         },
         _ -> {
           return String::create("");
@@ -7705,7 +7699,7 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
-        } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
+        } else if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
           Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
           return Option::NONE;
         }
@@ -8238,7 +8232,7 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
-        } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
+        } else if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
           Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
           return Option::NONE;
         }
@@ -8266,26 +8260,6 @@ export namespace Analyzer {
       Analyzer::Typecheck::recordExprType(state, pipe.right, specialized.returnType);
 
       return Option::SOME(specialized.returnType);
-    }
-
-    /// Whether the receiver place a piped method call mutates is a mutable binding.
-    ///
-    /// Only a local binding carries mutability the checker can see; a field or a call
-    /// result is the same accepted debt as on the direct call path (ADR D7).
-    function pipeReceiverIsMutable(
-      state: &mut Analyzer::Typecheck::TypecheckState,
-      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
-      receiverExprId: Ast::ExpressionId,
-    ): boolean {
-      let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, receiverExprId) else {
-        return true;
-      };
-
-      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
-        return true;
-      };
-
-      return binding.mutable;
     }
 
     /// A method's parameter types with the receiver removed: an instance method's first
