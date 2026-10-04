@@ -414,6 +414,28 @@ extern __errno {
 }
 ```
 
+#### Function Pointers in Extern Functions
+
+A function-typed parameter or result of an extern function is a plain C function pointer. The argument must be capture-free: a function named directly, or a closure literal that captures nothing. A capturing closure, or a variable holding a closure, is an error, and so is a function pointer signature that itself takes or returns a function value.
+
+```ignis
+extern LibC {
+    function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;
+}
+
+function compareAscending(left: *u8, right: *u8): i32 {
+    return *(left as *i32) - *(right as *i32);
+}
+
+function sort(values: *mut i32, count: u64): void {
+    LibC::qsort(values as *mut u8, count, 4, compareAscending);
+    LibC::qsort(values as *mut u8, count, 4, (left: *u8, right: *u8): i32 -> *(right as *i32) - *(left as *i32));
+    return;
+}
+```
+
+A function pointer an extern function returns is an ordinary function value: it can be stored, called, or passed back to an extern function.
+
 #### Extern Records
 
 An extern block can also declare records. Ignis defines the C struct for each one: the struct takes the record's written name, unmangled, and each field keeps its written name, in declaration order. `@packed` and `@aligned` apply as on any record. The record is used from Ignis like any other record, through the extern block's path.

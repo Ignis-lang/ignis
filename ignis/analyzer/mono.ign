@@ -412,6 +412,13 @@ export namespace Mono {
           parts = Mono::copyTypeIds(&signature.params);
           inner = signature.returnType;
         },
+        // Never a type argument, since the typechecker never produces one;
+        // spelled like the function type it lowers so mangling stays total.
+        Analyzer::Type::RawFunction(signature) -> {
+          kind = 6;
+          parts = Mono::copyTypeIds(&signature.params);
+          inner = signature.returnType;
+        },
         Analyzer::Type::Record(recordDef) -> {
           kind = 7;
           definition = recordDef;
@@ -833,6 +840,11 @@ export namespace Mono {
           elementTypes = Mono::copyTypeIds(&functionType.params);
           functionReturn = functionType.returnType;
         },
+        Analyzer::Type::RawFunction(functionType) -> {
+          shape = 8;
+          elementTypes = Mono::copyTypeIds(&functionType.params);
+          functionReturn = functionType.returnType;
+        },
         Analyzer::Type::Instance(instance) -> {
           shape = 7;
           instanceDef = instance.definition;
@@ -870,7 +882,7 @@ export namespace Mono {
       return arrayStoreRef.intern(Analyzer::Type::FixedArray(concreteInner, arrayLength));
     }
 
-    if (shape == 5 || shape == 6) {
+    if (shape == 5 || shape == 6 || shape == 8) {
       let mut concreteElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut elementIndex: u64 = 0;
 
@@ -891,6 +903,10 @@ export namespace Mono {
 
       let concreteReturn: Analyzer::TypeId = Mono::concretizeType(defStore, typeStore, symbols, state, functionReturn);
       let mut functionStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (shape == 8) {
+        return functionStoreRef.rawFunctionType(concreteElements, concreteReturn);
+      }
 
       return functionStoreRef.intern(Analyzer::Type::Function(Analyzer::FunctionType {
         params: concreteElements,
@@ -2477,6 +2493,12 @@ export namespace Mono {
         },
         Hir::HirKind::Dereference(innerId) -> {
           clonedKind = Hir::HirKind::Dereference(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::ToRawFunction(innerId) -> {
+          clonedKind = Hir::HirKind::ToRawFunction(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::FromRawFunction(innerId) -> {
+          clonedKind = Hir::HirKind::FromRawFunction(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
         },
         Hir::HirKind::Index(indexNode) -> {
           let base: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, indexNode.base);

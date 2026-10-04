@@ -674,6 +674,68 @@ function codegenEmitsCLayoutRecordFieldsByName(): void {
   Test::assert(!codegenContains(&emission.source, "field_"));
 }
 
+/// A function-typed extern parameter takes a typed C function pointer: the
+/// signature gets one `ignis_fn_<id>` typedef, and a named function is passed
+/// as itself, cast to it, with no forwarding closure in between.
+@test
+function codegenPassesNamedFunctionsToExternsAsTypedFunctionPointers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern LibC {\n  function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;\n}\n\nfunction compareAscending(left: *u8, right: *u8): i32 {\n  return *(left as *i32) - *(right as *i32);\n}\n\nfunction main(): i32 {\n  let mut values: i32[2] = [2, 1];\n\n  LibC::qsort((&mut values[0]) as *mut u8, 2, 4, compareAscending);\n\n  return values[0];\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")(u8*, u8*);\n"));
+  Test::assert(codegenContains(&emission.source, " = (ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")compareAscending_"));
+  Test::assert(!codegenContains(&emission.source, "__closure_thunk"));
+}
+
+/// A lambda without captures reaches a C function pointer through a `_raw`
+/// wrapper that calls its thunk with a null environment.
+@test
+function codegenPassesNonCapturingLambdasToExternsThroughRawWrappers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern LibC {\n  function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;\n}\n\nfunction main(): i32 {\n  let mut values: i32[2] = [2, 1];\n\n  LibC::qsort((&mut values[0]) as *mut u8, 2, 4, (left: *u8, right: *u8): i32 -> *(left as *i32) - *(right as *i32));\n\n  return values[0];\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, "_raw(u8* a0, u8* a1) {\n"));
+  Test::assert(codegenContains(&emission.source, "(NULL, a0, a1);\n"));
+  Test::assert(codegenContains(&emission.source, "_raw;\n"));
+}
+
+/// One signature used both as an extern function pointer and as a local
+/// closure keeps both representations: the closure struct for the closure and
+/// the typedef for the pointer, rather than one of them for every use.
+@test
+function codegenKeepsClosureAndFunctionPointerOfOneSignatureApart(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Native {\n  function apply(callback: (i32) -> i32, value: i32): i32;\n}\n\nfunction twice(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  let offset: i32 = 3;\n  let shift: (i32) -> i32 = (value: i32): i32 -> value + offset;\n\n  return Native::apply(twice, shift(1));\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")(i32);\n"));
+  Test::assert(codegenContains(&emission.source, "struct __ignis_closure_t"));
+  Test::assert(codegenContains(&emission.source, ".call("));
+  Test::assert(codegenContains(&emission.source, ")twice_"));
+}
+
+/// Drop glue is a plain C function: passed to an extern it is cast to the
+/// signature's typedef, and held as a function value it is called through the
+/// C function pointer trampoline.
+@test
+function codegenTypesDropGlueAsACFunctionPointer(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Runtime {\n  function registerDrop(glue: (*mut u8) -> void): void;\n}\n\nfunction main(): i32 {\n  Runtime::registerDrop(@dropGlue<i32>());\n\n  let glue: (*mut u8) -> void = @dropGlue<i32>();\n  let mut value: i32 = 1;\n\n  glue((&mut value) as *mut u8);\n\n  return value;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef void (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")ignis_drop_glue_t"));
+  Test::assert(codegenContains(&emission.source, "registerDrop((void*)t"));
+  Test::assert(codegenContains(&emission.source, "{ ignis_raw_tramp_"));
+  Test::assert(!codegenContains(&emission.source, "(void*)ignis_drop_glue_t"));
+}
+
 /// A record without a C layout keeps its index-named fields.
 @test
 function codegenKeepsIndexNamedFieldsOnPlainRecords(): void {

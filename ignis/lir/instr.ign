@@ -251,6 +251,26 @@ export namespace Lir {
     public env: Lir::Operand;
   }
 
+  /// A plain C function pointer to `callee`, of the `RawFunction` type
+  /// `dest` has. With `viaThunk` the function is a closure thunk that takes
+  /// an environment first, and the pointer names the wrapper that calls it
+  /// with a null one instead.
+  record InstrMakeRawFunction {
+    public dest: Lir::TempId;
+    public callee: Analyzer::DefinitionId;
+    public viaThunk: boolean;
+  }
+
+  /// A closure value of `closureType` that calls the C function pointer
+  /// `raw` through a trampoline: the pointer is the closure's environment and
+  /// the closure has no drop function.
+  record InstrRawToClosure {
+    public dest: Lir::TempId;
+    public raw: Lir::Operand;
+    public rawType: Analyzer::TypeId;
+    public closureType: Analyzer::TypeId;
+  }
+
   /// Mirrors `ignis_lir::Instr` (TAC: one operation, result in a temp).
   /// `SizeOf`/`AlignOf`/`MaxOf`/`MinOf` share the `InstrTypeQuery` payload
   /// because the Rust variants carry identical fields.
@@ -297,5 +317,7 @@ export namespace Lir {
     CallClosure(Lir::InstrCallClosure),
     DropClosure(Lir::InstrDropClosure),
     FreeEnv(Lir::InstrFreeEnv),
+    MakeRawFunction(Lir::InstrMakeRawFunction),
+    RawToClosure(Lir::InstrRawToClosure),
   }
 }

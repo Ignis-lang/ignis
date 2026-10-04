@@ -2082,17 +2082,39 @@ export namespace Lowering {
     }
 
     let mut calleeIsFunction: boolean = false;
+    let mut calleeIsExtern: boolean = false;
     let mut calleeReturnType: Analyzer::TypeId = Lowering::voidType(typeStore);
 
     if (let Option::SOME(definition) = defStore.get(calleeDef)) {
       if (let Analyzer::Definition::Function(functionDef) = definition) {
         calleeIsFunction = true;
+        calleeIsExtern = functionDef.isExtern;
         calleeReturnType = functionDef.returnType;
       }
     }
 
     if (!calleeIsFunction) {
       return Lowering::errorNode(hir, typeStore, call.span);
+    }
+
+    let callType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+      Option::SOME(typeId) -> typeId,
+      Option::NONE -> calleeReturnType,
+    };
+
+    if (calleeIsExtern) {
+      let externArgs: Vector<Hir::HirId> = Lowering::lowerExternArguments(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        hir,
+        &call.arguments,
+      );
+
+      return Lowering::allocExternCall(defStore, typeStore, hir, calleeDef, callTypeArgs, externArgs, call.span, callType);
     }
 
     let args: Vector<Hir::HirId> = Lowering::lowerExpressionList(
@@ -2106,11 +2128,6 @@ export namespace Lowering {
       &call.arguments,
     );
 
-    let callType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
-      Option::SOME(typeId) -> typeId,
-      Option::NONE -> calleeReturnType,
-    };
-
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {
       kind: Hir::HirKind::Call(Hir::HirCall {
@@ -2119,6 +2136,217 @@ export namespace Lowering {
         args: args,
       }),
       span: call.span,
+      typeId: callType,
+    });
+  }
+
+  /// The non-generic function `argumentId` names when the argument is written
+  /// as a bare function name, so an extern call can pass that function as a C
+  /// function pointer instead of a closure that forwards to it.
+  function namedFunctionArgument(
+    defStore: &mut Analyzer::DefinitionStore,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    argumentId: Ast::ExpressionId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut isNameReference: boolean = false;
+
+    if (let Option::SOME(expression) = module.expressions.get(argumentId)) {
+      isNameReference = match (expression) {
+        Ast::Expression::Node::Variable(_) -> true,
+        Ast::Expression::Node::Path(_) -> true,
+        _ -> false,
+      };
+    }
+
+    if (!isNameReference) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(&output.resolvedBodies.bodyResolution, argumentId.raw()) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::ResolverBodies::ResolvedRef::Definition(defId) = resolved else {
+      return Option::NONE;
+    };
+
+    if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId)) {
+      if (functionDef.typeParams.length() == 0) {
+        return Option::SOME(defId);
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  /// Lowers the arguments of an extern call. A bare function name becomes a
+  /// `Variable` naming the function itself; `allocExternCall` then turns it
+  /// into a C function pointer to that function.
+  function lowerExternArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    arguments: &Vector<Ast::ExpressionId>,
+  ): Vector<Hir::HirId> {
+    let mut lowered: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < arguments.length()) {
+      let Option::SOME(argumentId) = arguments.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(functionDef) = Lowering::namedFunctionArgument(defStore, module, output, *argumentId) else {
+        lowered.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *argumentId));
+        index += 1;
+        continue;
+      };
+
+      let functionType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, *argumentId);
+      let mut span: SourceSpan = SourceSpan::new("", 0, 0);
+
+      if (let Option::SOME(Ast::Expression::Node::Variable(variable)) = module.expressions.get(*argumentId)) {
+        span = variable.span;
+      }
+
+      if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(*argumentId)) {
+        span = path.span;
+      }
+
+      let mut hirRef: &mut Hir::HirStore = hir;
+      lowered.push(hirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Variable(functionDef),
+        span: span,
+        typeId: functionType,
+      }));
+
+      index += 1;
+    }
+
+    return lowered;
+  }
+
+  /// `argumentId` as the C function pointer of type `rawType`. A value that
+  /// was itself read from a C function pointer passes the pointer through.
+  function toCFacing(
+    hir: &mut Hir::HirStore,
+    argumentId: Hir::HirId,
+    rawType: Analyzer::TypeId
+  ): Hir::HirId {
+    let mut span: SourceSpan = SourceSpan::new("", 0, 0);
+
+    if (let Option::SOME(node) = hir.get(argumentId)) {
+      span = node.span;
+
+      if (let Hir::HirKind::FromRawFunction(inner) = &node.kind) {
+        if (let Option::SOME(innerNode) = hir.get(inner)) {
+          if (innerNode.typeId.raw() == rawType.raw()) {
+            return inner;
+          }
+        }
+      }
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::ToRawFunction(argumentId),
+      span: span,
+      typeId: rawType,
+    });
+  }
+
+  /// A call to an extern function. Every argument whose parameter has a
+  /// function type is passed as a C function pointer, and a function-typed
+  /// result comes back as a C function pointer that `FromRawFunction` turns
+  /// into a function value of `callType`.
+  function allocExternCall(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    calleeDef: Analyzer::DefinitionId,
+    typeArgs: Vector<Analyzer::TypeId>,
+    args: Vector<Hir::HirId>,
+    span: SourceSpan,
+    callType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut paramIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(calleeDef)) {
+      let mut copyIndex: u64 = 0;
+
+      while (copyIndex < functionDef.params.length()) {
+        if (let Option::SOME(paramId) = functionDef.params.get(copyIndex)) {
+          paramIds.push(*paramId);
+        }
+
+        copyIndex += 1;
+      }
+    }
+
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < paramIds.length()) {
+      if (let Option::SOME(paramId) = paramIds.get(paramIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variable(paramDef)) = defStore.get(*paramId)) {
+          paramTypes.push(paramDef.declaredType);
+        }
+      }
+
+      paramIndex += 1;
+    }
+
+    let mut cFacingArgs: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut argIndex: u64 = 0;
+
+    while (argIndex < args.length()) {
+      let Option::SOME(argumentId) = args.get(argIndex) else {
+        argIndex += 1;
+        continue;
+      };
+
+      let mut converted: Hir::HirId = *argumentId;
+
+      // A variadic tail has no declared parameter and passes as written.
+      if (let Option::SOME(paramType) = paramTypes.get(argIndex)) {
+        let rawType: Analyzer::TypeId = Hir::cFacingType(defStore, typeStore, *paramType);
+
+        if (rawType.raw() != paramType.raw()) {
+          converted = Lowering::toCFacing(hir, *argumentId, rawType);
+        }
+      }
+
+      cFacingArgs.push(converted);
+      argIndex += 1;
+    }
+
+    let rawReturnType: Analyzer::TypeId = Hir::cFacingType(defStore, typeStore, callType);
+
+    let mut callHirRef: &mut Hir::HirStore = hir;
+    let callNode: Hir::HirId = callHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Call(Hir::HirCall {
+        callee: calleeDef,
+        typeArgs: typeArgs,
+        args: cFacingArgs,
+      }),
+      span: span,
+      typeId: rawReturnType,
+    });
+
+    if (rawReturnType.raw() == callType.raw()) {
+      return callNode;
+    }
+
+    let mut resultHirRef: &mut Hir::HirStore = hir;
+    return resultHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FromRawFunction(callNode),
+      span: span,
       typeId: callType,
     });
   }
@@ -3705,11 +3933,13 @@ export namespace Lowering {
     };
 
     let mut calleeIsFunction: boolean = false;
+    let mut calleeIsExtern: boolean = false;
     let mut calleeReturnType: Analyzer::TypeId = Lowering::voidType(typeStore);
 
     if (let Option::SOME(definition) = defStore.get(calleeDef)) {
       if (let Analyzer::Definition::Function(functionDef) = definition) {
         calleeIsFunction = true;
+        calleeIsExtern = functionDef.isExtern;
         calleeReturnType = functionDef.returnType;
       }
     }
@@ -3742,6 +3972,10 @@ export namespace Lowering {
       Option::SOME(recorded) -> recorded,
       Option::NONE -> Vector::new<Analyzer::TypeId>(),
     };
+
+    if (calleeIsExtern) {
+      return Lowering::allocExternCall(defStore, typeStore, hir, calleeDef, typeArgs, args, pipe.span, pipeType);
+    }
 
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {

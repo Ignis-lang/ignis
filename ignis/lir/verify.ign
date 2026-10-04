@@ -342,6 +342,13 @@ export namespace LirVerify {
       Lir::Instr::FreeEnv(node) -> {
         LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.env);
       },
+      Lir::Instr::MakeRawFunction(node) -> {
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::RawToClosure(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.raw);
+        LirVerify::markDefined(state, node.dest);
+      },
     };
   }
 
@@ -521,6 +528,10 @@ export namespace LirVerify {
       Lir::Instr::DropClosure(_) -> {},
       Lir::Instr::FreeEnv(node) -> {
         LirVerify::markAddressedOperand(addressed, &node.env);
+      },
+      Lir::Instr::MakeRawFunction(_) -> {},
+      Lir::Instr::RawToClosure(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.raw);
       },
     };
   }

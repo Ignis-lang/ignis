@@ -61,7 +61,7 @@ typedef void* null;
 | `&mut T` | `T*` |
 | `T[N]` | `T[N]` (stack allocated) |
 | `(T1, T2, ...)` | `void*` |
-| `(T...) -> R` | `void*` |
+| `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries |
 
 References and pointers both compile to C pointers. The distinction between `*T` and `*mut T`, and between `&T` and `&mut T`, is enforced at compile time only.
 
@@ -372,6 +372,39 @@ Error display for try-capable returns:
 
 Extern functions are declared with `extern`. When calling extern functions, pointer and reference arguments are cast through `void*` to avoid C incompatible-pointer-type warnings.
 
+### C Function Pointers
+
+An Ignis function value is a closure struct: a call pointer, a drop pointer and an environment. C cannot call that, so a function-typed parameter or result of an extern function is a plain C function pointer instead. Each signature used that way gets one typedef, named after its type id:
+
+```c
+typedef i32 (*ignis_fn_331)(u8*, u8*);
+```
+
+An argument passed to a function-typed extern parameter must be capture-free: a function named directly, or a closure literal that captures nothing. Anything else, such as a capturing closure or a local holding a closure, is rejected (A0217), and so is a signature that itself takes or returns a function value. A named function is passed as itself; a capture-free closure literal is passed as a wrapper around its thunk that supplies a null environment. Both cross the call through `void*`, like pointer arguments:
+
+```c
+static i32 __closure_thunk_0_1931_raw(u8* a0, u8* a1) {
+    return __closure_thunk_0_1931(NULL, a0, a1);
+}
+
+t7 = (ignis_fn_331)compareAscending_1695;
+qsort((void*)t3, 4U, 4U, (void*)t7);
+t12 = (ignis_fn_331)__closure_thunk_0_1931_raw;
+```
+
+A function-typed result is converted to the typedef and read back as a closure whose call pointer is one trampoline per signature, whose environment is the C pointer itself, and whose drop pointer is null:
+
+```c
+static void ignis_raw_tramp_326(u8* env, i32 a0) {
+    ((ignis_fn_326)env)(a0);
+}
+
+t1 = (ignis_fn_326)signal(10, (void*)t0);
+t2 = (struct __ignis_closure_t162){ ignis_raw_tramp_326, NULL, (u8*)t1 };
+```
+
+A pointer to a function type, `*(T) -> R`, still points at a closure struct.
+
 ## Drop Semantics
 
 ### Drop State
@@ -428,7 +461,7 @@ static void ignis_drop_glue_<mangled_type>(u8* payload) {
 }
 ```
 
-This returns a function pointer `void(*)(u8*)` for use by containers that need to drop generic payloads through a uniform callback.
+This returns a function pointer `void(*)(u8*)` for use by containers that need to drop generic payloads through a uniform callback. Passed straight to an extern function it is that C function pointer; used as an Ignis value of type `(*mut u8) -> void` it is read back through the C function pointer trampoline (see C Function Pointers).
 
 ### Use-After-Drop Guards
 

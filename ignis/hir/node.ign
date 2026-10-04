@@ -270,6 +270,15 @@ export namespace Hir {
 
     Match(Hir::HirMatch),
 
+    /// A function value converted to the plain C function pointer a
+    /// C-facing position takes. The node's type is the `RawFunction` the
+    /// operand's `Function` type becomes. The operand is a named function, a
+    /// closure literal, or anything else, which capture-free checking rejects.
+    ToRawFunction(Hir::HirId),
+    /// A plain C function pointer read back as an Ignis function value. The
+    /// node's type is the `Function` type; the operand's is the `RawFunction`.
+    FromRawFunction(Hir::HirId),
+
     Error,
   }
 
@@ -502,6 +511,8 @@ export namespace Hir {
         scrutinee: Hir::offsetHirId(matchNode.scrutinee, offset),
         arms: Hir::offsetMatchArms(matchNode.arms, offset),
       }),
+      Hir::HirKind::ToRawFunction(id) -> Hir::HirKind::ToRawFunction(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::FromRawFunction(id) -> Hir::HirKind::FromRawFunction(Hir::offsetHirId(id, offset)),
       Hir::HirKind::Error -> Hir::HirKind::Error,
     };
   }
@@ -539,6 +550,12 @@ export namespace Hir {
         children.push(id);
       },
       Hir::HirKind::ExpressionStatement(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::ToRawFunction(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::FromRawFunction(id) -> {
         children.push(id);
       },
       Hir::HirKind::BuiltinLoad(load) -> {
@@ -1015,6 +1032,49 @@ export namespace Hir {
       Analyzer::Type::Function(_) -> true,
       _ -> false,
     };
+  }
+
+  /// The type a value of `typeId` has where it crosses into C: a function
+  /// type, behind any aliases, becomes the `RawFunction` with the same
+  /// signature, and every other type is unchanged. Only the outermost type
+  /// changes; a function-typed parameter of that signature stays a closure.
+  function cFacingType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return typeId;
+    }
+
+    let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut returnType: Analyzer::TypeId = typeId;
+    let mut isFunction: boolean = false;
+
+    if (let Option::SOME(Analyzer::Type::Function(signature)) = typeStore.get(resolved.typeId)) {
+      isFunction = true;
+      returnType = signature.returnType;
+
+      let mut index: u64 = 0;
+
+      while (index < signature.params.length()) {
+        if (let Option::SOME(param) = signature.params.get(index)) {
+          params.push(*param);
+        }
+
+        index += 1;
+      }
+    }
+
+    if (!isFunction) {
+      return typeId;
+    }
+
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+    return typeStoreRef.rawFunctionType(params, returnType);
   }
 
   /// The expressions whose value `valueId` can evaluate to, pushed onto

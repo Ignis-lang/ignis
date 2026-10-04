@@ -466,6 +466,12 @@ export namespace Capture {
       Hir::HirKind::TypeOf(inner) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
       },
+      Hir::HirKind::ToRawFunction(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
+      Hir::HirKind::FromRawFunction(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
       Hir::HirKind::ExpressionStatement(inner) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
       },
@@ -728,6 +734,12 @@ export namespace Capture {
         Capture::collectClosuresPostorder(hir, inner, result, visited);
       },
       Hir::HirKind::TypeOf(inner) -> {
+        Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::ToRawFunction(inner) -> {
+        Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::FromRawFunction(inner) -> {
         Capture::collectClosuresPostorder(hir, inner, result, visited);
       },
       Hir::HirKind::ExpressionStatement(inner) -> {
@@ -1125,6 +1137,12 @@ export namespace Capture {
         Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
       },
       Hir::HirKind::TypeOf(inner) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::ToRawFunction(inner) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::FromRawFunction(inner) -> {
         Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
       },
       Hir::HirKind::ExpressionStatement(inner) -> {
@@ -1871,6 +1889,129 @@ export namespace Capture {
             bag.push(diagnostic);
           }
         }
+      }
+
+      nodeIndex += 1;
+    }
+
+    return diagnostics;
+  }
+
+  /// Whether a C function pointer of `rawType` can point at an Ignis
+  /// function: none of its parameters or its result is itself a function
+  /// value, whose Ignis representation C would not pass or return.
+  function rawSignatureIsPlain(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    rawType: Analyzer::TypeId,
+  ): boolean {
+    let mut signatureTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(Analyzer::Type::RawFunction(signature)) = typeStore.get(rawType)) {
+      let mut index: u64 = 0;
+
+      while (index < signature.params.length()) {
+        if (let Option::SOME(param) = signature.params.get(index)) {
+          signatureTypes.push(*param);
+        }
+
+        index += 1;
+      }
+
+      signatureTypes.push(signature.returnType);
+    }
+
+    let mut typeIndex: u64 = 0;
+
+    while (typeIndex < signatureTypes.length()) {
+      if (let Option::SOME(typeId) = signatureTypes.get(typeIndex)) {
+        if (Hir::cFacingType(defStore, typeStore, *typeId).raw() != typeId.raw()) {
+          return false;
+        }
+      }
+
+      typeIndex += 1;
+    }
+
+    return true;
+  }
+
+  /// Whether the operand of a `ToRawFunction` is provably free of captures: a
+  /// function named directly, a closure literal that captures nothing, or the
+  /// drop glue of a type.
+  function rawOperandIsCaptureFree(
+    defStore: &mut Analyzer::DefinitionStore,
+    hir: &Hir::HirStore,
+    operandId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(operand) = hir.get(operandId) else {
+      return false;
+    };
+
+    match (&operand.kind) {
+      Hir::HirKind::Variable(defId) -> {
+        if (let Option::SOME(Analyzer::Definition::Function(_)) = defStore.get(defId)) {
+          return true;
+        }
+
+        return false;
+      },
+      Hir::HirKind::Closure(closureNode) -> {
+        return closureNode.captures.isEmpty() && closureNode.thunkDef.isSome();
+      },
+      Hir::HirKind::BuiltinDropGlue(_) -> {
+        return true;
+      },
+      _ -> {
+        return false;
+      },
+    };
+
+    return false;
+  }
+
+  /// Report every function value converted to a C function pointer that is
+  /// not provably capture-free, or whose signature takes or returns a
+  /// function value.
+  ///
+  /// A C function pointer has no environment, so only a named function or a
+  /// closure literal without captures fits in one. Capture lists are complete
+  /// once `populateClosureCaptures` has run over every module, so this runs
+  /// once over the whole program afterwards.
+  function reportNonCaptureFreeRawFunctions(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+  ): DiagnosticBag {
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut nodeIndex: u64 = 0;
+
+    while (nodeIndex < hir.nodes.length()) {
+      let Option::SOME(node) = hir.nodes.get(nodeIndex) else {
+        nodeIndex += 1;
+        continue;
+      };
+
+      let Hir::HirKind::ToRawFunction(operandId) = &node.kind else {
+        nodeIndex += 1;
+        continue;
+      };
+
+      let span: SourceSpan = node.span;
+      let mut message: Option<str> = Option::NONE;
+
+      if (!Capture::rawSignatureIsPlain(defStore, typeStore, node.typeId)) {
+        message = Option::SOME("a C function pointer cannot take or return a function value");
+      } else if (!Capture::rawOperandIsCaptureFree(defStore, hir, operandId)) {
+        message = Option::SOME("a C function pointer needs a named function or a closure that captures nothing");
+      }
+
+      if (let Option::SOME(text) = message) {
+        let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::C_FUNCTION_POINTER_NOT_CAPTURE_FREE, text, span);
+        diagnostic.addLabel(LabelKind::PRIMARY, span, "passed to C here");
+
+        let mut bag: &mut DiagnosticBag = &mut diagnostics;
+        bag.push(diagnostic);
       }
 
       nodeIndex += 1;
