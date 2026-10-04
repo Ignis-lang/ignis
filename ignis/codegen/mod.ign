@@ -165,6 +165,15 @@ export namespace CodegenC {
     return CodegenReserved::mangleReservedCName(`${base.toStr()}_${defId.raw()}`);
   }
 
+  /// The `volatile ` qualifier for a volatile builtin load or store, empty otherwise.
+  function volatileQualifier(isVolatile: boolean): str {
+    if (isVolatile) {
+      return "volatile ";
+    }
+
+    return "";
+  }
+
   function structName(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -2018,7 +2027,8 @@ export namespace CodegenC {
       Lir::Instr::BuiltinLoad(node) -> {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
-        let line: String = `    t${node.dest.raw()} = *(${target.toStr()}*)(${pointer.toStr()});\n`;
+        let qualifier: str = CodegenC::volatileQualifier(node.volatile);
+        let line: String = `    t${node.dest.raw()} = *(${qualifier}${target.toStr()}*)(${pointer.toStr()});\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2026,7 +2036,8 @@ export namespace CodegenC {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
-        let line: String = `    *(${target.toStr()}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
+        let qualifier: str = CodegenC::volatileQualifier(node.volatile);
+        let line: String = `    *(${qualifier}${target.toStr()}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },

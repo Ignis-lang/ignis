@@ -516,6 +516,20 @@ function codegenLeavesNonDroppableAccessUnguarded(): void {
   Test::assert(!codegenContains(&emission.source, "panic: use of dropped value"));
 }
 
+/// `@readVolatile` and `@writeVolatile` reach C through a `volatile` pointer so
+/// the C compiler keeps every access, while `@read` and `@write` stay plain.
+@test
+function codegenEmitsVolatileBuiltinAccessesThroughVolatilePointers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let mut value: i32 = 41;\n  let pointer: *mut i32 = (&mut value) as *mut i32;\n\n  @writeVolatile<i32>(pointer, 42);\n  @write<i32>(pointer, @read<i32>(pointer));\n\n  return @readVolatile<i32>(pointer);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, " = *(volatile i32*)("));
+  Test::assert(codegenContains(&emission.source, "    *(volatile i32*)("));
+  Test::assert(codegenContains(&emission.source, " = *(i32*)("));
+  Test::assert(codegenContains(&emission.source, "    *(i32*)("));
+}
+
 /// A signed minimum reaches C as one constant, not as the negation of a
 /// magnitude that already wrapped: `--2147483648` does not compile and the
 /// `i64` magnitude wraps to zero.

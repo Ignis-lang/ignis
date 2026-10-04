@@ -6581,6 +6581,10 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinPointerFamily(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
 
+      if (name.equals("readVolatile") || name.equals("writeVolatile")) {
+        return Analyzer::Typecheck::checkBuiltinPointerFamily(state, defStore, typeStore, symbols, module, resolvedBodies, call);
+      }
+
       if (Analyzer::Typecheck::isKnownBuiltinName(name)) {
         let detail: String = `the \`@${name.toStr()}\` builtin`;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
@@ -6614,6 +6618,10 @@ export namespace Analyzer {
       }
 
       if (name.equals("sliceFromParts") || name.equals("read") || name.equals("write")) {
+        return true;
+      }
+
+      if (name.equals("readVolatile") || name.equals("writeVolatile")) {
         return true;
       }
 
@@ -6818,7 +6826,8 @@ export namespace Analyzer {
       return typeStoreRef.functionType(params, voidType);
     }
 
-    /// `@read<T>(p)`, `@write<T>(p, v)`, `@dropInPlace<T>(p)`, `@eq<T>(a, b)`:
+    /// `@read<T>(p)`, `@write<T>(p, v)`, their volatile forms `@readVolatile<T>(p)` and
+    /// `@writeVolatile<T>(p, v)`, `@dropInPlace<T>(p)`, `@eq<T>(a, b)`:
     /// one type argument driving each argument's expectation.
     function checkBuiltinPointerFamily(
       state: &mut Analyzer::Typecheck::TypecheckState,
@@ -6849,7 +6858,8 @@ export namespace Analyzer {
       let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
 
       let isEq: boolean = call.name.equals("eq");
-      let isWrite: boolean = call.name.equals("write");
+      let isRead: boolean = call.name.equals("read") || call.name.equals("readVolatile");
+      let isWrite: boolean = call.name.equals("write") || call.name.equals("writeVolatile");
       let mut expectedCount: u64 = 1;
       if (isEq || isWrite) {
         expectedCount = 2;
@@ -6887,10 +6897,10 @@ export namespace Analyzer {
         argIndex += 1;
       }
 
-      // `@read`/`@write` dereference their first argument, so handing them a
-      // literal null is a dereference the host rejects here rather than at
-      // run time.
-      if (call.name.equals("read") || isWrite) {
+      // `@read`/`@write` and their volatile forms dereference their first
+      // argument, so handing them a literal null is a dereference the host
+      // rejects here rather than at run time.
+      if (isRead || isWrite) {
         if (let Option::SOME(pointerArgId) = call.arguments.get(0)) {
           if (Analyzer::Typecheck::isNullLiteral(module, *pointerArgId)) {
             let argSpan: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, *pointerArgId, call.span);
@@ -6900,7 +6910,7 @@ export namespace Analyzer {
         }
       }
 
-      if (call.name.equals("read")) {
+      if (isRead) {
         return Option::SOME(valueType);
       }
 

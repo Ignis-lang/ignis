@@ -33,6 +33,24 @@ export namespace Hir {
       };
     }
 
+    /// `_volatile` for a volatile builtin load or store, empty otherwise.
+    function volatileSuffix(isVolatile: boolean): str {
+      if (isVolatile) {
+        return "_volatile";
+      }
+
+      return "";
+    }
+
+    /// `volatile ` for a volatile builtin load or store, empty otherwise.
+    function volatilePrefix(isVolatile: boolean): str {
+      if (isVolatile) {
+        return "volatile ";
+      }
+
+      return "";
+    }
+
     function writeIndent(output: &mut String, indent: u64): void {
       let mut out: &mut String = output;
       let mut level: u64 = 0;
@@ -195,12 +213,16 @@ export namespace Hir {
         Hir::HirKind::AlignOf(typeId) -> `alignOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`,
         Hir::HirKind::MaxOf(typeId) -> `maxOf<${Hir::Display::formatType(types, defs, symbols, typeId)}>()`,
         Hir::HirKind::MinOf(typeId) -> `minOf<${Hir::Display::formatType(types, defs, symbols, typeId)}>()`,
-        Hir::HirKind::BuiltinLoad(load) -> String::create("builtin_read<")
+        Hir::HirKind::BuiltinLoad(load) -> String::create("builtin_read")
+          .concat(Hir::Display::volatileSuffix(load.volatile))
+          .concat("<")
           .concat(Hir::Display::formatType(types, defs, symbols, load.ty))
           .concat(">(")
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, load.ptr))
           .concat(")"),
-        Hir::HirKind::BuiltinStore(storeNode) -> String::create("builtin_write<")
+        Hir::HirKind::BuiltinStore(storeNode) -> String::create("builtin_write")
+          .concat(Hir::Display::volatileSuffix(storeNode.volatile))
+          .concat("<")
           .concat(Hir::Display::formatType(types, defs, symbols, storeNode.ty))
           .concat(">(")
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, storeNode.ptr))
@@ -610,12 +632,12 @@ export namespace Hir {
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::BuiltinLoad(load) -> {
-          let head: String = `BuiltinLoad(${Hir::Display::formatType(types, defs, symbols, load.ty)})`;
+          let head: String = `BuiltinLoad(${Hir::Display::volatilePrefix(load.volatile)}${Hir::Display::formatType(types, defs, symbols, load.ty)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, load.ptr, indent + 1, out);
         },
         Hir::HirKind::BuiltinStore(storeNode) -> {
-          let head: String = `BuiltinStore(${Hir::Display::formatType(types, defs, symbols, storeNode.ty)})`;
+          let head: String = `BuiltinStore(${Hir::Display::volatilePrefix(storeNode.volatile)}${Hir::Display::formatType(types, defs, symbols, storeNode.ty)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, storeNode.ptr, indent + 1, out);
           Hir::Display::printNode(hir, types, defs, symbols, storeNode.value, indent + 1, out);

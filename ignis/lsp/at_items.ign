@@ -40,6 +40,8 @@ function pushBuiltins(items: &mut Vector<AtItem>): void {
   pushAtItem(itemsRef, "sliceFromParts", true, "@sliceFromParts<T>(ptr, len)", "Creates a non-owning `T[]` slice from a data pointer and length.", "Low-level builtin for std containers. The pointer must address at least `len` initialized `T` values.");
   pushAtItem(itemsRef, "read", true, "@read<T>(ptr)", "Loads a value of type `T` from a pointer.", "Performs an untyped load through a raw pointer. Equivalent to C dereference.");
   pushAtItem(itemsRef, "write", true, "@write<T>(ptr, value)", "Stores a value of type `T` through a pointer.", "Performs an untyped store through a raw pointer. Takes the pointer and the value to write.");
+  pushAtItem(itemsRef, "readVolatile", true, "@readVolatile<T>(ptr)", "Loads a value of type `T` from a pointer with a volatile access.", "Like `@read`, but the load is never elided, merged or reordered across other volatile accesses. Emits C `*(volatile T*)ptr`.");
+  pushAtItem(itemsRef, "writeVolatile", true, "@writeVolatile<T>(ptr, value)", "Stores a value of type `T` through a pointer with a volatile access.", "Like `@write`, but the store is never elided, merged or reordered across other volatile accesses. Emits C `*(volatile T*)ptr = value`.");
   pushAtItem(itemsRef, "dropInPlace", true, "@dropInPlace<T>(ptr)", "Calls the drop glue for type `T` on the value behind `ptr`.", "Used for manual resource cleanup through raw pointers. Only valid for types that implement Drop.");
   pushAtItem(itemsRef, "dropGlue", true, "@dropGlue<T>()", "Returns the drop glue function pointer for type `T`.", "Returns `(*mut u8) -> void`. Used for passing drop functions to allocators and containers.");
   pushAtItem(itemsRef, "hash", true, "@hash<T>(value, hasher)", "Hashes `value` with the concrete `Hash` implementation for `T`.", "Used by std collections to force concrete hash dispatch after monomorphization.");
@@ -136,7 +138,7 @@ export function atItemSnippet(item: &AtItem): Option<String> {
     return Option::SOME(name.concat("<${1:T}>()"));
   }
 
-  if (name.equals("bitCast") || name.equals("pointerCast") || name.equals("read") || name.equals("dropInPlace")) {
+  if (name.equals("bitCast") || name.equals("pointerCast") || name.equals("read") || name.equals("readVolatile") || name.equals("dropInPlace")) {
     return Option::SOME(name.concat("<${1:T}>(${2:expr})"));
   }
 
@@ -148,7 +150,7 @@ export function atItemSnippet(item: &AtItem): Option<String> {
     return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3:len})"));
   }
 
-  if (name.equals("write")) {
+  if (name.equals("write") || name.equals("writeVolatile")) {
     return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3:value})"));
   }
 
