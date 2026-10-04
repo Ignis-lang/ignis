@@ -6012,7 +6012,7 @@ function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
 /// variant declared with one payload slot. `resolvePatternPathVariantArity`
 /// compares against the variant's declared payload arity, so the body
 /// resolver rejects the pattern before typecheck ever sees a variant behind
-/// it; typecheck then reports the pattern as an unresolved constructor.
+/// it; typecheck then reports nothing more for the pattern.
 /// Spec: selfhost-match-exhaustiveness — enum coverage prerequisite.
 @test
 function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
@@ -6072,17 +6072,11 @@ function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
   // the variant's real payload arity.
   assertContainsDiagnosticCodeInBag(&output.resolvedBodies.diagnostics, DiagnosticCode::PATTERN_ARITY_MISMATCH);
 
-  // With the pattern left unresolved, typecheck falls back to its record
-  // destructure path (which rejects the enum scrutinee) and the arm credits
-  // no variant toward coverage, so `E::B` is reported as missing.
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
-  let Option::SOME(patternDiagnostic) = output.typecheck.diagnostics.get(0) else {
-    @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing pattern diagnostic");
-  };
-  Test::assertEq<str>(patternDiagnostic.code, DiagnosticCode::PATTERN_TYPE_MISMATCH);
-  Test::assertEq<str>(patternDiagnostic.messageText(), "record destructure annotation must be a non-generic record");
-
-  let Option::SOME(coverageDiagnostic) = output.typecheck.diagnostics.get(1) else {
+  // With the pattern left unresolved, typecheck adds nothing to the
+  // resolver's error, and the arm credits no variant toward coverage, so
+  // `E::B` is reported as missing.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(coverageDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing coverage diagnostic");
   };
   Test::assertEq<str>(coverageDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
@@ -15874,4 +15868,78 @@ function typecheckNamespaceLocalRecordShadowsTopLevelInSingleModule(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+// ===========================================================================
+// Qualified-only variant patterns
+// ===========================================================================
+
+/// Analyze `source` and assert it reports exactly one error with `code`,
+/// carrying `message` and the help text `help`.
+function typecheckAssertSingleDiagnosticWithHelp(
+  source: str,
+  code: str,
+  message: str,
+  help: str
+): void {
+  let parsed: ParseOutput = typecheckParseSource(source);
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  let expectedCode: String = String::create(code);
+  let mut matches: u64 = 0;
+  let mut index: u64 = 0;
+  while (index < output.diagnostics.length()) {
+    if (let Option::SOME(diagnostic) = output.diagnostics.get(index)) {
+      if (expectedCode.equals(diagnostic.code)) {
+        matches += 1;
+        Test::assertEq<Severity>(diagnostic.severity, Severity::ERROR);
+        Test::assertEq<str>(diagnostic.messageText(), message);
+
+        let Option::SOME(helpText) = diagnostic.helpText() else {
+          @panic("typecheckAssertSingleDiagnosticWithHelp: missing help");
+        };
+
+        Test::assertEq<str>(helpText, help);
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<u64>(matches, 1);
+}
+
+@test
+function typecheckBareVariantPatternSuggestsQualifiedVariant(): void {
+  typecheckAssertSingleDiagnosticWithHelp(
+    "enum Shape {\n  CIRCLE(i32),\n  EMPTY,\n}\n\nfunction area(shape: Shape): i32 {\n  return match (shape) {\n    CIRCLE(r) -> r,\n    Shape::EMPTY -> 0,\n  };\n}\n",
+    DiagnosticCode::UNKNOWN_VARIANT,
+    "unknown variant 'CIRCLE'",
+    "did you mean `Shape::CIRCLE`?",
+  );
+}
+
+@test
+function typecheckBareVariantPatternOnGenericEnumSuggestsQualifiedVariant(): void {
+  typecheckAssertSingleDiagnosticWithHelp(
+    "enum Option<T> {\n  SOME(T),\n  NONE,\n}\n\nfunction pick(value: Option<i32>): i32 {\n  return match (value) {\n    SOME(x) -> x,\n    Option::NONE -> 0,\n  };\n}\n",
+    DiagnosticCode::UNKNOWN_VARIANT,
+    "unknown variant 'SOME'",
+    "did you mean `Option::SOME`?",
+  );
+}
+
+@test
+function typecheckBareBindingNamedAfterVariantIsRejected(): void {
+  typecheckAssertSingleDiagnosticWithHelp(
+    "enum Shape {\n  CIRCLE(i32),\n  EMPTY,\n}\n\nfunction area(shape: Shape): i32 {\n  return match (shape) {\n    Shape::CIRCLE(r) -> r,\n    EMPTY -> 0,\n  };\n}\n",
+    DiagnosticCode::BINDING_SHADOWS_VARIANT,
+    "pattern 'EMPTY' binds a new variable instead of matching the variant 'Shape::EMPTY'",
+    "did you mean `Shape::EMPTY`?",
+  );
 }
