@@ -1,4 +1,5 @@
 import HashSet from "std::collections";
+import Path from "std::path";
 import Vector from "std::vector";
 
 import Id from "@compiler::ids";
@@ -48,6 +49,11 @@ export namespace CodegenC {
     public freeHandler: Option<Analyzer::DefinitionId>;
     /// The program's sources, which a panic's line is read from.
     public sources: Vector<SourceFile>;
+    /// The project root a panic's file is named relative to, empty when unknown.
+    public projectRoot: String;
+    /// The std root a panic's file under the std is named relative to, empty
+    /// when the build has no std.
+    public stdRoot: String;
     public unhandledPanics: Vector<SourceSpan>;
 
     public static hosted(): RuntimeHooks {
@@ -57,6 +63,8 @@ export namespace CodegenC {
         allocHandler: Option::NONE,
         freeHandler: Option::NONE,
         sources: Vector::new<SourceFile>(),
+        projectRoot: String::new(),
+        stdRoot: String::new(),
         unhandledPanics: Vector::new<SourceSpan>(),
       };
     }
@@ -876,11 +884,62 @@ export namespace CodegenC {
 
     let handlerName: String = CodegenC::mangledName(defStore, symbols, handler);
     let escapedMessage: String = CodegenC::escapeStringLiteral(message);
-    let filePath: String = String::create(site.filePath);
+    let filePath: String = CodegenC::panicFilePath(&hooks.projectRoot, &hooks.stdRoot, site.filePath);
     let escapedFile: String = CodegenC::escapeStringLiteral(&filePath);
     let line: u32 = CodegenC::sourceLine(&hooks.sources, site);
 
     return `${handlerName.toStr()}("${escapedMessage.toStr()}", "${escapedFile.toStr()}", ${line}); __builtin_unreachable();`;
+  }
+
+  /// The name a panic reports for the source file at `filePath`, free of the
+  /// build machine's directories: relative to `projectRoot`, `std/` plus the
+  /// path relative to `stdRoot`, or else the bare file name. An empty root
+  /// matches nothing, and an empty path stays empty.
+  function panicFilePath(projectRoot: &String, stdRoot: &String, filePath: str): String {
+    let path: String = String::create(filePath);
+
+    if (let Option::SOME(relative) = CodegenC::pathRelativeTo(&path, projectRoot)) {
+      return relative;
+    }
+
+    if (let Option::SOME(relative) = CodegenC::pathRelativeTo(&path, stdRoot)) {
+      return `std/${relative.toStr()}`;
+    }
+
+    let pathBuf: Path::PathBuf = Path::PathBuf::fromString(&path);
+    let Option::SOME(fileName) = pathBuf.fileName() else {
+      return String::new();
+    };
+
+    return fileName;
+  }
+
+  /// The part of `path` below the directory `root`, when `root` is not empty
+  /// and `path` lies strictly inside it.
+  function pathRelativeTo(path: &String, root: &String): Option<String> {
+    if (root.length() == 0 || !path.startsWith(root.toStr())) {
+      return Option::NONE;
+    }
+
+    let mut start: u64 = root.length();
+
+    if (!root.endsWith("/")) {
+      let Option::SOME(boundary) = path.charAt(start) else {
+        return Option::NONE;
+      };
+
+      if (boundary != '/') {
+        return Option::NONE;
+      }
+
+      start += 1;
+    }
+
+    if (start >= path.length()) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(path.substringBytes(start, path.length()));
   }
 
   /// The 1-based line `site` starts on, 0 when no source holds its file.

@@ -96,7 +96,10 @@ function onPanic(message: str, file: str, line: u32): void {
 
 - A panic calls the handler with its message and the file and line of the
   panic site, then reaches `__builtin_unreachable()`, so the handler must not
-  return. The file is the source path the compiler read. A drop state guard
+  return. The file never names the build machine's directories: a source
+  under the project root is named relative to it (`src/kernel/console.ign`),
+  a source under the std root is `std/` followed by its path relative to that
+  root, and any other source is its file name alone. A drop state guard
   reports the site of the value it reads, or file `""` and line `0` when no
   site is known.
 - A build that can panic without a `@panicHandler` is an error (`A0211`).

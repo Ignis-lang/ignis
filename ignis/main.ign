@@ -1567,6 +1567,8 @@ function compileDiscovered(
 
   let mut hooks: CodegenC::RuntimeHooks = runtimeHooksFor(&handlers, options.freestanding);
   hooks.sources = files;
+  hooks.projectRoot = discovery.root.toString();
+  hooks.stdRoot = discovery.stdRoot.toString();
 
   let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
@@ -4362,6 +4364,40 @@ function buildRoutesAFreestandingObjectThroughItsRuntimeHandlers(): void {
   Test::assert(!source.contains(&hostedPanic));
   Test::assert(!source.contains(&hostedAllocation));
   Test::assert(!source.contains(&hostedRelease));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// A freestanding panic names its file relative to the project root, so the
+/// object never carries the absolute path of the machine that built it.
+@test
+function buildPassesTheProjectRelativePanicFileToTheRuntimeHandler(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/freestanding/handlers");
+  let scratch: Path::PathBuf = checkStdScratchDir("freestanding-panic-file");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("freestanding-handlers");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+
+  let Result::OK(source) = Fs::readToString(&artifacts.source) else {
+    Test::fail();
+    return;
+  };
+
+  let handlerCall: String = String::create("(\"boom\", \"src/lib.ign\", 29); __builtin_unreachable();");
+  let absoluteRoot: String = projectRoot.toString();
+  Test::assert(source.contains(&handlerCall));
+  Test::assert(!source.contains(&absoluteRoot));
 
   let _removed = Fs::removeDirAll(&scratch);
 }

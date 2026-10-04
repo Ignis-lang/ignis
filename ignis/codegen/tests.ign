@@ -1012,3 +1012,48 @@ function codegenHostedPanicWithoutRuntimeHandlerKeepsLibc(): void {
 
   Test::assert(codegenContains(&emission.source, "    fprintf(stderr, \"panic: %s\\n\", \"boom\");\n    exit(101);\n"));
 }
+
+/// The file a panic at `filePath` reports in a build rooted at
+/// `/work/kernel` with a user std at `/opt/kstd`.
+function codegenPanicFile(filePath: str): String {
+  let projectRoot: String = String::create("/work/kernel");
+  let stdRoot: String = String::create("/opt/kstd");
+
+  return CodegenC::panicFilePath(&projectRoot, &stdRoot, filePath);
+}
+
+/// A panic in a project source names its file relative to the project root.
+@test
+function codegenPanicFileIsRelativeToTheProjectRoot(): void {
+  let file: String = codegenPanicFile("/work/kernel/src/kernel/console.ign");
+
+  Test::assert(file.equals("src/kernel/console.ign"));
+}
+
+/// A panic in a std source names its file under `std/`, relative to the std
+/// root.
+@test
+function codegenPanicFileIsRelativeToTheStdRoot(): void {
+  let file: String = codegenPanicFile("/opt/kstd/core/mod.ign");
+
+  Test::assert(file.equals("std/core/mod.ign"));
+}
+
+/// A panic in a file outside both roots, including one whose directory only
+/// shares a prefix with a root, keeps only the file name.
+@test
+function codegenPanicFileOutsideBothRootsKeepsTheFileName(): void {
+  let outside: String = codegenPanicFile("/home/builder/vendor/glue.ign");
+  let sibling: String = codegenPanicFile("/work/kernel-old/src/main.ign");
+
+  Test::assert(outside.equals("glue.ign"));
+  Test::assert(sibling.equals("main.ign"));
+}
+
+/// A panic with no known site keeps an empty file.
+@test
+function codegenPanicFileWithoutASiteStaysEmpty(): void {
+  let file: String = codegenPanicFile("");
+
+  Test::assertEq<u64>(file.length(), 0);
+}
