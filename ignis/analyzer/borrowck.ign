@@ -2042,6 +2042,38 @@ export namespace Borrowck {
     return Borrowck::needsDropType(defStore, typeStore, typeId);
   }
 
+  /// Whether `defId` is a variable of function type, a closure value.
+  function definitionIsClosure(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(typeId) = Borrowck::variableTypeOf(defStore, defId) else {
+      return false;
+    };
+
+    return Hir::typeIsFunction(typeStore, typeId);
+  }
+
+  /// Makes a closure pattern binding that takes its payload out of an owned
+  /// scrutinee the owner of the closure's environment, like a payload that
+  /// needs a drop: it is moved when handed on and dropped at the end of its
+  /// scope. A binding through a reference stays a borrow and never gets here.
+  function declarePatternClosureOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut Borrowck::State,
+    defRaw: u32,
+  ): void {
+    if (!Borrowck::definitionIsClosure(defStore, typeStore, Id::fromRaw<Analyzer::DefinitionTag>(defRaw))) {
+      return;
+    }
+
+    let mut ownerRef: &mut Borrowck::State = state;
+    ownerRef.recordClosureEnvOwner(defRaw, defRaw);
+    ownerRef.markMoveOnlyClosureOwner(defRaw);
+  }
+
   // --- HIR place queries ------------------------------------------------------------
 
   /// Root local of a place expression, following field, index, reference, and
@@ -2515,7 +2547,7 @@ export namespace Borrowck {
       Hir::HirPattern::Literal(_) -> {},
       Hir::HirPattern::Constant(_) -> {},
       Hir::HirPattern::Binding(defId) -> {
-        if (Borrowck::definitionNeedsDrop(defStore, typeStore, defId)) {
+        if (Borrowck::definitionNeedsDrop(defStore, typeStore, defId) || Borrowck::definitionIsClosure(defStore, typeStore, defId)) {
           Borrowck::pushUniqueRaw(output, defId.raw());
         }
       },
@@ -3635,6 +3667,12 @@ export namespace Borrowck {
       Hir::HirPattern::Literal(_) -> {},
       Hir::HirPattern::Constant(_) -> {},
       Hir::HirPattern::Binding(_) -> {
+        // A closure payload is copyable by type, but the binding that takes it
+        // owns its environment, so the scrutinee gives the payload up.
+        if (Hir::typeIsFunction(typeStore, valueType)) {
+          return true;
+        }
+
         let owns: boolean = Borrowck::needsDropType(defStore, typeStore, valueType);
         let copies: boolean = Analyzer::Typecheck::isCopyType(defStore, typeStore, valueType);
 
@@ -5712,6 +5750,7 @@ export namespace Borrowck {
           // construct and belongs to the enclosing scope, so it is declared
           // owned there and dropped at that scope's end. Mirrors
           // `declare_owned_pattern_bindings`.
+          Borrowck::declarePatternClosureOwner(defStore, typeStore, state, *defRaw);
           Borrowck::declareOwned(state, Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
         }
       }
@@ -5867,6 +5906,7 @@ export namespace Borrowck {
 
           if (!bindingIsBorrowed) {
             ownedBindings.push(*defRaw);
+            Borrowck::declarePatternClosureOwner(defStore, typeStore, state, *defRaw);
           }
 
           if (bindingIsBorrowed) {
