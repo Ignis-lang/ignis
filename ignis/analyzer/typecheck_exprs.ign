@@ -3054,17 +3054,18 @@ export namespace Analyzer {
       return false;
     }
 
-    /// Reject `@extension(T, mut)` reached through an immutable binding.
-    ///
-    /// Only a local binding is checked here; `mut self` method calls check the
-    /// whole receiver place through `isMutablePlaceExpr`.
+    /// Reject `@extension(T, mut)` reached through a receiver place that cannot
+    /// lend it, with the same reference-first, place-based rule as `mut self`
+    /// method calls.
     function checkExtensionReceiverMutability(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       ma: &Ast::Expression::MemberAccess,
       extensionDefId: Analyzer::DefinitionId,
+      receiverType: Analyzer::TypeId,
     ): void {
       let Option::SOME(Analyzer::Definition::Function(extensionFn)) = defStore.get(extensionDefId) else {
         return;
@@ -3076,23 +3077,19 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, ma.object);
 
-      let Option::SOME(receiverRef) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object) else {
-        return;
-      };
+      let referenceMutability: Option<boolean> = Analyzer::Typecheck::receiverReferenceMutability(defStore, typeStore, receiverType);
 
-      let Analyzer::ResolverBodies::ResolvedRef::Local(localId) = receiverRef else {
-        return;
-      };
+      if (let Option::SOME(referenceMutable) = referenceMutability) {
+        if (!referenceMutable) {
+          Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
+        }
 
-      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
-        return;
-      };
-
-      if (binding.mutable) {
         return;
       }
 
-      Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
+      if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
+        Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
+      }
     }
 
     /// Reports reaching a `mut self` method through a receiver that cannot lend
@@ -3193,10 +3190,12 @@ export namespace Analyzer {
       Analyzer::Typecheck::checkExtensionReceiverMutability(
         state,
         defStore,
+        typeStore,
         module,
         resolvedBodies,
         ma,
         extensionDefId,
+        receiverType,
       );
 
       if (let Option::SOME(receiverParam) = paramTypes.get(0)) {
