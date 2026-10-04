@@ -430,6 +430,42 @@ export namespace ParserStatements {
     return ParserStatements::parseExpressionStatement(parserRef);
   }
 
+  /// Whether the parser is at a keyword that starts an item declaration other
+  /// than `const`, which is a local binding in statement position.
+  function atNestedItemKeyword(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (parserRef.atKeyword(Keyword::FUNCTION) || parserRef.atKeyword(Keyword::RECORD)) {
+      return true;
+    }
+
+    if (parserRef.atKeyword(Keyword::ENUM) || parserRef.atKeyword(Keyword::TYPE)) {
+      return true;
+    }
+
+    if (parserRef.atKeyword(Keyword::NAMESPACE) || parserRef.atKeyword(Keyword::TRAIT)) {
+      return true;
+    }
+
+    if (parserRef.atKeyword(Keyword::EXTERN) || parserRef.atKeyword(Keyword::IMPORT)) {
+      return true;
+    }
+
+    return parserRef.atKeyword(Keyword::EXPORT);
+  }
+
+  /// Rejects an item declared inside a function body. Items live at module or
+  /// namespace level only; the declaration is skipped whole so the rest of the
+  /// body parses cleanly and contributes no statement.
+  function rejectNestedItem(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let keyword: Token = parserRef.current();
+
+    parserRef.emitDiagnostic(keyword.span, DiagnosticCode::UNEXPECTED_TOKEN, "Item declarations are not allowed inside a function body", "declare this item at module or namespace level");
+
+    return ParserExpressions::skipGatedDeclaration(parserRef);
+  }
+
   /// One branch of a compile-time directive in statement position. A discarded
   /// branch is skipped whole; the selected one splices its statements into the
   /// enclosing block.
@@ -552,6 +588,12 @@ export namespace ParserStatements {
     if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
       ParserExpressions::rejectUnmatchedCompileElse(parserRef);
       return false;
+    }
+
+    parserRef.skipTrivia();
+
+    if (ParserStatements::atNestedItemKeyword(parserRef)) {
+      return ParserStatements::rejectNestedItem(parserRef);
     }
 
     let mut statementsRef: &mut Vector<Ast::StatementId> = statements;
