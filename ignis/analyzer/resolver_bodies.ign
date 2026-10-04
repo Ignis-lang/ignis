@@ -2548,8 +2548,9 @@ export namespace Analyzer {
               index: lid.index,
             }),
           );
-          // Annotation type-syntax is intentionally NOT resolved here — typecheck
-          // owns let-bound type inference. TODO(pattern-binding-annotation).
+          // The binding's annotation (only a `for ... of` binding carries one) is
+          // resolved by typecheck in `resolveForOfBindingType`, which rejects
+          // unknown and wrongly-qualified types.
         },
         Ast::Pattern::Node::Wildcard(_) -> {
           // No binding, no side-table entry (REQ-C2).
@@ -3076,8 +3077,8 @@ export namespace Analyzer {
         },
         Ast::Expression::Node::Cast(c) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.expression);
-          // Cast target type was resolved by type-syntax resolver if reachable.
-          // Body walker does not re-resolve it. TODO(cast-type-in-body).
+          // The target type is resolved by typecheck in `checkCastExpr` through
+          // `resolveLocalAnnotation`, which rejects unknown and wrongly-qualified types.
         },
         Ast::Expression::Node::Call(c) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.callee);
@@ -3213,8 +3214,8 @@ export namespace Analyzer {
             };
 
             Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, field.value);
-            // Field names within the initializer are NOT resolved here (need
-            // the record type from typecheck). TODO(record-init-field-resolution).
+            // Field names need the record type, so typecheck resolves them in
+            // `checkRecordInitExpr` and reports unknown, duplicate and missing fields.
             fieldIdx += 1;
           }
         },
