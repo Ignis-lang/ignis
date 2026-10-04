@@ -127,7 +127,7 @@ struct Counter_12 {
 };
 ```
 
-Field access, record initialization and drop paths use the written field name for these records. Neither kind can be generic or carry a drop state byte. Function-typed fields are currently emitted with the closure representation every function value has.
+Field access, record initialization and drop paths use the written field name for these records, so a field named by a C keyword is rejected (A0218). Neither kind can be generic or carry a drop state byte. Function-typed fields are currently emitted with the closure representation every function value has.
 
 ### Record Attributes
 

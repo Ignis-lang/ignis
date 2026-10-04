@@ -8,6 +8,7 @@ import
 from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
+import CodegenReserved from "@compiler::codegen::reserved";
 import Vector from "std::vector";
 
 /// Extra-checks phase for the Ignis selfhost compiler.
@@ -1053,6 +1054,19 @@ export namespace Analyzer {
         if (Analyzer::Binder::fieldBindingIsStatic(&binding)) {
           patternIndex += 1;
           continue;
+        }
+
+        let fieldName: String = String::create(binding.name.toStr());
+
+        if (CodegenReserved::isCKeyword(&fieldName)) {
+          let message: String = `field '${binding.name.toStr()}' of ${kind} '${record_.name.toStr()}' is named by a C keyword`;
+          Analyzer::Checks::emitError(
+            diagnostics,
+            binding.span,
+            DiagnosticCode::C_LAYOUT_FIELD_RESERVED_NAME,
+            message.toStr(),
+            "a C-layout record keeps its written field names in C, so a field cannot be named by a C keyword",
+          );
         }
 
         let mut fieldType: Option<Analyzer::TypeId> = Option::NONE;

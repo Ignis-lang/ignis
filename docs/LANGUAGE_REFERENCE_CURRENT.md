@@ -433,7 +433,7 @@ function reset(register: *mut Device::Register): void {
 }
 ```
 
-An extern record cannot be generic and cannot declare methods, static fields or `@implements`. Each field must have a C representation: an integer, a float, a boolean, a pointer, a function type, another C-layout record (an extern record or a `@cLayout` record), or a fixed array of one of those. Because C struct names are global, two extern records with the same name are an error, even in different extern blocks or modules. Enums and type aliases cannot be declared inside an extern block.
+An extern record cannot be generic and cannot declare methods, static fields or `@implements`. Each field must have a C representation: an integer, a float, a boolean, a pointer, a function type, another C-layout record (an extern record or a `@cLayout` record), or a fixed array of one of those. A field cannot be named by a C keyword such as `int` or `register`, since C could not spell it as a struct member. Because C struct names are global, two extern records with the same name are an error, even in different extern blocks or modules. Enums and type aliases cannot be declared inside an extern block.
 
 A record outside an extern block gets the same field layout with `@cLayout` (see [Attributes](#7-attributes)).
 
@@ -711,7 +711,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@implements(...)` -- lang traits (`Drop`, `Clone`, `Copy`) or user-defined traits
 - `@packed` -- remove struct padding
 - `@aligned(N)` -- set minimum alignment
-- `@cLayout` -- give a record a C layout: fields in declaration order, each emitted under its written name. Its C struct name stays mangled and its methods are allowed. The record cannot be generic or implement `Drop`, and every field needs a C representation, as in an extern record (see 4.10)
+- `@cLayout` -- give a record a C layout: fields in declaration order, each emitted under its written name. Its C struct name stays mangled and its methods are allowed. The record cannot be generic or implement `Drop`, and every field needs a C representation and a name that is not a C keyword, as in an extern record (see 4.10)
 - `@cold` -- mark function as unlikely to execute
 - `@externName("...")` -- override the C symbol name for a function
 - `@deprecated` / `@deprecated("...")` -- mark as deprecated

@@ -756,6 +756,28 @@ function codegenLeavesOrdinaryCIdentifiersAlone(): void {
   Test::assert(untouched.equals("value"));
 }
 
+/// A C-layout field keeps its written name, so only the C keywords are off
+/// limits: a prelude or libc name such as `size_t` or `stderr` is reserved
+/// for an emitter-owned name but is a valid struct member.
+@test
+function codegenRecognizesOnlyCKeywordsAsCKeywords(): void {
+  let registerKeyword: String = String::create("register");
+  let intKeyword: String = String::create("int");
+  let boolKeyword: String = String::create("_Bool");
+  let sizeType: String = String::create("size_t");
+  let stream: String = String::create("stderr");
+  let temporary: String = String::create("t7");
+  let status: String = String::create("status");
+
+  Test::assert(CodegenReserved::isCKeyword(&registerKeyword));
+  Test::assert(CodegenReserved::isCKeyword(&intKeyword));
+  Test::assert(CodegenReserved::isCKeyword(&boolKeyword));
+  Test::assert(!CodegenReserved::isCKeyword(&sizeType));
+  Test::assert(!CodegenReserved::isCKeyword(&stream));
+  Test::assert(!CodegenReserved::isCKeyword(&temporary));
+  Test::assert(!CodegenReserved::isCKeyword(&status));
+}
+
 /// A definition carrying the tracer's fixed `@externName`, in a module of the
 /// given kind.
 function pushAllocTraceCandidate(
