@@ -22,8 +22,8 @@ import Vector from "std::vector";
 ///   - a `return` operand, or the tail expression of a function or closure
 ///     body (the function's result crosses the frame boundary), including a
 ///     closure literal written into an aggregate built in that position;
-///   - an assignment whose target is a field, an index, or a static place
-///     (the place outlives the assignment);
+///   - an assignment whose target is a field, an index, a static place, or
+///     a dereference (the place outlives the assignment);
 ///   - a record-initializer field, an enum-variant payload, or a
 ///     vector/tuple literal element (the aggregate may itself outlive the
 ///     frame);
@@ -36,16 +36,16 @@ import Vector from "std::vector";
 /// # Who frees a heap environment
 ///
 /// A heap environment is freed by the binding that owns it, exactly once: the
-/// local a closure literal is bound to, or — for a closure that crosses a
-/// return — the local in the caller that receives the returned value. So a
-/// closure literal written as a bare temporary is heap-allocated only where an
-/// owner exists on the other side, which is the result position. Everywhere
-/// else a bare temporary keeps its stack environment: it lives in the frame
-/// that built it, which is alive for the whole call it is handed to, and
-/// heap-allocating it there would only produce an environment nothing frees. A
-/// closure reached through a variable is heap-allocated in every escaping
-/// position, because that variable's binding owns the environment and frees it
-/// at scope exit.
+/// local a closure literal is bound to, the local in the caller that receives
+/// a returned closure, or a parameter that is not `@noescape`, which owns the
+/// closure it receives. So a closure literal written as a bare temporary is
+/// heap-allocated only where an owner exists on the other side: the result
+/// position and a call argument whose parameter is not `@noescape`, which
+/// includes every argument of an indirect closure call. Everywhere else a bare temporary keeps its stack environment:
+/// it lives in the frame that built it, and heap-allocating it there would
+/// only produce an environment nothing frees. A closure reached through a
+/// variable is heap-allocated in every escaping position, because that
+/// variable's binding owns the environment and frees it at scope exit.
 ///
 /// The gap this leaves is a callee that stores a closure it was handed past
 /// the call while its caller's frame, or the binding that owns the
@@ -386,8 +386,8 @@ export namespace Escape {
   }
 
   /// Mark the closures a value reaching a non-result escaping position can
-  /// evaluate to: a call argument, an assignment to a field or index, a
-  /// record-initializer field, an enum payload, a vector or tuple element.
+  /// evaluate to: an assignment to a field, index or dereference, a record-initializer field,
+  /// an enum payload, a vector or tuple element.
   ///
   /// A closure literal written straight into one of these positions is not
   /// marked: nothing on the other side owns its environment, so
@@ -617,8 +617,13 @@ export namespace Escape {
 
     while (index < args.length()) {
       if (let Option::SOME(argId) = args.get(index)) {
+        // A parameter that is not `@noescape` owns the closure it receives
+        // and frees it, so a closure literal handed to it needs a heap
+        // environment the callee can keep. An argument without a known
+        // parameter, such as one of an indirect closure call, is treated the
+        // same way, because nothing says the callee will not store it.
         if (!Escape::paramIsNoEscape(defStore, paramDefs, index + paramOffset)) {
-          Escape::markEscapingArgument(hir, aliases, escaping, *argId);
+          Escape::markEscapingResult(hir, aliases, escaping, *argId);
         }
 
         Escape::scanForEscapes(hir, defStore, aliases, escaping, *argId);
@@ -680,6 +685,9 @@ export namespace Escape {
               complexTarget = true;
             },
             Hir::HirKind::Index(_) -> {
+              complexTarget = true;
+            },
+            Hir::HirKind::Dereference(_) -> {
               complexTarget = true;
             },
             _ -> {},

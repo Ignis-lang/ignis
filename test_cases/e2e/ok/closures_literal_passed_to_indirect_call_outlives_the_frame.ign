@@ -1,0 +1,30 @@
+// e2e: std
+// A closure literal handed to an indirect call has no parameter list to read,
+// and the callee stores it in a vector the caller owns, so the literal outlives
+// the frame that built it. Its environment is on the heap, and the vector frees
+// it once.
+import Vector from "std::vector";
+
+function fill(
+  callbacks: &mut Vector<() -> i32>,
+  store: (&mut Vector<() -> i32>, () -> i32) -> void,
+  base: i32
+): void {
+  store(callbacks, (): i32 -> base + 2);
+}
+
+function main(): i32 {
+  let mut callbacks: Vector<() -> i32> = Vector::new<() -> i32>();
+  let store = (target: &mut Vector<() -> i32>, callback: () -> i32): void -> {
+    target.push(callback);
+  };
+  fill(&mut callbacks, store, 40);
+
+  let Option::SOME(first) = callbacks.pop() else {
+    return 1;
+  };
+  let result: i32 = first();
+  callbacks.push(first);
+
+  return result;
+}

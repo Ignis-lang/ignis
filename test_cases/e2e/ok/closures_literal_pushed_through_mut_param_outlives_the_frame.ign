@@ -1,0 +1,23 @@
+// e2e: std
+// A closure literal handed straight to `Vector::push` moves into a vector the
+// caller owns, so it outlives the frame that built it. Its environment is on the
+// heap. The caller pops it, calls it and pushes it back, and the vector frees
+// it once.
+import Vector from "std::vector";
+
+function fill(callbacks: &mut Vector<() -> i32>, base: i32): void {
+  callbacks.push((): i32 -> base + 2);
+}
+
+function main(): i32 {
+  let mut callbacks: Vector<() -> i32> = Vector::new<() -> i32>();
+  fill(&mut callbacks, 40);
+
+  let Option::SOME(first) = callbacks.pop() else {
+    return 1;
+  };
+  let result: i32 = first();
+  callbacks.push(first);
+
+  return result;
+}
