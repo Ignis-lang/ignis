@@ -3646,9 +3646,11 @@ export namespace LirLowering {
   /// slot, one check/arm block pair per arm, guards branching to the next
   /// check, a panic block for the non-exhaustive tail, and a result local
   /// loaded in the merge block for non-void matches.
-  /// Checks one arm's pattern against a tuple scrutinee held in per-element
-  /// locals. A tuple literal never becomes a value: `match (a, b)` compares
-  /// the elements positionally, so nothing materializes the pair.
+  /// Checks one arm's pattern against a tuple scrutinee held in per-leaf locals.
+  /// A tuple literal never becomes a value: `match (a, b)` compares the elements
+  /// positionally, so nothing materializes the pair. A nested tuple literal is
+  /// flattened the same way, so `leafLocals` holds every non-tuple element in
+  /// source order and `leafStart` is where `elementIds` begins among them.
   function lowerTupleMatchPatternCheck(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3656,8 +3658,10 @@ export namespace LirLowering {
     dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
-    elementLocals: &Vector<Lir::LocalId>,
-    elementTypes: &Vector<Analyzer::TypeId>,
+    elementIds: &Vector<Hir::HirId>,
+    leafLocals: &Vector<Lir::LocalId>,
+    leafTypes: &Vector<Analyzer::TypeId>,
+    leafStart: u64,
     pattern: &Hir::HirPattern,
     span: SourceSpan,
     borrowedAlias: boolean,
@@ -3669,49 +3673,67 @@ export namespace LirLowering {
         return LirLowering::boolConstOperand(typeStore, function_, state, true, span);
       },
       Hir::HirPattern::Tuple(elements) -> {
-        if (elements.length() != elementLocals.length()) {
+        if (elements.length() != elementIds.length()) {
           return LirLowering::boolConstOperand(typeStore, function_, state, false, span);
         }
 
         let mut combined: Lir::Operand = LirLowering::boolConstOperand(typeStore, function_, state, true, span);
         let mut index: u64 = 0;
+        let mut leafIndex: u64 = leafStart;
 
         while (index < elements.length()) {
           let Option::SOME(elementPattern) = elements.get(index) else {
             index += 1;
             continue;
           };
-          let Option::SOME(elementLocal) = elementLocals.get(index) else {
-            index += 1;
-            continue;
-          };
-          let Option::SOME(elementType) = elementTypes.get(index) else {
+          let Option::SOME(elementId) = elementIds.get(index) else {
             index += 1;
             continue;
           };
 
-          let elementTemp: Lir::TempId = LirLowering::freshTemp(function_, *elementType, span);
+          let mut nested: Lir::Operand = LirLowering::boolConstOperand(typeStore, function_, state, false, span);
 
-          LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
-            dest: elementTemp,
-            source: *elementLocal,
-          }));
+          if (let Option::SOME(innerIds) = LirLowering::tupleLiteralElements(hirStore, *elementId)) {
+            nested = LirLowering::lowerTupleMatchPatternCheck(
+              defStore,
+              typeStore,
+              hirStore,
+              dropSchedules,
+              function_,
+              state,
+              &innerIds,
+              leafLocals,
+              leafTypes,
+              leafIndex,
+              elementPattern,
+              span,
+              borrowedAlias,
+            );
+          } else {
+            let leaf: LirLowering::TupleLeaf = LirLowering::tupleLeafAt(leafLocals, leafTypes, leafIndex);
+            let elementTemp: Lir::TempId = LirLowering::freshTemp(function_, leaf.ty, span);
 
-          let elementOperand: Lir::Operand = Lir::Operand::Temp(elementTemp);
-          let nested: Lir::Operand = LirLowering::lowerPatternCheck(
-            defStore,
-            typeStore,
-            hirStore,
-            dropSchedules,
-            function_,
-            state,
-            &elementOperand,
-            *elementType,
-            elementPattern,
-            span,
-            borrowedAlias,
-            Option::NONE,
-          );
+            LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+              dest: elementTemp,
+              source: leaf.local,
+            }));
+
+            let elementOperand: Lir::Operand = Lir::Operand::Temp(elementTemp);
+            nested = LirLowering::lowerPatternCheck(
+              defStore,
+              typeStore,
+              hirStore,
+              dropSchedules,
+              function_,
+              state,
+              &elementOperand,
+              leaf.ty,
+              elementPattern,
+              span,
+              borrowedAlias,
+              Option::NONE,
+            );
+          }
 
           let andTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
 
@@ -3723,6 +3745,7 @@ export namespace LirLowering {
           }));
 
           combined = Lir::Operand::Temp(andTemp);
+          leafIndex += LirLowering::tupleLeafCount(hirStore, *elementId);
           index += 1;
         }
 
@@ -3745,8 +3768,10 @@ export namespace LirLowering {
             dropSchedules,
             function_,
             state,
-            elementLocals,
-            elementTypes,
+            elementIds,
+            leafLocals,
+            leafTypes,
+            leafStart,
             alternative,
             span,
             borrowedAlias,
@@ -3773,6 +3798,258 @@ export namespace LirLowering {
     };
 
     @panic("unreachable: lowerTupleMatchPatternCheck match did not return");
+  }
+
+  /// The elements of `id` when it is a tuple literal.
+  function tupleLiteralElements(
+    hirStore: &Hir::HirStore,
+    id: Hir::HirId,
+  ): Option<Vector<Hir::HirId>> {
+    let Option::SOME(node) = hirStore.get(id) else {
+      return Option::NONE;
+    };
+
+    let Hir::HirKind::TupleLiteral(elements) = &node.kind else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(LirLowering::copyHirIds(&elements));
+  }
+
+  /// How many leaf locals a tuple scrutinee element occupies: one, or the leaves of
+  /// every element of a nested tuple literal.
+  function tupleLeafCount(hirStore: &Hir::HirStore, id: Hir::HirId): u64 {
+    let Option::SOME(innerIds) = LirLowering::tupleLiteralElements(hirStore, id) else {
+      return 1;
+    };
+
+    let mut count: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < innerIds.length()) {
+      if (let Option::SOME(innerId) = innerIds.get(index)) {
+        count += LirLowering::tupleLeafCount(hirStore, *innerId);
+      }
+
+      index += 1;
+    }
+
+    return count;
+  }
+
+  /// Frees what the chosen pattern leaves unowned in a tuple scrutinee's leaves.
+  ///
+  /// A tuple literal consumes its elements, so every leaf that owns its value
+  /// belongs to the construct until a pattern takes it. A leaf the pattern binds
+  /// keeps only the payload slots its bindings take, and the rest is freed here;
+  /// a leaf the pattern only tests, or skips with a wildcard, is freed whole.
+  function emitTupleLeafDrops(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    elementIds: &Vector<Hir::HirId>,
+    leafLocals: &Vector<Lir::LocalId>,
+    leafTypes: &Vector<Analyzer::TypeId>,
+    leafStart: u64,
+    pattern: &Hir::HirPattern,
+    span: SourceSpan,
+  ): void {
+    let Hir::HirPattern::Tuple(subpatterns) = pattern else {
+      LirLowering::dropOwnedTupleLeaves(defStore, typeStore, hirStore, dropSchedules, function_, state, elementIds, leafLocals, leafTypes, leafStart);
+      return;
+    };
+
+    let mut index: u64 = 0;
+    let mut leafIndex: u64 = leafStart;
+
+    while (index < elementIds.length()) {
+      let Option::SOME(elementId) = elementIds.get(index) else {
+        @panic("tuple scrutinee element missing: tuple leaf invariant broken");
+      };
+      let Option::SOME(subpattern) = subpatterns.get(index) else {
+        @panic("tuple pattern arity differs from its scrutinee: tuple leaf invariant broken");
+      };
+
+      if (let Option::SOME(innerIds) = LirLowering::tupleLiteralElements(hirStore, *elementId)) {
+        LirLowering::emitTupleLeafDrops(
+          defStore,
+          typeStore,
+          hirStore,
+          dropSchedules,
+          function_,
+          state,
+          &innerIds,
+          leafLocals,
+          leafTypes,
+          leafIndex,
+          subpattern,
+          span,
+        );
+      } else {
+        let leaf: LirLowering::TupleLeaf = LirLowering::tupleLeafAt(leafLocals, leafTypes, leafIndex);
+
+        if (LirLowering::tupleLeafIsOwned(defStore, typeStore, hirStore, dropSchedules, *elementId, leaf.ty)) {
+          if (Borrowck::patternMovesOwnedValue(defStore, typeStore, leaf.ty, subpattern)) {
+            let leafTemp: Lir::TempId = LirLowering::freshTemp(function_, leaf.ty, span);
+
+            LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+              dest: leafTemp,
+              source: leaf.local,
+            }));
+
+            let leafOperand: Lir::Operand = Lir::Operand::Temp(leafTemp);
+            LirLowering::emitUnboundPayloadDrops(defStore, typeStore, function_, state, &leafOperand, leaf.ty, subpattern, span);
+          } else {
+            LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+              local: leaf.local,
+            }));
+          }
+        }
+      }
+
+      leafIndex += LirLowering::tupleLeafCount(hirStore, *elementId);
+      index += 1;
+    }
+  }
+
+  /// Frees every leaf of a tuple scrutinee that owns its value.
+  function dropOwnedTupleLeaves(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    elementIds: &Vector<Hir::HirId>,
+    leafLocals: &Vector<Lir::LocalId>,
+    leafTypes: &Vector<Analyzer::TypeId>,
+    leafStart: u64,
+  ): void {
+    let mut index: u64 = 0;
+    let mut leafIndex: u64 = leafStart;
+
+    while (index < elementIds.length()) {
+      let Option::SOME(elementId) = elementIds.get(index) else {
+        @panic("tuple scrutinee element missing: tuple leaf invariant broken");
+      };
+
+      if (let Option::SOME(innerIds) = LirLowering::tupleLiteralElements(hirStore, *elementId)) {
+        LirLowering::dropOwnedTupleLeaves(defStore, typeStore, hirStore, dropSchedules, function_, state, &innerIds, leafLocals, leafTypes, leafIndex);
+      } else {
+        let leaf: LirLowering::TupleLeaf = LirLowering::tupleLeafAt(leafLocals, leafTypes, leafIndex);
+
+        if (LirLowering::tupleLeafIsOwned(defStore, typeStore, hirStore, dropSchedules, *elementId, leaf.ty)) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+            local: leaf.local,
+          }));
+        }
+      }
+
+      leafIndex += LirLowering::tupleLeafCount(hirStore, *elementId);
+      index += 1;
+    }
+  }
+
+  /// Whether a tuple scrutinee leaf holds a value the construct owns: a droppable
+  /// value that is not read out of storage someone else still drops.
+  function tupleLeafIsOwned(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    elementId: Hir::HirId,
+    leafType: Analyzer::TypeId,
+  ): boolean {
+    if (!Borrowck::needsDropType(defStore, typeStore, leafType)) {
+      return false;
+    }
+
+    return LirLowering::matchOwnsScrutinee(typeStore, hirStore, dropSchedules, elementId);
+  }
+
+  record TupleLeaf {
+    public local: Lir::LocalId;
+    public ty: Analyzer::TypeId;
+  }
+
+  /// The local and type of leaf `leafIndex`. Every leaf is evaluated before any
+  /// pattern is checked, so a missing one is a lowering bug, not a non-match.
+  function tupleLeafAt(
+    leafLocals: &Vector<Lir::LocalId>,
+    leafTypes: &Vector<Analyzer::TypeId>,
+    leafIndex: u64,
+  ): LirLowering::TupleLeaf {
+    let Option::SOME(local) = leafLocals.get(leafIndex) else {
+      @panic("tuple scrutinee leaf local missing: tuple leaf invariant broken");
+    };
+    let Option::SOME(ty) = leafTypes.get(leafIndex) else {
+      @panic("tuple scrutinee leaf type missing: tuple leaf invariant broken");
+    };
+
+    return LirLowering::TupleLeaf { local: *local, ty: *ty };
+  }
+
+  /// Evaluates the elements of a tuple scrutinee left to right into one local per
+  /// leaf, descending into nested tuple literals instead of evaluating them.
+  function lowerTupleScrutineeLeaves(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    elementIds: &Vector<Hir::HirId>,
+    leafLocals: &mut Vector<Lir::LocalId>,
+    leafTypes: &mut Vector<Analyzer::TypeId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < elementIds.length()) {
+      let Option::SOME(elementId) = elementIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Option::SOME(innerIds) = LirLowering::tupleLiteralElements(hirStore, *elementId)) {
+        LirLowering::lowerTupleScrutineeLeaves(
+          defStore,
+          typeStore,
+          hirStore,
+          dropSchedules,
+          function_,
+          state,
+          &innerIds,
+          leafLocals,
+          leafTypes,
+        );
+
+        index += 1;
+        continue;
+      }
+
+      let mut elementType: Analyzer::TypeId = function_.returnType;
+
+      if (let Option::SOME(elementNode) = hirStore.get(*elementId)) {
+        elementType = elementNode.typeId;
+      }
+
+      let elementValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *elementId);
+      let elementLocal: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, elementType);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+        dest: elementLocal,
+        value: elementValue,
+      }));
+
+      let mut localsRef: &mut Vector<Lir::LocalId> = leafLocals;
+      localsRef.push(elementLocal);
+      let mut typesRef: &mut Vector<Analyzer::TypeId> = leafTypes;
+      typesRef.push(elementType);
+      index += 1;
+    }
   }
 
   /// Whether the operation only evaluates its right operand for some values of
@@ -4047,32 +4324,17 @@ export namespace LirLowering {
     let mut scrutineeSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
 
     if (isTupleScrutinee) {
-      let mut elementIndex: u64 = 0;
-
-      while (elementIndex < tupleElements.length()) {
-        let Option::SOME(elementId) = tupleElements.get(elementIndex) else {
-          elementIndex += 1;
-          continue;
-        };
-
-        let mut elementType: Analyzer::TypeId = nodeType;
-
-        if (let Option::SOME(elementNode) = hirStore.get(*elementId)) {
-          elementType = elementNode.typeId;
-        }
-
-        let elementValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *elementId);
-        let elementLocal: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, elementType);
-
-        LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
-          dest: elementLocal,
-          value: elementValue,
-        }));
-
-        elementLocals.push(elementLocal);
-        elementTypes.push(elementType);
-        elementIndex += 1;
-      }
+      LirLowering::lowerTupleScrutineeLeaves(
+        defStore,
+        typeStore,
+        hirStore,
+        dropSchedules,
+        function_,
+        state,
+        &tupleElements,
+        &mut elementLocals,
+        &mut elementTypes,
+      );
     } else {
       // Whether the scrutinee is a field of storage this function owns that no arm
       // takes a payload out of. Reading it by value would mark the field moved —
@@ -4215,8 +4477,10 @@ export namespace LirLowering {
           dropSchedules,
           function_,
           state,
+          &tupleElements,
           &elementLocals,
           &elementTypes,
+          0,
           &arm.pattern,
           nodeSpan,
           false,
@@ -4275,6 +4539,25 @@ export namespace LirLowering {
       }
 
       LirLowering::switchToBlock(state, armBlock);
+
+      // Arm entry is the one point every path out of the arm passes through
+      // exactly once, and nothing in the body can name a tuple scrutinee leaf.
+      if (isTupleScrutinee) {
+        LirLowering::emitTupleLeafDrops(
+          defStore,
+          typeStore,
+          hirStore,
+          dropSchedules,
+          function_,
+          state,
+          &tupleElements,
+          &elementLocals,
+          &elementTypes,
+          0,
+          &arm.pattern,
+          nodeSpan,
+        );
+      }
 
       // An arm that takes a payload is skipped by the whole-scrutinee drop below,
       // so the payload slots its pattern does not bind have no owner at all. Free
@@ -4385,6 +4668,73 @@ export namespace LirLowering {
       valueType = valueNode.typeId;
     }
 
+    // A tuple literal is destructured element by element, as a tuple `match`
+    // scrutinee is; it never becomes a value, so it has no payload to free below.
+    if (let Option::SOME(tupleElements) = LirLowering::tupleLiteralElements(hirStore, letElseNode.value)) {
+      let mut leafLocals: Vector<Lir::LocalId> = Vector::new<Lir::LocalId>();
+      let mut leafTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      LirLowering::lowerTupleScrutineeLeaves(
+        defStore,
+        typeStore,
+        hirStore,
+        dropSchedules,
+        function_,
+        state,
+        &tupleElements,
+        &mut leafLocals,
+        &mut leafTypes,
+      );
+
+      let tupleMatches: Lir::Operand = LirLowering::lowerTupleMatchPatternCheck(
+        defStore,
+        typeStore,
+        hirStore,
+        dropSchedules,
+        function_,
+        state,
+        &tupleElements,
+        &leafLocals,
+        &leafTypes,
+        0,
+        &letElseNode.pattern,
+        nodeSpan,
+        false,
+      );
+
+      let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_ok");
+      let failBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_fail");
+
+      LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+        condition: tupleMatches,
+        thenBlock: continueBlock,
+        elseBlock: failBlock,
+      }));
+
+      // On failure no binding survives, so the construct still owns every leaf.
+      LirLowering::switchToBlock(state, failBlock);
+      LirLowering::dropOwnedTupleLeaves(defStore, typeStore, hirStore, dropSchedules, function_, state, &tupleElements, &leafLocals, &leafTypes, 0);
+      LirLowering::lowerLetElseFailure(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode);
+
+      LirLowering::switchToBlock(state, continueBlock);
+      LirLowering::emitTupleLeafDrops(
+        defStore,
+        typeStore,
+        hirStore,
+        dropSchedules,
+        function_,
+        state,
+        &tupleElements,
+        &leafLocals,
+        &leafTypes,
+        0,
+        &letElseNode.pattern,
+        nodeSpan,
+      );
+
+      return;
+    }
+
     let valueOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode.value);
     let scrutineeSlot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, valueType);
 
@@ -4409,23 +4759,7 @@ export namespace LirLowering {
       Option::NONE,
     );
 
-    let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_ok");
-    let failBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_fail");
-
-    LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
-      condition: matches,
-      thenBlock: continueBlock,
-      elseBlock: failBlock,
-    }));
-
-    LirLowering::switchToBlock(state, failBlock);
-    let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode.elseBlock);
-
-    if (!state.terminated) {
-      LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
-    }
-
-    LirLowering::switchToBlock(state, continueBlock);
+    LirLowering::lowerLetElseBranches(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode, matches);
 
     // `let Kind::PAIR(left, _) = kind else { ... }` binds `left` and leaves the
     // second payload with no owner, exactly as a matching `match` arm does. Free
@@ -4458,6 +4792,50 @@ export namespace LirLowering {
         &letElseNode.pattern,
         nodeSpan,
       );
+    }
+  }
+
+  /// Branches on `matches`: the diverging else block on failure, and the success
+  /// path left as the current block.
+  function lowerLetElseBranches(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    letElseNode: &Hir::HirLetElse,
+    matches: Lir::Operand,
+  ): void {
+    let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_ok");
+    let failBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_fail");
+
+    LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+      condition: matches,
+      thenBlock: continueBlock,
+      elseBlock: failBlock,
+    }));
+
+    LirLowering::switchToBlock(state, failBlock);
+    LirLowering::lowerLetElseFailure(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode);
+
+    LirLowering::switchToBlock(state, continueBlock);
+  }
+
+  /// Lowers the diverging else block of a `let ... else` into the current block.
+  function lowerLetElseFailure(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    letElseNode: &Hir::HirLetElse,
+  ): void {
+    let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode.elseBlock);
+
+    if (!state.terminated) {
+      LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
     }
   }
 

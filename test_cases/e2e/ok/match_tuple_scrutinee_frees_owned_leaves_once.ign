@@ -1,0 +1,84 @@
+// e2e: std
+//
+// A tuple literal consumes its elements, so the construct owns every owned leaf until a
+// pattern takes it. A leaf the pattern skips or only tests is freed when the arm is
+// chosen or when `let ... else` succeeds; a leaf it binds keeps only what its bindings
+// take. When `let ... else` fails, no binding survives and every owned leaf is freed
+// before the else block runs. Each payload is dropped exactly once.
+import Io from "std::io";
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Pair {
+  BOTH(Tracked, Tracked),
+  EMPTY,
+}
+
+function make(id: i32): Option<Tracked> {
+  return Option::SOME(Tracked { id: id });
+}
+
+function matchIgnored(): i32 {
+  return match ((make(1), 5)) {
+    (_, n) -> n,
+  };
+}
+
+function matchPartial(): i32 {
+  return match ((make(2), make(3))) {
+    (Option::SOME(a), _) -> a.id,
+    _ -> 0,
+  };
+}
+
+function letElseIgnored(): i32 {
+  let (_, n) = (make(4), 5) else {
+    return 0;
+  };
+
+  return n;
+}
+
+function letElseBinds(): i32 {
+  let (Option::SOME(a), _) = (make(6), make(7)) else {
+    return 0;
+  };
+
+  return a.id;
+}
+
+function letElseFails(): i32 {
+  let empty: Option<Tracked> = Option::NONE;
+  let (Option::SOME(a), Option::SOME(b)) = (make(8), empty) else {
+    Io::println("else path");
+    return 0;
+  };
+
+  return a.id + b.id;
+}
+
+function matchHalfOfAPayload(): i32 {
+  return match ((Pair::BOTH(Tracked { id: 9 }, Tracked { id: 10 }), 0)) {
+    (Pair::BOTH(first, _), _) -> first.id,
+    _ -> 0,
+  };
+}
+
+function main(): i32 {
+  Io::println(`match ignored ${matchIgnored()}`.toStr());
+  Io::println(`match partial ${matchPartial()}`.toStr());
+  Io::println(`let else ignored ${letElseIgnored()}`.toStr());
+  Io::println(`let else binds ${letElseBinds()}`.toStr());
+  Io::println(`let else fails ${letElseFails()}`.toStr());
+  Io::println(`match half ${matchHalfOfAPayload()}`.toStr());
+
+  return 0;
+}

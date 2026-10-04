@@ -1,0 +1,33 @@
+// e2e: err
+//
+// `let ... else` over a tuple literal of references borrows each referenced payload as a
+// tuple `match` does, so handing a binding on by value moves out of a borrow.
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function consume(tracked: Tracked): i32 {
+  return tracked.id;
+}
+
+function steal(first: &Option<Tracked>, second: &Option<Tracked>): i32 {
+  let (Option::SOME(taken), _) = (first, second) else {
+    return 0;
+  };
+
+  return consume(taken);
+}
+
+function main(): i32 {
+  let one: Option<Tracked> = Option::SOME(Tracked { id: 1 });
+  let two: Option<Tracked> = Option::NONE;
+
+  return steal(&one, &two);
+}

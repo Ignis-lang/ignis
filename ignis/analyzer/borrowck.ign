@@ -5693,11 +5693,26 @@ export namespace Borrowck {
       }
     }
 
+    // A tuple literal borrows element by element, as a tuple `match` scrutinee does.
+    let mut borrowedElementBindings: Vector<u32> = Vector::new<u32>();
+
+    if (!bindsBorrowedPayloads) {
+      Borrowck::collectBorrowedTupleElementBindings(
+        defStore,
+        typeStore,
+        hir,
+        state,
+        letElse.value,
+        &letElse.pattern,
+        &mut borrowedElementBindings,
+      );
+    }
+
     let mut index: u64 = 0;
 
     while (index < bindings.length()) {
       if (let Option::SOME(defRaw) = bindings.get(index)) {
-        if (bindsBorrowedPayloads) {
+        if (bindsBorrowedPayloads || Borrowck::containsRaw(&mut borrowedElementBindings, *defRaw)) {
           // The payload stays in the referenced storage: the binding is live
           // but owns nothing, so it gets no drop of its own.
           Borrowck::notePatternBinding(state, *defRaw, span);

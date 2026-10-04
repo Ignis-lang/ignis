@@ -1,0 +1,52 @@
+// e2e: std
+//
+// A tuple literal scrutinee may nest tuple literals. Each one is destructured element by
+// element like the outer one, so a pattern binds at every level, and a wildcard can stand
+// for a whole inner tuple. `match`, `if let` and `let ... else` all accept the shape.
+import Io from "std::io";
+
+function sumAll(x: i32, y: i32, z: i32): i32 {
+  return match ((x, (y, z))) {
+    (0, _) -> -1,
+    (a, (b, c)) -> a + b + c,
+  };
+}
+
+function innerOnly(x: i32, y: i32, z: i32): i32 {
+  return match ((x, (y, z))) {
+    (_, (b, 3)) -> b,
+    (_, (_, c)) -> c * 10,
+  };
+}
+
+function deepest(w: i32, x: i32, y: i32, z: i32): i32 {
+  return match (((w, x), (y, (z, w)))) {
+    ((a, _), (_, (d, e))) -> a + d + e,
+  };
+}
+
+function byIfLet(x: i32, y: i32, z: i32): i32 {
+  if (let (a, (b, 3)) = (x, (y, z))) {
+    return a * b;
+  }
+
+  return 0;
+}
+
+function byLetElse(x: i32, y: i32, z: i32): i32 {
+  let (a, (b, c)) = (x, (y, z)) else {
+    return 0;
+  };
+
+  return a - b - c;
+}
+
+function main(): i32 {
+  Io::println(`sum ${sumAll(1, 2, 3)} ${sumAll(0, 2, 3)}`.toStr());
+  Io::println(`inner ${innerOnly(1, 2, 3)} ${innerOnly(1, 2, 4)}`.toStr());
+  Io::println(`deepest ${deepest(1, 2, 3, 4)}`.toStr());
+  Io::println(`if let ${byIfLet(4, 5, 3)} ${byIfLet(4, 5, 6)}`.toStr());
+  Io::println(`let else ${byLetElse(10, 2, 3)}`.toStr());
+
+  return 0;
+}
