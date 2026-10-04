@@ -4661,6 +4661,74 @@ function parserRejectsExternFunctionWithBody(): void {
   Test::assertEq<str>(second.code, "I0002");
 }
 
+/// A record is an extern member like a function or a constant: Ignis defines
+/// the C struct the extern block describes.
+@test
+function parserParsesRecordInsideExternBlock(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_extern_record.ign",
+    "extern Device { @packed record Port { public control: u8; public status: u32; } function reset(port: *mut Port): void; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let externId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing extern root"),
+  };
+
+  let Option::SOME(Ast::Item::Node::Extern(externItem)) = module.items.get(externId) else {
+    @panic("expected extern root item");
+  };
+
+  Test::assertEq<u64>(externItem.items.length(), 2);
+
+  let recordId: Ast::ItemId = match (externItem.items.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing extern record member"),
+  };
+
+  let Option::SOME(Ast::Item::Node::Record(recordItem)) = module.items.get(recordId) else {
+    @panic("expected extern record member");
+  };
+
+  Test::assertEq<str>(recordItem.name.toStr(), "Port");
+  Test::assertEq<u64>(recordItem.fields.length(), 2);
+  Test::assertEq<u64>(recordItem.metadata.attributes.length(), 1);
+}
+
+/// An enum stays outside what an extern block declares, and the diagnostic
+/// names the members it does accept.
+@test
+function parserRejectsEnumInsideExternBlock(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_extern_enum.ign",
+    "extern Device { enum Mode { READ, WRITE, } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  let first: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing extern enum diagnostic"),
+  };
+
+  Test::assertEq<str>(first.code, "I0002");
+  Test::assertEq<str>(first.message.toStr(), "Unexpected token");
+
+  let label: String = match (first.labels.get(0)) {
+    Option::SOME(value) -> value.message.clone(),
+    Option::NONE -> @panic("missing extern enum label"),
+  };
+
+  Test::assertEq<str>(label.toStr(), "expected function, const, or record declaration in extern block");
+}
+
 /// A free function always annotates its return type, so the `:` is required
 /// where a method may leave it out.
 @test

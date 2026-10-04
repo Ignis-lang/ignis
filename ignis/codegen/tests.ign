@@ -639,6 +639,52 @@ function codegenEmitsRecordWithoutFieldsAsEmptyStruct(): void {
   Test::assert(!codegenContains(&emission.source, "char _empty;"));
 }
 
+/// An extern record defines the struct the C side names: the written record
+/// name without a definition suffix, and the written field names in
+/// declaration order, reached by name wherever a field is.
+@test
+function codegenEmitsExternRecordsUnderTheirCNames(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Device {\n  record Port {\n    public control: u8;\n    public status: u32;\n  }\n}\n\nfunction main(): i32 {\n  let mut port: Device::Port = Device::Port { control: 1, status: 2 };\n  let pointer: *mut Device::Port = &mut port as *mut Device::Port;\n\n  (*pointer).status = 5;\n\n  return port.status as i32 + port.control as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "struct Port {\n    u8 control;\n    u32 status;\n};\n"));
+  Test::assert(codegenContains(&emission.source, ")->control = "));
+  Test::assert(codegenContains(&emission.source, ")->status);"));
+  Test::assert(!codegenContains(&emission.source, "struct Port_"));
+  Test::assert(!codegenContains(&emission.source, "field_"));
+}
+
+/// A `@cLayout` record keeps its mangled struct name but spells its fields
+/// as written, in declaration order.
+@test
+function codegenEmitsCLayoutRecordFieldsByName(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "@cLayout\nrecord Counter {\n  public value: i32;\n  public step: i32;\n\n  public total(&self): i32 {\n    return self.value + self.step;\n  }\n}\n\nfunction main(): i32 {\n  let counter: Counter = Counter { value: 2, step: 5 };\n\n  return counter.total();\n}\n",
+  );
+
+  let Option::SOME(name) = codegenMangledStructName(&mut emission, "Counter") else {
+    @panic("expected the Counter record to be emitted");
+  };
+
+  let definition: String = `struct ${name.toStr()} {\n    i32 value;\n    i32 step;\n};\n`;
+
+  Test::assert(codegenContains(&name, "Counter_"));
+  Test::assert(emission.source.contains(&definition));
+  Test::assert(!codegenContains(&emission.source, "field_"));
+}
+
+/// A record without a C layout keeps its index-named fields.
+@test
+function codegenKeepsIndexNamedFieldsOnPlainRecords(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "record Plain {\n  public value: i32;\n  public step: i32;\n}\n\nfunction main(): i32 {\n  let plain: Plain = Plain { value: 2, step: 5 };\n\n  return plain.value + plain.step;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, " {\n    i32 field_0;\n    i32 field_1;\n};\n"));
+  Test::assert(!codegenContains(&emission.source, " value;"));
+}
+
 /// The reserved-name table is the contract both compilers share, so it is
 /// asserted directly rather than through an emission: a divergence here is a
 /// bootstrap fixed-point failure, not a wrong-looking function body.

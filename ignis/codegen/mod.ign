@@ -211,6 +211,9 @@ export namespace CodegenC {
     return "";
   }
 
+  /// The C struct name of a record or enum. A record declared inside an
+  /// extern block keeps its written name, which the C side names too; every
+  /// other nominal is suffixed with its definition id.
   function structName(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -218,7 +221,88 @@ export namespace CodegenC {
   ): String {
     let base: String = CodegenC::definitionName(defStore, symbols, defId);
 
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
+      if (recordDef.isExtern) {
+        return base;
+      }
+    }
+
     return CodegenReserved::mangleReservedCName(`${base.toStr()}_${defId.raw()}`);
+  }
+
+  /// The C member name of field `fieldIndex` of record `recordId`. A record
+  /// with a C layout keeps each written field name; every other record names
+  /// its fields by position.
+  function recordFieldMember(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    recordId: Analyzer::DefinitionId,
+    fieldIndex: u64,
+  ): String {
+    let mut fieldId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordId)) {
+      if (recordDef.cLayout) {
+        if (let Option::SOME(id) = recordDef.fields.get(fieldIndex)) {
+          fieldId = Option::SOME(*id);
+        }
+      }
+    }
+
+    if (let Option::SOME(id) = fieldId) {
+      if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(id)) {
+        if (let Option::SOME(text) = symbols.resolve(fieldDef.name)) {
+          return CodegenC::sanitize(text);
+        }
+      }
+    }
+
+    return `field_${fieldIndex}`;
+  }
+
+  /// `recordFieldMember` for a record reached as a value of `typeId`, through
+  /// any number of pointers or references. Any other type names the field by
+  /// position.
+  function fieldMemberForType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeId: Analyzer::TypeId,
+    fieldIndex: u64,
+  ): String {
+    let mut current: Analyzer::TypeId = typeId;
+
+    while (true) {
+      let mut record_: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut pointee: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(current)) {
+        match (typeNode) {
+          Analyzer::Type::Record(defId) -> {
+            record_ = Option::SOME(defId);
+          },
+          Analyzer::Type::Pointer(pointer) -> {
+            pointee = Option::SOME(pointer.pointee);
+          },
+          Analyzer::Type::Reference(reference) -> {
+            pointee = Option::SOME(reference.referent);
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(defId) = record_) {
+        return CodegenC::recordFieldMember(defStore, symbols, defId, fieldIndex);
+      }
+
+      let Option::SOME(inner) = pointee else {
+        return `field_${fieldIndex}`;
+      };
+
+      current = inner;
+    }
+
+    return `field_${fieldIndex}`;
   }
 
   /// The C spelling of a type.
@@ -1201,7 +1285,8 @@ export namespace CodegenC {
       let index: u32 = fieldDef.index;
 
       if (Borrowck::needsDropType(defStore, typeStore, fieldType) || Hir::typeIsFunction(typeStore, fieldType)) {
-        let access: String = `${expression.toStr()}.field_${index}`;
+        let member: String = CodegenC::recordFieldMember(defStore, symbols, nominal, index as u64);
+        let access: String = `${expression.toStr()}.${member.toStr()}`;
         CodegenC::emitFieldDrops(defStore, typeStore, symbols, output, closures, &access, fieldType);
       }
 
@@ -2025,7 +2110,13 @@ export namespace CodegenC {
 
         CodegenC::emitFieldPointerDropGuard(defStore, typeStore, symbols, hooks, function_, output, &base, &node.base);
 
-        let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->field_${node.fieldIndex});\n`;
+        let mut member: String = `field_${node.fieldIndex}`;
+
+        if (let Option::SOME(baseType) = CodegenC::operandType(function_, &node.base)) {
+          member = CodegenC::fieldMemberForType(defStore, typeStore, symbols, baseType, node.fieldIndex as u64);
+        }
+
+        let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->${member.toStr()});\n`;
 
         if (CodegenC::operandIsEnvironmentPointer(typeStore, function_, &node.base)) {
           if (let Option::SOME(envName) = CodegenC::currentEnvName(closures, function_.defId)) {
@@ -2127,7 +2218,8 @@ export namespace CodegenC {
         while (fieldIndex < node.fields.length()) {
           if (let Option::SOME(field) = node.fields.get(fieldIndex)) {
             let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &field.value);
-            let line: String = `    (${destination.toStr()})->field_${field.fieldIndex} = ${value.toStr()};\n`;
+            let member: String = CodegenC::fieldMemberForType(defStore, typeStore, symbols, node.recordType, field.fieldIndex as u64);
+            let line: String = `    (${destination.toStr()})->${member.toStr()} = ${value.toStr()};\n`;
             let mut fieldRef: &mut String = output;
             fieldRef.pushStr(line.toStr());
           }
@@ -2811,7 +2903,8 @@ export namespace CodegenC {
           if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
             let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, fieldDef.fieldType);
             let fieldAttributes: String = CodegenC::fieldLayoutAttributes(fieldDef.alignment);
-            let line: String = `    ${fieldType.toStr()} field_${fieldDef.index}${fieldAttributes.toStr()};\n`;
+            let member: String = CodegenC::recordFieldMember(defStore, symbols, defId, fieldDef.index as u64);
+            let line: String = `    ${fieldType.toStr()} ${member.toStr()}${fieldAttributes.toStr()};\n`;
 
             let mut fieldRef: &mut String = output;
             fieldRef.pushStr(line.toStr());
@@ -4309,7 +4402,8 @@ export namespace CodegenC {
         if (CodegenC::isStrType(typeStore, *errType)) {
           errorMessage = errorAccess.clone();
         } else if (let Option::SOME(fieldIndex) = CodegenC::recordMessageFieldIndex(defStore, typeStore, symbols, *errType)) {
-          errorMessage = `${errorAccess.toStr()}.field_${fieldIndex}`;
+          let member: String = CodegenC::fieldMemberForType(defStore, typeStore, symbols, *errType, fieldIndex as u64);
+          errorMessage = `${errorAccess.toStr()}.${member.toStr()}`;
         }
       }
     }

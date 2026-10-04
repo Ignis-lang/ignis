@@ -288,6 +288,7 @@
 // <directive-attr>; the shapes below record which argument lists are accepted.
 <known-attribute> ::= "@" "packed"
   | "@" "aligned" "(" <integer> ")"
+  | "@" "cLayout"
   | "@" "cold"
   | "@" "test"
   | "@" "externName" "(" <string> ")"
@@ -305,7 +306,8 @@
 // `@implements(...)` takes one or more trait names, including the lang traits
 // `Drop`, `Clone` and `Copy`. `@lang(try)` marks the `Result`/`Option` enums.
 // `@langHook("name")` applies to a namespace. `@takes` and `@noescape` are
-// parameter attributes (see <parameter>).
+// parameter attributes (see <parameter>). `@cLayout` applies to a non-generic
+// record that does not implement `Drop`.
 
 // Compile-time selection. These are resolved by the parser: the discarded
 // branch or item is skipped and never reaches the AST.
@@ -388,10 +390,17 @@
 
 <extern> ::= <directive-attrs>? "extern" <qualified-identifier> "{" <extern-item>* "}"
 
-<extern-item> ::= <directive-attrs>? ( <extern-function> | <record> | <enum> | <type-alias> )
+<extern-item> ::= <directive-attrs>? ( <extern-function> | <extern-const> | <record> )
 
 <extern-function> ::= "function" <identifier> (<generic-type>)?
                       "(" <parameters>? ")" ":" <type> ";"
+
+<extern-const> ::= "const" <identifier> ":" <type> ";"
+
+// A <record> inside an extern block defines a C struct under its written
+// name, with its written field names in declaration order. It takes no
+// generics, methods, static fields or `@implements`. Enums and type aliases
+// are not accepted inside an extern block.
 
 <namespace> ::= <directive-attrs>? "namespace" <qualified-identifier> "{" <namespace-item>* "}"
 <namespace-item> ::= <function> | <const> | <record> | <enum> | <trait> | <type-alias> | <extern> | <namespace>

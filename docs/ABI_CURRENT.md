@@ -95,6 +95,40 @@ struct Empty {
 };
 ```
 
+### C-Layout Records
+
+A record with a C layout names each C field after its written field name instead of `field_N`, in declaration order. Two kinds of record have one:
+
+- A record declared inside an `extern` block. Its C struct takes the written record name, with no definition id suffix, so C code can name the same struct.
+- A record with `@cLayout`. Its C struct name is mangled like any other record.
+
+```ignis
+extern Device {
+    record Port {
+        public control: u8;
+        public status: u32;
+    }
+}
+
+@cLayout
+record Counter {
+    public value: i32;
+}
+```
+
+```c
+struct Port {
+    u8 control;
+    u32 status;
+};
+
+struct Counter_12 {
+    i32 value;
+};
+```
+
+Field access, record initialization and drop paths use the written field name for these records. Neither kind can be generic or carry a drop state byte. Function-typed fields are currently emitted with the closure representation every function value has.
+
 ### Record Attributes
 
 | Ignis Attribute | C Output |
@@ -102,6 +136,7 @@ struct Empty {
 | `@packed` | `__attribute__((packed))` |
 | `@aligned(N)` | `__attribute__((aligned(N)))` |
 | `@aligned(N)` on field | `__attribute__((aligned(N)))` on the field |
+| `@cLayout` | Fields named as written (see C-Layout Records) |
 
 ### Record Initialization
 
