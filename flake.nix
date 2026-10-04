@@ -12,50 +12,133 @@
     flake-utils,
     ...
   }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
+    let
+      releaseInfo = import ./nix/release-info.nix;
 
-        ignisNix = import ./default.nix {
-          inherit pkgs;
-          version = "0.4.0";
-        };
-      in
-      {
-        packages.default = ignisNix.package;
-        packages.ignis = ignisNix.package;
+      # Systems that ship a prebuilt binary in the matching GitHub Release.
+      # Other systems still get the source build.
+      prebuiltSystems = builtins.attrNames releaseInfo.artifacts;
 
-        apps.default = flake-utils.lib.mkApp {
-          drv = ignisNix.package;
-          exePath = "/bin/ignis";
-        };
+      perSystem = flake-utils.lib.eachDefaultSystem (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
 
-        apps.ignis = flake-utils.lib.mkApp {
-          drv = ignisNix.package;
-          exePath = "/bin/ignis";
-        };
+          ignisNix = import ./default.nix {
+            inherit pkgs;
+            version = "0.4.0";
+          };
 
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs =
-            ignisNix.runtimeTools
-            ++ [
-              pkgs.git
-              # scripts/build_from_seed.sh decompresses the C seed.
-              pkgs.xz
-              # The bootstrap ladder, its gates and the parity harnesses.
-              pkgs.python3
-              # Lints the workflows the same way CI does.
-              pkgs.actionlint
-            ];
+          # Built from the C seed through the bootstrap ladder, no download.
+          ignisSource = ignisNix.package;
 
-          shellHook = ''
-            export IGNIS_HOME="$PWD"
-            export IGNIS_STD_PATH="$IGNIS_HOME/std"
+          hasPrebuilt = builtins.elem system prebuiltSystems;
 
-            echo "Ignis development environment loaded (Nix flake)"
-          '';
-        };
+          ignisBin =
+            if hasPrebuilt then
+              pkgs.callPackage ./nix/binary.nix { inherit (ignisNix) runtimeTools; }
+            else
+              null;
 
-        formatter = pkgs.nixpkgs-fmt;
-      });
+          # Rolling nightly prebuilt. On `main` the hash in nightly-info.nix is
+          # a placeholder: consume it via
+          # `github:Ignis-lang/ignis/nightly#ignis-nightly`.
+          ignisNightly =
+            if hasPrebuilt then
+              pkgs.callPackage ./nix/binary.nix {
+                inherit (ignisNix) runtimeTools;
+                infoFile = ./nix/nightly-info.nix;
+              }
+            else
+              null;
+
+          # Prefer the prebuilt binary when one exists for this system.
+          ignisDefault = if hasPrebuilt then ignisBin else ignisSource;
+        in
+        {
+          # Packages:
+          #   .default        -> prebuilt when available, source otherwise
+          #   .ignis          -> alias for .default
+          #   .ignis-bin      -> explicit prebuilt (only on supported systems)
+          #   .ignis-source   -> explicit source build (bootstrap ladder)
+          #   .ignis-nightly  -> rolling nightly prebuilt (pin to the nightly ref)
+          packages = {
+            default = ignisDefault;
+            ignis = ignisDefault;
+            ignis-source = ignisSource;
+          } // (if hasPrebuilt then {
+            ignis-bin = ignisBin;
+            ignis-nightly = ignisNightly;
+          } else { });
+
+          apps = {
+            default = flake-utils.lib.mkApp {
+              drv = ignisDefault;
+              exePath = "/bin/ignis";
+            };
+
+            ignis = flake-utils.lib.mkApp {
+              drv = ignisDefault;
+              exePath = "/bin/ignis";
+            };
+          } // (if hasPrebuilt then {
+            ignis-nightly = flake-utils.lib.mkApp {
+              drv = ignisNightly;
+              exePath = "/bin/ignis-nightly";
+            };
+          } else { });
+
+          devShells.default = pkgs.mkShell {
+            nativeBuildInputs =
+              ignisNix.runtimeTools
+              ++ [
+                pkgs.git
+                # scripts/build_from_seed.sh decompresses the C seed.
+                pkgs.xz
+                # The bootstrap ladder, its gates and the parity harnesses.
+                pkgs.python3
+                # Lints the workflows the same way CI does.
+                pkgs.actionlint
+              ];
+
+            shellHook = ''
+              export IGNIS_HOME="$PWD"
+              export IGNIS_STD_PATH="$IGNIS_HOME/std"
+
+              echo "Ignis development environment loaded (Nix flake)"
+            '';
+          };
+
+          formatter = pkgs.nixpkgs-fmt;
+        });
+    in
+    perSystem // {
+      # Overlay for downstream consumers:
+      #
+      #   nixpkgs.overlays = [ inputs.ignis.overlays.default ];
+      #   environment.systemPackages = [ pkgs.ignis ];
+      #
+      # `pkgs.ignis`         -> prebuilt binary when available, source otherwise
+      # `pkgs.ignis-source`  -> built from the C seed
+      # `pkgs.ignis-bin`     -> explicit prebuilt (only on prebuilt systems)
+      # `pkgs.ignis-nightly` -> rolling nightly prebuilt (only on prebuilt systems)
+      overlays.default = final: prev:
+        let
+          system = prev.stdenv.hostPlatform.system;
+          hasSystem = perSystem.packages ? ${system};
+          sysPkgs = perSystem.packages.${system};
+        in
+        if hasSystem then
+          {
+            ignis = sysPkgs.ignis;
+            ignis-source = sysPkgs.ignis-source;
+          }
+          // nixpkgs.lib.optionalAttrs (sysPkgs ? ignis-bin) {
+            ignis-bin = sysPkgs.ignis-bin;
+          }
+          // nixpkgs.lib.optionalAttrs (sysPkgs ? ignis-nightly) {
+            ignis-nightly = sysPkgs.ignis-nightly;
+          }
+        else
+          { };
+    };
 }
