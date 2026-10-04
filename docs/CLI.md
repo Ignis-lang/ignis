@@ -89,7 +89,8 @@ A project with `[ignis] std = false` builds in freestanding mode (see
 POSIX headers and no C `main` wrapper, every unit is compiled with
 `-ffreestanding`, and nothing links `libm`. With `[build] bin = false` the build
 writes an object file (`<name>.o`) instead of only the C source. `--std-path`
-names the official standard library, so a freestanding build ignores it.
+still overrides `[ignis] std_path` and names the user standard library a
+freestanding build loads, while `IGNIS_STD_PATH` is ignored.
 
 ## `ignis check`
 

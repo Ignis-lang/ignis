@@ -416,16 +416,17 @@ function resolverStdRoot(
 
 /// Resolve the std root a project build reads its modules from.
 ///
-/// A hosted project (`std = true`) resolves the official std as before. A
-/// freestanding one (`std = false`) reads only the user std its own
-/// `std_path` names, never `--std-path`, which names the official std; with
-/// no `std_path` the root is empty and the build has no std at all.
+/// `--std-path` wins over the project's `std_path` in both modes. A hosted
+/// project (`std = true`) otherwise resolves the official std as before. A
+/// freestanding one (`std = false`) otherwise reads only the user std its own
+/// `std_path` names (`IGNIS_STD_PATH` names the official std and is never
+/// read); with neither, the root is empty and the build has no std at all.
 function resolverProjectStdRoot(
   configPath: &Path::PathBuf,
   resolved: &ResolvedProject,
   overrides: &BuildOverrides,
 ): Result<Path::PathBuf, DiagnosticBag> {
-  if (resolved.stdEnabled) {
+  if (resolved.stdEnabled || overrides.stdPath.isSome()) {
     return resolverStdRoot(configPath, &resolved.stdRoot, overrides);
   }
 
@@ -2577,4 +2578,104 @@ function resolverFreestandingProjectLoadsThePreludeFromTheUserStdManifest(): voi
   };
 
   Test::assertEq<boolean>(coreKind == BuildModuleKind::STD, true);
+}
+
+/// Discovers a freestanding fixture with `--std-path` set to `stdRoot`.
+function resolverDiscoverFreestandingWithStdPath(
+  fixtureRoot: &Path::PathBuf,
+  stdRoot: &Path::PathBuf,
+): Result<DiscoveryResult, DiagnosticBag> {
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = Option::SOME(stdRoot.toString());
+
+  return Resolver::discover(fixtureRoot, &overrides, false);
+}
+
+/// Asserts that a freestanding discovery reads its std from the
+/// `override_std` fixture: that root, and its `boot` module as the prelude.
+function resolverAssertOverrideStd(discovery: &DiscoveryResult, stdRoot: &Path::PathBuf): void {
+  Test::assertEq<boolean>(discovery.stdEnabled, false);
+  Test::assertEq<str>(discovery.stdRoot.asStr(), stdRoot.asStr());
+  Test::assertEq<u64>(discovery.preludePaths.length(), 1);
+
+  let Option::SOME(preludePath) = discovery.preludePaths.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(preludePath.asStr(), stdRoot.join("boot/mod.ign").asStr());
+}
+
+/// `--std-path` supplies a user std to a freestanding project that declares no
+/// `std_path`, and that std's own `[auto_load]` list is the prelude.
+@test
+function resolverFreestandingStdPathOverrideSuppliesAUserStd(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
+  let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
+
+  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  resolverAssertOverrideStd(&discovery, &stdRoot);
+}
+
+/// `--std-path` wins over a freestanding project's own `std_path`, the same
+/// precedence a hosted build applies.
+@test
+function resolverFreestandingStdPathOverrideWinsOverTheProjectStdPath(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/user_std");
+  let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
+
+  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  resolverAssertOverrideStd(&discovery, &stdRoot);
+}
+
+/// A freestanding `--std-path` must name a std with a `manifest.toml`; a
+/// directory without one is a missing module, not an empty std.
+@test
+function resolverFreestandingStdPathOverrideRequiresAManifest(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
+  let stdRoot: Path::PathBuf = fixtureRoot.join("src");
+
+  let Result::ERROR(bag) = resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(resolverDiagnosticSummary(&bag).toStr(), "B2001|std manifest could not be resolved");
+}
+
+/// `IGNIS_STD_PATH` names the official std, so a freestanding project ignores
+/// it and still builds with no standard library.
+@test
+function resolverFreestandingProjectIgnoresIgnisStdPath(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
+  let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
+  Env::set("IGNIS_STD_PATH", stdRoot.asStr());
+
+  let result: Result<DiscoveryResult, DiagnosticBag> = Resolver::discoverProject(&fixtureRoot);
+  Env::unset("IGNIS_STD_PATH");
+
+  let discovery: DiscoveryResult = match (result) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(discovery.stdRoot.isEmpty(), true);
+  Test::assertEq<u64>(discovery.preludePaths.length(), 0);
 }

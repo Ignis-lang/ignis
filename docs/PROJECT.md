@@ -54,16 +54,19 @@ sort_imports = false
 - `std` - Enable standard library support. `false` builds in freestanding mode
   (see below).
 - `std_path` - Optional path to std root. With `std = false` it names a user
-  standard library instead of the official one.
+  standard library instead of the official one. `--std-path` overrides it in
+  both modes. Without either, a hosted build (`std = true`) falls back to
+  `IGNIS_STD_PATH`; a freestanding build never reads that variable.
 
 #### Freestanding mode (`std = false`)
 
 A project with `std = false` neither requires nor loads the official standard
-library. `IGNIS_STD_PATH` and `--std-path` are ignored.
+library. `IGNIS_STD_PATH` is ignored. `--std-path` still wins over `std_path`,
+as in a hosted build, and names the user standard library to use.
 
-- Without `std_path` there is no standard library: no prelude is auto-loaded and
-  a `std::` import is an unresolved module.
-- With `std_path`, the directory is a user standard library with its own
+- Without `std_path` or `--std-path` there is no standard library: no prelude is
+  auto-loaded and a `std::` import is an unresolved module.
+- With either, the directory is a user standard library with its own
   `manifest.toml` in the same format as `std/manifest.toml`. Its `[modules]`
   table resolves `std::` imports and its `[auto_load]` list is the prelude.
 
