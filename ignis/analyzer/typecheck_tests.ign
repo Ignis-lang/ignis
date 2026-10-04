@@ -5529,13 +5529,64 @@ function typecheckStaticMethodCallStaysGreenWithBareReferenceGuardActive(): void
   assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
 }
 
-/// Scenario: a qualified type annotation (`Ns::Rec`, 2 segments) resolves
-/// through the restricted N>=2 branch of `resolveLocalAnnotation` — the
-/// leading `Ns` segment is unvalidated (`TODO(namespace-path-validation)`),
-/// only the last segment (`Rec`) is resolved, and it hits the `Record` arm.
+/// Scenario: a qualified type annotation (`Ns::Rec`, 2 segments) naming a
+/// record declared inside `namespace Ns` resolves through the restricted N>=2
+/// branch of `resolveLocalAnnotation` and hits the `Record` arm.
 /// Spec: selfhost-method-call-resolution — qualified type annotations.
 @test
 function typecheckQualifiedAnnotationAcceptsRecordType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32Type);
+  let mut recFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  recFields.push(xField);
+  let recItem: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("Rec"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: recFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut namespaceItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  namespaceItems.push(recItem);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: typecheckDummySpan(),
+    name: String::create("Ns"),
+    items: namespaceItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recPath: Ast::ExpressionId = typecheckAddPathExpr2(&mut module, "Ns", "Rec");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, recPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let qualifiedAnnotation: Ast::TypeId = typecheckAddPathType2(&mut module, "Ns", "Rec");
+  let rPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "_r", qualifiedAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, rPattern, qualifiedAnnotation, initExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: a qualified type annotation (`Ns::Rec`) whose `Ns` prefix names
+/// no namespace resolves to nothing, even though a top-level `Rec` exists, so
+/// the caller reports its "unsupported local annotation type" diagnostic.
+/// Spec: selfhost-method-call-resolution — qualified type annotations.
+@test
+function typecheckQualifiedAnnotationRejectsUnknownNamespacePrefix(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -5564,7 +5615,7 @@ function typecheckQualifiedAnnotationAcceptsRecordType(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support unsupported local annotation type");
 }
 
 /// Scenario: a qualified annotation whose last segment names a `Method`
