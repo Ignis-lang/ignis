@@ -40,8 +40,8 @@ import Vector from "std::vector";
 /// a returned closure, or a parameter that is not `@noescape`, which owns the
 /// closure it receives. So a closure literal written as a bare temporary is
 /// heap-allocated only where an owner exists on the other side: the result
-/// position and an argument of a call whose matching parameter is not
-/// `@noescape`. Everywhere else a bare temporary keeps its stack environment:
+/// position and a call argument whose parameter is not `@noescape`, which
+/// includes every argument of an indirect closure call. Everywhere else a bare temporary keeps its stack environment:
 /// it lives in the frame that built it, and heap-allocating it there would
 /// only produce an environment nothing frees. A closure reached through a
 /// variable is heap-allocated in every escaping position, because that
@@ -386,8 +386,7 @@ export namespace Escape {
   }
 
   /// Mark the closures a value reaching a non-result escaping position can
-  /// evaluate to: an argument of a call without a known parameter, an
-  /// assignment to a field, index or dereference, a record-initializer field,
+  /// evaluate to: an assignment to a field, index or dereference, a record-initializer field,
   /// an enum payload, a vector or tuple element.
   ///
   /// A closure literal written straight into one of these positions is not
@@ -618,15 +617,13 @@ export namespace Escape {
 
     while (index < args.length()) {
       if (let Option::SOME(argId) = args.get(index)) {
-        if (index + paramOffset < paramDefs.length()) {
-          // A parameter that is not `@noescape` owns the closure it receives
-          // and frees it, so a closure literal handed to it needs a heap
-          // environment the callee can keep.
-          if (!Escape::paramIsNoEscape(defStore, paramDefs, index + paramOffset)) {
-            Escape::markEscapingResult(hir, aliases, escaping, *argId);
-          }
-        } else {
-          Escape::markEscapingArgument(hir, aliases, escaping, *argId);
+        // A parameter that is not `@noescape` owns the closure it receives
+        // and frees it, so a closure literal handed to it needs a heap
+        // environment the callee can keep. An argument without a known
+        // parameter, such as one of an indirect closure call, is treated the
+        // same way, because nothing says the callee will not store it.
+        if (!Escape::paramIsNoEscape(defStore, paramDefs, index + paramOffset)) {
+          Escape::markEscapingResult(hir, aliases, escaping, *argId);
         }
 
         Escape::scanForEscapes(hir, defStore, aliases, escaping, *argId);
