@@ -646,6 +646,7 @@ record LexerScanner {
       }
 
       if (next == '\\') {
+        let escapeStart: SourceMark = self.cursor.mark();
         self.cursor.advanceChar();
 
         if (self.cursor.isAtEnd()) {
@@ -653,7 +654,7 @@ record LexerScanner {
           return false;
         }
 
-        self.cursor.advanceChar();
+        self.scanStringEscape(escapeStart, true);
         continue;
       }
 
@@ -695,6 +696,7 @@ record LexerScanner {
       }
 
       if (next == '\\') {
+        let escapeStart: SourceMark = self.cursor.mark();
         self.cursor.advanceChar();
 
         if (self.cursor.isAtEnd()) {
@@ -735,7 +737,7 @@ record LexerScanner {
           return;
         }
 
-        self.cursor.advanceChar();
+        self.scanStringEscape(escapeStart, false);
         continue;
       }
 
@@ -832,6 +834,62 @@ record LexerScanner {
     return Option::NONE;
   }
 
+  /// The escapes that stand for one character in a char, string or template
+  /// literal: `\a \b \f \n \r \t \v \0 \\ \' \"`.
+  private isSingleCharacterEscape(&self, escaped: char): boolean {
+    return escaped == 'a' || escaped == 'b' || escaped == 'f' || escaped == 'n' || escaped == 'r' || escaped == 't' || escaped == 'v' || escaped == '0' || escaped == '\\' || escaped == '\'' || escaped == '"';
+  }
+
+  /// Consumes the escape after the backslash at `escapeStart` in a string or
+  /// template literal, reporting one the language does not define (I0023)
+  /// without ending the literal, so lexing continues past it. Besides the
+  /// single-character escapes and `\u{...}`, a template accepts `` \` `` and
+  /// `\$`, and a backslash before a line break inside it.
+  private scanStringEscape(&mut self, escapeStart: SourceMark, inTemplate: boolean): void {
+    let Option::SOME(escaped) = self.cursor.peekChar() else {
+      return;
+    };
+
+    if (inTemplate && escaped == '\0') {
+      let nulStart: SourceMark = self.cursor.mark();
+      self.cursor.advanceChar();
+      self.emitRawNulInSource(nulStart);
+      return;
+    }
+
+    self.cursor.advanceChar();
+
+    if (self.isSingleCharacterEscape(escaped)) {
+      return;
+    }
+
+    if (inTemplate && (escaped == '`' || escaped == '$' || self.isLineTerminator(escaped))) {
+      return;
+    }
+
+    let literalKind: str = inTemplate ? "template" : "string";
+
+    if (escaped == 'u') {
+      let mut valid: boolean = false;
+
+      if (let Option::SOME(codepoint) = self.scanUnicodeEscapeValue()) {
+        valid = codepoint <= 1114111 && (codepoint < 55296 || codepoint > 57343);
+      }
+
+      if (!valid) {
+        let escape: String = self.cursor.lexemeFrom(escapeStart);
+        let message: String = `Invalid unicode escape '${escape.toStr()}' in ${literalKind} literal`;
+        self.emitDiagnostic(escapeStart, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, message.toStr(), "unicode escape must be \\u{...} with one to six hex digits naming a Unicode scalar");
+      }
+
+      return;
+    }
+
+    let escape: String = self.cursor.lexemeFrom(escapeStart);
+    let message: String = `Unknown escape sequence '${escape.toStr()}' in ${literalKind} literal`;
+    self.emitDiagnostic(escapeStart, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, message.toStr(), "escape must be one of \\a \\b \\f \\n \\r \\t \\v \\0 \\\\ \\' \\\" or \\u{...}");
+  }
+
   private scanCharEscape(&mut self, start: SourceMark): boolean {
     let Option::SOME(next) = self.cursor.peekChar() else {
       self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "Unterminated character literal", "char literal must end with a closing quote");
@@ -849,7 +907,7 @@ record LexerScanner {
       return false;
     }
 
-    if (next == 'b' || next == 'f' || next == 'n' || next == 'r' || next == 't' || next == '0' || next == '\\' || next == '\'' || next == '"') {
+    if (self.isSingleCharacterEscape(next)) {
       self.cursor.advanceChar();
       return true;
     }

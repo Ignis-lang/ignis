@@ -204,7 +204,9 @@
 <string> ::= "\"" (<string-char> | <escape-sequence>)* "\""
 <string-char> ::= [^"\\] | <escape-sequence>
 <char> ::= "'" ( [^'\\] | <escape-sequence> ) "'"
-<escape-sequence> ::= "\\" [abfnrtv'"\\]
+<escape-sequence> ::= "\\" [abfnrtv0'"\\] | "\\u{" [0-9a-fA-F]{1,6} "}"
+// Any other escape is an error (I0023). `\u{...}` names one Unicode scalar,
+// never a surrogate; a string encodes it as UTF-8. There is no `\x` escape.
 
 <boolean> ::= "true" | "false"
 <null> ::= "null"
@@ -654,7 +656,9 @@
 <string> ::= "\"" (<string-char> | <escape-sequence>)* "\""
 <string-char> ::= [^"\\] | <escape-sequence>
 <char> ::= "'" ( [^'\\] | <escape-sequence> ) "'"
-<escape-sequence> ::= "\\" [abfnrtv'"\\]
+<escape-sequence> ::= "\\" [abfnrtv0'"\\] | "\\u{" [0-9a-fA-F]{1,6} "}"
+// Any other escape is an error (I0023). `\u{...}` names one Unicode scalar,
+// never a surrogate; a string encodes it as UTF-8. There is no `\x` escape.
 
 <template> ::= <template-no-substitution>
   | <template-head> <expression> (<template-middle> <expression>)* <template-tail>

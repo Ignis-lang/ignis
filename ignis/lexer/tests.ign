@@ -477,6 +477,48 @@ function lexerRejectsUnicodeEscapesThatExceedScalarDigitWidth(): void {
   Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
 }
 
+/// An escape a string or template literal does not define is reported at the
+/// escape, and the literal still lexes as one token so the rest of the line
+/// does too.
+@test
+function lexerRejectsUnknownStringAndTemplateEscapes(): void {
+  let result: LexResult = lexText("fixtures/unknown_escape.ign", "let a = \"ab\\x08\"; let b = `c\\qd`; let after = 1;");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 2);
+  Test::assertEq<str>(match (result.diagnostics.get(0)) {
+    Option::SOME(value) -> value.code,
+    Option::NONE -> "",
+  }, "I0023");
+  Test::assertEq<str>(match (result.diagnostics.get(1)) {
+    Option::SOME(value) -> value.code,
+    Option::NONE -> "",
+  }, "I0023");
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::STRING);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_NO_SUBSTITUTION);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+}
+
+/// Every escape the language defines lexes cleanly in a string, a template
+/// and a char literal, `\u{...}` included.
+@test
+function lexerAcceptsEveryDefinedEscape(): void {
+  let result: LexResult = lexText(
+    "fixtures/known_escapes.ign",
+    "let a = \"\\a\\b\\f\\n\\r\\t\\v\\0\\\\\\'\\\"\\u{e9}\"; let b = `\\a\\v\\`\\$\\u{20AC}`; let c = '\\a'; let d = '\\v';",
+  );
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+}
+
 @test
 function lexerReportsRawNulInsideCharsAndCommentsWhileRecovering(): void {
   let raw: *mut u8 = Memory::allocateVector<u8>(37);
