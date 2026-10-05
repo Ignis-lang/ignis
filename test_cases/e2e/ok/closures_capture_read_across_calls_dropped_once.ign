@@ -1,0 +1,44 @@
+// e2e: std
+// A closure that only reads and borrows the values it captured by value can be
+// called any number of times. The environment keeps those values between calls
+// and drops each of them exactly once, when the closure itself is dropped.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function idOf(value: &Tracked): i32 {
+  return value.id;
+}
+
+function makeReader(): () -> i32 {
+  let first: Tracked = Tracked { id: 1 };
+  let second: Tracked = Tracked { id: 2 };
+
+  return (): i32 -> {
+    let _ = @move first;
+    let _ = @move second;
+
+    return idOf(&first) * 10 + second.id;
+  };
+}
+
+function main(): i32 {
+  {
+    let reader = makeReader();
+    let once: i32 = reader();
+    let twice: i32 = reader();
+
+    Io::println(`calls ${once} ${twice}`.toStr());
+  }
+
+  Io::println("reader gone");
+
+  return 0;
+}

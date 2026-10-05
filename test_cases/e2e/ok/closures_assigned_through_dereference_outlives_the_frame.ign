@@ -1,0 +1,17 @@
+// A closure assigned through a dereferenced `&mut` parameter moves into the
+// caller's binding, so it outlives the frame that built it. Its environment is on
+// the heap, and the assignment drops the closure the binding held before.
+function install(slot: &mut (i32) -> i32, a: i32): void {
+  let g = (x: i32): i32 -> x + a;
+  *slot = g;
+
+  return;
+}
+
+function main(): i32 {
+  let base: i32 = 0;
+  let mut f = (x: i32): i32 -> x + base;
+  install(&mut f, 1);
+
+  return f(41);
+}

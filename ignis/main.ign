@@ -1534,7 +1534,9 @@ function compileDiscovered(
 
   // A check answers whether the program is well formed, so it stops with the
   // last phase that can say no. Nothing past this point reports a diagnostic.
-  if (!emitCode) {
+  // A build stops here too when capture or ownership checking failed: the C
+  // it would emit drops or reads values the analysis rejected.
+  if (!emitCode || captureErrors + ownershipErrors > 0) {
     return CompiledProgram {
       source: String::new(),
       tests: tests,
@@ -4567,6 +4569,45 @@ function freestandingRuntimeHandlersRejectDuplicatesSignaturesAndHalfAllocators(
   Test::assert(freestandingErrorsContain(&messages, "'@panicHandler' is already declared on another function"));
   Test::assert(freestandingErrorsContain(&messages, "'@freeHandler' function must have the signature (pointer: *mut u8): void"));
   Test::assert(freestandingErrorsContain(&messages, "'@allocHandler' requires a '@freeHandler' function"));
+}
+
+/// A program that fails ownership checking fails the build without emitting C
+/// or linking an executable, like a program that fails analysis.
+@test
+function buildFailsWithoutAnExecutableOnAnOwnershipError(): void {
+  let stdRoot: Path::PathBuf = checkStdRepositoryStd();
+  let Result::OK(repositoryRoot) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+  let scratch: Path::PathBuf = checkStdScratchDir("ownership-error");
+  let sourcePath: Path::PathBuf = scratch.join("moved.ign");
+  let executablePath: Path::PathBuf = scratch.join("moved");
+  let source: String = String::create(
+    "function make(base: i32): (i32) -> i32 {\n  return (x: i32): i32 -> x + base;\n}\n\nfunction main(): i32 {\n  let f = make(1);\n  let g = f;\n\n  return f(1) + g(1);\n}\n",
+  );
+
+  let Result::OK(_) = Fs::writeString(&sourcePath, &source) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i32>(LibC::File::chdir(scratch.asStr() as *u8), 0);
+
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.stdPath = Option::SOME(stdRoot.toString());
+  options.outputPath = Option::SOME(executablePath.toString());
+
+  let status: i32 = runCompile(&sourcePath, &options, false, false);
+  let emittedSource: boolean = Fs::exists(scratch.join("selfhost_emit.c").asStr());
+  let linkedExecutable: boolean = Fs::exists(executablePath.asStr());
+
+  Test::assertEq<i32>(LibC::File::chdir(repositoryRoot.asStr() as *u8), 0);
+  Test::assertEq<i32>(status, 1);
+  Test::assertEq<boolean>(emittedSource, false);
+  Test::assertEq<boolean>(linkedExecutable, false);
+
+  let _removed = Fs::removeDirAll(&scratch);
 }
 
 /// Check the standard library up to C codegen without archiving it.

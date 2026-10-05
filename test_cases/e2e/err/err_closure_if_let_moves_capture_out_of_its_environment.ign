@@ -1,0 +1,40 @@
+// e2e: err
+// An `if let` over a captured value by value moves its payload out of the
+// closure's environment, which the next call would find gone.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+enum Slot {
+  FULL(Tracked),
+  EMPTY,
+}
+
+function consume(value: Tracked): i32 {
+  return value.id;
+}
+
+function makeConsumer(): () -> i32 {
+  let slot: Slot = Slot::FULL(Tracked { id: 4 });
+
+  return (): i32 -> {
+    let _ = @move slot;
+
+    if (let Slot::FULL(inner) = slot) {
+      return consume(inner);
+    }
+
+    return 0;
+  };
+}
+
+function main(): i32 {
+  let consumer = makeConsumer();
+
+  return consumer();
+}

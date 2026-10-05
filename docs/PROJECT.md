@@ -116,11 +116,11 @@ function onPanic(message: str, file: str, line: u32): void {
   `@implements(Drop)` value is guarded, so most programs need one. The check
   runs when the build emits C, so `ignis check` does not report it.
 - `@allocHandler` and `@freeHandler` come as a pair (`A0210`). A capturing
-  closure that escapes its scope without them is an error (`A0206`). A closure
+  closure that escapes its scope without them is an error (`A0227`). A closure
   with no captures never allocates and needs neither.
 - A handler with the wrong signature, or on an `extern` declaration, is
-  `A0209`. A second handler of one kind is `A0208`. A handler in a hosted
-  build is `A0207`.
+  `A0209`. A second handler of one kind is `A0229`. A handler in a hosted
+  build is `A0228`.
 
 The handlers keep external linkage in the emitted unit.
 

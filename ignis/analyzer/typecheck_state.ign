@@ -320,6 +320,30 @@ export namespace Analyzer {
       );
     }
 
+    function emitTupleBoundAsAWhole(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::TUPLE_BOUND_AS_A_WHOLE,
+        "a tuple cannot be bound to one name; destructure it with a tuple pattern",
+      );
+    }
+
+    function emitTupleDestructuresANonLiteral(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::TUPLE_PATTERN_NEEDS_A_TUPLE_LITERAL,
+        "a tuple pattern can only destructure a tuple literal",
+      );
+    }
+
     function emitMatchArmTypeMismatch(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -3600,6 +3624,112 @@ export namespace Analyzer {
       return accepted;
     }
 
+    /// The qualified path `Enum::VARIANT` when `typeId`, seen through aliases and
+    /// references, is an enum that declares a variant named `name`.
+    function scrutineeVariantPath(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      typeId: Analyzer::TypeId,
+      name: str,
+    ): Option<String> {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      let Option::SOME(typeNode) = typeStore.get(resolvedType.typeId) else {
+        return Option::NONE;
+      };
+
+      let enumDefIdOpt: Option<Analyzer::DefinitionId> = match (typeNode) {
+        Analyzer::Type::Enum(defId) -> Option::SOME(defId),
+        Analyzer::Type::Instance(instance) -> Option::SOME(instance.definition),
+        Analyzer::Type::Reference(reference) -> {
+          return Analyzer::Typecheck::scrutineeVariantPath(defStore, typeStore, symbols, reference.referent, name);
+        },
+        _ -> Option::NONE,
+      };
+      let Option::SOME(enumDefId) = enumDefIdOpt else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(Analyzer::Definition::Enum(enum_)) = defStore.get(enumDefId) else {
+        return Option::NONE;
+      };
+
+      let mut variantIndex: u64 = 0;
+      while (variantIndex < enum_.variants.length()) {
+        let Option::SOME(variantDefId) = enum_.variants.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(Analyzer::Definition::Variant(variant)) = defStore.get(*variantDefId)) {
+          let variantName: String = Analyzer::Typecheck::symbolText(symbols, variant.name);
+          if (variantName.equals(name)) {
+            let enumName: String = Analyzer::Typecheck::symbolText(symbols, enum_.name);
+            return Option::SOME(`${enumName.toStr()}::${name}`);
+          }
+        }
+
+        variantIndex += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Report a one-segment pattern path that names nothing as an unknown
+    /// variant, suggesting the qualified form when the scrutinee's enum has a
+    /// variant with that name.
+    function emitUnknownSingleSegmentPattern(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      path: &Ast::Pattern::Path,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(name) = path.segments.get(0) else {
+        return;
+      };
+
+      let message: String = `unknown variant '${name.toStr()}'`;
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::UNKNOWN_VARIANT, message.toStr(), path.span);
+      diagnostic.addLabel(LabelKind::PRIMARY, path.span, message.toStr());
+
+      if (let Option::SOME(qualified) = Analyzer::Typecheck::scrutineeVariantPath(defStore, typeStore, symbols, typeId, name.toStr())) {
+        let help: String = `did you mean \`${qualified.toStr()}\`?`;
+        diagnostic.setHelp(help.toStr());
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.diagnostics.push(diagnostic);
+    }
+
+    /// Reject a bare pattern name that equals a variant of the scrutinee's enum.
+    ///
+    /// Variants in patterns are qualified-only, so such a name binds a new
+    /// variable that matches every value, which is never what it reads as.
+    function checkBindingShadowsVariant(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      name: str,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(qualified) = Analyzer::Typecheck::scrutineeVariantPath(defStore, typeStore, symbols, typeId, name) else {
+        return;
+      };
+
+      let message: String = `pattern '${name}' binds a new variable instead of matching the variant '${qualified.toStr()}'`;
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::BINDING_SHADOWS_VARIANT, message.toStr(), span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, message.toStr());
+      let help: String = `did you mean \`${qualified.toStr()}\`?`;
+      diagnostic.setHelp(help.toStr());
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.diagnostics.push(diagnostic);
+    }
+
     /// `placeMutable` says this pattern is destructuring through a `&mut` scrutinee, so
     /// the bindings under it name places the caller may write. It is not the binding's
     /// own declared mutability (`mutable`) — see `pushPatternLocal`.
@@ -3621,7 +3751,8 @@ export namespace Analyzer {
       };
 
       match (pattern) {
-        Ast::Pattern::Node::Binding(_) -> {
+        Ast::Pattern::Node::Binding(binding) -> {
+          Analyzer::Typecheck::checkBindingShadowsVariant(state, defStore, typeStore, symbols, binding.name.toStr(), binding.span, typeId);
           return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, placeMutable, span);
         },
         Ast::Pattern::Node::Wildcard(_) -> {
@@ -3639,7 +3770,20 @@ export namespace Analyzer {
           }
 
           if (pathBindsLocal) {
+            if (let Option::SOME(name) = path.segments.get(0)) {
+              Analyzer::Typecheck::checkBindingShadowsVariant(state, defStore, typeStore, symbols, name.toStr(), path.span, typeId);
+            }
+
             return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, placeMutable, span);
+          }
+
+          // Every other unresolved path was already reported by the resolver.
+          if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Unresolved(reason)) = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId)) {
+            if (reason.equals(Analyzer::ResolverBodies::UNKNOWN_SINGLE_SEGMENT_PATTERN)) {
+              Analyzer::Typecheck::emitUnknownSingleSegmentPattern(state, defStore, typeStore, symbols, &path, typeId);
+            }
+
+            return false;
           }
 
           if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = patternRefOpt) {

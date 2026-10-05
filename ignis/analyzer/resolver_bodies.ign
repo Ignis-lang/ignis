@@ -2548,8 +2548,9 @@ export namespace Analyzer {
               index: lid.index,
             }),
           );
-          // Annotation type-syntax is intentionally NOT resolved here — typecheck
-          // owns let-bound type inference. TODO(pattern-binding-annotation).
+          // The binding's annotation (only a `for ... of` binding carries one) is
+          // resolved by typecheck in `resolveForOfBindingType`, which rejects
+          // unknown and wrongly-qualified types.
         },
         Ast::Pattern::Node::Wildcard(_) -> {
           // No binding, no side-table entry (REQ-C2).
@@ -2600,9 +2601,11 @@ export namespace Analyzer {
     /// Resolve a `Pattern::Path` constructor (enum variant or record pattern).
     ///
     /// - 1 segment: Record constructor lookup via global index. If the name resolves
-    ///   to a Record, returns `Definition(recordDefId)`. Otherwise (bare enum variant
-    ///   name without qualifier, or unknown name) emits `UNDECLARED_VARIABLE` and
-    ///   returns `Unresolved`. TODO(unqualified-variant-patterns) for bare variants.
+    ///   to a Record, returns `Definition(recordDefId)`. Enum variants are only
+    ///   reachable through a qualified path, so an unknown name (including a bare
+    ///   variant name) returns `Unresolved(UNKNOWN_SINGLE_SEGMENT_PATTERN)` and
+    ///   leaves the `UNKNOWN_VARIANT` report to typecheck, which knows the
+    ///   scrutinee type and can suggest the qualified form.
     /// - 2+ segments: last-two-segment lookup via `resolvePathTail` (`owner` =
     ///   `segments[N-2]`, `member` = `segments[N-1]`), mirroring expression
     ///   position. Variant hits enforce arity against the variant's declared
@@ -2742,12 +2745,16 @@ export namespace Analyzer {
       );
     }
 
+    /// The `Unresolved` reason of a one-segment pattern path that names nothing.
+    const UNKNOWN_SINGLE_SEGMENT_PATTERN: str = "unknown single-segment pattern";
+
     /// Resolve a single-segment pattern path.
     ///
     /// If the name resolves to a Record in the global index, returns `Definition(recordDefId)`.
-    /// Bare enum variant names (unqualified) are not yet supported (ADR-B9):
-    /// those emit `UNSUPPORTED_CONSTRUCT` and return `Unresolved`.
-    /// TODO(unqualified-variant-patterns).
+    /// Enum variants in patterns are qualified-only (`Shape::CIRCLE(r)`), so a bare
+    /// variant name is an unknown name: it is not in the global index, and this
+    /// returns `Unresolved(UNKNOWN_SINGLE_SEGMENT_PATTERN)` without a diagnostic.
+    /// Typecheck reports it as `UNKNOWN_VARIANT` against the scrutinee's type.
     function resolvePatternPath1Seg(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2764,8 +2771,7 @@ export namespace Analyzer {
       let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
 
       let Option::SOME(defId) = globalOpt else {
-        Analyzer::ResolverBodies::emitUnknownVariantPattern(state, p);
-        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create(Analyzer::ResolverBodies::UNKNOWN_SINGLE_SEGMENT_PATTERN));
       };
 
       // Only Record constructors are supported as single-segment patterns.
@@ -3071,8 +3077,8 @@ export namespace Analyzer {
         },
         Ast::Expression::Node::Cast(c) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.expression);
-          // Cast target type was resolved by type-syntax resolver if reachable.
-          // Body walker does not re-resolve it. TODO(cast-type-in-body).
+          // The target type is resolved by typecheck in `checkCastExpr` through
+          // `resolveLocalAnnotation`, which rejects unknown and wrongly-qualified types.
         },
         Ast::Expression::Node::Call(c) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.callee);
@@ -3208,8 +3214,8 @@ export namespace Analyzer {
             };
 
             Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, field.value);
-            // Field names within the initializer are NOT resolved here (need
-            // the record type from typecheck). TODO(record-init-field-resolution).
+            // Field names need the record type, so typecheck resolves them in
+            // `checkRecordInitExpr` and reports unknown, duplicate and missing fields.
             fieldIdx += 1;
           }
         },
@@ -3424,8 +3430,7 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, d.statement);
         },
         Ast::Statement::Node::Item(_) -> {
-          // Nested items deferred — the binder doesn't recurse into statement-level
-          // items either. TODO(nested-item-resolution).
+          // The parser rejects items inside a function body, so none reach here.
         },
         Ast::Statement::Node::Comment(_) -> {
           // No children.

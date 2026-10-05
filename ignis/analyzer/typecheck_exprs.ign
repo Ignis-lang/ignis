@@ -1937,7 +1937,7 @@ export namespace Analyzer {
     /// with `Dot`. Resolves the receiver's owner via `requireMethodOwner`,
     /// looks the member up in `instanceMethods` (falling back to `staticMethods`
     /// for the static-through-instance diagnostic, ADR D10), enforces the
-    /// mut-self check (ADR D7, Local-only), then typechecks the call arguments
+    /// mut-self check on the receiver place, then typechecks the call arguments
     /// against the method signature with `self` excluded (`firstParamIndex = 1`).
     /// The `MemberAccess` node itself records a receiver-less function type
     /// (ADR D9) — never reaches `checkMemberAccessExpr`.
@@ -2092,29 +2092,9 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
-        } else {
-          let receiverRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object);
-
-          if (let Option::SOME(receiverRef) = receiverRefOpt) {
-            match (receiverRef) {
-              Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
-                let bindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
-
-                if (let Option::SOME(binding) = bindingOpt) {
-                  if (!binding.mutable) {
-                    Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
-                    return Option::NONE;
-                  }
-                }
-              },
-              // TODO(receiver-place-mutability): non-Local receiver places (record
-              // fields, call results, etc.) are not checked for mutability here —
-              // accepted debt for this slice (ADR D7).
-              Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {},
-              Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {},
-              Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {},
-            };
-          }
+        } else if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
+          Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
+          return Option::NONE;
         }
       }
 
@@ -3074,17 +3054,18 @@ export namespace Analyzer {
       return false;
     }
 
-    /// Reject `@extension(T, mut)` reached through an immutable binding.
-    ///
-    /// Only a local binding is checked, the way the direct method path does:
-    /// other receiver places carry the same accepted debt.
+    /// Reject `@extension(T, mut)` reached through a receiver place that cannot
+    /// lend it, with the same reference-first, place-based rule as `mut self`
+    /// method calls.
     function checkExtensionReceiverMutability(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       ma: &Ast::Expression::MemberAccess,
       extensionDefId: Analyzer::DefinitionId,
+      receiverType: Analyzer::TypeId,
     ): void {
       let Option::SOME(Analyzer::Definition::Function(extensionFn)) = defStore.get(extensionDefId) else {
         return;
@@ -3096,23 +3077,19 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, ma.object);
 
-      let Option::SOME(receiverRef) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object) else {
-        return;
-      };
+      let referenceMutability: Option<boolean> = Analyzer::Typecheck::receiverReferenceMutability(defStore, typeStore, receiverType);
 
-      let Analyzer::ResolverBodies::ResolvedRef::Local(localId) = receiverRef else {
-        return;
-      };
+      if (let Option::SOME(referenceMutable) = referenceMutability) {
+        if (!referenceMutable) {
+          Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
+        }
 
-      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
-        return;
-      };
-
-      if (binding.mutable) {
         return;
       }
 
-      Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
+      if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
+        Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
+      }
     }
 
     /// Reports reaching a `mut self` method through a receiver that cannot lend
@@ -3158,6 +3135,20 @@ export namespace Analyzer {
 
           return last.clone();
         },
+        Ast::Expression::Node::MemberAccess(memberAccess) -> {
+          let baseName: String = Analyzer::Typecheck::receiverBindingName(module, memberAccess.object);
+          return `${baseName.toStr()}.${memberAccess.member.toStr()}`;
+        },
+        Ast::Expression::Node::Dereference(deref) -> {
+          let operandName: String = Analyzer::Typecheck::receiverBindingName(module, deref.operand);
+          return `(*${operandName.toStr()})`;
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::receiverBindingName(module, grouped.expression);
+        },
+        Ast::Expression::Node::VectorAccess(_) -> {
+          return String::create("<vector element>");
+        },
         _ -> {
           return String::create("");
         },
@@ -3199,10 +3190,12 @@ export namespace Analyzer {
       Analyzer::Typecheck::checkExtensionReceiverMutability(
         state,
         defStore,
+        typeStore,
         module,
         resolvedBodies,
         ma,
         extensionDefId,
+        receiverType,
       );
 
       if (let Option::SOME(receiverParam) = paramTypes.get(0)) {
@@ -4942,6 +4935,7 @@ export namespace Analyzer {
 
           if (let Option::SOME(valueType) = valueTypeOpt) {
             Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, value.pattern, valueType, false, value.span);
+            Analyzer::Typecheck::checkTupleDestructure(state, typeStore, module, value.pattern, Option::SOME(value.value), valueType);
           }
 
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
@@ -5418,6 +5412,7 @@ export namespace Analyzer {
         Analyzer::Typecheck::pushScope(state);
         if (let Option::SOME(scrutineeType) = scrutineeTypeOpt) {
           Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, arm.pattern, scrutineeType, false, value.span);
+          Analyzer::Typecheck::checkTupleDestructure(state, typeStore, module, arm.pattern, Option::SOME(value.scrutinee), scrutineeType);
         }
 
         if (let Option::SOME(guardId) = arm.guard) {
@@ -7010,6 +7005,112 @@ export namespace Analyzer {
       };
     }
 
+    /// Rejects the destructuring shapes lowering cannot take apart. A tuple is
+    /// destructured only when the tuple being matched is written as a literal,
+    /// element by element, so a name cannot stand for a whole tuple there and a
+    /// tuple pattern cannot take apart a tuple held anywhere else. Checked from
+    /// the pattern and the expression it destructures, together.
+    function checkTupleDestructure(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      patternId: Ast::PatternId,
+      scrutinee: Option<Ast::ExpressionId>,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(pattern) = module.patterns.get(patternId) else {
+        return;
+      };
+
+      if (let Ast::Pattern::Node::Or(alternatives) = pattern) {
+        let mut alternativeIndex: u64 = 0;
+
+        while (alternativeIndex < alternatives.alternatives.length()) {
+          if (let Option::SOME(alternative) = alternatives.alternatives.get(alternativeIndex)) {
+            Analyzer::Typecheck::checkTupleDestructure(state, typeStore, module, *alternative, scrutinee, typeId);
+          }
+
+          alternativeIndex += 1;
+        }
+
+        return;
+      }
+
+      let mut elementTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut isTuple: boolean = false;
+
+      if (let Option::SOME(Analyzer::Type::Tuple(tupleType)) = typeStore.get(typeId)) {
+        isTuple = true;
+        let mut typeIndex: u64 = 0;
+
+        while (typeIndex < tupleType.elements.length()) {
+          if (let Option::SOME(elementType) = tupleType.elements.get(typeIndex)) {
+            elementTypes.push(*elementType);
+          }
+
+          typeIndex += 1;
+        }
+      }
+
+      if (!isTuple) {
+        return;
+      }
+
+      match (pattern) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          Analyzer::Typecheck::emitTupleBoundAsAWhole(state, binding.span);
+        },
+        Ast::Pattern::Node::Tuple(tuplePattern) -> {
+          let mut literalElements: Option<Vector<Ast::ExpressionId>> = Option::NONE;
+
+          if (let Option::SOME(scrutineeId) = scrutinee) {
+            if (let Option::SOME(Ast::Expression::Node::Tuple(literal)) = module.expressions.get(scrutineeId)) {
+              let mut copied: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+              let mut copyIndex: u64 = 0;
+
+              while (copyIndex < literal.elements.length()) {
+                if (let Option::SOME(elementId) = literal.elements.get(copyIndex)) {
+                  copied.push(*elementId);
+                }
+
+                copyIndex += 1;
+              }
+
+              literalElements = Option::SOME(copied);
+            }
+          }
+
+          let Option::SOME(elements) = literalElements else {
+            Analyzer::Typecheck::emitTupleDestructuresANonLiteral(state, tuplePattern.span);
+            return;
+          };
+
+          let mut index: u64 = 0;
+
+          while (index < tuplePattern.elements.length()) {
+            let Option::SOME(elementPattern) = tuplePattern.elements.get(index) else {
+              index += 1;
+              continue;
+            };
+            let Option::SOME(elementType) = elementTypes.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            let mut elementScrutinee: Option<Ast::ExpressionId> = Option::NONE;
+
+            if (let Option::SOME(elementId) = elements.get(index)) {
+              elementScrutinee = Option::SOME(*elementId);
+            }
+
+            Analyzer::Typecheck::checkTupleDestructure(state, typeStore, module, *elementPattern, elementScrutinee, *elementType);
+            index += 1;
+          }
+        },
+        _ -> {},
+      };
+    }
+
     function checkLetElse(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -7094,6 +7195,7 @@ export namespace Analyzer {
         }
 
         Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, value.pattern, expectedType, value.mutable, value.span);
+        Analyzer::Typecheck::checkTupleDestructure(state, typeStore, module, value.pattern, Option::SOME(value.value), expectedType);
       } else if (value.annotation.isSome()) {
         Analyzer::Typecheck::emitUnsupported(state, value.span, "unsupported local annotation type");
       }
@@ -8505,7 +8607,7 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
-        } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
+        } else if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
           Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
           return Option::NONE;
         }
@@ -9038,7 +9140,7 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
-        } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
+        } else if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, ma.object)) {
           Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
           return Option::NONE;
         }
@@ -9066,26 +9168,6 @@ export namespace Analyzer {
       Analyzer::Typecheck::recordExprType(state, pipe.right, specialized.returnType);
 
       return Option::SOME(specialized.returnType);
-    }
-
-    /// Whether the receiver place a piped method call mutates is a mutable binding.
-    ///
-    /// Only a local binding carries mutability the checker can see; a field or a call
-    /// result is the same accepted debt as on the direct call path (ADR D7).
-    function pipeReceiverIsMutable(
-      state: &mut Analyzer::Typecheck::TypecheckState,
-      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
-      receiverExprId: Ast::ExpressionId,
-    ): boolean {
-      let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, receiverExprId) else {
-        return true;
-      };
-
-      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
-        return true;
-      };
-
-      return binding.mutable;
     }
 
     /// A method's parameter types with the receiver removed: an instance method's first

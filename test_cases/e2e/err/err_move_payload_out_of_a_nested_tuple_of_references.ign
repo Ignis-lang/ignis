@@ -1,0 +1,33 @@
+// e2e: err
+//
+// A payload destructured out of a referenced element of a nested tuple literal still
+// lives in the referent, so handing the binding on by value moves out of a borrow.
+import Option from "std::option";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function consume(tracked: Tracked): i32 {
+  return tracked.id;
+}
+
+function steal(first: &Option<Tracked>, second: &Option<Tracked>, third: &Option<Tracked>): i32 {
+  return match ((first, (second, third))) {
+    (_, (Option::SOME(taken), _)) -> consume(taken),
+    _ -> 0,
+  };
+}
+
+function main(): i32 {
+  let one: Option<Tracked> = Option::NONE;
+  let two: Option<Tracked> = Option::SOME(Tracked { id: 2 });
+  let three: Option<Tracked> = Option::NONE;
+
+  return steal(&one, &two, &three);
+}

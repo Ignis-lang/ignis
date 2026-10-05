@@ -1,0 +1,59 @@
+// Overloads, a reopened namespace, the same name in different scopes, a free
+// function named like a method and configuration-excluded alternatives all
+// bind without a duplicate error.
+function scale(value: i32): i32 {
+    return value * 2;
+}
+
+function scale(value: i32, factor: i32): i32 {
+    return value * factor;
+}
+
+namespace Counter {
+    function one(): i32 {
+        return 1;
+    }
+}
+
+namespace Counter {
+    function two(): i32 {
+        return 2;
+    }
+}
+
+record Wrapper {
+    public value: i32;
+
+    public doubled(&self): i32 {
+        return self.value * 2;
+    }
+}
+
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+namespace Inner {
+    function Wrapper(): i32 {
+        return 4;
+    }
+}
+
+@configFlag(@platform("linux"))
+const Target: i32 = 8;
+
+@configFlag(!@platform("linux"))
+function Target(): i32 {
+    return 8;
+}
+
+function main(): i32 {
+    let wrapper: Wrapper = Wrapper { value: 16 };
+    let total: i32 = scale(1) + scale(1, 3) + Counter::one() + Counter::two() + Inner::Wrapper() + wrapper.value + wrapper.doubled() + doubled(2);
+
+    if (total != 64) {
+        return 1;
+    }
+
+    return 0;
+}
