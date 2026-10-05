@@ -569,20 +569,22 @@ target = (target_type)(uintptr_t)(int_val);
 
 ### BitCast
 
-`@bitCast<T>(value)` uses `memcpy` with a compile-time size check:
+`@bitCast<T>(value)` uses `__builtin_memcpy` with a compile-time size check:
 
 ```c
 _Static_assert(sizeof(target_type) == sizeof(source_type), "bitCast: size mismatch");
-memcpy(&dest, &source, sizeof(target_type));
+__builtin_memcpy(&dest, &source, sizeof(target_type));
 ```
 
 ### Vector Assignment
 
-Fixed-size array assignment uses `memcpy`:
+Fixed-size array assignment uses `__builtin_memcpy`:
 
 ```c
-memcpy(dest, source, sizeof(element_type) * N);
+__builtin_memcpy(dest, source, N * sizeof(element_type));
 ```
+
+The emitter's copies use the compiler builtin rather than `memcpy`, so a freestanding unit, which has no `<string.h>`, needs no declaration for them. The C compiler may still lower a builtin copy to a call to `memcpy`, so a freestanding program links one, as it does for the copies C itself generates.
 
 ## C File Emission Order
 

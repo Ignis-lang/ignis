@@ -2442,8 +2442,8 @@ export namespace CodegenC {
 
         if (let Option::SOME(data) = function_.locals.get(node.dest.raw() as u64)) {
           if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, data.ty)) {
-            let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
-            line = `    memcpy(l${node.dest.raw()}, ${value.toStr()}, ${array.size} * sizeof(${elementText.toStr()}));\n`;
+            let local: String = `l${node.dest.raw()}`;
+            line = CodegenC::arrayCopyLine(defStore, typeStore, symbols, closures, &local, &value, &array);
           }
         }
 
@@ -2786,7 +2786,7 @@ export namespace CodegenC {
         // cannot resolve yet, so the copy is sized by the destination alone.
         let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.source);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.targetType);
-        let line: String = `    memcpy(&t${node.dest.raw()}, &${source.toStr()}, sizeof(${target.toStr()}));\n`;
+        let line: String = `    __builtin_memcpy(&t${node.dest.raw()}, &${source.toStr()}, sizeof(${target.toStr()}));\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -4047,6 +4047,10 @@ export namespace CodegenC {
 
   /// A statement copying the `array.size` elements at `source` to the array
   /// at `destination`.
+  ///
+  /// The emitter's own copies call `__builtin_memcpy`, which needs no
+  /// declaration: a freestanding unit has no `<string.h>`, and declaring
+  /// `memcpy` there would conflict with a program that defines it itself.
   function arrayCopyLine(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -4058,7 +4062,7 @@ export namespace CodegenC {
   ): String {
     let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
 
-    return `    memcpy(${destination.toStr()}, ${source.toStr()}, ${array.size} * sizeof(${elementText.toStr()}));\n`;
+    return `    __builtin_memcpy(${destination.toStr()}, ${source.toStr()}, ${array.size} * sizeof(${elementText.toStr()}));\n`;
   }
 
   function isVoidType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {

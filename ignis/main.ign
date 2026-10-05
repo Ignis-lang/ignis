@@ -4475,6 +4475,45 @@ function buildPassesTheProjectRelativePanicFileToTheRuntimeHandler(): void {
   let _removed = Fs::removeDirAll(&scratch);
 }
 
+/// Builds the freestanding fixture project at `relativeRoot` into a scratch
+/// directory and answers whether the build succeeded and the C compiler wrote
+/// the object of the package named `packageName`.
+function freestandingFixtureBuildsObject(
+  relativeRoot: str,
+  packageName: str,
+  scratchLabel: str
+): boolean {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return false;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join(relativeRoot);
+  let scratch: Path::PathBuf = checkStdScratchDir(scratchLabel);
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  let status: i32 = runCompile(&projectRoot, &options, false, true);
+
+  let name: String = String::create(packageName);
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let built: boolean = status == 0 && Fs::exists(artifacts.object.asStr());
+
+  let _removed = Fs::removeDirAll(&scratch);
+
+  return built;
+}
+
+/// The copies the emitter writes itself, for an array literal stored into its
+/// local and for a bit cast, compile in a freestanding unit, which has no
+/// `<string.h>` to declare `memcpy`.
+@test
+function buildCompilesTheEmittersMemoryCopiesInAFreestandingObject(): void {
+  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/memory_intrinsics", "freestanding-memory-intrinsics", "freestanding-memory"));
+}
+
 /// The error messages a freestanding fixture project reports when it is
 /// compiled quietly, up to and including C emission.
 function freestandingFixtureErrors(relativeRoot: str): Vector<String> {
