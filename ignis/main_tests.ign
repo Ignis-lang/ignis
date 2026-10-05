@@ -13,6 +13,9 @@ import
   fmtConfigErrorMessage,
   fmtConfigErrorMessageForPath,
   fmtStdinJsonValidateAndProcessLine,
+  formatBuildDuration,
+  formatFailureLine,
+  formatSuccessLine,
   prepareTestBinaryDirectory,
   testBinaryPath,
   validateUtf8From,
@@ -289,4 +292,39 @@ function testBinaryDirectoryFailsUnderAFile(): void {
   Test::assert(!prepareTestBinaryDirectory(&binaryPath));
 
   let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// Build durations read like the Rust compiler's: milliseconds below one
+/// second, tenths of a second below one minute, then minutes and seconds.
+@test
+function formatBuildDurationPicksTheUnitByMagnitude(): void {
+  Test::assertEq<str>(formatBuildDuration(0).toStr(), "0ms");
+  Test::assertEq<str>(formatBuildDuration(75).toStr(), "75ms");
+  Test::assertEq<str>(formatBuildDuration(999).toStr(), "999ms");
+  Test::assertEq<str>(formatBuildDuration(1000).toStr(), "1.0s");
+  Test::assertEq<str>(formatBuildDuration(1250).toStr(), "1.2s");
+  Test::assertEq<str>(formatBuildDuration(59999).toStr(), "59.9s");
+  Test::assertEq<str>(formatBuildDuration(60000).toStr(), "1m00s");
+  Test::assertEq<str>(formatBuildDuration(123456).toStr(), "2m03s");
+}
+
+/// A failed run counts its errors and warnings with the right noun, and leaves
+/// the warnings out when there are none.
+@test
+function formatFailureLineCountsWithSingularAndPlural(): void {
+  Test::assertEq<str>(formatFailureLine("Build", 3, 1).toStr(), "Build failed: 3 errors, 1 warning");
+  Test::assertEq<str>(formatFailureLine("Check", 1, 2).toStr(), "Check failed: 1 error, 2 warnings");
+  Test::assertEq<str>(formatFailureLine("Build", 2, 0).toStr(), "Build failed: 2 errors");
+}
+
+/// A successful run names its warnings only when it has some.
+@test
+function formatSuccessLineMentionsWarningsOnlyWhenPresent(): void {
+  let timing: String = String::create("2m03s");
+  let cached: String = String::create("cached");
+
+  Test::assertEq<str>(formatSuccessLine("Compiled", " with ", 0, &timing).toStr(), "Compiled (2m03s)");
+  Test::assertEq<str>(formatSuccessLine("Compiled", " with ", 12, &timing).toStr(), "Compiled with 12 warnings (2m03s)");
+  Test::assertEq<str>(formatSuccessLine("Compiled", " with ", 1, &cached).toStr(), "Compiled with 1 warning (cached)");
+  Test::assertEq<str>(formatSuccessLine("No errors found", ", ", 2, &timing).toStr(), "No errors found, 2 warnings (2m03s)");
 }

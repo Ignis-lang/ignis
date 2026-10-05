@@ -598,9 +598,11 @@ compile_stage() {
 # failure in build_stage1's one-line failure message, without dumping the
 # whole log there. Preferred
 # in order: Ignis's own `Error[<code>]:` diagnostics, a linker/gcc `error:`
-# line, any case-insensitive "error", then the first non-blank line (banner
-# text from the compiler's phase report, as a last resort). ANSI color codes
-# are stripped first since the compiler colors its own "Error" banner.
+# line, any case-insensitive "error" (which includes the compiler's closing
+# `✗ Build failed: N errors` line), then the first non-blank line (the
+# `Building ...` header, or an older stage0's phase report, as a last resort).
+# ANSI color codes are stripped first since the compiler colors its own
+# "Error" banner.
 first_error_line() {
   local log="$1"
   local line=""
