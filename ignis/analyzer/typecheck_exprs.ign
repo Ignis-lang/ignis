@@ -5221,6 +5221,12 @@ export namespace Analyzer {
           Analyzer::Typecheck::recordExprType(state, exprId, tryType);
           return Option::SOME(tryType);
         },
+        Ast::Expression::Node::Asm(value) -> {
+          let asmType: Analyzer::TypeId = Analyzer::Typecheck::checkInlineAsm(state, defStore, typeStore, symbols, module, resolvedBodies, &value, Option::NONE)!;
+
+          Analyzer::Typecheck::recordExprType(state, exprId, asmType);
+          return Option::SOME(asmType);
+        },
       };
 
       @panic("unreachable: checkExprExpected match did not return");
@@ -6065,6 +6071,8 @@ export namespace Analyzer {
         Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, value.target);
       }
 
+      Analyzer::Typecheck::checkCLayoutFunctionFieldReference(state, defStore, typeStore, symbols, module, value);
+
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let mut referenceType: Analyzer::TypeId = typeStoreRef.reference(targetType);
       if (value.mutable) {
@@ -6073,6 +6081,788 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::recordExprType(state, exprId, referenceType);
       return Option::SOME(referenceType);
+    }
+
+    /// Reports a reference to a function-typed field of a C-layout record
+    /// (A0219). The field holds a C function pointer, and a read converts it
+    /// to a function value, so a reference to it could only point at that
+    /// temporary value: writes through `&mut` would never reach the field.
+    function checkCLayoutFunctionFieldReference(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      value: &Ast::Expression::Reference,
+    ): void {
+      let Option::SOME(Ast::Expression::Node::MemberAccess(memberAccess)) = module.expressions.get(value.target) else {
+        return;
+      };
+
+      if (memberAccess.operator != Ast::Expression::AccessOperator::Dot) {
+        return;
+      }
+
+      let Option::SOME(objectType) = Analyzer::Typecheck::lookupRecordedExprType(state, memberAccess.object) else {
+        return;
+      };
+
+      let mut recordType: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, objectType).typeId;
+
+      if (let Option::SOME(Analyzer::Type::Reference(reference)) = typeStore.get(recordType)) {
+        recordType = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, reference.referent).typeId;
+      }
+
+      let Option::SOME(Analyzer::Type::Record(recordId)) = typeStore.get(recordType) else {
+        return;
+      };
+
+      let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordId) else {
+        return;
+      };
+
+      if (!recordDef.cLayout) {
+        return;
+      }
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let memberSymbol: Analyzer::SymbolId = symbolsRef.intern(memberAccess.member.toStr());
+      let fields: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::copyDefinitionIdVector(&recordDef.fields);
+      let mut index: u64 = 0;
+
+      while (index < fields.length()) {
+        let Option::SOME(fieldId) = fields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+          index += 1;
+          continue;
+        };
+
+        if (fieldDef.name.raw() != memberSymbol.raw()) {
+          index += 1;
+          continue;
+        }
+
+        let fieldType: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, fieldDef.fieldType).typeId;
+
+        let Option::SOME(Analyzer::Type::Function(_)) = typeStore.get(fieldType) else {
+          return;
+        };
+
+        let recordName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, recordId);
+        let message: String = `cannot borrow function-typed field '${memberAccess.member.toStr()}' of C-layout record '${recordName.toStr()}'`;
+        let label: String = `the field holds a C function pointer, so a reference would point at a temporary copy; read it into a local or assign '${memberAccess.member.toStr()}' directly`;
+        Analyzer::Typecheck::emitDiagnosticLabeled(state, value.span, DiagnosticCode::C_LAYOUT_FUNCTION_FIELD_REFERENCE, message.toStr(), label.toStr());
+
+        return;
+      }
+    }
+
+    /// Checks an `asm` expression or statement: the locations it names, the
+    /// types and places of its operands, its clobbers and its holes.
+    /// `statementId` is set for a statement `asm`, whose outputs become
+    /// immutable locals for the rest of the block. The result is the type of
+    /// the expression: its one output's, or `void` without outputs.
+    function checkInlineAsm(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      asmNode: &Ast::Expression::Asm,
+      statementId: Option<Ast::StatementId>,
+    ): Option<Analyzer::TypeId> {
+      if (asmNode.isPure && asmNode.outputs.length() == 0) {
+        Analyzer::Typecheck::emitDiagnosticLabeled(
+          state,
+          asmNode.span,
+          DiagnosticCode::INLINE_ASM_OUTPUTS,
+          "a pure asm needs an output",
+          "a pure asm without outputs has no effect the program can see",
+        );
+      }
+
+      let mut shapeIsValid: boolean = true;
+
+      if (statementId.isNone() && asmNode.outputs.length() > 1) {
+        shapeIsValid = false;
+        Analyzer::Typecheck::emitDiagnosticLabeled(
+          state,
+          asmNode.span,
+          DiagnosticCode::INLINE_ASM_OUTPUTS,
+          "an asm expression has at most one output",
+          "write the asm as a statement to bind each output as a local",
+        );
+      }
+
+      let mut inputFamilies: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < asmNode.inputs.length()) {
+        if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+          Analyzer::Typecheck::checkInlineAsmInput(state, defStore, typeStore, symbols, module, resolvedBodies, input, &mut inputFamilies);
+        }
+
+        index += 1;
+      }
+
+      let mut outputFamilies: Vector<String> = Vector::new<String>();
+      let mut outputTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut outputResolved: Vector<boolean> = Vector::new<boolean>();
+
+      index = 0;
+
+      while (index < asmNode.outputs.length()) {
+        let resolvedType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkInlineAsmOutput(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          asmNode,
+          index,
+          &mut outputFamilies,
+        );
+
+        if (let Option::SOME(outputType) = resolvedType) {
+          outputTypes.push(outputType);
+          outputResolved.push(true);
+        } else {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          outputTypes.push(typeStoreRef.intern(Analyzer::Type::VOID));
+          outputResolved.push(false);
+        }
+
+        index += 1;
+      }
+
+      Analyzer::Typecheck::checkInlineAsmClobbers(state, asmNode, &inputFamilies, &outputFamilies);
+      Analyzer::Typecheck::checkInlineAsmHoles(state, module, asmNode);
+
+      if (let Option::SOME(stmtId) = statementId) {
+        index = 0;
+
+        while (index < asmNode.outputs.length()) {
+          let Option::SOME(output) = asmNode.outputs.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          let mut resolved: boolean = false;
+
+          if (let Option::SOME(flag) = outputResolved.get(index)) {
+            resolved = *flag;
+          }
+
+          if (let Option::SOME(outputType) = outputTypes.get(index)) {
+            if (resolved) {
+              Analyzer::Typecheck::pushPatternLocal(
+                state,
+                resolvedBodies,
+                Analyzer::InlineAsm::outputBinding(stmtId, index),
+                *outputType,
+                false,
+                false,
+                output.span,
+              );
+            }
+          }
+
+          index += 1;
+        }
+
+        let mut statementTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        return Option::SOME(statementTypeStoreRef.intern(Analyzer::Type::VOID));
+      }
+
+      if (!shapeIsValid) {
+        return Option::NONE;
+      }
+
+      if (asmNode.outputs.length() == 1) {
+        let mut resolved: boolean = false;
+
+        if (let Option::SOME(flag) = outputResolved.get(0)) {
+          resolved = *flag;
+        }
+
+        if (!resolved) {
+          return Option::NONE;
+        }
+
+        let Option::SOME(outputType) = outputTypes.get(0) else {
+          return Option::NONE;
+        };
+
+        return Option::SOME(*outputType);
+      }
+
+      let mut voidTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return Option::SOME(voidTypeStoreRef.intern(Analyzer::Type::VOID));
+    }
+
+    /// Reports a location that names nothing asm can use (A0220) and answers
+    /// whether the location is usable.
+    function checkInlineAsmLocationKnown(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      location: &Analyzer::InlineAsm::Location,
+      written: &String,
+      span: SourceSpan,
+    ): boolean {
+      if (location.kind == Analyzer::InlineAsm::LocationKind::UNKNOWN) {
+        let message: String = `unknown asm location '${written.toStr()}'`;
+        Analyzer::Typecheck::emitDiagnosticLabeled(
+          state,
+          span,
+          DiagnosticCode::INLINE_ASM_LOCATION,
+          message.toStr(),
+          "a location is a general-purpose register or one of 'reg', 'mem' and 'imm'",
+        );
+        return false;
+      }
+
+      if (location.kind == Analyzer::InlineAsm::LocationKind::RESERVED) {
+        let message: String = `asm cannot use '${written.toStr()}'`;
+        Analyzer::Typecheck::emitDiagnosticLabeled(
+          state,
+          span,
+          DiagnosticCode::INLINE_ASM_LOCATION,
+          message.toStr(),
+          "the stack and frame pointers belong to the compiled function",
+        );
+        return false;
+      }
+
+      return true;
+    }
+
+    /// Width in bits of a type a register or an immediate can hold: an
+    /// integer or a raw pointer. 0 for any other type.
+    function inlineAsmOperandWidth(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): u32 {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return 0;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return 0;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::I8 -> 8,
+        Analyzer::Type::U8 -> 8,
+        Analyzer::Type::I16 -> 16,
+        Analyzer::Type::U16 -> 16,
+        Analyzer::Type::I32 -> 32,
+        Analyzer::Type::U32 -> 32,
+        Analyzer::Type::I64 -> 64,
+        Analyzer::Type::U64 -> 64,
+        Analyzer::Type::Pointer(_) -> 64,
+        _ -> 0,
+      };
+    }
+
+    function inlineAsmOperandIsPointer(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::Pointer(_) -> true,
+        _ -> false,
+      };
+    }
+
+    /// Checks that a register or immediate operand has a type the location
+    /// holds (A0221) and, for a named register, its exact width (A0222).
+    function checkInlineAsmOperandType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      typeId: Analyzer::TypeId,
+      location: &Analyzer::InlineAsm::Location,
+      written: &String,
+      span: SourceSpan,
+    ): void {
+      let width: u32 = Analyzer::Typecheck::inlineAsmOperandWidth(defStore, typeStore, typeId);
+      let isImmediate: boolean = location.kind == Analyzer::InlineAsm::LocationKind::IMM;
+
+      if (width == 0 || (isImmediate && Analyzer::Typecheck::inlineAsmOperandIsPointer(defStore, typeStore, typeId))) {
+        let typeName: String = typeStore.nameOfResolved(typeId, &*defStore, &*symbols);
+        let message: String = `type '${typeName.toStr()}' cannot be an asm operand in '${written.toStr()}'`;
+        let mut label: str = "registers hold integers and raw pointers";
+
+        if (isImmediate) {
+          label = "immediates are integers";
+        }
+
+        Analyzer::Typecheck::emitDiagnosticLabeled(state, span, DiagnosticCode::INLINE_ASM_OPERAND_TYPE, message.toStr(), label);
+        return;
+      }
+
+      if (location.kind == Analyzer::InlineAsm::LocationKind::REGISTER && width != location.widthBits) {
+        let typeName: String = typeStore.nameOfResolved(typeId, &*defStore, &*symbols);
+        let message: String = `type '${typeName.toStr()}' is ${width} bits wide, but '${written.toStr()}' is ${location.widthBits}`;
+
+        Analyzer::Typecheck::emitDiagnosticLabeled(
+          state,
+          span,
+          DiagnosticCode::INLINE_ASM_REGISTER_WIDTH,
+          message.toStr(),
+          "name the part of the register as wide as the operand, such as 'eax' for a 32-bit value",
+        );
+      }
+    }
+
+    /// Reports a second operand in a register `families` already holds
+    /// (A0224), or records the register.
+    function claimInlineAsmRegister(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      families: &mut Vector<String>,
+      location: &Analyzer::InlineAsm::Location,
+      written: &String,
+      span: SourceSpan,
+      role: str,
+    ): void {
+      if (location.kind != Analyzer::InlineAsm::LocationKind::REGISTER) {
+        return;
+      }
+
+      if (Analyzer::Typecheck::inlineAsmNamesContain(&*families, &location.family)) {
+        let message: String = `two asm ${role}s are in '${location.family.toStr()}'`;
+        let label: String = `'${written.toStr()}' is part of a register another ${role} already uses`;
+
+        Analyzer::Typecheck::emitDiagnosticLabeled(state, span, DiagnosticCode::INLINE_ASM_DUPLICATE_REGISTER, message.toStr(), label.toStr());
+        return;
+      }
+
+      let mut familiesRef: &mut Vector<String> = families;
+      familiesRef.push(location.family.clone());
+    }
+
+    function inlineAsmNamesContain(names: &Vector<String>, name: &String): boolean {
+      let mut index: u64 = 0;
+
+      while (index < names.length()) {
+        if (let Option::SOME(candidate) = names.get(index)) {
+          if (candidate.equals(name.toStr())) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether an expression is a decimal, hex or binary integer literal.
+    function isIntegerLiteralExpr(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      let Option::SOME(Ast::Expression::Node::Literal(literal)) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      return match (literal.value) {
+        Ast::Expression::LiteralValue::Int(_) -> true,
+        Ast::Expression::LiteralValue::UInt(_) -> true,
+        _ -> false,
+      };
+    }
+
+    /// Whether an `imm` input is a value the C compiler can see as a
+    /// constant: an integer literal, possibly negated, or the name of a
+    /// constant.
+    function isInlineAsmConstant(
+      defStore: &mut Analyzer::DefinitionStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Literal(_) -> {
+          return Analyzer::Typecheck::isIntegerLiteralExpr(module, exprId);
+        },
+        Ast::Expression::Node::Unary(unary) -> {
+          return Analyzer::Typecheck::negativeIntegerLiteralValue(module, &unary).isSome();
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::isInlineAsmConstant(defStore, module, resolvedBodies, grouped.expression);
+        },
+        Ast::Expression::Node::Variable(_) -> {
+          return Analyzer::Typecheck::resolvesToImmutableDefinition(defStore, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::Path(_) -> {
+          return Analyzer::Typecheck::resolvesToImmutableDefinition(defStore, resolvedBodies, exprId);
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      return false;
+    }
+
+    /// Whether a name resolves to a module-level constant or immutable static
+    /// rather than a local.
+    function resolvesToImmutableDefinition(
+      defStore: &mut Analyzer::DefinitionStore,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, exprId) else {
+        return false;
+      };
+
+      let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId) else {
+        return false;
+      };
+
+      return !variable.mutable;
+    }
+
+    /// Whether a `mem` input names storage: a local, a field, an element, a
+    /// dereference, or a `static mut`. A constant has no storage to point at.
+    function isInlineAsmMemoryPlace(
+      defStore: &mut Analyzer::DefinitionStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      if (!Analyzer::Typecheck::isLvalueExpr(module, exprId)) {
+        return false;
+      }
+
+      return !Analyzer::Typecheck::resolvesToImmutableDefinition(defStore, resolvedBodies, exprId);
+    }
+
+    function reportInlineAsmPlace(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      message: str,
+      label: str
+    ): void {
+      Analyzer::Typecheck::emitDiagnosticLabeled(state, span, DiagnosticCode::INLINE_ASM_OPERAND_PLACE, message, label);
+    }
+
+    /// Checks one `expression in location` or `expression inout location`
+    /// entry. An integer literal in a named register is typed as an unsigned
+    /// integer as wide as the register.
+    function checkInlineAsmInput(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      input: &Ast::Expression::AsmInput,
+      inputFamilies: &mut Vector<String>,
+    ): void {
+      let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&input.location);
+      let known: boolean = Analyzer::Typecheck::checkInlineAsmLocationKnown(state, &location, &input.location, input.locationSpan);
+
+      let mut expected: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (known && location.kind == Analyzer::InlineAsm::LocationKind::REGISTER && Analyzer::Typecheck::isIntegerLiteralExpr(module, input.expression)) {
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let mut literalType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::U64);
+
+        if (location.widthBits == 8) {
+          literalType = typeStoreRef.intern(Analyzer::Type::U8);
+        } else if (location.widthBits == 16) {
+          literalType = typeStoreRef.intern(Analyzer::Type::U16);
+        } else if (location.widthBits == 32) {
+          literalType = typeStoreRef.intern(Analyzer::Type::U32);
+        }
+
+        expected = Option::SOME(literalType);
+      }
+
+      let Option::SOME(inputType) = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        input.expression,
+        expected,
+      ) else {
+        return;
+      };
+
+      if (!known) {
+        return;
+      }
+
+      let isInOut: boolean = match (input.mode) {
+        Ast::Expression::AsmInputMode::In -> false,
+        Ast::Expression::AsmInputMode::InOut -> true,
+      };
+
+      Analyzer::Typecheck::claimInlineAsmRegister(state, inputFamilies, &location, &input.location, input.locationSpan, "input");
+
+      if (location.kind == Analyzer::InlineAsm::LocationKind::IMM) {
+        if (isInOut) {
+          Analyzer::Typecheck::reportInlineAsmPlace(state, input.span, "an 'imm' input cannot be inout", "an immediate is part of the instruction, so nothing can be written back to it");
+          return;
+        }
+
+        if (!Analyzer::Typecheck::isInlineAsmConstant(defStore, module, resolvedBodies, input.expression)) {
+          Analyzer::Typecheck::reportInlineAsmPlace(state, input.span, "an 'imm' input must be a constant", "write an integer literal or the name of a constant");
+          return;
+        }
+
+        Analyzer::Typecheck::checkInlineAsmOperandType(state, defStore, typeStore, symbols, inputType, &location, &input.location, input.span);
+        return;
+      }
+
+      if (location.kind == Analyzer::InlineAsm::LocationKind::MEM) {
+        if (!Analyzer::Typecheck::isInlineAsmMemoryPlace(defStore, module, resolvedBodies, input.expression)) {
+          Analyzer::Typecheck::reportInlineAsmPlace(state, input.span, "a 'mem' input must be a place", "write a local, a field, an element or a dereferenced pointer");
+          return;
+        }
+      } else {
+        Analyzer::Typecheck::checkInlineAsmOperandType(state, defStore, typeStore, symbols, inputType, &location, &input.location, input.span);
+      }
+
+      if (!isInOut) {
+        return;
+      }
+
+      if (!Analyzer::Typecheck::isLvalueExpr(module, input.expression) || !Analyzer::Typecheck::isAssignablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, input.expression)) {
+        Analyzer::Typecheck::reportInlineAsmPlace(state, input.span, "an inout input must be a place the asm may write", "write a mutable local, a field or element of one, or a dereferenced '*mut' pointer");
+        return;
+      }
+
+      Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, input.expression);
+    }
+
+    /// Checks the output at `outputIndex` and answers its type when the type
+    /// resolves.
+    function checkInlineAsmOutput(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      asmNode: &Ast::Expression::Asm,
+      outputIndex: u64,
+      outputFamilies: &mut Vector<String>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(output) = asmNode.outputs.get(outputIndex) else {
+        return Option::NONE;
+      };
+
+      let mut earlier: u64 = 0;
+
+      while (earlier < outputIndex) {
+        if (let Option::SOME(previous) = asmNode.outputs.get(earlier)) {
+          if (previous.name.equals(output.name.toStr())) {
+            let message: String = `two asm outputs are named '${output.name.toStr()}'`;
+            Analyzer::Typecheck::emitDiagnosticLabeled(
+              state,
+              output.span,
+              DiagnosticCode::INLINE_ASM_OUTPUTS,
+              message.toStr(),
+              "each output names its own value",
+            );
+            break;
+          }
+        }
+
+        earlier += 1;
+      }
+
+      let Option::SOME(outputType) = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output.outputType,
+        Option::SOME(state.currentFunction),
+      ) else {
+        Analyzer::Typecheck::emitUnsupported(state, output.span, "unsupported asm output type");
+        return Option::NONE;
+      };
+
+      let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&output.location);
+
+      if (!Analyzer::Typecheck::checkInlineAsmLocationKnown(state, &location, &output.location, output.locationSpan)) {
+        return Option::SOME(outputType);
+      }
+
+      if (location.kind == Analyzer::InlineAsm::LocationKind::IMM) {
+        Analyzer::Typecheck::emitDiagnosticLabeled(
+          state,
+          output.locationSpan,
+          DiagnosticCode::INLINE_ASM_LOCATION,
+          "an asm output cannot be in 'imm'",
+          "an immediate is part of the instruction, so the asm cannot write it",
+        );
+        return Option::SOME(outputType);
+      }
+
+      Analyzer::Typecheck::claimInlineAsmRegister(state, outputFamilies, &location, &output.location, output.locationSpan, "output");
+      Analyzer::Typecheck::checkInlineAsmOperandType(state, defStore, typeStore, symbols, outputType, &location, &output.location, output.span);
+
+      return Option::SOME(outputType);
+    }
+
+    /// Checks the clobber list: each entry is `memory`, `flags` or a register
+    /// asm may use (A0220), named once and not holding an operand (A0224).
+    function checkInlineAsmClobbers(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      asmNode: &Ast::Expression::Asm,
+      inputFamilies: &Vector<String>,
+      outputFamilies: &Vector<String>,
+    ): void {
+      let mut seen: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < asmNode.clobbers.length()) {
+        let Option::SOME(clobber) = asmNode.clobbers.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        index += 1;
+
+        let Option::SOME(clobberName) = Analyzer::InlineAsm::clobberName(&clobber.name) else {
+          let message: String = `asm cannot clobber '${clobber.name.toStr()}'`;
+          Analyzer::Typecheck::emitDiagnosticLabeled(
+            state,
+            clobber.span,
+            DiagnosticCode::INLINE_ASM_LOCATION,
+            message.toStr(),
+            "a clobber is 'memory', 'flags' or a general-purpose register other than the stack and frame pointers",
+          );
+          continue;
+        };
+
+        if (Analyzer::Typecheck::inlineAsmNamesContain(&seen, &clobberName)) {
+          let message: String = `'${clobber.name.toStr()}' is clobbered twice`;
+          Analyzer::Typecheck::emitDiagnosticLabeled(state, clobber.span, DiagnosticCode::INLINE_ASM_DUPLICATE_REGISTER, message.toStr(), "name each clobber once");
+          continue;
+        }
+
+        if (Analyzer::Typecheck::inlineAsmNamesContain(inputFamilies, &clobberName) || Analyzer::Typecheck::inlineAsmNamesContain(outputFamilies, &clobberName)) {
+          let message: String = `'${clobber.name.toStr()}' holds an operand, so it cannot be clobbered`;
+          Analyzer::Typecheck::emitDiagnosticLabeled(
+            state,
+            clobber.span,
+            DiagnosticCode::INLINE_ASM_DUPLICATE_REGISTER,
+            message.toStr(),
+            "an operand's register is already known to change",
+          );
+          continue;
+        }
+
+        seen.push(clobberName);
+      }
+    }
+
+    /// Checks that each `{name}` hole names exactly one operand (A0223). An
+    /// input is named by the variable it reads or the pointer it
+    /// dereferences, an output by its own name.
+    function checkInlineAsmHoles(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      module: &Ast::Module,
+      asmNode: &Ast::Expression::Asm,
+    ): void {
+      let names: Vector<String> = Analyzer::Typecheck::inlineAsmOperandNames(module, asmNode);
+      let mut index: u64 = 0;
+
+      while (index < asmNode.holes.length()) {
+        let Option::SOME(hole) = asmNode.holes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        index += 1;
+
+        let mut matches: u64 = 0;
+        let mut nameIndex: u64 = 0;
+
+        while (nameIndex < names.length()) {
+          if (let Option::SOME(name) = names.get(nameIndex)) {
+            if (name.length() > 0 && name.equals(hole.name.toStr())) {
+              matches += 1;
+            }
+          }
+
+          nameIndex += 1;
+        }
+
+        if (matches == 0) {
+          let message: String = `no asm operand is named '${hole.name.toStr()}'`;
+          Analyzer::Typecheck::emitDiagnosticLabeled(
+            state,
+            hole.span,
+            DiagnosticCode::INLINE_ASM_HOLE,
+            message.toStr(),
+            "a hole names an output, a variable an input reads, or a pointer an input dereferences",
+          );
+        } else if (matches > 1) {
+          let message: String = `more than one asm operand is named '${hole.name.toStr()}'`;
+          Analyzer::Typecheck::emitDiagnosticLabeled(
+            state,
+            hole.span,
+            DiagnosticCode::INLINE_ASM_HOLE,
+            message.toStr(),
+            "a hole has to name exactly one operand",
+          );
+        }
+      }
+    }
+
+    /// The name each operand of an `asm` goes by, inputs first and then
+    /// outputs, in header order. An input with no name a hole can use has an
+    /// empty entry.
+    function inlineAsmOperandNames(
+      module: &Ast::Module,
+      asmNode: &Ast::Expression::Asm
+    ): Vector<String> {
+      let mut names: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < asmNode.inputs.length()) {
+        if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+          names.push(Analyzer::InlineAsm::inputName(module, input.expression));
+        }
+
+        index += 1;
+      }
+
+      index = 0;
+
+      while (index < asmNode.outputs.length()) {
+        if (let Option::SOME(output) = asmNode.outputs.get(index)) {
+          names.push(output.name.clone());
+        }
+
+        index += 1;
+      }
+
+      return names;
     }
 
     function checkUnaryExpr(
@@ -6683,6 +7473,10 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinPointerFamily(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
 
+      if (name.equals("readVolatile") || name.equals("writeVolatile")) {
+        return Analyzer::Typecheck::checkBuiltinPointerFamily(state, defStore, typeStore, symbols, module, resolvedBodies, call);
+      }
+
       if (Analyzer::Typecheck::isKnownBuiltinName(name)) {
         let detail: String = `the \`@${name.toStr()}\` builtin`;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
@@ -6716,6 +7510,10 @@ export namespace Analyzer {
       }
 
       if (name.equals("sliceFromParts") || name.equals("read") || name.equals("write")) {
+        return true;
+      }
+
+      if (name.equals("readVolatile") || name.equals("writeVolatile")) {
         return true;
       }
 
@@ -6920,7 +7718,8 @@ export namespace Analyzer {
       return typeStoreRef.functionType(params, voidType);
     }
 
-    /// `@read<T>(p)`, `@write<T>(p, v)`, `@dropInPlace<T>(p)`, `@eq<T>(a, b)`:
+    /// `@read<T>(p)`, `@write<T>(p, v)`, their volatile forms `@readVolatile<T>(p)` and
+    /// `@writeVolatile<T>(p, v)`, `@dropInPlace<T>(p)`, `@eq<T>(a, b)`:
     /// one type argument driving each argument's expectation.
     function checkBuiltinPointerFamily(
       state: &mut Analyzer::Typecheck::TypecheckState,
@@ -6951,7 +7750,8 @@ export namespace Analyzer {
       let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
 
       let isEq: boolean = call.name.equals("eq");
-      let isWrite: boolean = call.name.equals("write");
+      let isRead: boolean = call.name.equals("read") || call.name.equals("readVolatile");
+      let isWrite: boolean = call.name.equals("write") || call.name.equals("writeVolatile");
       let mut expectedCount: u64 = 1;
       if (isEq || isWrite) {
         expectedCount = 2;
@@ -6989,10 +7789,10 @@ export namespace Analyzer {
         argIndex += 1;
       }
 
-      // `@read`/`@write` dereference their first argument, so handing them a
-      // literal null is a dereference the host rejects here rather than at
-      // run time.
-      if (call.name.equals("read") || isWrite) {
+      // `@read`/`@write` and their volatile forms dereference their first
+      // argument, so handing them a literal null is a dereference the host
+      // rejects here rather than at run time.
+      if (isRead || isWrite) {
         if (let Option::SOME(pointerArgId) = call.arguments.get(0)) {
           if (Analyzer::Typecheck::isNullLiteral(module, *pointerArgId)) {
             let argSpan: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, *pointerArgId, call.span);
@@ -7002,7 +7802,7 @@ export namespace Analyzer {
         }
       }
 
-      if (call.name.equals("read")) {
+      if (isRead) {
         return Option::SOME(valueType);
       }
 
@@ -8477,6 +9277,7 @@ export namespace Analyzer {
         Ast::Expression::Node::Cast(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
         Ast::Expression::Node::CaptureOverride(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
         Ast::Expression::Node::Try(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
+        Ast::Expression::Node::Asm(_) -> 0,
         Ast::Expression::Node::Dereference(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
         Ast::Expression::Node::Unary(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
         Ast::Expression::Node::PostfixIncrement(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
@@ -8522,6 +9323,7 @@ export namespace Analyzer {
         Ast::Statement::Node::Continue(_) -> 0,
         Ast::Statement::Node::Comment(_) -> 0,
         Ast::Statement::Node::Item(_) -> 0,
+        Ast::Statement::Node::Asm(_) -> 0,
         Ast::Statement::Node::Expression(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
         Ast::Statement::Node::Defer(value) -> Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.statement),
         Ast::Statement::Node::Variable(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.value),
@@ -9405,6 +10207,18 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Item(value) -> {
           Analyzer::Typecheck::emitUnsupported(state, value.span, "nested item statements");
+        },
+        Ast::Statement::Node::Asm(value) -> {
+          let _asmType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkInlineAsm(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &value,
+            Option::SOME(stmtId),
+          );
         },
       };
     }

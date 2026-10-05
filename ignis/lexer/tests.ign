@@ -848,3 +848,183 @@ function lexerAcceptsIntegerLiteralsUpToU64Max(): void {
   Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::HEX);
   Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::FLOAT);
 }
+
+/// Bumps the next token and checks that it is the literal `kind` spelling
+/// exactly `lexeme`.
+function assertLiteralToken(tokens: &mut TokenStream, kind: LiteralKind, lexeme: str): void {
+  let mut stream: &mut TokenStream = tokens;
+  let token: Token = stream.bump();
+  let text: String = token.lexemeString();
+
+  Test::assertEq<TokenKind>(token.kindValue(), TokenKind::LITERAL);
+  Test::assertEq<LiteralKind>(token.literalKindValue(), kind);
+  Test::assertEq<str>(text.toStr(), lexeme);
+}
+
+@test
+function lexerLexesAsmBodyWithoutHoles(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm () { cli }");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_NO_HOLE, "{ cli }");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerLexesAsmBodyChunksAroundHoles(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm (port in dx) -> (value: u8 in al) { in {value}, {port} }");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::IN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::ARROW);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::UINT8_TYPE);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::IN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_HEAD, "{ in {");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_MIDDLE, "}, {");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_TAIL, "} }");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerKeepsDoubledBracesInsideAsmChunks(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm () { a {{b}} {c} }}d }");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_HEAD, "{ a {{b}} {");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_TAIL, "} }}d }");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+/// Comments stay part of the chunk text, so braces inside them neither open
+/// a hole nor close the body.
+@test
+function lexerKeepsCommentsInsideAsmChunks(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm () {\n  nop // } {\n  /* { */ hlt\n}\nx");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_NO_HOLE, "{\n  nop // } {\n  /* { */ hlt\n}");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+/// A `{` inside the header's parentheses is ordinary syntax: only the first
+/// `{` at parenthesis depth zero opens the body.
+@test
+function lexerLexesBracesInsideAsmHeaderAsPunctuation(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm (P { x: 1 }.x in rax) { nop }");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_BRACE);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_BRACE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::DOT);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::IN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_NO_HOLE, "{ nop }");
+}
+
+/// The space before the interpolation's `}` matters: `}}` right after the
+/// body text would be an escaped brace inside the body.
+@test
+function lexerLexesAsmInsideTemplateInterpolation(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "`a${asm () -> (v: u8 in al) { mov {v}, 1 } }b`");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  assertLiteralToken(&mut tokens, LiteralKind::TEMPLATE_HEAD, "`a${");
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::ARROW);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::UINT8_TYPE);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::IN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_HEAD, "{ mov {");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_TAIL, "}, 1 }");
+  assertLiteralToken(&mut tokens, LiteralKind::TEMPLATE_TAIL, "}b`");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+/// A `;` before the body ends the header, so a later `{` is an ordinary
+/// block again.
+@test
+function lexerDropsAsmHeaderAtSemicolon(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm; { x }");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_BRACE);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_BRACE);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+/// A `}` closing the enclosing block before any body ends the header too, and
+/// still closes that block.
+@test
+function lexerDropsAsmHeaderAtEnclosingRightBrace(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "`${asm}{x}`");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  assertLiteralToken(&mut tokens, LiteralKind::TEMPLATE_HEAD, "`${");
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  assertLiteralToken(&mut tokens, LiteralKind::TEMPLATE_TAIL, "}{x}`");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerReportsUnterminatedAsmBody(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm () { nop");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+  Test::assertEq<str>(firstDiagnosticCode(&result), "I0053");
+  Test::assertEq<str>(firstDiagnosticMessage(&result), "Unterminated asm body");
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_NO_HOLE, "{ nop");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}

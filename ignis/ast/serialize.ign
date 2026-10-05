@@ -318,6 +318,10 @@ export namespace Ast {
         return String::create("Try");
       }
 
+      if (let Ast::Expression::Node::Asm(value) = node) {
+        return Ast::Serializer::renderAsm(&value);
+      }
+
       return String::create("If");
     }
 
@@ -376,6 +380,10 @@ export namespace Ast {
 
       if (let Ast::Statement::Node::Continue(_) = node) {
         return String::create("Continue");
+      }
+
+      if (let Ast::Statement::Node::Asm(value) = node) {
+        return Ast::Serializer::renderAsm(&value);
       }
 
       return String::create("Defer");
@@ -735,6 +743,92 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderExpressionId(node.object).toStr());
       output.pushStr(" member=");
       output.pushStr(Ast::Serializer::renderQuoted(node.member.toStr()).toStr());
+      return output;
+    }
+
+    /// `asm` as an expression or a statement: its header, then the body as
+    /// the text between holes and the hole names.
+    function renderAsm(node: &Ast::Expression::Asm): String {
+      let mut output: String = String::create("Asm span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" pure=");
+      output.pushStr(Ast::Serializer::renderBoolean(node.isPure).toStr());
+      output.pushStr(" inputs=[");
+
+      let mut index: u64 = 0;
+
+      while (index < node.inputs.length()) {
+        let input: &Ast::Expression::AsmInput = match (node.inputs.get(index)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing asm input"),
+        };
+
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        output.pushStr(Ast::Serializer::renderExpressionId(input.expression).toStr());
+
+        match (input.mode) {
+          Ast::Expression::AsmInputMode::In -> output.pushStr(" in "),
+          Ast::Expression::AsmInputMode::InOut -> output.pushStr(" inout "),
+        };
+
+        output.pushStr(Ast::Serializer::renderQuoted(input.location.toStr()).toStr());
+        index += 1;
+      }
+
+      output.pushStr("] outputs=[");
+      index = 0;
+
+      while (index < node.outputs.length()) {
+        let asmOutput: &Ast::Expression::AsmOutput = match (node.outputs.get(index)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing asm output"),
+        };
+
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        output.pushStr(Ast::Serializer::renderQuoted(asmOutput.name.toStr()).toStr());
+        output.pushStr(": ");
+        output.pushStr(Ast::Serializer::renderTypeId(asmOutput.outputType).toStr());
+        output.pushStr(" in ");
+        output.pushStr(Ast::Serializer::renderQuoted(asmOutput.location.toStr()).toStr());
+        index += 1;
+      }
+
+      output.pushStr("] clobbers=");
+      output.pushStr(Ast::Serializer::renderAsmNamesInline(&node.clobbers).toStr());
+      output.pushStr(" chunks=");
+      output.pushStr(Ast::Serializer::renderStringsInline(&node.chunks).toStr());
+      output.pushStr(" holes=");
+      output.pushStr(Ast::Serializer::renderAsmNamesInline(&node.holes).toStr());
+      output.pushStr(" body=");
+      output.pushStr(Ast::Serializer::renderSpan(node.bodySpan.filePath, node.bodySpan.start, node.bodySpan.end).toStr());
+      return output;
+    }
+
+    function renderAsmNamesInline(values: &Vector<Ast::Expression::AsmName>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        let value: &Ast::Expression::AsmName = match (values.get(index)) {
+          Option::SOME(entry) -> entry,
+          Option::NONE -> @panic("missing asm name"),
+        };
+
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        output.pushStr(Ast::Serializer::renderQuoted(value.name.toStr()).toStr());
+        index += 1;
+      }
+
+      output.pushStr("]");
       return output;
     }
 
@@ -1365,6 +1459,10 @@ export namespace Ast {
         return value.span;
       }
 
+      if (let Ast::Expression::Node::Asm(value) = node) {
+        return value.span;
+      }
+
       return SourceSpan::new("", 0, 0);
     }
 
@@ -1398,6 +1496,7 @@ export namespace Ast {
         Ast::Statement::Node::Defer(value) -> value.span,
         Ast::Statement::Node::Item(value) -> value.span,
         Ast::Statement::Node::Comment(value) -> value.span,
+        Ast::Statement::Node::Asm(value) -> value.span,
       };
     }
 

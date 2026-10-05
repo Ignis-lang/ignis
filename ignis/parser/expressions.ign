@@ -2190,7 +2190,7 @@ export namespace ParserExpressions {
     let mut tail: Option<Ast::ExpressionId> = Option::NONE;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      if (parserRef.atKeyword(Keyword::LET) || parserRef.atKeyword(Keyword::CONST) || parserRef.atKeyword(Keyword::IF) || parserRef.atKeyword(Keyword::WHILE) || parserRef.atKeyword(Keyword::RETURN) || parserRef.atKeyword(Keyword::BREAK) || parserRef.atKeyword(Keyword::CONTINUE) || parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
+      if (parserRef.atKeyword(Keyword::LET) || parserRef.atKeyword(Keyword::CONST) || parserRef.atKeyword(Keyword::IF) || parserRef.atKeyword(Keyword::WHILE) || parserRef.atKeyword(Keyword::RETURN) || parserRef.atKeyword(Keyword::BREAK) || parserRef.atKeyword(Keyword::CONTINUE) || parserRef.atKeyword(Keyword::ASM) || parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
         let mut statementResult: Option<Ast::StatementId> = Option::NONE;
 
         if (parserRef.atKeyword(Keyword::LET)) {
@@ -2207,6 +2207,8 @@ export namespace ParserExpressions {
           statementResult = ParserExpressions::parseInlineBreakStatement(parserRef);
         } else if (parserRef.atKeyword(Keyword::CONTINUE)) {
           statementResult = ParserExpressions::parseInlineContinueStatement(parserRef);
+        } else if (parserRef.atKeyword(Keyword::ASM)) {
+          statementResult = ParserExpressions::parseAsmStatement(parserRef);
         } else {
           statementResult = ParserExpressions::parseInlineBlockStatement(parserRef);
         }
@@ -2725,6 +2727,10 @@ export namespace ParserExpressions {
       return ParserExpressions::parseLetConditionExpression(parserRef);
     }
 
+    if (token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == Keyword::ASM) {
+      return ParserExpressions::parseAsmExpression(parserRef);
+    }
+
     if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::LEFT_BRACKET) {
       return ParserExpressions::parseVectorLiteralExpression(parserRef);
     }
@@ -3140,5 +3146,298 @@ export namespace ParserExpressions {
 
   function parseExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     return ParserExpressions::parseExpressionWithMinBindingPower(parser, 0);
+  }
+
+  /// Whether the next token is the identifier `word`. `pure`, `inout` and
+  /// `clobber` are reserved only in their own places of an `asm` header, so
+  /// they stay ordinary identifiers everywhere else.
+  function atContextualWord(parser: &mut ParserShared::State, word: str): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+    parserRef.skipTrivia();
+
+    let token: Token = parserRef.current();
+    return token.kindValue() == TokenKind::IDENTIFIER && token.lexemeString().equals(word);
+  }
+
+  /// An `asm` where an expression is expected. Its value is its output, so
+  /// the analyzer accepts it with at most one.
+  function parseAsmExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let asmNode = ParserExpressions::parseAsm(parserRef)!;
+    let span: SourceSpan = asmNode.span;
+    let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Asm(asmNode));
+
+    return Option::SOME(ParsedExpression {
+      id: expressionId,
+      span: span,
+    });
+  }
+
+  /// An `asm` at the start of a statement. It ends with its body's `}`, as a
+  /// `while` ends with its block, and each of its outputs names a local for
+  /// the rest of the block.
+  function parseAsmStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let asmNode = ParserExpressions::parseAsm(parserRef)!;
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Asm(asmNode)));
+  }
+
+  /// Parses `asm pure? (inputs) (-> (outputs))? clobber(names)? { body }`,
+  /// from the keyword through the body's closing `}`. Every list takes a
+  /// trailing comma. The inputs may be empty, but an output list or a
+  /// clobber list, once written, names at least one entry: an empty one
+  /// would say nothing.
+  function parseAsm(parser: &mut ParserShared::State): Option<Ast::Expression::Asm> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let keyword = parserRef.expectKeyword(Keyword::ASM, "expected 'asm'")!;
+
+    let mut isPure: boolean = false;
+
+    if (ParserExpressions::atContextualWord(parserRef, "pure")) {
+      parserRef.bump();
+      isPure = true;
+    }
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to open the asm inputs") else {
+      return Option::NONE;
+    };
+
+    let mut inputs: Vector<Ast::Expression::AsmInput> = Vector::new<Ast::Expression::AsmInput>();
+
+    while (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+      let input = ParserExpressions::parseAsmInput(parserRef)!;
+      inputs.push(input);
+
+      if (parserRef.consumePunctuation(Punctuation::COMMA).isNone()) {
+        break;
+      }
+    }
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' to close the asm inputs") else {
+      return Option::NONE;
+    };
+
+    let mut outputs: Vector<Ast::Expression::AsmOutput> = Vector::new<Ast::Expression::AsmOutput>();
+
+    if (parserRef.consumePunctuation(Punctuation::ARROW).isSome()) {
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to open the asm outputs") else {
+        return Option::NONE;
+      };
+
+      while (true) {
+        let output = ParserExpressions::parseAsmOutput(parserRef)!;
+        outputs.push(output);
+
+        if (parserRef.consumePunctuation(Punctuation::COMMA).isNone() || parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+          break;
+        }
+      }
+
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' to close the asm outputs") else {
+        return Option::NONE;
+      };
+    }
+
+    let mut clobbers: Vector<Ast::Expression::AsmName> = Vector::new<Ast::Expression::AsmName>();
+
+    if (ParserExpressions::atContextualWord(parserRef, "clobber")) {
+      parserRef.bump();
+
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'clobber'") else {
+        return Option::NONE;
+      };
+
+      while (true) {
+        let name = parserRef.expectIdentifier("expected a clobbered register, 'memory' or 'flags'")!;
+        clobbers.push(Ast::Expression::AsmName { span: name.span, name: name.lexemeString() });
+
+        if (parserRef.consumePunctuation(Punctuation::COMMA).isNone() || parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+          break;
+        }
+      }
+
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' to close the clobber list") else {
+        return Option::NONE;
+      };
+    }
+
+    let body = ParserExpressions::parseAsmBody(parserRef)!;
+
+    return Option::SOME(Ast::Expression::Asm {
+      span: ParserShared::mergeSpans(keyword.span, body.span),
+      isPure: isPure,
+      inputs: inputs,
+      outputs: outputs,
+      clobbers: clobbers,
+      chunks: body.chunks,
+      holes: body.holes,
+      bodySpan: body.span,
+    });
+  }
+
+  /// `expression in location` or `expression inout location`.
+  function parseAsmInput(parser: &mut ParserShared::State): Option<Ast::Expression::AsmInput> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let expression = ParserExpressions::parseExpression(parserRef)!;
+
+    let mut mode: Ast::Expression::AsmInputMode = Ast::Expression::AsmInputMode::In;
+
+    if (ParserExpressions::atContextualWord(parserRef, "inout")) {
+      parserRef.bump();
+      mode = Ast::Expression::AsmInputMode::InOut;
+    } else {
+      let Option::SOME(_) = parserRef.expectKeyword(Keyword::IN, "an asm input names its location after 'in' or 'inout'") else {
+        return Option::NONE;
+      };
+    }
+
+    let location = parserRef.expectIdentifier("expected the register or operand class the input goes in")!;
+
+    return Option::SOME(Ast::Expression::AsmInput {
+      span: ParserShared::mergeSpans(expression.span, location.span),
+      expression: expression.id,
+      mode: mode,
+      location: location.lexemeString(),
+      locationSpan: location.span,
+    });
+  }
+
+  /// `name: Type in location`.
+  function parseAsmOutput(parser: &mut ParserShared::State): Option<Ast::Expression::AsmOutput> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let name = parserRef.expectIdentifier("expected the name of an asm output")!;
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' before the asm output type") else {
+      return Option::NONE;
+    };
+
+    let outputType = ParserTypes::parseType(parserRef)!;
+
+    let Option::SOME(_) = parserRef.expectKeyword(Keyword::IN, "an asm output names its location after 'in'") else {
+      return Option::NONE;
+    };
+
+    let location = parserRef.expectIdentifier("expected the register or operand class the output comes from")!;
+
+    return Option::SOME(Ast::Expression::AsmOutput {
+      span: ParserShared::mergeSpans(name.span, location.span),
+      name: name.lexemeString(),
+      outputType: outputType,
+      location: location.lexemeString(),
+      locationSpan: location.span,
+    });
+  }
+
+  /// The pieces of an `asm` body.
+  record ParsedAsmBody {
+    public span: SourceSpan;
+    public chunks: Vector<String>;
+    public holes: Vector<Ast::Expression::AsmName>;
+  }
+
+  /// The body text an embed chunk token carries, without the brace that
+  /// opens it and the brace that ends it. A body the lexer found unterminated
+  /// has no closing brace to drop.
+  function embedChunkText(token: &Token): String {
+    let lexeme: String = token.lexemeString();
+    let kind: LiteralKind = token.literalKindValue();
+    let mut trailing: u64 = 1;
+
+    if ((kind == LiteralKind::EMBED_NO_HOLE || kind == LiteralKind::EMBED_TAIL) && !lexeme.endsWith("}")) {
+      trailing = 0;
+    }
+
+    return ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, trailing);
+  }
+
+  /// Whether `token` is an embed chunk that closes the body.
+  function isEmbedBodyEnd(token: &Token): boolean {
+    if (token.kindValue() != TokenKind::LITERAL) {
+      return false;
+    }
+
+    let kind: LiteralKind = token.literalKindValue();
+    return kind == LiteralKind::EMBED_NO_HOLE || kind == LiteralKind::EMBED_TAIL;
+  }
+
+  /// Whether `token` is an embed chunk that follows a hole.
+  function isEmbedContinuation(token: &Token): boolean {
+    if (token.kindValue() != TokenKind::LITERAL) {
+      return false;
+    }
+
+    let kind: LiteralKind = token.literalKindValue();
+    return kind == LiteralKind::EMBED_MIDDLE || kind == LiteralKind::EMBED_TAIL;
+  }
+
+  /// Parses the body the lexer hands over as embed chunks, with the tokens of
+  /// each hole between them. A hole holds one name. A hole holding anything
+  /// else is reported and skipped up to the chunk after it, so the rest of
+  /// the body still parses.
+  function parseAsmBody(parser: &mut ParserShared::State): Option<ParsedAsmBody> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    parserRef.skipTrivia();
+
+    let first: Token = parserRef.current();
+    let opensBody: boolean = first.kindValue() == TokenKind::LITERAL && (first.literalKindValue() == LiteralKind::EMBED_NO_HOLE || first.literalKindValue() == LiteralKind::EMBED_HEAD);
+
+    if (!opensBody) {
+      parserRef.expectedToken(first.span, "LeftBrace", "expected '{' to open the asm body");
+      return Option::NONE;
+    }
+
+    parserRef.bump();
+
+    let mut chunks: Vector<String> = Vector::new<String>();
+    let mut holes: Vector<Ast::Expression::AsmName> = Vector::new<Ast::Expression::AsmName>();
+    let mut last: Token = first.clone();
+
+    chunks.push(ParserExpressions::embedChunkText(&first));
+
+    while (!ParserExpressions::isEmbedBodyEnd(&last)) {
+      parserRef.skipTrivia();
+      let holeToken: Token = parserRef.current();
+
+      if (holeToken.kindValue() == TokenKind::EOF) {
+        parserRef.expectedToken(holeToken.span, "RightBrace", "an asm hole must close with '}'");
+        return Option::NONE;
+      }
+
+      if (holeToken.kindValue() == TokenKind::IDENTIFIER) {
+        parserRef.bump();
+      } else {
+        parserRef.expectedToken(holeToken.span, "Identifier", "an asm hole names an input or output");
+      }
+
+      holes.push(Ast::Expression::AsmName { span: holeToken.span, name: holeToken.lexemeString() });
+
+      parserRef.skipTrivia();
+      let mut chunkToken: Token = parserRef.current();
+
+      if (!ParserExpressions::isEmbedContinuation(&chunkToken) && holeToken.kindValue() == TokenKind::IDENTIFIER) {
+        parserRef.expectedToken(chunkToken.span, "RightBrace", "an asm hole holds a single name");
+      }
+
+      while (!ParserExpressions::isEmbedContinuation(&chunkToken) && chunkToken.kindValue() != TokenKind::EOF) {
+        parserRef.bump();
+        parserRef.skipTrivia();
+        chunkToken = parserRef.current();
+      }
+
+      if (chunkToken.kindValue() == TokenKind::EOF) {
+        return Option::NONE;
+      }
+
+      parserRef.bump();
+      chunks.push(ParserExpressions::embedChunkText(&chunkToken));
+      last = chunkToken;
+    }
+
+    return Option::SOME(ParsedAsmBody {
+      span: ParserShared::mergeSpans(first.span, last.span),
+      chunks: chunks,
+      holes: holes,
+    });
   }
 }

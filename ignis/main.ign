@@ -8,7 +8,14 @@ import Process from "std::process";
 import Sort from "std::sort";
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::diagnostics";
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticRenderer,
+  Severity,
+  SourceFile,
+  SourceSpan,
+from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
 import Config, ResolvedProject from "@compiler::config";
@@ -27,6 +34,7 @@ import _ from "./analyzer/lowering";
 import Borrowck from "./analyzer/borrowck";
 import _ from "./analyzer/escape";
 import Capture from "./analyzer/capture";
+import RuntimeHandlers from "./analyzer/runtime_handlers";
 import CodegenC from "./codegen/mod";
 import Mono from "./analyzer/mono";
 import LirLowering from "./lir/lowering";
@@ -196,6 +204,9 @@ record BuildProfile {
   public cflags: Vector<String>;
   /// The project's `[build] cc`, the driver every toolchain step is invoked with.
   public cc: String;
+  /// A `std = false` build: every unit is compiled with `-ffreestanding` and
+  /// without the std runtime headers, and nothing links `libm`.
+  public freestanding: boolean;
 }
 
 function buildProfileCloneStrings(source: &Vector<String>): Vector<String> {
@@ -225,6 +236,7 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
     debug: discovery.flags.debug,
     cflags: buildProfileCloneStrings(&discovery.cflags),
     cc: discovery.cc.clone(),
+    freestanding: false,
   };
 
   if (let Option::SOME(level) = optLevel) {
@@ -283,8 +295,12 @@ function programBuildFingerprint(
 ): BuildFingerprint {
   let sources: Vector<Path::PathBuf> = discoveredSourcePaths(discovery);
   let profileHash: String = stampProfileHash(profile.optLevel, profile.debug, &profile.cflags);
-  let manifestPath: Path::PathBuf = discovery.stdRoot.join("manifest.toml");
-  let manifestHash: String = fingerprintHashFile(&manifestPath);
+  let mut manifestHash: String = String::new();
+
+  if (!discovery.stdRoot.isEmpty()) {
+    let manifestPath: Path::PathBuf = discovery.stdRoot.join("manifest.toml");
+    manifestHash = fingerprintHashFile(&manifestPath);
+  }
 
   return stampProgramFingerprint(
     IGNIS_VERSION,
@@ -320,20 +336,21 @@ function cacheBypassReason(options: &CliOptions): String {
 
 /// The artifacts a whole-program build's stamp stands for.
 ///
-/// A project that links nothing produces the translation unit and no object or
-/// binary, so guarding those would report a miss on every run. The binary
+/// A hosted project that links nothing produces the translation unit and no
+/// object or binary, so guarding those would report a miss on every run. A
+/// freestanding one that links nothing still produces its object. The binary
 /// itself is not here: it is guarded by the stamp's recorded output path and
 /// key, which `-o` can move without moving any input.
 function guardedBuildArtifacts(
   artifacts: &BuildArtifacts,
   reportPath: &Path::PathBuf,
-  linksExecutable: boolean,
+  producesObject: boolean,
 ): Vector<Path::PathBuf> {
   let mut guarded: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   guarded.push(artifacts.source.clone());
   guarded.push(reportPath.clone());
 
-  if (linksExecutable) {
+  if (producesObject) {
     guarded.push(artifacts.object.clone());
   }
 
@@ -361,6 +378,7 @@ function replayBuildReport(reportPath: &Path::PathBuf): void {
 function reportReusedBuild(
   artifacts: &BuildArtifacts,
   linksExecutable: boolean,
+  objectOnly: boolean,
   warnings: u64,
   statusToStderr: boolean,
 ): void {
@@ -368,6 +386,10 @@ function reportReusedBuild(
 
   if (linksExecutable) {
     printStatus(`  link: ${artifacts.executable.asStr()}`, statusToStderr);
+  }
+
+  if (objectOnly) {
+    printStatus(`  object: ${artifacts.object.asStr()}`, statusToStderr);
   }
 
   printStatus(`  summary: 0 errors, ${warnings} warnings`, statusToStderr);
@@ -411,6 +433,7 @@ function planBuildCache(
   fingerprint: &BuildFingerprint,
   artifacts: &BuildArtifacts,
   linksExecutable: boolean,
+  objectOnly: boolean,
 ): BuildCachePlan {
   if (!fingerprintCompilerIdentityIsKnown()) {
     return BuildCachePlan {
@@ -434,7 +457,7 @@ function planBuildCache(
     };
   }
 
-  let guarded: Vector<Path::PathBuf> = guardedBuildArtifacts(artifacts, reportPath, linksExecutable);
+  let guarded: Vector<Path::PathBuf> = guardedBuildArtifacts(artifacts, reportPath, linksExecutable || objectOnly);
   let verdict: StampVerdict = stampVerdict(stampPath, fingerprint, &guarded, &artifacts.executable, linksExecutable);
 
   if (verdict.reason.length() == 0) {
@@ -502,6 +525,8 @@ function relinkCachedBuild(
   let mut prebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   prebuiltObjects.push(artifacts.object.clone());
 
+  let noInlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
+
   let linkErrors: u64 = compileAndLinkUnits(
     &noSources,
     &noObjects,
@@ -512,6 +537,7 @@ function relinkCachedBuild(
     file,
     statusToStderr,
     TestRunner::jobLimit(Option::NONE),
+    &noInlineAsmUnits,
   );
 
   if (linkErrors > 0) {
@@ -526,10 +552,127 @@ function relinkCachedBuild(
   return 0;
 }
 
+/// The include directories every C unit of a build is compiled with: the std
+/// runtime headers for a hosted build, none for a freestanding one.
+function toolchainIncludeDirs(stdRoot: &Path::PathBuf, profile: &BuildProfile): Vector<String> {
+  let mut includeDirs: Vector<String> = Vector::new<String>();
+
+  if (!profile.freestanding) {
+    includeDirs.push(stdRoot.join("runtime").toString());
+  }
+
+  return includeDirs;
+}
+
+/// The flags every C unit of a build is compiled with. `-ffreestanding` comes
+/// before the project's `cflags`, so a project flag still has the last word.
+function toolchainCompileFlags(profile: &BuildProfile): Vector<String> {
+  let mut flags: Vector<String> = Vector::new<String>();
+
+  if (profile.freestanding) {
+    flags.push(String::create("-ffreestanding"));
+  }
+
+  let profileFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let mut index: u64 = 0;
+
+  while (index < profileFlags.length()) {
+    let Option::SOME(flag) = profileFlags.get(index) else {
+      break;
+    };
+
+    flags.push(flag.clone());
+    index += 1;
+  }
+
+  return flags;
+}
+
+/// The flags one C unit is compiled with. A unit that contains inline asm
+/// adds `-masm=intel`, the syntax asm bodies are written in. Every other
+/// unit keeps the default dialect, which the inline asm of system headers is
+/// written for.
+function inlineAsmUnitFlags(flags: &Vector<String>, usesInlineAsm: boolean): Vector<String> {
+  let mut unitFlags: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < flags.length()) {
+    if (let Option::SOME(flag) = flags.get(index)) {
+      unitFlags.push(flag.clone());
+    }
+
+    index += 1;
+  }
+
+  if (usesInlineAsm) {
+    unitFlags.push(String::create("-masm=intel"));
+  }
+
+  return unitFlags;
+}
+
+/// The libraries a build links: `libm` for a hosted build, none for a
+/// freestanding one.
+function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
+  let mut libs: Vector<String> = Vector::new<String>();
+
+  if (!profile.freestanding) {
+    libs.push(String::create("m"));
+  }
+
+  return libs;
+}
+
+/// Compile every emitted translation unit into an object and link nothing,
+/// which is what a freestanding library build produces. `usesInlineAsm`
+/// says whether the units contain inline asm.
+///
+/// Returns 0 when every unit compiles and 1 when any one fails.
+function compileObjectUnits(
+  sourcePaths: &Vector<Path::PathBuf>,
+  objectPaths: &Vector<Path::PathBuf>,
+  stdRoot: &Path::PathBuf,
+  profile: &BuildProfile,
+  file: &SourceFile,
+  statusToStderr: boolean,
+  usesInlineAsm: boolean,
+): u64 {
+  let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
+  let profileFlags: Vector<String> = toolchainCompileFlags(profile);
+  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, usesInlineAsm);
+
+  if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
+    profile.cc.toStr(),
+    sourcePaths,
+    objectPaths,
+    &includeDirs,
+    &extraFlags,
+    TestRunner::jobLimit(Option::NONE),
+  )) {
+    renderBagToStderr(&compileBag, file);
+    printStatus(String::create("  object: failed"), statusToStderr);
+    return 1;
+  }
+
+  let mut objectIndex: u64 = 0;
+
+  while (objectIndex < objectPaths.length()) {
+    let Option::SOME(objectPath) = objectPaths.get(objectIndex) else {
+      break;
+    };
+
+    printStatus(`  object: ${objectPath.asStr()}`, statusToStderr);
+    objectIndex += 1;
+  }
+
+  return 0;
+}
+
 /// Compile and link one fixture's translation unit without reporting anything.
 ///
 /// A fixture's toolchain failure belongs to that fixture's own report block,
 /// not to the run's output, so nothing is printed and nothing is rendered.
+/// `usesInlineAsm` says whether the units contain inline asm.
 ///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails.
 function compileAndLinkQuietly(
@@ -538,14 +681,12 @@ function compileAndLinkQuietly(
   outputPath: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
+  usesInlineAsm: boolean,
 ): u64 {
   let cc: str = profile.cc.toStr();
-  let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
-
-  let mut includeDirs: Vector<String> = Vector::new<String>();
-  includeDirs.push(runtimeDir.toString());
-
-  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
+  let profileFlags: Vector<String> = toolchainCompileFlags(profile);
+  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, usesInlineAsm);
 
   let mut objects: Vector<String> = Vector::new<String>();
   let mut unitIndex: u64 = 0;
@@ -571,9 +712,7 @@ function compileAndLinkQuietly(
   }
 
   let archives: Vector<String> = Vector::new<String>();
-
-  let mut libs: Vector<String> = Vector::new<String>();
-  libs.push(String::create("m"));
+  let libs: Vector<String> = toolchainLinkLibraries(profile);
 
   let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
@@ -587,7 +726,9 @@ function compileAndLinkQuietly(
 /// Compile every emitted translation unit and link them into an executable.
 ///
 /// `prebuiltObjects` are linked without being compiled, which is how a run
-/// reuses an object the build cache reported current.
+/// reuses an object the build cache reported current. `inlineAsmUnits` says,
+/// for each unit of `sourcePaths`, whether it contains inline asm; the units
+/// that do are compiled on their own with `-masm=intel`.
 ///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails.
 function compileAndLinkUnits(
@@ -600,14 +741,11 @@ function compileAndLinkUnits(
   file: &SourceFile,
   statusToStderr: boolean,
   jobs: u64,
+  inlineAsmUnits: &Vector<boolean>,
 ): u64 {
   let cc: str = profile.cc.toStr();
-  let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
-
-  let mut includeDirs: Vector<String> = Vector::new<String>();
-  includeDirs.push(runtimeDir.toString());
-
-  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
+  let extraFlags: Vector<String> = toolchainCompileFlags(profile);
 
   let mut objects: Vector<String> = Vector::new<String>();
   let mut unitIndex: u64 = 0;
@@ -633,14 +771,50 @@ function compileAndLinkUnits(
   }
 
   // A relink reuses every object it links, so there is no unit to compile and
-  // the toolchain is never invoked for one.
-  if (sourcePaths.length() > 0) {
+  // the toolchain is never invoked for one. The units with inline asm and the
+  // units without take different flags, so each group is compiled on its own.
+  let mut groupIndex: u64 = 0;
+
+  while (groupIndex < 2) {
+    let groupUsesInlineAsm: boolean = groupIndex == 1;
+    let mut groupSources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut groupObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut sourceIndex: u64 = 0;
+
+    while (sourceIndex < sourcePaths.length() && sourceIndex < objectPaths.length()) {
+      let mut unitUsesInlineAsm: boolean = false;
+
+      if (let Option::SOME(flag) = inlineAsmUnits.get(sourceIndex)) {
+        unitUsesInlineAsm = *flag;
+      }
+
+      if (unitUsesInlineAsm == groupUsesInlineAsm) {
+        if (let Option::SOME(sourcePath) = sourcePaths.get(sourceIndex)) {
+          groupSources.push(sourcePath.clone());
+        }
+
+        if (let Option::SOME(objectPath) = objectPaths.get(sourceIndex)) {
+          groupObjects.push(objectPath.clone());
+        }
+      }
+
+      sourceIndex += 1;
+    }
+
+    groupIndex += 1;
+
+    if (groupSources.length() == 0) {
+      continue;
+    }
+
+    let groupFlags: Vector<String> = inlineAsmUnitFlags(&extraFlags, groupUsesInlineAsm);
+
     if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
       cc,
-      sourcePaths,
-      objectPaths,
+      &groupSources,
+      &groupObjects,
       &includeDirs,
-      &extraFlags,
+      &groupFlags,
       jobs,
     )) {
       renderBagToStderr(&compileBag, file);
@@ -650,9 +824,7 @@ function compileAndLinkUnits(
   }
 
   let archives: Vector<String> = Vector::new<String>();
-
-  let mut libs: Vector<String> = Vector::new<String>();
-  libs.push(String::create("m"));
+  let libs: Vector<String> = toolchainLinkLibraries(profile);
 
   let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
@@ -701,6 +873,9 @@ record CompileOptions {
   /// rather than to the graph root's directory, and a `@test` in a shipping
   /// std module is a setup error.
   public stdTestRoot: Option<Path::PathBuf>;
+  /// Emit a freestanding unit, which a `std = false` build compiles: no
+  /// runtime or hosted headers and no C `main` wrapper.
+  public freestanding: boolean;
 
   public static build(emitCode: boolean): CompileOptions {
     return CompileOptions {
@@ -714,6 +889,7 @@ record CompileOptions {
       ownershipReportFunction: String::new(),
       statusToStderr: false,
       stdTestRoot: Option::NONE,
+      freestanding: false,
     };
   }
 }
@@ -768,6 +944,9 @@ record CompiledProgram {
   /// beside its object so a later run that reuses the object prints what the
   /// run that produced it printed, instead of going quiet.
   public report: String;
+  /// Whether the emitted C contains inline asm, which is compiled with
+  /// `-masm=intel`.
+  public usesInlineAsm: boolean;
 }
 
 function failedCompilation(errors: u64, warnings: u64): CompiledProgram {
@@ -779,6 +958,7 @@ function failedCompilation(errors: u64, warnings: u64): CompiledProgram {
     errorMessages: Vector::new<String>(),
     warningMessages: Vector::new<String>(),
     report: String::new(),
+    usesInlineAsm: false,
   };
 }
 
@@ -1021,6 +1201,42 @@ function compileDiscovered(
     recordIndex += 1;
   }
 
+  // A runtime handler can live in any module and the program may declare at
+  // most one of each kind, so handlers are collected once every module is
+  // analyzed.
+  let mut handlers: RuntimeHandlers::HandlerSet = RuntimeHandlers::HandlerSet::empty();
+  let mut handlerDiagnostics: DiagnosticBag = DiagnosticBag::init();
+  let mut handlerIndex: u64 = 0;
+
+  while (handlerIndex < records.length()) {
+    let Option::SOME(analysisRecord) = records.get(handlerIndex) else {
+      break;
+    };
+    let Option::SOME(module) = modules.get(handlerIndex) else {
+      break;
+    };
+
+    RuntimeHandlers::collectModule(
+      &defStore,
+      &typeStore,
+      module,
+      &analysisRecord.output.pass2,
+      options.freestanding,
+      &mut handlers,
+      &mut handlerDiagnostics,
+    );
+    handlerIndex += 1;
+  }
+
+  RuntimeHandlers::checkAllocatorPair(&handlers, &mut handlerDiagnostics);
+  analyzeErrors += countBySeverity(&handlerDiagnostics, Severity::ERROR);
+
+  if (quiet) {
+    collectDiagnosticMessages(&handlerDiagnostics, Severity::ERROR, false, &mut errorMessages);
+  } else {
+    renderBagCollecting(&handlerDiagnostics, file, &mut report);
+  }
+
   if (!quiet) {
     printStatus(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings), statusToStderr);
   }
@@ -1053,6 +1269,7 @@ function compileDiscovered(
       errorMessages: errorMessages,
       warningMessages: warningMessages,
       report: report,
+      usesInlineAsm: false,
     };
   }
 
@@ -1191,6 +1408,14 @@ function compileDiscovered(
     lowerIndex += 1;
   }
 
+  if (options.freestanding && handlers.allocHandler.isNone()) {
+    let allocatorDiagnostics: DiagnosticBag = Capture::reportEscapingEnvironmentsWithoutAllocator(&programHir);
+    Analyzer::appendDiagnostics(&mut captureDiagnostics, &allocatorDiagnostics);
+  }
+
+  let rawFunctionDiagnostics: DiagnosticBag = Capture::reportNonCaptureFreeRawFunctions(&mut defStore, &mut typeStore, &programHir);
+  Analyzer::appendDiagnostics(&mut captureDiagnostics, &rawFunctionDiagnostics);
+
   let captureErrors: u64 = countBySeverity(&captureDiagnostics, Severity::ERROR);
   let captureWarnings: u64 = countBySeverity(&captureDiagnostics, Severity::WARNING);
 
@@ -1215,6 +1440,19 @@ function compileDiscovered(
     }
 
     testRootIndex += 1;
+  }
+
+  // A runtime handler is called only from generated code, so it is a root
+  // for the same reason.
+  let handlerIds: Vector<u32> = handlers.definitionIds();
+  let mut handlerRootIndex: u64 = 0;
+
+  while (handlerRootIndex < handlerIds.length()) {
+    if (let Option::SOME(handlerId) = handlerIds.get(handlerRootIndex)) {
+      testRoots.push(*handlerId);
+    }
+
+    handlerRootIndex += 1;
   }
 
   let monoResult: Mono::MonoOutput = Mono::runWithRoots(
@@ -1307,6 +1545,7 @@ function compileDiscovered(
       errorMessages: errorMessages,
       warningMessages: warningMessages,
       report: report,
+      usesInlineAsm: false,
     };
   }
 
@@ -1359,6 +1598,7 @@ function compileDiscovered(
       errorMessages: errorMessages,
       warningMessages: warningMessages,
       report: report,
+      usesInlineAsm: false,
     };
   }
 
@@ -1398,6 +1638,21 @@ function compileDiscovered(
     externalIndex += 1;
   }
 
+  let mut handlerSymbolIndex: u64 = 0;
+
+  while (handlerSymbolIndex < handlerIds.length()) {
+    if (let Option::SOME(handlerId) = handlerIds.get(handlerSymbolIndex)) {
+      externalSymbols.push(*handlerId);
+    }
+
+    handlerSymbolIndex += 1;
+  }
+
+  let mut hooks: CodegenC::RuntimeHooks = runtimeHooksFor(&handlers, options.freestanding);
+  hooks.sources = files;
+  hooks.projectRoot = discovery.root.toString();
+  hooks.stdRoot = discovery.stdRoot.toString();
+
   let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
     &mut typeStore,
@@ -1405,6 +1660,7 @@ function compileDiscovered(
     &lirResult.program,
     &externalSymbols,
     &infos,
+    &mut hooks,
   );
 
   if (!quiet) {
@@ -1412,6 +1668,33 @@ function compileDiscovered(
       `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`,
       statusToStderr
     );
+  }
+
+  // Only the emitter knows every site that can panic, drop state guards
+  // included, so a freestanding build without a panic handler is rejected
+  // here, and the unit it emitted is not handed to the C compiler.
+  if (let Option::SOME(firstPanic) = hooks.unhandledPanics.get(0)) {
+    let panicSite: SourceSpan = *firstPanic;
+    let diagnostic: Diagnostic = RuntimeHandlers::missingPanicHandler(panicSite, hooks.unhandledPanics.length());
+    let mut panicDiagnostics: DiagnosticBag = DiagnosticBag::init();
+    panicDiagnostics.push(diagnostic);
+
+    if (quiet) {
+      collectDiagnosticMessages(&panicDiagnostics, Severity::ERROR, false, &mut errorMessages);
+    } else {
+      renderBagCollecting(&panicDiagnostics, file, &mut report);
+    }
+
+    return CompiledProgram {
+      source: String::new(),
+      tests: tests,
+      errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors + 1,
+      warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
+      errorMessages: errorMessages,
+      warningMessages: warningMessages,
+      report: report,
+      usesInlineAsm: false,
+    };
   }
 
   return CompiledProgram {
@@ -1422,7 +1705,37 @@ function compileDiscovered(
     errorMessages: errorMessages,
     warningMessages: warningMessages,
     report: report,
+    usesInlineAsm: emitResult.usesInlineAsm,
   };
+}
+
+/// The runtime services the emitter routes generated code through: libc for
+/// a hosted build, the program's runtime handlers for a freestanding one.
+function runtimeHooksFor(
+  handlers: &RuntimeHandlers::HandlerSet,
+  freestanding: boolean
+): CodegenC::RuntimeHooks {
+  let mut hooks: CodegenC::RuntimeHooks = CodegenC::RuntimeHooks::hosted();
+
+  if (!freestanding) {
+    return hooks;
+  }
+
+  hooks.freestanding = true;
+
+  if (let Option::SOME(handler) = &handlers.panicHandler) {
+    hooks.panicHandler = Option::SOME(handler.defId);
+  }
+
+  if (let Option::SOME(handler) = &handlers.allocHandler) {
+    hooks.allocHandler = Option::SOME(handler.defId);
+  }
+
+  if (let Option::SOME(handler) = &handlers.freeHandler) {
+    hooks.freeHandler = Option::SOME(handler.defId);
+  }
+
+  return hooks;
 }
 
 /// Command-line values a build applies on top of the project file.
@@ -1523,7 +1836,10 @@ function runCompile(
   };
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
-  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  profile.freestanding = !discovery.stdEnabled;
+
+  let objectOnly: boolean = profile.freestanding && !discovery.bin;
   let artifacts: BuildArtifacts = projectMode ? projectArtifacts(&discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(&options.outputPath);
   let stampPath: Path::PathBuf = stampPathForObject(&artifacts.object);
   let reportPath: Path::PathBuf = stampReportPathForObject(&artifacts.object);
@@ -1531,13 +1847,13 @@ function runCompile(
   let mut cacheIsWritable: boolean = false;
 
   if (!checkOnly) {
-    let plan: BuildCachePlan = planBuildCache(options, &stampPath, &reportPath, &fingerprint, &artifacts, discovery.bin);
+    let plan: BuildCachePlan = planBuildCache(options, &stampPath, &reportPath, &fingerprint, &artifacts, discovery.bin, objectOnly);
     cacheIsWritable = plan.writable;
 
     if (plan.reused) {
       printStatus(String::create("  cache: reused"), statusToStderr);
       replayBuildReport(&reportPath);
-      reportReusedBuild(&artifacts, discovery.bin, plan.warnings, statusToStderr);
+      reportReusedBuild(&artifacts, discovery.bin, objectOnly, plan.warnings, statusToStderr);
       return 0;
     }
 
@@ -1565,6 +1881,7 @@ function runCompile(
   compileOptions.dumpOwnershipReport = options.dumpOwnershipReport;
   compileOptions.ownershipReportFunction = options.ownershipReportFunction.clone();
   compileOptions.statusToStderr = options.dumpOwnershipReport;
+  compileOptions.freestanding = profile.freestanding;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
   let mut emitted: boolean = false;
@@ -1591,6 +1908,9 @@ function runCompile(
 
       let noPrebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
 
+      let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
+      inlineAsmUnits.push(compiled.usesInlineAsm);
+
       if (discovery.bin) {
         linkErrors += compileAndLinkUnits(
           &sourcePaths,
@@ -1602,7 +1922,10 @@ function runCompile(
           &file,
           statusToStderr,
           TestRunner::jobLimit(Option::NONE),
+          &inlineAsmUnits,
         );
+      } else if (objectOnly) {
+        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, statusToStderr, compiled.usesInlineAsm);
       }
     }
   }
@@ -1859,7 +2182,7 @@ function runProgramFixture(
   let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   objectPaths.push(objectPath.clone());
 
-  if (compileAndLinkQuietly(&sourcePaths, &objectPaths, &binaryPath, &fixtureDiscovery.stdRoot, &profile) > 0) {
+  if (compileAndLinkQuietly(&sourcePaths, &objectPaths, &binaryPath, &fixtureDiscovery.stdRoot, &profile, compiled.usesInlineAsm) > 0) {
     return String::create("compilation failed");
   }
 
@@ -2170,22 +2493,25 @@ function linkTestBinary(
   let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut prebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
 
   if (programIsCached) {
     prebuiltObjects.push(programObjectPath.clone());
   } else {
     sourcePaths.push(programPath.clone());
     objectPaths.push(programObjectPath.clone());
+    inlineAsmUnits.push(compiled.usesInlineAsm);
   }
 
   sourcePaths.push(harnessPath.clone());
   objectPaths.push(Path::PathBuf::fromString(&harnessObjectText));
+  inlineAsmUnits.push(false);
 
   let binaryPath: Path::PathBuf = Path::PathBuf::fromString(&outputPath);
 
   let jobs: u64 = TestRunner::jobLimit(options.jobs);
 
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false, jobs) > 0) {
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false, jobs, &inlineAsmUnits) > 0) {
     return Option::NONE;
   }
 
@@ -3590,7 +3916,8 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let mut includeDirs: Vector<String> = Vector::new<String>();
   includeDirs.push(runtimeDir.toString());
 
-  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let profileFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, compiled.usesInlineAsm);
 
   if (let Result::ERROR(compileBag) = CCompiler::compileObject(
     profile.cc.toStr(),
@@ -4055,6 +4382,193 @@ function checkStdFailsOnAMissingStandardLibrary(): void {
   Test::assertEq<boolean>(Fs::exists(outDir.join("ignis_std.c").asStr()), false);
 
   let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// A `std = false` library project builds a freestanding object: the unit is
+/// compiled with `-ffreestanding` into a `.o`, carries no hosted runtime and
+/// is never linked.
+@test
+function buildWritesAFreestandingObjectForAStdlessLibrary(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/freestanding/no_std");
+  let scratch: Path::PathBuf = checkStdScratchDir("freestanding");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("freestanding-no-std");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+
+  Test::assertEq<boolean>(Fs::exists(artifacts.object.asStr()), true);
+  Test::assertEq<boolean>(Fs::exists(artifacts.executable.asStr()), false);
+
+  let Result::OK(source) = Fs::readToString(&artifacts.source) else {
+    Test::fail();
+    return;
+  };
+
+  let runtimeHeader: String = String::create("ignis_rt.h");
+  let hostedEntry: String = String::create("int main(");
+  Test::assert(!source.contains(&runtimeHeader));
+  Test::assert(!source.contains(&hostedEntry));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// A freestanding library that declares its runtime handlers compiles into an
+/// object whose panics and closure environments go through those handlers
+/// instead of libc.
+@test
+function buildRoutesAFreestandingObjectThroughItsRuntimeHandlers(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/freestanding/handlers");
+  let scratch: Path::PathBuf = checkStdScratchDir("freestanding-handlers");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("freestanding-handlers");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+
+  Test::assertEq<boolean>(Fs::exists(artifacts.object.asStr()), true);
+
+  let Result::OK(source) = Fs::readToString(&artifacts.source) else {
+    Test::fail();
+    return;
+  };
+
+  let hostedPanic: String = String::create("fprintf");
+  let hostedAllocation: String = String::create("malloc(");
+  let hostedRelease: String = String::create("free(");
+  Test::assert(!source.contains(&hostedPanic));
+  Test::assert(!source.contains(&hostedAllocation));
+  Test::assert(!source.contains(&hostedRelease));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// A freestanding panic names its file relative to the project root, so the
+/// object never carries the absolute path of the machine that built it.
+@test
+function buildPassesTheProjectRelativePanicFileToTheRuntimeHandler(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/freestanding/handlers");
+  let scratch: Path::PathBuf = checkStdScratchDir("freestanding-panic-file");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("freestanding-handlers");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+
+  let Result::OK(source) = Fs::readToString(&artifacts.source) else {
+    Test::fail();
+    return;
+  };
+
+  let handlerCall: String = String::create("(\"boom\", \"src/lib.ign\", 29); __builtin_unreachable();");
+  let absoluteRoot: String = projectRoot.toString();
+  Test::assert(source.contains(&handlerCall));
+  Test::assert(!source.contains(&absoluteRoot));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// The error messages a freestanding fixture project reports when it is
+/// compiled quietly, up to and including C emission.
+function freestandingFixtureErrors(relativeRoot: str): Vector<String> {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return Vector::new<String>();
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join(relativeRoot);
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&projectRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Vector::new<String>();
+    },
+  };
+
+  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let mut options: CompileOptions = CompileOptions::build(true);
+  options.quiet = true;
+  options.freestanding = true;
+
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &options);
+
+  return compiled.errorMessages;
+}
+
+/// Whether one of `messages` is exactly `expected`.
+function freestandingErrorsContain(messages: &Vector<String>, expected: str): boolean {
+  let mut index: u64 = 0;
+
+  while (index < messages.length()) {
+    if (let Option::SOME(message) = messages.get(index)) {
+      if (message.equals(expected)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// A freestanding build that can panic has nowhere to report the panic
+/// without a `@panicHandler` function.
+@test
+function freestandingRuntimeHandlerIsRequiredByAPanic(): void {
+  let messages: Vector<String> = freestandingFixtureErrors("test_cases/freestanding/missing_panic_handler");
+
+  Test::assertEq<u64>(messages.length(), 1);
+  Test::assert(freestandingErrorsContain(&messages, "freestanding build can panic but declares no '@panicHandler' function"));
+}
+
+/// A freestanding escaping closure with captures needs a heap environment,
+/// which only the allocation handlers can provide.
+@test
+function freestandingRuntimeHandlersAreRequiredByAnEscapingClosure(): void {
+  let messages: Vector<String> = freestandingFixtureErrors("test_cases/freestanding/missing_allocator");
+
+  Test::assertEq<u64>(messages.length(), 1);
+  Test::assert(freestandingErrorsContain(&messages, "escaping closure needs a heap environment, but no '@allocHandler' and '@freeHandler' functions are declared"));
+}
+
+/// A second handler of one kind, a handler with the wrong signature and an
+/// allocation handler without its release counterpart are each an error.
+@test
+function freestandingRuntimeHandlersRejectDuplicatesSignaturesAndHalfAllocators(): void {
+  let messages: Vector<String> = freestandingFixtureErrors("test_cases/freestanding/invalid_handlers");
+
+  Test::assertEq<u64>(messages.length(), 3);
+  Test::assert(freestandingErrorsContain(&messages, "'@panicHandler' is already declared on another function"));
+  Test::assert(freestandingErrorsContain(&messages, "'@freeHandler' function must have the signature (pointer: *mut u8): void"));
+  Test::assert(freestandingErrorsContain(&messages, "'@allocHandler' requires a '@freeHandler' function"));
 }
 
 /// A program that fails ownership checking fails the build without emitting C

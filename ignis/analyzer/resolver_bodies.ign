@@ -3268,7 +3268,59 @@ export namespace Analyzer {
         Ast::Expression::Node::Try(t) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, t.expression);
         },
+        Ast::Expression::Node::Asm(asmNode) -> {
+          Analyzer::ResolverBodies::walkAsmInputs(state, defStore, symbols, module, &asmNode);
+        },
       };
+    }
+
+    /// Resolves the input expressions of an `asm`. The outputs of an `asm`
+    /// expression bind nothing: they only name holes.
+    function walkAsmInputs(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      asmNode: &Ast::Expression::Asm,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < asmNode.inputs.length()) {
+        if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, input.expression);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Binds each output of a statement `asm` as a local for the rest of the
+    /// block, after the inputs, which cannot see them. An output has no
+    /// pattern, so its binding is recorded under the id
+    /// `InlineAsm::outputBinding` reserves for it.
+    function bindAsmOutputs(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      symbols: &mut Analyzer::SymbolTable,
+      stmtId: Ast::StatementId,
+      asmNode: &Ast::Expression::Asm,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < asmNode.outputs.length()) {
+        if (let Option::SOME(output) = asmNode.outputs.get(index)) {
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let sym: Analyzer::SymbolId = symbolsRef.intern(output.name.toStr());
+          let lid: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::bindLocal(state, sym);
+
+          Analyzer::ResolverBodies::recordPatternRef(
+            state,
+            Analyzer::InlineAsm::outputBinding(stmtId, index),
+            Analyzer::ResolverBodies::ResolvedRef::Local(lid),
+          );
+        }
+
+        index += 1;
+      }
     }
 
     // =========================================================================
@@ -3382,6 +3434,10 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Comment(_) -> {
           // No children.
+        },
+        Ast::Statement::Node::Asm(asmNode) -> {
+          Analyzer::ResolverBodies::walkAsmInputs(state, defStore, symbols, module, &asmNode);
+          Analyzer::ResolverBodies::bindAsmOutputs(state, symbols, stmtId, &asmNode);
         },
       };
     }

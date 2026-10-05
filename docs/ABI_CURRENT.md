@@ -61,7 +61,7 @@ typedef void* null;
 | `&mut T` | `T*` |
 | `T[N]` | `T[N]` (stack allocated) |
 | `(T1, T2, ...)` | `void*` |
-| `(T...) -> R` | `void*` |
+| `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries and in C-layout record fields |
 
 References and pointers both compile to C pointers. The distinction between `*T` and `*mut T`, and between `&T` and `&mut T`, is enforced at compile time only.
 
@@ -95,6 +95,55 @@ struct Empty {
 };
 ```
 
+### C-Layout Records
+
+A record with a C layout names each C field after its written field name instead of `field_N`, in declaration order. Two kinds of record have one:
+
+- A record declared inside an `extern` block. Its C struct takes the written record name, with no definition id suffix, so C code can name the same struct.
+- A record with `@cLayout`. Its C struct name is mangled like any other record.
+
+```ignis
+extern Device {
+    record Port {
+        public control: u8;
+        public status: u32;
+    }
+}
+
+@cLayout
+record Counter {
+    public value: i32;
+}
+```
+
+```c
+struct Port {
+    u8 control;
+    u32 status;
+};
+
+struct Counter_12 {
+    i32 value;
+};
+```
+
+Field access, record initialization and drop paths use the written field name for these records, so a field named by a C keyword is rejected (A0218). Neither kind can be generic or carry a drop state byte.
+
+A function-typed field of a C-layout record is a typed C function pointer, spelled by its signature's `ignis_fn_<id>` typedef (see C Function Pointers), so C code can call it. Storing into the field, by initialization or assignment, takes a capture-free value exactly as a function-typed extern parameter does, and anything else is A0217. Reading the field yields a closure through the signature's trampoline. Copying one such field into another copies the pointer. The field owns nothing, so the record's drop skips it.
+
+```c
+struct Handler {
+    ignis_fn_328 apply;
+    i32 bias;
+};
+
+t0 = (ignis_fn_328)addOne_1696;
+(t1)->apply = t0;
+t4 = &((t3)->apply);
+t5 = *t4;
+t6 = (struct __ignis_closure_t164){ ignis_raw_tramp_328, NULL, (u8*)t5 };
+```
+
 ### Record Attributes
 
 | Ignis Attribute | C Output |
@@ -102,6 +151,7 @@ struct Empty {
 | `@packed` | `__attribute__((packed))` |
 | `@aligned(N)` | `__attribute__((aligned(N)))` |
 | `@aligned(N)` on field | `__attribute__((aligned(N)))` on the field |
+| `@cLayout` | Fields named as written (see C-Layout Records) |
 
 ### Record Initialization
 
@@ -337,6 +387,95 @@ Error display for try-capable returns:
 
 Extern functions are declared with `extern`. When calling extern functions, pointer and reference arguments are cast through `void*` to avoid C incompatible-pointer-type warnings.
 
+A hosted unit never declares an extern function: the headers it includes do. A freestanding unit (`std = false`) has none, so it emits one prototype for each extern function it calls or takes as a C function pointer, under its C symbol, with C function pointer typedefs for function-typed parameters and results:
+
+```c
+extern void platform_register_handler(ignis_fn_18);
+extern u32 platform_raise(u32);
+```
+
+Because those prototypes use the emitter's own typedefs, a freestanding unit passes a C function pointer argument as it is, without the `void*` cast.
+
+### C Function Pointers
+
+An Ignis function value is a closure struct: a call pointer, a drop pointer and an environment. C cannot call that, so a function-typed parameter or result of an extern function is a plain C function pointer instead. Each signature used that way gets one typedef, named after its type id:
+
+```c
+typedef i32 (*ignis_fn_331)(u8*, u8*);
+```
+
+An argument passed to a function-typed extern parameter must be capture-free: a function named directly, or a closure literal that captures nothing. Anything else, such as a capturing closure or a local holding a closure, is rejected (A0217), and so is a signature that itself takes or returns a function value. A named function is passed as itself; a capture-free closure literal is passed as a wrapper around its thunk that supplies a null environment. In a hosted unit both cross the call through `void*`, like pointer arguments:
+
+```c
+static i32 __closure_thunk_0_1931_raw(u8* a0, u8* a1) {
+    return __closure_thunk_0_1931(NULL, a0, a1);
+}
+
+t7 = (ignis_fn_331)compareAscending_1695;
+qsort((void*)t3, 4U, 4U, (void*)t7);
+t12 = (ignis_fn_331)__closure_thunk_0_1931_raw;
+```
+
+A function-typed result is converted to the typedef and read back as a closure whose call pointer is one trampoline per signature, whose environment is the C pointer itself, and whose drop pointer is null:
+
+```c
+static void ignis_raw_tramp_326(u8* env, i32 a0) {
+    ((ignis_fn_326)env)(a0);
+}
+
+t1 = (ignis_fn_326)signal(10, (void*)t0);
+t2 = (struct __ignis_closure_t162){ ignis_raw_tramp_326, NULL, (u8*)t1 };
+```
+
+A pointer to a function type, `*(T) -> R`, still points at a closure struct.
+
+## Inline Assembly
+
+An `asm` becomes one GCC extended asm statement in its own C block. The C unit that contains it is compiled with `-masm=intel`, so the C compiler prints operands in the Intel syntax the body is written in; every other unit keeps the default AT&T dialect its system headers expect.
+
+```c
+{
+    __asm__ volatile(" in %[value], %[port] " : [value] "=a"(t2) : [port] "d"(((u16)t1)));
+}
+```
+
+| Part | Emitted as |
+| --- | --- |
+| Volatility | `__asm__ volatile(...)`; a `pure` asm drops `volatile`. |
+| Body | One string: the chunks between holes, with `//` and `/* */` comments removed, `%` written `%%`, `\|` written `%\|`, and the escaped braces `{{` and `}}` written `%{` and `%}`. |
+| Hole | `%[name]`, the operand's symbolic name. An operand whose name another operand shares has no symbolic name, and no hole can name it. |
+| Outputs | Written operands in header order: the outputs, then the `inout` inputs. |
+| Inputs | The operands only read, cast to their type, so a constant has the operand's width: `((u64)21U)`. |
+| Clobbers | `memory` as `"memory"`, `flags` as `"cc"`, a register by its 64-bit name. |
+
+Constraints are a prefix, `=` for an output and `+` for an `inout` input, then the location:
+
+| Location | Constraint | Operand |
+| --- | --- | --- |
+| `rax` family | `a` | |
+| `rbx` family | `b` | |
+| `rcx` family | `c` | |
+| `rdx` family | `d` | |
+| `rsi` family | `S` | |
+| `rdi` family | `D` | |
+| `r8` to `r15` families | `r` | a register variable bound to the register |
+| `reg` | `r` | |
+| `mem` | `m` | the place itself, `(*(T*)ptr)` |
+| `imm` | `n` | the constant |
+
+An output of an `asm` expression is written to a temp, which is the expression's value. An `inout` input, a `mem` input and the output of a statement `asm`, which is stored in its local, are reached through a pointer to the place: the operand is `(*(T*)ptr)`.
+
+`r8` to `r15` have no constraint letter, so an operand in one goes through a local register variable, initialized from the operand when the asm reads it and copied back when it writes it:
+
+```c
+{
+    register u64 ignis_asm_0 __asm__("r8") = ((u64)t1);
+    register u64 ignis_asm_1 __asm__("r9");
+    __asm__ volatile(" lea %[result], [%[value] + 2] " : [result] "=r"(ignis_asm_1) : [value] "r"(ignis_asm_0));
+    t2 = ignis_asm_1;
+}
+```
+
 ## Drop Semantics
 
 ### Drop State
@@ -393,7 +532,7 @@ static void ignis_drop_glue_<mangled_type>(u8* payload) {
 }
 ```
 
-This returns a function pointer `void(*)(u8*)` for use by containers that need to drop generic payloads through a uniform callback.
+This returns a function pointer `void(*)(u8*)` for use by containers that need to drop generic payloads through a uniform callback. Passed straight to an extern function it is that C function pointer; used as an Ignis value of type `(*mut u8) -> void` it is read back through the C function pointer trampoline (see C Function Pointers).
 
 ### Use-After-Drop Guards
 

@@ -52,6 +52,25 @@ function decimalDigitsFitU64(digits: &String): boolean {
   return significant.compare(&maxDigits) <= 0;
 }
 
+/// What an open lexer frame is waiting for.
+enum LexerFrameKind {
+  /// A template interpolation `${ ... }`. Its `}` resumes the template text.
+  TEMPLATE,
+  /// The header of an `asm` expression, between the keyword and the body.
+  /// Its first `{` outside parentheses opens the body.
+  EMBED_HEADER,
+  /// A hole `{ ... }` inside an embedded body. Its `}` resumes the body text.
+  EMBED_HOLE,
+}
+
+/// One open frame. `depth` counts the braces opened inside a template
+/// interpolation or an embed hole, and the parentheses opened inside an
+/// embed header.
+record LexerFrame {
+  public kind: LexerFrameKind;
+  public depth: u64;
+}
+
 export record LexResult {
   public tokens: TokenStream;
   public diagnostics: DiagnosticBag;
@@ -62,18 +81,19 @@ record LexerScanner {
   public diagnostics: DiagnosticBag;
   public tokens: TokenStream;
 
-  /// Brace depth inside each template interpolation that is still open.
+  /// The template interpolations, embed headers and embed holes still open,
+  /// innermost last.
   ///
-  /// A `}` closes an interpolation only when the innermost frame is at depth
-  /// zero; otherwise it closes a block written inside the slot.
-  templateBraceDepth: Vector<u64>;
+  /// A `}` closes an interpolation or a hole only when the innermost frame is
+  /// at depth zero; otherwise it closes a block written inside it.
+  frames: Vector<LexerFrame>;
 
   public static create(file: &SourceFile): LexerScanner {
     return LexerScanner {
       cursor: SourceCursor::create(file),
       diagnostics: DiagnosticBag::init(),
       tokens: TokenStream::create(),
-      templateBraceDepth: Vector::new<u64>(),
+      frames: Vector::new<LexerFrame>(),
     };
   }
 
@@ -93,10 +113,16 @@ record LexerScanner {
   private emitIdentifierOrKeyword(&mut self, start: SourceMark): void {
     let lexeme: String = self.cursor.lexemeFrom(start);
 
-    match (Keyword::fromLexeme(&lexeme)) {
-      Option::SOME(keyword) -> self.emitToken(Token::keyword(keyword, self.cursor.spanFrom(start), lexeme.toStr())),
-      Option::NONE -> self.emitToken(Token::identifier(self.cursor.spanFrom(start), lexeme.toStr())),
+    let Option::SOME(keyword) = Keyword::fromLexeme(&lexeme) else {
+      self.emitToken(Token::identifier(self.cursor.spanFrom(start), lexeme.toStr()));
+      return;
     };
+
+    self.emitToken(Token::keyword(keyword, self.cursor.spanFrom(start), lexeme.toStr()));
+
+    if (keyword == Keyword::ASM) {
+      self.pushFrame(LexerFrameKind::EMBED_HEADER);
+    }
   }
 
   private emitComment(&mut self, start: SourceMark, kind: TokenKind): void {
@@ -363,51 +389,145 @@ record LexerScanner {
     self.scanDecimalOrFloatLiteral(start);
   }
 
-  private scanLeftBrace(&mut self, start: SourceMark): void {
-    let depthCount: u64 = self.templateBraceDepth.length();
+  private pushFrame(&mut self, kind: LexerFrameKind): void {
+    self.frames.push(LexerFrame { kind: kind, depth: 0 });
+  }
 
-    if (depthCount > 0) {
-      let lastIndex: u64 = depthCount - 1;
-      let Option::SOME(depth) = self.templateBraceDepth.get(lastIndex) else {
-        self.emitPunctuation(start, Punctuation::LEFT_BRACE, "{");
-        return;
-      };
+  /// The innermost open frame, if any.
+  private topFrame(&self): Option<LexerFrame> {
+    let count: u64 = self.frames.length();
 
-      let next: u64 = *depth + 1;
-      self.templateBraceDepth.set(lastIndex, next);
+    if (count == 0) {
+      return Option::NONE;
     }
+
+    let Option::SOME(frame) = self.frames.get(count - 1) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(LexerFrame { kind: frame.kind, depth: frame.depth });
+  }
+
+  /// Replaces the innermost frame's depth.
+  private setTopDepth(&mut self, depth: u64): void {
+    let count: u64 = self.frames.length();
+
+    if (count == 0) {
+      return;
+    }
+
+    let Option::SOME(frame) = self.topFrame() else {
+      return;
+    };
+
+    self.frames.set(count - 1, LexerFrame { kind: frame.kind, depth: depth });
+  }
+
+  private scanLeftBrace(&mut self, start: SourceMark): void {
+    let Option::SOME(frame) = self.topFrame() else {
+      self.emitPunctuation(start, Punctuation::LEFT_BRACE, "{");
+      return;
+    };
+
+    match (frame.kind) {
+      LexerFrameKind::EMBED_HEADER -> {
+        if (frame.depth == 0) {
+          self.frames.pop();
+          self.scanEmbedHead(start);
+          return;
+        }
+      },
+      _ -> self.setTopDepth(frame.depth + 1),
+    };
 
     self.emitPunctuation(start, Punctuation::LEFT_BRACE, "{");
   }
 
   private scanRightBrace(&mut self, start: SourceMark): void {
-    let depthCount: u64 = self.templateBraceDepth.length();
+    let Option::SOME(frame) = self.topFrame() else {
+      self.emitPunctuation(start, Punctuation::RIGHT_BRACE, "}");
+      return;
+    };
 
-    if (depthCount > 0) {
-      let lastIndex: u64 = depthCount - 1;
-      let Option::SOME(depth) = self.templateBraceDepth.get(lastIndex) else {
-        self.emitPunctuation(start, Punctuation::RIGHT_BRACE, "}");
-        return;
-      };
+    match (frame.kind) {
+      LexerFrameKind::EMBED_HEADER -> {
+        // Parentheses do not count braces, so a `}` at depth zero closes
+        // whatever encloses the `asm`, and the header never got its body.
+        if (frame.depth == 0) {
+          self.frames.pop();
+          self.scanRightBrace(start);
+          return;
+        }
+      },
+      LexerFrameKind::TEMPLATE -> {
+        if (frame.depth == 0) {
+          self.frames.pop();
+          self.scanTemplateContinuation(start);
+          return;
+        }
 
-      let current: u64 = *depth;
+        self.setTopDepth(frame.depth - 1);
+      },
+      LexerFrameKind::EMBED_HOLE -> {
+        if (frame.depth == 0) {
+          self.frames.pop();
+          self.scanEmbedContinuation(start);
+          return;
+        }
 
-      if (current == 0) {
-        self.templateBraceDepth.pop();
-        self.scanTemplateContinuation(start);
-        return;
-      }
-
-      self.templateBraceDepth.set(lastIndex, current - 1);
-    }
+        self.setTopDepth(frame.depth - 1);
+      },
+    };
 
     self.emitPunctuation(start, Punctuation::RIGHT_BRACE, "}");
+  }
+
+  /// Counts a `(` inside an embed header, so a `{` within its parentheses is
+  /// not taken for the body.
+  private scanLeftParen(&mut self, start: SourceMark): void {
+    if (let Option::SOME(frame) = self.topFrame()) {
+      if (let LexerFrameKind::EMBED_HEADER = frame.kind) {
+        self.setTopDepth(frame.depth + 1);
+      }
+    }
+
+    self.emitPunctuation(start, Punctuation::LEFT_PAREN, "(");
+  }
+
+  /// Uncounts a `)` inside an embed header. One at depth zero closes what
+  /// encloses the `asm`, which ends the header.
+  private scanRightParen(&mut self, start: SourceMark): void {
+    if (let Option::SOME(frame) = self.topFrame()) {
+      if (let LexerFrameKind::EMBED_HEADER = frame.kind) {
+        if (frame.depth == 0) {
+          self.frames.pop();
+        } else {
+          self.setTopDepth(frame.depth - 1);
+        }
+      }
+    }
+
+    self.emitPunctuation(start, Punctuation::RIGHT_PAREN, ")");
+  }
+
+  /// A `;` outside the parentheses of an embed header ends the header: the
+  /// `asm` never got a body, and a later `{` is ordinary syntax again.
+  private scanSemicolon(&mut self, start: SourceMark): void {
+    if (let Option::SOME(frame) = self.topFrame()) {
+      if (let LexerFrameKind::EMBED_HEADER = frame.kind) {
+        if (frame.depth == 0) {
+          self.frames.pop();
+        }
+      }
+    }
+
+    self.emitPunctuation(start, Punctuation::SEMICOLON, ";");
   }
 
   /// Scans a template literal opened by a backtick.
   private scanTemplateLiteral(&mut self, start: SourceMark): void {
     if (self.scanTemplateChunk(start)) {
-      self.templateBraceDepth.push(0 as u64);
+      self.pushFrame(LexerFrameKind::TEMPLATE);
       self.emitLiteral(start, LiteralKind::TEMPLATE_HEAD);
       return;
     }
@@ -418,12 +538,83 @@ record LexerScanner {
   /// Scans the literal text that follows the `}` closing an interpolation.
   private scanTemplateContinuation(&mut self, start: SourceMark): void {
     if (self.scanTemplateChunk(start)) {
-      self.templateBraceDepth.push(0 as u64);
+      self.pushFrame(LexerFrameKind::TEMPLATE);
       self.emitLiteral(start, LiteralKind::TEMPLATE_MIDDLE);
       return;
     }
 
     self.emitLiteral(start, LiteralKind::TEMPLATE_TAIL);
+  }
+
+  /// Scans an embedded body from the `{` that opens it.
+  private scanEmbedHead(&mut self, start: SourceMark): void {
+    if (self.scanEmbedChunk(start)) {
+      self.pushFrame(LexerFrameKind::EMBED_HOLE);
+      self.emitLiteral(start, LiteralKind::EMBED_HEAD);
+      return;
+    }
+
+    self.emitLiteral(start, LiteralKind::EMBED_NO_HOLE);
+  }
+
+  /// Scans the body text that follows the `}` closing a hole.
+  private scanEmbedContinuation(&mut self, start: SourceMark): void {
+    if (self.scanEmbedChunk(start)) {
+      self.pushFrame(LexerFrameKind::EMBED_HOLE);
+      self.emitLiteral(start, LiteralKind::EMBED_MIDDLE);
+      return;
+    }
+
+    self.emitLiteral(start, LiteralKind::EMBED_TAIL);
+  }
+
+  /// Consumes embedded body text up to the `{` of the next hole or the `}`
+  /// closing the body.
+  ///
+  /// `{{` and `}}` stand for literal braces and stay in the chunk, and so do
+  /// `//` and `/* */` comments, whose braces count for nothing. Returns
+  /// whether a hole follows the chunk. On an unterminated body it reports the
+  /// diagnostic itself and returns false, which leaves the caller emitting a
+  /// closing token over the recovered span.
+  private scanEmbedChunk(&mut self, start: SourceMark): boolean {
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next == '{' || next == '}') {
+        self.cursor.advanceChar();
+
+        if (self.matchAscii(next)) {
+          continue;
+        }
+
+        return next == '{';
+      }
+
+      if (next == '/') {
+        self.cursor.advanceChar();
+
+        if (self.matchAscii('/')) {
+          self.scanLineComment();
+          continue;
+        }
+
+        if (self.matchAscii('*')) {
+          self.scanBlockCommentBody();
+        }
+
+        continue;
+      }
+
+      if (next == '\0') {
+        let nulStart: SourceMark = self.cursor.mark();
+        self.cursor.advanceChar();
+        self.emitRawNulInSource(nulStart);
+        continue;
+      }
+
+      self.cursor.advanceChar();
+    }
+
+    self.emitDiagnostic(start, DiagnosticCode::UNTERMINATED_ASM_BODY, "Unterminated asm body", "asm body must end with '}'");
+    return false;
   }
 
   /// Consumes template text up to the next `${` or the closing backtick.
@@ -935,14 +1126,14 @@ record LexerScanner {
 
   private scanGrammarToken(&mut self, start: SourceMark, current: char): void {
     match (current) {
-      '(' -> self.emitPunctuation(start, Punctuation::LEFT_PAREN, "("),
-      ')' -> self.emitPunctuation(start, Punctuation::RIGHT_PAREN, ")"),
+      '(' -> self.scanLeftParen(start),
+      ')' -> self.scanRightParen(start),
       '{' -> self.scanLeftBrace(start),
       '}' -> self.scanRightBrace(start),
       '[' -> self.emitPunctuation(start, Punctuation::LEFT_BRACKET, "["),
       ']' -> self.emitPunctuation(start, Punctuation::RIGHT_BRACKET, "]"),
       ',' -> self.emitPunctuation(start, Punctuation::COMMA, ","),
-      ';' -> self.emitPunctuation(start, Punctuation::SEMICOLON, ";"),
+      ';' -> self.scanSemicolon(start),
       '@' -> self.emitPunctuation(start, Punctuation::AT, "@"),
       '#' -> self.emitPunctuation(start, Punctuation::HASH, "#"),
       '?' -> self.emitPunctuation(start, Punctuation::QUESTION_MARK, "?"),

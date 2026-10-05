@@ -317,6 +317,8 @@ export namespace Analyzer {
         implementedTraits: Vector::new<String>(),
         packed: false,
         alignment: Option::NONE,
+        cLayout: false,
+        isExtern: false,
       };
       return defsRef.push(Analyzer::Definition::Record(placeholder));
     }
@@ -810,6 +812,141 @@ export namespace Analyzer {
       return false;
     }
 
+    /// Whether the item carries `@cLayout`.
+    function cLayoutAttribute(metadata: &Ast::Metadata): boolean {
+      return Analyzer::Binder::attributeSpanNamed(metadata, "cLayout").isSome();
+    }
+
+    /// The span of the first attribute called `name`, if the item carries one.
+    function attributeSpanNamed(metadata: &Ast::Metadata, name: str): Option<SourceSpan> {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        if (let Option::SOME(attribute) = metadata.attributes.get(index)) {
+          if (attribute.name.equals(name)) {
+            return Option::SOME(attribute.span);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function emitCLayoutError(
+      state: &mut Analyzer::Binder::BinderState,
+      code: str,
+      message: &String,
+      span: SourceSpan,
+    ): void {
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        code,
+        message.toStr(),
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, message.toStr());
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// Report what a record with a C layout cannot declare.
+    ///
+    /// A record inside an extern block describes a C struct and nothing more,
+    /// so it takes no generics, methods, static fields or `@implements`. A
+    /// `@cLayout` record keeps its methods, but cannot be generic, since its
+    /// layout is one C struct, nor implement `Drop`, whose drop state byte
+    /// would be appended to that struct. `@cLayout` takes no arguments.
+    function checkCLayoutRecordShape(
+      state: &mut Analyzer::Binder::BinderState,
+      ast: &Ast::Module,
+      rec: &Ast::Item::Record,
+      isExternRecord: boolean,
+    ): void {
+      if (let Option::SOME(attributeSpan) = Analyzer::Binder::attributeSpanNamed(&rec.metadata, "cLayout")) {
+        let argumentCount: u64 = Analyzer::Binder::attributeArgumentCount(&rec.metadata, "cLayout");
+
+        if (argumentCount > 0) {
+          let message: String = `@cLayout expects 0 argument(s), got ${argumentCount}`;
+          Analyzer::Binder::emitCLayoutError(state, DiagnosticCode::ATTRIBUTE_ARG_COUNT, &message, attributeSpan);
+        }
+      } else if (!isExternRecord) {
+        return;
+      }
+
+      let kind: str = isExternRecord ? "extern record" : "@cLayout record";
+
+      if (rec.genericParameters.length() > 0) {
+        let message: String = `${kind} '${rec.name.toStr()}' cannot be generic`;
+        Analyzer::Binder::emitCLayoutError(state, DiagnosticCode::C_LAYOUT_RECORD_IS_GENERIC, &message, rec.span);
+      }
+
+      if (!isExternRecord) {
+        if (Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop")) {
+          let message: String = `@cLayout record '${rec.name.toStr()}' cannot implement Drop`;
+          Analyzer::Binder::emitCLayoutError(state, DiagnosticCode::C_LAYOUT_RECORD_IMPLEMENTS, &message, rec.span);
+        }
+
+        return;
+      }
+
+      if (let Option::SOME(implementsSpan) = Analyzer::Binder::attributeSpanNamed(&rec.metadata, "implements")) {
+        let message: String = `extern record '${rec.name.toStr()}' cannot use @implements`;
+        Analyzer::Binder::emitCLayoutError(state, DiagnosticCode::C_LAYOUT_RECORD_IMPLEMENTS, &message, implementsSpan);
+      }
+
+      let mut methodIndex: u64 = 0;
+
+      while (methodIndex < rec.methods.length()) {
+        if (let Option::SOME(methodId) = rec.methods.get(methodIndex)) {
+          let mut methodSpan: SourceSpan = rec.span;
+
+          if (let Option::SOME(Ast::Item::Node::Function(method)) = ast.items.get(*methodId)) {
+            methodSpan = method.span;
+          }
+
+          let message: String = `extern record '${rec.name.toStr()}' cannot declare methods`;
+          Analyzer::Binder::emitCLayoutError(state, DiagnosticCode::EXTERN_RECORD_UNSUPPORTED_MEMBER, &message, methodSpan);
+        }
+
+        methodIndex += 1;
+      }
+
+      let mut fieldIndex: u64 = 0;
+
+      while (fieldIndex < rec.fields.length()) {
+        if (let Option::SOME(patternId) = rec.fields.get(fieldIndex)) {
+          if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = ast.patterns.get(*patternId)) {
+            if (Analyzer::Binder::fieldBindingIsStatic(&binding)) {
+              let message: String = `extern record '${rec.name.toStr()}' cannot declare static fields`;
+              Analyzer::Binder::emitCLayoutError(state, DiagnosticCode::EXTERN_RECORD_UNSUPPORTED_MEMBER, &message, binding.span);
+            }
+          }
+        }
+
+        fieldIndex += 1;
+      }
+    }
+
+    /// The argument count of the first attribute called `name`, 0 when the
+    /// item carries none.
+    function attributeArgumentCount(metadata: &Ast::Metadata, name: str): u64 {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        if (let Option::SOME(attribute) = metadata.attributes.get(index)) {
+          if (attribute.name.equals(name)) {
+            return attribute.arguments.length();
+          }
+        }
+
+        index += 1;
+      }
+
+      return 0;
+    }
+
     /// The alignment `@aligned(N)` asks for, in bytes.
     ///
     /// Attribute arguments arrive from the parser as raw lexeme text, so the
@@ -1207,7 +1344,7 @@ export namespace Analyzer {
       let targetName: String = String::create(target);
 
       if (targetName.equals("record")) {
-        return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang");
+        return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang") || name.equals("cLayout");
       }
 
       if (targetName.equals("field")) {
@@ -1216,6 +1353,10 @@ export namespace Analyzer {
 
       if (targetName.equals("parameter")) {
         return name.equals("takes") || name.equals("noescape");
+      }
+
+      if (targetName.equals("function") && (name.equals("panicHandler") || name.equals("allocHandler") || name.equals("freeHandler"))) {
+        return true;
       }
 
       return name.equals("test") || name.equals("externName") || name.equals("cold") || name.equals("deprecated") || name.equals("extension") || name.equals("directive");
@@ -2358,6 +2499,9 @@ export namespace Analyzer {
         @panic("completeRecord: non-Record at Record defId — invariant broken");
       }
 
+      let isExternRecord: boolean = state.insideExtern;
+      Analyzer::Binder::checkCLayoutRecordShape(state, ast, rec, isExternRecord);
+
       // Immutable borrow of defStore is released here. Now allocate sub-defs.
       let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &rec.genericParameters, defId);
       let fieldTables: Analyzer::Binder::OwnerFieldTables = bindFields(state, defStore, typeStore, symbols, ast, &rec.fields, defId);
@@ -2390,6 +2534,8 @@ export namespace Analyzer {
         implementedTraits: Analyzer::Binder::implementedTraitNames(&rec.metadata),
         packed: Analyzer::Binder::packedAttribute(&rec.metadata),
         alignment: Analyzer::Binder::alignmentAttribute(&rec.metadata),
+        cLayout: isExternRecord || Analyzer::Binder::cLayoutAttribute(&rec.metadata),
+        isExtern: isExternRecord,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Record(newRec));
@@ -2413,6 +2559,11 @@ export namespace Analyzer {
       // The host reports a misplaced enum attribute against the `record`
       // target too, so the wording matches for both declaration kinds.
       Analyzer::Binder::validateAttributes(state, &en.metadata, "record");
+
+      if (let Option::SOME(cLayoutSpan) = Analyzer::Binder::attributeSpanNamed(&en.metadata, "cLayout")) {
+        let cLayoutName: String = String::create("cLayout");
+        Analyzer::Binder::emitUnknownAttribute(state, &cLayoutName, "enum", cLayoutSpan);
+      }
 
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
       let Option::SOME(defId) = defIdOpt else {

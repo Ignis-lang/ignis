@@ -155,6 +155,9 @@ export namespace LirLowering {
       Hir::HirKind::Defer(_) -> "Defer",
       Hir::HirKind::ExpressionStatement(_) -> "ExpressionStatement",
       Hir::HirKind::Match(_) -> "Match",
+      Hir::HirKind::ToRawFunction(_) -> "ToRawFunction",
+      Hir::HirKind::FromRawFunction(_) -> "FromRawFunction",
+      Hir::HirKind::InlineAsm(_) -> "InlineAsm",
       Hir::HirKind::Error -> "Error",
     };
   }
@@ -1708,6 +1711,31 @@ export namespace LirLowering {
 
         return Lir::Operand::Temp(dest);
       },
+      Hir::HirKind::ToRawFunction(operandId) -> {
+        return LirLowering::lowerToRawFunction(defStore, hirStore, function_, state, operandId, nodeType, nodeSpan);
+      },
+      Hir::HirKind::InlineAsm(asmNode) -> {
+        return LirLowering::lowerInlineAsm(defStore, typeStore, hirStore, dropSchedules, function_, state, &asmNode, nodeType, nodeSpan);
+      },
+      Hir::HirKind::FromRawFunction(operandId) -> {
+        let raw: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, operandId);
+        let mut rawType: Analyzer::TypeId = nodeType;
+
+        if (let Option::SOME(operandNode) = hirStore.get(operandId)) {
+          rawType = operandNode.typeId;
+        }
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::RawToClosure(Lir::InstrRawToClosure {
+          dest: dest,
+          raw: raw,
+          rawType: rawType,
+          closureType: nodeType,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
       Hir::HirKind::Dereference(innerId) -> {
         let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
@@ -1858,6 +1886,7 @@ export namespace LirLowering {
           dest: dest,
           ptr: pointer,
           ty: loadNode.ty,
+          volatile: loadNode.volatile,
         }));
 
         return Lir::Operand::Temp(dest);
@@ -1870,6 +1899,7 @@ export namespace LirLowering {
           ptr: pointer,
           value: value,
           ty: storeNode.ty,
+          volatile: storeNode.volatile,
         }));
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
@@ -1918,12 +1948,24 @@ export namespace LirLowering {
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
+      // The glue is a plain C function, so as a function value it is reached
+      // through the same trampoline as any other C function pointer.
       Hir::HirKind::BuiltinDropGlue(ty) -> {
-        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+        let rawType: Analyzer::TypeId = Hir::cFacingType(defStore, typeStore, nodeType);
+        let raw: Lir::TempId = LirLowering::freshTemp(function_, rawType, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::DropGlue(Lir::InstrDropGlue {
-          dest: dest,
+          dest: raw,
           ty: ty,
+        }));
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::RawToClosure(Lir::InstrRawToClosure {
+          dest: dest,
+          raw: Lir::Operand::Temp(raw),
+          rawType: rawType,
+          closureType: nodeType,
         }));
 
         return Lir::Operand::Temp(dest);
@@ -2766,6 +2808,169 @@ export namespace LirLowering {
         env: Lir::Operand::Temp(envTemp),
       }));
     }
+  }
+
+  /// Lowers an `asm`. Inputs are evaluated in header order, then the
+  /// pointers to the places the asm writes: an `inout` or `mem` input and a
+  /// statement `asm`'s output locals. The output of an `asm` expression is a
+  /// fresh temp, which is the result; a statement `asm` has none.
+  function lowerInlineAsm(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    asmNode: &Hir::HirInlineAsm,
+    nodeType: Analyzer::TypeId,
+    nodeSpan: SourceSpan,
+  ): Lir::Operand {
+    let mut operands: Vector<Lir::InlineAsmOperand> = Vector::new<Lir::InlineAsmOperand>();
+    let mut index: u64 = 0;
+
+    while (index < asmNode.inputs.length()) {
+      if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+        let mut inputType: Analyzer::TypeId = nodeType;
+
+        if (let Option::SOME(inputNode) = hirStore.get(input.value)) {
+          inputType = inputNode.typeId;
+        }
+
+        let mut value: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Undef(inputType));
+
+        if (input.isPlace) {
+          value = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, input.value);
+        } else {
+          value = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, input.value);
+        }
+
+        operands.push(Lir::InlineAsmOperand {
+          name: input.name.clone(),
+          location: input.location.clone(),
+          ty: inputType,
+          value: value,
+          isPlace: input.isPlace,
+          reads: true,
+          writes: input.writes,
+        });
+      }
+
+      index += 1;
+    }
+
+    let mut dest: Option<Lir::TempId> = Option::NONE;
+    index = 0;
+
+    while (index < asmNode.outputs.length()) {
+      if (let Option::SOME(output) = asmNode.outputs.get(index)) {
+        let mut value: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Undef(output.outputType));
+        let mut isPlace: boolean = false;
+
+        if (let Option::SOME(place) = output.place) {
+          value = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, place);
+          isPlace = true;
+        } else {
+          let outputTemp: Lir::TempId = LirLowering::freshTemp(function_, output.outputType, nodeSpan);
+
+          value = Lir::Operand::Temp(outputTemp);
+          dest = Option::SOME(outputTemp);
+        }
+
+        operands.push(Lir::InlineAsmOperand {
+          name: output.name.clone(),
+          location: output.location.clone(),
+          ty: output.outputType,
+          value: value,
+          isPlace: isPlace,
+          reads: false,
+          writes: true,
+        });
+      }
+
+      index += 1;
+    }
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::InlineAsm(Lir::InstrInlineAsm {
+      dest: dest,
+      chunks: Hir::cloneStrings(&asmNode.chunks),
+      holes: Hir::cloneIndexes(&asmNode.holes),
+      operands: operands,
+      clobbers: Hir::cloneStrings(&asmNode.clobbers),
+      volatile: asmNode.volatile,
+    }));
+
+    if (let Option::SOME(outputTemp) = dest) {
+      return Lir::Operand::Temp(outputTemp);
+    }
+
+    return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+  }
+
+  /// The C function pointer a `ToRawFunction` produces, of type `rawType`.
+  ///
+  /// Capture-free checking only lets through a named function, a closure
+  /// literal without captures and drop glue, so those are the operands with
+  /// a pointer to take. A closure literal is never built: its thunk already
+  /// is the function, reached through a wrapper that supplies a null
+  /// environment. Anything else was reported, and lowers to an undefined
+  /// pointer the build never emits.
+  function lowerToRawFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operandId: Hir::HirId,
+    rawType: Analyzer::TypeId,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let mut target: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut viaThunk: boolean = false;
+    let mut glueType: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(operand) = hirStore.get(operandId)) {
+      match (&operand.kind) {
+        Hir::HirKind::Variable(defId) -> {
+          if (let Option::SOME(Analyzer::Definition::Function(_)) = defStore.get(defId)) {
+            target = Option::SOME(defId);
+          }
+        },
+        Hir::HirKind::Closure(closureNode) -> {
+          if (closureNode.captures.isEmpty()) {
+            target = closureNode.thunkDef;
+            viaThunk = true;
+          }
+        },
+        Hir::HirKind::BuiltinDropGlue(ty) -> {
+          glueType = Option::SOME(ty);
+        },
+        _ -> {},
+      };
+    }
+
+    if (let Option::SOME(ty) = glueType) {
+      let glue: Lir::TempId = LirLowering::freshTemp(function_, rawType, span);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::DropGlue(Lir::InstrDropGlue {
+        dest: glue,
+        ty: ty,
+      }));
+
+      return Lir::Operand::Temp(glue);
+    }
+
+    let Option::SOME(functionDef) = target else {
+      return Lir::Operand::Const(Lir::ConstValue::Undef(rawType));
+    };
+
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, rawType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::MakeRawFunction(Lir::InstrMakeRawFunction {
+      dest: dest,
+      callee: functionDef,
+      viaThunk: viaThunk,
+    }));
+
+    return Lir::Operand::Temp(dest);
   }
 
   /// Packs the captured values into an environment and produces the closure

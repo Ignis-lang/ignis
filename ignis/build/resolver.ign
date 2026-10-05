@@ -19,7 +19,7 @@ import Test from "std::test";
 import Vector from "std::vector";
 
 import BuildGraph, BuildModuleKind, ModuleGraph from "./module_graph";
-import Manifest, StdManifest from "./manifest";
+import Manifest, StdManifest, StdManifestModule from "./manifest";
 import SourceOverrides from "./sources";
 
 const MISSING_MODULE: str = "B2001";
@@ -414,6 +414,46 @@ function resolverStdRoot(
   };
 }
 
+/// Resolve the std root a project build reads its modules from.
+///
+/// `--std-path` wins over the project's `std_path` in both modes. A hosted
+/// project (`std = true`) otherwise resolves the official std as before. A
+/// freestanding one (`std = false`) otherwise reads only the user std its own
+/// `std_path` names (`IGNIS_STD_PATH` names the official std and is never
+/// read); with neither, the root is empty and the build has no std at all.
+function resolverProjectStdRoot(
+  configPath: &Path::PathBuf,
+  resolved: &ResolvedProject,
+  overrides: &BuildOverrides,
+): Result<Path::PathBuf, DiagnosticBag> {
+  if (resolved.stdEnabled || overrides.stdPath.isSome()) {
+    return resolverStdRoot(configPath, &resolved.stdRoot, overrides);
+  }
+
+  return match (&resolved.stdRoot) {
+    Option::SOME(path) -> Result::OK(path.clone()),
+    Option::NONE -> Result::OK(Path::PathBuf::new()),
+  };
+}
+
+/// The manifest discovery reads the prelude and the std modules from.
+///
+/// A project with no std root has neither, so it gets a manifest that
+/// declares nothing instead of reading one from disk.
+function resolverLoadManifest(project: &ResolverProject): Result<StdManifest, DiagnosticBag> {
+  if (!project.stdRoot.isEmpty()) {
+    return Manifest::loadFile(&project.stdManifestPath);
+  }
+
+  return Result::OK(StdManifest {
+    path: Path::PathBuf::new(),
+    includeDirs: Vector::new<String>(),
+    modules: Vector::new<StdManifestModule>(),
+    autoLoadModules: Vector::new<String>(),
+    compileOnlyModules: Vector::new<String>(),
+  });
+}
+
 /// The target triple the compile-time predicates are answered with.
 function resolverTargetTriple(declared: &Option<String>, overrides: &BuildOverrides): String {
   if (let Option::SOME(triple) = &overrides.targetTriple) {
@@ -489,9 +529,13 @@ function resolverLoadProject(
     ));
   }
 
-  let stdRoot: Path::PathBuf = resolverStdRoot(&configPath, &resolved.stdRoot, overrides)!;
-  let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
-  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+  let stdRoot: Path::PathBuf = resolverProjectStdRoot(&configPath, &resolved, overrides)!;
+  let mut stdManifestPath: Path::PathBuf = Path::PathBuf::new();
+
+  if (!stdRoot.isEmpty()) {
+    let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
+    stdManifestPath = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+  }
 
   let mut features: Vector<String> = Vector::new<String>();
   resolverPushMissingStrings(&mut features, &overrides.features);
@@ -967,7 +1011,12 @@ function resolverIsStdTestCompanionPath(path: &Path::PathBuf): boolean {
   return fileName.equals("tests.ign");
 }
 
+/// An empty root, which is what a build without a std has, contains nothing.
 function resolverPathUnderRoot(path: &Path::PathBuf, root: &Path::PathBuf): boolean {
+  if (root.isEmpty()) {
+    return false;
+  }
+
   let pathText: String = path.toString();
   let rootText: String = root.toString();
 
@@ -1023,6 +1072,10 @@ function resolverResolveImport(
   span: SourceSpan,
 ): Result<ResolvedImportTarget, DiagnosticBag> {
   if (importSource.startsWith("std::")) {
+    if (project.stdRoot.isEmpty()) {
+      return Result::ERROR(resolverMissingModuleDiagnostic(currentFile, importSource, span));
+    }
+
     let moduleName: String = importSource.substringBytes(5, importSource.length());
     let stdRoot: Path::PathBuf = project.stdRoot.clone();
 
@@ -1792,8 +1845,7 @@ export namespace Resolver {
       Option::SOME(_) -> resolverLoadProject(startPath, overrides)!,
       Option::NONE -> resolverSingleFileProject(startPath, overrides)!,
     };
-    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
-    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+    let manifest: StdManifest = resolverLoadManifest(&project)!;
 
     return resolverDiscoverProjectRoots(&project, &manifest, includeTests);
   }
@@ -1824,8 +1876,7 @@ export namespace Resolver {
 
     project.entry = entry.clone();
 
-    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
-    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+    let manifest: StdManifest = resolverLoadManifest(&project)!;
 
     return resolverDiscoverProjectRoots(&project, &manifest, false);
   }
@@ -1874,7 +1925,7 @@ export namespace Resolver {
   ): Result<DocDiscovery, DiagnosticBag> {
     if (projectMode) {
       let project: ResolverProject = resolverLoadProject(startPath, overrides)!;
-      let manifest: StdManifest = Manifest::loadFile(&project.stdManifestPath)!;
+      let manifest: StdManifest = resolverLoadManifest(&project)!;
       return resolverDiscoverDocRoots(&project, &manifest);
     }
 
@@ -2451,4 +2502,180 @@ function resolverRejectsAStdTestRunOverAnEmptyManifest(): void {
 
   let expected: String = `B2001|No modules found in std manifest at '${stdRoot.asStr()}/manifest.toml'`;
   Test::assertEq<str>(resolverDiagnosticSummary(&bag).toStr(), expected.toStr());
+}
+
+/// `std = false` without `std_path` is a freestanding build with no standard
+/// library at all: discovery needs no std root, loads no prelude and keeps
+/// every module the project's own.
+@test
+function resolverFreestandingProjectLoadsNoPreludeWithoutAStdPath(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(discovery.stdEnabled, false);
+  Test::assertEq<boolean>(discovery.stdRoot.isEmpty(), true);
+  Test::assertEq<u64>(discovery.preludePaths.length(), 0);
+  Test::assertEq<u64>(discovery.orderCount(), 1);
+
+  let Option::SOME(entryKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "src/lib.ign") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(entryKind == BuildModuleKind::PROJECT, true);
+}
+
+/// Without a standard library a `std::` import names nothing, so it is a
+/// missing module rather than a lookup under some unrelated directory.
+@test
+function resolverFreestandingProjectRejectsAStdImportWithoutAStdPath(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std_import");
+  let Result::ERROR(bag) = Resolver::discoverProject(&fixtureRoot) else {
+    Test::fail();
+    return;
+  };
+
+  let summary: String = resolverDiagnosticSummary(&bag);
+  Test::assert(summary.startsWith("B2001|"));
+
+  let importName: String = String::create("std::io");
+  Test::assert(summary.contains(&importName));
+}
+
+/// `std = false` with `std_path` names a user standard library: its own
+/// `manifest.toml` `[auto_load]` list is the prelude, and its modules are `STD`.
+@test
+function resolverFreestandingProjectLoadsThePreludeFromTheUserStdManifest(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/user_std");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(discovery.stdEnabled, false);
+  Test::assertEq<str>(discovery.stdRoot.asStr(), fixtureRoot.join("kstd").asStr());
+  Test::assertEq<u64>(discovery.preludePaths.length(), 1);
+
+  let Option::SOME(preludePath) = discovery.preludePaths.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(preludePath.asStr(), fixtureRoot.join("kstd/core/mod.ign").asStr());
+
+  let Option::SOME(coreKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "kstd/core/mod.ign") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(coreKind == BuildModuleKind::STD, true);
+}
+
+/// Discovers a freestanding fixture with `--std-path` set to `stdRoot`.
+function resolverDiscoverFreestandingWithStdPath(
+  fixtureRoot: &Path::PathBuf,
+  stdRoot: &Path::PathBuf,
+): Result<DiscoveryResult, DiagnosticBag> {
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = Option::SOME(stdRoot.toString());
+
+  return Resolver::discover(fixtureRoot, &overrides, false);
+}
+
+/// Asserts that a freestanding discovery reads its std from the
+/// `override_std` fixture: that root, and its `boot` module as the prelude.
+function resolverAssertOverrideStd(discovery: &DiscoveryResult, stdRoot: &Path::PathBuf): void {
+  Test::assertEq<boolean>(discovery.stdEnabled, false);
+  Test::assertEq<str>(discovery.stdRoot.asStr(), stdRoot.asStr());
+  Test::assertEq<u64>(discovery.preludePaths.length(), 1);
+
+  let Option::SOME(preludePath) = discovery.preludePaths.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(preludePath.asStr(), stdRoot.join("boot/mod.ign").asStr());
+}
+
+/// `--std-path` supplies a user std to a freestanding project that declares no
+/// `std_path`, and that std's own `[auto_load]` list is the prelude.
+@test
+function resolverFreestandingStdPathOverrideSuppliesAUserStd(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
+  let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
+
+  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  resolverAssertOverrideStd(&discovery, &stdRoot);
+}
+
+/// `--std-path` wins over a freestanding project's own `std_path`, the same
+/// precedence a hosted build applies.
+@test
+function resolverFreestandingStdPathOverrideWinsOverTheProjectStdPath(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/user_std");
+  let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
+
+  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  resolverAssertOverrideStd(&discovery, &stdRoot);
+}
+
+/// A freestanding `--std-path` must name a std with a `manifest.toml`; a
+/// directory without one is a missing module, not an empty std.
+@test
+function resolverFreestandingStdPathOverrideRequiresAManifest(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
+  let stdRoot: Path::PathBuf = fixtureRoot.join("src");
+
+  let Result::ERROR(bag) = resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(resolverDiagnosticSummary(&bag).toStr(), "B2001|std manifest could not be resolved");
+}
+
+/// `IGNIS_STD_PATH` names the official std, so a freestanding project ignores
+/// it and still builds with no standard library.
+@test
+function resolverFreestandingProjectIgnoresIgnisStdPath(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
+  let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
+  Env::set("IGNIS_STD_PATH", stdRoot.asStr());
+
+  let result: Result<DiscoveryResult, DiagnosticBag> = Resolver::discoverProject(&fixtureRoot);
+  Env::unset("IGNIS_STD_PATH");
+
+  let discovery: DiscoveryResult = match (result) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(discovery.stdRoot.isEmpty(), true);
+  Test::assertEq<u64>(discovery.preludePaths.length(), 0);
 }

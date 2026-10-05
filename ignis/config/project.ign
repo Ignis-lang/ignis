@@ -705,7 +705,7 @@ function parseAliases(
 }
 
 function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, DiagnosticBag> {
-  if (project.stdEnabled) {
+  if (project.stdEnabled || project.stdRoot.isSome()) {
     let Option::SOME(stdManifestPath) = project.stdManifestPathText() else {
       let configPath: Path::PathBuf = match (&project.configPath) {
         Option::SOME(path) -> path.clone(),
@@ -1330,8 +1330,17 @@ export namespace Config {
         },
       };
     } else {
+      // A freestanding build reads only a user std, named here or by
+      // `--std-path`, which the resolver applies over this value.
+      // `IGNIS_STD_PATH` names the official one, which it never loads.
       match (stdPathValue) {
-        Option::SOME(_) -> {},
+        Option::SOME(value) -> {
+          let resolved: Path::PathBuf = resolveProjectPath(&root, &value.value);
+          let canonical: Path::PathBuf = canonicalExistingPath(configPath, "ignis.std_path", &resolved)!;
+
+          stdManifestPath = manifestPath(&canonical);
+          stdRoot = Option::SOME(canonical);
+        },
         Option::NONE -> {},
       };
     }

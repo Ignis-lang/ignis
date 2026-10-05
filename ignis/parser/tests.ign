@@ -4661,6 +4661,74 @@ function parserRejectsExternFunctionWithBody(): void {
   Test::assertEq<str>(second.code, "I0002");
 }
 
+/// A record is an extern member like a function or a constant: Ignis defines
+/// the C struct the extern block describes.
+@test
+function parserParsesRecordInsideExternBlock(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_extern_record.ign",
+    "extern Device { @packed record Port { public control: u8; public status: u32; } function reset(port: *mut Port): void; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let externId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing extern root"),
+  };
+
+  let Option::SOME(Ast::Item::Node::Extern(externItem)) = module.items.get(externId) else {
+    @panic("expected extern root item");
+  };
+
+  Test::assertEq<u64>(externItem.items.length(), 2);
+
+  let recordId: Ast::ItemId = match (externItem.items.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing extern record member"),
+  };
+
+  let Option::SOME(Ast::Item::Node::Record(recordItem)) = module.items.get(recordId) else {
+    @panic("expected extern record member");
+  };
+
+  Test::assertEq<str>(recordItem.name.toStr(), "Port");
+  Test::assertEq<u64>(recordItem.fields.length(), 2);
+  Test::assertEq<u64>(recordItem.metadata.attributes.length(), 1);
+}
+
+/// An enum stays outside what an extern block declares, and the diagnostic
+/// names the members it does accept.
+@test
+function parserRejectsEnumInsideExternBlock(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_extern_enum.ign",
+    "extern Device { enum Mode { READ, WRITE, } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  let first: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing extern enum diagnostic"),
+  };
+
+  Test::assertEq<str>(first.code, "I0002");
+  Test::assertEq<str>(first.message.toStr(), "Unexpected token");
+
+  let label: String = match (first.labels.get(0)) {
+    Option::SOME(value) -> value.message.clone(),
+    Option::NONE -> @panic("missing extern enum label"),
+  };
+
+  Test::assertEq<str>(label.toStr(), "expected function, const, or record declaration in extern block");
+}
+
 /// A free function always annotates its return type, so the `:` is required
 /// where a method may leave it out.
 @test
@@ -5556,4 +5624,114 @@ function parserAcceptsNamedExportFrom(): void {
   let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_named_export_from.ign", "export Foo from \"./lib\";");
 
   Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Parses `source` into `module` and returns the parse diagnostics. The
+/// caller keeps `source` alive, since the spans in `module` point into it.
+function parseAsmSource(source: &SourceFile, module: &mut Ast::Module): DiagnosticBag {
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(source, module, &mut diagnostics);
+  return diagnostics;
+}
+
+function assertRenderedContains(rendered: &String, needle: str): void {
+  let expected: String = String::create(needle);
+
+  if (!rendered.contains(&expected)) {
+    Io::println(rendered.toStr());
+    Io::println(needle);
+    Test::fail();
+  }
+}
+
+@test
+function parserParsesAsmExpressionWithOneOutput(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_expression.ign", "function read(port: u16): u8 { return asm (port in dx) -> (value: u8 in al) { in {value}, {port} }; }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "Return span=");
+  assertRenderedContains(&rendered, "Asm span=fixtures/parser_asm_expression.ign:38-98 pure=false inputs=[expression#0 in \"dx\"]");
+  assertRenderedContains(&rendered, " in \"al\"] clobbers=[] chunks=[\" in \", \", \", \" \"] holes=[\"value\", \"port\"]");
+  assertRenderedContains(&rendered, "body=fixtures/parser_asm_expression.ign:76-98");
+}
+
+@test
+function parserParsesAsmStatementWithPureClobbersAndTrailingCommas(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_statement.ign", "function main(): void { asm pure (a in rax, b inout rbx,) -> (low: u32 in eax, high: u32 in edx,) clobber(memory, flags,) { rdtsc } let x: u32 = low; }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "statement#0 Asm span=");
+  assertRenderedContains(&rendered, "pure=true inputs=[expression#0 in \"rax\", expression#1 inout \"rbx\"] outputs=[\"low\": type#");
+  assertRenderedContains(&rendered, " in \"eax\", \"high\": type#");
+  assertRenderedContains(&rendered, " in \"edx\"] clobbers=[\"memory\", \"flags\"] chunks=[\" rdtsc \"] holes=[]");
+  assertRenderedContains(&rendered, "statement#1 Let span=");
+}
+
+@test
+function parserParsesAsmStatementWithoutOperands(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_empty.ign", "function main(): void { asm () { cli } }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "pure=false inputs=[] outputs=[] clobbers=[] chunks=[\" cli \"] holes=[]");
+}
+
+@test
+function parserParsesAsmStatementInsideALambdaBody(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_lambda.ign", "function main(): void { let halt = (): void -> { asm () { hlt } }; }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "Asm span=");
+  assertRenderedContains(&rendered, "chunks=[\" hlt \"] holes=[]");
+}
+
+@test
+function parserRejectsANonIdentifierAsmHole(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_bad_hole.ign", "function main(): void { asm () { mov {1}, eax } }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0001", "Expected Identifier");
+}
+
+@test
+function parserRejectsAnAsmInputWithoutIn(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_missing_in.ign", "function main(port: u16): void { asm (port dx) { nop } }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+
+  Test::assert(diagnostics.length() >= 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0001", "Expected In");
+}
+
+@test
+function parserRejectsAnAsmOutputWithoutIn(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_output_missing_in.ign", "function main(): void { asm () -> (value: u8 al) { nop } }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+
+  Test::assert(diagnostics.length() >= 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0001", "Expected In");
+}
+
+@test
+function parserRejectsAnAsmWithoutABody(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create("fixtures/parser_asm_no_body.ign", "function main(): void { asm (); }");
+  let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
+
+  Test::assert(diagnostics.length() >= 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0001", "Expected LeftBrace");
 }

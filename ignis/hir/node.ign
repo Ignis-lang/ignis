@@ -117,12 +117,14 @@ export namespace Hir {
   record HirBuiltinLoad {
     public ty: Analyzer::TypeId;
     public ptr: Hir::HirId;
+    public volatile: boolean;
   }
 
   record HirBuiltinStore {
     public ty: Analyzer::TypeId;
     public ptr: Hir::HirId;
     public value: Hir::HirId;
+    public volatile: boolean;
   }
 
   record HirBuiltinHash {
@@ -214,6 +216,148 @@ export namespace Hir {
     public arms: Vector<Hir::HirMatchArm>;
   }
 
+  /// One input of an `asm`.
+  record HirAsmInput {
+    /// The name the C asm statement gives the operand, which holes print
+    /// through; empty when no hole can name it.
+    public name: String;
+    /// The register or operand class, as `Analyzer::InlineAsm` reads it.
+    public location: String;
+    /// The value the instructions read or, when `isPlace`, the place they
+    /// read and, when `writes`, write back to. Every `mem` input and every
+    /// `inout` input is a place.
+    public value: Hir::HirId;
+    public isPlace: boolean;
+    public writes: boolean;
+  }
+
+  /// One output of an `asm`.
+  record HirAsmOutput {
+    public name: String;
+    public location: String;
+    public outputType: Analyzer::TypeId;
+    /// The local a statement `asm` stores the output in. `NONE` for the
+    /// output of an `asm` expression, which is the node's value.
+    public place: Option<Hir::HirId>;
+  }
+
+  /// Inline assembly. `chunks` is the body text around the holes, comments
+  /// and `{{`/`}}` escapes as written, one more entry than `holes`. Each hole
+  /// is the index of its operand among the inputs followed by the outputs.
+  /// `clobbers` holds the names a C compiler knows them by.
+  record HirInlineAsm {
+    public chunks: Vector<String>;
+    public holes: Vector<u64>;
+    public inputs: Vector<Hir::HirAsmInput>;
+    public outputs: Vector<Hir::HirAsmOutput>;
+    public clobbers: Vector<String>;
+    public volatile: boolean;
+  }
+
+  function cloneStrings(source: &Vector<String>): Vector<String> {
+    let mut result: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(text) = source.get(index)) {
+        result.push(text.clone());
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function cloneIndexes(source: &Vector<u64>): Vector<u64> {
+    let mut result: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(value) = source.get(index)) {
+        result.push(*value);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// `node` with every operand node id moved by `offset`.
+  function offsetInlineAsm(node: Hir::HirInlineAsm, offset: u32): Hir::HirInlineAsm {
+    let mut inputs: Vector<Hir::HirAsmInput> = Vector::new<Hir::HirAsmInput>();
+    let mut index: u64 = 0;
+
+    while (index < node.inputs.length()) {
+      if (let Option::SOME(input) = node.inputs.get(index)) {
+        inputs.push(Hir::HirAsmInput {
+          name: input.name.clone(),
+          location: input.location.clone(),
+          value: Hir::offsetHirId(input.value, offset),
+          isPlace: input.isPlace,
+          writes: input.writes,
+        });
+      }
+
+      index += 1;
+    }
+
+    let mut outputs: Vector<Hir::HirAsmOutput> = Vector::new<Hir::HirAsmOutput>();
+    index = 0;
+
+    while (index < node.outputs.length()) {
+      if (let Option::SOME(output) = node.outputs.get(index)) {
+        outputs.push(Hir::HirAsmOutput {
+          name: output.name.clone(),
+          location: output.location.clone(),
+          outputType: output.outputType,
+          place: Hir::offsetOptionalHirId(output.place, offset),
+        });
+      }
+
+      index += 1;
+    }
+
+    return Hir::HirInlineAsm {
+      chunks: Hir::cloneStrings(&node.chunks),
+      holes: Hir::cloneIndexes(&node.holes),
+      inputs: inputs,
+      outputs: outputs,
+      clobbers: Hir::cloneStrings(&node.clobbers),
+      volatile: node.volatile,
+    };
+  }
+
+  /// The operand nodes of an `asm`: input values and places, then the
+  /// places of a statement `asm`'s outputs.
+  function inlineAsmChildIds(node: &Hir::HirInlineAsm): Vector<Hir::HirId> {
+    let mut children: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < node.inputs.length()) {
+      if (let Option::SOME(input) = node.inputs.get(index)) {
+        children.push(input.value);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < node.outputs.length()) {
+      if (let Option::SOME(output) = node.outputs.get(index)) {
+        if (let Option::SOME(place) = output.place) {
+          children.push(place);
+        }
+      }
+
+      index += 1;
+    }
+
+    return children;
+  }
+
   /// Mirrors `ignis_hir::HIRKind`.
   enum HirKind {
     Literal(Hir::LiteralValue),
@@ -267,6 +411,19 @@ export namespace Hir {
     ExpressionStatement(Hir::HirId),
 
     Match(Hir::HirMatch),
+
+    /// A function value converted to the plain C function pointer a
+    /// C-facing position takes. The node's type is the `RawFunction` the
+    /// operand's `Function` type becomes. The operand is a named function, a
+    /// closure literal, or anything else, which capture-free checking rejects.
+    ToRawFunction(Hir::HirId),
+    /// A plain C function pointer read back as an Ignis function value. The
+    /// node's type is the `Function` type; the operand's is the `RawFunction`.
+    FromRawFunction(Hir::HirId),
+
+    /// An `asm` expression, whose type is its output's or `void`, or the
+    /// `asm` of a statement, whose outputs are stored in their locals.
+    InlineAsm(Hir::HirInlineAsm),
 
     Error,
   }
@@ -415,11 +572,13 @@ export namespace Hir {
       Hir::HirKind::BuiltinLoad(load) -> Hir::HirKind::BuiltinLoad(Hir::HirBuiltinLoad {
         ty: load.ty,
         ptr: Hir::offsetHirId(load.ptr, offset),
+        volatile: load.volatile,
       }),
       Hir::HirKind::BuiltinStore(store) -> Hir::HirKind::BuiltinStore(Hir::HirBuiltinStore {
         ty: store.ty,
         ptr: Hir::offsetHirId(store.ptr, offset),
         value: Hir::offsetHirId(store.value, offset),
+        volatile: store.volatile,
       }),
       Hir::HirKind::BuiltinHash(hashNode) -> Hir::HirKind::BuiltinHash(Hir::HirBuiltinHash {
         ty: hashNode.ty,
@@ -498,6 +657,9 @@ export namespace Hir {
         scrutinee: Hir::offsetHirId(matchNode.scrutinee, offset),
         arms: Hir::offsetMatchArms(matchNode.arms, offset),
       }),
+      Hir::HirKind::ToRawFunction(id) -> Hir::HirKind::ToRawFunction(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::FromRawFunction(id) -> Hir::HirKind::FromRawFunction(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::InlineAsm(asmNode) -> Hir::HirKind::InlineAsm(Hir::offsetInlineAsm(asmNode, offset)),
       Hir::HirKind::Error -> Hir::HirKind::Error,
     };
   }
@@ -536,6 +698,24 @@ export namespace Hir {
       },
       Hir::HirKind::ExpressionStatement(id) -> {
         children.push(id);
+      },
+      Hir::HirKind::ToRawFunction(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::FromRawFunction(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::InlineAsm(asmNode) -> {
+        let operands: Vector<Hir::HirId> = Hir::inlineAsmChildIds(&asmNode);
+        let mut index: u64 = 0;
+
+        while (index < operands.length()) {
+          if (let Option::SOME(operand) = operands.get(index)) {
+            children.push(*operand);
+          }
+
+          index += 1;
+        }
       },
       Hir::HirKind::BuiltinLoad(load) -> {
         children.push(load.ptr);
@@ -1011,6 +1191,72 @@ export namespace Hir {
       Analyzer::Type::Function(_) -> true,
       _ -> false,
     };
+  }
+
+  /// The type a value of `typeId` has where it crosses into C: a function
+  /// type, behind any aliases, becomes the `RawFunction` with the same
+  /// signature, and every other type is unchanged. Only the outermost type
+  /// changes; a function-typed parameter of that signature stays a closure.
+  function cFacingType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return typeId;
+    }
+
+    let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut returnType: Analyzer::TypeId = typeId;
+    let mut isFunction: boolean = false;
+
+    if (let Option::SOME(Analyzer::Type::Function(signature)) = typeStore.get(resolved.typeId)) {
+      isFunction = true;
+      returnType = signature.returnType;
+
+      let mut index: u64 = 0;
+
+      while (index < signature.params.length()) {
+        if (let Option::SOME(param) = signature.params.get(index)) {
+          params.push(*param);
+        }
+
+        index += 1;
+      }
+    }
+
+    if (!isFunction) {
+      return typeId;
+    }
+
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+    return typeStoreRef.rawFunctionType(params, returnType);
+  }
+
+  /// The type a field declared `fieldType` of record `recordId` is stored as.
+  /// A C-layout record is read by C, so a function-typed field holds the C
+  /// function pointer `cFacingType` names; every other field holds its
+  /// declared type.
+  function recordFieldStorageType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordId: Analyzer::DefinitionId,
+    fieldType: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let mut cLayout: boolean = false;
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordId)) {
+      cLayout = recordDef.cLayout;
+    }
+
+    if (!cLayout) {
+      return fieldType;
+    }
+
+    return Hir::cFacingType(defStore, typeStore, fieldType);
   }
 
   /// The expressions whose value `valueId` can evaluate to, pushed onto

@@ -8,6 +8,7 @@ import
 from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
+import CodegenReserved from "@compiler::codegen::reserved";
 import Vector from "std::vector";
 
 /// Extra-checks phase for the Ignis selfhost compiler.
@@ -564,7 +565,33 @@ export namespace Analyzer {
           Analyzer::Checks::checkItem(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, itemStmt.item);
         },
         Ast::Statement::Node::Comment(_) -> {},
+        Ast::Statement::Node::Asm(asmNode) -> {
+          Analyzer::Checks::walkAsmInputs(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &asmNode, inDefer);
+        },
       };
+    }
+
+    /// Walks the input expressions of an `asm`, the only expressions it holds.
+    function walkAsmInputs(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      asmNode: &Ast::Expression::Asm,
+      inDefer: boolean,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < asmNode.inputs.length()) {
+        if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, input.expression, inDefer);
+        }
+
+        index += 1;
+      }
     }
 
     function walkExpr(
@@ -718,6 +745,9 @@ export namespace Analyzer {
           }
 
           Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, tryExpr.expression, inDefer);
+        },
+        Ast::Expression::Node::Asm(asmNode) -> {
+          Analyzer::Checks::walkAsmInputs(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &asmNode, inDefer);
         },
       };
     }
@@ -953,6 +983,261 @@ export namespace Analyzer {
       }
     }
 
+    // =========================================================================
+    // C-layout records
+    // =========================================================================
+
+    /// Whether a value of `typeId` has a C representation a C-layout record
+    /// can hold: an integer, a float, a boolean, a pointer, a function type, a
+    /// C-layout record, or a fixed array of one of those. Aliases are followed;
+    /// `depth` bounds a cyclic alias, which the resolver reports on its own.
+    function hasCRepresentation(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+      depth: u64,
+    ): boolean {
+      if (depth > 64) {
+        return false;
+      }
+
+      let mut verdict: boolean = false;
+      let mut nested: Option<Analyzer::TypeId> = Option::NONE;
+      let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(type_) = typeStore.get(typeId)) {
+        verdict = match (type_) {
+          Analyzer::Type::I8 -> true,
+          Analyzer::Type::I16 -> true,
+          Analyzer::Type::I32 -> true,
+          Analyzer::Type::I64 -> true,
+          Analyzer::Type::U8 -> true,
+          Analyzer::Type::U16 -> true,
+          Analyzer::Type::U32 -> true,
+          Analyzer::Type::U64 -> true,
+          Analyzer::Type::F32 -> true,
+          Analyzer::Type::F64 -> true,
+          Analyzer::Type::BOOLEAN -> true,
+          Analyzer::Type::Pointer(_) -> true,
+          Analyzer::Type::Function(_) -> true,
+          _ -> false,
+        };
+
+        if (let Analyzer::Type::FixedArray(element, _) = type_) {
+          nested = Option::SOME(element);
+        }
+
+        if (let Analyzer::Type::Record(defId) = type_) {
+          nominal = Option::SOME(defId);
+        }
+
+        if (let Analyzer::Type::Alias(aliasDefId) = type_) {
+          if (let Option::SOME(Analyzer::Definition::TypeAlias(aliasDef)) = defStore.get(aliasDefId)) {
+            nested = Option::SOME(aliasDef.aliasedType);
+          }
+        }
+      }
+
+      if (let Option::SOME(defId) = nominal) {
+        if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
+          return recordDef.cLayout;
+        }
+
+        return false;
+      }
+
+      if (let Option::SOME(inner) = nested) {
+        return Analyzer::Checks::hasCRepresentation(defStore, typeStore, inner, depth + 1);
+      }
+
+      return verdict;
+    }
+
+    /// Report each field of a C-layout record whose type has no C
+    /// representation. `fieldIds` are the record's instance fields, in the
+    /// order its non-static field bindings declare them.
+    function checkCLayoutFields(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      record_: &Ast::Item::Record,
+      fieldIds: &Vector<Analyzer::DefinitionId>,
+      isExtern: boolean,
+    ): void {
+      let kind: str = isExtern ? "extern record" : "@cLayout record";
+      let mut fieldPosition: u64 = 0;
+      let mut patternIndex: u64 = 0;
+
+      while (patternIndex < record_.fields.length()) {
+        let Option::SOME(patternId) = record_.fields.get(patternIndex) else {
+          patternIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*patternId) else {
+          patternIndex += 1;
+          continue;
+        };
+
+        if (Analyzer::Binder::fieldBindingIsStatic(&binding)) {
+          patternIndex += 1;
+          continue;
+        }
+
+        let fieldName: String = String::create(binding.name.toStr());
+
+        if (CodegenReserved::isCKeyword(&fieldName)) {
+          let message: String = `field '${binding.name.toStr()}' of ${kind} '${record_.name.toStr()}' is named by a C keyword`;
+          Analyzer::Checks::emitError(
+            diagnostics,
+            binding.span,
+            DiagnosticCode::C_LAYOUT_FIELD_RESERVED_NAME,
+            message.toStr(),
+            "a C-layout record keeps its written field names in C, so a field cannot be named by a C keyword",
+          );
+        }
+
+        let mut fieldType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(fieldId) = fieldIds.get(fieldPosition)) {
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+            fieldType = Option::SOME(fieldDef.fieldType);
+          }
+        }
+
+        if (let Option::SOME(typeId) = fieldType) {
+          if (!Analyzer::Checks::hasCRepresentation(defStore, typeStore, typeId, 0)) {
+            let message: String = `field '${binding.name.toStr()}' of ${kind} '${record_.name.toStr()}' has no C representation`;
+            Analyzer::Checks::emitError(
+              diagnostics,
+              binding.span,
+              DiagnosticCode::C_LAYOUT_FIELD_TYPE,
+              message.toStr(),
+              "a C-layout field must be an integer, float, boolean, pointer, function, C-layout record or fixed array of those",
+            );
+          }
+        }
+
+        fieldPosition += 1;
+        patternIndex += 1;
+      }
+    }
+
+    /// Check a record with a C layout once its field types are resolved.
+    ///
+    /// Every field needs a C representation. An extern record defines a C
+    /// struct under its written name, which is global in C, so a second extern
+    /// record with that name is reported wherever it is declared.
+    function checkCLayoutRecord(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      record_: &Ast::Item::Record,
+    ): void {
+      let Option::SOME(defId) = Analyzer::Checks::findItemDef(pass1, pass2, itemId) else {
+        return;
+      };
+
+      let mut fieldIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut cLayout: boolean = false;
+      let mut isExtern: boolean = false;
+      let mut nameSymbol: Option<Analyzer::SymbolId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
+        cLayout = recordDef.cLayout;
+        isExtern = recordDef.isExtern;
+        nameSymbol = Option::SOME(recordDef.name);
+
+        let mut copyIndex: u64 = 0;
+
+        while (copyIndex < recordDef.fields.length()) {
+          if (let Option::SOME(fieldId) = recordDef.fields.get(copyIndex)) {
+            fieldIds.push(*fieldId);
+          }
+
+          copyIndex += 1;
+        }
+      }
+
+      if (!cLayout) {
+        return;
+      }
+
+      // A generic C-layout record is already an error, and its type
+      // parameters have no C representation of their own to report.
+      if (record_.genericParameters.isEmpty()) {
+        Analyzer::Checks::checkCLayoutFields(diagnostics, defStore, typeStore, module, record_, &fieldIds, isExtern);
+      }
+
+      let Option::SOME(symbol) = nameSymbol else {
+        return;
+      };
+
+      if (!isExtern) {
+        return;
+      }
+
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(symbol);
+      let mut candidateIndex: u64 = 0;
+
+      while (candidateIndex < candidates.length()) {
+        let Option::SOME(candidate) = candidates.get(candidateIndex) else {
+          candidateIndex += 1;
+          continue;
+        };
+
+        if (candidate.raw() >= defId.raw()) {
+          candidateIndex += 1;
+          continue;
+        }
+
+        if (let Option::SOME(Analyzer::Definition::Record(other)) = defStore.get(*candidate)) {
+          if (other.isExtern) {
+            let message: String = `extern record '${record_.name.toStr()}' is already defined by another extern block`;
+            Analyzer::Checks::emitError(
+              diagnostics,
+              record_.span,
+              DiagnosticCode::DUPLICATE_EXTERN_RECORD,
+              message.toStr(),
+              "an extern record defines a C struct under its written name, which is global in C",
+            );
+            return;
+          }
+        }
+
+        candidateIndex += 1;
+      }
+    }
+
+    /// Check the records an extern block declares. Its functions and
+    /// constants are signatures with nothing to check here.
+    function checkExternRecords(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemIds: &Vector<Ast::ItemId>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < itemIds.length()) {
+        if (let Option::SOME(itemId) = itemIds.get(index)) {
+          if (let Option::SOME(Ast::Item::Node::Record(record_)) = module.items.get(*itemId)) {
+            Analyzer::Checks::checkCLayoutRecord(diagnostics, defStore, typeStore, module, pass1, pass2, *itemId, &record_);
+          }
+        }
+
+        index += 1;
+      }
+    }
+
     /// Check one item: functions and methods get the missing-return check
     /// and body walk, namespaces recurse, exports unwrap, constants walk
     /// their value, and everything else is skipped.
@@ -985,6 +1270,7 @@ export namespace Analyzer {
           );
         },
         Ast::Item::Node::Record(record_) -> {
+          Analyzer::Checks::checkCLayoutRecord(diagnostics, defStore, typeStore, module, pass1, pass2, itemId, &record_);
           Analyzer::Checks::checkMethods(
             diagnostics,
             defStore,
@@ -995,6 +1281,9 @@ export namespace Analyzer {
             typecheck,
             &record_.methods,
           );
+        },
+        Ast::Item::Node::Extern(externItem) -> {
+          Analyzer::Checks::checkExternRecords(diagnostics, defStore, typeStore, module, pass1, pass2, &externItem.items);
         },
         Ast::Item::Node::Enum(enum_) -> {
           Analyzer::Checks::checkMethods(

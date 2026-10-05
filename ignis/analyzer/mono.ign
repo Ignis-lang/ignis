@@ -412,6 +412,13 @@ export namespace Mono {
           parts = Mono::copyTypeIds(&signature.params);
           inner = signature.returnType;
         },
+        // Never a type argument, since the typechecker never produces one;
+        // spelled like the function type it lowers so mangling stays total.
+        Analyzer::Type::RawFunction(signature) -> {
+          kind = 6;
+          parts = Mono::copyTypeIds(&signature.params);
+          inner = signature.returnType;
+        },
         Analyzer::Type::Record(recordDef) -> {
           kind = 7;
           definition = recordDef;
@@ -833,6 +840,11 @@ export namespace Mono {
           elementTypes = Mono::copyTypeIds(&functionType.params);
           functionReturn = functionType.returnType;
         },
+        Analyzer::Type::RawFunction(functionType) -> {
+          shape = 8;
+          elementTypes = Mono::copyTypeIds(&functionType.params);
+          functionReturn = functionType.returnType;
+        },
         Analyzer::Type::Instance(instance) -> {
           shape = 7;
           instanceDef = instance.definition;
@@ -870,7 +882,7 @@ export namespace Mono {
       return arrayStoreRef.intern(Analyzer::Type::FixedArray(concreteInner, arrayLength));
     }
 
-    if (shape == 5 || shape == 6) {
+    if (shape == 5 || shape == 6 || shape == 8) {
       let mut concreteElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut elementIndex: u64 = 0;
 
@@ -891,6 +903,10 @@ export namespace Mono {
 
       let concreteReturn: Analyzer::TypeId = Mono::concretizeType(defStore, typeStore, symbols, state, functionReturn);
       let mut functionStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (shape == 8) {
+        return functionStoreRef.rawFunctionType(concreteElements, concreteReturn);
+      }
 
       return functionStoreRef.intern(Analyzer::Type::Function(Analyzer::FunctionType {
         params: concreteElements,
@@ -1473,6 +1489,8 @@ export namespace Mono {
           implementedTraits: Vector::new<String>(),
           packed: false,
           alignment: Option::NONE,
+          cLayout: false,
+          isExtern: false,
         }));
       } else {
         shellId = defStoreRef.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
@@ -2209,6 +2227,69 @@ export namespace Mono {
   /// definitions remapped, and generic call targets rewritten to their
   /// concrete clones (enqueuing new instantiations on first sight), the
   /// oracle's `substitute_hir`.
+  /// Clones an `asm` node: its operand nodes, and the output types under
+  /// the substitution.
+  function cloneInlineAsm(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+    outputHir: &mut Hir::HirStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    asmNode: &Hir::HirInlineAsm,
+  ): Hir::HirInlineAsm {
+    let mut inputs: Vector<Hir::HirAsmInput> = Vector::new<Hir::HirAsmInput>();
+    let mut index: u64 = 0;
+
+    while (index < asmNode.inputs.length()) {
+      if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+        let value: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, input.value);
+
+        inputs.push(Hir::HirAsmInput {
+          name: input.name.clone(),
+          location: input.location.clone(),
+          value: value,
+          isPlace: input.isPlace,
+          writes: input.writes,
+        });
+      }
+
+      index += 1;
+    }
+
+    let mut outputs: Vector<Hir::HirAsmOutput> = Vector::new<Hir::HirAsmOutput>();
+    index = 0;
+
+    while (index < asmNode.outputs.length()) {
+      if (let Option::SOME(output) = asmNode.outputs.get(index)) {
+        let mut place: Option<Hir::HirId> = Option::NONE;
+
+        if (let Option::SOME(placeId) = output.place) {
+          place = Option::SOME(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, placeId));
+        }
+
+        outputs.push(Hir::HirAsmOutput {
+          name: output.name.clone(),
+          location: output.location.clone(),
+          outputType: Mono::substituteType(defStore, typeStore, symbols, state, subst, output.outputType),
+          place: place,
+        });
+      }
+
+      index += 1;
+    }
+
+    return Hir::HirInlineAsm {
+      chunks: Hir::cloneStrings(&asmNode.chunks),
+      holes: Hir::cloneIndexes(&asmNode.holes),
+      inputs: inputs,
+      outputs: outputs,
+      clobbers: Hir::cloneStrings(&asmNode.clobbers),
+      volatile: asmNode.volatile,
+    };
+  }
+
   function cloneHir(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2476,6 +2557,15 @@ export namespace Mono {
         Hir::HirKind::Dereference(innerId) -> {
           clonedKind = Hir::HirKind::Dereference(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
         },
+        Hir::HirKind::ToRawFunction(innerId) -> {
+          clonedKind = Hir::HirKind::ToRawFunction(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::FromRawFunction(innerId) -> {
+          clonedKind = Hir::HirKind::FromRawFunction(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::InlineAsm(asmNode) -> {
+          clonedKind = Hir::HirKind::InlineAsm(Mono::cloneInlineAsm(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &asmNode));
+        },
         Hir::HirKind::Index(indexNode) -> {
           let base: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, indexNode.base);
           let indexExpr: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, indexNode.index);
@@ -2522,6 +2612,7 @@ export namespace Mono {
           clonedKind = Hir::HirKind::BuiltinLoad(Hir::HirBuiltinLoad {
             ty: Mono::substituteType(defStore, typeStore, symbols, state, subst, loadNode.ty),
             ptr: ptr,
+            volatile: loadNode.volatile,
           });
         },
         Hir::HirKind::BuiltinStore(storeNode) -> {
@@ -2532,6 +2623,7 @@ export namespace Mono {
             ty: Mono::substituteType(defStore, typeStore, symbols, state, subst, storeNode.ty),
             ptr: ptr,
             value: value,
+            volatile: storeNode.volatile,
           });
         },
         Hir::HirKind::BuiltinHash(hashNode) -> {
@@ -3477,6 +3569,8 @@ export namespace Mono {
     let mut implementedTraits: Vector<String> = Vector::new<String>();
     let mut packed: boolean = false;
     let mut alignment: Option<u64> = Option::NONE;
+    let mut cLayout: boolean = false;
+    let mut isExtern: boolean = false;
 
     if (let Option::SOME(definition) = defStore.get(genericDefId)) {
       if (let Analyzer::Definition::Record(recordDef) = definition) {
@@ -3486,6 +3580,8 @@ export namespace Mono {
         implementedTraits = Mono::copyTraitNames(&recordDef.implementedTraits);
         packed = recordDef.packed;
         alignment = recordDef.alignment;
+        cLayout = recordDef.cLayout;
+        isExtern = recordDef.isExtern;
         fieldDefs = Mono::copyDefIdList(&recordDef.fields);
       }
     }
@@ -3547,6 +3643,8 @@ export namespace Mono {
       implementedTraits: implementedTraits,
       packed: packed,
       alignment: alignment,
+      cLayout: cLayout,
+      isExtern: isExtern,
     }));
 
     let _ = state;

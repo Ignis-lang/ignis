@@ -414,6 +414,73 @@ extern __errno {
 }
 ```
 
+#### Function Pointers in Extern Functions
+
+A function-typed parameter or result of an extern function is a plain C function pointer. The argument must be capture-free: a function named directly, or a closure literal that captures nothing. A capturing closure, or a variable holding a closure, is an error, and so is a function pointer signature that itself takes or returns a function value.
+
+```ignis
+extern LibC {
+    function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;
+}
+
+function compareAscending(left: *u8, right: *u8): i32 {
+    return *(left as *i32) - *(right as *i32);
+}
+
+function sort(values: *mut i32, count: u64): void {
+    LibC::qsort(values as *mut u8, count, 4, compareAscending);
+    LibC::qsort(values as *mut u8, count, 4, (left: *u8, right: *u8): i32 -> *(right as *i32) - *(left as *i32));
+    return;
+}
+```
+
+A function pointer an extern function returns is an ordinary function value: it can be stored, called, or passed back to an extern function.
+
+#### Extern Records
+
+An extern block can also declare records. Ignis defines the C struct for each one: the struct takes the record's written name, unmangled, and each field keeps its written name, in declaration order. `@packed` and `@aligned` apply as on any record. The record is used from Ignis like any other record, through the extern block's path.
+
+```ignis
+extern Device {
+    @packed
+    record Register {
+        public control: u8;
+        public status: u32;
+    }
+}
+
+function reset(register: *mut Device::Register): void {
+    (*register).status = 0;
+    return;
+}
+```
+
+An extern record cannot be generic and cannot declare methods, static fields or `@implements`. Each field must have a C representation: an integer, a float, a boolean, a pointer, a function type, another C-layout record (an extern record or a `@cLayout` record), or a fixed array of one of those. A field cannot be named by a C keyword such as `int` or `register`, since C could not spell it as a struct member. Because C struct names are global, two extern records with the same name are an error, even in different extern blocks or modules. Enums and type aliases cannot be declared inside an extern block.
+
+A record outside an extern block gets the same field layout with `@cLayout` (see [Attributes](#7-attributes)).
+
+A function-typed field of an extern or `@cLayout` record is a plain C function pointer, as a function-typed extern parameter is. A value stored into it, by initialization or assignment, must be capture-free: a function named directly, or a closure literal that captures nothing. Reading the field yields an ordinary function value. Taking a reference to the field (`&record.field` or `&mut record.field`) is an error, since the reference could only point at a temporary function value and writes through it would never reach the field: read the field into a local, or assign the field directly.
+
+```ignis
+extern Device {
+    record Handler {
+        public apply: (i32) -> i32;
+    }
+}
+
+function twice(value: i32): i32 {
+    return value * 2;
+}
+
+function run(): i32 {
+    let mut handler: Device::Handler = Device::Handler { apply: twice };
+    handler.apply = (value: i32): i32 -> value + 1;
+
+    let apply: (i32) -> i32 = handler.apply;
+    return apply(41);
+}
+```
+
 #### Side-Effect Imports
 
 `import _ from "..."` loads a module purely for its side effects (e.g., namespace contributions) without binding any name into the importing scope.
@@ -688,6 +755,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@implements(...)` -- lang traits (`Drop`, `Clone`, `Copy`) or user-defined traits
 - `@packed` -- remove struct padding
 - `@aligned(N)` -- set minimum alignment
+- `@cLayout` -- give a record a C layout: fields in declaration order, each emitted under its written name. Its C struct name stays mangled and its methods are allowed. The record cannot be generic or implement `Drop`, and every field needs a C representation and a name that is not a C keyword, as in an extern record (see 4.10)
 - `@cold` -- mark function as unlikely to execute
 - `@externName("...")` -- override the C symbol name for a function
 - `@deprecated` / `@deprecated("...")` -- mark as deprecated
@@ -695,6 +763,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@extension(Type)` / `@extension(Type, mut)` -- extension methods
 - `@lang(try)` -- mark an enum as try-capable for use with the `!` operator
 - `@test` -- mark a top-level function as a native test case
+- `@panicHandler`, `@allocHandler`, `@freeHandler` -- runtime handlers of a freestanding (`std = false`) build, which replace libc for panics and escaping closure environments (see `docs/PROJECT.md`)
 
 ### Parameter attributes
 
@@ -916,7 +985,62 @@ function example(): void {
 - The deferred expression must be `void`-typed.
 - The try operator `!` is not allowed inside a deferred expression.
 
-### 8.8 Other statements
+### 8.8 Inline assembly (`asm`)
+
+`asm` embeds x86-64 instructions, written in Intel syntax. Its header lists the inputs, the outputs and what the instructions clobber, and its body is the instruction text with `{name}` holes:
+
+```ignis
+function readPort(port: u16): u8 {
+    return asm (port in dx) -> (value: u8 in al) { in {value}, {port} };
+}
+
+function cycles(): u64 {
+    asm () -> (low: u32 in eax, high: u32 in edx) {
+        rdtsc
+    }
+
+    return ((high as u64) << 32) | (low as u64);
+}
+
+function bump(counter: *mut u64): void {
+    asm (*counter inout mem) clobber(flags) { add qword ptr {counter}, 1 }
+}
+```
+
+- An input is `expression in location`, or `expression inout location` when the instructions also write it back. An output is `name: Type in location`. A location is a register or an operand class.
+- `clobber(...)` names what the instructions overwrite besides the outputs. An output list or a clobber list, once written, holds at least one entry.
+- `asm` is volatile: it runs where it is written, every time. With `pure`, the instructions only compute their outputs from their inputs, so the C compiler may drop an `asm` whose outputs go unused or merge two identical ones. A `pure` asm needs an output (A0226).
+- Where an expression is expected, `asm` is an expression whose value is its output, and it has at most one (A0226). At the start of a statement it is a statement that ends with its body's `}`, and each output becomes an immutable local for the rest of the block. Output names are unique (A0226).
+- The body is not Ignis. `{name}` is a hole naming an operand, and `{{` and `}}` write literal braces. Because of that, the body's closing `}` cannot be directly followed by another `}`; write a space or a line break between them. `//` and `/* */` comments in the body are Ignis comments: the formatter keeps them, and the compiler drops them before the assembler sees the text.
+- `pure`, `inout` and `clobber` are reserved only in their places in the header. `asm` is a keyword everywhere.
+
+**Locations:**
+
+| Location | Meaning |
+| --- | --- |
+| `rax`, `eax`, `ax`, `al` | The `a` register, at 64, 32, 16 or 8 bits. `rbx`, `rcx`, `rdx` follow the same pattern (`ebx`, `bx`, `bl`, ...). |
+| `rsi`, `esi`, `si`, `sil` | The source index register. `rdi`, `edi`, `di`, `dil` name the destination index register. |
+| `r8` to `r15` | The 64-bit registers. `r8d`, `r8w`, `r8b` name their 32, 16 and 8 bit parts. |
+| `reg` | Any general-purpose register the compiler picks. |
+| `mem` | The operand's place in memory, not a copy of it. |
+| `imm` | A constant written into the instruction. Inputs only. |
+
+`rsp`, `rbp` and their parts belong to the compiled function and cannot be named, nor can `ah`, `bh`, `ch` and `dh`. An unknown location is A0220.
+
+**Operands:**
+
+- An operand in a register or `imm` is an integer (`i8` to `u64`) or, in a register, a raw pointer (A0221). An output is always an integer or a raw pointer. An operand in a named register is exactly as wide as the name says: a `u64` goes in `rax`, a `u8` in `al` (A0222). An integer literal in a named register takes the unsigned type of that width.
+- An `imm` input is an integer literal, possibly negative, or the name of a constant, and cannot be `inout` (A0225).
+- A `mem` input is a place: a local, a field, an element, a dereferenced pointer or a `static mut` (A0225).
+- An `inout` input is a place the asm may write: a mutable local, a field or element of one, or a dereferenced `*mut` pointer (A0225).
+- Two inputs cannot be in the same register, and neither can two outputs (A0224). An input and an output may share one, which is how a register that is read and then overwritten is written.
+- A hole names an output by its name, and an input by the variable it reads or the pointer it dereferences: `{counter}` above names `*counter`. Any other input, such as a literal or a call, has no name. A hole names exactly one operand (A0223).
+- A clobber is `memory`, `flags` or a register that holds no operand, each named once (A0224). Anything else is A0220.
+- The places an `asm` writes, its `inout` and `mem` inputs and the locals of a statement's outputs, cannot be borrowed while it runs.
+
+**Memory operands need a size.** A `mem` hole stands for an address, and an instruction that cannot tell the operand size from a register, such as one with an immediate, needs it written out: `add qword ptr {counter}, 1`, not `add {counter}, 1`. Clang prints a memory operand without a size, so the second form does not assemble; GCC prints its own size and accepts the repeated one.
+
+### 8.9 Other statements
 
 ```ignis
 return;

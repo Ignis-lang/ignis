@@ -288,6 +288,7 @@
 // <directive-attr>; the shapes below record which argument lists are accepted.
 <known-attribute> ::= "@" "packed"
   | "@" "aligned" "(" <integer> ")"
+  | "@" "cLayout"
   | "@" "cold"
   | "@" "test"
   | "@" "externName" "(" <string> ")"
@@ -305,7 +306,8 @@
 // `@implements(...)` takes one or more trait names, including the lang traits
 // `Drop`, `Clone` and `Copy`. `@lang(try)` marks the `Result`/`Option` enums.
 // `@langHook("name")` applies to a namespace. `@takes` and `@noescape` are
-// parameter attributes (see <parameter>).
+// parameter attributes (see <parameter>). `@cLayout` applies to a non-generic
+// record that does not implement `Drop`.
 
 // Compile-time selection. These are resolved by the parser: the discarded
 // branch or item is skipped and never reaches the AST.
@@ -388,10 +390,17 @@
 
 <extern> ::= <directive-attrs>? "extern" <qualified-identifier> "{" <extern-item>* "}"
 
-<extern-item> ::= <directive-attrs>? ( <extern-function> | <record> | <enum> | <type-alias> )
+<extern-item> ::= <directive-attrs>? ( <extern-function> | <extern-const> | <record> )
 
 <extern-function> ::= "function" <identifier> (<generic-type>)?
                       "(" <parameters>? ")" ":" <type> ";"
+
+<extern-const> ::= "const" <identifier> ":" <type> ";"
+
+// A <record> inside an extern block defines a C struct under its written
+// name, with its written field names in declaration order. It takes no
+// generics, methods, static fields or `@implements`. Enums and type aliases
+// are not accepted inside an extern block.
 
 <namespace> ::= <directive-attrs>? "namespace" <qualified-identifier> "{" <namespace-item>* "}"
 <namespace-item> ::= <function> | <const> | <record> | <enum> | <trait> | <type-alias> | <extern> | <namespace>
@@ -420,6 +429,7 @@
   | <break>
   | <continue>
   | <defer>
+  | <asm>
   | <block>
   | <variable>
   | <let-else>
@@ -456,6 +466,40 @@
 <break> ::= "break" ";"
 <continue> ::= "continue" ";"
 <defer> ::= "defer" <expression> ";"
+
+<asm> ::= "asm" "pure"? "(" <asm-inputs>? ")" ("->" "(" <asm-outputs> ")")?
+          ("clobber" "(" <asm-clobbers> ")")? <asm-body>
+<asm-inputs> ::= <asm-input> ("," <asm-input>)* ","?
+<asm-input> ::= <expression> ("in" | "inout") <identifier>
+<asm-outputs> ::= <asm-output> ("," <asm-output>)* ","?
+<asm-output> ::= <identifier> ":" <type> "in" <identifier>
+<asm-clobbers> ::= <identifier> ("," <identifier>)* ","?
+<asm-body> ::= <embed-no-hole>
+  | <embed-head> <identifier> (<embed-middle> <identifier>)* <embed-tail>
+<embed-no-hole> ::= "{" <embed-char>* "}"
+<embed-head> ::= "{" <embed-char>* "{"
+<embed-middle> ::= "}" <embed-char>* "{"
+<embed-tail> ::= "}" <embed-char>* "}"
+<embed-char> ::= [^{}] | "{{" | "}}" | <comment>
+
+// Inline assembly. At the start of a statement `asm` is a statement that ends
+// with its body's `}` (no `;`), and each output names a local for the rest of
+// the block. Anywhere else it is a primary expression whose value is its
+// output. `pure`, `inout` and `clobber` are identifiers reserved only in these
+// places; `asm` is a keyword. The identifier after `in` or `inout` is a
+// location: a general-purpose register name such as `rax`, `eax` or `r8b`, or
+// one of the classes `reg`, `mem` and `imm`. A clobber is a register name,
+// `memory` or `flags`. The analyzer, not the grammar, decides which names are
+// valid (A0220).
+//
+// The lexer reads the header as ordinary tokens until the first `{` outside
+// its parentheses, then reads the body as embedded text: `{name}` is a hole
+// whose name is an ordinary token, `{{` and `}}` are literal braces, and `//`
+// and `/* */` comments stay in the text, so braces inside them count for
+// nothing. A `;`, or a `)` or `}` that closes what encloses the `asm`, ends the
+// header when no body has opened. A body still open at the end of the file is
+// I0053. Since `}}` is an escaped brace, the body's closing `}` cannot be
+// directly followed by another `}`.
 
 <block> ::= "{" <statement>* "}"
 <variable> ::= <directive-attrs>? "let" "mut"? <identifier> ":" <type> ("=" <expression>)? ";"
@@ -572,6 +616,7 @@
   | <capture-override>
   | <pipe-placeholder>
   | <lambda>
+  | <asm>
   
 <record-init> ::= <type-path> "{" <record-init-fields>? "}"
 <record-init-fields> ::= <record-init-field> ("," <record-init-field>)* ","?

@@ -247,6 +247,46 @@ The first argument must be exactly `*mut T`. Passing `null` is a compile-time er
 
 ---
 
+### `@readVolatile<T>(ptr)`
+
+Reads a value of type `T` from a mutable pointer with a volatile access.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | 1 expression (`*mut T`) |
+| **Returns** | `T` |
+
+```ignis
+function readStatus(address: *mut u32): u32 {
+    return @readVolatile<u32>(address);
+}
+```
+
+Same rules as `@read`. The load is emitted as C `*(volatile T*)(ptr)`, so the C compiler never elides it, merges it with another access, or reorders it across other volatile accesses. Use it for memory-mapped device registers and memory shared with code the compiler cannot see.
+
+---
+
+### `@writeVolatile<T>(ptr, value)`
+
+Writes a value of type `T` to a mutable pointer with a volatile access.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | 2 expressions (`*mut T`, `T`) |
+| **Returns** | `void` |
+
+```ignis
+function writeControl(address: *mut u32, value: u32): void {
+    @writeVolatile<u32>(address, value);
+}
+```
+
+Same rules as `@write`. The store is emitted as C `*(volatile T*)(ptr) = value`, with the same guarantees as `@readVolatile`.
+
+---
+
 ### `@dropInPlace<T>(ptr)`
 
 Runs drop glue for `T` at the given address.
@@ -351,6 +391,8 @@ function divide(a: i32, b: i32): i32 {
 The return type is `Never`, so the compiler knows execution does not continue past a `@panic` call.
 
 Emits `fprintf(stderr, "panic: %s\n", message); exit(101);` in the C backend.
+A freestanding build (`std = false`) calls the program's `@panicHandler`
+function with the message, file and line instead (see `docs/PROJECT.md`).
 
 ---
 
@@ -490,6 +532,8 @@ For unsigned types, `minOf` returns `0`.
 | `@pointerFromInteger<T>(int)` | 1 type arg + 1 expr | `T` | Yes (C cast) |
 | `@read<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (load through pointer) |
 | `@write<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (store through pointer) |
+| `@readVolatile<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (volatile load through pointer) |
+| `@writeVolatile<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (volatile store through pointer) |
 | `@dropInPlace<T>(ptr)` | 1 type arg + 1 expr | `void` | Yes (drop glue call) |
 | `@dropGlue<T>()` | 1 type arg | `(*mut u8) -> void` | Yes (function pointer constant) |
 | `@eq<T>(left, right)` | 1 type arg + 2 refs | `boolean` | Yes |

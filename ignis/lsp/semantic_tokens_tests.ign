@@ -294,3 +294,18 @@ function theLegendListsTheHostsTypesAndModifiersInOrder(): void {
     "{\"tokenTypes\":[\"namespace\",\"type\",\"class\",\"enum\",\"struct\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"enumMember\",\"function\",\"method\",\"keyword\",\"modifier\",\"comment\",\"string\",\"number\",\"operator\"],\"tokenModifiers\":[\"declaration\",\"definition\",\"readonly\",\"static\",\"modification\",\"mutable\"]}",
   );
 }
+
+/// `asm` and the header words it reserves are keywords, the body text is a
+/// string, and a hole is a variable.
+@test
+function asmHeaderWordsAreKeywordsAndItsBodyIsAString(): void {
+  let tokens: Vector<ClassifiedToken> = classifySource("asm pure (port in dx, flag inout rax) clobber(memory) { out {port}, al }");
+
+  Test::assertEq<u64>(typeOfLexeme(&tokens, "asm").unwrapOr(99), SEMANTIC_KEYWORD);
+  Test::assertEq<u64>(typeOfLexeme(&tokens, "pure").unwrapOr(99), SEMANTIC_KEYWORD);
+  Test::assertEq<u64>(typeOfLexeme(&tokens, "inout").unwrapOr(99), SEMANTIC_KEYWORD);
+  Test::assertEq<u64>(typeOfLexeme(&tokens, "clobber").unwrapOr(99), SEMANTIC_KEYWORD);
+  Test::assertEq<u64>(typeOfLexeme(&tokens, "{ out {").unwrapOr(99), SEMANTIC_STRING);
+  Test::assertEq<u64>(typeOfLexeme(&tokens, "port").unwrapOr(99), SEMANTIC_VARIABLE);
+  Test::assertEq<u64>(typeOfLexeme(&tokens, "}, al }").unwrapOr(99), SEMANTIC_STRING);
+}

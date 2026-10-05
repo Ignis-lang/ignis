@@ -1,0 +1,37 @@
+extern Device {
+  @packed
+  record Register {
+    public control: u8;
+    public status: u32;
+  }
+
+  record Frame {
+    public registers: Register[2];
+    public next: *mut Frame;
+    public enabled: boolean;
+  }
+}
+
+function update(frame: *mut Device::Frame): void {
+  (*frame).registers[1].status = 40;
+  (*frame).enabled = true;
+  return;
+}
+
+function main(): i32 {
+  let mut frame: Device::Frame = Device::Frame {
+    registers: [Device::Register { control: 1, status: 2 }, Device::Register { control: 3, status: 4 }],
+    next: null,
+    enabled: false,
+  };
+
+  update(&mut frame as *mut Device::Frame);
+
+  if (!frame.enabled || frame.next != null) {
+    return 1;
+  }
+
+  let size: u64 = @sizeOf<Device::Register>();
+
+  return frame.registers[1].status as i32 + frame.registers[0].control as i32 + size as i32;
+}

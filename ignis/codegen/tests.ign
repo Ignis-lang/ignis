@@ -10,6 +10,8 @@ import BuildModuleKind, DiscoveryResult, Resolver from "@compiler::build";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
 import Borrowck from "@compiler::analyzer::borrowck";
+import Capture from "@compiler::analyzer::capture";
+import RuntimeHandlers from "@compiler::analyzer::runtime_handlers";
 import Lowering from "@compiler::analyzer::lowering";
 import Mono from "@compiler::analyzer::mono";
 import LirLowering from "@compiler::lir::lowering";
@@ -46,6 +48,7 @@ function codegenContains(haystack: &String, needle: str): boolean {
 /// can name a definition the emitter mangled rather than guess its id.
 record CodegenEmission {
   public source: String;
+  public usesInlineAsm: boolean;
   public defStore: Analyzer::DefinitionStore;
   public symbols: Analyzer::SymbolTable;
 }
@@ -103,6 +106,24 @@ function codegenEmit(source: str): CodegenEmission {
 /// `codegenEmit`, with the functions `externalNames` names kept externally
 /// visible the way the test harness unit needs its `@test` functions.
 function codegenEmitExposing(source: str, externalNames: &Vector<String>): CodegenEmission {
+  return codegenEmitWith(source, externalNames, false);
+}
+
+/// `codegenEmit` for a `std = false` build, which emits a freestanding unit.
+function codegenEmitFreestanding(source: str): CodegenEmission {
+  let externalNames: Vector<String> = Vector::new<String>();
+
+  return codegenEmitWith(source, &externalNames, true);
+}
+
+/// The pipeline behind `codegenEmit` and its variants, with the emitter told
+/// whether the unit is freestanding and handed the runtime handlers the
+/// source declares.
+function codegenEmitWith(
+  source: str,
+  externalNames: &Vector<String>,
+  freestanding: boolean,
+): CodegenEmission {
   let file: SourceFile = SourceFile::create("codegen_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
@@ -122,7 +143,22 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
 
   Test::assertEq<u64>(codegenCountErrors(&output.diagnostics), 0);
 
-  let hir: Hir::HirStore = Lowering::lowerModule(
+  let mut handlers: RuntimeHandlers::HandlerSet = RuntimeHandlers::HandlerSet::empty();
+  let mut handlerDiagnostics: DiagnosticBag = DiagnosticBag::init();
+  RuntimeHandlers::collectModule(
+    &defStore,
+    &typeStore,
+    &parsed.module,
+    &output.pass2,
+    freestanding,
+    &mut handlers,
+    &mut handlerDiagnostics,
+  );
+  RuntimeHandlers::checkAllocatorPair(&handlers, &mut handlerDiagnostics);
+
+  Test::assertEq<u64>(codegenCountErrors(&handlerDiagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -130,7 +166,12 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
     &output,
   );
 
-  let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &hir);
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(&mut defStore, &mut typeStore, &mut symbols, &mut hir);
+
+  Test::assertEq<u64>(codegenCountErrors(&captureDiagnostics), 0);
+
+  let handlerIds: Vector<u32> = handlers.definitionIds();
+  let monoResult: Mono::MonoOutput = Mono::runWithRoots(&mut defStore, &mut typeStore, &mut symbols, &hir, false, &handlerIds);
 
   let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
     &mut defStore,
@@ -154,8 +195,33 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
     constValues,
   );
 
-  let externalSymbols: Vector<u32> = codegenFunctionDefIds(&mut defStore, &mut symbols, externalNames);
+  let mut externalSymbols: Vector<u32> = codegenFunctionDefIds(&mut defStore, &mut symbols, externalNames);
+  let mut handlerIndex: u64 = 0;
+
+  while (handlerIndex < handlerIds.length()) {
+    if (let Option::SOME(handlerId) = handlerIds.get(handlerIndex)) {
+      externalSymbols.push(*handlerId);
+    }
+
+    handlerIndex += 1;
+  }
+
   let moduleInfos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  let mut hooks: CodegenC::RuntimeHooks = CodegenC::RuntimeHooks::hosted();
+  hooks.freestanding = freestanding;
+  hooks.sources.push(SourceFile::create("codegen_tests.ign", source));
+
+  if (let Option::SOME(handler) = &handlers.panicHandler) {
+    hooks.panicHandler = Option::SOME(handler.defId);
+  }
+
+  if (let Option::SOME(handler) = &handlers.allocHandler) {
+    hooks.allocHandler = Option::SOME(handler.defId);
+  }
+
+  if (let Option::SOME(handler) = &handlers.freeHandler) {
+    hooks.freeHandler = Option::SOME(handler.defId);
+  }
 
   let emitted: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
@@ -164,10 +230,14 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
     &lowered.program,
     &externalSymbols,
     &moduleInfos,
+    &mut hooks,
   );
+
+  Test::assertEq<u64>(hooks.unhandledPanics.length(), 0);
 
   return CodegenEmission {
     source: emitted.source,
+    usesInlineAsm: emitted.usesInlineAsm,
     defStore: defStore,
     symbols: symbols,
   };
@@ -516,6 +586,20 @@ function codegenLeavesNonDroppableAccessUnguarded(): void {
   Test::assert(!codegenContains(&emission.source, "panic: use of dropped value"));
 }
 
+/// `@readVolatile` and `@writeVolatile` reach C through a `volatile` pointer so
+/// the C compiler keeps every access, while `@read` and `@write` stay plain.
+@test
+function codegenEmitsVolatileBuiltinAccessesThroughVolatilePointers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let mut value: i32 = 41;\n  let pointer: *mut i32 = (&mut value) as *mut i32;\n\n  @writeVolatile<i32>(pointer, 42);\n  @write<i32>(pointer, @read<i32>(pointer));\n\n  return @readVolatile<i32>(pointer);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, " = *(volatile i32*)("));
+  Test::assert(codegenContains(&emission.source, "    *(volatile i32*)("));
+  Test::assert(codegenContains(&emission.source, " = *(i32*)("));
+  Test::assert(codegenContains(&emission.source, "    *(i32*)("));
+}
+
 /// A signed minimum reaches C as one constant, not as the negation of a
 /// magnitude that already wrapped: `--2147483648` does not compile and the
 /// `i64` magnitude wraps to zero.
@@ -555,6 +639,145 @@ function codegenEmitsRecordWithoutFieldsAsEmptyStruct(): void {
   Test::assert(codegenContains(&emission.source, "sizeof(struct Empty_"));
   Test::assert(codegenContains(&emission.source, " {\n};\n"));
   Test::assert(!codegenContains(&emission.source, "char _empty;"));
+}
+
+/// An extern record defines the struct the C side names: the written record
+/// name without a definition suffix, and the written field names in
+/// declaration order, reached by name wherever a field is.
+@test
+function codegenEmitsExternRecordsUnderTheirCNames(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Device {\n  record Port {\n    public control: u8;\n    public status: u32;\n  }\n}\n\nfunction main(): i32 {\n  let mut port: Device::Port = Device::Port { control: 1, status: 2 };\n  let pointer: *mut Device::Port = &mut port as *mut Device::Port;\n\n  (*pointer).status = 5;\n\n  return port.status as i32 + port.control as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "struct Port {\n    u8 control;\n    u32 status;\n};\n"));
+  Test::assert(codegenContains(&emission.source, ")->control = "));
+  Test::assert(codegenContains(&emission.source, ")->status);"));
+  Test::assert(!codegenContains(&emission.source, "struct Port_"));
+  Test::assert(!codegenContains(&emission.source, "field_"));
+}
+
+/// A `@cLayout` record keeps its mangled struct name but spells its fields
+/// as written, in declaration order.
+@test
+function codegenEmitsCLayoutRecordFieldsByName(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "@cLayout\nrecord Counter {\n  public value: i32;\n  public step: i32;\n\n  public total(&self): i32 {\n    return self.value + self.step;\n  }\n}\n\nfunction main(): i32 {\n  let counter: Counter = Counter { value: 2, step: 5 };\n\n  return counter.total();\n}\n",
+  );
+
+  let Option::SOME(name) = codegenMangledStructName(&mut emission, "Counter") else {
+    @panic("expected the Counter record to be emitted");
+  };
+
+  let definition: String = `struct ${name.toStr()} {\n    i32 value;\n    i32 step;\n};\n`;
+
+  Test::assert(codegenContains(&name, "Counter_"));
+  Test::assert(emission.source.contains(&definition));
+  Test::assert(!codegenContains(&emission.source, "field_"));
+}
+
+/// A function-typed extern parameter takes a typed C function pointer: the
+/// signature gets one `ignis_fn_<id>` typedef, and a named function is passed
+/// as itself, cast to it, with no forwarding closure in between.
+@test
+function codegenPassesNamedFunctionsToExternsAsTypedFunctionPointers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern LibC {\n  function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;\n}\n\nfunction compareAscending(left: *u8, right: *u8): i32 {\n  return *(left as *i32) - *(right as *i32);\n}\n\nfunction main(): i32 {\n  let mut values: i32[2] = [2, 1];\n\n  LibC::qsort((&mut values[0]) as *mut u8, 2, 4, compareAscending);\n\n  return values[0];\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")(u8*, u8*);\n"));
+  Test::assert(codegenContains(&emission.source, " = (ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")compareAscending_"));
+  Test::assert(!codegenContains(&emission.source, "__closure_thunk"));
+}
+
+/// A lambda without captures reaches a C function pointer through a `_raw`
+/// wrapper that calls its thunk with a null environment.
+@test
+function codegenPassesNonCapturingLambdasToExternsThroughRawWrappers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern LibC {\n  function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;\n}\n\nfunction main(): i32 {\n  let mut values: i32[2] = [2, 1];\n\n  LibC::qsort((&mut values[0]) as *mut u8, 2, 4, (left: *u8, right: *u8): i32 -> *(left as *i32) - *(right as *i32));\n\n  return values[0];\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, "_raw(u8* a0, u8* a1) {\n"));
+  Test::assert(codegenContains(&emission.source, "(NULL, a0, a1);\n"));
+  Test::assert(codegenContains(&emission.source, "_raw;\n"));
+}
+
+/// One signature used both as an extern function pointer and as a local
+/// closure keeps both representations: the closure struct for the closure and
+/// the typedef for the pointer, rather than one of them for every use.
+@test
+function codegenKeepsClosureAndFunctionPointerOfOneSignatureApart(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Native {\n  function apply(callback: (i32) -> i32, value: i32): i32;\n}\n\nfunction twice(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  let offset: i32 = 3;\n  let shift: (i32) -> i32 = (value: i32): i32 -> value + offset;\n\n  return Native::apply(twice, shift(1));\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")(i32);\n"));
+  Test::assert(codegenContains(&emission.source, "struct __ignis_closure_t"));
+  Test::assert(codegenContains(&emission.source, ".call("));
+  Test::assert(codegenContains(&emission.source, ")twice_"));
+}
+
+/// Drop glue is a plain C function: passed to an extern it is cast to the
+/// signature's typedef, and held as a function value it is called through the
+/// C function pointer trampoline.
+@test
+function codegenTypesDropGlueAsACFunctionPointer(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Runtime {\n  function registerDrop(glue: (*mut u8) -> void): void;\n}\n\nfunction main(): i32 {\n  Runtime::registerDrop(@dropGlue<i32>());\n\n  let glue: (*mut u8) -> void = @dropGlue<i32>();\n  let mut value: i32 = 1;\n\n  glue((&mut value) as *mut u8);\n\n  return value;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef void (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, ")ignis_drop_glue_t"));
+  Test::assert(codegenContains(&emission.source, "registerDrop((void*)t"));
+  Test::assert(codegenContains(&emission.source, "{ ignis_raw_tramp_"));
+  Test::assert(!codegenContains(&emission.source, "(void*)ignis_drop_glue_t"));
+}
+
+/// A function-typed field of a C-layout record is a typed C function pointer:
+/// the struct member is spelled by the signature's typedef, and a named
+/// function stored into it is cast to that typedef with no closure around it.
+@test
+function codegenStoresCLayoutFunctionFieldsAsTypedFunctionPointers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "extern Native {\n  record Handler {\n    public apply: (i32) -> i32;\n    public bias: i32;\n  }\n}\n\nfunction twice(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  let mut handler: Native::Handler = Native::Handler { apply: twice, bias: 1 };\n\n  handler.apply = twice;\n\n  return handler.bias;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "typedef i32 (*ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, "struct Handler {\n    ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, " apply;\n    i32 bias;\n};\n"));
+  Test::assert(codegenContains(&emission.source, ")twice_"));
+  Test::assert(!codegenContains(&emission.source, "struct __ignis_closure_t"));
+}
+
+/// Reading a function-typed field of a C-layout record yields a closure that
+/// calls the stored pointer through the signature's trampoline; a lambda
+/// without captures is stored through its `_raw` wrapper.
+@test
+function codegenReadsCLayoutFunctionFieldsThroughTheTrampoline(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "@cLayout\nrecord Table {\n  public apply: (i32) -> i32;\n}\n\nfunction main(): i32 {\n  let table: Table = Table { apply: (value: i32): i32 -> value + 1 };\n  let apply: (i32) -> i32 = table.apply;\n\n  return apply(41);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "_raw(i32 a0) {\n"));
+  Test::assert(codegenContains(&emission.source, "->apply);\n"));
+  Test::assert(codegenContains(&emission.source, "{ ignis_raw_tramp_"));
+  Test::assert(codegenContains(&emission.source, "static i32 ignis_raw_tramp_"));
+}
+
+/// A record without a C layout keeps its index-named fields.
+@test
+function codegenKeepsIndexNamedFieldsOnPlainRecords(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "record Plain {\n  public value: i32;\n  public step: i32;\n}\n\nfunction main(): i32 {\n  let plain: Plain = Plain { value: 2, step: 5 };\n\n  return plain.value + plain.step;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, " {\n    i32 field_0;\n    i32 field_1;\n};\n"));
+  Test::assert(!codegenContains(&emission.source, " value;"));
 }
 
 /// The reserved-name table is the contract both compilers share, so it is
@@ -626,6 +849,28 @@ function codegenLeavesOrdinaryCIdentifiersAlone(): void {
 
   let untouched: String = CodegenReserved::mangleReservedCName(String::create("value"));
   Test::assert(untouched.equals("value"));
+}
+
+/// A C-layout field keeps its written name, so only the C keywords are off
+/// limits: a prelude or libc name such as `size_t` or `stderr` is reserved
+/// for an emitter-owned name but is a valid struct member.
+@test
+function codegenRecognizesOnlyCKeywordsAsCKeywords(): void {
+  let registerKeyword: String = String::create("register");
+  let intKeyword: String = String::create("int");
+  let boolKeyword: String = String::create("_Bool");
+  let sizeType: String = String::create("size_t");
+  let stream: String = String::create("stderr");
+  let temporary: String = String::create("t7");
+  let status: String = String::create("status");
+
+  Test::assert(CodegenReserved::isCKeyword(&registerKeyword));
+  Test::assert(CodegenReserved::isCKeyword(&intKeyword));
+  Test::assert(CodegenReserved::isCKeyword(&boolKeyword));
+  Test::assert(!CodegenReserved::isCKeyword(&sizeType));
+  Test::assert(!CodegenReserved::isCKeyword(&stream));
+  Test::assert(!CodegenReserved::isCKeyword(&temporary));
+  Test::assert(!CodegenReserved::isCKeyword(&status));
 }
 
 /// A definition carrying the tracer's fixed `@externName`, in a module of the
@@ -843,4 +1088,245 @@ function codegenAllocTraceReportIsDecidedByRealDiscoveryNotAHandBuiltModuleInfo(
 
   Test::assert(CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, hook));
   Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, decoy));
+}
+
+/// The program every freestanding emission test compiles: an entry point plus
+/// an exported function that writes through a volatile pointer.
+const CODEGEN_FREESTANDING_SOURCE: str = "@externName(\"freestanding_poke\")\nfunction poke(address: u64, value: u32): void {\n  let target: *mut u32 = @pointerFromInteger<*mut u32>(address);\n  @writeVolatile<u32>(target, value);\n}\n\nfunction main(): i32 {\n  poke(4096, 7);\n\n  return 0;\n}\n";
+
+/// A `std = false` unit compiles under `-ffreestanding`: it keeps the type
+/// prelude and its freestanding headers, and drops `ignis_rt.h`, every hosted
+/// libc or POSIX header and the C `main` wrapper.
+@test
+function codegenFreestandingUnitOmitsTheHostedRuntime(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(CODEGEN_FREESTANDING_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "#include <stdint.h>"));
+  Test::assert(codegenContains(&emission.source, "#include <stddef.h>"));
+  Test::assert(codegenContains(&emission.source, "#include <stdbool.h>"));
+  Test::assert(codegenContains(&emission.source, "freestanding_poke("));
+  Test::assert(!codegenContains(&emission.source, "ignis_rt.h"));
+  Test::assert(!codegenContains(&emission.source, "#include <stdio.h>"));
+  Test::assert(!codegenContains(&emission.source, "#include <stdlib.h>"));
+  Test::assert(!codegenContains(&emission.source, "#include <unistd.h>"));
+  Test::assert(!codegenContains(&emission.source, "int main("));
+  Test::assert(!codegenContains(&emission.source, "ignis_runtime_init"));
+}
+
+/// The program the extern prototype tests compile: two referenced extern
+/// functions, one of them renamed and taking a function pointer, and one
+/// extern function nothing calls.
+const CODEGEN_EXTERN_PROTOTYPE_SOURCE: str = "extern Platform {\n  @externName(\"platform_register_handler\")\n  function registerHandler(handler: (u32) -> u32): void;\n\n  function platform_raise(vector: u32): u32;\n\n  function platform_unused(value: u32): u32;\n}\n\nfunction onInterrupt(vector: u32): u32 {\n  return vector + 1;\n}\n\nfunction main(): i32 {\n  Platform::registerHandler(onInterrupt);\n\n  return Platform::platform_raise(3) as i32;\n}\n";
+
+/// A freestanding unit has no headers to declare extern functions, so it
+/// declares each one it calls itself: under its C symbol, with a function
+/// pointer parameter spelled by the signature's typedef.
+@test
+function codegenFreestandingUnitDeclaresTheExternFunctionsItCalls(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(CODEGEN_EXTERN_PROTOTYPE_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "extern void platform_register_handler(ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, "extern u32 platform_raise(u32);\n"));
+  Test::assert(!codegenContains(&emission.source, "platform_unused"));
+  Test::assert(!codegenContains(&emission.source, "registerHandler("));
+  Test::assert(codegenContains(&emission.source, "platform_register_handler(t"));
+}
+
+/// A hosted unit leaves extern functions to the headers it includes, whose
+/// spelling of a parameter type would conflict with a second declaration.
+@test
+function codegenHostedUnitLeavesExternFunctionsToHeaders(): void {
+  let emission: CodegenEmission = codegenEmit(CODEGEN_EXTERN_PROTOTYPE_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "platform_raise(3U)"));
+  Test::assert(!codegenContains(&emission.source, "extern u32 platform_raise("));
+  Test::assert(!codegenContains(&emission.source, "extern void platform_register_handler("));
+}
+
+/// A hosted unit keeps the runtime header, the hosted headers and the C
+/// `main` wrapper.
+@test
+function codegenHostedUnitKeepsTheRuntimeAFreestandingUnitDrops(): void {
+  let emission: CodegenEmission = codegenEmit(CODEGEN_FREESTANDING_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "#include <stdint.h>"));
+  Test::assert(codegenContains(&emission.source, "#include \"ignis_rt.h\""));
+  Test::assert(codegenContains(&emission.source, "#include <stdio.h>"));
+  Test::assert(codegenContains(&emission.source, "#include <stdlib.h>"));
+  Test::assert(codegenContains(&emission.source, "int main(int argc, char** argv)"));
+}
+
+/// A freestanding `@panic` reports through the `@panicHandler` function with
+/// the panic's file and line, and never reaches `fprintf` or `exit`.
+@test
+function codegenFreestandingRuntimeHandlerReceivesPanics(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(
+    "@panicHandler\n@externName(\"kernel_panic\")\nfunction onPanic(message: str, file: str, line: u32): void {\n  return;\n}\n\nfunction main(): i32 {\n  let value: i32 = @panic(\"boom\");\n\n  return value;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "    kernel_panic(\"boom\", \"codegen_tests.ign\", 8); __builtin_unreachable();\n"));
+  Test::assert(!codegenContains(&emission.source, "fprintf"));
+  Test::assert(!codegenContains(&emission.source, "exit("));
+}
+
+/// A freestanding drop state guard reports a use of a dropped value through
+/// the `@panicHandler` function as well.
+@test
+function codegenFreestandingRuntimeHandlerReceivesDropGuards(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(
+    "@panicHandler\n@externName(\"kernel_panic\")\nfunction onPanic(message: str, file: str, line: u32): void {\n  return;\n}\n\n@implements(Drop)\nrecord Payload {\n  public value: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n\n  public peek(&self): i32 {\n    return 7;\n  }\n}\n\nfunction main(): i32 {\n  let payload: Payload = Payload { value: 1 };\n\n  return payload.peek();\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "__ignis_drop_state) { kernel_panic(\"use of dropped value\", \"codegen_tests.ign\", "));
+  Test::assert(!codegenContains(&emission.source, "fprintf"));
+  Test::assert(!codegenContains(&emission.source, "exit("));
+}
+
+/// A freestanding escaping closure takes its heap environment from the
+/// `@allocHandler` function and returns it to the `@freeHandler` function.
+@test
+function codegenFreestandingRuntimeHandlersAllocateEscapingEnvironments(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(
+    "@allocHandler\n@externName(\"kernel_alloc\")\nfunction allocate(size: u64, align: u64): *mut u8 {\n  return @pointerFromInteger<*mut u8>(size + align);\n}\n\n@freeHandler\n@externName(\"kernel_release\")\nfunction release(pointer: *mut u8): void {\n  return;\n}\n\nfunction makeAdder(base: i32): (i32) -> i32 {\n  return (value: i32): i32 -> value + base;\n}\n\nfunction main(): i32 {\n  let add = makeAdder(40);\n\n  return add(2);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "kernel_alloc(sizeof(struct "));
+  Test::assert(codegenContains(&emission.source, "kernel_release((u8*)"));
+  Test::assert(!codegenContains(&emission.source, "malloc("));
+  Test::assert(!codegenContains(&emission.source, "free("));
+}
+
+/// A hosted `@panic` keeps reporting through `fprintf` and `exit`.
+@test
+function codegenHostedPanicWithoutRuntimeHandlerKeepsLibc(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let value: i32 = @panic(\"boom\");\n\n  return value;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "    fprintf(stderr, \"panic: %s\\n\", \"boom\");\n    exit(101);\n"));
+}
+
+/// The file a panic at `filePath` reports in a build rooted at
+/// `/work/kernel` with a user std at `/opt/kstd`.
+function codegenPanicFile(filePath: str): String {
+  let projectRoot: String = String::create("/work/kernel");
+  let stdRoot: String = String::create("/opt/kstd");
+
+  return CodegenC::panicFilePath(&projectRoot, &stdRoot, filePath);
+}
+
+/// A panic in a project source names its file relative to the project root.
+@test
+function codegenPanicFileIsRelativeToTheProjectRoot(): void {
+  let file: String = codegenPanicFile("/work/kernel/src/kernel/console.ign");
+
+  Test::assert(file.equals("src/kernel/console.ign"));
+}
+
+/// A panic in a std source names its file under `std/`, relative to the std
+/// root.
+@test
+function codegenPanicFileIsRelativeToTheStdRoot(): void {
+  let file: String = codegenPanicFile("/opt/kstd/core/mod.ign");
+
+  Test::assert(file.equals("std/core/mod.ign"));
+}
+
+/// A panic in a file outside both roots, including one whose directory only
+/// shares a prefix with a root, keeps only the file name.
+@test
+function codegenPanicFileOutsideBothRootsKeepsTheFileName(): void {
+  let outside: String = codegenPanicFile("/home/builder/vendor/glue.ign");
+  let sibling: String = codegenPanicFile("/work/kernel-old/src/main.ign");
+
+  Test::assert(outside.equals("glue.ign"));
+  Test::assert(sibling.equals("main.ign"));
+}
+
+/// A panic with no known site keeps an empty file.
+@test
+function codegenPanicFileWithoutASiteStaysEmpty(): void {
+  let file: String = codegenPanicFile("");
+
+  Test::assertEq<u64>(file.length(), 0);
+}
+
+/// Port I/O, which only runs in kernel mode, is checked as emitted C: the
+/// fixed registers become machine constraints, holes become named operands,
+/// and the asm stays volatile.
+@test
+function codegenEmitsPortIoAsmWithMachineConstraints(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function inByte(port: u16): u8 {\n  return asm (port in dx) -> (value: u8 in al) { in {value}, {port} };\n}\n\nfunction outByte(port: u16, value: u8): void {\n  asm (port in dx, value in al) { out {port}, {value} }\n}\n\nfunction main(): i32 {\n  outByte(128, inByte(96));\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(emission.usesInlineAsm);
+  Test::assert(codegenContains(&emission.source, "__asm__ volatile(\" in %[value], %[port] \" : [value] \"=a\"(t"));
+  Test::assert(codegenContains(&emission.source, ") : [port] \"d\"(((u16)"));
+  Test::assert(codegenContains(&emission.source, "__asm__ volatile(\" out %[port], %[value] \" :  : [port] \"d\"(((u16)"));
+  Test::assert(codegenContains(&emission.source, "[value] \"a\"(((u8)"));
+}
+
+/// The body reaches GCC as a template: Ignis comments are dropped, and `%`,
+/// `|` and the braces `{{` and `}}` write are escaped. `flags` is the `cc`
+/// clobber.
+@test
+function codegenEscapesInlineAsmBodiesAndClobbers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () clobber(memory, flags) {\n    mov eax, 100 % 7 // keeps {this} out\n    or eax, 1 | 2 /* and {this} */ {{ }}\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "mov eax, 100 %% 7 \\n    or eax, 1 %| 2   %{ %}\\n  \" :  :  : \"memory\", \"cc\");"));
+  Test::assert(!codegenContains(&emission.source, "keeps"));
+  Test::assert(!codegenContains(&emission.source, "and {this}"));
+}
+
+/// A `pure` asm is not volatile, so the C compiler may drop it when its
+/// output goes unused.
+@test
+function codegenEmitsPureInlineAsmWithoutVolatile(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let value: u64 = 21;\n  let doubled: u64 = asm pure (value in reg) -> (result: u64 in reg) { lea {result}, [{value} + {value}] };\n\n  return doubled as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "__asm__(\" lea %[result], [%[value] + %[value]] \" : [result] \"=r\"(t"));
+  Test::assert(codegenContains(&emission.source, "[value] \"r\"(((u64)"));
+  Test::assert(!codegenContains(&emission.source, "__asm__ volatile"));
+}
+
+/// `r8` to `r15` have no constraint letter, so their operands go through
+/// register variables, written back after the asm when it writes them.
+@test
+function codegenBindsHighRegistersThroughRegisterVariables(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let value: u64 = 40;\n  let mut counter: u64 = asm (value in r8) -> (result: u64 in r9) { lea {result}, [{value} + 2] };\n\n  asm (counter inout r15) clobber(flags) { add {counter}, 0 }\n\n  return counter as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "register u64 ignis_asm_0 __asm__(\"r8\") = ((u64)t"));
+  Test::assert(codegenContains(&emission.source, "register u64 ignis_asm_1 __asm__(\"r9\");"));
+  Test::assert(codegenContains(&emission.source, ": [result] \"=r\"(ignis_asm_1) : [value] \"r\"(ignis_asm_0));"));
+  Test::assert(codegenContains(&emission.source, " = ignis_asm_1;"));
+  Test::assert(codegenContains(&emission.source, "register u64 ignis_asm_0 __asm__(\"r15\") = (*(u64*)t"));
+  Test::assert(codegenContains(&emission.source, ": [counter] \"+r\"(ignis_asm_0) :  : \"cc\");"));
+  Test::assert(codegenContains(&emission.source, "(*(u64*)t"));
+}
+
+/// A `mem` operand is the place itself, read and written through the
+/// pointer to it, and a statement `asm` stores its outputs in their locals.
+@test
+function codegenEmitsMemoryOperandsAndStatementOutputsAsPlaces(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let mut value: u64 = 40;\n  let pointer: *mut u64 = (&mut value) as *mut u64;\n\n  asm (*pointer inout mem) -> (low: u32 in eax) { add qword ptr {pointer}, 2 }\n\n  return (value as i32) + (low as i32);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "add qword ptr %[pointer], 2 \" : [pointer] \"+m\"((*(u64*)t"));
+  Test::assert(codegenContains(&emission.source, ", [low] \"=a\"((*(u32*)t"));
+}
+
+/// A unit without asm does not ask for Intel syntax.
+@test
+function codegenReportsNoInlineAsmForPlainUnits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  return 0;\n}\n");
+
+  Test::assert(!emission.usesInlineAsm);
 }

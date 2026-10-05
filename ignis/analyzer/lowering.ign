@@ -651,10 +651,13 @@ export namespace Lowering {
     return empty;
   }
 
-  /// Position and declared type of one field of a record type.
+  /// Position, declared type and storage type of one field of a record type.
+  /// The storage type differs from the declared one only for a function-typed
+  /// field of a C-layout record, which holds a C function pointer.
   record RecordFieldLocation {
     public index: u32;
     public fieldType: Analyzer::TypeId;
+    public storageType: Analyzer::TypeId;
   }
 
   function recordFieldLocation(
@@ -689,15 +692,26 @@ export namespace Lowering {
         continue;
       };
 
+      let mut matched: Option<Lowering::RecordFieldLocation> = Option::NONE;
+
       if (let Option::SOME(definition) = defStore.get(*fieldDefId)) {
         if (let Analyzer::Definition::Field(field) = definition) {
           if (field.name.raw() == targetSym.raw()) {
-            return Option::SOME(Lowering::RecordFieldLocation {
+            matched = Option::SOME(Lowering::RecordFieldLocation {
               index: field.index,
               fieldType: field.fieldType,
+              storageType: field.fieldType,
             });
           }
         }
+      }
+
+      if (let Option::SOME(location) = matched) {
+        return Option::SOME(Lowering::RecordFieldLocation {
+          index: location.index,
+          fieldType: location.fieldType,
+          storageType: Hir::recordFieldStorageType(defStore, typeStore, recordDef, location.fieldType),
+        });
       }
 
       index += 1;
@@ -1352,7 +1366,7 @@ export namespace Lowering {
         });
       },
       Ast::Expression::Node::Assignment(assignment) -> {
-        let loweredTarget: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.target);
+        let loweredTarget: Hir::HirId = Lowering::lowerAssignmentTarget(defStore, typeStore, symbols, module, output, locals, hir, assignment.target);
         let target: Hir::HirId = Lowering::implicitMutRefAssignmentTarget(
           defStore,
           typeStore,
@@ -1361,7 +1375,19 @@ export namespace Lowering {
           assignment.target,
           loweredTarget,
         );
-        let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value);
+
+        let mut rawTargetType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(targetNode) = hir.get(target)) {
+          if (Lowering::isRawFunctionType(typeStore, targetNode.typeId)) {
+            rawTargetType = Option::SOME(targetNode.typeId);
+          }
+        }
+
+        let value: Hir::HirId = match (rawTargetType) {
+          Option::SOME(rawType) -> Lowering::lowerCFacingValue(defStore, typeStore, symbols, module, output, locals, hir, assignment.value, rawType),
+          Option::NONE -> Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value),
+        };
         let assignType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
 
         let mut hirRef: &mut Hir::HirStore = hir;
@@ -1636,6 +1662,12 @@ export namespace Lowering {
       },
       Ast::Expression::Node::Try(tryExpr) -> {
         return Lowering::lowerTryExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &tryExpr);
+      },
+      Ast::Expression::Node::Asm(asmNode) -> {
+        let noPlaces: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+        let asmType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        return Lowering::lowerInlineAsm(defStore, typeStore, symbols, module, output, locals, hir, &asmNode, &noPlaces, asmType);
       },
     };
 
@@ -2082,17 +2114,39 @@ export namespace Lowering {
     }
 
     let mut calleeIsFunction: boolean = false;
+    let mut calleeIsExtern: boolean = false;
     let mut calleeReturnType: Analyzer::TypeId = Lowering::voidType(typeStore);
 
     if (let Option::SOME(definition) = defStore.get(calleeDef)) {
       if (let Analyzer::Definition::Function(functionDef) = definition) {
         calleeIsFunction = true;
+        calleeIsExtern = functionDef.isExtern;
         calleeReturnType = functionDef.returnType;
       }
     }
 
     if (!calleeIsFunction) {
       return Lowering::errorNode(hir, typeStore, call.span);
+    }
+
+    let callType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+      Option::SOME(typeId) -> typeId,
+      Option::NONE -> calleeReturnType,
+    };
+
+    if (calleeIsExtern) {
+      let externArgs: Vector<Hir::HirId> = Lowering::lowerExternArguments(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        hir,
+        &call.arguments,
+      );
+
+      return Lowering::allocExternCall(defStore, typeStore, hir, calleeDef, callTypeArgs, externArgs, call.span, callType);
     }
 
     let args: Vector<Hir::HirId> = Lowering::lowerExpressionList(
@@ -2106,11 +2160,6 @@ export namespace Lowering {
       &call.arguments,
     );
 
-    let callType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
-      Option::SOME(typeId) -> typeId,
-      Option::NONE -> calleeReturnType,
-    };
-
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {
       kind: Hir::HirKind::Call(Hir::HirCall {
@@ -2119,6 +2168,246 @@ export namespace Lowering {
         args: args,
       }),
       span: call.span,
+      typeId: callType,
+    });
+  }
+
+  /// The non-generic function `argumentId` names when the argument is written
+  /// as a bare function name, so an extern call can pass that function as a C
+  /// function pointer instead of a closure that forwards to it.
+  function namedFunctionArgument(
+    defStore: &mut Analyzer::DefinitionStore,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    argumentId: Ast::ExpressionId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut isNameReference: boolean = false;
+
+    if (let Option::SOME(expression) = module.expressions.get(argumentId)) {
+      isNameReference = match (expression) {
+        Ast::Expression::Node::Variable(_) -> true,
+        Ast::Expression::Node::Path(_) -> true,
+        _ -> false,
+      };
+    }
+
+    if (!isNameReference) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(&output.resolvedBodies.bodyResolution, argumentId.raw()) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::ResolverBodies::ResolvedRef::Definition(defId) = resolved else {
+      return Option::NONE;
+    };
+
+    if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId)) {
+      if (functionDef.typeParams.length() == 0) {
+        return Option::SOME(defId);
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  /// Lowers the arguments of an extern call. A bare function name becomes a
+  /// `Variable` naming the function itself; `allocExternCall` then turns it
+  /// into a C function pointer to that function.
+  function lowerExternArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    arguments: &Vector<Ast::ExpressionId>,
+  ): Vector<Hir::HirId> {
+    let mut lowered: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < arguments.length()) {
+      if (let Option::SOME(argumentId) = arguments.get(index)) {
+        lowered.push(Lowering::lowerRawFunctionOperand(defStore, typeStore, symbols, module, output, locals, hir, *argumentId));
+      }
+
+      index += 1;
+    }
+
+    return lowered;
+  }
+
+  /// Lowers `expressionId` where a C function pointer may be taken from it.
+  /// A bare function name becomes a `Variable` naming the function itself
+  /// instead of a closure that forwards to it; anything else lowers as usual.
+  function lowerRawFunctionOperand(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    expressionId: Ast::ExpressionId,
+  ): Hir::HirId {
+    let Option::SOME(functionDef) = Lowering::namedFunctionArgument(defStore, module, output, expressionId) else {
+      return Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, expressionId);
+    };
+
+    let functionType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, expressionId);
+    let mut span: SourceSpan = SourceSpan::new("", 0, 0);
+
+    if (let Option::SOME(Ast::Expression::Node::Variable(variable)) = module.expressions.get(expressionId)) {
+      span = variable.span;
+    }
+
+    if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(expressionId)) {
+      span = path.span;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(functionDef),
+      span: span,
+      typeId: functionType,
+    });
+  }
+
+  /// `expressionId` as the C function pointer of type `rawType` a C-facing
+  /// place stores, such as a function-typed field of a C-layout record.
+  function lowerCFacingValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    expressionId: Ast::ExpressionId,
+    rawType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let value: Hir::HirId = Lowering::lowerRawFunctionOperand(defStore, typeStore, symbols, module, output, locals, hir, expressionId);
+
+    return Lowering::toCFacing(hir, value, rawType);
+  }
+
+  /// `argumentId` as the C function pointer of type `rawType`. A value that
+  /// was itself read from a C function pointer passes the pointer through.
+  function toCFacing(
+    hir: &mut Hir::HirStore,
+    argumentId: Hir::HirId,
+    rawType: Analyzer::TypeId
+  ): Hir::HirId {
+    let mut span: SourceSpan = SourceSpan::new("", 0, 0);
+
+    if (let Option::SOME(node) = hir.get(argumentId)) {
+      span = node.span;
+
+      if (let Hir::HirKind::FromRawFunction(inner) = &node.kind) {
+        if (let Option::SOME(innerNode) = hir.get(inner)) {
+          if (innerNode.typeId.raw() == rawType.raw()) {
+            return inner;
+          }
+        }
+      }
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::ToRawFunction(argumentId),
+      span: span,
+      typeId: rawType,
+    });
+  }
+
+  /// A call to an extern function. Every argument whose parameter has a
+  /// function type is passed as a C function pointer, and a function-typed
+  /// result comes back as a C function pointer that `FromRawFunction` turns
+  /// into a function value of `callType`.
+  function allocExternCall(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    calleeDef: Analyzer::DefinitionId,
+    typeArgs: Vector<Analyzer::TypeId>,
+    args: Vector<Hir::HirId>,
+    span: SourceSpan,
+    callType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut paramIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(calleeDef)) {
+      let mut copyIndex: u64 = 0;
+
+      while (copyIndex < functionDef.params.length()) {
+        if (let Option::SOME(paramId) = functionDef.params.get(copyIndex)) {
+          paramIds.push(*paramId);
+        }
+
+        copyIndex += 1;
+      }
+    }
+
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < paramIds.length()) {
+      if (let Option::SOME(paramId) = paramIds.get(paramIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variable(paramDef)) = defStore.get(*paramId)) {
+          paramTypes.push(paramDef.declaredType);
+        }
+      }
+
+      paramIndex += 1;
+    }
+
+    let mut cFacingArgs: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut argIndex: u64 = 0;
+
+    while (argIndex < args.length()) {
+      let Option::SOME(argumentId) = args.get(argIndex) else {
+        argIndex += 1;
+        continue;
+      };
+
+      let mut converted: Hir::HirId = *argumentId;
+
+      // A variadic tail has no declared parameter and passes as written.
+      if (let Option::SOME(paramType) = paramTypes.get(argIndex)) {
+        let rawType: Analyzer::TypeId = Hir::cFacingType(defStore, typeStore, *paramType);
+
+        if (rawType.raw() != paramType.raw()) {
+          converted = Lowering::toCFacing(hir, *argumentId, rawType);
+        }
+      }
+
+      cFacingArgs.push(converted);
+      argIndex += 1;
+    }
+
+    let rawReturnType: Analyzer::TypeId = Hir::cFacingType(defStore, typeStore, callType);
+
+    let mut callHirRef: &mut Hir::HirStore = hir;
+    let callNode: Hir::HirId = callHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Call(Hir::HirCall {
+        callee: calleeDef,
+        typeArgs: typeArgs,
+        args: cFacingArgs,
+      }),
+      span: span,
+      typeId: rawReturnType,
+    });
+
+    if (rawReturnType.raw() == callType.raw()) {
+      return callNode;
+    }
+
+    let mut resultHirRef: &mut Hir::HirStore = hir;
+    return resultHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FromRawFunction(callNode),
+      span: span,
       typeId: callType,
     });
   }
@@ -2355,7 +2644,52 @@ export namespace Lowering {
   /// `Path` expression, so `MemberAccess` always carries `Dot` and the
   /// oracle's static-access branch (`StaticAccess`, unit `EnumVariant`) has no
   /// reachable form to lower.
+  ///
+  /// A function-typed field of a C-layout record holds a C function pointer,
+  /// so reading it as a value converts the pointer back to a function value
+  /// with `FromRawFunction`.
   function lowerMemberAccess(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    memberAccess: &Ast::Expression::MemberAccess,
+  ): Hir::HirId {
+    let place: Hir::HirId = Lowering::lowerMemberAccessPlace(defStore, typeStore, symbols, module, output, locals, hir, exprId, memberAccess);
+
+    let mut placeType: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut span: SourceSpan = memberAccess.span;
+
+    if (let Option::SOME(placeNode) = hir.get(place)) {
+      placeType = placeNode.typeId;
+      span = placeNode.span;
+    }
+
+    let valueType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+      Option::SOME(typeId) -> typeId,
+      Option::NONE -> placeType,
+    };
+
+    if (!Lowering::isRawFunctionType(typeStore, placeType)) {
+      return place;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FromRawFunction(place),
+      span: span,
+      typeId: valueType,
+    });
+  }
+
+  /// `obj.field` as the place it names, typed by what the field stores: a
+  /// function-typed field of a C-layout record is the C function pointer
+  /// itself, which an assignment stores into directly.
+  function lowerMemberAccessPlace(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -2397,10 +2731,14 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, memberAccess.span);
     };
 
-    let fieldType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+    let mut fieldType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
       Option::SOME(typeId) -> typeId,
       Option::NONE -> field.fieldType,
     };
+
+    if (field.storageType.raw() != field.fieldType.raw()) {
+      fieldType = field.storageType;
+    }
 
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {
@@ -2411,6 +2749,55 @@ export namespace Lowering {
       span: memberAccess.span,
       typeId: fieldType,
     });
+  }
+
+  function isRawFunctionType(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::RawFunction(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// The target of `target = value`. A field is lowered as the place it
+  /// names, so a function-typed field of a C-layout record is assigned the C
+  /// function pointer itself rather than a function value read out of it.
+  function lowerAssignmentTarget(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    targetId: Ast::ExpressionId,
+  ): Hir::HirId {
+    let mut current: Ast::ExpressionId = targetId;
+
+    while (true) {
+      let Option::SOME(expression) = module.expressions.get(current) else {
+        break;
+      };
+
+      if (let Ast::Expression::Node::Grouped(grouped) = expression) {
+        current = grouped.expression;
+        continue;
+      }
+
+      if (let Ast::Expression::Node::MemberAccess(memberAccess) = expression) {
+        return Lowering::lowerMemberAccessPlace(defStore, typeStore, symbols, module, output, locals, hir, current, &memberAccess);
+      }
+
+      break;
+    }
+
+    return Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, targetId);
   }
 
   /// Lowers `expr as T` to `HirKind::Cast`. The target type is resolved from
@@ -2508,7 +2895,12 @@ export namespace Lowering {
       };
 
       fieldIndexes.push(location.index);
-      fieldValues.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, field.value));
+
+      if (location.storageType.raw() != location.fieldType.raw()) {
+        fieldValues.push(Lowering::lowerCFacingValue(defStore, typeStore, symbols, module, output, locals, hir, field.value, location.storageType));
+      } else {
+        fieldValues.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, field.value));
+      }
 
       index += 1;
     }
@@ -2845,7 +3237,7 @@ export namespace Lowering {
       });
     }
 
-    if (name.equals("read")) {
+    if (name.equals("read") || name.equals("readVolatile")) {
       let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
         return Lowering::errorNode(hir, typeStore, builtinCall.span);
       };
@@ -2861,13 +3253,14 @@ export namespace Lowering {
         kind: Hir::HirKind::BuiltinLoad(Hir::HirBuiltinLoad {
           ty: valueType,
           ptr: pointer,
+          volatile: name.equals("readVolatile"),
         }),
         span: builtinCall.span,
         typeId: valueType,
       });
     }
 
-    if (name.equals("write")) {
+    if (name.equals("write") || name.equals("writeVolatile")) {
       let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
         return Lowering::errorNode(hir, typeStore, builtinCall.span);
       };
@@ -2889,6 +3282,7 @@ export namespace Lowering {
           ty: valueType,
           ptr: pointer,
           value: value,
+          volatile: name.equals("writeVolatile"),
         }),
         span: builtinCall.span,
         typeId: Lowering::voidType(typeStore),
@@ -3703,11 +4097,13 @@ export namespace Lowering {
     };
 
     let mut calleeIsFunction: boolean = false;
+    let mut calleeIsExtern: boolean = false;
     let mut calleeReturnType: Analyzer::TypeId = Lowering::voidType(typeStore);
 
     if (let Option::SOME(definition) = defStore.get(calleeDef)) {
       if (let Analyzer::Definition::Function(functionDef) = definition) {
         calleeIsFunction = true;
+        calleeIsExtern = functionDef.isExtern;
         calleeReturnType = functionDef.returnType;
       }
     }
@@ -3740,6 +4136,10 @@ export namespace Lowering {
       Option::SOME(recorded) -> recorded,
       Option::NONE -> Vector::new<Analyzer::TypeId>(),
     };
+
+    if (calleeIsExtern) {
+      return Lowering::allocExternCall(defStore, typeStore, hir, calleeDef, typeArgs, args, pipe.span, pipeType);
+    }
 
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {
@@ -4038,6 +4438,24 @@ export namespace Lowering {
         continue;
       }
 
+      // A statement `asm` declares its outputs as locals of this block, so
+      // its statements join the block instead of a block of their own.
+      if (let Option::SOME(Ast::Statement::Node::Asm(asmNode)) = module.statements.get(*stmtId)) {
+        let asmStatements: Vector<Hir::HirId> = Lowering::lowerInlineAsmStatement(defStore, typeStore, symbols, module, output, locals, hir, *stmtId, &asmNode);
+        let mut asmIndex: u64 = 0;
+
+        while (asmIndex < asmStatements.length()) {
+          if (let Option::SOME(statement) = asmStatements.get(asmIndex)) {
+            loweredStatements.push(*statement);
+          }
+
+          asmIndex += 1;
+        }
+
+        index += 1;
+        continue;
+      }
+
       loweredStatements.push(Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, *stmtId));
       index += 1;
     }
@@ -4056,6 +4474,251 @@ export namespace Lowering {
       span: span,
       typeId: blockType,
     });
+  }
+
+  /// Lowers an `asm`. `outputPlaces` holds, for a statement `asm`, the local
+  /// each output is stored in, and is empty for an `asm` expression, whose
+  /// node is its output's value. `nodeType` is the type of that value, or
+  /// `void`.
+  function lowerInlineAsm(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    asmNode: &Ast::Expression::Asm,
+    outputPlaces: &Vector<Hir::HirId>,
+    nodeType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let names: Vector<String> = Analyzer::Typecheck::inlineAsmOperandNames(module, asmNode);
+    let mut operandIndex: u64 = 0;
+
+    let mut inputs: Vector<Hir::HirAsmInput> = Vector::new<Hir::HirAsmInput>();
+    let mut index: u64 = 0;
+
+    while (index < asmNode.inputs.length()) {
+      if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+        let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&input.location);
+        let writes: boolean = match (input.mode) {
+          Ast::Expression::AsmInputMode::In -> false,
+          Ast::Expression::AsmInputMode::InOut -> true,
+        };
+        let isPlace: boolean = writes || location.kind == Analyzer::InlineAsm::LocationKind::MEM;
+
+        let value: Hir::HirId = isPlace ? Lowering::lowerAssignmentTarget(defStore, typeStore, symbols, module, output, locals, hir, input.expression) : Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, input.expression);
+
+        inputs.push(Hir::HirAsmInput {
+          name: Lowering::inlineAsmOperandName(&names, operandIndex),
+          location: input.location.clone(),
+          value: value,
+          isPlace: isPlace,
+          writes: writes,
+        });
+      }
+
+      operandIndex += 1;
+      index += 1;
+    }
+
+    let mut outputs: Vector<Hir::HirAsmOutput> = Vector::new<Hir::HirAsmOutput>();
+    index = 0;
+
+    while (index < asmNode.outputs.length()) {
+      if (let Option::SOME(asmOutput) = asmNode.outputs.get(index)) {
+        let mut place: Option<Hir::HirId> = Option::NONE;
+        let mut outputType: Analyzer::TypeId = nodeType;
+
+        if (let Option::SOME(placeId) = outputPlaces.get(index)) {
+          place = Option::SOME(*placeId);
+
+          if (let Option::SOME(placeNode) = hir.get(*placeId)) {
+            outputType = placeNode.typeId;
+          }
+        }
+
+        outputs.push(Hir::HirAsmOutput {
+          name: Lowering::inlineAsmOperandName(&names, operandIndex),
+          location: asmOutput.location.clone(),
+          outputType: outputType,
+          place: place,
+        });
+      }
+
+      operandIndex += 1;
+      index += 1;
+    }
+
+    let mut holes: Vector<u64> = Vector::new<u64>();
+    index = 0;
+
+    while (index < asmNode.holes.length()) {
+      if (let Option::SOME(hole) = asmNode.holes.get(index)) {
+        holes.push(Lowering::inlineAsmHoleOperand(&names, &hole.name));
+      }
+
+      index += 1;
+    }
+
+    let mut clobbers: Vector<String> = Vector::new<String>();
+    index = 0;
+
+    while (index < asmNode.clobbers.length()) {
+      if (let Option::SOME(clobber) = asmNode.clobbers.get(index)) {
+        if (let Option::SOME(clobberName) = Analyzer::InlineAsm::clobberName(&clobber.name)) {
+          clobbers.push(clobberName);
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut chunks: Vector<String> = Vector::new<String>();
+    index = 0;
+
+    while (index < asmNode.chunks.length()) {
+      if (let Option::SOME(chunk) = asmNode.chunks.get(index)) {
+        chunks.push(chunk.clone());
+      }
+
+      index += 1;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::InlineAsm(Hir::HirInlineAsm {
+        chunks: chunks,
+        holes: holes,
+        inputs: inputs,
+        outputs: outputs,
+        clobbers: clobbers,
+        volatile: !asmNode.isPure,
+      }),
+      span: asmNode.span,
+      typeId: nodeType,
+    });
+  }
+
+  /// The name the operand at `operandIndex` keeps in C: its own name when no
+  /// other operand of the `asm` shares it, otherwise none, since a C asm
+  /// statement cannot name two operands alike and no hole names either.
+  function inlineAsmOperandName(names: &Vector<String>, operandIndex: u64): String {
+    let Option::SOME(name) = names.get(operandIndex) else {
+      return String::new();
+    };
+
+    if (name.length() == 0) {
+      return String::new();
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < names.length()) {
+      if (index != operandIndex) {
+        if (let Option::SOME(other) = names.get(index)) {
+          if (other.equals(name.toStr())) {
+            return String::new();
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return name.clone();
+  }
+
+  /// The operand a hole names. The checker has made sure exactly one does.
+  function inlineAsmHoleOperand(names: &Vector<String>, holeName: &String): u64 {
+    let mut index: u64 = 0;
+
+    while (index < names.length()) {
+      if (let Option::SOME(name) = names.get(index)) {
+        if (name.equals(holeName.toStr())) {
+          return index;
+        }
+      }
+
+      index += 1;
+    }
+
+    return 0;
+  }
+
+  /// Lowers a statement `asm` to the statements it stands for: one `let`
+  /// without a value per output, which the asm then writes, and the asm
+  /// itself.
+  function lowerInlineAsmStatement(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    stmtId: Ast::StatementId,
+    asmNode: &Ast::Expression::Asm,
+  ): Vector<Hir::HirId> {
+    let mut statements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut places: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < asmNode.outputs.length()) {
+      let Option::SOME(asmOutput) = asmNode.outputs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let binding: Ast::PatternId = Analyzer::InlineAsm::outputBinding(stmtId, index);
+      let mut outputType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+      if (let Option::SOME(settled) = Lowering::lookupLocalBindingType(&output.typecheck, binding)) {
+        outputType = settled;
+      }
+
+      let defId: Analyzer::DefinitionId = Lowering::declarePatternBinding(
+        defStore,
+        symbols,
+        output,
+        locals,
+        binding,
+        asmOutput.name.toStr(),
+        outputType,
+      );
+
+      let mut hirRef: &mut Hir::HirStore = hir;
+
+      statements.push(hirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Let(Hir::HirLet {
+          name: defId,
+          value: Option::NONE,
+        }),
+        span: asmOutput.span,
+        typeId: Lowering::voidType(typeStore),
+      }));
+
+      places.push(hirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Variable(defId),
+        span: asmOutput.span,
+        typeId: outputType,
+      }));
+
+      index += 1;
+    }
+
+    let voidType: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let asmId: Hir::HirId = Lowering::lowerInlineAsm(defStore, typeStore, symbols, module, output, locals, hir, asmNode, &places, voidType);
+    let mut statementHirRef: &mut Hir::HirStore = hir;
+
+    statements.push(statementHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::ExpressionStatement(asmId),
+      span: asmNode.span,
+      typeId: voidType,
+    }));
+
+    return statements;
   }
 
   /// Lowers a `let`/`let mut` with a simple `Binding` pattern: allocates a
@@ -5404,6 +6067,22 @@ export namespace Lowering {
         return hirRef.alloc(Hir::HirNode {
           kind: Hir::HirKind::Unit,
           span: comment.span,
+          typeId: Lowering::voidType(typeStore),
+        });
+      },
+      // Reached only for an `asm` that is a whole branch on its own. Its
+      // outputs would be locals of a block that ends with it, so a block of
+      // its statements stands in for it.
+      Ast::Statement::Node::Asm(asmNode) -> {
+        let statements: Vector<Hir::HirId> = Lowering::lowerInlineAsmStatement(defStore, typeStore, symbols, module, output, locals, hir, stmtId, &asmNode);
+        let mut hirRef: &mut Hir::HirStore = hir;
+
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Block(Hir::HirBlock {
+            statements: statements,
+            expression: Option::NONE,
+          }),
+          span: asmNode.span,
           typeId: Lowering::voidType(typeStore),
         });
       },

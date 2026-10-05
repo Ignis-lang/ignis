@@ -51,8 +51,82 @@ sort_imports = false
 
 ### `[ignis]`
 
-- `std` - Enable standard library support.
-- `std_path` - Optional path to std root.
+- `std` - Enable standard library support. `false` builds in freestanding mode
+  (see below).
+- `std_path` - Optional path to std root. With `std = false` it names a user
+  standard library instead of the official one. `--std-path` overrides it in
+  both modes. Without either, a hosted build (`std = true`) falls back to
+  `IGNIS_STD_PATH`; a freestanding build never reads that variable.
+
+#### Freestanding mode (`std = false`)
+
+A project with `std = false` neither requires nor loads the official standard
+library. `IGNIS_STD_PATH` is ignored. `--std-path` still wins over `std_path`,
+as in a hosted build, and names the user standard library to use.
+
+- Without `std_path` or `--std-path` there is no standard library: no prelude is
+  auto-loaded and a `std::` import is an unresolved module.
+- With either, the directory is a user standard library with its own
+  `manifest.toml` in the same format as `std/manifest.toml`. Its `[modules]`
+  table resolves `std::` imports and its `[auto_load]` list is the prelude.
+
+The emitted C carries only the type prelude (`stdbool.h`, `stddef.h`,
+`stdint.h`): no `ignis_rt.h`, no hosted libc or POSIX headers and no C `main`
+wrapper. Every unit is compiled with `-ffreestanding` ahead of `[build] cflags`,
+the runtime include directory is not passed, and nothing links `libm`. With
+`bin = false` the build compiles the unit into `<out_dir>/user/obj/<name>.o` with
+`cc` and `cflags` instead of only writing the C source.
+
+With no headers to declare them, the unit declares every extern function it
+calls or takes as a C function pointer itself: one `extern` prototype under the
+function's C symbol (its `@externName` when it has one), with each
+function-typed parameter or result spelled as a C function pointer. Extern
+functions the program never reaches get no prototype. Two extern declarations
+of one C symbol must agree on their C signature, or the C compiler reports
+conflicting types. A hosted build declares no extern function and relies on its
+headers.
+
+The services a hosted build takes from libc come from the program's own
+runtime handlers instead. Each is a function marked with an attribute, at most
+one of each kind per program, and each attribute is an error in a hosted build:
+
+| Attribute | Signature | Replaces |
+| --- | --- | --- |
+| `@panicHandler` | `(message: str, file: str, line: u32): void` (or `never`) | `fprintf` and `exit` for `@panic`, match exhaustion and drop state guards |
+| `@allocHandler` | `(size: u64, align: u64): *mut u8` | `malloc` for the heap environment of an escaping capturing closure |
+| `@freeHandler` | `(pointer: *mut u8): void` | `free` for that environment |
+
+```ignis
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  while (true) {}
+}
+```
+
+- A panic calls the handler with its message and the file and line of the
+  panic site, then reaches `__builtin_unreachable()`, so the handler must not
+  return. The file never names the build machine's directories: a source
+  under the project root is named relative to it (`src/kernel/console.ign`),
+  a source under the std root is `std/` followed by its path relative to that
+  root, and any other source is its file name alone. A drop state guard
+  reports the site of the value it reads, or file `""` and line `0` when no
+  site is known.
+- A build that can panic without a `@panicHandler` is an error (`A0211`).
+  Every `match` lowers with an exhaustion panic and every use of an
+  `@implements(Drop)` value is guarded, so most programs need one. The check
+  runs when the build emits C, so `ignis check` does not report it.
+- `@allocHandler` and `@freeHandler` come as a pair (`A0210`). A capturing
+  closure that escapes its scope without them is an error (`A0227`). A closure
+  with no captures never allocates and needs neither.
+- A handler with the wrong signature, or on an `extern` declaration, is
+  `A0209`. A second handler of one kind is `A0229`. A handler in a hosted
+  build is `A0228`.
+
+The handlers keep external linkage in the emitted unit.
+
+C compilers may still emit calls to `memcpy` and `memset` on their own, for
+example for array and record copies, bit casts, and the zeroing of enum and
+droppable locals. A freestanding program provides both symbols at link time.
 
 ### `[build]`
 
@@ -134,6 +208,9 @@ Library project:
 bin = false
 entry = "lib.ign"
 ```
+
+A hosted library project writes the C translation unit only. A freestanding
+one (`[ignis] std = false`) also compiles it into an object file.
 
 ## `ignis init` Generation Rules
 

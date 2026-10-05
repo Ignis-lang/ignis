@@ -1,4 +1,5 @@
 import HashSet from "std::collections";
+import Path from "std::path";
 import Vector from "std::vector";
 
 import Id from "@compiler::ids";
@@ -6,6 +7,7 @@ import Analyzer from "@compiler::analyzer";
 import Borrowck from "@compiler::analyzer::borrowck";
 import Hir from "@compiler::hir";
 import Lir from "@compiler::lir";
+import SourceFile, SourceSpan from "@compiler::diagnostics";
 import CodegenReserved from "./reserved";
 
 /// LIR -> C emission for the Ignis selfhost compiler.
@@ -31,6 +33,43 @@ export namespace CodegenC {
     public unsupported: u64;
     /// Function bodies written out, extern declarations excluded.
     public functions: u64;
+    /// Whether the unit contains inline asm, whose bodies are Intel syntax.
+    public usesInlineAsm: boolean;
+  }
+
+  /// The runtime services a unit's generated code calls.
+  ///
+  /// A hosted unit reports a panic with `fprintf` and `exit` and allocates a
+  /// heap closure environment with `malloc`. A freestanding unit calls the
+  /// program's own `@panicHandler`, `@allocHandler` and `@freeHandler`
+  /// functions instead, and records every panic it has no handler for in
+  /// `unhandledPanics`, which the caller reports as an error.
+  record RuntimeHooks {
+    public freestanding: boolean;
+    public panicHandler: Option<Analyzer::DefinitionId>;
+    public allocHandler: Option<Analyzer::DefinitionId>;
+    public freeHandler: Option<Analyzer::DefinitionId>;
+    /// The program's sources, which a panic's line is read from.
+    public sources: Vector<SourceFile>;
+    /// The project root a panic's file is named relative to, empty when unknown.
+    public projectRoot: String;
+    /// The std root a panic's file under the std is named relative to, empty
+    /// when the build has no std.
+    public stdRoot: String;
+    public unhandledPanics: Vector<SourceSpan>;
+
+    public static hosted(): RuntimeHooks {
+      return RuntimeHooks {
+        freestanding: false,
+        panicHandler: Option::NONE,
+        allocHandler: Option::NONE,
+        freeHandler: Option::NONE,
+        sources: Vector::new<SourceFile>(),
+        projectRoot: String::new(),
+        stdRoot: String::new(),
+        unhandledPanics: Vector::new<SourceSpan>(),
+      };
+    }
   }
 
   /// The environment struct one closure thunk reads its captures out of.
@@ -44,13 +83,10 @@ export namespace CodegenC {
     public dropFn: Option<u32>;
   }
 
-  /// What the closure prepass found, so `formatCType` can tell a closure value
-  /// from a raw C function pointer.
-  ///
-  /// A `Type::Function` reaches the emitter for two different things: an Ignis
-  /// closure, which is a struct of call pointer, drop pointer and environment,
-  /// and a bare C function pointer an extern declaration takes. Only the raw
-  /// ids listed in `signatures` are the former.
+  /// What the closure prepass found: the `Type::Function` signatures that
+  /// need a closure struct, and the environment struct of every thunk. A plain
+  /// C function pointer is a `Type::RawFunction` instead, named by its
+  /// `ignis_fn_<id>` typedef.
   record ClosureTables {
     public signatures: Vector<u32>;
     public envs: Vector<CodegenC::ClosureEnv>;
@@ -165,6 +201,18 @@ export namespace CodegenC {
     return CodegenReserved::mangleReservedCName(`${base.toStr()}_${defId.raw()}`);
   }
 
+  /// The `volatile ` qualifier for a volatile builtin load or store, empty otherwise.
+  function volatileQualifier(isVolatile: boolean): str {
+    if (isVolatile) {
+      return "volatile ";
+    }
+
+    return "";
+  }
+
+  /// The C struct name of a record or enum. A record declared inside an
+  /// extern block keeps its written name, which the C side names too; every
+  /// other nominal is suffixed with its definition id.
   function structName(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -172,7 +220,88 @@ export namespace CodegenC {
   ): String {
     let base: String = CodegenC::definitionName(defStore, symbols, defId);
 
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
+      if (recordDef.isExtern) {
+        return base;
+      }
+    }
+
     return CodegenReserved::mangleReservedCName(`${base.toStr()}_${defId.raw()}`);
+  }
+
+  /// The C member name of field `fieldIndex` of record `recordId`. A record
+  /// with a C layout keeps each written field name; every other record names
+  /// its fields by position.
+  function recordFieldMember(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    recordId: Analyzer::DefinitionId,
+    fieldIndex: u64,
+  ): String {
+    let mut fieldId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordId)) {
+      if (recordDef.cLayout) {
+        if (let Option::SOME(id) = recordDef.fields.get(fieldIndex)) {
+          fieldId = Option::SOME(*id);
+        }
+      }
+    }
+
+    if (let Option::SOME(id) = fieldId) {
+      if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(id)) {
+        if (let Option::SOME(text) = symbols.resolve(fieldDef.name)) {
+          return CodegenC::sanitize(text);
+        }
+      }
+    }
+
+    return `field_${fieldIndex}`;
+  }
+
+  /// `recordFieldMember` for a record reached as a value of `typeId`, through
+  /// any number of pointers or references. Any other type names the field by
+  /// position.
+  function fieldMemberForType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeId: Analyzer::TypeId,
+    fieldIndex: u64,
+  ): String {
+    let mut current: Analyzer::TypeId = typeId;
+
+    while (true) {
+      let mut record_: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut pointee: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(current)) {
+        match (typeNode) {
+          Analyzer::Type::Record(defId) -> {
+            record_ = Option::SOME(defId);
+          },
+          Analyzer::Type::Pointer(pointer) -> {
+            pointee = Option::SOME(pointer.pointee);
+          },
+          Analyzer::Type::Reference(reference) -> {
+            pointee = Option::SOME(reference.referent);
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(defId) = record_) {
+        return CodegenC::recordFieldMember(defStore, symbols, defId, fieldIndex);
+      }
+
+      let Option::SOME(inner) = pointee else {
+        return `field_${fieldIndex}`;
+      };
+
+      current = inner;
+    }
+
+    return `field_${fieldIndex}`;
   }
 
   /// The C spelling of a type.
@@ -270,12 +399,13 @@ export namespace CodegenC {
         shape = 2;
         nominal = enumDef;
       },
-      // A function type the prepass recognised as a closure is a struct; every
-      // other one is a bare C function pointer an extern declaration takes.
       Analyzer::Type::Function(_) -> {
         if (CodegenC::hasRaw(&closures.signatures, typeId.raw())) {
           shape = 3;
         }
+      },
+      Analyzer::Type::RawFunction(_) -> {
+        shape = 5;
       },
       Analyzer::Type::Slice(_) -> {
         shape = 4;
@@ -293,6 +423,10 @@ export namespace CodegenC {
       let name: String = CodegenC::sliceStructName(typeId);
 
       return `struct ${name.toStr()}`;
+    }
+
+    if (shape == 5) {
+      return CodegenC::rawFunctionTypeName(typeId);
     }
 
     if (shape == 1) {
@@ -712,6 +846,8 @@ export namespace CodegenC {
     symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     closures: &CodegenC::ClosureTables,
+    hooks: &mut CodegenC::RuntimeHooks,
+    function_: &Lir::FunctionLir,
     callee: Analyzer::DefinitionId,
     args: &Vector<Lir::Operand>,
   ): void {
@@ -739,8 +875,9 @@ export namespace CodegenC {
 
     let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, receiver);
     let access: String = `(${value.toStr()})->`;
+    let site: SourceSpan = CodegenC::operandSpan(function_, receiver);
 
-    CodegenC::emitDropStateGuard(output, &access);
+    CodegenC::emitDropStateGuard(defStore, symbols, output, hooks, &access, site);
   }
 
   /// Trap before a field is reached through a base whose nominal was already
@@ -748,6 +885,8 @@ export namespace CodegenC {
   function emitFieldPointerDropGuard(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hooks: &mut CodegenC::RuntimeHooks,
     function_: &Lir::FunctionLir,
     output: &mut String,
     base: &String,
@@ -767,16 +906,147 @@ export namespace CodegenC {
       access = `(${base.toStr()})->`;
     }
 
-    CodegenC::emitDropStateGuard(output, &access);
+    let site: SourceSpan = CodegenC::operandSpan(function_, operand);
+
+    CodegenC::emitDropStateGuard(defStore, symbols, output, hooks, &access, site);
   }
 
   /// The shared body of both drop guards: read the drop state byte reached by
   /// `access` and panic when it is set.
-  function emitDropStateGuard(output: &mut String, access: &String): void {
-    let line: String = `    if (${access.toStr()}__ignis_drop_state) { fprintf(stderr, "panic: use of dropped value\\n"); exit(101); }\n`;
+  function emitDropStateGuard(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    hooks: &mut CodegenC::RuntimeHooks,
+    access: &String,
+    site: SourceSpan,
+  ): void {
+    let mut report: String = String::create("fprintf(stderr, \"panic: use of dropped value\\n\"); exit(101);");
+
+    if (hooks.freestanding) {
+      let message: String = String::create("use of dropped value");
+      report = CodegenC::freestandingPanic(defStore, symbols, hooks, &message, site);
+    }
+
+    let line: String = `    if (${access.toStr()}__ignis_drop_state) { ${report.toStr()} }\n`;
 
     let mut outputRef: &mut String = output;
     outputRef.pushStr(line.toStr());
+  }
+
+  /// Where a guard on `operand` reports its panic: the span of the
+  /// temporary it reads, or the function's own span for anything else.
+  function operandSpan(function_: &Lir::FunctionLir, operand: &Lir::Operand): SourceSpan {
+    if (let Lir::Operand::Temp(temp) = operand) {
+      if (let Option::SOME(data) = function_.temps.get(temp.raw() as u64)) {
+        return data.span;
+      }
+    }
+
+    return function_.span;
+  }
+
+  /// The statement a freestanding unit panics with: a call to the
+  /// `@panicHandler` function with `message` and the file and line of `site`,
+  /// which never returns.
+  ///
+  /// Without a handler the site is recorded as unhandled for the caller to
+  /// report, and the unit traps there so it stays valid C.
+  function freestandingPanic(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hooks: &mut CodegenC::RuntimeHooks,
+    message: &String,
+    site: SourceSpan,
+  ): String {
+    if (hooks.panicHandler.isNone()) {
+      let mut hooksRef: &mut CodegenC::RuntimeHooks = hooks;
+      hooksRef.unhandledPanics.push(site);
+
+      return String::create("__builtin_trap();");
+    }
+
+    let Option::SOME(handler) = &hooks.panicHandler else {
+      return String::create("__builtin_trap();");
+    };
+
+    let handlerName: String = CodegenC::mangledName(defStore, symbols, handler);
+    let escapedMessage: String = CodegenC::escapeStringLiteral(message);
+    let filePath: String = CodegenC::panicFilePath(&hooks.projectRoot, &hooks.stdRoot, site.filePath);
+    let escapedFile: String = CodegenC::escapeStringLiteral(&filePath);
+    let line: u32 = CodegenC::sourceLine(&hooks.sources, site);
+
+    return `${handlerName.toStr()}("${escapedMessage.toStr()}", "${escapedFile.toStr()}", ${line}); __builtin_unreachable();`;
+  }
+
+  /// The name a panic reports for the source file at `filePath`, free of the
+  /// build machine's directories: relative to `projectRoot`, `std/` plus the
+  /// path relative to `stdRoot`, or else the bare file name. An empty root
+  /// matches nothing, and an empty path stays empty.
+  function panicFilePath(projectRoot: &String, stdRoot: &String, filePath: str): String {
+    let path: String = String::create(filePath);
+
+    if (let Option::SOME(relative) = CodegenC::pathRelativeTo(&path, projectRoot)) {
+      return relative;
+    }
+
+    if (let Option::SOME(relative) = CodegenC::pathRelativeTo(&path, stdRoot)) {
+      return `std/${relative.toStr()}`;
+    }
+
+    let pathBuf: Path::PathBuf = Path::PathBuf::fromString(&path);
+    let Option::SOME(fileName) = pathBuf.fileName() else {
+      return String::new();
+    };
+
+    return fileName;
+  }
+
+  /// The part of `path` below the directory `root`, when `root` is not empty
+  /// and `path` lies strictly inside it.
+  function pathRelativeTo(path: &String, root: &String): Option<String> {
+    if (root.length() == 0 || !path.startsWith(root.toStr())) {
+      return Option::NONE;
+    }
+
+    let mut start: u64 = root.length();
+
+    if (!root.endsWith("/")) {
+      let Option::SOME(boundary) = path.charAt(start) else {
+        return Option::NONE;
+      };
+
+      if (boundary != '/') {
+        return Option::NONE;
+      }
+
+      start += 1;
+    }
+
+    if (start >= path.length()) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(path.substringBytes(start, path.length()));
+  }
+
+  /// The 1-based line `site` starts on, 0 when no source holds its file.
+  function sourceLine(sources: &Vector<SourceFile>, site: SourceSpan): u32 {
+    let mut index: u64 = 0;
+
+    while (index < sources.length()) {
+      if (let Option::SOME(file) = sources.get(index)) {
+        let path: String = file.path.toString();
+
+        if (path.equals(site.filePath)) {
+          return file.lineIndexAt(site.start) + 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return 0;
   }
 
   /// The user-written `drop` method of a nominal, if it declares one.
@@ -1018,8 +1288,15 @@ export namespace CodegenC {
       let fieldType: Analyzer::TypeId = fieldDef.fieldType;
       let index: u32 = fieldDef.index;
 
+      // A C function pointer field owns nothing to drop.
+      if (Hir::recordFieldStorageType(defStore, typeStore, nominal, fieldType).raw() != fieldType.raw()) {
+        fieldIndex += 1;
+        continue;
+      }
+
       if (Borrowck::needsDropType(defStore, typeStore, fieldType) || Hir::typeIsFunction(typeStore, fieldType)) {
-        let access: String = `${expression.toStr()}.field_${index}`;
+        let member: String = CodegenC::recordFieldMember(defStore, symbols, nominal, index as u64);
+        let access: String = `${expression.toStr()}.${member.toStr()}`;
         CodegenC::emitFieldDrops(defStore, typeStore, symbols, output, closures, &access, fieldType);
       }
 
@@ -1161,11 +1438,13 @@ export namespace CodegenC {
   ///
   /// For that to hold, this must mark exactly the places `emitFieldDrops` would drop. A
   /// nominal carrying the Drop trait owns a flag of its own and stops the walk; anything
-  /// else is opened up — record fields by index, enum payloads through a switch on the
-  /// tag, because that is the only variant whose payload the drop side would touch.
+  /// else is opened up — record fields under the member name `emitFieldDrops` uses, enum
+  /// payloads through a switch on the tag, because that is the only variant whose payload
+  /// the drop side would touch.
   function emitUninitializedDropState(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     expression: &String,
     typeId: Analyzer::TypeId,
@@ -1203,7 +1482,7 @@ export namespace CodegenC {
     }
 
     if (isEnum) {
-      CodegenC::emitUninitializedEnumVariantState(defStore, typeStore, output, expression, nominal);
+      CodegenC::emitUninitializedEnumVariantState(defStore, typeStore, symbols, output, expression, nominal);
 
       return;
     }
@@ -1238,8 +1517,9 @@ export namespace CodegenC {
       let index: u32 = fieldDef.index;
 
       if (Borrowck::needsDropType(defStore, typeStore, fieldType)) {
-        let access: String = `${expression.toStr()}.field_${index}`;
-        CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, fieldType);
+        let member: String = CodegenC::recordFieldMember(defStore, symbols, nominal, index as u64);
+        let access: String = `${expression.toStr()}.${member.toStr()}`;
+        CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, output, &access, fieldType);
       }
 
       fieldIndex += 1;
@@ -1254,6 +1534,7 @@ export namespace CodegenC {
   function emitUninitializedEnumVariantState(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     expression: &String,
     defId: Analyzer::DefinitionId,
@@ -1299,7 +1580,7 @@ export namespace CodegenC {
 
         if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
           let access: String = `${expression.toStr()}.payload.variant_${tag}.field_${payloadIndex}`;
-          CodegenC::emitUninitializedDropState(defStore, typeStore, &mut arm, &access, *payloadType);
+          CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, &mut arm, &access, *payloadType);
         }
 
         payloadIndex += 1;
@@ -1423,6 +1704,29 @@ export namespace CodegenC {
   /// this one translation unit.
   function closureStructName(typeId: Analyzer::TypeId): String {
     return `__ignis_closure_t${typeId.raw()}`;
+  }
+
+  /// The typedef one C function pointer signature is spelled by.
+  function rawFunctionTypeName(typeId: Analyzer::TypeId): String {
+    return `ignis_fn_${typeId.raw()}`;
+  }
+
+  /// The closure thunk wrapper a C function pointer to a capture-free lambda
+  /// points at.
+  function rawThunkWrapperName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    thunk: Analyzer::DefinitionId,
+  ): String {
+    let thunkName: String = CodegenC::mangledName(defStore, symbols, thunk);
+
+    return `${thunkName.toStr()}_raw`;
+  }
+
+  /// The closure call function that forwards to the C function pointer of
+  /// type `rawType` stored as its environment.
+  function rawTrampolineName(rawType: Analyzer::TypeId): String {
+    return `ignis_raw_tramp_${rawType.raw()}`;
   }
 
   /// The environment struct a thunk reads its captures out of.
@@ -1725,7 +2029,386 @@ export namespace CodegenC {
       Lir::Instr::CallClosure(_) -> "CallClosure",
       Lir::Instr::DropClosure(_) -> "DropClosure",
       Lir::Instr::FreeEnv(_) -> "FreeEnv",
+      Lir::Instr::MakeRawFunction(_) -> "MakeRawFunction",
+      Lir::Instr::RawToClosure(_) -> "RawToClosure",
+      Lir::Instr::InlineAsm(_) -> "InlineAsm",
     };
+  }
+
+  /// Whether any function of `program` contains inline asm. The driver
+  /// compiles such a unit with `-masm=intel`, the syntax asm bodies are
+  /// written in.
+  function programUsesInlineAsm(program: &Lir::LirProgram): boolean {
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      if (let Option::SOME(function_) = program.functions.functionAt(functionIndex)) {
+        let mut blockIndex: u64 = 0;
+
+        while (blockIndex < function_.blocks.length()) {
+          if (let Option::SOME(block) = function_.blocks.get(blockIndex)) {
+            let mut instructionIndex: u64 = 0;
+
+            while (instructionIndex < block.instructions.length()) {
+              if (let Option::SOME(Lir::Instr::InlineAsm(_)) = block.instructions.get(instructionIndex)) {
+                return true;
+              }
+
+              instructionIndex += 1;
+            }
+          }
+
+          blockIndex += 1;
+        }
+      }
+
+      functionIndex += 1;
+    }
+
+    return false;
+  }
+
+  /// The text of an asm body chunk as a GCC asm template, before C string
+  /// escaping. `//` and `/* */` comments are Ignis comments and are dropped,
+  /// since the assembler reads neither. `%`, `|`, and the braces `{{` and
+  /// `}}` stand for are escaped, because GCC gives them meaning in a
+  /// template.
+  function inlineAsmTemplateText(chunk: &String): String {
+    let mut result: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < chunk.length()) {
+      let Option::SOME(byte) = chunk.byteAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut next: u8 = 0;
+
+      if (let Option::SOME(following) = chunk.byteAt(index + 1)) {
+        next = following;
+      }
+
+      if (byte == '/' as u8 && next == '/' as u8) {
+        while (index < chunk.length()) {
+          let Option::SOME(commentByte) = chunk.byteAt(index) else {
+            break;
+          };
+
+          if (commentByte == 10) {
+            break;
+          }
+
+          index += 1;
+        }
+
+        continue;
+      }
+
+      if (byte == '/' as u8 && next == '*' as u8) {
+        index += 2;
+
+        while (index < chunk.length()) {
+          let Option::SOME(commentByte) = chunk.byteAt(index) else {
+            break;
+          };
+
+          if (commentByte == '*' as u8) {
+            if (let Option::SOME(closing) = chunk.byteAt(index + 1)) {
+              if (closing == '/' as u8) {
+                index += 2;
+                break;
+              }
+            }
+          }
+
+          index += 1;
+        }
+
+        result.pushByte(' ' as u8);
+        continue;
+      }
+
+      if ((byte == '{' as u8 || byte == '}' as u8) && next == byte) {
+        result.pushByte('%' as u8);
+        result.pushByte(byte);
+        index += 2;
+        continue;
+      }
+
+      if (byte == '%' as u8 || byte == '|' as u8 || byte == '{' as u8 || byte == '}' as u8) {
+        result.pushByte('%' as u8);
+      }
+
+      result.pushByte(byte);
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// The constraint an asm operand takes: `=` for an output, `+` for an
+  /// operand read and written, then the location. A register without a
+  /// constraint letter of its own, `r8` to `r15`, takes `r` and is bound
+  /// through a register variable.
+  function inlineAsmConstraint(operand: &Lir::InlineAsmOperand): String {
+    let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&operand.location);
+    let mut letter: str = "r";
+
+    if (location.kind == Analyzer::InlineAsm::LocationKind::REGISTER) {
+      let familyLetter: str = Analyzer::InlineAsm::constraintLetter(&location.family);
+
+      if (String::create(familyLetter).length() > 0) {
+        letter = familyLetter;
+      }
+    } else if (location.kind == Analyzer::InlineAsm::LocationKind::MEM) {
+      letter = "m";
+    } else if (location.kind == Analyzer::InlineAsm::LocationKind::IMM) {
+      letter = "n";
+    }
+
+    let mut prefix: str = "";
+
+    if (operand.writes && operand.reads) {
+      prefix = "+";
+    } else if (operand.writes) {
+      prefix = "=";
+    }
+
+    return `${prefix}${letter}`;
+  }
+
+  /// The register an operand has to be bound to through a register
+  /// variable, or `NONE` when its constraint names the register already.
+  function inlineAsmRegisterVariable(operand: &Lir::InlineAsmOperand): Option<String> {
+    let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&operand.location);
+
+    if (location.kind != Analyzer::InlineAsm::LocationKind::REGISTER) {
+      return Option::NONE;
+    }
+
+    if (String::create(Analyzer::InlineAsm::constraintLetter(&location.family)).length() > 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(location.family);
+  }
+
+  /// The C expression for what an asm operand names: the place behind its
+  /// pointer, the output temp, or the value read, cast to the operand type
+  /// so a constant has the operand's width.
+  function inlineAsmOperandExpression(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    operand: &Lir::InlineAsmOperand,
+  ): String {
+    let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, operand.ty);
+    let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &operand.value);
+
+    if (operand.isPlace) {
+      return `(*(${typeText.toStr()}*)${value.toStr()})`;
+    }
+
+    if (operand.writes) {
+      return value;
+    }
+
+    return `((${typeText.toStr()})${value.toStr()})`;
+  }
+
+  /// Emits an asm statement:
+  ///
+  /// ```c
+  /// {
+  ///     register uint64_t ignis_asm_0 __asm__("r8") = ((uint64_t)t1);
+  ///     __asm__ volatile("lea %[result], [%[value] + 2]" : [result] "=r"(t2) : [value] "r"(ignis_asm_0) : "cc");
+  /// }
+  /// ```
+  ///
+  /// Outputs come first in C, in operand order, then the operands only
+  /// read. An operand in `r8` to `r15` goes through a register variable
+  /// initialized from it when read and copied back after the asm when
+  /// written. Without `volatile`, the C compiler may drop or merge a `pure`
+  /// asm whose outputs it does not need.
+  function emitInlineAsm(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    node: &Lir::InstrInlineAsm,
+  ): void {
+    let mut prelude: String = String::create("");
+    let mut epilogue: String = String::create("");
+    let mut expressions: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < node.operands.length()) {
+      let Option::SOME(operand) = node.operands.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let expression: String = CodegenC::inlineAsmOperandExpression(defStore, typeStore, symbols, closures, operand);
+
+      if (let Option::SOME(registerName) = CodegenC::inlineAsmRegisterVariable(operand)) {
+        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, operand.ty);
+        let variable: String = `ignis_asm_${index}`;
+        let declaration: String = `        register ${typeText.toStr()} ${variable.toStr()} __asm__("${registerName.toStr()}")`;
+
+        prelude.push(&declaration);
+
+        if (operand.reads) {
+          let initializer: String = ` = ${expression.toStr()}`;
+          prelude.push(&initializer);
+        }
+
+        prelude.pushStr(";\n");
+
+        if (operand.writes) {
+          let copyBack: String = `        ${expression.toStr()} = ${variable.toStr()};\n`;
+          epilogue.push(&copyBack);
+        }
+
+        expressions.push(variable);
+      } else {
+        expressions.push(expression.clone());
+      }
+
+      index += 1;
+    }
+
+    let mut outputs: String = String::create("");
+    let mut inputs: String = String::create("");
+    let mut positions: Vector<u64> = Vector::new<u64>();
+    let mut outputCount: u64 = 0;
+
+    index = 0;
+
+    while (index < node.operands.length()) {
+      if (let Option::SOME(operand) = node.operands.get(index)) {
+        if (operand.writes) {
+          outputCount += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut nextOutput: u64 = 0;
+    let mut nextInput: u64 = outputCount;
+    index = 0;
+
+    while (index < node.operands.length()) {
+      let Option::SOME(operand) = node.operands.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut entry: String = String::create("");
+
+      if (operand.name.length() > 0) {
+        let symbolicName: String = `[${operand.name.toStr()}] `;
+        entry.push(&symbolicName);
+      }
+
+      let constraint: String = CodegenC::inlineAsmConstraint(operand);
+      let mut expression: String = String::create("");
+
+      if (let Option::SOME(text) = expressions.get(index)) {
+        expression = text.clone();
+      }
+
+      let binding: String = `"${constraint.toStr()}"(${expression.toStr()})`;
+      entry.push(&binding);
+
+      if (operand.writes) {
+        if (outputs.length() > 0) {
+          outputs.pushStr(", ");
+        }
+
+        outputs.push(&entry);
+        positions.push(nextOutput);
+        nextOutput += 1;
+      } else {
+        if (inputs.length() > 0) {
+          inputs.pushStr(", ");
+        }
+
+        inputs.push(&entry);
+        positions.push(nextInput);
+        nextInput += 1;
+      }
+
+      index += 1;
+    }
+
+    let mut asmTemplate: String = String::create("");
+    index = 0;
+
+    while (index < node.chunks.length()) {
+      if (let Option::SOME(chunk) = node.chunks.get(index)) {
+        let chunkText: String = CodegenC::inlineAsmTemplateText(chunk);
+        asmTemplate.push(&chunkText);
+      }
+
+      if (let Option::SOME(operandIndex) = node.holes.get(index)) {
+        let mut holeText: String = String::create("%0");
+
+        if (let Option::SOME(operand) = node.operands.get(*operandIndex)) {
+          if (operand.name.length() > 0) {
+            holeText = `%[${operand.name.toStr()}]`;
+          } else if (let Option::SOME(position) = positions.get(*operandIndex)) {
+            holeText = `%${*position}`;
+          }
+        }
+
+        asmTemplate.push(&holeText);
+      }
+
+      index += 1;
+    }
+
+    let mut clobbers: String = String::create("");
+    index = 0;
+
+    while (index < node.clobbers.length()) {
+      if (let Option::SOME(clobber) = node.clobbers.get(index)) {
+        if (clobbers.length() > 0) {
+          clobbers.pushStr(", ");
+        }
+
+        let quoted: String = `"${clobber.toStr()}"`;
+        clobbers.push(&quoted);
+      }
+
+      index += 1;
+    }
+
+    let mut qualifier: str = "";
+
+    if (node.volatile) {
+      qualifier = " volatile";
+    }
+
+    let escaped: String = CodegenC::escapeStringLiteral(&asmTemplate);
+    let mut statement: String = `        __asm__${qualifier}("${escaped.toStr()}" : ${outputs.toStr()} : ${inputs.toStr()}`;
+
+    if (clobbers.length() > 0) {
+      let clobberList: String = ` : ${clobbers.toStr()}`;
+      statement.push(&clobberList);
+    }
+
+    statement.pushStr(");\n");
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr("    {\n");
+    outputRef.push(&prelude);
+    outputRef.push(&statement);
+    outputRef.push(&epilogue);
+    outputRef.pushStr("    }\n");
   }
 
   /// One instruction. Anything the emitter cannot express yet leaves a comment
@@ -1737,6 +2420,7 @@ export namespace CodegenC {
     output: &mut String,
     unsupported: &mut u64,
     closures: &CodegenC::ClosureTables,
+    hooks: &mut CodegenC::RuntimeHooks,
     function_: &Lir::FunctionLir,
     instruction: &Lir::Instr,
   ): void {
@@ -1840,9 +2524,15 @@ export namespace CodegenC {
       Lir::Instr::GetFieldPtr(node) -> {
         let base: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.base);
 
-        CodegenC::emitFieldPointerDropGuard(defStore, typeStore, function_, output, &base, &node.base);
+        CodegenC::emitFieldPointerDropGuard(defStore, typeStore, symbols, hooks, function_, output, &base, &node.base);
 
-        let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->field_${node.fieldIndex});\n`;
+        let mut member: String = `field_${node.fieldIndex}`;
+
+        if (let Option::SOME(baseType) = CodegenC::operandType(function_, &node.base)) {
+          member = CodegenC::fieldMemberForType(defStore, typeStore, symbols, baseType, node.fieldIndex as u64);
+        }
+
+        let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->${member.toStr()});\n`;
 
         if (CodegenC::operandIsEnvironmentPointer(typeStore, function_, &node.base)) {
           if (let Option::SOME(envName) = CodegenC::currentEnvName(closures, function_.defId)) {
@@ -1944,7 +2634,8 @@ export namespace CodegenC {
         while (fieldIndex < node.fields.length()) {
           if (let Option::SOME(field) = node.fields.get(fieldIndex)) {
             let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &field.value);
-            let line: String = `    (${destination.toStr()})->field_${field.fieldIndex} = ${value.toStr()};\n`;
+            let member: String = CodegenC::fieldMemberForType(defStore, typeStore, symbols, node.recordType, field.fieldIndex as u64);
+            let line: String = `    (${destination.toStr()})->${member.toStr()} = ${value.toStr()};\n`;
             let mut fieldRef: &mut String = output;
             fieldRef.pushStr(line.toStr());
           }
@@ -1955,7 +2646,7 @@ export namespace CodegenC {
         CodegenC::emitInitializedDropState(defStore, typeStore, output, &destination, node.recordType);
       },
       Lir::Instr::Call(node) -> {
-        CodegenC::emitMethodReceiverDropGuard(defStore, typeStore, symbols, output, closures, node.callee, &node.args);
+        CodegenC::emitMethodReceiverDropGuard(defStore, typeStore, symbols, output, closures, hooks, function_, node.callee, &node.args);
 
         let callee: String = CodegenC::mangledName(defStore, symbols, node.callee);
         let calleeIsExtern: boolean = CodegenC::isExternFunction(defStore, node.callee);
@@ -1966,6 +2657,17 @@ export namespace CodegenC {
           if (!CodegenC::tempIsVoid(typeStore, function_, dest)) {
             let assignment: String = `t${dest.raw()} = `;
             call.pushStr(assignment.toStr());
+
+            // The header spells the returned pointer's parameters its own
+            // way, so the result is converted to the emitter's typedef.
+            if (calleeIsExtern) {
+              if (let Option::SOME(destType) = function_.tempType(dest)) {
+                if (CodegenC::isRawFunctionType(typeStore, destType)) {
+                  let conversion: String = `(${CodegenC::rawFunctionTypeName(destType).toStr()})`;
+                  call.pushStr(conversion.toStr());
+                }
+              }
+            }
           }
         }
 
@@ -1986,7 +2688,7 @@ export namespace CodegenC {
             // tags, which are structurally identical to the emitter's record
             // structs but named differently. Passing through `void*` is what
             // the host does for the same reason.
-            if (calleeIsExtern && CodegenC::operandIsIndirect(typeStore, function_, argument)) {
+            if (calleeIsExtern && CodegenC::operandCrossesAsVoidPointer(typeStore, function_, argument, hooks.freestanding)) {
               call.pushStr("(void*)");
             }
 
@@ -2002,8 +2704,16 @@ export namespace CodegenC {
         outputRef.pushStr(call.toStr());
       },
       Lir::Instr::PanicMessage(node) -> {
-        let escaped: String = CodegenC::escapeStringLiteral(&node.message);
-        let line: String = `    fprintf(stderr, "panic: %s\\n", "${escaped.toStr()}");\n    exit(101);\n`;
+        let mut line: String = String::new();
+
+        if (hooks.freestanding) {
+          let report: String = CodegenC::freestandingPanic(defStore, symbols, hooks, &node.message, node.span);
+          line = `    ${report.toStr()}\n`;
+        } else {
+          let escaped: String = CodegenC::escapeStringLiteral(&node.message);
+          line = `    fprintf(stderr, "panic: %s\\n", "${escaped.toStr()}");\n    exit(101);\n`;
+        }
+
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2018,7 +2728,8 @@ export namespace CodegenC {
       Lir::Instr::BuiltinLoad(node) -> {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
-        let line: String = `    t${node.dest.raw()} = *(${target.toStr()}*)(${pointer.toStr()});\n`;
+        let qualifier: str = CodegenC::volatileQualifier(node.volatile);
+        let line: String = `    t${node.dest.raw()} = *(${qualifier}${target.toStr()}*)(${pointer.toStr()});\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2026,7 +2737,8 @@ export namespace CodegenC {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
-        let line: String = `    *(${target.toStr()}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
+        let qualifier: str = CodegenC::volatileQualifier(node.volatile);
+        let line: String = `    *(${qualifier}${target.toStr()}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2126,7 +2838,14 @@ export namespace CodegenC {
         let mut envPointer: String = String::create("");
 
         if (node.heapAllocate) {
-          let allocation: String = `    struct ${envName.toStr()}* __envp_t${node.dest.raw()} = (struct ${envName.toStr()}*)malloc(sizeof(struct ${envName.toStr()}));\n`;
+          let mut allocate: String = `malloc(sizeof(struct ${envName.toStr()}))`;
+
+          if (let Option::SOME(allocHandler) = &hooks.allocHandler) {
+            let handlerName: String = CodegenC::mangledName(defStore, symbols, allocHandler);
+            allocate = `${handlerName.toStr()}(sizeof(struct ${envName.toStr()}), _Alignof(struct ${envName.toStr()}))`;
+          }
+
+          let allocation: String = `    struct ${envName.toStr()}* __envp_t${node.dest.raw()} = (struct ${envName.toStr()}*)${allocate.toStr()};\n`;
 
           let mut allocationRef: &mut String = output;
           allocationRef.pushStr(allocation.toStr());
@@ -2255,7 +2974,12 @@ export namespace CodegenC {
       Lir::Instr::FreeEnv(node) -> {
         let ptr: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.env);
 
-        let release: String = `    if (${ptr.toStr()}) free(${ptr.toStr()});\n`;
+        let mut release: String = `    if (${ptr.toStr()}) free(${ptr.toStr()});\n`;
+
+        if (let Option::SOME(freeHandler) = &hooks.freeHandler) {
+          let handlerName: String = CodegenC::mangledName(defStore, symbols, freeHandler);
+          release = `    if (${ptr.toStr()}) ${handlerName.toStr()}((u8*)${ptr.toStr()});\n`;
+        }
 
         let mut releaseRef: &mut String = output;
         releaseRef.pushStr(release.toStr());
@@ -2433,16 +3157,49 @@ export namespace CodegenC {
         openRef.pushStr(open.toStr());
 
         let access: String = String::create("(*__moved)");
-        CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, node.ty);
+        CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, output, &access, node.ty);
 
         let mut closeRef: &mut String = output;
         closeRef.pushStr("    }\n");
       },
       Lir::Instr::DropGlue(node) -> {
-        // The runtime takes glue through an opaque `void*` and casts it back to
-        // `IgnisDropFn` itself.
         let glue: String = CodegenC::dropGlueName(node.ty);
-        let line: String = `    t${node.dest.raw()} = (void*)${glue.toStr()};\n`;
+        let mut typeText: String = String::create("void*");
+
+        if (let Option::SOME(destType) = function_.tempType(node.dest)) {
+          typeText = CodegenC::formatCType(defStore, typeStore, symbols, closures, destType);
+        }
+
+        let line: String = `    t${node.dest.raw()} = (${typeText.toStr()})${glue.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::MakeRawFunction(node) -> {
+        let mut target: String = CodegenC::mangledName(defStore, symbols, node.callee);
+
+        if (node.viaThunk) {
+          target = CodegenC::rawThunkWrapperName(defStore, symbols, node.callee);
+        }
+
+        let mut typeText: String = String::create("void*");
+
+        if (let Option::SOME(destType) = function_.tempType(node.dest)) {
+          typeText = CodegenC::formatCType(defStore, typeStore, symbols, closures, destType);
+        }
+
+        let line: String = `    t${node.dest.raw()} = (${typeText.toStr()})${target.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::InlineAsm(node) -> {
+        CodegenC::emitInlineAsm(defStore, typeStore, symbols, output, closures, &node);
+      },
+      Lir::Instr::RawToClosure(node) -> {
+        let closureType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.closureType);
+        let trampoline: String = CodegenC::rawTrampolineName(node.rawType);
+        let raw: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.raw);
+
+        let line: String = `    t${node.dest.raw()} = (${closureType.toStr()}){ ${trampoline.toStr()}, NULL, (u8*)${raw.toStr()} };\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2604,9 +3361,11 @@ export namespace CodegenC {
 
         if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
           if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
-            let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, fieldDef.fieldType);
+            let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, defId, fieldDef.fieldType);
+            let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, storageType);
             let fieldAttributes: String = CodegenC::fieldLayoutAttributes(fieldDef.alignment);
-            let line: String = `    ${fieldType.toStr()} field_${fieldDef.index}${fieldAttributes.toStr()};\n`;
+            let member: String = CodegenC::recordFieldMember(defStore, symbols, defId, fieldDef.index as u64);
+            let line: String = `    ${fieldType.toStr()} ${member.toStr()}${fieldAttributes.toStr()};\n`;
 
             let mut fieldRef: &mut String = output;
             fieldRef.pushStr(line.toStr());
@@ -2816,6 +3575,7 @@ export namespace CodegenC {
   function emitUninitializedLocals(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     function_: &Lir::FunctionLir,
   ): void {
@@ -2846,7 +3606,7 @@ export namespace CodegenC {
       let mut clearRef: &mut String = output;
       clearRef.pushStr(clear.toStr());
 
-      CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, local.ty);
+      CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, output, &access, local.ty);
       localIndex += 1;
     }
   }
@@ -2858,6 +3618,7 @@ export namespace CodegenC {
     output: &mut String,
     unsupported: &mut u64,
     closures: &CodegenC::ClosureTables,
+    hooks: &mut CodegenC::RuntimeHooks,
     externalSymbols: &Vector<u32>,
     function_: &Lir::FunctionLir,
   ): void {
@@ -2897,7 +3658,7 @@ export namespace CodegenC {
       localIndex += 1;
     }
 
-    CodegenC::emitUninitializedLocals(defStore, typeStore, output, function_);
+    CodegenC::emitUninitializedLocals(defStore, typeStore, symbols, output, function_);
 
     // Parameters already occupy `t0..tn-1` as the signature declares them.
     let mut tempIndex: u64 = function_.params.length();
@@ -2932,7 +3693,7 @@ export namespace CodegenC {
 
       while (instructionIndex < block.instructions.length()) {
         if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
-          CodegenC::emitInstruction(defStore, typeStore, symbols, output, unsupported, closures, function_, instruction);
+          CodegenC::emitInstruction(defStore, typeStore, symbols, output, unsupported, closures, hooks, function_, instruction);
         }
 
         instructionIndex += 1;
@@ -2948,79 +3709,16 @@ export namespace CodegenC {
   }
 
   /// Find every closure in the program: which `Type::Function` signatures are
-  /// real closures, and which thunk needs an environment struct.
-  ///
-  /// A function type that only ever reaches an extern declaration or a
-  /// `DropGlue` destination is a bare C function pointer, so it stays out of
-  /// `signatures` and keeps rendering as `void*`.
+  /// used, so each gets its closure struct, and which thunk needs an
+  /// environment struct. A C function pointer is a `Type::RawFunction`, so a
+  /// signature used both ways gets both representations.
   function collectClosureTables(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     program: &Lir::LirProgram,
   ): CodegenC::ClosureTables {
     let mut tables: CodegenC::ClosureTables = CodegenC::ClosureTables::empty();
-    let mut rawFunctionPointers: Vector<u32> = Vector::new<u32>();
     let mut seenThunks: Vector<u32> = Vector::new<u32>();
-
-    let mut scanIndex: u64 = 0;
-
-    while (scanIndex < program.functions.length()) {
-      let Option::SOME(function_) = program.functions.functionAt(scanIndex) else {
-        scanIndex += 1;
-        continue;
-      };
-
-      if (function_.isExtern) {
-        let mut paramIndex: u64 = 0;
-
-        while (paramIndex < function_.params.length()) {
-          if (let Option::SOME(paramId) = function_.params.get(paramIndex)) {
-            if (let Option::SOME(paramDefinition) = defStore.get(*paramId)) {
-              if (let Analyzer::Definition::Variable(variableDef) = paramDefinition) {
-                let declared: Analyzer::TypeId = variableDef.declaredType;
-
-                if (CodegenC::isFunctionType(typeStore, declared)) {
-                  if (!CodegenC::containsRaw(&mut rawFunctionPointers, declared.raw())) {
-                    rawFunctionPointers.push(declared.raw());
-                  }
-                }
-              }
-            }
-          }
-
-          paramIndex += 1;
-        }
-      }
-
-      let mut blockIndex: u64 = 0;
-
-      while (blockIndex < function_.blocks.length()) {
-        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
-          blockIndex += 1;
-          continue;
-        };
-
-        let mut instructionIndex: u64 = 0;
-
-        while (instructionIndex < block.instructions.length()) {
-          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
-            if (let Lir::Instr::DropGlue(node) = instruction) {
-              if (let Option::SOME(data) = function_.temps.get(node.dest.raw() as u64)) {
-                if (!CodegenC::containsRaw(&mut rawFunctionPointers, data.ty.raw())) {
-                  rawFunctionPointers.push(data.ty.raw());
-                }
-              }
-            }
-          }
-
-          instructionIndex += 1;
-        }
-
-        blockIndex += 1;
-      }
-
-      scanIndex += 1;
-    }
 
     let mut functionIndex: u64 = 0;
 
@@ -3097,6 +3795,12 @@ export namespace CodegenC {
                 tables.signatures.push(node.closureType.raw());
               }
             }
+
+            if (let Lir::Instr::RawToClosure(node) = instruction) {
+              if (!CodegenC::containsRaw(&mut tables.signatures, node.closureType.raw())) {
+                tables.signatures.push(node.closureType.raw());
+              }
+            }
           }
 
           instructionIndex += 1;
@@ -3117,10 +3821,8 @@ export namespace CodegenC {
                 let declared: Analyzer::TypeId = variableDef.declaredType;
 
                 if (CodegenC::isFunctionType(typeStore, declared)) {
-                  if (!CodegenC::containsRaw(&mut rawFunctionPointers, declared.raw())) {
-                    if (!CodegenC::containsRaw(&mut tables.signatures, declared.raw())) {
-                      tables.signatures.push(declared.raw());
-                    }
+                  if (!CodegenC::containsRaw(&mut tables.signatures, declared.raw())) {
+                    tables.signatures.push(declared.raw());
                   }
                 }
               }
@@ -3136,10 +3838,8 @@ export namespace CodegenC {
       while (localIndex < function_.locals.length()) {
         if (let Option::SOME(local) = function_.locals.get(localIndex)) {
           if (CodegenC::isFunctionType(typeStore, local.ty)) {
-            if (!CodegenC::containsRaw(&mut rawFunctionPointers, local.ty.raw())) {
-              if (!CodegenC::containsRaw(&mut tables.signatures, local.ty.raw())) {
-                tables.signatures.push(local.ty.raw());
-              }
+            if (!CodegenC::containsRaw(&mut tables.signatures, local.ty.raw())) {
+              tables.signatures.push(local.ty.raw());
             }
           }
         }
@@ -3185,6 +3885,32 @@ export namespace CodegenC {
       Analyzer::Type::Reference(_) -> true,
       _ -> false,
     };
+  }
+
+  /// Whether an extern call argument is passed through `void*`: a pointer or
+  /// reference, whose header spells the pointee with its own C tags, or a C
+  /// function pointer, whose header spells the parameters its own way. A
+  /// freestanding unit declares extern functions itself, with the emitter's
+  /// own typedef for a C function pointer, so that one passes as it is.
+  function operandCrossesAsVoidPointer(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+    freestanding: boolean,
+  ): boolean {
+    if (CodegenC::operandIsIndirect(typeStore, function_, operand)) {
+      return true;
+    }
+
+    if (freestanding) {
+      return false;
+    }
+
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return false;
+    };
+
+    return CodegenC::isRawFunctionType(typeStore, typeId);
   }
 
   function countNonVoid(
@@ -3244,6 +3970,31 @@ export namespace CodegenC {
 
     return match (typeNode) {
       Analyzer::Type::VOID -> true,
+      _ -> false,
+    };
+  }
+
+  function isNeverType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::NEVER -> true,
+      _ -> false,
+    };
+  }
+
+  function isRawFunctionType(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::RawFunction(_) -> true,
       _ -> false,
     };
   }
@@ -3379,6 +4130,542 @@ export namespace CodegenC {
       bodyRef.pushStr(body.toStr());
 
       signatureIndex += 1;
+    }
+  }
+
+  /// Creates the C function pointer type of every function-typed field of a
+  /// C-layout record in `typeDefs`, so the field's typedef is emitted even
+  /// when no code reads or writes the field.
+  function internRecordFieldStorageTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeDefs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut definitionIndex: u64 = 0;
+
+    while (definitionIndex < typeDefs.length()) {
+      let Option::SOME(defId) = typeDefs.get(definitionIndex) else {
+        definitionIndex += 1;
+        continue;
+      };
+
+      let mut fieldTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(*defId)) {
+        if (recordDef.cLayout) {
+          let mut fieldIndex: u64 = 0;
+
+          while (fieldIndex < recordDef.fields.length()) {
+            if (let Option::SOME(fieldId) = recordDef.fields.get(fieldIndex)) {
+              if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+                fieldTypes.push(fieldDef.fieldType);
+              }
+            }
+
+            fieldIndex += 1;
+          }
+        }
+      }
+
+      let mut typeIndex: u64 = 0;
+
+      while (typeIndex < fieldTypes.length()) {
+        if (let Option::SOME(fieldType) = fieldTypes.get(typeIndex)) {
+          let _ = Hir::recordFieldStorageType(defStore, typeStore, *defId, *fieldType);
+        }
+
+        typeIndex += 1;
+      }
+
+      definitionIndex += 1;
+    }
+  }
+
+  /// The extern functions `program` reaches, in the order it first reaches
+  /// them: called directly, or taken as a C function pointer.
+  function referencedExternFunctions(
+    defStore: &mut Analyzer::DefinitionStore,
+    program: &Lir::LirProgram,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut seen: Vector<u32> = Vector::new<u32>();
+    let mut externs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < function_.blocks.length()) {
+        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        let mut instructionIndex: u64 = 0;
+
+        while (instructionIndex < block.instructions.length()) {
+          let mut callee: Option<Analyzer::DefinitionId> = Option::NONE;
+
+          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+            if (let Lir::Instr::Call(node) = instruction) {
+              callee = Option::SOME(node.callee);
+            }
+
+            if (let Lir::Instr::MakeRawFunction(node) = instruction) {
+              callee = Option::SOME(node.callee);
+            }
+          }
+
+          if (let Option::SOME(defId) = callee) {
+            if (CodegenC::isExternFunction(defStore, defId) && !CodegenC::containsRaw(&mut seen, defId.raw())) {
+              seen.push(defId.raw());
+              externs.push(defId);
+            }
+          }
+
+          instructionIndex += 1;
+        }
+
+        blockIndex += 1;
+      }
+
+      functionIndex += 1;
+    }
+
+    return externs;
+  }
+
+  /// The parameter types and the result type of extern function `defId` as C
+  /// sees them, with every function type a C function pointer.
+  record ExternSignature {
+    public params: Vector<Analyzer::TypeId>;
+    public returnType: Analyzer::TypeId;
+  }
+
+  function externSignature(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<CodegenC::ExternSignature> {
+    let mut paramIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId)) {
+      paramIds = CodegenC::copyDefIds(&functionDef.params);
+      returnType = Option::SOME(functionDef.returnType);
+    }
+
+    let Option::SOME(declaredReturn) = returnType else {
+      return Option::NONE;
+    };
+
+    let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < paramIds.length()) {
+      let mut declared: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(paramId) = paramIds.get(paramIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variable(paramDef)) = defStore.get(*paramId)) {
+          declared = Option::SOME(paramDef.declaredType);
+        }
+      }
+
+      if (let Option::SOME(paramType) = declared) {
+        params.push(Hir::cFacingType(defStore, typeStore, paramType));
+      }
+
+      paramIndex += 1;
+    }
+
+    return Option::SOME(CodegenC::ExternSignature {
+      params: params,
+      returnType: Hir::cFacingType(defStore, typeStore, declaredReturn),
+    });
+  }
+
+  /// Creates the C function pointer types the prototypes of `externs` name,
+  /// so their typedefs are emitted before the prototypes use them.
+  function internExternPrototypeTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    externs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < externs.length()) {
+      if (let Option::SOME(defId) = externs.get(index)) {
+        let _ = CodegenC::externSignature(defStore, typeStore, *defId);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// One `extern` prototype per extern function in `externs`, for a
+  /// freestanding unit, which has no headers to declare them. Each is named by
+  /// its C symbol, `@externName` included, and declares a function-typed
+  /// parameter or result as the signature's C function pointer typedef. Two
+  /// declarations of one symbol with the same C signature share a prototype;
+  /// with different ones, C reports the conflict.
+  function emitExternPrototypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    externs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut emitted: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < externs.length()) {
+      let Option::SOME(defId) = externs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(signature) = CodegenC::externSignature(defStore, typeStore, *defId) else {
+        index += 1;
+        continue;
+      };
+
+      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, signature.returnType);
+      let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &signature.params);
+      let name: String = CodegenC::mangledName(defStore, symbols, *defId);
+      let line: String = `extern ${returnText.toStr()} ${name.toStr()}(${paramText.toStr()});\n`;
+
+      let mut duplicate: boolean = false;
+      let mut emittedIndex: u64 = 0;
+
+      while (emittedIndex < emitted.length()) {
+        if (let Option::SOME(previous) = emitted.get(emittedIndex)) {
+          if (previous.equals(line.toStr())) {
+            duplicate = true;
+          }
+        }
+
+        emittedIndex += 1;
+      }
+
+      if (!duplicate) {
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+        emitted.push(line.clone());
+      }
+
+      index += 1;
+    }
+  }
+
+  /// One `ignis_fn_<id>` typedef per C function pointer signature, in type id
+  /// order. Every `RawFunction` in the store gets one: lowering creates them
+  /// only at extern boundaries, and a typedef nothing names costs nothing.
+  /// Parameter types may be records that are only forward-declared so far,
+  /// which a declarator accepts.
+  function emitRawFunctionTypedefs(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    let mut emitted: u64 = 0;
+    let mut rawId: u64 = 0;
+
+    while (rawId < typeStore.length()) {
+      let typeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(rawId as u32);
+      let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Type::RawFunction(signature)) = typeStore.get(typeId)) {
+        params = CodegenC::copyTypeIds(&signature.params);
+        returnType = Option::SOME(signature.returnType);
+      }
+
+      let Option::SOME(resultType) = returnType else {
+        rawId += 1;
+        continue;
+      };
+
+      if (emitted == 0) {
+        let mut headerRef: &mut String = output;
+        headerRef.pushStr("\n// C function pointer types\n");
+      }
+
+      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, resultType);
+      let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &params);
+      let name: String = CodegenC::rawFunctionTypeName(typeId);
+      let line: String = `typedef ${returnText.toStr()} (*${name.toStr()})(${paramText.toStr()});\n`;
+
+      let mut lineRef: &mut String = output;
+      lineRef.pushStr(line.toStr());
+
+      emitted += 1;
+      rawId += 1;
+    }
+  }
+
+  /// `types` as a C parameter type list, `void` when it is empty.
+  function formatCParamTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    types: &Vector<Analyzer::TypeId>,
+  ): String {
+    if (types.isEmpty()) {
+      return String::create("void");
+    }
+
+    let mut text: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < types.length()) {
+      if (let Option::SOME(typeId) = types.get(index)) {
+        if (index > 0) {
+          text.pushStr(", ");
+        }
+
+        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *typeId);
+        text.pushStr(typeText.toStr());
+      }
+
+      index += 1;
+    }
+
+    return text;
+  }
+
+  /// `<type> a0, <type> a1, ...` for a definition's parameters, and the
+  /// matching `a0, a1, ...` argument list.
+  record AdapterParams {
+    public declarations: String;
+    public arguments: String;
+  }
+
+  function adapterParams(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    types: &Vector<Analyzer::TypeId>,
+  ): CodegenC::AdapterParams {
+    let mut declarations: String = String::new();
+    let mut arguments: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < types.length()) {
+      if (let Option::SOME(typeId) = types.get(index)) {
+        if (index > 0) {
+          declarations.pushStr(", ");
+          arguments.pushStr(", ");
+        }
+
+        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *typeId);
+        let declaration: String = `${typeText.toStr()} a${index}`;
+        let argument: String = `a${index}`;
+
+        declarations.pushStr(declaration.toStr());
+        arguments.pushStr(argument.toStr());
+      }
+
+      index += 1;
+    }
+
+    return CodegenC::AdapterParams {
+      declarations: declarations,
+      arguments: arguments,
+    };
+  }
+
+  /// `return <call>;`, or the bare call when the function returns nothing.
+  function adapterReturn(
+    typeStore: &mut Analyzer::TypeStore,
+    returnType: Analyzer::TypeId,
+    call: &String
+  ): String {
+    if (CodegenC::isVoidType(typeStore, returnType) || CodegenC::isNeverType(typeStore, returnType)) {
+      return `    ${call.toStr()};\n`;
+    }
+
+    return `    return ${call.toStr()};\n`;
+  }
+
+  /// The functions C function pointers need around closures, after the
+  /// prototypes they call:
+  ///
+  ///   - `<thunk>_raw`, for each capture-free lambda passed to C: the thunk's
+  ///     own signature without the environment, calling it with a null one;
+  ///   - `ignis_raw_tramp_<id>`, for each C function pointer read back as a
+  ///     closure: a closure call function whose environment is the pointer.
+  function emitRawFunctionAdapters(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    program: &Lir::LirProgram,
+  ): void {
+    let mut thunks: Vector<u32> = Vector::new<u32>();
+    let mut rawTypes: Vector<u32> = Vector::new<u32>();
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < function_.blocks.length()) {
+        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        let mut instructionIndex: u64 = 0;
+
+        while (instructionIndex < block.instructions.length()) {
+          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+            if (let Lir::Instr::MakeRawFunction(node) = instruction) {
+              if (node.viaThunk && !CodegenC::containsRaw(&mut thunks, node.callee.raw())) {
+                thunks.push(node.callee.raw());
+              }
+            }
+
+            if (let Lir::Instr::RawToClosure(node) = instruction) {
+              if (!CodegenC::containsRaw(&mut rawTypes, node.rawType.raw())) {
+                rawTypes.push(node.rawType.raw());
+              }
+            }
+          }
+
+          instructionIndex += 1;
+        }
+
+        blockIndex += 1;
+      }
+
+      functionIndex += 1;
+    }
+
+    if (thunks.isEmpty() && rawTypes.isEmpty()) {
+      return;
+    }
+
+    let mut headerRef: &mut String = output;
+    headerRef.pushStr("\n// C function pointer adapters\n");
+
+    let mut thunkIndex: u64 = 0;
+
+    while (thunkIndex < thunks.length()) {
+      let Option::SOME(raw) = thunks.get(thunkIndex) else {
+        thunkIndex += 1;
+        continue;
+      };
+
+      let thunk: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*raw);
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(thunkFunction) = program.functions.get(thunk)) {
+        returnType = Option::SOME(thunkFunction.returnType);
+
+        // The first parameter is the environment the wrapper supplies.
+        let mut paramIndex: u64 = 1;
+
+        while (paramIndex < thunkFunction.params.length()) {
+          if (let Option::SOME(paramId) = thunkFunction.params.get(paramIndex)) {
+            if (let Option::SOME(Analyzer::Definition::Variable(paramDef)) = defStore.get(*paramId)) {
+              paramTypes.push(paramDef.declaredType);
+            }
+          }
+
+          paramIndex += 1;
+        }
+      }
+
+      let Option::SOME(resultType) = returnType else {
+        thunkIndex += 1;
+        continue;
+      };
+
+      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, resultType);
+      let wrapper: String = CodegenC::rawThunkWrapperName(defStore, symbols, thunk);
+      let thunkName: String = CodegenC::mangledName(defStore, symbols, thunk);
+      let params: CodegenC::AdapterParams = CodegenC::adapterParams(defStore, typeStore, symbols, closures, &paramTypes);
+
+      let mut declarations: String = params.declarations;
+
+      if (paramTypes.isEmpty()) {
+        declarations = String::create("void");
+      }
+
+      let mut forwarded: String = String::create("NULL");
+
+      if (!paramTypes.isEmpty()) {
+        forwarded.pushStr(", ");
+        forwarded.pushStr(params.arguments.toStr());
+      }
+
+      let call: String = `${thunkName.toStr()}(${forwarded.toStr()})`;
+      let statement: String = CodegenC::adapterReturn(typeStore, resultType, &call);
+      let definition: String = `static ${returnText.toStr()} ${wrapper.toStr()}(${declarations.toStr()}) {\n${statement.toStr()}}\n`;
+
+      let mut definitionRef: &mut String = output;
+      definitionRef.pushStr(definition.toStr());
+
+      thunkIndex += 1;
+    }
+
+    let mut rawIndex: u64 = 0;
+
+    while (rawIndex < rawTypes.length()) {
+      let Option::SOME(raw) = rawTypes.get(rawIndex) else {
+        rawIndex += 1;
+        continue;
+      };
+
+      let rawType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Type::RawFunction(signature)) = typeStore.get(rawType)) {
+        paramTypes = CodegenC::copyTypeIds(&signature.params);
+        returnType = Option::SOME(signature.returnType);
+      }
+
+      let Option::SOME(resultType) = returnType else {
+        rawIndex += 1;
+        continue;
+      };
+
+      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, resultType);
+      let trampoline: String = CodegenC::rawTrampolineName(rawType);
+      let typeName: String = CodegenC::rawFunctionTypeName(rawType);
+      let params: CodegenC::AdapterParams = CodegenC::adapterParams(defStore, typeStore, symbols, closures, &paramTypes);
+
+      let mut declarations: String = String::create("u8* env");
+
+      if (!paramTypes.isEmpty()) {
+        declarations.pushStr(", ");
+        declarations.pushStr(params.declarations.toStr());
+      }
+
+      let call: String = `((${typeName.toStr()})env)(${params.arguments.toStr()})`;
+      let statement: String = CodegenC::adapterReturn(typeStore, resultType, &call);
+      let definition: String = `static ${returnText.toStr()} ${trampoline.toStr()}(${declarations.toStr()}) {\n${statement.toStr()}}\n`;
+
+      let mut definitionRef: &mut String = output;
+      definitionRef.pushStr(definition.toStr());
+
+      rawIndex += 1;
     }
   }
 
@@ -3669,6 +4956,13 @@ export namespace CodegenC {
     }
   }
 
+  /// Emits the whole program as one C translation unit.
+  ///
+  /// `hooks.freestanding` is set for a `std = false` build: the unit then
+  /// carries only the type prelude, with no `ignis_rt.h`, no hosted libc or
+  /// POSIX headers and no C `main` wrapper, so it compiles under
+  /// `-ffreestanding`, and its panics and heap closure environments go through
+  /// the program's runtime handlers.
   function emitProgram(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3676,6 +4970,7 @@ export namespace CodegenC {
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
     moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
+    hooks: &mut CodegenC::RuntimeHooks,
   ): CodegenC::EmitOutput {
     let mut source: String = String::create("");
     let mut unsupported: u64 = 0;
@@ -3683,14 +4978,16 @@ export namespace CodegenC {
 
     CodegenC::emitTypePrelude(&mut source);
 
-    source.pushStr("#include \"ignis_rt.h\"\n");
+    if (!hooks.freestanding) {
+      source.pushStr("#include \"ignis_rt.h\"\n");
 
-    // The host includes the headers each linked std module names in
-    // `std/manifest.toml`; this is that list for `libc` and `math`, which every
-    // program pulls through the prelude. An extern function is then declared
-    // by its header, never by the emitter, since a second declaration with the
-    // emitter's spelling of the parameter types conflicts with the header's.
-    CodegenC::emitStdHeaders(&mut source);
+      // The host includes the headers each linked std module names in
+      // `std/manifest.toml`; this is that list for `libc` and `math`, which every
+      // program pulls through the prelude. An extern function is then declared
+      // by its header, never by the emitter, since a second declaration with the
+      // emitter's spelling of the parameter types conflicts with the header's.
+      CodegenC::emitStdHeaders(&mut source);
+    }
 
     let tables: CodegenC::ClosureTables = CodegenC::collectClosureTables(defStore, typeStore, program);
     let closures: &CodegenC::ClosureTables = &tables;
@@ -3720,6 +5017,20 @@ export namespace CodegenC {
     // is emitted — the reverse order left that field incomplete.
     CodegenC::emitClosureSignatureStructs(defStore, typeStore, symbols, &mut source, closures);
 
+    CodegenC::internRecordFieldStorageTypes(defStore, typeStore, &typeDefs);
+
+    // A hosted unit leaves extern functions to the headers it includes.
+    let mut externPrototypes: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (hooks.freestanding) {
+      externPrototypes = CodegenC::referencedExternFunctions(defStore, program);
+      CodegenC::internExternPrototypeTypes(defStore, typeStore, &externPrototypes);
+    }
+
+    // After the closure structs: a C function pointer may take a closure by
+    // value, which a declarator can name only once the struct is declared.
+    CodegenC::emitRawFunctionTypedefs(defStore, typeStore, symbols, &mut source, closures);
+
     source.pushStr("\n// Type definitions\n");
 
     let mut definitionIndex: u64 = 0;
@@ -3748,6 +5059,8 @@ export namespace CodegenC {
 
     source.pushStr("\n// Function prototypes\n");
 
+    CodegenC::emitExternPrototypes(defStore, typeStore, symbols, &mut source, closures, &externPrototypes);
+
     let mut prototypeIndex: u64 = 0;
 
     while (prototypeIndex < program.functions.length()) {
@@ -3770,6 +5083,8 @@ export namespace CodegenC {
 
       prototypeIndex += 1;
     }
+
+    CodegenC::emitRawFunctionAdapters(defStore, typeStore, symbols, &mut source, closures, program);
 
     source.pushStr("\n// Function definitions\n");
 
@@ -3794,6 +5109,7 @@ export namespace CodegenC {
         &mut source,
         &mut unsupported,
         closures,
+        hooks,
         externalSymbols,
         function_,
       );
@@ -3802,12 +5118,15 @@ export namespace CodegenC {
       bodyIndex += 1;
     }
 
-    CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program, moduleInfos);
+    if (!hooks.freestanding) {
+      CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program, moduleInfos);
+    }
 
     return CodegenC::EmitOutput {
       source: source,
       unsupported: unsupported,
       functions: functions,
+      usesInlineAsm: CodegenC::programUsesInlineAsm(program),
     };
   }
 
@@ -4090,7 +5409,8 @@ export namespace CodegenC {
         if (CodegenC::isStrType(typeStore, *errType)) {
           errorMessage = errorAccess.clone();
         } else if (let Option::SOME(fieldIndex) = CodegenC::recordMessageFieldIndex(defStore, typeStore, symbols, *errType)) {
-          errorMessage = `${errorAccess.toStr()}.field_${fieldIndex}`;
+          let member: String = CodegenC::fieldMemberForType(defStore, typeStore, symbols, *errType, fieldIndex as u64);
+          errorMessage = `${errorAccess.toStr()}.${member.toStr()}`;
         }
       }
     }
