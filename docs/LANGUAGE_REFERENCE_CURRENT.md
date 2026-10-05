@@ -459,7 +459,7 @@ An extern record cannot be generic and cannot declare methods, static fields or 
 
 A record outside an extern block gets the same field layout with `@cLayout` (see [Attributes](#7-attributes)).
 
-A function-typed field of an extern or `@cLayout` record is a plain C function pointer, as a function-typed extern parameter is. A value stored into it, by initialization or assignment, must be capture-free: a function named directly, or a closure literal that captures nothing. Reading the field yields an ordinary function value.
+A function-typed field of an extern or `@cLayout` record is a plain C function pointer, as a function-typed extern parameter is. A value stored into it, by initialization or assignment, must be capture-free: a function named directly, or a closure literal that captures nothing. Reading the field yields an ordinary function value. Taking a reference to the field (`&record.field` or `&mut record.field`) is an error, since the reference could only point at a temporary function value and writes through it would never reach the field: read the field into a local, or assign the field directly.
 
 ```ignis
 extern Device {

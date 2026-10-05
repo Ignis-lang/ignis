@@ -6070,6 +6070,8 @@ export namespace Analyzer {
         Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, value.target);
       }
 
+      Analyzer::Typecheck::checkCLayoutFunctionFieldReference(state, defStore, typeStore, symbols, module, value);
+
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let mut referenceType: Analyzer::TypeId = typeStoreRef.reference(targetType);
       if (value.mutable) {
@@ -6078,6 +6080,84 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::recordExprType(state, exprId, referenceType);
       return Option::SOME(referenceType);
+    }
+
+    /// Reports a reference to a function-typed field of a C-layout record
+    /// (A0219). The field holds a C function pointer, and a read converts it
+    /// to a function value, so a reference to it could only point at that
+    /// temporary value: writes through `&mut` would never reach the field.
+    function checkCLayoutFunctionFieldReference(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      value: &Ast::Expression::Reference,
+    ): void {
+      let Option::SOME(Ast::Expression::Node::MemberAccess(memberAccess)) = module.expressions.get(value.target) else {
+        return;
+      };
+
+      if (memberAccess.operator != Ast::Expression::AccessOperator::Dot) {
+        return;
+      }
+
+      let Option::SOME(objectType) = Analyzer::Typecheck::lookupRecordedExprType(state, memberAccess.object) else {
+        return;
+      };
+
+      let mut recordType: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, objectType).typeId;
+
+      if (let Option::SOME(Analyzer::Type::Reference(reference)) = typeStore.get(recordType)) {
+        recordType = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, reference.referent).typeId;
+      }
+
+      let Option::SOME(Analyzer::Type::Record(recordId)) = typeStore.get(recordType) else {
+        return;
+      };
+
+      let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordId) else {
+        return;
+      };
+
+      if (!recordDef.cLayout) {
+        return;
+      }
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let memberSymbol: Analyzer::SymbolId = symbolsRef.intern(memberAccess.member.toStr());
+      let fields: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::copyDefinitionIdVector(&recordDef.fields);
+      let mut index: u64 = 0;
+
+      while (index < fields.length()) {
+        let Option::SOME(fieldId) = fields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+          index += 1;
+          continue;
+        };
+
+        if (fieldDef.name.raw() != memberSymbol.raw()) {
+          index += 1;
+          continue;
+        }
+
+        let fieldType: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, fieldDef.fieldType).typeId;
+
+        let Option::SOME(Analyzer::Type::Function(_)) = typeStore.get(fieldType) else {
+          return;
+        };
+
+        let recordName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, recordId);
+        let message: String = `cannot borrow function-typed field '${memberAccess.member.toStr()}' of C-layout record '${recordName.toStr()}'`;
+        let label: String = `the field holds a C function pointer, so a reference would point at a temporary copy; read it into a local or assign '${memberAccess.member.toStr()}' directly`;
+        Analyzer::Typecheck::emitDiagnosticLabeled(state, value.span, DiagnosticCode::C_LAYOUT_FUNCTION_FIELD_REFERENCE, message.toStr(), label.toStr());
+
+        return;
+      }
     }
 
     function checkUnaryExpr(

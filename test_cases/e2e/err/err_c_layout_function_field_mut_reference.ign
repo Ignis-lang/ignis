@@ -1,0 +1,27 @@
+// e2e: err
+// A function-typed field of an extern record holds a C function pointer, so
+// `&mut handler.apply` could only borrow a closure built from it, and writes
+// through that borrow would never reach the field.
+extern Native {
+  record Handler {
+    public apply: (i32) -> i32;
+  }
+}
+
+function addOne(value: i32): i32 {
+  return value + 1;
+}
+
+function triple(value: i32): i32 {
+  return value * 3;
+}
+
+function main(): i32 {
+  let mut handler: Native::Handler = Native::Handler { apply: addOne };
+  let slot = &mut handler.apply;
+  *slot = triple;
+
+  let apply: (i32) -> i32 = handler.apply;
+
+  return apply(1);
+}

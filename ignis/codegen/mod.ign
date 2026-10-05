@@ -1436,11 +1436,13 @@ export namespace CodegenC {
   ///
   /// For that to hold, this must mark exactly the places `emitFieldDrops` would drop. A
   /// nominal carrying the Drop trait owns a flag of its own and stops the walk; anything
-  /// else is opened up — record fields by index, enum payloads through a switch on the
-  /// tag, because that is the only variant whose payload the drop side would touch.
+  /// else is opened up — record fields under the member name `emitFieldDrops` uses, enum
+  /// payloads through a switch on the tag, because that is the only variant whose payload
+  /// the drop side would touch.
   function emitUninitializedDropState(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     expression: &String,
     typeId: Analyzer::TypeId,
@@ -1478,7 +1480,7 @@ export namespace CodegenC {
     }
 
     if (isEnum) {
-      CodegenC::emitUninitializedEnumVariantState(defStore, typeStore, output, expression, nominal);
+      CodegenC::emitUninitializedEnumVariantState(defStore, typeStore, symbols, output, expression, nominal);
 
       return;
     }
@@ -1513,8 +1515,9 @@ export namespace CodegenC {
       let index: u32 = fieldDef.index;
 
       if (Borrowck::needsDropType(defStore, typeStore, fieldType)) {
-        let access: String = `${expression.toStr()}.field_${index}`;
-        CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, fieldType);
+        let member: String = CodegenC::recordFieldMember(defStore, symbols, nominal, index as u64);
+        let access: String = `${expression.toStr()}.${member.toStr()}`;
+        CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, output, &access, fieldType);
       }
 
       fieldIndex += 1;
@@ -1529,6 +1532,7 @@ export namespace CodegenC {
   function emitUninitializedEnumVariantState(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     expression: &String,
     defId: Analyzer::DefinitionId,
@@ -1574,7 +1578,7 @@ export namespace CodegenC {
 
         if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
           let access: String = `${expression.toStr()}.payload.variant_${tag}.field_${payloadIndex}`;
-          CodegenC::emitUninitializedDropState(defStore, typeStore, &mut arm, &access, *payloadType);
+          CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, &mut arm, &access, *payloadType);
         }
 
         payloadIndex += 1;
@@ -2774,7 +2778,7 @@ export namespace CodegenC {
         openRef.pushStr(open.toStr());
 
         let access: String = String::create("(*__moved)");
-        CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, node.ty);
+        CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, output, &access, node.ty);
 
         let mut closeRef: &mut String = output;
         closeRef.pushStr("    }\n");
@@ -3189,6 +3193,7 @@ export namespace CodegenC {
   function emitUninitializedLocals(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     function_: &Lir::FunctionLir,
   ): void {
@@ -3219,7 +3224,7 @@ export namespace CodegenC {
       let mut clearRef: &mut String = output;
       clearRef.pushStr(clear.toStr());
 
-      CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, local.ty);
+      CodegenC::emitUninitializedDropState(defStore, typeStore, symbols, output, &access, local.ty);
       localIndex += 1;
     }
   }
@@ -3271,7 +3276,7 @@ export namespace CodegenC {
       localIndex += 1;
     }
 
-    CodegenC::emitUninitializedLocals(defStore, typeStore, output, function_);
+    CodegenC::emitUninitializedLocals(defStore, typeStore, symbols, output, function_);
 
     // Parameters already occupy `t0..tn-1` as the signature declares them.
     let mut tempIndex: u64 = function_.params.length();
