@@ -80,6 +80,7 @@ PARSE_DIAGNOSTIC_CODES = frozenset(
     "I0049",
     "I0051",
     "I0052",
+    "I0053",
   }
 )
 
