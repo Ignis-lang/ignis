@@ -685,6 +685,23 @@ function codegenKeepsFullValueOfWideRadixLiteral(): void {
   Test::assert(codegenContains(&emission.source, "4294967296U"));
 }
 
+/// An integer constant reaches C with the width of its Ignis type: a `u64` or
+/// `i64` constant carries a 64-bit suffix, so `ACCESS << 40` shifts a 64-bit
+/// value instead of a 32-bit one, while narrower types keep their spelling.
+@test
+function codegenSpellsIntegerConstantsWithTheirTypeWidth(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "const ACCESS: u64 = 0x89;\nconst SIGNED: i64 = 0x89;\nconst NARROW: u32 = 0x89;\n\nfunction main(): i32 {\n  let a: u64 = ACCESS << 40;\n  let b: u64 = ~ACCESS;\n  let c: i64 = SIGNED << 40;\n  let d: i64 = -5000000000;\n  let e: u32 = NARROW << 8;\n\n  return (a >> 40) as i32 + (b >> 63) as i32 + (c >> 40) as i32 + (d >> 40) as i32 + e as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "137ULL << 40"));
+  Test::assert(codegenContains(&emission.source, "~137ULL"));
+  Test::assert(codegenContains(&emission.source, "137LL << 40"));
+  Test::assert(codegenContains(&emission.source, "-5000000000LL"));
+  Test::assert(codegenContains(&emission.source, "137U << 8"));
+  Test::assert(!codegenContains(&emission.source, "137U << 40"));
+}
+
 /// A record with no fields is an empty GNU C struct, sized zero like the
 /// reference lays it out, not one padded with a dummy byte.
 @test
