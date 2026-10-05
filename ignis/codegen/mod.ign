@@ -2305,7 +2305,7 @@ export namespace CodegenC {
             // tags, which are structurally identical to the emitter's record
             // structs but named differently. Passing through `void*` is what
             // the host does for the same reason.
-            if (calleeIsExtern && CodegenC::operandCrossesAsVoidPointer(typeStore, function_, argument)) {
+            if (calleeIsExtern && CodegenC::operandCrossesAsVoidPointer(typeStore, function_, argument, hooks.freestanding)) {
               call.pushStr("(void*)");
             }
 
@@ -3502,14 +3502,21 @@ export namespace CodegenC {
 
   /// Whether an extern call argument is passed through `void*`: a pointer or
   /// reference, whose header spells the pointee with its own C tags, or a C
-  /// function pointer, whose header spells the parameters its own way.
+  /// function pointer, whose header spells the parameters its own way. A
+  /// freestanding unit declares extern functions itself, with the emitter's
+  /// own typedef for a C function pointer, so that one passes as it is.
   function operandCrossesAsVoidPointer(
     typeStore: &mut Analyzer::TypeStore,
     function_: &Lir::FunctionLir,
     operand: &Lir::Operand,
+    freestanding: boolean,
   ): boolean {
     if (CodegenC::operandIsIndirect(typeStore, function_, operand)) {
       return true;
+    }
+
+    if (freestanding) {
+      return false;
     }
 
     let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
@@ -3784,6 +3791,187 @@ export namespace CodegenC {
       }
 
       definitionIndex += 1;
+    }
+  }
+
+  /// The extern functions `program` reaches, in the order it first reaches
+  /// them: called directly, or taken as a C function pointer.
+  function referencedExternFunctions(
+    defStore: &mut Analyzer::DefinitionStore,
+    program: &Lir::LirProgram,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut seen: Vector<u32> = Vector::new<u32>();
+    let mut externs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < function_.blocks.length()) {
+        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        let mut instructionIndex: u64 = 0;
+
+        while (instructionIndex < block.instructions.length()) {
+          let mut callee: Option<Analyzer::DefinitionId> = Option::NONE;
+
+          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+            if (let Lir::Instr::Call(node) = instruction) {
+              callee = Option::SOME(node.callee);
+            }
+
+            if (let Lir::Instr::MakeRawFunction(node) = instruction) {
+              callee = Option::SOME(node.callee);
+            }
+          }
+
+          if (let Option::SOME(defId) = callee) {
+            if (CodegenC::isExternFunction(defStore, defId) && !CodegenC::containsRaw(&mut seen, defId.raw())) {
+              seen.push(defId.raw());
+              externs.push(defId);
+            }
+          }
+
+          instructionIndex += 1;
+        }
+
+        blockIndex += 1;
+      }
+
+      functionIndex += 1;
+    }
+
+    return externs;
+  }
+
+  /// The parameter types and the result type of extern function `defId` as C
+  /// sees them, with every function type a C function pointer.
+  record ExternSignature {
+    public params: Vector<Analyzer::TypeId>;
+    public returnType: Analyzer::TypeId;
+  }
+
+  function externSignature(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<CodegenC::ExternSignature> {
+    let mut paramIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId)) {
+      paramIds = CodegenC::copyDefIds(&functionDef.params);
+      returnType = Option::SOME(functionDef.returnType);
+    }
+
+    let Option::SOME(declaredReturn) = returnType else {
+      return Option::NONE;
+    };
+
+    let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < paramIds.length()) {
+      let mut declared: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(paramId) = paramIds.get(paramIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variable(paramDef)) = defStore.get(*paramId)) {
+          declared = Option::SOME(paramDef.declaredType);
+        }
+      }
+
+      if (let Option::SOME(paramType) = declared) {
+        params.push(Hir::cFacingType(defStore, typeStore, paramType));
+      }
+
+      paramIndex += 1;
+    }
+
+    return Option::SOME(CodegenC::ExternSignature {
+      params: params,
+      returnType: Hir::cFacingType(defStore, typeStore, declaredReturn),
+    });
+  }
+
+  /// Creates the C function pointer types the prototypes of `externs` name,
+  /// so their typedefs are emitted before the prototypes use them.
+  function internExternPrototypeTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    externs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < externs.length()) {
+      if (let Option::SOME(defId) = externs.get(index)) {
+        let _ = CodegenC::externSignature(defStore, typeStore, *defId);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// One `extern` prototype per extern function in `externs`, for a
+  /// freestanding unit, which has no headers to declare them. Each is named by
+  /// its C symbol, `@externName` included, and declares a function-typed
+  /// parameter or result as the signature's C function pointer typedef. Two
+  /// declarations of one symbol with the same C signature share a prototype;
+  /// with different ones, C reports the conflict.
+  function emitExternPrototypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    externs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut emitted: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < externs.length()) {
+      let Option::SOME(defId) = externs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(signature) = CodegenC::externSignature(defStore, typeStore, *defId) else {
+        index += 1;
+        continue;
+      };
+
+      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, signature.returnType);
+      let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &signature.params);
+      let name: String = CodegenC::mangledName(defStore, symbols, *defId);
+      let line: String = `extern ${returnText.toStr()} ${name.toStr()}(${paramText.toStr()});\n`;
+
+      let mut duplicate: boolean = false;
+      let mut emittedIndex: u64 = 0;
+
+      while (emittedIndex < emitted.length()) {
+        if (let Option::SOME(previous) = emitted.get(emittedIndex)) {
+          if (previous.equals(line.toStr())) {
+            duplicate = true;
+          }
+        }
+
+        emittedIndex += 1;
+      }
+
+      if (!duplicate) {
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+        emitted.push(line.clone());
+      }
+
+      index += 1;
     }
   }
 
@@ -4444,6 +4632,14 @@ export namespace CodegenC {
 
     CodegenC::internRecordFieldStorageTypes(defStore, typeStore, &typeDefs);
 
+    // A hosted unit leaves extern functions to the headers it includes.
+    let mut externPrototypes: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (hooks.freestanding) {
+      externPrototypes = CodegenC::referencedExternFunctions(defStore, program);
+      CodegenC::internExternPrototypeTypes(defStore, typeStore, &externPrototypes);
+    }
+
     // After the closure structs: a C function pointer may take a closure by
     // value, which a declarator can name only once the struct is declared.
     CodegenC::emitRawFunctionTypedefs(defStore, typeStore, symbols, &mut source, closures);
@@ -4475,6 +4671,8 @@ export namespace CodegenC {
     CodegenC::emitStaticMutGlobals(defStore, typeStore, symbols, &mut source, closures, program);
 
     source.pushStr("\n// Function prototypes\n");
+
+    CodegenC::emitExternPrototypes(defStore, typeStore, symbols, &mut source, closures, &externPrototypes);
 
     let mut prototypeIndex: u64 = 0;
 

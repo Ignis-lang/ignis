@@ -77,6 +77,15 @@ the runtime include directory is not passed, and nothing links `libm`. With
 `bin = false` the build compiles the unit into `<out_dir>/user/obj/<name>.o` with
 `cc` and `cflags` instead of only writing the C source.
 
+With no headers to declare them, the unit declares every extern function it
+calls or takes as a C function pointer itself: one `extern` prototype under the
+function's C symbol (its `@externName` when it has one), with each
+function-typed parameter or result spelled as a C function pointer. Extern
+functions the program never reaches get no prototype. Two extern declarations
+of one C symbol must agree on their C signature, or the C compiler reports
+conflicting types. A hosted build declares no extern function and relies on its
+headers.
+
 The services a hosted build takes from libc come from the program's own
 runtime handlers instead. Each is a function marked with an attribute, at most
 one of each kind per program, and each attribute is an error in a hosted build:

@@ -1111,6 +1111,36 @@ function codegenFreestandingUnitOmitsTheHostedRuntime(): void {
   Test::assert(!codegenContains(&emission.source, "ignis_runtime_init"));
 }
 
+/// The program the extern prototype tests compile: two referenced extern
+/// functions, one of them renamed and taking a function pointer, and one
+/// extern function nothing calls.
+const CODEGEN_EXTERN_PROTOTYPE_SOURCE: str = "extern Platform {\n  @externName(\"platform_register_handler\")\n  function registerHandler(handler: (u32) -> u32): void;\n\n  function platform_raise(vector: u32): u32;\n\n  function platform_unused(value: u32): u32;\n}\n\nfunction onInterrupt(vector: u32): u32 {\n  return vector + 1;\n}\n\nfunction main(): i32 {\n  Platform::registerHandler(onInterrupt);\n\n  return Platform::platform_raise(3) as i32;\n}\n";
+
+/// A freestanding unit has no headers to declare extern functions, so it
+/// declares each one it calls itself: under its C symbol, with a function
+/// pointer parameter spelled by the signature's typedef.
+@test
+function codegenFreestandingUnitDeclaresTheExternFunctionsItCalls(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(CODEGEN_EXTERN_PROTOTYPE_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "extern void platform_register_handler(ignis_fn_"));
+  Test::assert(codegenContains(&emission.source, "extern u32 platform_raise(u32);\n"));
+  Test::assert(!codegenContains(&emission.source, "platform_unused"));
+  Test::assert(!codegenContains(&emission.source, "registerHandler("));
+  Test::assert(codegenContains(&emission.source, "platform_register_handler(t"));
+}
+
+/// A hosted unit leaves extern functions to the headers it includes, whose
+/// spelling of a parameter type would conflict with a second declaration.
+@test
+function codegenHostedUnitLeavesExternFunctionsToHeaders(): void {
+  let emission: CodegenEmission = codegenEmit(CODEGEN_EXTERN_PROTOTYPE_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "platform_raise(3U)"));
+  Test::assert(!codegenContains(&emission.source, "extern u32 platform_raise("));
+  Test::assert(!codegenContains(&emission.source, "extern void platform_register_handler("));
+}
+
 /// A hosted unit keeps the runtime header, the hosted headers and the C
 /// `main` wrapper.
 @test

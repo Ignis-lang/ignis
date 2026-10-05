@@ -387,6 +387,15 @@ Error display for try-capable returns:
 
 Extern functions are declared with `extern`. When calling extern functions, pointer and reference arguments are cast through `void*` to avoid C incompatible-pointer-type warnings.
 
+A hosted unit never declares an extern function: the headers it includes do. A freestanding unit (`std = false`) has none, so it emits one prototype for each extern function it calls or takes as a C function pointer, under its C symbol, with C function pointer typedefs for function-typed parameters and results:
+
+```c
+extern void platform_register_handler(ignis_fn_18);
+extern u32 platform_raise(u32);
+```
+
+Because those prototypes use the emitter's own typedefs, a freestanding unit passes a C function pointer argument as it is, without the `void*` cast.
+
 ### C Function Pointers
 
 An Ignis function value is a closure struct: a call pointer, a drop pointer and an environment. C cannot call that, so a function-typed parameter or result of an extern function is a plain C function pointer instead. Each signature used that way gets one typedef, named after its type id:
@@ -395,7 +404,7 @@ An Ignis function value is a closure struct: a call pointer, a drop pointer and 
 typedef i32 (*ignis_fn_331)(u8*, u8*);
 ```
 
-An argument passed to a function-typed extern parameter must be capture-free: a function named directly, or a closure literal that captures nothing. Anything else, such as a capturing closure or a local holding a closure, is rejected (A0217), and so is a signature that itself takes or returns a function value. A named function is passed as itself; a capture-free closure literal is passed as a wrapper around its thunk that supplies a null environment. Both cross the call through `void*`, like pointer arguments:
+An argument passed to a function-typed extern parameter must be capture-free: a function named directly, or a closure literal that captures nothing. Anything else, such as a capturing closure or a local holding a closure, is rejected (A0217), and so is a signature that itself takes or returns a function value. A named function is passed as itself; a capture-free closure literal is passed as a wrapper around its thunk that supplies a null environment. In a hosted unit both cross the call through `void*`, like pointer arguments:
 
 ```c
 static i32 __closure_thunk_0_1931_raw(u8* a0, u8* a1) {
