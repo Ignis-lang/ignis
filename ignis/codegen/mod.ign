@@ -2517,7 +2517,15 @@ export namespace CodegenC {
       },
       Lir::Instr::AddrOfGlobal(node) -> {
         let name: String = CodegenC::mangledName(defStore, symbols, node.def);
-        let line: String = `    t${node.dest.raw()} = &${name.toStr()};\n`;
+        let mut line: String = `    t${node.dest.raw()} = &${name.toStr()};\n`;
+
+        // An array global's name already decays to the pointer, as an array
+        // local's does.
+        if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(node.def)) {
+          if (CodegenC::fixedArrayShape(typeStore, variable.declaredType).isSome()) {
+            line = `    t${node.dest.raw()} = ${name.toStr()};\n`;
+          }
+        }
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -4946,14 +4954,75 @@ export namespace CodegenC {
         declaredType = variable.declaredType;
       }
 
-      let cType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
       let name: String = CodegenC::mangledName(defStore, symbols, global.defId);
-      let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &global.value);
-      let line: String = `static ${cType.toStr()} ${name.toStr()} = ${value.toStr()};\n`;
+      let mut declarator: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
+      declarator.pushStr(" ");
+      declarator.pushStr(name.toStr());
+
+      // A fixed array global is the array itself, declared like an array local.
+      if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, declaredType)) {
+        let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+        declarator = `${elementText.toStr()} ${name.toStr()}[${array.size}]`;
+      }
+
+      let value: String = CodegenC::formatGlobalInitializer(defStore, typeStore, symbols, closures, &global.parts);
+      let line: String = `static ${declarator.toStr()} = ${value.toStr()};\n`;
 
       outputRef.pushStr(line.toStr());
       index += 1;
     }
+  }
+
+  /// The C initializer of a global: a scalar is its constant, an array or
+  /// record a braced list whose record fields are designated by member name,
+  /// so the C order of the members does not matter.
+  function formatGlobalInitializer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    parts: &Vector<Lir::GlobalInitPart>,
+  ): String {
+    let mut text: String = String::new();
+    let mut afterItem: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < parts.length()) {
+      let Option::SOME(part) = parts.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      index += 1;
+
+      let separator: str = afterItem ? ", " : "";
+
+      match (part) {
+        Lir::GlobalInitPart::Open -> {
+          text.pushStr(separator);
+          text.pushStr("{");
+          afterItem = false;
+        },
+        Lir::GlobalInitPart::Close -> {
+          text.pushStr("}");
+          afterItem = true;
+        },
+        Lir::GlobalInitPart::Field(owner, fieldIndex) -> {
+          let member: String = CodegenC::recordFieldMember(defStore, symbols, owner, fieldIndex as u64);
+          text.pushStr(separator);
+          text.pushStr(`.${member.toStr()} = `.toStr());
+          afterItem = false;
+        },
+        Lir::GlobalInitPart::Value(operand) -> {
+          let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &operand);
+          text.pushStr(separator);
+          text.pushStr(value.toStr());
+          afterItem = true;
+        },
+      };
+    }
+
+    return text;
   }
 
   /// Emits the whole program as one C translation unit.

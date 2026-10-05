@@ -1,0 +1,32 @@
+// A `static mut` array or record starts at its constant initializer: the
+// global exists, reads see the initial elements and fields, and writes stick.
+@cLayout
+record Tag {
+  public magic: u64;
+  public revision: u64;
+}
+
+record Pair {
+  public left: i32;
+  public right: i32;
+}
+
+const MAGIC: u64 = 40;
+
+record Tags {
+  static mut IDS: u64[3] = [1, 2, 3];
+  static mut OFFSETS: i32[2] = [-1, 5];
+  static mut BASE: Tag = Tag { revision: 6, magic: MAGIC + 2 };
+  static mut PAIR: Pair = Pair { left: 3, right: -2 };
+}
+
+function main(): i32 {
+  Tags::IDS[1] = 10;
+  Tags::BASE.revision = Tags::BASE.revision + 1;
+
+  let ids: u64 = Tags::IDS[0] + Tags::IDS[1] + Tags::IDS[2];
+  let tag: u64 = Tags::BASE.magic + Tags::BASE.revision;
+  let signed: i32 = Tags::OFFSETS[0] + Tags::OFFSETS[1] + Tags::PAIR.left + Tags::PAIR.right;
+
+  return (ids + tag) as i32 + signed;
+}

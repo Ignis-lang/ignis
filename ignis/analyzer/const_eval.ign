@@ -1,5 +1,13 @@
-import DiagnosticBag from "@compiler::diagnostics";
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticCode,
+  LabelKind,
+  Severity,
+  SourceSpan,
+from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
 import Vector from "std::vector";
 
 /// Constant-evaluation phase for the Ignis selfhost compiler.
@@ -18,19 +26,21 @@ import Vector from "std::vector";
 /// namespaces and unwrapping exports. A reference to a constant that has not
 /// been evaluated yet simply folds to not-const; like the Rust oracle, no
 /// cycle diagnostic is emitted, and failed folds (overflow, division by zero,
-/// out-of-range shifts) are silently not-const. The phase emits no
-/// diagnostics in its current scope; the bag exists for output-shape parity
-/// with the other phases.
+/// out-of-range shifts) are silently not-const.
+///
+/// A `static mut` field is the one static field with storage the emitter has
+/// to seed, so its initializer must fold: a scalar to a `ConstValue`, and an
+/// array or record literal of constants to a flattened `ConstPart` sequence.
+/// One that does not fold is A0230, the only diagnostic this phase reports.
 ///
 /// Scoped out relative to the Rust oracle:
 ///   - function-body and local-statement walking (selfhost constants are
 ///     module-level only),
 ///   - the A0068 diagnostic for a static field whose initializer is not
 ///     constant, and the values of every static field except a `static mut`
-///     one, which is the only static field with storage the emitter has to
-///     seed,
-///   - `ConstValue::Array` / `ConstValue::Tuple` and vector-index folding
-///     (nothing consumes const arrays in the selfhost yet),
+///     one,
+///   - `ConstValue::Array` / `ConstValue::Tuple` and vector-index folding for
+///     constants (an aggregate folds only as a `static mut` initializer),
 ///   - enum tag evaluation, `configFlag`, and the A0048/A0074 typecheck
 ///     integrations.
 export namespace Analyzer {
@@ -48,11 +58,36 @@ export namespace Analyzer {
       Null,
     }
 
+    /// One step of a folded array or record initializer, in source nesting
+    /// order. `Open` and `Close` bracket one array or record, `Field` names the
+    /// record field (owner and index) the next step initializes, and `Value`
+    /// is a scalar leaf with the type of the storage it initializes.
+    enum ConstPart {
+      Open,
+      Close,
+      Field(Analyzer::DefinitionId, u32),
+      Value(Analyzer::ConstEval::ConstValue, Analyzer::TypeId),
+    }
+
     /// Side map from a constant's raw `DefinitionId` to its evaluated value.
     /// Parallel vectors, following the `ExprTypeMap` pattern.
+    ///
+    /// `aggregateDefIdRaws` and `aggregates` hold the `static mut` fields whose
+    /// initializer is an array or record literal, each with its parts.
     record ConstValueMap {
       public defIdRaws: Vector<u32>;
       public values: Vector<Analyzer::ConstEval::ConstValue>;
+      public aggregateDefIdRaws: Vector<u32>;
+      public aggregates: Vector<Vector<Analyzer::ConstEval::ConstPart>>;
+
+      public static empty(): ConstValueMap {
+        return ConstValueMap {
+          defIdRaws: Vector::new<u32>(),
+          values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+          aggregateDefIdRaws: Vector::new<u32>(),
+          aggregates: Vector::new<Vector<Analyzer::ConstEval::ConstPart>>(),
+        };
+      }
     }
 
     /// Output of the const-eval phase.
@@ -108,6 +143,97 @@ export namespace Analyzer {
       let mut mapRef: &mut Analyzer::ConstEval::ConstValueMap = map;
       mapRef.defIdRaws.push(defIdRaw);
       mapRef.values.push(value);
+    }
+
+    function copyConstPart(part: &Analyzer::ConstEval::ConstPart): Analyzer::ConstEval::ConstPart {
+      return match (part) {
+        Analyzer::ConstEval::ConstPart::Open -> Analyzer::ConstEval::ConstPart::Open,
+        Analyzer::ConstEval::ConstPart::Close -> Analyzer::ConstEval::ConstPart::Close,
+        Analyzer::ConstEval::ConstPart::Field(owner, index) -> Analyzer::ConstEval::ConstPart::Field(owner, index),
+        Analyzer::ConstEval::ConstPart::Value(value, ty) -> Analyzer::ConstEval::ConstPart::Value(Analyzer::ConstEval::copyConstValue(&value), ty),
+      };
+    }
+
+    function copyConstParts(
+      parts: &Vector<Analyzer::ConstEval::ConstPart>
+    ): Vector<Analyzer::ConstEval::ConstPart> {
+      let mut copied: Vector<Analyzer::ConstEval::ConstPart> = Vector::new<Analyzer::ConstEval::ConstPart>();
+      let mut index: u64 = 0;
+
+      while (index < parts.length()) {
+        if (let Option::SOME(part) = parts.get(index)) {
+          copied.push(Analyzer::ConstEval::copyConstPart(part));
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    /// The folded initializer parts of a `static mut` array or record field.
+    function findConstAggregate(
+      map: &Analyzer::ConstEval::ConstValueMap,
+      defIdRaw: u32,
+    ): Option<Vector<Analyzer::ConstEval::ConstPart>> {
+      let mut index: u64 = 0;
+
+      while (index < map.aggregateDefIdRaws.length()) {
+        if (let Option::SOME(candidate) = map.aggregateDefIdRaws.get(index)) {
+          if (*candidate == defIdRaw) {
+            if (let Option::SOME(parts) = map.aggregates.get(index)) {
+              return Option::SOME(Analyzer::ConstEval::copyConstParts(parts));
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function insertConstAggregate(
+      map: &mut Analyzer::ConstEval::ConstValueMap,
+      defIdRaw: u32,
+      parts: Vector<Analyzer::ConstEval::ConstPart>,
+    ): void {
+      let mut mapRef: &mut Analyzer::ConstEval::ConstValueMap = map;
+      mapRef.aggregateDefIdRaws.push(defIdRaw);
+      mapRef.aggregates.push(parts);
+    }
+
+    /// Appends a copy of every value and aggregate in `source` to `target`.
+    function appendConstValueMap(
+      target: &mut Analyzer::ConstEval::ConstValueMap,
+      source: &Analyzer::ConstEval::ConstValueMap,
+    ): void {
+      let mut targetRef: &mut Analyzer::ConstEval::ConstValueMap = target;
+      let mut index: u64 = 0;
+
+      while (index < source.defIdRaws.length()) {
+        if (let Option::SOME(defIdRaw) = source.defIdRaws.get(index)) {
+          if (let Option::SOME(value) = source.values.get(index)) {
+            targetRef.defIdRaws.push(*defIdRaw);
+            targetRef.values.push(Analyzer::ConstEval::copyConstValue(value));
+          }
+        }
+
+        index += 1;
+      }
+
+      let mut aggregateIndex: u64 = 0;
+
+      while (aggregateIndex < source.aggregateDefIdRaws.length()) {
+        if (let Option::SOME(defIdRaw) = source.aggregateDefIdRaws.get(aggregateIndex)) {
+          if (let Option::SOME(parts) = source.aggregates.get(aggregateIndex)) {
+            targetRef.aggregateDefIdRaws.push(*defIdRaw);
+            targetRef.aggregates.push(Analyzer::ConstEval::copyConstParts(parts));
+          }
+        }
+
+        aggregateIndex += 1;
+      }
     }
 
     // =========================================================================
@@ -876,8 +1002,10 @@ export namespace Analyzer {
     /// the owner's `staticFields`.
     function evalOwnerStaticMutFields(
       values: &mut Analyzer::ConstEval::ConstValueMap,
+      diagnostics: &mut DiagnosticBag,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
@@ -925,9 +1053,11 @@ export namespace Analyzer {
         };
 
         let mut isMutable: boolean = false;
+        let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
 
         if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(fieldDefId)) {
           isMutable = variableDef.mutable;
+          declaredType = variableDef.declaredType;
         }
 
         if (!isMutable) {
@@ -935,41 +1065,241 @@ export namespace Analyzer {
         }
 
         let mut initializerOpt: Option<Ast::ExpressionId> = Option::NONE;
+        let mut fieldName: String = String::new();
 
         if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*patternId)) {
           initializerOpt = binding.initializer;
+          fieldName = binding.name.clone();
         }
 
         let Option::SOME(initializer) = initializerOpt else {
           continue;
         };
 
-        let valueOpt: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
+        let mut parts: Vector<Analyzer::ConstEval::ConstPart> = Vector::new<Analyzer::ConstEval::ConstPart>();
+        let folded: boolean = Analyzer::ConstEval::evalInitializerParts(
           values,
           defStore,
           typeStore,
+          symbols,
           module,
           resolvedBodies,
           typecheck,
           initializer,
+          declaredType,
+          &mut parts,
         );
 
-        if (let Option::SOME(value) = &valueOpt) {
-          Analyzer::ConstEval::insertConstValue(
-            values,
-            fieldDefId.raw(),
-            Analyzer::ConstEval::copyConstValue(&value),
-          );
+        if (!folded) {
+          Analyzer::ConstEval::reportNonConstantStaticMut(diagnostics, module, initializer, &fieldName);
+          continue;
         }
+
+        if (parts.length() == 1) {
+          if (let Option::SOME(Analyzer::ConstEval::ConstPart::Value(value, _)) = parts.get(0)) {
+            Analyzer::ConstEval::insertConstValue(values, fieldDefId.raw(), Analyzer::ConstEval::copyConstValue(&value));
+            continue;
+          }
+        }
+
+        Analyzer::ConstEval::insertConstAggregate(values, fieldDefId.raw(), parts);
       }
+    }
+
+    /// Folds `exprId`, the initializer of storage typed `expectedType`, into
+    /// `parts`: an array literal of a fixed array type and a record literal of
+    /// a record type open a bracket and fold each element or field against its
+    /// own type, and any other expression is one scalar `Value`. False when
+    /// some leaf does not fold, or a literal does not match the type it
+    /// initializes.
+    function evalInitializerParts(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+      expectedType: Analyzer::TypeId,
+      parts: &mut Vector<Analyzer::ConstEval::ConstPart>,
+    ): boolean {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      if (let Ast::Expression::Node::Grouped(grouped) = expression) {
+        return Analyzer::ConstEval::evalInitializerParts(
+          values,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          typecheck,
+          grouped.expression,
+          expectedType,
+          parts,
+        );
+      }
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+      let mut arrayElement: Option<Analyzer::TypeId> = Option::NONE;
+      let mut arraySize: u64 = 0;
+      let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(resolved.typeId)) {
+        match (typeNode) {
+          Analyzer::Type::FixedArray(element, size) -> {
+            arrayElement = Option::SOME(element);
+            arraySize = size;
+          },
+          Analyzer::Type::Record(defId) -> {
+            recordDefId = Option::SOME(defId);
+          },
+          _ -> {},
+        };
+      }
+
+      let mut partsRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
+
+      if (let Option::SOME(elementType) = arrayElement) {
+        let Ast::Expression::Node::Vector(literal) = expression else {
+          return false;
+        };
+
+        if (literal.elements.length() != arraySize) {
+          return false;
+        }
+
+        partsRef.push(Analyzer::ConstEval::ConstPart::Open);
+
+        let mut index: u64 = 0;
+
+        while (index < literal.elements.length()) {
+          let Option::SOME(elementId) = literal.elements.get(index) else {
+            return false;
+          };
+
+          if (!Analyzer::ConstEval::evalInitializerParts(values, defStore, typeStore, symbols, module, resolvedBodies, typecheck, *elementId, elementType, parts)) {
+            return false;
+          }
+
+          index += 1;
+        }
+
+        let mut closeRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
+        closeRef.push(Analyzer::ConstEval::ConstPart::Close);
+        return true;
+      }
+
+      if (let Option::SOME(ownerId) = recordDefId) {
+        let Ast::Expression::Node::RecordInit(recordInit) = expression else {
+          return false;
+        };
+
+        partsRef.push(Analyzer::ConstEval::ConstPart::Open);
+
+        let mut index: u64 = 0;
+
+        while (index < recordInit.fields.length()) {
+          let Option::SOME(field) = recordInit.fields.get(index) else {
+            return false;
+          };
+
+          let Option::SOME(fieldDef) = Analyzer::ConstEval::recordFieldNamed(defStore, symbols, ownerId, field.name.toStr()) else {
+            return false;
+          };
+
+          let mut fieldRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
+          fieldRef.push(Analyzer::ConstEval::ConstPart::Field(ownerId, fieldDef.index));
+
+          if (!Analyzer::ConstEval::evalInitializerParts(values, defStore, typeStore, symbols, module, resolvedBodies, typecheck, field.value, fieldDef.fieldType, parts)) {
+            return false;
+          }
+
+          index += 1;
+        }
+
+        let mut closeRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
+        closeRef.push(Analyzer::ConstEval::ConstPart::Close);
+        return true;
+      }
+
+      let Option::SOME(value) = Analyzer::ConstEval::evalExpression(values, defStore, typeStore, module, resolvedBodies, typecheck, exprId) else {
+        return false;
+      };
+
+      partsRef.push(Analyzer::ConstEval::ConstPart::Value(value, expectedType));
+      return true;
+    }
+
+    /// The index and declared type of the instance field `name` of the record
+    /// `recordDefId`.
+    record RecordFieldInfo {
+      public index: u32;
+      public fieldType: Analyzer::TypeId;
+    }
+
+    function recordFieldNamed(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      recordDefId: Analyzer::DefinitionId,
+      name: str,
+    ): Option<Analyzer::ConstEval::RecordFieldInfo> {
+      let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordDefId)) {
+        fields = Analyzer::Resolver::copyDefinitionIdVector(&recordDef.fields);
+      }
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let target: Analyzer::SymbolId = symbolsRef.intern(name);
+      let mut index: u64 = 0;
+
+      while (index < fields.length()) {
+        if (let Option::SOME(fieldDefId) = fields.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldDefId)) {
+            if (fieldDef.name.raw() == target.raw()) {
+              return Option::SOME(Analyzer::ConstEval::RecordFieldInfo { index: fieldDef.index, fieldType: fieldDef.fieldType });
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// A0230 at the initializer of the `static mut` field `fieldName`.
+    function reportNonConstantStaticMut(
+      diagnostics: &mut DiagnosticBag,
+      module: &Ast::Module,
+      initializer: Ast::ExpressionId,
+      fieldName: &String,
+    ): void {
+      let Option::SOME(node) = module.expressions.get(initializer) else {
+        return;
+      };
+
+      let span: SourceSpan = Ast::Serializer::expressionSpan(node);
+      let message: String = `'static mut' field '${fieldName.toStr()}' needs a constant initializer`;
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::STATIC_MUT_NON_CONSTANT_INITIALIZER, message.toStr(), span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, "only literals, constants, and array or record literals of them are constant");
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
     }
 
     /// Evaluate one item: constants fold, namespaces recurse, exports unwrap,
     /// everything else is skipped (mirroring the pass-2 binder walk).
     function evalItem(
       values: &mut Analyzer::ConstEval::ConstValueMap,
+      diagnostics: &mut DiagnosticBag,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
@@ -1004,8 +1334,10 @@ export namespace Analyzer {
         Ast::Item::Node::Record(recordItem) -> {
           Analyzer::ConstEval::evalOwnerStaticMutFields(
             values,
+            diagnostics,
             defStore,
             typeStore,
+            symbols,
             module,
             pass1,
             pass2,
@@ -1019,8 +1351,10 @@ export namespace Analyzer {
         Ast::Item::Node::Enum(enumItem) -> {
           Analyzer::ConstEval::evalOwnerStaticMutFields(
             values,
+            diagnostics,
             defStore,
             typeStore,
+            symbols,
             module,
             pass1,
             pass2,
@@ -1034,8 +1368,10 @@ export namespace Analyzer {
         Ast::Item::Node::Namespace(namespaceItem) -> {
           Analyzer::ConstEval::evalItems(
             values,
+            diagnostics,
             defStore,
             typeStore,
+            symbols,
             module,
             pass1,
             pass2,
@@ -1048,8 +1384,10 @@ export namespace Analyzer {
           if (let Option::SOME(innerItemId) = exportItem.declaration) {
             Analyzer::ConstEval::evalItem(
               values,
+              diagnostics,
               defStore,
               typeStore,
+              symbols,
               module,
               pass1,
               pass2,
@@ -1065,8 +1403,10 @@ export namespace Analyzer {
 
     function evalItems(
       values: &mut Analyzer::ConstEval::ConstValueMap,
+      diagnostics: &mut DiagnosticBag,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
@@ -1084,8 +1424,10 @@ export namespace Analyzer {
 
         Analyzer::ConstEval::evalItem(
           values,
+          diagnostics,
           defStore,
           typeStore,
+          symbols,
           module,
           pass1,
           pass2,
@@ -1104,21 +1446,22 @@ export namespace Analyzer {
     function evalModule(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
     ): Analyzer::ConstEval::ConstEvalOutput {
-      let mut values: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
-        defIdRaws: Vector::new<u32>(),
-        values: Vector::new<Analyzer::ConstEval::ConstValue>(),
-      };
+      let mut values: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap::empty();
+      let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
 
       Analyzer::ConstEval::evalItems(
         &mut values,
+        &mut diagnostics,
         defStore,
         typeStore,
+        symbols,
         module,
         pass1,
         pass2,
@@ -1128,7 +1471,7 @@ export namespace Analyzer {
       );
 
       return Analyzer::ConstEval::ConstEvalOutput {
-        diagnostics: DiagnosticBag::init(),
+        diagnostics: diagnostics,
         values: values,
       };
     }

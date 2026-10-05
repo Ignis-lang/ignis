@@ -238,26 +238,10 @@ export namespace LirLowering {
   function copyConstValueMap(
     map: &Analyzer::ConstEval::ConstValueMap
   ): Analyzer::ConstEval::ConstValueMap {
-    let mut defIdRaws: Vector<u32> = Vector::new<u32>();
-    let mut values: Vector<Analyzer::ConstEval::ConstValue> = Vector::new<Analyzer::ConstEval::ConstValue>();
-    let mut index: u64 = 0;
+    let mut copied: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap::empty();
+    Analyzer::ConstEval::appendConstValueMap(&mut copied, map);
 
-    while (index < map.defIdRaws.length()) {
-      let Option::SOME(defIdRaw) = map.defIdRaws.get(index) else {
-        index += 1;
-        continue;
-      };
-      let Option::SOME(value) = map.values.get(index) else {
-        index += 1;
-        continue;
-      };
-
-      defIdRaws.push(*defIdRaw);
-      values.push(Analyzer::ConstEval::copyConstValue(value));
-      index += 1;
-    }
-
-    return Analyzer::ConstEval::ConstValueMap { defIdRaws: defIdRaws, values: values };
+    return copied;
   }
 
   function isUnsignedIntegerType(
@@ -322,6 +306,15 @@ export namespace LirLowering {
       return Option::NONE;
     };
 
+    return Option::SOME(LirLowering::constOperand(typeStore, value, ty));
+  }
+
+  /// The LIR constant of an evaluated value whose storage has type `ty`.
+  function constOperand(
+    typeStore: &mut Analyzer::TypeStore,
+    value: Analyzer::ConstEval::ConstValue,
+    ty: Analyzer::TypeId,
+  ): Lir::Operand {
     let isUnsigned: boolean = LirLowering::isUnsignedIntegerType(typeStore, ty);
 
     let constant: Lir::ConstValue = match (value) {
@@ -333,7 +326,7 @@ export namespace LirLowering {
       Analyzer::ConstEval::ConstValue::Null -> Lir::ConstValue::Null(ty),
     };
 
-    return Option::SOME(Lir::Operand::Const(constant));
+    return Lir::Operand::Const(constant);
   }
 
   function implicitTerminator(
@@ -5511,16 +5504,50 @@ export namespace LirLowering {
         continue;
       }
 
-      let Option::SOME(value) = LirLowering::constOperandFromMap(typeStore, &mut values, defId, declaredType) else {
+      let mut parts: Vector<Lir::GlobalInitPart> = Vector::new<Lir::GlobalInitPart>();
+
+      if (let Option::SOME(value) = LirLowering::constOperandFromMap(typeStore, &mut values, defId, declaredType)) {
+        parts.push(Lir::GlobalInitPart::Value(value));
+      } else if (let Option::SOME(aggregate) = Analyzer::ConstEval::findConstAggregate(&values, defId.raw())) {
+        parts = LirLowering::globalInitParts(typeStore, &aggregate);
+      } else {
         continue;
-      };
+      }
 
       let mut programRef: &mut Lir::LirProgram = program;
       programRef.globalInits.push(Lir::GlobalInit {
         defId: defId,
-        value: value,
+        parts: parts,
       });
     }
+  }
+
+  /// The LIR form of a folded array or record initializer.
+  function globalInitParts(
+    typeStore: &mut Analyzer::TypeStore,
+    aggregate: &Vector<Analyzer::ConstEval::ConstPart>,
+  ): Vector<Lir::GlobalInitPart> {
+    let mut parts: Vector<Lir::GlobalInitPart> = Vector::new<Lir::GlobalInitPart>();
+    let mut index: u64 = 0;
+
+    while (index < aggregate.length()) {
+      if (let Option::SOME(part) = aggregate.get(index)) {
+        let converted: Lir::GlobalInitPart = match (part) {
+          Analyzer::ConstEval::ConstPart::Open -> Lir::GlobalInitPart::Open,
+          Analyzer::ConstEval::ConstPart::Close -> Lir::GlobalInitPart::Close,
+          Analyzer::ConstEval::ConstPart::Field(owner, fieldIndex) -> Lir::GlobalInitPart::Field(owner, fieldIndex),
+          Analyzer::ConstEval::ConstPart::Value(value, ty) -> Lir::GlobalInitPart::Value(
+            LirLowering::constOperand(typeStore, Analyzer::ConstEval::copyConstValue(&value), ty),
+          ),
+        };
+
+        parts.push(converted);
+      }
+
+      index += 1;
+    }
+
+    return parts;
   }
 
   /// Lowers every function body of one module's HIR store.
