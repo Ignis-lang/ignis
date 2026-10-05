@@ -210,6 +210,7 @@ export namespace Hir {
           .concat(")"),
         Hir::HirKind::ToRawFunction(expression) -> `toRawFunction(${Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression)})`,
         Hir::HirKind::FromRawFunction(expression) -> `fromRawFunction(${Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression)})`,
+        Hir::HirKind::InlineAsm(asmNode) -> `asm(${asmNode.inputs.length()} inputs, ${asmNode.outputs.length()} outputs)`,
         Hir::HirKind::TypeOf(expression) -> `typeOf(${Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression)})`,
         Hir::HirKind::SizeOf(typeId) -> `sizeOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`,
         Hir::HirKind::AlignOf(typeId) -> `alignOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`,
@@ -472,6 +473,13 @@ export namespace Hir {
           let head: String = String::create("FromRawFunction");
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, expression, indent + 1, out);
+        },
+        Hir::HirKind::InlineAsm(asmNode) -> {
+          let head: String = String::create("InlineAsm");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          let operands: Vector<Hir::HirId> = Hir::inlineAsmChildIds(&asmNode);
+          Hir::Display::printIndexedChildren(hir, types, defs, symbols, &operands, indent + 1, out);
         },
         Hir::HirKind::Index(indexNode) -> {
           let head: String = String::create("Index");

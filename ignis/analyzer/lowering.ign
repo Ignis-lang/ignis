@@ -1663,9 +1663,11 @@ export namespace Lowering {
       Ast::Expression::Node::Try(tryExpr) -> {
         return Lowering::lowerTryExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &tryExpr);
       },
-      // The typechecker rejects every `asm` (A0220), so lowering never runs on one.
       Ast::Expression::Node::Asm(asmNode) -> {
-        return Lowering::errorNode(hir, typeStore, asmNode.span);
+        let noPlaces: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+        let asmType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        return Lowering::lowerInlineAsm(defStore, typeStore, symbols, module, output, locals, hir, &asmNode, &noPlaces, asmType);
       },
     };
 
@@ -4436,6 +4438,24 @@ export namespace Lowering {
         continue;
       }
 
+      // A statement `asm` declares its outputs as locals of this block, so
+      // its statements join the block instead of a block of their own.
+      if (let Option::SOME(Ast::Statement::Node::Asm(asmNode)) = module.statements.get(*stmtId)) {
+        let asmStatements: Vector<Hir::HirId> = Lowering::lowerInlineAsmStatement(defStore, typeStore, symbols, module, output, locals, hir, *stmtId, &asmNode);
+        let mut asmIndex: u64 = 0;
+
+        while (asmIndex < asmStatements.length()) {
+          if (let Option::SOME(statement) = asmStatements.get(asmIndex)) {
+            loweredStatements.push(*statement);
+          }
+
+          asmIndex += 1;
+        }
+
+        index += 1;
+        continue;
+      }
+
       loweredStatements.push(Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, *stmtId));
       index += 1;
     }
@@ -4454,6 +4474,251 @@ export namespace Lowering {
       span: span,
       typeId: blockType,
     });
+  }
+
+  /// Lowers an `asm`. `outputPlaces` holds, for a statement `asm`, the local
+  /// each output is stored in, and is empty for an `asm` expression, whose
+  /// node is its output's value. `nodeType` is the type of that value, or
+  /// `void`.
+  function lowerInlineAsm(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    asmNode: &Ast::Expression::Asm,
+    outputPlaces: &Vector<Hir::HirId>,
+    nodeType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let names: Vector<String> = Analyzer::Typecheck::inlineAsmOperandNames(module, asmNode);
+    let mut operandIndex: u64 = 0;
+
+    let mut inputs: Vector<Hir::HirAsmInput> = Vector::new<Hir::HirAsmInput>();
+    let mut index: u64 = 0;
+
+    while (index < asmNode.inputs.length()) {
+      if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+        let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&input.location);
+        let writes: boolean = match (input.mode) {
+          Ast::Expression::AsmInputMode::In -> false,
+          Ast::Expression::AsmInputMode::InOut -> true,
+        };
+        let isPlace: boolean = writes || location.kind == Analyzer::InlineAsm::LocationKind::MEM;
+
+        let value: Hir::HirId = isPlace ? Lowering::lowerAssignmentTarget(defStore, typeStore, symbols, module, output, locals, hir, input.expression) : Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, input.expression);
+
+        inputs.push(Hir::HirAsmInput {
+          name: Lowering::inlineAsmOperandName(&names, operandIndex),
+          location: input.location.clone(),
+          value: value,
+          isPlace: isPlace,
+          writes: writes,
+        });
+      }
+
+      operandIndex += 1;
+      index += 1;
+    }
+
+    let mut outputs: Vector<Hir::HirAsmOutput> = Vector::new<Hir::HirAsmOutput>();
+    index = 0;
+
+    while (index < asmNode.outputs.length()) {
+      if (let Option::SOME(asmOutput) = asmNode.outputs.get(index)) {
+        let mut place: Option<Hir::HirId> = Option::NONE;
+        let mut outputType: Analyzer::TypeId = nodeType;
+
+        if (let Option::SOME(placeId) = outputPlaces.get(index)) {
+          place = Option::SOME(*placeId);
+
+          if (let Option::SOME(placeNode) = hir.get(*placeId)) {
+            outputType = placeNode.typeId;
+          }
+        }
+
+        outputs.push(Hir::HirAsmOutput {
+          name: Lowering::inlineAsmOperandName(&names, operandIndex),
+          location: asmOutput.location.clone(),
+          outputType: outputType,
+          place: place,
+        });
+      }
+
+      operandIndex += 1;
+      index += 1;
+    }
+
+    let mut holes: Vector<u64> = Vector::new<u64>();
+    index = 0;
+
+    while (index < asmNode.holes.length()) {
+      if (let Option::SOME(hole) = asmNode.holes.get(index)) {
+        holes.push(Lowering::inlineAsmHoleOperand(&names, &hole.name));
+      }
+
+      index += 1;
+    }
+
+    let mut clobbers: Vector<String> = Vector::new<String>();
+    index = 0;
+
+    while (index < asmNode.clobbers.length()) {
+      if (let Option::SOME(clobber) = asmNode.clobbers.get(index)) {
+        if (let Option::SOME(clobberName) = Analyzer::InlineAsm::clobberName(&clobber.name)) {
+          clobbers.push(clobberName);
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut chunks: Vector<String> = Vector::new<String>();
+    index = 0;
+
+    while (index < asmNode.chunks.length()) {
+      if (let Option::SOME(chunk) = asmNode.chunks.get(index)) {
+        chunks.push(chunk.clone());
+      }
+
+      index += 1;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::InlineAsm(Hir::HirInlineAsm {
+        chunks: chunks,
+        holes: holes,
+        inputs: inputs,
+        outputs: outputs,
+        clobbers: clobbers,
+        volatile: !asmNode.isPure,
+      }),
+      span: asmNode.span,
+      typeId: nodeType,
+    });
+  }
+
+  /// The name the operand at `operandIndex` keeps in C: its own name when no
+  /// other operand of the `asm` shares it, otherwise none, since a C asm
+  /// statement cannot name two operands alike and no hole names either.
+  function inlineAsmOperandName(names: &Vector<String>, operandIndex: u64): String {
+    let Option::SOME(name) = names.get(operandIndex) else {
+      return String::new();
+    };
+
+    if (name.length() == 0) {
+      return String::new();
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < names.length()) {
+      if (index != operandIndex) {
+        if (let Option::SOME(other) = names.get(index)) {
+          if (other.equals(name.toStr())) {
+            return String::new();
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return name.clone();
+  }
+
+  /// The operand a hole names. The checker has made sure exactly one does.
+  function inlineAsmHoleOperand(names: &Vector<String>, holeName: &String): u64 {
+    let mut index: u64 = 0;
+
+    while (index < names.length()) {
+      if (let Option::SOME(name) = names.get(index)) {
+        if (name.equals(holeName.toStr())) {
+          return index;
+        }
+      }
+
+      index += 1;
+    }
+
+    return 0;
+  }
+
+  /// Lowers a statement `asm` to the statements it stands for: one `let`
+  /// without a value per output, which the asm then writes, and the asm
+  /// itself.
+  function lowerInlineAsmStatement(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    stmtId: Ast::StatementId,
+    asmNode: &Ast::Expression::Asm,
+  ): Vector<Hir::HirId> {
+    let mut statements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut places: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < asmNode.outputs.length()) {
+      let Option::SOME(asmOutput) = asmNode.outputs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let binding: Ast::PatternId = Analyzer::InlineAsm::outputBinding(stmtId, index);
+      let mut outputType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+      if (let Option::SOME(settled) = Lowering::lookupLocalBindingType(&output.typecheck, binding)) {
+        outputType = settled;
+      }
+
+      let defId: Analyzer::DefinitionId = Lowering::declarePatternBinding(
+        defStore,
+        symbols,
+        output,
+        locals,
+        binding,
+        asmOutput.name.toStr(),
+        outputType,
+      );
+
+      let mut hirRef: &mut Hir::HirStore = hir;
+
+      statements.push(hirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Let(Hir::HirLet {
+          name: defId,
+          value: Option::NONE,
+        }),
+        span: asmOutput.span,
+        typeId: Lowering::voidType(typeStore),
+      }));
+
+      places.push(hirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Variable(defId),
+        span: asmOutput.span,
+        typeId: outputType,
+      }));
+
+      index += 1;
+    }
+
+    let voidType: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let asmId: Hir::HirId = Lowering::lowerInlineAsm(defStore, typeStore, symbols, module, output, locals, hir, asmNode, &places, voidType);
+    let mut statementHirRef: &mut Hir::HirStore = hir;
+
+    statements.push(statementHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::ExpressionStatement(asmId),
+      span: asmNode.span,
+      typeId: voidType,
+    }));
+
+    return statements;
   }
 
   /// Lowers a `let`/`let mut` with a simple `Binding` pattern: allocates a
@@ -5798,8 +6063,21 @@ export namespace Lowering {
           typeId: Lowering::voidType(typeStore),
         });
       },
+      // Reached only for an `asm` that is a whole branch on its own. Its
+      // outputs would be locals of a block that ends with it, so a block of
+      // its statements stands in for it.
       Ast::Statement::Node::Asm(asmNode) -> {
-        return Lowering::errorNode(hir, typeStore, asmNode.span);
+        let statements: Vector<Hir::HirId> = Lowering::lowerInlineAsmStatement(defStore, typeStore, symbols, module, output, locals, hir, stmtId, &asmNode);
+        let mut hirRef: &mut Hir::HirStore = hir;
+
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Block(Hir::HirBlock {
+            statements: statements,
+            expression: Option::NONE,
+          }),
+          span: asmNode.span,
+          typeId: Lowering::voidType(typeStore),
+        });
       },
     };
 

@@ -33,6 +33,8 @@ export namespace CodegenC {
     public unsupported: u64;
     /// Function bodies written out, extern declarations excluded.
     public functions: u64;
+    /// Whether the unit contains inline asm, whose bodies are Intel syntax.
+    public usesInlineAsm: boolean;
   }
 
   /// The runtime services a unit's generated code calls.
@@ -2029,7 +2031,384 @@ export namespace CodegenC {
       Lir::Instr::FreeEnv(_) -> "FreeEnv",
       Lir::Instr::MakeRawFunction(_) -> "MakeRawFunction",
       Lir::Instr::RawToClosure(_) -> "RawToClosure",
+      Lir::Instr::InlineAsm(_) -> "InlineAsm",
     };
+  }
+
+  /// Whether any function of `program` contains inline asm. The driver
+  /// compiles such a unit with `-masm=intel`, the syntax asm bodies are
+  /// written in.
+  function programUsesInlineAsm(program: &Lir::LirProgram): boolean {
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      if (let Option::SOME(function_) = program.functions.functionAt(functionIndex)) {
+        let mut blockIndex: u64 = 0;
+
+        while (blockIndex < function_.blocks.length()) {
+          if (let Option::SOME(block) = function_.blocks.get(blockIndex)) {
+            let mut instructionIndex: u64 = 0;
+
+            while (instructionIndex < block.instructions.length()) {
+              if (let Option::SOME(Lir::Instr::InlineAsm(_)) = block.instructions.get(instructionIndex)) {
+                return true;
+              }
+
+              instructionIndex += 1;
+            }
+          }
+
+          blockIndex += 1;
+        }
+      }
+
+      functionIndex += 1;
+    }
+
+    return false;
+  }
+
+  /// The text of an asm body chunk as a GCC asm template, before C string
+  /// escaping. `//` and `/* */` comments are Ignis comments and are dropped,
+  /// since the assembler reads neither. `%`, `|`, and the braces `{{` and
+  /// `}}` stand for are escaped, because GCC gives them meaning in a
+  /// template.
+  function inlineAsmTemplateText(chunk: &String): String {
+    let mut result: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < chunk.length()) {
+      let Option::SOME(byte) = chunk.byteAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut next: u8 = 0;
+
+      if (let Option::SOME(following) = chunk.byteAt(index + 1)) {
+        next = following;
+      }
+
+      if (byte == '/' as u8 && next == '/' as u8) {
+        while (index < chunk.length()) {
+          let Option::SOME(commentByte) = chunk.byteAt(index) else {
+            break;
+          };
+
+          if (commentByte == 10) {
+            break;
+          }
+
+          index += 1;
+        }
+
+        continue;
+      }
+
+      if (byte == '/' as u8 && next == '*' as u8) {
+        index += 2;
+
+        while (index < chunk.length()) {
+          let Option::SOME(commentByte) = chunk.byteAt(index) else {
+            break;
+          };
+
+          if (commentByte == '*' as u8) {
+            if (let Option::SOME(closing) = chunk.byteAt(index + 1)) {
+              if (closing == '/' as u8) {
+                index += 2;
+                break;
+              }
+            }
+          }
+
+          index += 1;
+        }
+
+        result.pushByte(' ' as u8);
+        continue;
+      }
+
+      if ((byte == '{' as u8 || byte == '}' as u8) && next == byte) {
+        result.pushByte('%' as u8);
+        result.pushByte(byte);
+        index += 2;
+        continue;
+      }
+
+      if (byte == '%' as u8 || byte == '|' as u8 || byte == '{' as u8 || byte == '}' as u8) {
+        result.pushByte('%' as u8);
+      }
+
+      result.pushByte(byte);
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// The constraint an asm operand takes: `=` for an output, `+` for an
+  /// operand read and written, then the location. A register without a
+  /// constraint letter of its own, `r8` to `r15`, takes `r` and is bound
+  /// through a register variable.
+  function inlineAsmConstraint(operand: &Lir::InlineAsmOperand): String {
+    let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&operand.location);
+    let mut letter: str = "r";
+
+    if (location.kind == Analyzer::InlineAsm::LocationKind::REGISTER) {
+      let familyLetter: str = Analyzer::InlineAsm::constraintLetter(&location.family);
+
+      if (String::create(familyLetter).length() > 0) {
+        letter = familyLetter;
+      }
+    } else if (location.kind == Analyzer::InlineAsm::LocationKind::MEM) {
+      letter = "m";
+    } else if (location.kind == Analyzer::InlineAsm::LocationKind::IMM) {
+      letter = "n";
+    }
+
+    let mut prefix: str = "";
+
+    if (operand.writes && operand.reads) {
+      prefix = "+";
+    } else if (operand.writes) {
+      prefix = "=";
+    }
+
+    return `${prefix}${letter}`;
+  }
+
+  /// The register an operand has to be bound to through a register
+  /// variable, or `NONE` when its constraint names the register already.
+  function inlineAsmRegisterVariable(operand: &Lir::InlineAsmOperand): Option<String> {
+    let location: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(&operand.location);
+
+    if (location.kind != Analyzer::InlineAsm::LocationKind::REGISTER) {
+      return Option::NONE;
+    }
+
+    if (String::create(Analyzer::InlineAsm::constraintLetter(&location.family)).length() > 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(location.family);
+  }
+
+  /// The C expression for what an asm operand names: the place behind its
+  /// pointer, the output temp, or the value read, cast to the operand type
+  /// so a constant has the operand's width.
+  function inlineAsmOperandExpression(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    operand: &Lir::InlineAsmOperand,
+  ): String {
+    let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, operand.ty);
+    let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &operand.value);
+
+    if (operand.isPlace) {
+      return `(*(${typeText.toStr()}*)${value.toStr()})`;
+    }
+
+    if (operand.writes) {
+      return value;
+    }
+
+    return `((${typeText.toStr()})${value.toStr()})`;
+  }
+
+  /// Emits an asm statement:
+  ///
+  /// ```c
+  /// {
+  ///     register uint64_t ignis_asm_0 __asm__("r8") = ((uint64_t)t1);
+  ///     __asm__ volatile("lea %[result], [%[value] + 2]" : [result] "=r"(t2) : [value] "r"(ignis_asm_0) : "cc");
+  /// }
+  /// ```
+  ///
+  /// Outputs come first in C, in operand order, then the operands only
+  /// read. An operand in `r8` to `r15` goes through a register variable
+  /// initialized from it when read and copied back after the asm when
+  /// written. Without `volatile`, the C compiler may drop or merge a `pure`
+  /// asm whose outputs it does not need.
+  function emitInlineAsm(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    node: &Lir::InstrInlineAsm,
+  ): void {
+    let mut prelude: String = String::create("");
+    let mut epilogue: String = String::create("");
+    let mut expressions: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < node.operands.length()) {
+      let Option::SOME(operand) = node.operands.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let expression: String = CodegenC::inlineAsmOperandExpression(defStore, typeStore, symbols, closures, operand);
+
+      if (let Option::SOME(registerName) = CodegenC::inlineAsmRegisterVariable(operand)) {
+        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, operand.ty);
+        let variable: String = `ignis_asm_${index}`;
+        let declaration: String = `        register ${typeText.toStr()} ${variable.toStr()} __asm__("${registerName.toStr()}")`;
+
+        prelude.push(&declaration);
+
+        if (operand.reads) {
+          let initializer: String = ` = ${expression.toStr()}`;
+          prelude.push(&initializer);
+        }
+
+        prelude.pushStr(";\n");
+
+        if (operand.writes) {
+          let copyBack: String = `        ${expression.toStr()} = ${variable.toStr()};\n`;
+          epilogue.push(&copyBack);
+        }
+
+        expressions.push(variable);
+      } else {
+        expressions.push(expression.clone());
+      }
+
+      index += 1;
+    }
+
+    let mut outputs: String = String::create("");
+    let mut inputs: String = String::create("");
+    let mut positions: Vector<u64> = Vector::new<u64>();
+    let mut outputCount: u64 = 0;
+
+    index = 0;
+
+    while (index < node.operands.length()) {
+      if (let Option::SOME(operand) = node.operands.get(index)) {
+        if (operand.writes) {
+          outputCount += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut nextOutput: u64 = 0;
+    let mut nextInput: u64 = outputCount;
+    index = 0;
+
+    while (index < node.operands.length()) {
+      let Option::SOME(operand) = node.operands.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut entry: String = String::create("");
+
+      if (operand.name.length() > 0) {
+        let symbolicName: String = `[${operand.name.toStr()}] `;
+        entry.push(&symbolicName);
+      }
+
+      let constraint: String = CodegenC::inlineAsmConstraint(operand);
+      let mut expression: String = String::create("");
+
+      if (let Option::SOME(text) = expressions.get(index)) {
+        expression = text.clone();
+      }
+
+      let binding: String = `"${constraint.toStr()}"(${expression.toStr()})`;
+      entry.push(&binding);
+
+      if (operand.writes) {
+        if (outputs.length() > 0) {
+          outputs.pushStr(", ");
+        }
+
+        outputs.push(&entry);
+        positions.push(nextOutput);
+        nextOutput += 1;
+      } else {
+        if (inputs.length() > 0) {
+          inputs.pushStr(", ");
+        }
+
+        inputs.push(&entry);
+        positions.push(nextInput);
+        nextInput += 1;
+      }
+
+      index += 1;
+    }
+
+    let mut asmTemplate: String = String::create("");
+    index = 0;
+
+    while (index < node.chunks.length()) {
+      if (let Option::SOME(chunk) = node.chunks.get(index)) {
+        let chunkText: String = CodegenC::inlineAsmTemplateText(chunk);
+        asmTemplate.push(&chunkText);
+      }
+
+      if (let Option::SOME(operandIndex) = node.holes.get(index)) {
+        let mut holeText: String = String::create("%0");
+
+        if (let Option::SOME(operand) = node.operands.get(*operandIndex)) {
+          if (operand.name.length() > 0) {
+            holeText = `%[${operand.name.toStr()}]`;
+          } else if (let Option::SOME(position) = positions.get(*operandIndex)) {
+            holeText = `%${*position}`;
+          }
+        }
+
+        asmTemplate.push(&holeText);
+      }
+
+      index += 1;
+    }
+
+    let mut clobbers: String = String::create("");
+    index = 0;
+
+    while (index < node.clobbers.length()) {
+      if (let Option::SOME(clobber) = node.clobbers.get(index)) {
+        if (clobbers.length() > 0) {
+          clobbers.pushStr(", ");
+        }
+
+        let quoted: String = `"${clobber.toStr()}"`;
+        clobbers.push(&quoted);
+      }
+
+      index += 1;
+    }
+
+    let mut qualifier: str = "";
+
+    if (node.volatile) {
+      qualifier = " volatile";
+    }
+
+    let escaped: String = CodegenC::escapeStringLiteral(&asmTemplate);
+    let mut statement: String = `        __asm__${qualifier}("${escaped.toStr()}" : ${outputs.toStr()} : ${inputs.toStr()}`;
+
+    if (clobbers.length() > 0) {
+      let clobberList: String = ` : ${clobbers.toStr()}`;
+      statement.push(&clobberList);
+    }
+
+    statement.pushStr(");\n");
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr("    {\n");
+    outputRef.push(&prelude);
+    outputRef.push(&statement);
+    outputRef.push(&epilogue);
+    outputRef.pushStr("    }\n");
   }
 
   /// One instruction. Anything the emitter cannot express yet leaves a comment
@@ -2811,6 +3190,9 @@ export namespace CodegenC {
         let line: String = `    t${node.dest.raw()} = (${typeText.toStr()})${target.toStr()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::InlineAsm(node) -> {
+        CodegenC::emitInlineAsm(defStore, typeStore, symbols, output, closures, &node);
       },
       Lir::Instr::RawToClosure(node) -> {
         let closureType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.closureType);
@@ -4744,6 +5126,7 @@ export namespace CodegenC {
       source: source,
       unsupported: unsupported,
       functions: functions,
+      usesInlineAsm: CodegenC::programUsesInlineAsm(program),
     };
   }
 

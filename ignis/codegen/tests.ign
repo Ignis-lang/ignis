@@ -48,6 +48,7 @@ function codegenContains(haystack: &String, needle: str): boolean {
 /// can name a definition the emitter mangled rather than guess its id.
 record CodegenEmission {
   public source: String;
+  public usesInlineAsm: boolean;
   public defStore: Analyzer::DefinitionStore;
   public symbols: Analyzer::SymbolTable;
 }
@@ -236,6 +237,7 @@ function codegenEmitWith(
 
   return CodegenEmission {
     source: emitted.source,
+    usesInlineAsm: emitted.usesInlineAsm,
     defStore: defStore,
     symbols: symbols,
   };
@@ -1247,4 +1249,84 @@ function codegenPanicFileWithoutASiteStaysEmpty(): void {
   let file: String = codegenPanicFile("");
 
   Test::assertEq<u64>(file.length(), 0);
+}
+
+/// Port I/O, which only runs in kernel mode, is checked as emitted C: the
+/// fixed registers become machine constraints, holes become named operands,
+/// and the asm stays volatile.
+@test
+function codegenEmitsPortIoAsmWithMachineConstraints(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function inByte(port: u16): u8 {\n  return asm (port in dx) -> (value: u8 in al) { in {value}, {port} };\n}\n\nfunction outByte(port: u16, value: u8): void {\n  asm (port in dx, value in al) { out {port}, {value} }\n}\n\nfunction main(): i32 {\n  outByte(128, inByte(96));\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(emission.usesInlineAsm);
+  Test::assert(codegenContains(&emission.source, "__asm__ volatile(\" in %[value], %[port] \" : [value] \"=a\"(t"));
+  Test::assert(codegenContains(&emission.source, ") : [port] \"d\"(((u16)"));
+  Test::assert(codegenContains(&emission.source, "__asm__ volatile(\" out %[port], %[value] \" :  : [port] \"d\"(((u16)"));
+  Test::assert(codegenContains(&emission.source, "[value] \"a\"(((u8)"));
+}
+
+/// The body reaches GCC as a template: Ignis comments are dropped, and `%`,
+/// `|` and the braces `{{` and `}}` write are escaped. `flags` is the `cc`
+/// clobber.
+@test
+function codegenEscapesInlineAsmBodiesAndClobbers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () clobber(memory, flags) {\n    mov eax, 100 % 7 // keeps {this} out\n    or eax, 1 | 2 /* and {this} */ {{ }}\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "mov eax, 100 %% 7 \\n    or eax, 1 %| 2   %{ %}\\n  \" :  :  : \"memory\", \"cc\");"));
+  Test::assert(!codegenContains(&emission.source, "keeps"));
+  Test::assert(!codegenContains(&emission.source, "and {this}"));
+}
+
+/// A `pure` asm is not volatile, so the C compiler may drop it when its
+/// output goes unused.
+@test
+function codegenEmitsPureInlineAsmWithoutVolatile(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let value: u64 = 21;\n  let doubled: u64 = asm pure (value in reg) -> (result: u64 in reg) { lea {result}, [{value} + {value}] };\n\n  return doubled as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "__asm__(\" lea %[result], [%[value] + %[value]] \" : [result] \"=r\"(t"));
+  Test::assert(codegenContains(&emission.source, "[value] \"r\"(((u64)"));
+  Test::assert(!codegenContains(&emission.source, "__asm__ volatile"));
+}
+
+/// `r8` to `r15` have no constraint letter, so their operands go through
+/// register variables, written back after the asm when it writes them.
+@test
+function codegenBindsHighRegistersThroughRegisterVariables(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let value: u64 = 40;\n  let mut counter: u64 = asm (value in r8) -> (result: u64 in r9) { lea {result}, [{value} + 2] };\n\n  asm (counter inout r15) clobber(flags) { add {counter}, 0 }\n\n  return counter as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "register u64 ignis_asm_0 __asm__(\"r8\") = ((u64)t"));
+  Test::assert(codegenContains(&emission.source, "register u64 ignis_asm_1 __asm__(\"r9\");"));
+  Test::assert(codegenContains(&emission.source, ": [result] \"=r\"(ignis_asm_1) : [value] \"r\"(ignis_asm_0));"));
+  Test::assert(codegenContains(&emission.source, " = ignis_asm_1;"));
+  Test::assert(codegenContains(&emission.source, "register u64 ignis_asm_0 __asm__(\"r15\") = (*(u64*)t"));
+  Test::assert(codegenContains(&emission.source, ": [counter] \"+r\"(ignis_asm_0) :  : \"cc\");"));
+  Test::assert(codegenContains(&emission.source, "(*(u64*)t"));
+}
+
+/// A `mem` operand is the place itself, read and written through the
+/// pointer to it, and a statement `asm` stores its outputs in their locals.
+@test
+function codegenEmitsMemoryOperandsAndStatementOutputsAsPlaces(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let mut value: u64 = 40;\n  let pointer: *mut u64 = (&mut value) as *mut u64;\n\n  asm (*pointer inout mem) -> (low: u32 in eax) { add qword ptr {pointer}, 2 }\n\n  return (value as i32) + (low as i32);\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "add qword ptr %[pointer], 2 \" : [pointer] \"+m\"((*(u64*)t"));
+  Test::assert(codegenContains(&emission.source, ", [low] \"=a\"((*(u32*)t"));
+}
+
+/// A unit without asm does not ask for Intel syntax.
+@test
+function codegenReportsNoInlineAsmForPlainUnits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  return 0;\n}\n");
+
+  Test::assert(!emission.usesInlineAsm);
 }

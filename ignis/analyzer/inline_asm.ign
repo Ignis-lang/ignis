@@ -1,0 +1,287 @@
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
+
+export namespace Analyzer {
+  /// The x86-64 locations an `asm` header can name, shared by the checker,
+  /// HIR lowering and C emission so all three read a location the same way.
+  namespace InlineAsm {
+    /// First raw id of the binding sites a statement `asm` declares for its
+    /// outputs. Real pattern ids are indexes into a module's pattern store and
+    /// stay far below it, and the resolver's side table keeps its own high
+    /// bit (`PATTERN_KEY_BIT`) above it.
+    const OUTPUT_BINDING_BASE: u32 = 1073741824;
+
+    /// How many binding ids each statement reserves. C compilers accept at
+    /// most 30 operands per asm, so no statement gets near it.
+    const OUTPUT_BINDING_STRIDE: u32 = 64;
+
+    /// What a location names.
+    enum LocationKind {
+      /// One named register; `family` and `widthBits` say which.
+      REGISTER,
+      /// Any general-purpose register the C compiler picks.
+      REG,
+      /// A memory operand.
+      MEM,
+      /// An immediate operand.
+      IMM,
+      /// A register the stack and frame pointers live in, which asm may not
+      /// take over.
+      RESERVED,
+      /// Nothing asm knows.
+      UNKNOWN,
+    }
+
+    /// A location as written in an `asm` header or clobber list.
+    record Location {
+      public kind: Analyzer::InlineAsm::LocationKind;
+      /// The 64-bit name of the register, such as `rax` for `al`; empty for
+      /// an operand class.
+      public family: String;
+      /// The register's width in bits; 0 for an operand class.
+      public widthBits: u32;
+    }
+
+    function location(
+      kind: Analyzer::InlineAsm::LocationKind,
+      family: str,
+      widthBits: u32
+    ): Analyzer::InlineAsm::Location {
+      return Analyzer::InlineAsm::Location {
+        kind: kind,
+        family: String::create(family),
+        widthBits: widthBits,
+      };
+    }
+
+    /// The width `name` has within one register family, or 0 when it is not
+    /// one of the four names given for the 64, 32, 16 and 8 bit parts.
+    function widthInFamily(name: &String, wide: str, double: str, word: str, byte: str): u32 {
+      if (name.equals(wide)) {
+        return 64;
+      }
+
+      if (name.equals(double)) {
+        return 32;
+      }
+
+      if (name.equals(word)) {
+        return 16;
+      }
+
+      if (name.equals(byte)) {
+        return 8;
+      }
+
+      return 0;
+    }
+
+    /// The 64-bit name and width of a general-purpose register name, or an
+    /// empty family when `name` is not one. `rsp` and `rbp` are included so
+    /// callers can tell them apart from unknown names.
+    function registerOf(name: &String): Analyzer::InlineAsm::Location {
+      let mut table: Vector<str> = Vector::new<str>();
+
+      table.push("rax");
+      table.push("eax");
+      table.push("ax");
+      table.push("al");
+      table.push("rbx");
+      table.push("ebx");
+      table.push("bx");
+      table.push("bl");
+      table.push("rcx");
+      table.push("ecx");
+      table.push("cx");
+      table.push("cl");
+      table.push("rdx");
+      table.push("edx");
+      table.push("dx");
+      table.push("dl");
+      table.push("rsi");
+      table.push("esi");
+      table.push("si");
+      table.push("sil");
+      table.push("rdi");
+      table.push("edi");
+      table.push("di");
+      table.push("dil");
+      table.push("rsp");
+      table.push("esp");
+      table.push("sp");
+      table.push("spl");
+      table.push("rbp");
+      table.push("ebp");
+      table.push("bp");
+      table.push("bpl");
+
+      let mut index: u64 = 0;
+
+      while (index + 3 < table.length()) {
+        let Option::SOME(wide) = table.get(index) else {
+          break;
+        };
+        let Option::SOME(double) = table.get(index + 1) else {
+          break;
+        };
+        let Option::SOME(word) = table.get(index + 2) else {
+          break;
+        };
+        let Option::SOME(byte) = table.get(index + 3) else {
+          break;
+        };
+
+        let width: u32 = Analyzer::InlineAsm::widthInFamily(name, *wide, *double, *word, *byte);
+
+        if (width > 0) {
+          return Analyzer::InlineAsm::location(Analyzer::InlineAsm::LocationKind::REGISTER, *wide, width);
+        }
+
+        index += 4;
+      }
+
+      let mut number: u32 = 8;
+
+      while (number <= 15) {
+        let wide: String = `r${number}`;
+        let double: String = `r${number}d`;
+        let word: String = `r${number}w`;
+        let byte: String = `r${number}b`;
+
+        let width: u32 = Analyzer::InlineAsm::widthInFamily(name, wide.toStr(), double.toStr(), word.toStr(), byte.toStr());
+
+        if (width > 0) {
+          return Analyzer::InlineAsm::Location {
+            kind: Analyzer::InlineAsm::LocationKind::REGISTER,
+            family: wide,
+            widthBits: width,
+          };
+        }
+
+        number += 1;
+      }
+
+      return Analyzer::InlineAsm::location(Analyzer::InlineAsm::LocationKind::UNKNOWN, "", 0);
+    }
+
+    /// Reads a location written in an `asm` header: a register, or one of the
+    /// classes `reg`, `mem` and `imm`.
+    function parseLocation(name: &String): Analyzer::InlineAsm::Location {
+      if (name.equals("reg")) {
+        return Analyzer::InlineAsm::location(Analyzer::InlineAsm::LocationKind::REG, "", 0);
+      }
+
+      if (name.equals("mem")) {
+        return Analyzer::InlineAsm::location(Analyzer::InlineAsm::LocationKind::MEM, "", 0);
+      }
+
+      if (name.equals("imm")) {
+        return Analyzer::InlineAsm::location(Analyzer::InlineAsm::LocationKind::IMM, "", 0);
+      }
+
+      let register: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::registerOf(name);
+
+      if (register.family.equals("rsp") || register.family.equals("rbp")) {
+        return Analyzer::InlineAsm::Location {
+          kind: Analyzer::InlineAsm::LocationKind::RESERVED,
+          family: register.family,
+          widthBits: register.widthBits,
+        };
+      }
+
+      return register;
+    }
+
+    /// The name a C compiler knows a clobber by: `memory`, `cc` for `flags`,
+    /// or the 64-bit register name. `NONE` when `name` is neither `memory`,
+    /// `flags` nor a register asm may use.
+    function clobberName(name: &String): Option<String> {
+      if (name.equals("memory")) {
+        return Option::SOME(String::create("memory"));
+      }
+
+      if (name.equals("flags")) {
+        return Option::SOME(String::create("cc"));
+      }
+
+      let register: Analyzer::InlineAsm::Location = Analyzer::InlineAsm::parseLocation(name);
+
+      if (register.kind == Analyzer::InlineAsm::LocationKind::REGISTER) {
+        return Option::SOME(register.family);
+      }
+
+      return Option::NONE;
+    }
+
+    /// The GCC machine constraint letter for a register family, or `""` for
+    /// `r8` to `r15`, which have none and are reached through register
+    /// variables instead.
+    function constraintLetter(family: &String): str {
+      if (family.equals("rax")) {
+        return "a";
+      }
+
+      if (family.equals("rbx")) {
+        return "b";
+      }
+
+      if (family.equals("rcx")) {
+        return "c";
+      }
+
+      if (family.equals("rdx")) {
+        return "d";
+      }
+
+      if (family.equals("rsi")) {
+        return "S";
+      }
+
+      if (family.equals("rdi")) {
+        return "D";
+      }
+
+      return "";
+    }
+
+    /// The binding site a statement `asm` declares for its output at
+    /// `outputIndex`. The output has no pattern of its own, so the resolver,
+    /// the checker and HIR lowering all key its local by this id, which no
+    /// pattern store entry ever has.
+    function outputBinding(statementId: Ast::StatementId, outputIndex: u64): Ast::PatternId {
+      let raw: u32 = OUTPUT_BINDING_BASE + statementId.raw() * OUTPUT_BINDING_STRIDE + (outputIndex as u32);
+      return Id::fromRaw<Ast::PatternTag>(raw);
+    }
+
+    /// The name a `{name}` hole uses for an input: the variable it reads, or
+    /// the pointer a dereference goes through. Any other input has no name a
+    /// hole can use, and the result is empty.
+    function inputName(module: &Ast::Module, expressionId: Ast::ExpressionId): String {
+      let Option::SOME(expression) = module.expressions.get(expressionId) else {
+        return String::new();
+      };
+
+      return match (expression) {
+        Ast::Expression::Node::Variable(variable) -> variable.name.clone(),
+        Ast::Expression::Node::Path(path) -> Analyzer::InlineAsm::singleSegment(&path.segments),
+        Ast::Expression::Node::Dereference(dereference) -> Analyzer::InlineAsm::inputName(module, dereference.operand),
+        Ast::Expression::Node::Grouped(grouped) -> Analyzer::InlineAsm::inputName(module, grouped.expression),
+        _ -> String::new(),
+      };
+    }
+
+    function singleSegment(segments: &Vector<String>): String {
+      if (segments.length() != 1) {
+        return String::new();
+      }
+
+      let Option::SOME(segment) = segments.get(0) else {
+        return String::new();
+      };
+
+      return segment.clone();
+    }
+  }
+}

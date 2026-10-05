@@ -525,6 +525,8 @@ function relinkCachedBuild(
   let mut prebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   prebuiltObjects.push(artifacts.object.clone());
 
+  let noInlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
+
   let linkErrors: u64 = compileAndLinkUnits(
     &noSources,
     &noObjects,
@@ -535,6 +537,7 @@ function relinkCachedBuild(
     file,
     statusToStderr,
     TestRunner::jobLimit(Option::NONE),
+    &noInlineAsmUnits,
   );
 
   if (linkErrors > 0) {
@@ -585,6 +588,29 @@ function toolchainCompileFlags(profile: &BuildProfile): Vector<String> {
   return flags;
 }
 
+/// The flags one C unit is compiled with. A unit that contains inline asm
+/// adds `-masm=intel`, the syntax asm bodies are written in. Every other
+/// unit keeps the default dialect, which the inline asm of system headers is
+/// written for.
+function inlineAsmUnitFlags(flags: &Vector<String>, usesInlineAsm: boolean): Vector<String> {
+  let mut unitFlags: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < flags.length()) {
+    if (let Option::SOME(flag) = flags.get(index)) {
+      unitFlags.push(flag.clone());
+    }
+
+    index += 1;
+  }
+
+  if (usesInlineAsm) {
+    unitFlags.push(String::create("-masm=intel"));
+  }
+
+  return unitFlags;
+}
+
 /// The libraries a build links: `libm` for a hosted build, none for a
 /// freestanding one.
 function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
@@ -598,7 +624,8 @@ function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
 }
 
 /// Compile every emitted translation unit into an object and link nothing,
-/// which is what a freestanding library build produces.
+/// which is what a freestanding library build produces. `usesInlineAsm`
+/// says whether the units contain inline asm.
 ///
 /// Returns 0 when every unit compiles and 1 when any one fails.
 function compileObjectUnits(
@@ -608,9 +635,11 @@ function compileObjectUnits(
   profile: &BuildProfile,
   file: &SourceFile,
   statusToStderr: boolean,
+  usesInlineAsm: boolean,
 ): u64 {
   let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
-  let extraFlags: Vector<String> = toolchainCompileFlags(profile);
+  let profileFlags: Vector<String> = toolchainCompileFlags(profile);
+  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, usesInlineAsm);
 
   if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
     profile.cc.toStr(),
@@ -643,6 +672,7 @@ function compileObjectUnits(
 ///
 /// A fixture's toolchain failure belongs to that fixture's own report block,
 /// not to the run's output, so nothing is printed and nothing is rendered.
+/// `usesInlineAsm` says whether the units contain inline asm.
 ///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails.
 function compileAndLinkQuietly(
@@ -651,10 +681,12 @@ function compileAndLinkQuietly(
   outputPath: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
+  usesInlineAsm: boolean,
 ): u64 {
   let cc: str = profile.cc.toStr();
   let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
-  let extraFlags: Vector<String> = toolchainCompileFlags(profile);
+  let profileFlags: Vector<String> = toolchainCompileFlags(profile);
+  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, usesInlineAsm);
 
   let mut objects: Vector<String> = Vector::new<String>();
   let mut unitIndex: u64 = 0;
@@ -694,7 +726,9 @@ function compileAndLinkQuietly(
 /// Compile every emitted translation unit and link them into an executable.
 ///
 /// `prebuiltObjects` are linked without being compiled, which is how a run
-/// reuses an object the build cache reported current.
+/// reuses an object the build cache reported current. `inlineAsmUnits` says,
+/// for each unit of `sourcePaths`, whether it contains inline asm; the units
+/// that do are compiled on their own with `-masm=intel`.
 ///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails.
 function compileAndLinkUnits(
@@ -707,6 +741,7 @@ function compileAndLinkUnits(
   file: &SourceFile,
   statusToStderr: boolean,
   jobs: u64,
+  inlineAsmUnits: &Vector<boolean>,
 ): u64 {
   let cc: str = profile.cc.toStr();
   let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
@@ -736,14 +771,50 @@ function compileAndLinkUnits(
   }
 
   // A relink reuses every object it links, so there is no unit to compile and
-  // the toolchain is never invoked for one.
-  if (sourcePaths.length() > 0) {
+  // the toolchain is never invoked for one. The units with inline asm and the
+  // units without take different flags, so each group is compiled on its own.
+  let mut groupIndex: u64 = 0;
+
+  while (groupIndex < 2) {
+    let groupUsesInlineAsm: boolean = groupIndex == 1;
+    let mut groupSources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut groupObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut sourceIndex: u64 = 0;
+
+    while (sourceIndex < sourcePaths.length() && sourceIndex < objectPaths.length()) {
+      let mut unitUsesInlineAsm: boolean = false;
+
+      if (let Option::SOME(flag) = inlineAsmUnits.get(sourceIndex)) {
+        unitUsesInlineAsm = *flag;
+      }
+
+      if (unitUsesInlineAsm == groupUsesInlineAsm) {
+        if (let Option::SOME(sourcePath) = sourcePaths.get(sourceIndex)) {
+          groupSources.push(sourcePath.clone());
+        }
+
+        if (let Option::SOME(objectPath) = objectPaths.get(sourceIndex)) {
+          groupObjects.push(objectPath.clone());
+        }
+      }
+
+      sourceIndex += 1;
+    }
+
+    groupIndex += 1;
+
+    if (groupSources.length() == 0) {
+      continue;
+    }
+
+    let groupFlags: Vector<String> = inlineAsmUnitFlags(&extraFlags, groupUsesInlineAsm);
+
     if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
       cc,
-      sourcePaths,
-      objectPaths,
+      &groupSources,
+      &groupObjects,
       &includeDirs,
-      &extraFlags,
+      &groupFlags,
       jobs,
     )) {
       renderBagToStderr(&compileBag, file);
@@ -873,6 +944,9 @@ record CompiledProgram {
   /// beside its object so a later run that reuses the object prints what the
   /// run that produced it printed, instead of going quiet.
   public report: String;
+  /// Whether the emitted C contains inline asm, which is compiled with
+  /// `-masm=intel`.
+  public usesInlineAsm: boolean;
 }
 
 function failedCompilation(errors: u64, warnings: u64): CompiledProgram {
@@ -884,6 +958,7 @@ function failedCompilation(errors: u64, warnings: u64): CompiledProgram {
     errorMessages: Vector::new<String>(),
     warningMessages: Vector::new<String>(),
     report: String::new(),
+    usesInlineAsm: false,
   };
 }
 
@@ -1194,6 +1269,7 @@ function compileDiscovered(
       errorMessages: errorMessages,
       warningMessages: warningMessages,
       report: report,
+      usesInlineAsm: false,
     };
   }
 
@@ -1467,6 +1543,7 @@ function compileDiscovered(
       errorMessages: errorMessages,
       warningMessages: warningMessages,
       report: report,
+      usesInlineAsm: false,
     };
   }
 
@@ -1519,6 +1596,7 @@ function compileDiscovered(
       errorMessages: errorMessages,
       warningMessages: warningMessages,
       report: report,
+      usesInlineAsm: false,
     };
   }
 
@@ -1613,6 +1691,7 @@ function compileDiscovered(
       errorMessages: errorMessages,
       warningMessages: warningMessages,
       report: report,
+      usesInlineAsm: false,
     };
   }
 
@@ -1624,6 +1703,7 @@ function compileDiscovered(
     errorMessages: errorMessages,
     warningMessages: warningMessages,
     report: report,
+    usesInlineAsm: emitResult.usesInlineAsm,
   };
 }
 
@@ -1826,6 +1906,9 @@ function runCompile(
 
       let noPrebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
 
+      let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
+      inlineAsmUnits.push(compiled.usesInlineAsm);
+
       if (discovery.bin) {
         linkErrors += compileAndLinkUnits(
           &sourcePaths,
@@ -1837,9 +1920,10 @@ function runCompile(
           &file,
           statusToStderr,
           TestRunner::jobLimit(Option::NONE),
+          &inlineAsmUnits,
         );
       } else if (objectOnly) {
-        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, statusToStderr);
+        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, statusToStderr, compiled.usesInlineAsm);
       }
     }
   }
@@ -2096,7 +2180,7 @@ function runProgramFixture(
   let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   objectPaths.push(objectPath.clone());
 
-  if (compileAndLinkQuietly(&sourcePaths, &objectPaths, &binaryPath, &fixtureDiscovery.stdRoot, &profile) > 0) {
+  if (compileAndLinkQuietly(&sourcePaths, &objectPaths, &binaryPath, &fixtureDiscovery.stdRoot, &profile, compiled.usesInlineAsm) > 0) {
     return String::create("compilation failed");
   }
 
@@ -2407,22 +2491,25 @@ function linkTestBinary(
   let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut prebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
 
   if (programIsCached) {
     prebuiltObjects.push(programObjectPath.clone());
   } else {
     sourcePaths.push(programPath.clone());
     objectPaths.push(programObjectPath.clone());
+    inlineAsmUnits.push(compiled.usesInlineAsm);
   }
 
   sourcePaths.push(harnessPath.clone());
   objectPaths.push(Path::PathBuf::fromString(&harnessObjectText));
+  inlineAsmUnits.push(false);
 
   let binaryPath: Path::PathBuf = Path::PathBuf::fromString(&outputPath);
 
   let jobs: u64 = TestRunner::jobLimit(options.jobs);
 
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false, jobs) > 0) {
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false, jobs, &inlineAsmUnits) > 0) {
     return Option::NONE;
   }
 
@@ -3827,7 +3914,8 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let mut includeDirs: Vector<String> = Vector::new<String>();
   includeDirs.push(runtimeDir.toString());
 
-  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let profileFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, compiled.usesInlineAsm);
 
   if (let Result::ERROR(compileBag) = CCompiler::compileObject(
     profile.cc.toStr(),

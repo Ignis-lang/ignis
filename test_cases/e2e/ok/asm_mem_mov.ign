@@ -1,0 +1,19 @@
+// A dereferenced pointer as a mem operand: the instruction writes the size
+// itself, since clang prints memory operands without one.
+function main(): i32 {
+  let mut value: u64 = 40;
+  let pointer: *mut u64 = (&mut value) as *mut u64;
+
+  asm (*pointer inout mem) clobber(flags) {
+    add qword ptr {pointer}, 2
+  }
+
+  let mut copied: u64 = 0;
+  let target: *mut u64 = (&mut copied) as *mut u64;
+
+  asm (value in reg, *target inout mem) {
+    mov qword ptr {target}, {value}
+  }
+
+  return copied as i32;
+}

@@ -216,6 +216,148 @@ export namespace Hir {
     public arms: Vector<Hir::HirMatchArm>;
   }
 
+  /// One input of an `asm`.
+  record HirAsmInput {
+    /// The name the C asm statement gives the operand, which holes print
+    /// through; empty when no hole can name it.
+    public name: String;
+    /// The register or operand class, as `Analyzer::InlineAsm` reads it.
+    public location: String;
+    /// The value the instructions read or, when `isPlace`, the place they
+    /// read and, when `writes`, write back to. Every `mem` input and every
+    /// `inout` input is a place.
+    public value: Hir::HirId;
+    public isPlace: boolean;
+    public writes: boolean;
+  }
+
+  /// One output of an `asm`.
+  record HirAsmOutput {
+    public name: String;
+    public location: String;
+    public outputType: Analyzer::TypeId;
+    /// The local a statement `asm` stores the output in. `NONE` for the
+    /// output of an `asm` expression, which is the node's value.
+    public place: Option<Hir::HirId>;
+  }
+
+  /// Inline assembly. `chunks` is the body text around the holes, comments
+  /// and `{{`/`}}` escapes as written, one more entry than `holes`. Each hole
+  /// is the index of its operand among the inputs followed by the outputs.
+  /// `clobbers` holds the names a C compiler knows them by.
+  record HirInlineAsm {
+    public chunks: Vector<String>;
+    public holes: Vector<u64>;
+    public inputs: Vector<Hir::HirAsmInput>;
+    public outputs: Vector<Hir::HirAsmOutput>;
+    public clobbers: Vector<String>;
+    public volatile: boolean;
+  }
+
+  function cloneStrings(source: &Vector<String>): Vector<String> {
+    let mut result: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(text) = source.get(index)) {
+        result.push(text.clone());
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function cloneIndexes(source: &Vector<u64>): Vector<u64> {
+    let mut result: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(value) = source.get(index)) {
+        result.push(*value);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// `node` with every operand node id moved by `offset`.
+  function offsetInlineAsm(node: Hir::HirInlineAsm, offset: u32): Hir::HirInlineAsm {
+    let mut inputs: Vector<Hir::HirAsmInput> = Vector::new<Hir::HirAsmInput>();
+    let mut index: u64 = 0;
+
+    while (index < node.inputs.length()) {
+      if (let Option::SOME(input) = node.inputs.get(index)) {
+        inputs.push(Hir::HirAsmInput {
+          name: input.name.clone(),
+          location: input.location.clone(),
+          value: Hir::offsetHirId(input.value, offset),
+          isPlace: input.isPlace,
+          writes: input.writes,
+        });
+      }
+
+      index += 1;
+    }
+
+    let mut outputs: Vector<Hir::HirAsmOutput> = Vector::new<Hir::HirAsmOutput>();
+    index = 0;
+
+    while (index < node.outputs.length()) {
+      if (let Option::SOME(output) = node.outputs.get(index)) {
+        outputs.push(Hir::HirAsmOutput {
+          name: output.name.clone(),
+          location: output.location.clone(),
+          outputType: output.outputType,
+          place: Hir::offsetOptionalHirId(output.place, offset),
+        });
+      }
+
+      index += 1;
+    }
+
+    return Hir::HirInlineAsm {
+      chunks: Hir::cloneStrings(&node.chunks),
+      holes: Hir::cloneIndexes(&node.holes),
+      inputs: inputs,
+      outputs: outputs,
+      clobbers: Hir::cloneStrings(&node.clobbers),
+      volatile: node.volatile,
+    };
+  }
+
+  /// The operand nodes of an `asm`: input values and places, then the
+  /// places of a statement `asm`'s outputs.
+  function inlineAsmChildIds(node: &Hir::HirInlineAsm): Vector<Hir::HirId> {
+    let mut children: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < node.inputs.length()) {
+      if (let Option::SOME(input) = node.inputs.get(index)) {
+        children.push(input.value);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < node.outputs.length()) {
+      if (let Option::SOME(output) = node.outputs.get(index)) {
+        if (let Option::SOME(place) = output.place) {
+          children.push(place);
+        }
+      }
+
+      index += 1;
+    }
+
+    return children;
+  }
+
   /// Mirrors `ignis_hir::HIRKind`.
   enum HirKind {
     Literal(Hir::LiteralValue),
@@ -278,6 +420,10 @@ export namespace Hir {
     /// A plain C function pointer read back as an Ignis function value. The
     /// node's type is the `Function` type; the operand's is the `RawFunction`.
     FromRawFunction(Hir::HirId),
+
+    /// An `asm` expression, whose type is its output's or `void`, or the
+    /// `asm` of a statement, whose outputs are stored in their locals.
+    InlineAsm(Hir::HirInlineAsm),
 
     Error,
   }
@@ -513,6 +659,7 @@ export namespace Hir {
       }),
       Hir::HirKind::ToRawFunction(id) -> Hir::HirKind::ToRawFunction(Hir::offsetHirId(id, offset)),
       Hir::HirKind::FromRawFunction(id) -> Hir::HirKind::FromRawFunction(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::InlineAsm(asmNode) -> Hir::HirKind::InlineAsm(Hir::offsetInlineAsm(asmNode, offset)),
       Hir::HirKind::Error -> Hir::HirKind::Error,
     };
   }
@@ -557,6 +704,18 @@ export namespace Hir {
       },
       Hir::HirKind::FromRawFunction(id) -> {
         children.push(id);
+      },
+      Hir::HirKind::InlineAsm(asmNode) -> {
+        let operands: Vector<Hir::HirId> = Hir::inlineAsmChildIds(&asmNode);
+        let mut index: u64 = 0;
+
+        while (index < operands.length()) {
+          if (let Option::SOME(operand) = operands.get(index)) {
+            children.push(*operand);
+          }
+
+          index += 1;
+        }
       },
       Hir::HirKind::BuiltinLoad(load) -> {
         children.push(load.ptr);

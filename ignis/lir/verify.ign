@@ -349,6 +349,25 @@ export namespace LirVerify {
         LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.raw);
         LirVerify::markDefined(state, node.dest);
       },
+      // Every operand is used, except the output temp of an `asm`
+      // expression, which the instruction defines.
+      Lir::Instr::InlineAsm(node) -> {
+        let mut index: u64 = 0;
+
+        while (index < node.operands.length()) {
+          if (let Option::SOME(operand) = node.operands.get(index)) {
+            if (operand.isPlace || !operand.writes) {
+              LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &operand.value);
+            }
+          }
+
+          index += 1;
+        }
+
+        if (let Option::SOME(dest) = node.dest) {
+          LirVerify::markDefined(state, dest);
+        }
+      },
     };
   }
 
@@ -532,6 +551,17 @@ export namespace LirVerify {
       Lir::Instr::MakeRawFunction(_) -> {},
       Lir::Instr::RawToClosure(node) -> {
         LirVerify::markAddressedOperand(addressed, &node.raw);
+      },
+      Lir::Instr::InlineAsm(node) -> {
+        let mut index: u64 = 0;
+
+        while (index < node.operands.length()) {
+          if (let Option::SOME(operand) = node.operands.get(index)) {
+            LirVerify::markAddressedOperand(addressed, &operand.value);
+          }
+
+          index += 1;
+        }
       },
     };
   }

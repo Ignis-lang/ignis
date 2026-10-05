@@ -189,6 +189,50 @@ export namespace Capture {
     };
   }
 
+  /// Walks the operands of an `asm`. An operand the asm writes, an `inout`
+  /// input or an output's local, mutates the variable it is rooted at; every
+  /// other operand only reads.
+  function analyzeInlineAsmUsage(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    usage: &mut Capture::VarUsage,
+    asmNode: &Hir::HirInlineAsm,
+    varDef: Analyzer::DefinitionId,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < asmNode.inputs.length()) {
+      if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+        if (input.writes && Capture::isRootedAt(hir, input.value, varDef)) {
+          let mut usageRef: &mut Capture::VarUsage = usage;
+          usageRef.mutated = true;
+        }
+
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, input.value, varDef);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < asmNode.outputs.length()) {
+      if (let Option::SOME(output) = asmNode.outputs.get(index)) {
+        if (let Option::SOME(place) = output.place) {
+          if (Capture::isRootedAt(hir, place, varDef)) {
+            let mut usageRef: &mut Capture::VarUsage = usage;
+            usageRef.mutated = true;
+          } else {
+            Capture::analyzeVarUsageInTarget(hir, defStore, typeStore, usage, place, varDef);
+          }
+        }
+      }
+
+      index += 1;
+    }
+  }
+
   /// Whether passing an argument in the given parameter position transfers
   /// ownership: it does when the parameter's type is non-Copy, and for an
   /// extern callee only when the parameter also says `@takes`.
@@ -472,6 +516,9 @@ export namespace Capture {
       Hir::HirKind::FromRawFunction(inner) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
       },
+      Hir::HirKind::InlineAsm(asmNode) -> {
+        Capture::analyzeInlineAsmUsage(hir, defStore, typeStore, usage, &asmNode, varDef);
+      },
       Hir::HirKind::ExpressionStatement(inner) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
       },
@@ -741,6 +788,10 @@ export namespace Capture {
       },
       Hir::HirKind::FromRawFunction(inner) -> {
         Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::InlineAsm(asmNode) -> {
+        let operands: Vector<Hir::HirId> = Hir::inlineAsmChildIds(&asmNode);
+        Capture::collectClosuresPostorderList(hir, result, visited, &operands);
       },
       Hir::HirKind::ExpressionStatement(inner) -> {
         Capture::collectClosuresPostorder(hir, inner, result, visited);
@@ -1144,6 +1195,10 @@ export namespace Capture {
       },
       Hir::HirKind::FromRawFunction(inner) -> {
         Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::InlineAsm(asmNode) -> {
+        let operands: Vector<Hir::HirId> = Hir::inlineAsmChildIds(&asmNode);
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &operands);
       },
       Hir::HirKind::ExpressionStatement(inner) -> {
         Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);

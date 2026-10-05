@@ -4147,6 +4147,9 @@ export namespace Borrowck {
       Hir::HirKind::FromRawFunction(inner) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, inner);
       },
+      Hir::HirKind::InlineAsm(asmNode) -> {
+        Borrowck::checkInlineAsm(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &asmNode, span);
+      },
       Hir::HirKind::TypeOf(inner) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, inner);
       },
@@ -5020,6 +5023,82 @@ export namespace Borrowck {
   /// borrowed, and assigning into a moved local revives it. The target place
   /// itself is not walked as a use, mirroring the ownership oracle, which
   /// would otherwise report a write to a moved local as a read of it.
+  /// Checks an `asm`. Every input is read. An `inout` or `mem` input hands
+  /// the asm its place to write, and a statement `asm` writes its outputs
+  /// into their locals, so none of those places may be borrowed. The output
+  /// locals hold integers and pointers, which need no drop, so writing them
+  /// is all their initialization takes.
+  function checkInlineAsm(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
+    asmNode: &Hir::HirInlineAsm,
+    span: SourceSpan,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < asmNode.inputs.length()) {
+      if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, input.value);
+
+        if (input.isPlace) {
+          Borrowck::rejectWriteWhileBorrowed(defStore, symbols, hir, state, diagnostics, input.value, span);
+        }
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < asmNode.outputs.length()) {
+      if (let Option::SOME(output) = asmNode.outputs.get(index)) {
+        if (let Option::SOME(place) = output.place) {
+          Borrowck::rejectWriteWhileBorrowed(defStore, symbols, hir, state, diagnostics, place, span);
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Reports a write to a place rooted at a borrowed local, the way an
+  /// assignment does.
+  function rejectWriteWhileBorrowed(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    placeId: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(target) = Borrowck::extractRootVariable(hir, placeId) else {
+      return;
+    };
+
+    if (state.borrowValue(target.raw()) == Borrowck::BORROW_NONE) {
+      return;
+    }
+
+    let name: String = Borrowck::definitionName(defStore, symbols, target);
+    let message: String = `Cannot assign to '${name}' because it is borrowed`;
+
+    Borrowck::emitOwnershipError(
+      state,
+      diagnostics,
+      span,
+      DiagnosticCode::MUTATED_WHILE_BORROWED,
+      message.toStr(),
+      "the asm writes it while a borrow is live",
+      Option::SOME(target),
+    );
+  }
+
   function checkAssign(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,

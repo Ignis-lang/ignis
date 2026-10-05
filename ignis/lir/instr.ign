@@ -271,6 +271,36 @@ export namespace Lir {
     public closureType: Analyzer::TypeId;
   }
 
+  /// One operand of an `InstrInlineAsm`.
+  record InlineAsmOperand {
+    /// The name the C asm statement gives the operand, which holes print
+    /// through; empty when it has none.
+    public name: String;
+    /// The register or operand class, as `Analyzer::InlineAsm` reads it.
+    public location: String;
+    /// The type of the value the instructions see.
+    public ty: Analyzer::TypeId;
+    /// A pointer to the place the instructions use when `isPlace`. Otherwise
+    /// the value they read or, for the output of an `asm` expression, the
+    /// temp they write.
+    public value: Lir::Operand;
+    public isPlace: boolean;
+    public reads: boolean;
+    public writes: boolean;
+  }
+
+  /// Inline assembly. `chunks` is the body text around the holes as written,
+  /// and each hole is an index into `operands`. `dest` is the value of an
+  /// `asm` expression's output, which its operand writes.
+  record InstrInlineAsm {
+    public dest: Option<Lir::TempId>;
+    public chunks: Vector<String>;
+    public holes: Vector<u64>;
+    public operands: Vector<Lir::InlineAsmOperand>;
+    public clobbers: Vector<String>;
+    public volatile: boolean;
+  }
+
   /// Mirrors `ignis_lir::Instr` (TAC: one operation, result in a temp).
   /// `SizeOf`/`AlignOf`/`MaxOf`/`MinOf` share the `InstrTypeQuery` payload
   /// because the Rust variants carry identical fields.
@@ -319,5 +349,6 @@ export namespace Lir {
     FreeEnv(Lir::InstrFreeEnv),
     MakeRawFunction(Lir::InstrMakeRawFunction),
     RawToClosure(Lir::InstrRawToClosure),
+    InlineAsm(Lir::InstrInlineAsm),
   }
 }
