@@ -1127,3 +1127,71 @@ function apiFormatsAnAsmExpression(): void {
     "function read(port: u16): u8 {\n  return asm (port in dx) -> (value: u8 in al) { in al, dx };\n}\n"
   );
 }
+
+/// An array literal written over several lines keeps one row per source line,
+/// reindented, and every row ends with a comma, the trailing one included.
+@test
+function apiKeepsAMultilineArrayLiteralWithATrailingComma(): void {
+  Test::assertEq<str>(
+    formatOrFail("function first(): u8 {\n  let values: u8[4] = [\n    1,\n    2,\n    3,\n    4,\n  ];\n\n  return values[0];\n}\n").toStr(),
+    "function first(): u8 {\n  let values: u8[4] = [\n    1,\n    2,\n    3,\n    4,\n  ];\n\n  return values[0];\n}\n"
+  );
+}
+
+/// A multiline array literal keeps its rows of several elements and gains the
+/// trailing comma its last row lacked.
+@test
+function apiKeepsTheRowsOfAMultilineArrayLiteral(): void {
+  Test::assertEq<str>(
+    formatOrFail("const GRID: u8[6] = [\n      1,2,  3,\n 4, 5, 6\n];\n").toStr(),
+    "const GRID: u8[6] = [\n  1, 2, 3,\n  4, 5, 6,\n];\n"
+  );
+}
+
+/// A single-line array literal that does not fit the line width wraps one
+/// element per line with a trailing comma, like a record initializer.
+@test
+function apiWrapsALongArrayLiteralOneElementPerLine(): void {
+  let sourceText: String = String::create("record Table {\n  static NAMES: str[3] = [\"first-name\", \"second-name\", \"third-name\"];\n}\n");
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.lineWidth = 40;
+
+  let Result::OK(output) = Format::formatSource(&sourceText, &config) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "record Table {\n  static NAMES: str[3] = [\n    \"first-name\",\n    \"second-name\",\n    \"third-name\",\n  ];\n}\n"
+  );
+}
+
+/// A single-line array literal that fits drops its trailing comma.
+@test
+function apiDropsTheTrailingCommaOfASingleLineArrayLiteral(): void {
+  Test::assertEq<str>(
+    formatOrFail("function main(): void {\n  let values: u8[2] = [1, 2,];\n}\n").toStr(),
+    "function main(): void {\n  let values: u8[2] = [1, 2];\n}\n"
+  );
+}
+
+/// A multiline array literal outside an initializer, here a call argument,
+/// keeps its source text, as a multiline call or record initializer does.
+@test
+function apiKeepsAMultilineArrayLiteralArgumentAsWritten(): void {
+  let source: str = "function main(): void {\n  consume([\n    1,\n    2,\n  ]);\n}\n";
+
+  Test::assertEq<str>(formatOrFail(source).toStr(), source);
+}
+
+/// Nested multiline array literals indent one level per array, and a second
+/// pass leaves the output unchanged.
+@test
+function apiFormatsNestedMultilineArrayLiteralsIdempotently(): void {
+  let first: String = formatOrFail("const MATRIX: u8[2][2] = [\n[1, 2],\n[\n3,\n4\n]\n];\n");
+  let second: String = formatOrFail(first.toStr());
+
+  Test::assertEq<str>(first.toStr(), "const MATRIX: u8[2][2] = [\n  [1, 2],\n  [\n    3,\n    4,\n  ],\n];\n");
+  Test::assertEq<str>(second.toStr(), first.toStr());
+}

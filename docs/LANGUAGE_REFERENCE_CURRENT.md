@@ -306,6 +306,18 @@ record Tables {
 }
 ```
 
+An immutable static field or a constant with a constant initializer has an address of its own: `&Table::ROWS` and `&DIGITS` point at one read-only global, the same in every function and valid for the whole program, so the pointer can be returned or stored. The global exists only when some function takes the address; reads still use the constant value directly. Writing through such a pointer, for example after a cast to `*mut`, is undefined.
+
+```ignis
+record Table {
+    static ROWS: u8[4] = [1, 2, 3, 4];
+}
+
+function rowAt(index: u64): *u8 {
+    return (&Table::ROWS as *u8) + index;
+}
+```
+
 For standard-library records, `::new()` is the canonical constructor naming
 convention. Some std records retain `::init()` aliases for compatibility only;
 new code should use forms such as `Vector::new<T>()`, `HashMap::new<K, V>()`,

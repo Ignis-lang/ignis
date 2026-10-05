@@ -281,6 +281,55 @@ export namespace LirLowering {
     return false;
   }
 
+  /// Whether `defId` names an immutable static field or module constant whose
+  /// initializer folded, so its address can be a read-only global seeded with
+  /// that value instead of a copy spilled into the current frame.
+  function isAddressableConstant(
+    defStore: &mut Analyzer::DefinitionStore,
+    constValues: &mut Analyzer::ConstEval::ConstValueMap,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let defsRef: &mut Analyzer::DefinitionStore = defStore;
+    let mut immutable: boolean = false;
+
+    if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defsRef.get(defId)) {
+      immutable = !variable.mutable && !variable.isExtern;
+    }
+
+    if (!immutable) {
+      return false;
+    }
+
+    if (Analyzer::ConstEval::findConstValue(constValues, defId.raw()).isSome()) {
+      return true;
+    }
+
+    return Analyzer::ConstEval::findConstAggregate(&*constValues, defId.raw()).isSome();
+  }
+
+  /// `&NAME` for an immutable static field or constant: the address of its
+  /// read-only global, which `collectStaticGlobals` emits.
+  function lowerConstantAddress(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+    nodeType: Analyzer::TypeId,
+    nodeSpan: SourceSpan,
+  ): Lir::Operand {
+    let mut pointerTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let pointerType: Analyzer::TypeId = pointerTypeStoreRef.pointer(nodeType);
+    let pointer: Lir::TempId = LirLowering::freshTemp(function_, pointerType, nodeSpan);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfGlobal(Lir::InstrAddrOfGlobal {
+      dest: pointer,
+      def: defId,
+      mutable: false,
+    }));
+
+    return Lir::Operand::Temp(pointer);
+  }
+
   /// The folded operand for a reference to a constant with an evaluated value.
   /// The analyzer keeps every integer as an `i64` bit pattern, so an unsigned
   /// constant is reinterpreted here, the way the oracle does, to keep C from
@@ -2348,6 +2397,36 @@ export namespace LirLowering {
     return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, hirId);
   }
 
+  /// The base of `&base[index]`: the array itself, except that an immutable
+  /// static or constant array is its read-only global, so the element address
+  /// does not point into a copy of the array spilled into this frame.
+  function lowerIndexPlaceBase(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    baseId: Hir::HirId,
+  ): Lir::Operand {
+    if (let Option::SOME(baseNode) = hirStore.get(baseId)) {
+      if (let Hir::HirKind::Variable(defId) = &baseNode.kind) {
+        let isLocal: boolean = LirLowering::lookupLocal(state, defId).isSome();
+        let mut isArray: boolean = false;
+
+        if (let Option::SOME(Analyzer::Type::FixedArray(_, _)) = typeStore.get(baseNode.typeId)) {
+          isArray = true;
+        }
+
+        if (isArray && !isLocal && LirLowering::isAddressableConstant(defStore, &mut state.constValues, defId)) {
+          return LirLowering::lowerConstantAddress(typeStore, function_, state, defId, baseNode.typeId, baseNode.span);
+        }
+      }
+    }
+
+    return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, baseId);
+  }
+
   function lowerPlacePtr(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2415,6 +2494,13 @@ export namespace LirLowering {
 
         return Lir::Operand::Temp(staticPtr);
       }
+
+      // An immutable static or constant is folded into its reads, so a spilled
+      // copy would hand out a pointer into this frame. Its address is its
+      // read-only global instead.
+      if (LirLowering::isAddressableConstant(defStore, &mut state.constValues, defId)) {
+        return LirLowering::lowerConstantAddress(typeStore, function_, state, defId, nodeType, nodeSpan);
+      }
     }
 
     if (let Hir::HirKind::Dereference(innerId) = &node.kind) {
@@ -2441,7 +2527,7 @@ export namespace LirLowering {
     // `&base[index]` is the element's own address, never a copy of it: a
     // spilled copy would hand the caller a pointer into this frame.
     if (let Hir::HirKind::Index(indexNode) = &node.kind) {
-      let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, indexNode.base);
+      let base: Lir::Operand = LirLowering::lowerIndexPlaceBase(defStore, typeStore, hirStore, dropSchedules, function_, state, indexNode.base);
       let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, indexNode.index);
 
       let mut elementPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
@@ -5474,15 +5560,19 @@ export namespace LirLowering {
     }
   }
 
-  /// Records one `GlobalInit` per `static mut` field, in definition order.
+  /// Records one `GlobalInit` per declaration with storage no function owns,
+  /// in definition order.
   ///
-  /// A `static mut` field is the only declaration with storage of its own that
-  /// no function owns: every read is a `GlobalRef` and every write goes through
-  /// `AddrOfGlobal`, so the emitter needs the constant its storage starts at.
-  function collectStaticMutGlobals(
+  /// A `static mut` field always has that storage: every read is a `GlobalRef`
+  /// and every write goes through `AddrOfGlobal`, so the emitter needs the
+  /// constant its storage starts at. An immutable static field or constant has
+  /// it only when some function takes its address, which is a read-only
+  /// `AddrOfGlobal`; its reads keep folding.
+  function collectStaticGlobals(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     constValues: &Analyzer::ConstEval::ConstValueMap,
+    addressedConstants: &HashSet<u32>,
     program: &mut Lir::LirProgram,
   ): void {
     let mut values: Analyzer::ConstEval::ConstValueMap = LirLowering::copyConstValueMap(constValues);
@@ -5492,15 +5582,16 @@ export namespace LirLowering {
       let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
       index += 1;
 
+      let raw: u32 = defId.raw();
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
-      let mut isStaticMut: boolean = false;
+      let mut hasStorage: boolean = false;
 
       if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
-        isStaticMut = variable.mutable;
+        hasStorage = variable.mutable || addressedConstants.contains(&raw);
         declaredType = variable.declaredType;
       }
 
-      if (!isStaticMut) {
+      if (!hasStorage) {
         continue;
       }
 
@@ -5520,6 +5611,47 @@ export namespace LirLowering {
         parts: parts,
       });
     }
+  }
+
+  /// Raw ids of the definitions some function takes a read-only global address
+  /// of: the immutable static fields and constants that need storage.
+  function readOnlyGlobalDefRaws(program: &Lir::LirProgram): HashSet<u32> {
+    let mut raws: HashSet<u32> = HashSet::new<u32>();
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      functionIndex += 1;
+
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < function_.blocks.length()) {
+        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        blockIndex += 1;
+
+        let mut instrIndex: u64 = 0;
+
+        while (instrIndex < block.instructions.length()) {
+          if (let Option::SOME(Lir::Instr::AddrOfGlobal(node)) = block.instructions.get(instrIndex)) {
+            if (!node.mutable) {
+              raws.insert(node.def.raw());
+            }
+          }
+
+          instrIndex += 1;
+        }
+      }
+    }
+
+    return raws;
   }
 
   /// The LIR form of a folded array or record initializer.
@@ -5667,7 +5799,8 @@ export namespace LirLowering {
       program.entryPoint = Option::SOME(entryDef);
     }
 
-    LirLowering::collectStaticMutGlobals(defStore, typeStore, constValues, &mut program);
+    let addressedConstants: HashSet<u32> = LirLowering::readOnlyGlobalDefRaws(&program);
+    LirLowering::collectStaticGlobals(defStore, typeStore, constValues, &addressedConstants, &mut program);
 
     return LirLowering::LowerModuleResult {
       program: program,

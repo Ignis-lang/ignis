@@ -263,7 +263,7 @@ function readStatus(address: *mut u32): u32 {
 }
 ```
 
-Same rules as `@read`. The load is emitted as C `*(volatile T*)(ptr)`, so the C compiler never elides it, merges it with another access, or reorders it across other volatile accesses. Use it for memory-mapped device registers and memory shared with code the compiler cannot see.
+Same rules as `@read`. The load is emitted as C `*(T volatile*)(ptr)`, with the qualifier after the element type so it applies to the accessed object for every `T`: for a pointer element it is `*(struct S* volatile*)(ptr)`, a volatile load of the pointer itself. The C compiler never elides it, merges it with another access, or reorders it across other volatile accesses. Use it for memory-mapped device registers and memory shared with code the compiler cannot see.
 
 ---
 
@@ -283,7 +283,7 @@ function writeControl(address: *mut u32, value: u32): void {
 }
 ```
 
-Same rules as `@write`. The store is emitted as C `*(volatile T*)(ptr) = value`, with the same guarantees as `@readVolatile`.
+Same rules as `@write`. The store is emitted as C `*(T volatile*)(ptr) = value`, with the same guarantees as `@readVolatile`.
 
 ---
 

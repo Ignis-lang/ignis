@@ -4528,6 +4528,40 @@ function buildCompilesNeverCallsAndVoidFunctionValuesInAFreestandingObject(): vo
   Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/call_shapes", "freestanding-call-shapes", "freestanding-call-shapes"));
 }
 
+/// A volatile read of a pointer slot that nothing in the unit writes stays a
+/// load at `-O2`. The fixture compiles with `-S`, so its object is assembly:
+/// had the read folded to the slot's `null` initializer, the unused static
+/// would be gone from it.
+@test
+function buildKeepsAVolatileReadOfAnUnwrittenPointerSlotAtO2(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/freestanding/volatile_pointer_slot");
+  let scratch: Path::PathBuf = checkStdScratchDir("freestanding-volatile-pointer-slot");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("freestanding-volatile-pointer-slot");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+
+  let Result::OK(assembly) = Fs::readToString(&artifacts.object) else {
+    Test::fail();
+    return;
+  };
+
+  let slot: String = String::create("handoffTarget_");
+  Test::assert(assembly.contains(&slot));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
 /// The error messages a freestanding fixture project reports when it is
 /// compiled quietly, up to and including C emission.
 function freestandingFixtureErrors(relativeRoot: str): Vector<String> {

@@ -33,6 +33,7 @@ This document defines the first canonical formatter policy shipped by `ignis fmt
 - Empty high-level blocks (`namespace`, `record`, `enum`, `trait`, `extern`) canonicalize to inline `{}`.
 - Callable parameter lists use layout-driven trailing commas: single-line canonical output drops the final comma, multiline canonical output adds the final comma.
 - Record initializers use the same rule: single-line canonical output drops the final comma, multiline canonical output adds the final comma.
+- Array literals that initialize a `let`, `const`, `return` or static field use the same rule. One written on a single line stays inline when it fits `line_width` and otherwise wraps one element per line. One written over several lines keeps its rows: elements that started on the same source line stay on one line, reindented, and every row ends with a comma, the last one included. An array literal anywhere else that the source wrote over several lines is kept as written, like a multiline call or record initializer.
 - Import and re-export item lists wrap when the flat form exceeds `line_width`; multiline canonical output adds the final comma before `from`.
 - Single pipe expressions may stay inline when they fit `line_width`; pipe chains with 2+ `|>` always format multiline.
 - There is still no shipped general-purpose wrapping contract for every long expression shape. When the formatter cannot prove a rewrite is safe, it fails rather than guessing.
@@ -48,6 +49,15 @@ formats as:
 
 ```ignis
 import TomlArray, TomlValue from "./value";
+```
+
+Multiline array example, rows kept as written:
+
+```ignis
+const GRID: u8[6] = [
+  1, 2, 3,
+  4, 5, 6,
+];
 ```
 
 Long import example with `line_width = 80`:
@@ -101,7 +111,7 @@ Example:
 - `ignis fmt` writes a file only when the formatted output differs.
 - The formatter reparses and revalidates formatted output before accepting it.
 - If lexing, modeling, or safety validation fails, the command exits with an error and does not rewrite the file.
-- Safety validation compares token shape, comment ownership, and directive structure, but treats optional trailing commas before `)`, `}`, and `from` as layout-normalized equivalents.
+- Safety validation compares token shape, comment ownership, and directive structure, but treats optional trailing commas before `)`, `]`, `}`, and `from` as layout-normalized equivalents.
 - Safety validation also treats consecutive same-path import/re-export statements and their grouped canonical form as equivalent.
 - Formatter failures are formatter bugs or invalid input, not lint diagnostics. Valid source is expected to format successfully.
 
@@ -125,7 +135,7 @@ Example:
 - Type: integer.
 - Accepted range: `40..=160`.
 - Default: `100`.
-- Controls layout-aware wrapping for supported constructs, including callable signatures, record initializers, import/re-export item lists, and single pipe expressions.
+- Controls layout-aware wrapping for supported constructs, including callable signatures, record initializers, array literal initializers, import/re-export item lists, and single pipe expressions.
 
 ### `use_tabs`
 

@@ -1,0 +1,21 @@
+// A loader fills `handoffTarget` before this code runs, so nothing in the
+// unit ever writes it. A volatile read of the slot has to stay a load at -O2
+// instead of folding to the `null` initializer. The project compiles with
+// `-S`, so its object is assembly text the test can search.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  return;
+}
+
+record Target {
+  public value: u64;
+}
+
+record Handoff {
+  static mut handoffTarget: *mut Target = null;
+}
+
+@externName("freestanding_handoff_target")
+function handoffTarget(): *mut Target {
+  return @readVolatile<*mut Target>(&mut Handoff::handoffTarget as *mut *mut Target);
+}
