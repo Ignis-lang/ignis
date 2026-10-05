@@ -59,7 +59,8 @@ typedef void* null;
 | `*mut T` | `T*` |
 | `&T` | `T*` |
 | `&mut T` | `T*` |
-| `T[N]` | `T[N]` (stack allocated) |
+| `T[N]` | `T[N]` (stack allocated; a record field of this type is stored in the record) |
+| `*T[N]`, `&T[N]` | `T*` (the address of the first element) |
 | `(T1, T2, ...)` | `void*` |
 | `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries and in C-layout record fields |
 
@@ -396,6 +397,13 @@ extern u32 platform_raise(u32);
 
 Because those prototypes use the emitter's own typedefs, a freestanding unit passes a C function pointer argument as it is, without the `void*` cast.
 
+A freestanding unit also declares every extern constant (`const NAME: T;` in an `extern` block) with its C type, a fixed array as a C array:
+
+```c
+extern u64 kernel_end;
+extern u8 font_data[4096];
+```
+
 ### C Function Pointers
 
 An Ignis function value is a closure struct: a call pointer, a drop pointer and an environment. C cannot call that, so a function-typed parameter or result of an extern function is a plain C function pointer instead. Each signature used that way gets one typedef, named after its type id:
@@ -568,20 +576,22 @@ target = (target_type)(uintptr_t)(int_val);
 
 ### BitCast
 
-`@bitCast<T>(value)` uses `memcpy` with a compile-time size check:
+`@bitCast<T>(value)` uses `__builtin_memcpy` with a compile-time size check:
 
 ```c
 _Static_assert(sizeof(target_type) == sizeof(source_type), "bitCast: size mismatch");
-memcpy(&dest, &source, sizeof(target_type));
+__builtin_memcpy(&dest, &source, sizeof(target_type));
 ```
 
 ### Vector Assignment
 
-Fixed-size array assignment uses `memcpy`:
+Fixed-size array assignment uses `__builtin_memcpy`:
 
 ```c
-memcpy(dest, source, sizeof(element_type) * N);
+__builtin_memcpy(dest, source, N * sizeof(element_type));
 ```
+
+The emitter's copies use the compiler builtin rather than `memcpy`, so a freestanding unit, which has no `<string.h>`, needs no declaration for them. The C compiler may still lower a builtin copy to a call to `memcpy`, so a freestanding program links one, as it does for the copies C itself generates.
 
 ## C File Emission Order
 

@@ -86,6 +86,9 @@ of one C symbol must agree on their C signature, or the C compiler reports
 conflicting types. A hosted build declares no extern function and relies on its
 headers.
 
+A freestanding unit also declares every extern constant itself, as
+`extern <type> <name>;`, for the same reason.
+
 The services a hosted build takes from libc come from the program's own
 runtime handlers instead. Each is a function marked with an attribute, at most
 one of each kind per program, and each attribute is an error in a hosted build:

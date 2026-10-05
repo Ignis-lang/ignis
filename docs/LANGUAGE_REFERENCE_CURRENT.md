@@ -297,6 +297,15 @@ record Config {
 let max = Config::MAX_SIZE;
 ```
 
+A `static mut` field is one global storage location, so its initializer must be a constant expression: a literal, a constant, an expression of those, or an array or record literal whose elements and fields are constant expressions. Any other initializer is an error (A0230).
+
+```ignis
+record Tables {
+    static mut IDS: u64[3] = [1, 2, 3];
+    static mut ORIGIN: Point = Point { x: 0, y: 0 };
+}
+```
+
 For standard-library records, `::new()` is the canonical constructor naming
 convention. Some std records retain `::init()` aliases for compatibility only;
 new code should use forms such as `Vector::new<T>()`, `HashMap::new<K, V>()`,

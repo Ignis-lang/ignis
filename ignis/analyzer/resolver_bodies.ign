@@ -3583,6 +3583,97 @@ export namespace Analyzer {
       Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.value);
     }
 
+    /// Walk the initializer of every static field a record or enum declares,
+    /// each with the field's own `DefinitionId` as `currentFunction`, like a
+    /// constant initializer.
+    ///
+    /// `memberPatternIds` is walked with the binder's own static-field filter,
+    /// so the k-th static field it accepts is the k-th id the binder pushed
+    /// into the owner's `staticFields`.
+    function walkStaticFieldInits(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      ownerItemId: Ast::ItemId,
+      memberPatternIds: &Vector<Ast::PatternId>,
+      enumMembers: boolean,
+    ): void {
+      let Option::SOME(ownerDefId) = Analyzer::ResolverBodies::lookupDef(pass1, pass2, ownerItemId.raw()) else {
+        return;
+      };
+
+      let mut staticFieldDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      match (defStore.get(ownerDefId)) {
+        Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+          staticFieldDefs = Analyzer::Resolver::copyDefinitionIdVector(&recordDef.staticFields);
+        },
+        Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+          staticFieldDefs = Analyzer::Resolver::copyDefinitionIdVector(&enumDef.staticFields);
+        },
+        _ -> {
+          return;
+        },
+      };
+
+      let mut patternIndex: u64 = 0;
+      let mut staticIndex: u64 = 0;
+
+      while (patternIndex < memberPatternIds.length()) {
+        let Option::SOME(patternId) = memberPatternIds.get(patternIndex) else {
+          patternIndex += 1;
+          continue;
+        };
+
+        patternIndex += 1;
+
+        let isStatic: boolean = match (enumMembers) {
+          true -> Analyzer::Binder::variantPatternIsStaticField(module, *patternId),
+          false -> Analyzer::Binder::fieldPatternIsStatic(module, *patternId),
+        };
+
+        if (!isStatic) {
+          continue;
+        }
+
+        let fieldDefOpt: Option<Analyzer::DefinitionId> = match (staticFieldDefs.get(staticIndex)) {
+          Option::SOME(value) -> Option::SOME(*value),
+          Option::NONE -> Option::NONE,
+        };
+
+        staticIndex += 1;
+
+        let Option::SOME(fieldDefId) = fieldDefOpt else {
+          continue;
+        };
+
+        let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*patternId) else {
+          continue;
+        };
+
+        let Option::SOME(initializer) = binding.initializer else {
+          continue;
+        };
+
+        let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+        stateRef.currentFunction = fieldDefId;
+        stateRef.localStack = Analyzer::ResolverBodies::LocalStack {
+          scopeStarts: Vector::new<u64>(),
+          names: Vector::new<Analyzer::SymbolId>(),
+          locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+        };
+        stateRef.typeParamScope = Analyzer::Resolver::TypeParamScope {
+          syms: Vector::new<Analyzer::SymbolId>(),
+          typeIds: Vector::new<Analyzer::TypeId>(),
+        };
+
+        Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, initializer);
+      }
+    }
+
     /// Iterate an owner's method ItemIds and walk each method body.
     ///
     /// Owners pass their own `genericParameters` so method bodies inherit the
@@ -3773,6 +3864,7 @@ export namespace Analyzer {
           }
         },
         Ast::Item::Node::Record(r) -> {
+          Analyzer::ResolverBodies::walkStaticFieldInits(state, defStore, symbols, module, pass1, pass2, itemId, &r.fields, false);
           Analyzer::ResolverBodies::walkOwnerMethodsForBody(
             state,
             defStore,
@@ -3786,6 +3878,7 @@ export namespace Analyzer {
           );
         },
         Ast::Item::Node::Enum(e) -> {
+          Analyzer::ResolverBodies::walkStaticFieldInits(state, defStore, symbols, module, pass1, pass2, itemId, &e.variants, true);
           Analyzer::ResolverBodies::walkOwnerMethodsForBody(
             state,
             defStore,

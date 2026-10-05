@@ -126,10 +126,7 @@ function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
 function collectProgramConstValues(
   records: &Vector<Analyzer::ModuleAnalysisRecord>,
 ): Analyzer::ConstEval::ConstValueMap {
-  let mut merged: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
-    defIdRaws: Vector::new<u32>(),
-    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
-  };
+  let mut merged: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap::empty();
   let mut recordIndex: u64 = 0;
 
   while (recordIndex < records.length()) {
@@ -138,24 +135,7 @@ function collectProgramConstValues(
       continue;
     };
 
-    let moduleValues: &Analyzer::ConstEval::ConstValueMap = &analysisRecord.output.constValues.values;
-    let mut valueIndex: u64 = 0;
-
-    while (valueIndex < moduleValues.defIdRaws.length()) {
-      let Option::SOME(defIdRaw) = moduleValues.defIdRaws.get(valueIndex) else {
-        valueIndex += 1;
-        continue;
-      };
-      let Option::SOME(value) = moduleValues.values.get(valueIndex) else {
-        valueIndex += 1;
-        continue;
-      };
-
-      merged.defIdRaws.push(*defIdRaw);
-      merged.values.push(Analyzer::ConstEval::copyConstValue(value));
-      valueIndex += 1;
-    }
-
+    Analyzer::ConstEval::appendConstValueMap(&mut merged, &analysisRecord.output.constValues.values);
     recordIndex += 1;
   }
 
@@ -4493,6 +4473,59 @@ function buildPassesTheProjectRelativePanicFileToTheRuntimeHandler(): void {
   Test::assert(!source.contains(&absoluteRoot));
 
   let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// Builds the freestanding fixture project at `relativeRoot` into a scratch
+/// directory and answers whether the build succeeded and the C compiler wrote
+/// the object of the package named `packageName`.
+function freestandingFixtureBuildsObject(
+  relativeRoot: str,
+  packageName: str,
+  scratchLabel: str
+): boolean {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return false;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join(relativeRoot);
+  let scratch: Path::PathBuf = checkStdScratchDir(scratchLabel);
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  let status: i32 = runCompile(&projectRoot, &options, false, true);
+
+  let name: String = String::create(packageName);
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let built: boolean = status == 0 && Fs::exists(artifacts.object.asStr());
+
+  let _removed = Fs::removeDirAll(&scratch);
+
+  return built;
+}
+
+/// The copies the emitter writes itself, for an array literal stored into its
+/// local and for a bit cast, compile in a freestanding unit, which has no
+/// `<string.h>` to declare `memcpy`.
+@test
+function buildCompilesTheEmittersMemoryCopiesInAFreestandingObject(): void {
+  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/memory_intrinsics", "freestanding-memory-intrinsics", "freestanding-memory"));
+}
+
+/// A freestanding unit declares the extern constants it reads, since no
+/// header does it for them.
+@test
+function buildDeclaresExternConstantsInAFreestandingObject(): void {
+  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/extern_const", "freestanding-extern-const", "freestanding-extern-const"));
+}
+
+/// A statement call to a `never` function and a named `void` function passed
+/// as a function value compile in a freestanding unit.
+@test
+function buildCompilesNeverCallsAndVoidFunctionValuesInAFreestandingObject(): void {
+  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/call_shapes", "freestanding-call-shapes", "freestanding-call-shapes"));
 }
 
 /// The error messages a freestanding fixture project reports when it is

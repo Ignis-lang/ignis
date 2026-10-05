@@ -153,10 +153,11 @@ export namespace ParserShared {
     return lexeme.substringBytes(1, lexeme.length() - 1);
   }
 
-  /// Decodes the escape sequences of a string or template chunk, mirroring
-  /// the host lexer's table: an unknown escape drops both the backslash and
-  /// the character after it. Template-only escapes (`` \` `` and `\$`)
-  /// decode the same way in a plain string, where they cannot occur.
+  /// Decodes the escape sequences of a string or template chunk. `\u{...}`
+  /// decodes to the UTF-8 bytes of its scalar. The lexer has already reported
+  /// any other escape, which decodes to nothing. Template-only escapes
+  /// (`` \` `` and `\$`) decode the same way in a plain string, where the
+  /// lexer rejects them.
   function decodeEscapes(text: String): String {
     let mut result: String = String::create("");
     let mut index: u64 = 0;
@@ -187,12 +188,37 @@ export namespace ParserShared {
         result.pushByte(9);
       } else if (escaped == '0' as u8) {
         result.pushByte(0);
+      } else if (escaped == 'a' as u8) {
+        result.pushByte(7);
       } else if (escaped == 'b' as u8) {
         result.pushByte(8);
       } else if (escaped == 'f' as u8) {
         result.pushByte(12);
-      } else if (escaped == '"' as u8 || escaped == '\\' as u8 || escaped == '`' as u8 || escaped == '$' as u8) {
+      } else if (escaped == 'v' as u8) {
+        result.pushByte(11);
+      } else if (escaped == '"' as u8 || escaped == '\'' as u8 || escaped == '\\' as u8 || escaped == '`' as u8 || escaped == '$' as u8) {
         result.pushByte(escaped);
+      } else if (escaped == 'u' as u8) {
+        let mut closeIndex: u64 = index + 1;
+
+        while (closeIndex < text.length()) {
+          if (let Option::SOME(current) = text.byteAt(closeIndex)) {
+            if (current == '}' as u8) {
+              break;
+            }
+          }
+
+          closeIndex += 1;
+        }
+
+        if (closeIndex < text.length()) {
+          let payload: String = text.substringBytes(index + 1, closeIndex + 1);
+
+          if (let Option::SOME(scalar) = ParserShared::parseUnicodeEscapeChar(&payload, 0)) {
+            result.pushChar(scalar);
+            index = closeIndex;
+          }
+        }
       }
 
       index += 1;
@@ -387,8 +413,16 @@ export namespace ParserShared {
       return Option::SOME('\0');
     }
 
+    if (escape == 'a') {
+      return Option::SOME((7 as u32) as char);
+    }
+
     if (escape == 'b') {
       return Option::SOME('\b');
+    }
+
+    if (escape == 'v') {
+      return Option::SOME((11 as u32) as char);
     }
 
     if (escape == 'f') {

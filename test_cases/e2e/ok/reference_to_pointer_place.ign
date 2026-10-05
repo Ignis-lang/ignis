@@ -1,0 +1,31 @@
+// A reference to a place that holds a pointer is the address of that place,
+// not the pointer stored in it: writing through it retargets the place.
+record Holder {
+  public target: *mut i32;
+}
+
+function retarget(slot: *mut *mut i32, target: *mut i32): void {
+  *slot = target;
+}
+
+function readThrough(slot: &*mut i32): i32 {
+  return **slot;
+}
+
+function main(): i32 {
+  let mut first: i32 = 1;
+  let mut second: i32 = 20;
+  let mut third: i32 = 100;
+
+  let mut local: *mut i32 = &mut first as *mut i32;
+  retarget(&mut local as *mut *mut i32, &mut second as *mut i32);
+
+  let mut holder: Holder = Holder { target: &mut first as *mut i32 };
+  retarget(&mut holder.target as *mut *mut i32, &mut third as *mut i32);
+
+  let mut other: Holder = Holder { target: &mut first as *mut i32 };
+  let pointer: *mut Holder = &mut other as *mut Holder;
+  retarget(&mut (*pointer).target as *mut *mut i32, &mut second as *mut i32);
+
+  return *local + *holder.target + *other.target + readThrough(&local);
+}

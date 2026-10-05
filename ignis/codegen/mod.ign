@@ -432,6 +432,12 @@ export namespace CodegenC {
     if (shape == 1) {
       let inner: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, pointee);
 
+      // A fixed array is addressed through its first element, the pointer its
+      // name decays to, so a pointer to one has the array's own spelling.
+      if (CodegenC::fixedArrayShape(typeStore, pointee).isSome()) {
+        return inner;
+      }
+
       return `${inner.toStr()}*`;
     }
 
@@ -2436,8 +2442,8 @@ export namespace CodegenC {
 
         if (let Option::SOME(data) = function_.locals.get(node.dest.raw() as u64)) {
           if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, data.ty)) {
-            let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
-            line = `    memcpy(l${node.dest.raw()}, ${value.toStr()}, ${array.size} * sizeof(${elementText.toStr()}));\n`;
+            let local: String = `l${node.dest.raw()}`;
+            line = CodegenC::arrayCopyLine(defStore, typeStore, symbols, closures, &local, &value, &array);
           }
         }
 
@@ -2446,14 +2452,29 @@ export namespace CodegenC {
       },
       Lir::Instr::LoadPtr(node) -> {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
-        let line: String = `    t${node.dest.raw()} = *${pointer.toStr()};\n`;
+        let mut line: String = `    t${node.dest.raw()} = *${pointer.toStr()};\n`;
+
+        // An array value is the address of its first element, which is what
+        // the pointer to the array already holds.
+        if (let Option::SOME(destination) = function_.temps.get(node.dest.raw() as u64)) {
+          if (CodegenC::fixedArrayShape(typeStore, destination.ty).isSome()) {
+            line = `    t${node.dest.raw()} = ${pointer.toStr()};\n`;
+          }
+        }
+
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
       Lir::Instr::StorePtr(node) -> {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
-        let line: String = `    *${pointer.toStr()} = ${value.toStr()};\n`;
+        let mut line: String = `    *${pointer.toStr()} = ${value.toStr()};\n`;
+
+        if (let Option::SOME(valueType) = CodegenC::operandType(function_, &node.value)) {
+          if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, valueType)) {
+            line = CodegenC::arrayCopyLine(defStore, typeStore, symbols, closures, &pointer, &value, &array);
+          }
+        }
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2517,7 +2538,15 @@ export namespace CodegenC {
       },
       Lir::Instr::AddrOfGlobal(node) -> {
         let name: String = CodegenC::mangledName(defStore, symbols, node.def);
-        let line: String = `    t${node.dest.raw()} = &${name.toStr()};\n`;
+        let mut line: String = `    t${node.dest.raw()} = &${name.toStr()};\n`;
+
+        // An array global's name already decays to the pointer, as an array
+        // local's does.
+        if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(node.def)) {
+          if (CodegenC::fixedArrayShape(typeStore, variable.declaredType).isSome()) {
+            line = `    t${node.dest.raw()} = ${name.toStr()};\n`;
+          }
+        }
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2532,11 +2561,12 @@ export namespace CodegenC {
           member = CodegenC::fieldMemberForType(defStore, typeStore, symbols, baseType, node.fieldIndex as u64);
         }
 
-        let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->${member.toStr()});\n`;
+        let addressOf: str = CodegenC::addressOperator(typeStore, function_, node.dest);
+        let mut line: String = `    t${node.dest.raw()} = ${addressOf}((${base.toStr()})->${member.toStr()});\n`;
 
         if (CodegenC::operandIsEnvironmentPointer(typeStore, function_, &node.base)) {
           if (let Option::SOME(envName) = CodegenC::currentEnvName(closures, function_.defId)) {
-            line = `    t${node.dest.raw()} = &(((struct ${envName.toStr()}*)${base.toStr()})->field_${node.fieldIndex});\n`;
+            line = `    t${node.dest.raw()} = ${addressOf}(((struct ${envName.toStr()}*)${base.toStr()})->field_${node.fieldIndex});\n`;
           }
         }
 
@@ -2594,7 +2624,8 @@ export namespace CodegenC {
           access = `(${source.toStr()})->`;
         }
 
-        let line: String = `    t${node.dest.raw()} = &(${access.toStr()}payload.variant_${node.variantTag}.field_${node.fieldIndex});\n`;
+        let addressOf: str = CodegenC::addressOperator(typeStore, function_, node.dest);
+        let line: String = `    t${node.dest.raw()} = ${addressOf}(${access.toStr()}payload.variant_${node.variantTag}.field_${node.fieldIndex});\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2635,7 +2666,14 @@ export namespace CodegenC {
           if (let Option::SOME(field) = node.fields.get(fieldIndex)) {
             let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &field.value);
             let member: String = CodegenC::fieldMemberForType(defStore, typeStore, symbols, node.recordType, field.fieldIndex as u64);
-            let line: String = `    (${destination.toStr()})->${member.toStr()} = ${value.toStr()};\n`;
+            let mut line: String = `    (${destination.toStr()})->${member.toStr()} = ${value.toStr()};\n`;
+
+            if (let Option::SOME(valueType) = CodegenC::operandType(function_, &field.value)) {
+              if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, valueType)) {
+                let target: String = `(${destination.toStr()})->${member.toStr()}`;
+                line = CodegenC::arrayCopyLine(defStore, typeStore, symbols, closures, &target, &value, &array);
+              }
+            }
             let mut fieldRef: &mut String = output;
             fieldRef.pushStr(line.toStr());
           }
@@ -2748,7 +2786,7 @@ export namespace CodegenC {
         // cannot resolve yet, so the copy is sized by the destination alone.
         let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.source);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.targetType);
-        let line: String = `    memcpy(&t${node.dest.raw()}, &${source.toStr()}, sizeof(${target.toStr()}));\n`;
+        let line: String = `    __builtin_memcpy(&t${node.dest.raw()}, &${source.toStr()}, sizeof(${target.toStr()}));\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -3362,9 +3400,17 @@ export namespace CodegenC {
         if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
           if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
             let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, defId, fieldDef.fieldType);
-            let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, storageType);
+            let mut fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, storageType);
             let fieldAttributes: String = CodegenC::fieldLayoutAttributes(fieldDef.alignment);
-            let member: String = CodegenC::recordFieldMember(defStore, symbols, defId, fieldDef.index as u64);
+            let mut member: String = CodegenC::recordFieldMember(defStore, symbols, defId, fieldDef.index as u64);
+
+            // A fixed array field is stored in the record, as C lays out
+            // `T name[N]`.
+            if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, storageType)) {
+              fieldType = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+              member = `${member.toStr()}[${array.size}]`;
+            }
+
             let line: String = `    ${fieldType.toStr()} ${member.toStr()}${fieldAttributes.toStr()};\n`;
 
             let mut fieldRef: &mut String = output;
@@ -3963,6 +4009,62 @@ export namespace CodegenC {
     return Option::NONE;
   }
 
+  /// The operator that takes a member's address into temp `dest`. A pointer
+  /// to a fixed array is spelled as the element pointer, which the member
+  /// already is: an array member decays to it, and an array held by pointer
+  /// stores it.
+  function addressOperator(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    dest: Lir::TempId,
+  ): str {
+    let Option::SOME(temp) = function_.temps.get(dest.raw() as u64) else {
+      return "&";
+    };
+
+    let mut pointee: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(temp.ty)) {
+      match (typeNode) {
+        Analyzer::Type::Pointer(pointerType) -> {
+          pointee = Option::SOME(pointerType.pointee);
+        },
+        Analyzer::Type::Reference(referenceType) -> {
+          pointee = Option::SOME(referenceType.referent);
+        },
+        _ -> {},
+      };
+    }
+
+    if (let Option::SOME(pointeeType) = pointee) {
+      if (CodegenC::fixedArrayShape(typeStore, pointeeType).isSome()) {
+        return "";
+      }
+    }
+
+    return "&";
+  }
+
+  /// A statement copying the `array.size` elements at `source` to the array
+  /// at `destination`.
+  ///
+  /// The emitter's own copies call `__builtin_memcpy`, which needs no
+  /// declaration: a freestanding unit has no `<string.h>`, and declaring
+  /// `memcpy` there would conflict with a program that defines it itself.
+  function arrayCopyLine(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    destination: &String,
+    source: &String,
+    array: &CodegenC::FixedArrayShape,
+  ): String {
+    let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+
+    return `    __builtin_memcpy(${destination.toStr()}, ${source.toStr()}, ${array.size} * sizeof(${elementText.toStr()}));\n`;
+  }
+
   function isVoidType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
     let Option::SOME(typeNode) = typeStore.get(typeId) else {
       return false;
@@ -4359,6 +4461,67 @@ export namespace CodegenC {
       }
 
       index += 1;
+    }
+  }
+
+  /// One `extern` declaration per extern constant (`const NAME: T;` inside an
+  /// `extern` block), for a freestanding unit, which has no header to declare
+  /// them. Each is named by its C symbol and declared with its Ignis type, a
+  /// fixed array as a C array. Two declarations of one symbol with the same
+  /// type share a line; with different types, C reports the conflict.
+  function emitExternConstDeclarations(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    let mut emitted: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+      index += 1;
+
+      let mut isExtern: boolean = false;
+      let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
+        isExtern = variable.isExtern;
+        declaredType = variable.declaredType;
+      }
+
+      if (!isExtern) {
+        continue;
+      }
+
+      let name: String = CodegenC::mangledName(defStore, symbols, defId);
+      let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
+      let mut line: String = `extern ${typeText.toStr()} ${name.toStr()};\n`;
+
+      if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, declaredType)) {
+        let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+        line = `extern ${elementText.toStr()} ${name.toStr()}[${array.size}];\n`;
+      }
+
+      let mut duplicate: boolean = false;
+      let mut emittedIndex: u64 = 0;
+
+      while (emittedIndex < emitted.length()) {
+        if (let Option::SOME(previous) = emitted.get(emittedIndex)) {
+          if (previous.equals(line.toStr())) {
+            duplicate = true;
+          }
+        }
+
+        emittedIndex += 1;
+      }
+
+      if (!duplicate) {
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+        emitted.push(line.clone());
+      }
     }
   }
 
@@ -4946,14 +5109,75 @@ export namespace CodegenC {
         declaredType = variable.declaredType;
       }
 
-      let cType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
       let name: String = CodegenC::mangledName(defStore, symbols, global.defId);
-      let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &global.value);
-      let line: String = `static ${cType.toStr()} ${name.toStr()} = ${value.toStr()};\n`;
+      let mut declarator: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
+      declarator.pushStr(" ");
+      declarator.pushStr(name.toStr());
+
+      // A fixed array global is the array itself, declared like an array local.
+      if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, declaredType)) {
+        let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+        declarator = `${elementText.toStr()} ${name.toStr()}[${array.size}]`;
+      }
+
+      let value: String = CodegenC::formatGlobalInitializer(defStore, typeStore, symbols, closures, &global.parts);
+      let line: String = `static ${declarator.toStr()} = ${value.toStr()};\n`;
 
       outputRef.pushStr(line.toStr());
       index += 1;
     }
+  }
+
+  /// The C initializer of a global: a scalar is its constant, an array or
+  /// record a braced list whose record fields are designated by member name,
+  /// so the C order of the members does not matter.
+  function formatGlobalInitializer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    parts: &Vector<Lir::GlobalInitPart>,
+  ): String {
+    let mut text: String = String::new();
+    let mut afterItem: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < parts.length()) {
+      let Option::SOME(part) = parts.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      index += 1;
+
+      let separator: str = afterItem ? ", " : "";
+
+      match (part) {
+        Lir::GlobalInitPart::Open -> {
+          text.pushStr(separator);
+          text.pushStr("{");
+          afterItem = false;
+        },
+        Lir::GlobalInitPart::Close -> {
+          text.pushStr("}");
+          afterItem = true;
+        },
+        Lir::GlobalInitPart::Field(owner, fieldIndex) -> {
+          let member: String = CodegenC::recordFieldMember(defStore, symbols, owner, fieldIndex as u64);
+          text.pushStr(separator);
+          text.pushStr(`.${member.toStr()} = `.toStr());
+          afterItem = false;
+        },
+        Lir::GlobalInitPart::Value(operand) -> {
+          let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &operand);
+          text.pushStr(separator);
+          text.pushStr(value.toStr());
+          afterItem = true;
+        },
+      };
+    }
+
+    return text;
   }
 
   /// Emits the whole program as one C translation unit.
@@ -5056,6 +5280,10 @@ export namespace CodegenC {
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
 
     CodegenC::emitStaticMutGlobals(defStore, typeStore, symbols, &mut source, closures, program);
+
+    if (hooks.freestanding) {
+      CodegenC::emitExternConstDeclarations(defStore, typeStore, symbols, &mut source, closures);
+    }
 
     source.pushStr("\n// Function prototypes\n");
 
@@ -5554,11 +5782,28 @@ export namespace CodegenC {
       return Option::NONE;
     };
 
-    return match (typeNode) {
-      Analyzer::Type::Record(recordDef) -> Option::SOME(recordDef),
-      Analyzer::Type::Enum(enumDef) -> Option::SOME(enumDef),
-      _ -> Option::NONE,
+    let mut element: Option<Analyzer::TypeId> = Option::NONE;
+    let mut direct: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (typeNode) {
+      Analyzer::Type::Record(recordDef) -> {
+        direct = Option::SOME(recordDef);
+      },
+      Analyzer::Type::Enum(enumDef) -> {
+        direct = Option::SOME(enumDef);
+      },
+      Analyzer::Type::FixedArray(elementType, _) -> {
+        element = Option::SOME(elementType);
+      },
+      _ -> {},
     };
+
+    // An array field holds its elements in place, so their type comes first.
+    if (let Option::SOME(elementType) = element) {
+      return CodegenC::byValueDependency(typeStore, elementType);
+    }
+
+    return direct;
   }
 
   function visitTypeDef(
