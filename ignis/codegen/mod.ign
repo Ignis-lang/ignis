@@ -2542,15 +2542,24 @@ export namespace CodegenC {
       },
       Lir::Instr::AddrOfGlobal(node) -> {
         let name: String = CodegenC::mangledName(defStore, symbols, node.def);
-        let mut line: String = `    t${node.dest.raw()} = &${name.toStr()};\n`;
+        let mut address: String = `&${name.toStr()}`;
 
         // An array global's name already decays to the pointer, as an array
         // local's does.
         if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(node.def)) {
           if (CodegenC::fixedArrayShape(typeStore, variable.declaredType).isSome()) {
-            line = `    t${node.dest.raw()} = ${name.toStr()};\n`;
+            address = name.clone();
           }
         }
+
+        // A read-only global is `const` in C while the temporary holding its
+        // address is not, so the qualifier is cast away; nothing writes
+        // through that address, since the analyzer rejects writes to it.
+        if (!node.mutable) {
+          address = `(void*)${address.toStr()}`;
+        }
+
+        let line: String = `    t${node.dest.raw()} = ${address.toStr()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -5082,9 +5091,11 @@ export namespace CodegenC {
   /// references by name, which today is the `@test` functions the harness unit
   /// dispatches to. Everything else the unit defines stays `static`.
   /// One C global per `static mut` field, seeded with its constant
-  /// initializer. Every other static field folds into its uses and needs no
-  /// storage, so nothing else reaches this section.
-  function emitStaticMutGlobals(
+  /// initializer, and one `const` global per immutable static field or constant
+  /// whose address some function takes. Every other static field and constant
+  /// folds into its uses and needs no storage, so nothing else reaches this
+  /// section.
+  function emitStaticGlobals(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -5097,7 +5108,7 @@ export namespace CodegenC {
     }
 
     let mut outputRef: &mut String = output;
-    outputRef.pushStr("\n// Static mutable fields\n");
+    outputRef.pushStr("\n// Static storage\n");
 
     let mut index: u64 = 0;
 
@@ -5108,9 +5119,14 @@ export namespace CodegenC {
       };
 
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut storage: str = "static";
 
       if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(global.defId)) {
         declaredType = variable.declaredType;
+
+        if (!variable.mutable) {
+          storage = "static const";
+        }
       }
 
       let name: String = CodegenC::mangledName(defStore, symbols, global.defId);
@@ -5125,7 +5141,7 @@ export namespace CodegenC {
       }
 
       let value: String = CodegenC::formatGlobalInitializer(defStore, typeStore, symbols, closures, &global.parts);
-      let line: String = `static ${declarator.toStr()} = ${value.toStr()};\n`;
+      let line: String = `${storage} ${declarator.toStr()} = ${value.toStr()};\n`;
 
       outputRef.pushStr(line.toStr());
       index += 1;
@@ -5283,7 +5299,7 @@ export namespace CodegenC {
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
 
-    CodegenC::emitStaticMutGlobals(defStore, typeStore, symbols, &mut source, closures, program);
+    CodegenC::emitStaticGlobals(defStore, typeStore, symbols, &mut source, closures, program);
 
     if (hooks.freestanding) {
       CodegenC::emitExternConstDeclarations(defStore, typeStore, symbols, &mut source, closures);

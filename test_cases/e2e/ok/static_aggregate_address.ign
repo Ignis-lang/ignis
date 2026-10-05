@@ -1,0 +1,73 @@
+// The address of an immutable static field or constant is its one read-only
+// global, wherever it is taken: a pointer returned out of the function that
+// took it stays valid, and every function sees the same address.
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+const DIGITS: u8[3] = [7, 8, 9];
+
+record Table {
+  static ROWS: u8[4] = [1, 2, 3, 4];
+  static ORIGIN: Point = Point { x: 3, y: 4 };
+  static COUNT: i32 = 11;
+}
+
+function rowsAt(depth: i32): *u8 {
+  if (depth > 0) {
+    return rowsAt(depth - 1);
+  }
+
+  return &Table::ROWS as *u8;
+}
+
+function originAt(depth: i32): *Point {
+  if (depth > 0) {
+    return originAt(depth - 1);
+  }
+
+  return &Table::ORIGIN as *Point;
+}
+
+function digitsAt(depth: i32): *u8 {
+  if (depth > 0) {
+    return digitsAt(depth - 1);
+  }
+
+  return &DIGITS as *u8;
+}
+
+function countAt(depth: i32): *i32 {
+  if (depth > 0) {
+    return countAt(depth - 1);
+  }
+
+  return &Table::COUNT as *i32;
+}
+
+/// Overwrites the stack below its caller, where a dangling copy would live.
+function clobber(): i32 {
+  let noise: i32[8] = [-1, -1, -1, -1, -1, -1, -1, -1];
+
+  return noise[0] + noise[7];
+}
+
+function main(): i32 {
+  let rows: *u8 = rowsAt(0);
+  let origin: *Point = originAt(0);
+  let digits: *u8 = digitsAt(0);
+  let count: *i32 = countAt(0);
+
+  if (rows != rowsAt(3) || origin != originAt(3) || digits != digitsAt(3) || count != countAt(3)) {
+    return 1;
+  }
+
+  let noise: i32 = clobber();
+
+  if (*(rows + 3) != 4 || (*origin).y != 4 || *(digits + 2) != 9 || *count != 11) {
+    return 2;
+  }
+
+  return 0 * noise;
+}

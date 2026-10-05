@@ -600,6 +600,50 @@ function codegenEmitsVolatileBuiltinAccessesThroughVolatilePointers(): void {
   Test::assert(codegenContains(&emission.source, "    *(i32*)("));
 }
 
+/// The C name of the one variable definition named `name` in an emission.
+function codegenStaticName(emission: &mut CodegenEmission, name: str): String {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create(name));
+
+  let ids: Vector<u32> = codegenVariableDefIds(&mut emission.defStore, &mut emission.symbols, &names);
+
+  let Option::SOME(raw) = ids.get(0) else {
+    @panic("the emitted program declares no variable with the requested name");
+  };
+
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*raw);
+
+  return CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, defId);
+}
+
+/// The address of an immutable static field or constant is a read-only C
+/// global seeded with its initializer, so a pointer to it outlives the function
+/// that took it. One whose address is never taken still folds into its uses.
+@test
+function codegenEmitsAddressedImmutableStaticsAsReadOnlyGlobals(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Point {\n  public x: i32;\n  public y: i32;\n}\n\nconst DIGITS: u8[3] = [7, 8, 9];\n\nrecord Table {\n  static ROWS: u8[4] = [1, 2, 3, 4];\n  static ORIGIN: Point = Point { x: 3, y: 4 };\n  static COUNT: i32 = 11;\n  static SEED: i32 = 7;\n}\n\nfunction main(): i32 {\n  let rows: *u8 = &Table::ROWS as *u8;\n  let origin: *Point = &Table::ORIGIN as *Point;\n  let digits: *u8 = &DIGITS as *u8;\n  let count: *i32 = &Table::COUNT as *i32;\n\n  return (*rows + *digits) as i32 + (*origin).y + *count + Table::SEED;\n}\n",
+  );
+
+  let rows: String = codegenStaticName(&mut emission, "ROWS");
+  let origin: String = codegenStaticName(&mut emission, "ORIGIN");
+  let digits: String = codegenStaticName(&mut emission, "DIGITS");
+  let count: String = codegenStaticName(&mut emission, "COUNT");
+  let seed: String = codegenStaticName(&mut emission, "SEED");
+
+  let rowsGlobal: String = `static const u8 ${rows.toStr()}[4] = {1U, 2U, 3U, 4U};`;
+  let digitsGlobal: String = `static const u8 ${digits.toStr()}[3] = {7U, 8U, 9U};`;
+  let countGlobal: String = `static const i32 ${count.toStr()} = 11;`;
+  let originGlobal: String = ` ${origin.toStr()} = {`;
+
+  Test::assert(emission.source.contains(&rowsGlobal));
+  Test::assert(emission.source.contains(&digitsGlobal));
+  Test::assert(emission.source.contains(&countGlobal));
+  Test::assert(emission.source.contains(&originGlobal));
+  Test::assert(codegenContains(&emission.source, "static const struct Point_"));
+  Test::assert(!emission.source.contains(&seed));
+}
+
 /// A volatile access to a pointer-typed slot qualifies the slot, not the
 /// pointee: `volatile i32**` would make the load of the pointer itself plain.
 @test

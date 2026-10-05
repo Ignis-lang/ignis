@@ -601,7 +601,7 @@ The generated C file is structured in this order:
 2. **Explicit headers** (from the link plan)
 3. **Type forward declarations** (`typedef struct X X;`)
 4. **Type definitions** (full struct/union bodies)
-5. **Static constants** (record/enum static fields)
+5. **Static storage** (`static mut` fields as writable globals, and the immutable static fields and constants whose address is taken as `static const` globals)
 6. **Extern declarations** (runtime function prototypes)
 7. **Drop glue helpers** (`static void ignis_drop_glue_<type>(u8*)`)
 8. **Forward declarations** (function prototypes)

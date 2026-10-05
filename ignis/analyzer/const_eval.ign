@@ -28,19 +28,22 @@ import Vector from "std::vector";
 /// cycle diagnostic is emitted, and failed folds (overflow, division by zero,
 /// out-of-range shifts) are silently not-const.
 ///
-/// A `static mut` field is the one static field with storage the emitter has
-/// to seed, so its initializer must fold: a scalar to a `ConstValue`, and an
+/// A `static mut` field is the one static field with storage the emitter always
+/// has to seed, so its initializer must fold: a scalar to a `ConstValue`, and an
 /// array or record literal of constants to a flattened `ConstPart` sequence.
 /// One that does not fold is A0230, the only diagnostic this phase reports.
+/// An immutable static field and a module constant fold the same way when they
+/// can, so taking their address names a read-only global seeded with that
+/// value; one that does not fold is left to its uses.
 ///
 /// Scoped out relative to the Rust oracle:
 ///   - function-body and local-statement walking (selfhost constants are
 ///     module-level only),
 ///   - the A0068 diagnostic for a static field whose initializer is not
-///     constant, and the values of every static field except a `static mut`
-///     one,
+///     constant,
 ///   - `ConstValue::Array` / `ConstValue::Tuple` and vector-index folding for
-///     constants (an aggregate folds only as a `static mut` initializer),
+///     constants (an aggregate folds only as a static field or constant
+///     initializer, never inside an expression),
 ///   - enum tag evaluation, `configFlag`, and the A0048/A0074 typecheck
 ///     integrations.
 export namespace Analyzer {
@@ -72,8 +75,9 @@ export namespace Analyzer {
     /// Side map from a constant's raw `DefinitionId` to its evaluated value.
     /// Parallel vectors, following the `ExprTypeMap` pattern.
     ///
-    /// `aggregateDefIdRaws` and `aggregates` hold the `static mut` fields whose
-    /// initializer is an array or record literal, each with its parts.
+    /// `aggregateDefIdRaws` and `aggregates` hold the static fields and
+    /// constants whose initializer is an array or record literal, each with its
+    /// parts.
     record ConstValueMap {
       public defIdRaws: Vector<u32>;
       public values: Vector<Analyzer::ConstEval::ConstValue>;
@@ -171,7 +175,7 @@ export namespace Analyzer {
       return copied;
     }
 
-    /// The folded initializer parts of a `static mut` array or record field.
+    /// The folded initializer parts of an array or record static field or constant.
     function findConstAggregate(
       map: &Analyzer::ConstEval::ConstValueMap,
       defIdRaw: u32,
@@ -990,17 +994,18 @@ export namespace Analyzer {
       return out;
     }
 
-    /// Folds the initializers of the `static mut` fields `ownerItemId` declares.
+    /// Folds the initializers of the static fields `ownerItemId` declares.
     ///
-    /// A `static mut` field is the only static field with storage of its own:
-    /// the emitter needs the constant that storage starts at, while every other
-    /// static field folds into its uses from its initializer expression and is
-    /// left alone here.
+    /// A `static mut` field always has storage of its own, so the emitter needs
+    /// the constant that storage starts at and an initializer that does not fold
+    /// is A0230. An immutable static field gets storage only when its address is
+    /// taken; one whose initializer does not fold is skipped without a
+    /// diagnostic and keeps lowering that expression at each use.
     ///
     /// `fieldPatternIds` is walked with the binder's own static-field filter, so
     /// the k-th static field it accepts is the k-th id the binder pushed into
     /// the owner's `staticFields`.
-    function evalOwnerStaticMutFields(
+    function evalOwnerStaticFields(
       values: &mut Analyzer::ConstEval::ConstValueMap,
       diagnostics: &mut DiagnosticBag,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1060,10 +1065,6 @@ export namespace Analyzer {
           declaredType = variableDef.declaredType;
         }
 
-        if (!isMutable) {
-          continue;
-        }
-
         let mut initializerOpt: Option<Ast::ExpressionId> = Option::NONE;
         let mut fieldName: String = String::new();
 
@@ -1091,7 +1092,10 @@ export namespace Analyzer {
         );
 
         if (!folded) {
-          Analyzer::ConstEval::reportNonConstantStaticMut(diagnostics, module, initializer, &fieldName);
+          if (isMutable) {
+            Analyzer::ConstEval::reportNonConstantStaticMut(diagnostics, module, initializer, &fieldName);
+          }
+
           continue;
         }
 
@@ -1292,6 +1296,51 @@ export namespace Analyzer {
       bag.push(diagnostic);
     }
 
+    /// Folds a module constant whose initializer is an array or record literal of
+    /// constants, so taking its address can name a read-only global. Anything
+    /// else that did not fold as a scalar is left to its uses.
+    function evalConstantAggregate(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      defId: Analyzer::DefinitionId,
+      initializer: Ast::ExpressionId,
+    ): void {
+      let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(defId)) {
+        declaredType = Option::SOME(variableDef.declaredType);
+      }
+
+      let Option::SOME(storageType) = declaredType else {
+        return;
+      };
+
+      let mut parts: Vector<Analyzer::ConstEval::ConstPart> = Vector::new<Analyzer::ConstEval::ConstPart>();
+      let folded: boolean = Analyzer::ConstEval::evalInitializerParts(
+        values,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        typecheck,
+        initializer,
+        storageType,
+        &mut parts,
+      );
+
+      if (!folded || parts.length() < 2) {
+        return;
+      }
+
+      Analyzer::ConstEval::insertConstAggregate(values, defId.raw(), parts);
+    }
+
     /// Evaluate one item: constants fold, namespaces recurse, exports unwrap,
     /// everything else is skipped (mirroring the pass-2 binder walk).
     function evalItem(
@@ -1329,10 +1378,23 @@ export namespace Analyzer {
 
           if (let Option::SOME(value) = valueOpt) {
             Analyzer::ConstEval::insertConstValue(values, defId.raw(), value);
+            return;
           }
+
+          Analyzer::ConstEval::evalConstantAggregate(
+            values,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            typecheck,
+            defId,
+            constant.value,
+          );
         },
         Ast::Item::Node::Record(recordItem) -> {
-          Analyzer::ConstEval::evalOwnerStaticMutFields(
+          Analyzer::ConstEval::evalOwnerStaticFields(
             values,
             diagnostics,
             defStore,
@@ -1349,7 +1411,7 @@ export namespace Analyzer {
           );
         },
         Ast::Item::Node::Enum(enumItem) -> {
-          Analyzer::ConstEval::evalOwnerStaticMutFields(
+          Analyzer::ConstEval::evalOwnerStaticFields(
             values,
             diagnostics,
             defStore,
