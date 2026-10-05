@@ -486,7 +486,11 @@
 // with its body's `}` (no `;`), and each output names a local for the rest of
 // the block. Anywhere else it is a primary expression whose value is its
 // output. `pure`, `inout` and `clobber` are identifiers reserved only in these
-// places; `asm` is a keyword.
+// places; `asm` is a keyword. The identifier after `in` or `inout` is a
+// location: a general-purpose register name such as `rax`, `eax` or `r8b`, or
+// one of the classes `reg`, `mem` and `imm`. A clobber is a register name,
+// `memory` or `flags`. The analyzer, not the grammar, decides which names are
+// valid (A0220).
 //
 // The lexer reads the header as ordinary tokens until the first `{` outside
 // its parentheses, then reads the body as embedded text: `{name}` is a hole

@@ -429,6 +429,53 @@ t2 = (struct __ignis_closure_t162){ ignis_raw_tramp_326, NULL, (u8*)t1 };
 
 A pointer to a function type, `*(T) -> R`, still points at a closure struct.
 
+## Inline Assembly
+
+An `asm` becomes one GCC extended asm statement in its own C block. The C unit that contains it is compiled with `-masm=intel`, so the C compiler prints operands in the Intel syntax the body is written in; every other unit keeps the default AT&T dialect its system headers expect.
+
+```c
+{
+    __asm__ volatile(" in %[value], %[port] " : [value] "=a"(t2) : [port] "d"(((u16)t1)));
+}
+```
+
+| Part | Emitted as |
+| --- | --- |
+| Volatility | `__asm__ volatile(...)`; a `pure` asm drops `volatile`. |
+| Body | One string: the chunks between holes, with `//` and `/* */` comments removed, `%` written `%%`, `\|` written `%\|`, and the escaped braces `{{` and `}}` written `%{` and `%}`. |
+| Hole | `%[name]`, the operand's symbolic name. An operand whose name another operand shares has no symbolic name, and no hole can name it. |
+| Outputs | Written operands in header order: the outputs, then the `inout` inputs. |
+| Inputs | The operands only read, cast to their type, so a constant has the operand's width: `((u64)21U)`. |
+| Clobbers | `memory` as `"memory"`, `flags` as `"cc"`, a register by its 64-bit name. |
+
+Constraints are a prefix, `=` for an output and `+` for an `inout` input, then the location:
+
+| Location | Constraint | Operand |
+| --- | --- | --- |
+| `rax` family | `a` | |
+| `rbx` family | `b` | |
+| `rcx` family | `c` | |
+| `rdx` family | `d` | |
+| `rsi` family | `S` | |
+| `rdi` family | `D` | |
+| `r8` to `r15` families | `r` | a register variable bound to the register |
+| `reg` | `r` | |
+| `mem` | `m` | the place itself, `(*(T*)ptr)` |
+| `imm` | `n` | the constant |
+
+An output of an `asm` expression is written to a temp, which is the expression's value. An `inout` input, a `mem` input and the output of a statement `asm`, which is stored in its local, are reached through a pointer to the place: the operand is `(*(T*)ptr)`.
+
+`r8` to `r15` have no constraint letter, so an operand in one goes through a local register variable, initialized from the operand when the asm reads it and copied back when it writes it:
+
+```c
+{
+    register u64 ignis_asm_0 __asm__("r8") = ((u64)t1);
+    register u64 ignis_asm_1 __asm__("r9");
+    __asm__ volatile(" lea %[result], [%[value] + 2] " : [result] "=r"(ignis_asm_1) : [value] "r"(ignis_asm_0));
+    t2 = ignis_asm_1;
+}
+```
+
 ## Drop Semantics
 
 ### Drop State
