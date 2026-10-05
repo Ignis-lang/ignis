@@ -397,6 +397,13 @@ extern u32 platform_raise(u32);
 
 Because those prototypes use the emitter's own typedefs, a freestanding unit passes a C function pointer argument as it is, without the `void*` cast.
 
+A freestanding unit also declares every extern constant (`const NAME: T;` in an `extern` block) with its C type, a fixed array as a C array:
+
+```c
+extern u64 kernel_end;
+extern u8 font_data[4096];
+```
+
 ### C Function Pointers
 
 An Ignis function value is a closure struct: a call pointer, a drop pointer and an environment. C cannot call that, so a function-typed parameter or result of an extern function is a plain C function pointer instead. Each signature used that way gets one typedef, named after its type id:

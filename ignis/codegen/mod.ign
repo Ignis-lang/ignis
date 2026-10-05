@@ -4464,6 +4464,67 @@ export namespace CodegenC {
     }
   }
 
+  /// One `extern` declaration per extern constant (`const NAME: T;` inside an
+  /// `extern` block), for a freestanding unit, which has no header to declare
+  /// them. Each is named by its C symbol and declared with its Ignis type, a
+  /// fixed array as a C array. Two declarations of one symbol with the same
+  /// type share a line; with different types, C reports the conflict.
+  function emitExternConstDeclarations(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    let mut emitted: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+      index += 1;
+
+      let mut isExtern: boolean = false;
+      let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
+        isExtern = variable.isExtern;
+        declaredType = variable.declaredType;
+      }
+
+      if (!isExtern) {
+        continue;
+      }
+
+      let name: String = CodegenC::mangledName(defStore, symbols, defId);
+      let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
+      let mut line: String = `extern ${typeText.toStr()} ${name.toStr()};\n`;
+
+      if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, declaredType)) {
+        let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+        line = `extern ${elementText.toStr()} ${name.toStr()}[${array.size}];\n`;
+      }
+
+      let mut duplicate: boolean = false;
+      let mut emittedIndex: u64 = 0;
+
+      while (emittedIndex < emitted.length()) {
+        if (let Option::SOME(previous) = emitted.get(emittedIndex)) {
+          if (previous.equals(line.toStr())) {
+            duplicate = true;
+          }
+        }
+
+        emittedIndex += 1;
+      }
+
+      if (!duplicate) {
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+        emitted.push(line.clone());
+      }
+    }
+  }
+
   /// One `ignis_fn_<id>` typedef per C function pointer signature, in type id
   /// order. Every `RawFunction` in the store gets one: lowering creates them
   /// only at extern boundaries, and a typedef nothing names costs nothing.
@@ -5219,6 +5280,10 @@ export namespace CodegenC {
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
 
     CodegenC::emitStaticMutGlobals(defStore, typeStore, symbols, &mut source, closures, program);
+
+    if (hooks.freestanding) {
+      CodegenC::emitExternConstDeclarations(defStore, typeStore, symbols, &mut source, closures);
+    }
 
     source.pushStr("\n// Function prototypes\n");
 
