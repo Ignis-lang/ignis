@@ -2065,8 +2065,21 @@ export namespace LirLowering {
 
         return Lir::Operand::Temp(dest);
       },
+      // A reference to a reference collapses (`& &T` is `&T` for the
+      // typechecker), so it is the inner reference itself. Any other place,
+      // one holding a raw pointer included, yields its own address.
       Hir::HirKind::Reference(referenceNode) -> {
-        return LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, referenceNode.expression);
+        let mut targetIsReference: boolean = false;
+
+        if (let Option::SOME(targetNode) = hirStore.get(referenceNode.expression)) {
+          targetIsReference = LirLowering::isReferenceType(typeStore, targetNode.typeId);
+        }
+
+        if (targetIsReference) {
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, referenceNode.expression);
+        }
+
+        return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, referenceNode.expression);
       },
       Hir::HirKind::RecordInit(recordNode) -> {
         let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
