@@ -59,7 +59,8 @@ typedef void* null;
 | `*mut T` | `T*` |
 | `&T` | `T*` |
 | `&mut T` | `T*` |
-| `T[N]` | `T[N]` (stack allocated) |
+| `T[N]` | `T[N]` (stack allocated; a record field of this type is stored in the record) |
+| `*T[N]`, `&T[N]` | `T*` (the address of the first element) |
 | `(T1, T2, ...)` | `void*` |
 | `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries and in C-layout record fields |
 

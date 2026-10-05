@@ -1,0 +1,66 @@
+// A fixed array field is stored inside its record, as C lays out `T name[N]`:
+// the record's size counts every element, a copy of the record copies the
+// elements, and references to the field point into the record itself.
+@cLayout
+record Request {
+  public id: u64[4];
+  public revision: u64;
+}
+
+extern Device {
+  record Frame {
+    public words: u32[3];
+    public tail: u8;
+  }
+}
+
+record Plain {
+  public values: i32[2];
+  public last: i32;
+}
+
+record Tables {
+  static mut REQUEST: Request = Request { id: [5, 6, 7, 8], revision: 1 };
+}
+
+function makePlain(): Plain {
+  let values: i32[2] = [4, 5];
+
+  return Plain { values: values, last: 6 };
+}
+
+function bumpFirst(request: *mut Request): void {
+  (*request).id[0] = (*request).id[0] + 1;
+}
+
+function firstAndLast(values: &u64[4]): u64 {
+  return (*values)[0] + (*values)[3];
+}
+
+function main(): i32 {
+  if (@sizeOf<Request>() != 40 || @sizeOf<Device::Frame>() != 16) {
+    return 1;
+  }
+
+  let mut request: Request = Request { id: [1, 2, 3, 4], revision: 7 };
+  request.id[2] = 30;
+  bumpFirst(&mut request as *mut Request);
+
+  let copy: Request = request;
+  let whole: *mut u64[4] = &mut request.id as *mut u64[4];
+  *whole = [9, 9, 9, 9];
+
+  if (copy.id[0] != 2 || copy.id[2] != 30 || copy.id[3] != 4 || request.id[2] != 9) {
+    return 2;
+  }
+
+  let frame: Device::Frame = Device::Frame { words: [1, 2, 3], tail: 9 };
+  let plain: Plain = makePlain();
+  let local: u64[4] = [1, 1, 1, 1];
+
+  let fromRecords: u64 = firstAndLast(&copy.id) + firstAndLast(&request.id) + Tables::REQUEST.id[3];
+  let fromLocal: u64 = firstAndLast(&local);
+  let small: i32 = frame.words[2] as i32 + frame.tail as i32 + plain.values[1] + plain.last;
+
+  return (fromRecords + fromLocal) as i32 + small;
+}
