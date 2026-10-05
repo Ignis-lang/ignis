@@ -572,11 +572,11 @@ export namespace Format {
 
   /// Renders an `Ast::Expression::Node`.
   ///
-  /// `Call`, `RecordInit` and `Match` fall back to a verbatim slice of their
-  /// own span when the source wrote them across several lines: re-indenting
-  /// them would need an absolute column this renderer does not carry. That is
-  /// the host's `is_multiline_source` rule, kept identical so both formatters
-  /// agree on the same fixed point.
+  /// `Call`, `RecordInit`, `Match` and an array literal fall back to a
+  /// verbatim slice of their own span when the source wrote them across
+  /// several lines: re-indenting them would need an absolute column this
+  /// renderer does not carry. That is the host's `is_multiline_source` rule,
+  /// kept identical so both formatters agree on the same fixed point.
   function formatExpression(
     module: &Ast::Module,
     node: &Ast::Expression::Node,
@@ -741,6 +741,12 @@ export namespace Format {
     }
 
     if (let Ast::Expression::Node::Vector(vectorLiteral) = node) {
+      let sourceText: String = Format::sliceSpanText(source, &vectorLiteral.span).trimAsciiWhitespace();
+
+      if (Format::expressionContainsNewline(&sourceText)) {
+        return Result::OK(sourceText);
+      }
+
       let inner: String = Format::joinFormattedExpressions(module, &vectorLiteral.elements, source, config)!;
       let mut result: String = String::create("[");
       result.push(&inner);
@@ -1762,6 +1768,9 @@ export namespace Format {
       if (let Ast::Expression::Node::RecordInit(nested) = valueNode) {
         let nestedText: String = Format::formatRecordInitMultiline(module, &nested, source, config, indentLevel + 1)!;
         fieldText.push(&nestedText);
+      } else if (let Ast::Expression::Node::Vector(nestedArray) = valueNode) {
+        let nestedText: String = Format::formatArrayLiteralMultiline(module, &nestedArray, source, config, indentLevel + 1)!;
+        fieldText.push(&nestedText);
       } else {
         let valueText: String = Format::formatExpressionNode(module, field.value, 0, source, config, 0)!;
         fieldText.push(&valueText);
@@ -1810,8 +1819,120 @@ export namespace Format {
     return Result::OK(formatted);
   }
 
+  /// Renders an array literal that a `return`/`let`/`const` may spread over
+  /// several lines, the way `formatRecordInitMultiline` renders a record
+  /// initializer.
+  ///
+  /// The inline form wins when the source wrote the literal on one line and it
+  /// fits. A single-line literal that does not fit wraps one element per line.
+  /// A literal the source already wrote over several lines keeps its rows: the
+  /// elements that started on the same source line stay together, so a table
+  /// laid out in rows stays a table. Every row ends with a comma, the last one
+  /// included, and an element that renders over several lines gets a row of
+  /// its own.
+  function formatArrayLiteralMultiline(
+    module: &Ast::Module,
+    arrayLiteral: &Ast::Expression::VectorLiteral,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    if (Format::regionContainsCommentText(source, arrayLiteral.span.start, arrayLiteral.span.end)) {
+      return Result::OK(Format::sliceSpanText(source, &arrayLiteral.span).trimAsciiWhitespace());
+    }
+
+    let mut elementTexts: Vector<String> = Vector::new<String>();
+    let mut elementLines: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < arrayLiteral.elements.length()) {
+      let Option::SOME(elementId) = arrayLiteral.elements.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(elementNode) = module.expressions.get(*elementId) else {
+        index += 1;
+        continue;
+      };
+
+      let elementSpan: SourceSpan = Ast::Serializer::expressionSpan(elementNode);
+      elementLines.push(Format::lineStartOffset(source, elementSpan.start));
+
+      if (let Ast::Expression::Node::Vector(nestedArray) = elementNode) {
+        elementTexts.push(Format::formatArrayLiteralMultiline(module, &nestedArray, source, config, indentLevel + 1)!);
+      } else if (let Ast::Expression::Node::RecordInit(nestedRecord) = elementNode) {
+        elementTexts.push(Format::formatRecordInitMultiline(module, &nestedRecord, source, config, indentLevel + 1)!);
+      } else {
+        elementTexts.push(Format::formatExpressionNode(module, *elementId, 0, source, config, 0)!);
+      }
+
+      index += 1;
+    }
+
+    let joined: String = Format::joinSegments(&elementTexts, ", ");
+    let mut inlineText: String = String::create("[");
+    inlineText.push(&joined);
+    inlineText.pushStr("]");
+
+    let rawSource: String = Format::sliceSpanText(source, &arrayLiteral.span);
+    let sourceIsInline: boolean = !Format::expressionContainsNewline(&rawSource);
+    let returnKeywordColumns: u64 = 7;
+    let fits: boolean = config.indentColumns(indentLevel) + returnKeywordColumns + inlineText.length() <= config.lineWidth;
+
+    if (elementTexts.length() == 0 || (sourceIsInline && fits && !Format::expressionContainsNewline(&inlineText))) {
+      return Result::OK(inlineText);
+    }
+
+    let rowIndent: String = config.indentString(indentLevel + 1);
+    let closingIndent: String = config.indentString(indentLevel);
+
+    let mut formatted: String = String::create("[");
+    let mut rowOpen: boolean = false;
+    let mut previousMultiline: boolean = false;
+    let mut previousLine: u64 = 0;
+    let mut elementIndex: u64 = 0;
+
+    while (elementIndex < elementTexts.length()) {
+      let Option::SOME(elementText) = elementTexts.get(elementIndex) else {
+        elementIndex += 1;
+        continue;
+      };
+
+      let mut line: u64 = 0;
+
+      if (let Option::SOME(start) = elementLines.get(elementIndex)) {
+        line = *start;
+      }
+
+      let multiline: boolean = Format::expressionContainsNewline(elementText);
+      let sharesRow: boolean = rowOpen && !sourceIsInline && line == previousLine && !multiline && !previousMultiline;
+
+      if (sharesRow) {
+        formatted.pushStr(" ");
+      } else {
+        formatted.pushStr("\n");
+        formatted.push(&rowIndent);
+      }
+
+      formatted.push(elementText);
+      formatted.pushStr(",");
+
+      rowOpen = true;
+      previousMultiline = multiline;
+      previousLine = line;
+      elementIndex += 1;
+    }
+
+    formatted.pushStr("\n");
+    formatted.push(&closingIndent);
+    formatted.pushStr("]");
+    return Result::OK(formatted);
+  }
+
   /// Renders the value of a `return`/`let`/`const`, which is the one place the
-  /// host lets a record initializer spread over several lines.
+  /// host lets a record initializer or an array literal spread over several
+  /// lines.
   function formatInitializerValue(
     module: &Ast::Module,
     expressionId: Ast::ExpressionId,
@@ -1825,6 +1946,10 @@ export namespace Format {
 
     if (let Ast::Expression::Node::RecordInit(recordInit) = node) {
       return Format::formatRecordInitMultiline(module, &recordInit, source, config, indentLevel);
+    }
+
+    if (let Ast::Expression::Node::Vector(arrayLiteral) = node) {
+      return Format::formatArrayLiteralMultiline(module, &arrayLiteral, source, config, indentLevel);
     }
 
     return Format::formatExpression(module, node, 0, source, config, indentLevel);
