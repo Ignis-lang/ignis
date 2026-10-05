@@ -1517,6 +1517,16 @@ export namespace LirLowering {
           argIndex += 1;
         }
 
+        if (LirLowering::producesNoValue(typeStore, nodeType)) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::Call(Lir::InstrCall {
+            dest: Option::NONE,
+            callee: call.callee,
+            args: args,
+          }));
+
+          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        }
+
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::Call(Lir::InstrCall {
@@ -2119,7 +2129,7 @@ export namespace LirLowering {
           argIndex += 1;
         }
 
-        if (LirLowering::isVoidType(typeStore, nodeType)) {
+        if (LirLowering::producesNoValue(typeStore, nodeType)) {
           LirLowering::pushInstr(function_, state, Lir::Instr::Call(Lir::InstrCall {
             dest: Option::NONE,
             callee: methodNode.method,
@@ -2154,7 +2164,7 @@ export namespace LirLowering {
           argIndex += 1;
         }
 
-        if (LirLowering::isVoidType(typeStore, nodeType)) {
+        if (LirLowering::producesNoValue(typeStore, nodeType)) {
           LirLowering::pushInstr(function_, state, Lir::Instr::CallClosure(Lir::InstrCallClosure {
             dest: Option::NONE,
             closure: closure,

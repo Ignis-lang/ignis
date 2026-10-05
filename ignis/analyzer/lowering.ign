@@ -4495,11 +4495,12 @@ export namespace Lowering {
       typeId: returnType,
     });
 
-    // A `void` call has no value to return: the call itself is the body, and
-    // the thunk's implicit end returns nothing.
+    // A `void` or `never` call has no value to return: the call itself is the
+    // body, and the thunk's implicit end returns nothing or is unreachable.
     let mut bodyNode: Hir::HirId = callNode;
+    let returnsValue: boolean = returnType.raw() != Lowering::voidType(typeStore).raw() && returnType.raw() != Lowering::neverType(typeStore).raw();
 
-    if (returnType.raw() != Lowering::voidType(typeStore).raw()) {
+    if (returnsValue) {
       let mut bodyHirRef: &mut Hir::HirStore = hir;
       bodyNode = bodyHirRef.alloc(Hir::HirNode {
         kind: Hir::HirKind::Return(Option::SOME(callNode)),
