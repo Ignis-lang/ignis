@@ -594,10 +594,23 @@ function codegenEmitsVolatileBuiltinAccessesThroughVolatilePointers(): void {
     "function main(): i32 {\n  let mut value: i32 = 41;\n  let pointer: *mut i32 = (&mut value) as *mut i32;\n\n  @writeVolatile<i32>(pointer, 42);\n  @write<i32>(pointer, @read<i32>(pointer));\n\n  return @readVolatile<i32>(pointer);\n}\n",
   );
 
-  Test::assert(codegenContains(&emission.source, " = *(volatile i32*)("));
-  Test::assert(codegenContains(&emission.source, "    *(volatile i32*)("));
+  Test::assert(codegenContains(&emission.source, " = *(i32 volatile*)("));
+  Test::assert(codegenContains(&emission.source, "    *(i32 volatile*)("));
   Test::assert(codegenContains(&emission.source, " = *(i32*)("));
   Test::assert(codegenContains(&emission.source, "    *(i32*)("));
+}
+
+/// A volatile access to a pointer-typed slot qualifies the slot, not the
+/// pointee: `volatile i32**` would make the load of the pointer itself plain.
+@test
+function codegenQualifiesThePointerSlotOfAVolatileAccessToAPointer(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let mut value: i32 = 7;\n  let mut slot: *mut i32 = (&mut value) as *mut i32;\n  let place: *mut *mut i32 = (&mut slot) as *mut *mut i32;\n\n  @writeVolatile<*mut i32>(place, slot);\n\n  return @read<i32>(@readVolatile<*mut i32>(place));\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, " = *(i32* volatile*)("));
+  Test::assert(codegenContains(&emission.source, "    *(i32* volatile*)("));
+  Test::assert(!codegenContains(&emission.source, "volatile i32*"));
 }
 
 /// A signed minimum reaches C as one constant, not as the negation of a

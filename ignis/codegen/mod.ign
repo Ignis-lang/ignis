@@ -201,10 +201,14 @@ export namespace CodegenC {
     return CodegenReserved::mangleReservedCName(`${base.toStr()}_${defId.raw()}`);
   }
 
-  /// The `volatile ` qualifier for a volatile builtin load or store, empty otherwise.
+  /// The ` volatile` qualifier for a volatile builtin load or store, empty
+  /// otherwise. It follows the formatted element type, so it qualifies the
+  /// accessed object for every element type: `u64 volatile*`, and for a pointer
+  /// element `struct T* volatile*`, where a leading `volatile struct T**` would
+  /// qualify the pointee and leave the load of the pointer itself plain.
   function volatileQualifier(isVolatile: boolean): str {
     if (isVolatile) {
-      return "volatile ";
+      return " volatile";
     }
 
     return "";
@@ -2767,7 +2771,7 @@ export namespace CodegenC {
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
         let qualifier: str = CodegenC::volatileQualifier(node.volatile);
-        let line: String = `    t${node.dest.raw()} = *(${qualifier}${target.toStr()}*)(${pointer.toStr()});\n`;
+        let line: String = `    t${node.dest.raw()} = *(${target.toStr()}${qualifier}*)(${pointer.toStr()});\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -2776,7 +2780,7 @@ export namespace CodegenC {
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
         let qualifier: str = CodegenC::volatileQualifier(node.volatile);
-        let line: String = `    *(${qualifier}${target.toStr()}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
+        let line: String = `    *(${target.toStr()}${qualifier}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
