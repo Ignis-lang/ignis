@@ -1,0 +1,21 @@
+function readPort(port: u16): u8 {
+  return asm (port in dx) -> (value: u8 in al) {
+    in {value}, {port}
+  };
+}
+
+function cycles(): u64 {
+  asm pure () -> (low: u32 in eax, high: u32 in edx) clobber(memory) {
+    rdtsc // fills {low} and {high}
+  }
+
+  return ((high as u64) << 32) | (low as u64);
+}
+
+function bump(counter: u64): u64 {
+  let mut value: u64 = counter;
+
+  asm (value inout rax) clobber(flags) { inc {value} }
+
+  return value;
+}

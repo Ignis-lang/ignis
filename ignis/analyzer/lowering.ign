@@ -1663,6 +1663,10 @@ export namespace Lowering {
       Ast::Expression::Node::Try(tryExpr) -> {
         return Lowering::lowerTryExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &tryExpr);
       },
+      // The typechecker rejects every `asm` (A0220), so lowering never runs on one.
+      Ast::Expression::Node::Asm(asmNode) -> {
+        return Lowering::errorNode(hir, typeStore, asmNode.span);
+      },
     };
 
     return Lowering::errorNode(hir, typeStore, SourceSpan::new("", 0, 0));
@@ -5793,6 +5797,9 @@ export namespace Lowering {
           span: comment.span,
           typeId: Lowering::voidType(typeStore),
         });
+      },
+      Ast::Statement::Node::Asm(asmNode) -> {
+        return Lowering::errorNode(hir, typeStore, asmNode.span);
       },
     };
 

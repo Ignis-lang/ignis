@@ -275,3 +275,16 @@ function completionListsAtItemsImportPathsAndKeywords(): void {
   let items: Vector<JsonValue> = completionItemsJson(&candidates);
   Test::assertEq<str>(labelsOf(&items).toStr(), "count compileError");
 }
+
+/// `asm` is offered as a keyword snippet at the start of a statement.
+@test
+function completionOffersTheAsmKeywordInABody(): void {
+  let fixture: CompletionFixture = completionFixture("text");
+  let empty: CompletionIndex = emptyCompletionIndex();
+  let unanalyzed: Option<CompletionAnalysis> = Option::NONE;
+  let text: String = String::create("function main(): void {\n  \n}\n");
+  let candidates: Vector<CompletionCandidate> = completionCandidates(&text, 26, &empty, &unanalyzed, &fixture.stdPath);
+  let items: Vector<JsonValue> = completionItemsJson(&candidates);
+
+  Test::assertEq<str>(fieldOf(&items, "asm", "insertText").toStr(), "asm ($1) {\n\t$0\n}");
+}

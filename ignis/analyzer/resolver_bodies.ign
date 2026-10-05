@@ -3262,7 +3262,30 @@ export namespace Analyzer {
         Ast::Expression::Node::Try(t) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, t.expression);
         },
+        Ast::Expression::Node::Asm(asmNode) -> {
+          Analyzer::ResolverBodies::walkAsmInputs(state, defStore, symbols, module, &asmNode);
+        },
       };
+    }
+
+    /// Resolves the input expressions of an `asm`. Its outputs are not bound
+    /// yet: the analyzer rejects every `asm` after this walk.
+    function walkAsmInputs(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      asmNode: &Ast::Expression::Asm,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < asmNode.inputs.length()) {
+        if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, input.expression);
+        }
+
+        index += 1;
+      }
     }
 
     // =========================================================================
@@ -3377,6 +3400,9 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Comment(_) -> {
           // No children.
+        },
+        Ast::Statement::Node::Asm(asmNode) -> {
+          Analyzer::ResolverBodies::walkAsmInputs(state, defStore, symbols, module, &asmNode);
         },
       };
     }

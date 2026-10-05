@@ -429,6 +429,7 @@
   | <break>
   | <continue>
   | <defer>
+  | <asm>
   | <block>
   | <variable>
   | <let-else>
@@ -465,6 +466,36 @@
 <break> ::= "break" ";"
 <continue> ::= "continue" ";"
 <defer> ::= "defer" <expression> ";"
+
+<asm> ::= "asm" "pure"? "(" <asm-inputs>? ")" ("->" "(" <asm-outputs> ")")?
+          ("clobber" "(" <asm-clobbers> ")")? <asm-body>
+<asm-inputs> ::= <asm-input> ("," <asm-input>)* ","?
+<asm-input> ::= <expression> ("in" | "inout") <identifier>
+<asm-outputs> ::= <asm-output> ("," <asm-output>)* ","?
+<asm-output> ::= <identifier> ":" <type> "in" <identifier>
+<asm-clobbers> ::= <identifier> ("," <identifier>)* ","?
+<asm-body> ::= <embed-no-hole>
+  | <embed-head> <identifier> (<embed-middle> <identifier>)* <embed-tail>
+<embed-no-hole> ::= "{" <embed-char>* "}"
+<embed-head> ::= "{" <embed-char>* "{"
+<embed-middle> ::= "}" <embed-char>* "{"
+<embed-tail> ::= "}" <embed-char>* "}"
+<embed-char> ::= [^{}] | "{{" | "}}" | <comment>
+
+// Inline assembly. At the start of a statement `asm` is a statement that ends
+// with its body's `}` (no `;`), and each output names a local for the rest of
+// the block. Anywhere else it is a primary expression whose value is its
+// output. `pure`, `inout` and `clobber` are identifiers reserved only in these
+// places; `asm` is a keyword.
+//
+// The lexer reads the header as ordinary tokens until the first `{` outside
+// its parentheses, then reads the body as embedded text: `{name}` is a hole
+// whose name is an ordinary token, `{{` and `}}` are literal braces, and `//`
+// and `/* */` comments stay in the text, so braces inside them count for
+// nothing. A `;`, or a `)` or `}` that closes what encloses the `asm`, ends the
+// header when no body has opened. A body still open at the end of the file is
+// I0053. Since `}}` is an escaped brace, the body's closing `}` cannot be
+// directly followed by another `}`.
 
 <block> ::= "{" <statement>* "}"
 <variable> ::= <directive-attrs>? "let" "mut"? <identifier> ":" <type> ("=" <expression>)? ";"
@@ -581,6 +612,7 @@
   | <capture-override>
   | <pipe-placeholder>
   | <lambda>
+  | <asm>
   
 <record-init> ::= <type-path> "{" <record-init-fields>? "}"
 <record-init-fields> ::= <record-init-field> ("," <record-init-field>)* ","?

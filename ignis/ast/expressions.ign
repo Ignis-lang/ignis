@@ -261,6 +261,57 @@ export namespace Ast {
       public elements: ExpressionIdList;
     }
 
+    /// How an `asm` input reaches its location: only read by the
+    /// instructions, or read and then written back to the place it names.
+    enum AsmInputMode {
+      In,
+      InOut,
+    }
+
+    /// One `expression in location` or `expression inout location` entry of
+    /// an `asm` header.
+    record AsmInput {
+      public span: SourceSpan;
+      public expression: Ast::ExpressionId;
+      public mode: AsmInputMode;
+      public location: String;
+      public locationSpan: SourceSpan;
+    }
+
+    /// One `name: Type in location` entry of an `asm` header.
+    record AsmOutput {
+      public span: SourceSpan;
+      public name: String;
+      public outputType: Ast::TypeId;
+      public location: String;
+      public locationSpan: SourceSpan;
+    }
+
+    /// A name written in an `asm`: an entry of `clobber(...)` or a `{name}`
+    /// hole of the body.
+    record AsmName {
+      public span: SourceSpan;
+      public name: String;
+    }
+
+    /// Inline assembly, `asm pure? (inputs) (-> (outputs))? clobber(...)? { body }`.
+    ///
+    /// The same record is an expression, whose value is its single output if
+    /// it has one, and a statement, whose outputs bind locals for the rest of
+    /// the block. `chunks` holds the body text between the holes exactly as
+    /// written, `{{`, `}}` and comments included, so it always has one more
+    /// entry than `holes`. `bodySpan` covers the body from `{` to `}`.
+    record Asm {
+      public span: SourceSpan;
+      public isPure: boolean;
+      public inputs: Vector<AsmInput>;
+      public outputs: Vector<AsmOutput>;
+      public clobbers: Vector<AsmName>;
+      public chunks: StringList;
+      public holes: Vector<AsmName>;
+      public bodySpan: SourceSpan;
+    }
+
     enum Node {
       Assignment(Assignment),
       Ternary(Ternary),
@@ -292,6 +343,7 @@ export namespace Ast {
       Pipe(Pipe),
       PipePlaceholder(PipePlaceholder),
       Try(Try),
+      Asm(Asm),
     }
   }
 }

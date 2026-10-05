@@ -211,6 +211,7 @@ function keywordClass(keyword: Keyword): Option<SemanticClass> {
     Keyword::WHEN -> classOf(SEMANTIC_KEYWORD, 0),
     Keyword::DECLARE -> classOf(SEMANTIC_KEYWORD, 0),
     Keyword::INLINE -> classOf(SEMANTIC_KEYWORD, 0),
+    Keyword::ASM -> classOf(SEMANTIC_KEYWORD, 0),
     Keyword::TRUE -> classOf(SEMANTIC_KEYWORD, 0),
     Keyword::FALSE -> classOf(SEMANTIC_KEYWORD, 0),
     Keyword::NULL -> classOf(SEMANTIC_KEYWORD, 0),
@@ -309,6 +310,10 @@ function literalClass(literalKind: LiteralKind): SemanticClass {
     LiteralKind::TEMPLATE_HEAD -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
     LiteralKind::TEMPLATE_MIDDLE -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
     LiteralKind::TEMPLATE_TAIL -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::EMBED_NO_HOLE -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::EMBED_HEAD -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::EMBED_MIDDLE -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
+    LiteralKind::EMBED_TAIL -> SemanticClass { tokenType: SEMANTIC_STRING, modifiers: 0 },
     _ -> SemanticClass { tokenType: SEMANTIC_NUMBER, modifiers: 0 },
   };
 }
@@ -388,6 +393,91 @@ function tokenLength(text: &String, token: &Token): u64 {
   return utf16Length(text, token.spanStart(), token.spanEnd());
 }
 
+/// Where `classifyTokens` stands relative to an `asm`: in its header, with
+/// how many parentheses are open there, or inside one of its body's holes.
+record AsmScan {
+  public inHeader: boolean;
+  public parenDepth: u64;
+  public afterKeyword: boolean;
+  public inHole: boolean;
+}
+
+/// The class of `token` inside an `asm`, or `NONE` when the ordinary class
+/// applies. `pure`, `inout` and `clobber` are keywords only where the header
+/// reserves them, and a name in a hole is a variable.
+function asmTokenClass(token: &Token, scan: &AsmScan): Option<SemanticClass> {
+  if (token.kindValue() != TokenKind::IDENTIFIER) {
+    return Option::NONE;
+  }
+
+  if (scan.inHole) {
+    return classOf(SEMANTIC_VARIABLE, 0);
+  }
+
+  if (!scan.inHeader) {
+    return Option::NONE;
+  }
+
+  let lexeme: String = token.lexemeString();
+  let isPure: boolean = scan.afterKeyword && lexeme.equals("pure");
+  let isInout: boolean = scan.parenDepth == 1 && lexeme.equals("inout");
+  let isClobber: boolean = scan.parenDepth == 0 && lexeme.equals("clobber");
+
+  if (isPure || isInout || isClobber) {
+    return classOf(SEMANTIC_KEYWORD, 0);
+  }
+
+  return Option::NONE;
+}
+
+/// `scan` after `token`, which is not a comment.
+function advanceAsmScan(token: &Token, scan: &AsmScan): AsmScan {
+  let kind: TokenKind = token.kindValue();
+
+  if (kind == TokenKind::KEYWORD && token.keywordValue() == Keyword::ASM) {
+    return AsmScan { inHeader: true, parenDepth: 0, afterKeyword: true, inHole: false };
+  }
+
+  if (kind == TokenKind::LITERAL) {
+    let literalKind: LiteralKind = token.literalKindValue();
+
+    if (literalKind == LiteralKind::EMBED_HEAD || literalKind == LiteralKind::EMBED_MIDDLE) {
+      return AsmScan { inHeader: false, parenDepth: 0, afterKeyword: false, inHole: true };
+    }
+
+    if (literalKind == LiteralKind::EMBED_TAIL || literalKind == LiteralKind::EMBED_NO_HOLE) {
+      return AsmScan { inHeader: false, parenDepth: 0, afterKeyword: false, inHole: false };
+    }
+  }
+
+  if (!scan.inHeader || kind != TokenKind::PUNCTUATION) {
+    return AsmScan {
+      inHeader: scan.inHeader,
+      parenDepth: scan.parenDepth,
+      afterKeyword: false,
+      inHole: scan.inHole,
+    };
+  }
+
+  let punctuation: Punctuation = token.punctuationValue();
+  let mut depth: u64 = scan.parenDepth;
+  let mut inHeader: boolean = true;
+
+  if (punctuation == Punctuation::LEFT_PAREN) {
+    depth += 1;
+  } else if (punctuation == Punctuation::RIGHT_PAREN) {
+    if (depth == 0) {
+      inHeader = false;
+    } else {
+      depth -= 1;
+    }
+  } else if (depth == 0 && (punctuation == Punctuation::SEMICOLON || punctuation == Punctuation::RIGHT_BRACE)) {
+    inHeader = false;
+  }
+
+  return AsmScan { inHeader: inHeader, parenDepth: depth, afterKeyword: false, inHole: scan.inHole };
+}
+
 /// The classified tokens of `text`, in source order.
 function classifyTokens(
   text: &String,
@@ -397,6 +487,7 @@ function classifyTokens(
   let lexed: LexResult = Lexer::lex(&file);
   let mut classified: Vector<AbsoluteToken> = Vector::new<AbsoluteToken>();
   let mut afterAt: boolean = false;
+  let mut asmScan: AsmScan = AsmScan { inHeader: false, parenDepth: 0, afterKeyword: false, inHole: false };
   let mut index: u64 = 0;
 
   while (index < lexed.tokens.length()) {
@@ -422,12 +513,19 @@ function classifyTokens(
       continue;
     }
 
-    if (let Option::SOME(class) = tokenClass(token, afterAt, identifiers)) {
-      classified.push(AbsoluteToken { start: token.spanStart(), length: tokenLength(text, token), class: class });
+    let mut class: Option<SemanticClass> = asmTokenClass(token, &asmScan);
+
+    if (class.isNone()) {
+      class = tokenClass(token, afterAt, identifiers);
+    }
+
+    if (let Option::SOME(found) = class) {
+      classified.push(AbsoluteToken { start: token.spanStart(), length: tokenLength(text, token), class: found });
     }
 
     if (!isComment(kind)) {
       afterAt = kind == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::AT;
+      asmScan = advanceAsmScan(token, &asmScan);
     }
   }
 

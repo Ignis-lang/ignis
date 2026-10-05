@@ -878,8 +878,106 @@ export namespace Format {
       return Result::OK(result);
     }
 
+    if (let Ast::Expression::Node::Asm(asmNode) = node) {
+      return Format::formatAsm(module, &asmNode, source, config);
+    }
+
     let span: SourceSpan = Ast::Serializer::expressionSpan(node);
     return Result::OK(Format::sliceSpanText(source, &span).trimAsciiWhitespace());
+  }
+
+  /// Renders an `asm`: the header in canonical layout on one line, then the
+  /// body exactly as written from its `{` through its `}`. The body is another
+  /// language, so the formatter never touches its spacing, line breaks or
+  /// comments.
+  function formatAsm(
+    module: &Ast::Module,
+    asmNode: &Ast::Expression::Asm,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let mut result: String = String::create("asm ");
+
+    if (asmNode.isPure) {
+      result.pushStr("pure ");
+    }
+
+    result.pushStr("(");
+
+    let mut index: u64 = 0;
+
+    while (index < asmNode.inputs.length()) {
+      let Option::SOME(input) = asmNode.inputs.get(index) else {
+        break;
+      };
+
+      if (index > 0) {
+        result.pushStr(", ");
+      }
+
+      let expressionText: String = Format::formatExpressionNode(module, input.expression, 0, source, config, 0)!;
+      result.push(&expressionText);
+
+      match (input.mode) {
+        Ast::Expression::AsmInputMode::In -> result.pushStr(" in "),
+        Ast::Expression::AsmInputMode::InOut -> result.pushStr(" inout "),
+      };
+
+      result.push(&input.location);
+      index += 1;
+    }
+
+    result.pushStr(")");
+
+    if (asmNode.outputs.length() > 0) {
+      result.pushStr(" -> (");
+      index = 0;
+
+      while (index < asmNode.outputs.length()) {
+        let Option::SOME(output) = asmNode.outputs.get(index) else {
+          break;
+        };
+
+        if (index > 0) {
+          result.pushStr(", ");
+        }
+
+        let typeText: String = Format::formatType(module, output.outputType, source);
+        result.push(&output.name);
+        result.pushStr(": ");
+        result.push(&typeText);
+        result.pushStr(" in ");
+        result.push(&output.location);
+        index += 1;
+      }
+
+      result.pushStr(")");
+    }
+
+    if (asmNode.clobbers.length() > 0) {
+      result.pushStr(" clobber(");
+      index = 0;
+
+      while (index < asmNode.clobbers.length()) {
+        let Option::SOME(clobber) = asmNode.clobbers.get(index) else {
+          break;
+        };
+
+        if (index > 0) {
+          result.pushStr(", ");
+        }
+
+        result.push(&clobber.name);
+        index += 1;
+      }
+
+      result.pushStr(")");
+    }
+
+    let body: String = Format::sliceSpanText(source, &asmNode.bodySpan);
+    result.pushStr(" ");
+    result.push(&body);
+    return Result::OK(result);
   }
 
   /// The byte the leftmost leaf of `node` starts at.
@@ -963,6 +1061,11 @@ export namespace Format {
         continue;
       }
 
+      if (let Option::SOME(afterAsm) = Format::asmEndOffset(source, cursor)) {
+        cursor = afterAsm;
+        continue;
+      }
+
       if (byte == '"' as u8 || byte == '\'' as u8) {
         let Option::SOME(afterQuote) = Format::quotedLiteralEndOffset(source, cursor, byte) else {
           return Option::NONE;
@@ -1010,8 +1113,192 @@ export namespace Format {
     return Option::NONE;
   }
 
+  /// Whether `byte` can continue an identifier.
+  function isIdentifierByte(byte: u8): boolean {
+    let isLower: boolean = byte >= 'a' as u8 && byte <= 'z' as u8;
+    let isUpper: boolean = byte >= 'A' as u8 && byte <= 'Z' as u8;
+    let isDigit: boolean = byte >= '0' as u8 && byte <= '9' as u8;
+
+    return isLower || isUpper || isDigit || byte == '_' as u8 || byte >= 128;
+  }
+
+  /// The byte just past the `//` or `/* */` comment starting at `start`, or
+  /// `NONE` when no comment starts there.
+  function commentEndOffset(source: &String, start: u64): Option<u64> {
+    let Option::SOME(slash) = source.byteAt(start) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(next) = source.byteAt(start + 1) else {
+      return Option::NONE;
+    };
+
+    if (slash != '/' as u8 || (next != '/' as u8 && next != '*' as u8)) {
+      return Option::NONE;
+    }
+
+    let mut cursor: u64 = start + 2;
+
+    while (cursor < source.length()) {
+      let byte: u8 = source.byteAt(cursor).unwrapOr(0);
+
+      if (next == '/' as u8 && byte == '\n' as u8) {
+        return Option::SOME(cursor);
+      }
+
+      if (next == '*' as u8 && byte == '*' as u8 && source.byteAt(cursor + 1).unwrapOr(0) == '/' as u8) {
+        return Option::SOME(cursor + 2);
+      }
+
+      cursor += 1;
+    }
+
+    return Option::SOME(source.length());
+  }
+
+  /// The byte just past the body of the `asm` whose keyword starts at
+  /// `start`, or `NONE` when no `asm` with a body starts there.
+  ///
+  /// It follows the lexer: the body opens at the first `{` outside the
+  /// header's parentheses, `{{` and `}}` are escaped braces, comments hide
+  /// their braces, and each `{ ... }` hole holds ordinary code. Scanners that
+  /// walk raw source jump over the body with it, since the body's text is not
+  /// Ignis and its braces, quotes and slashes mean nothing to them.
+  function asmEndOffset(source: &String, start: u64): Option<u64> {
+    if (source.byteAt(start).unwrapOr(0) != 'a' as u8) {
+      return Option::NONE;
+    }
+
+    let startsWord: boolean = start == 0 || !Format::isIdentifierByte(source.byteAt(start - 1).unwrapOr(0));
+    let isAsm: boolean = source.byteAt(start).unwrapOr(0) == 'a' as u8 && source.byteAt(start + 1).unwrapOr(0) == 's' as u8 && source.byteAt(start + 2).unwrapOr(0) == 'm' as u8;
+
+    if (!startsWord || !isAsm || Format::isIdentifierByte(source.byteAt(start + 3).unwrapOr(0))) {
+      return Option::NONE;
+    }
+
+    let mut cursor: u64 = start + 3;
+    let mut parenDepth: u64 = 0;
+
+    while (cursor < source.length()) {
+      let byte: u8 = source.byteAt(cursor).unwrapOr(0);
+
+      if (let Option::SOME(afterComment) = Format::commentEndOffset(source, cursor)) {
+        cursor = afterComment;
+        continue;
+      }
+
+      if (byte == '"' as u8 || byte == '\'' as u8) {
+        cursor = Format::quotedLiteralEndOffset(source, cursor, byte)!;
+        continue;
+      }
+
+      if (byte == '`' as u8) {
+        cursor = Format::templateEndOffset(source, cursor)!;
+        continue;
+      }
+
+      if (byte == '(' as u8) {
+        parenDepth += 1;
+      } else if (byte == ')' as u8) {
+        if (parenDepth == 0) {
+          return Option::NONE;
+        }
+
+        parenDepth -= 1;
+      } else if (parenDepth == 0 && (byte == ';' as u8 || byte == '}' as u8)) {
+        return Option::NONE;
+      } else if (parenDepth == 0 && byte == '{' as u8) {
+        return Format::embedBodyEndOffset(source, cursor);
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The byte just past the embedded body whose `{` is at `open`.
+  function embedBodyEndOffset(source: &String, open: u64): Option<u64> {
+    let mut cursor: u64 = open + 1;
+
+    while (cursor < source.length()) {
+      let byte: u8 = source.byteAt(cursor).unwrapOr(0);
+      let next: u8 = source.byteAt(cursor + 1).unwrapOr(0);
+
+      if (let Option::SOME(afterComment) = Format::commentEndOffset(source, cursor)) {
+        cursor = afterComment;
+        continue;
+      }
+
+      if ((byte == '{' as u8 || byte == '}' as u8) && next == byte) {
+        cursor += 2;
+        continue;
+      }
+
+      if (byte == '}' as u8) {
+        return Option::SOME(cursor + 1);
+      }
+
+      if (byte == '{' as u8) {
+        cursor = Format::embedHoleEndOffset(source, cursor)!;
+        continue;
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The byte just past the `}` closing the hole whose `{` is at `open`. A
+  /// hole holds ordinary code, so its strings, templates and nested `asm`
+  /// bodies are skipped whole.
+  function embedHoleEndOffset(source: &String, open: u64): Option<u64> {
+    let mut cursor: u64 = open + 1;
+    let mut depth: u64 = 0;
+
+    while (cursor < source.length()) {
+      let byte: u8 = source.byteAt(cursor).unwrapOr(0);
+
+      if (let Option::SOME(afterAsm) = Format::asmEndOffset(source, cursor)) {
+        cursor = afterAsm;
+        continue;
+      }
+
+      if (let Option::SOME(afterComment) = Format::commentEndOffset(source, cursor)) {
+        cursor = afterComment;
+        continue;
+      }
+
+      if (byte == '"' as u8 || byte == '\'' as u8) {
+        cursor = Format::quotedLiteralEndOffset(source, cursor, byte)!;
+        continue;
+      }
+
+      if (byte == '`' as u8) {
+        cursor = Format::templateEndOffset(source, cursor)!;
+        continue;
+      }
+
+      if (byte == '{' as u8) {
+        depth += 1;
+      } else if (byte == '}' as u8) {
+        if (depth == 0) {
+          return Option::SOME(cursor + 1);
+        }
+
+        depth -= 1;
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
   /// True when `[start, end)` holds a `//` or `/*` comment, skipping the
-  /// string, character and template literals a `/` could hide inside.
+  /// string, character and template literals a `/` could hide inside, and
+  /// the bodies of `asm`, whose comments belong to the body text.
   ///
   /// The selfhost AST keeps no span on a record-initializer field, so a
   /// multiline initializer carrying a comment cannot be rebuilt without losing
@@ -1023,6 +1310,11 @@ export namespace Format {
       let Option::SOME(byte) = source.byteAt(cursor) else {
         return false;
       };
+
+      if (let Option::SOME(afterAsm) = Format::asmEndOffset(source, cursor)) {
+        cursor = afterAsm;
+        continue;
+      }
 
       if (byte == '"' as u8 || byte == '\'' as u8) {
         let Option::SOME(afterQuote) = Format::quotedLiteralEndOffset(source, cursor, byte) else {
@@ -1746,6 +2038,13 @@ export namespace Format {
       let mut result: String = indentText;
       let commentText: String = commentStatement.text.trimAsciiWhitespace();
       result.push(&commentText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Asm(asmStatement) = node) {
+      let asmText: String = Format::formatAsm(module, &asmStatement, source, config)!;
+      let mut result: String = indentText;
+      result.push(&asmText);
       return Result::OK(result);
     }
 

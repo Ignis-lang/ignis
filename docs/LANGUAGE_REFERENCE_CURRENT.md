@@ -985,7 +985,34 @@ function example(): void {
 - The deferred expression must be `void`-typed.
 - The try operator `!` is not allowed inside a deferred expression.
 
-### 8.8 Other statements
+### 8.8 Inline assembly (`asm`)
+
+`asm` embeds x86-64 instructions. Its header lists the inputs, the outputs and what the instructions clobber, and its body is the instruction text with `{name}` holes:
+
+```ignis
+function readPort(port: u16): u8 {
+    return asm (port in dx) -> (value: u8 in al) { in {value}, {port} };
+}
+
+function cycles(): u64 {
+    asm pure () -> (low: u32 in eax, high: u32 in edx) {
+        rdtsc
+    }
+
+    return ((high as u64) << 32) | (low as u64);
+}
+```
+
+- An input is `expression in location`, or `expression inout location` when the instructions also write it back. An output is `name: Type in location`. A location is a register or an operand class.
+- `clobber(...)` names what the instructions overwrite besides the outputs, such as `memory` or `flags`. An output list or a clobber list, once written, holds at least one entry.
+- `asm` is volatile unless the header says `pure`.
+- Where an expression is expected, `asm` is an expression whose value is its output. At the start of a statement it is a statement that ends with its body's `}`, and each output names a local for the rest of the block.
+- The body is not Ignis: it is kept as written, comments included. `{name}` is a hole naming an input or an output, and `{{` and `}}` write literal braces. Because of that, the body's closing `}` cannot be directly followed by another `}`; write a space or a line break between them.
+- `pure`, `inout` and `clobber` are reserved only in their places in the header. `asm` is a keyword everywhere.
+
+The compiler parses and formats `asm` today, but does not check or compile it yet: any `asm` that reaches the analyzer is an error (A0220).
+
+### 8.9 Other statements
 
 ```ignis
 return;

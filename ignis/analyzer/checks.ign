@@ -565,7 +565,33 @@ export namespace Analyzer {
           Analyzer::Checks::checkItem(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, itemStmt.item);
         },
         Ast::Statement::Node::Comment(_) -> {},
+        Ast::Statement::Node::Asm(asmNode) -> {
+          Analyzer::Checks::walkAsmInputs(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &asmNode, inDefer);
+        },
       };
+    }
+
+    /// Walks the input expressions of an `asm`, the only expressions it holds.
+    function walkAsmInputs(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      asmNode: &Ast::Expression::Asm,
+      inDefer: boolean,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < asmNode.inputs.length()) {
+        if (let Option::SOME(input) = asmNode.inputs.get(index)) {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, input.expression, inDefer);
+        }
+
+        index += 1;
+      }
     }
 
     function walkExpr(
@@ -719,6 +745,9 @@ export namespace Analyzer {
           }
 
           Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, tryExpr.expression, inDefer);
+        },
+        Ast::Expression::Node::Asm(asmNode) -> {
+          Analyzer::Checks::walkAsmInputs(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &asmNode, inDefer);
         },
       };
     }

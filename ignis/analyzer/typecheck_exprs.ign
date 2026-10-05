@@ -5227,6 +5227,10 @@ export namespace Analyzer {
           Analyzer::Typecheck::recordExprType(state, exprId, tryType);
           return Option::SOME(tryType);
         },
+        Ast::Expression::Node::Asm(value) -> {
+          Analyzer::Typecheck::emitInlineAsmUnsupported(state, value.span);
+          return Option::NONE;
+        },
       };
 
       @panic("unreachable: checkExprExpected match did not return");
@@ -6158,6 +6162,21 @@ export namespace Analyzer {
 
         return;
       }
+    }
+
+    /// Reports an `asm` expression or statement, which parses but which no
+    /// phase after the parser handles yet (A0220).
+    function emitInlineAsmUnsupported(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan
+    ): void {
+      Analyzer::Typecheck::emitDiagnosticLabeled(
+        state,
+        span,
+        DiagnosticCode::INLINE_ASM_UNSUPPORTED,
+        "inline asm is not supported yet",
+        "the compiler parses inline asm but cannot check or compile it yet",
+      );
     }
 
     function checkUnaryExpr(
@@ -8485,6 +8504,7 @@ export namespace Analyzer {
         Ast::Expression::Node::Cast(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
         Ast::Expression::Node::CaptureOverride(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
         Ast::Expression::Node::Try(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
+        Ast::Expression::Node::Asm(_) -> 0,
         Ast::Expression::Node::Dereference(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
         Ast::Expression::Node::Unary(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
         Ast::Expression::Node::PostfixIncrement(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
@@ -8530,6 +8550,7 @@ export namespace Analyzer {
         Ast::Statement::Node::Continue(_) -> 0,
         Ast::Statement::Node::Comment(_) -> 0,
         Ast::Statement::Node::Item(_) -> 0,
+        Ast::Statement::Node::Asm(_) -> 0,
         Ast::Statement::Node::Expression(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
         Ast::Statement::Node::Defer(value) -> Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.statement),
         Ast::Statement::Node::Variable(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.value),
@@ -9413,6 +9434,9 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Item(value) -> {
           Analyzer::Typecheck::emitUnsupported(state, value.span, "nested item statements");
+        },
+        Ast::Statement::Node::Asm(value) -> {
+          Analyzer::Typecheck::emitInlineAsmUnsupported(state, value.span);
         },
       };
     }

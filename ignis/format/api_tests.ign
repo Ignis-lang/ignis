@@ -1104,3 +1104,26 @@ function apiReportsEofWhileParsingAValueAfterAPositionalArraysFirstComma(): void
 
   Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: EOF while parsing a value at line 1 column 5");
 }
+
+/// The header of an `asm` statement takes the canonical layout, while its
+/// body keeps every byte as written, odd spacing and line breaks included.
+@test
+function apiNormalizesAnAsmHeaderAndKeepsItsBodyVerbatim(): void {
+  let formatted: String = formatOrFail(
+    "function main(): void {\n  asm   pure(a   in rax ,b inout rbx,)->( v :u8 in al )clobber( memory ,flags ){   mov {v},   {a}\n      nop  }\n}\n"
+  );
+
+  Test::assertEq<str>(
+    formatted.toStr(),
+    "function main(): void {\n  asm pure (a in rax, b inout rbx) -> (v: u8 in al) clobber(memory, flags) {   mov {v},   {a}\n      nop  }\n}\n"
+  );
+  Test::assertEq<str>(formatOrFail(formatted.toStr()).toStr(), formatted.toStr());
+}
+
+@test
+function apiFormatsAnAsmExpression(): void {
+  Test::assertEq<str>(
+    formatOrFail("function read(port: u16): u8 {\n  return asm(port in dx)->(value:u8 in al){ in al, dx };\n}\n").toStr(),
+    "function read(port: u16): u8 {\n  return asm (port in dx) -> (value: u8 in al) { in al, dx };\n}\n"
+  );
+}
