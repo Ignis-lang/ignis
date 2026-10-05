@@ -12,25 +12,6 @@ from "@compiler::diagnostics";
 
 const ESCAPE: char = '\u{1B}';
 
-function lineCount(text: &String): u64 {
-  let mut index: u64 = 0;
-  let mut count: u64 = 1;
-
-  while (index < text.length()) {
-    let Option::SOME(ch) = text.charAt(index) else {
-      break;
-    };
-
-    if (ch == '\n') {
-      count += 1;
-    }
-
-    index += 1;
-  }
-
-  return count;
-}
-
 function escapeAnsi(text: String): String {
   let mut escaped: String = String::new();
   let mut index: u64 = 0;
@@ -72,29 +53,13 @@ function renderPlainSingleLabelDiagnosticMatchesSnapshot(): void {
 }
 
 @test
-function renderPlainSingleLabelDiagnosticShowsAdjacentContextAndLabelSnippet(): void {
+function renderPlainSingleLabelDiagnosticShowsOnlyThePrimaryLineWithInlineLabel(): void {
   let rendered: String = renderSingleLabelDiagnostic(false);
-  let previousLine: String = String::create("  1  |first\n");
-  let primaryLine: String = String::create("  2  |problem\n");
-  let nextLine: String = String::create("  3  |third\n");
-  let labelBlock: String = String::create("label: expression expected\n");
-  let repeatedSnippet: String = String::create("  2  |problem\n");
 
-  if (!rendered.contains(&previousLine) || !rendered.contains(&primaryLine) || !rendered.contains(&nextLine)) {
-    @panic("missing adjacent context lines");
-  }
-
-  if (!rendered.contains(&labelBlock)) {
-    @panic("missing label snippet header");
-  }
-
-  if (lineCount(&rendered) < 10) {
-    @panic("expected multi-block stage0-style rendering");
-  }
-
-  if (!rendered.contains(&repeatedSnippet)) {
-    @panic("missing repeated label snippet line");
-  }
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "Error[I0001]: expected expression\n --> fixtures/render_single.ign:2:1\n  |\n2 | problem\n  | ^^^^^^^ expression expected\n  |\n  = note: parser stopped here\n  = help: insert an expression before the newline\n",
+  );
 }
 
 @test
@@ -105,7 +70,7 @@ function renderAnsiSingleLabelDiagnosticMatchesSnapshot(): void {
 }
 
 @test
-function renderPlainMultiLabelDiagnosticPreservesInsertionOrder(): void {
+function renderPlainMultiLabelDiagnosticRendersLabelsInlineInLineOrder(): void {
   let source: SourceFile = SourceFile::create("fixtures/render_multi.ign", "let answer = 1;\nlet total = answer + nope;\n");
   let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("fixtures/render_multi.ign", 37, 41));
 
@@ -115,45 +80,101 @@ function renderPlainMultiLabelDiagnosticPreservesInsertionOrder(): void {
   diagnostic.setHelp("convert the value before use");
 
   let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
-  let primaryBlock: String = String::create("label: used here\n");
-  let secondaryBlock: String = String::create("label: declared here\n");
-  let primarySnippet: String = String::create("let total = answer + nope;\n");
-  let secondarySnippet: String = String::create("let answer = 1;\n");
-  let trailingNotes: String = String::create("  = note: expected i32\n  = help: convert the value before use\n");
 
-  if (!rendered.contains(&primaryBlock) || !rendered.contains(&secondaryBlock)) {
-    @panic("missing label blocks");
-  }
-
-  if (!rendered.contains(&primarySnippet) || !rendered.contains(&secondarySnippet)) {
-    @panic("missing per-label snippets");
-  }
-
-  if (!rendered.contains(&trailingNotes)) {
-    @panic("missing trailing notes");
-  }
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "Error[A0045]: type mismatch\n --> fixtures/render_multi.ign:2:22\n  |\n1 | let answer = 1;\n  |     ------ declared here\n2 | let total = answer + nope;\n  |                      ^^^^ used here\n  |\n  = note: expected i32\n  = help: convert the value before use\n",
+  );
 }
 
 @test
-function renderPlainMultiLabelDiagnosticRendersPerLabelSnippetBlocks(): void {
-  let source: SourceFile = SourceFile::create("fixtures/render_multi.ign", "let answer = 1;\nlet total = answer + nope;\n");
-  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("fixtures/render_multi.ign", 37, 41));
+function renderSecondaryLabelOnDistantLineMarksTheGap(): void {
+  let path: str = "fixtures/render_gap.ign";
+  let source: SourceFile = SourceFile::create(path, "let answer = 1;\n\n\nlet other = 2;\nlet total = answer + nope;\n");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new(path, 54, 58));
 
-  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("fixtures/render_multi.ign", 37, 41), "used here");
-  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new("fixtures/render_multi.ign", 4, 10), "declared here");
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new(path, 54, 58), "used here");
+  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new(path, 4, 10), "declared here");
 
   let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
-  let primaryBlock: String = String::create("label: used here\n");
-  let secondaryBlock: String = String::create("label: declared here\n");
-  let declarationLine: String = String::create("let answer = 1;\n");
 
-  if (!rendered.contains(&primaryBlock) || !rendered.contains(&secondaryBlock)) {
-    @panic("missing per-label blocks");
-  }
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "Error[A0045]: type mismatch\n --> fixtures/render_gap.ign:5:22\n  |\n1 | let answer = 1;\n  |     ------ declared here\n...\n5 | let total = answer + nope;\n  |                      ^^^^ used here\n  |\n",
+  );
+}
 
-  if (!rendered.contains(&declarationLine)) {
-    @panic("missing secondary label source excerpt");
-  }
+@test
+function renderSecondaryLabelOneLineAwayPrintsTheLineBetween(): void {
+  let path: str = "fixtures/render_one_gap.ign";
+  let source: SourceFile = SourceFile::create(path, "let answer = 1;\nlet other = 2;\nlet total = answer + nope;\n");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new(path, 52, 56));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new(path, 52, 56), "used here");
+  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new(path, 4, 10), "declared here");
+
+  let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
+
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "Error[A0045]: type mismatch\n --> fixtures/render_one_gap.ign:3:22\n  |\n1 | let answer = 1;\n  |     ------ declared here\n2 | let other = 2;\n3 | let total = answer + nope;\n  |                      ^^^^ used here\n  |\n",
+  );
+}
+
+@test
+function renderAlignsTheGutterForFourDigitLineNumbers(): void {
+  let path: str = "fixtures/render_wide.ign";
+  let mut text: String = String::new();
+
+  text.pushRepeated("\n", 999);
+  text.pushStr("let mut value = 1;\n");
+
+  let source: SourceFile = SourceFile::create(path, text.toStr());
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::WARNING, DiagnosticCode::UNUSED_MUT, "variable 'value' does not need to be mutable", SourceSpan::new(path, 1007, 1012));
+
+  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new(path, 999, 1002), "declared here");
+
+  let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
+
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "Warning[A0127]: variable 'value' does not need to be mutable\n    --> fixtures/render_wide.ign:1000:9\n     |\n1000 | let mut value = 1;\n     |         ^^^^^\n     | --- declared here\n     |\n",
+  );
+}
+
+@test
+function renderCaretStartsAtTheSourceColumn(): void {
+  let path: str = "fixtures/render_column.ign";
+  let source: SourceFile = SourceFile::create(path, "value\n  let total = 1;\n");
+  let firstColumn: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new(path, 0, 5));
+  let midLine: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new(path, 12, 17));
+  let firstRendered: String = DiagnosticRenderer::render(&firstColumn, &source, false);
+  let midRendered: String = DiagnosticRenderer::render(&midLine, &source, false);
+
+  Test::assertEq<str>(
+    firstRendered.toStr(),
+    "Error[A0045]: type mismatch\n --> fixtures/render_column.ign:1:1\n  |\n1 | value\n  | ^^^^^\n  |\n",
+  );
+  Test::assertEq<str>(
+    midRendered.toStr(),
+    "Error[A0045]: type mismatch\n --> fixtures/render_column.ign:2:7\n  |\n2 |   let total = 1;\n  |       ^^^^^\n  |\n",
+  );
+}
+
+@test
+function renderOmitsPrimaryLabelTextThatRepeatsTheMessage(): void {
+  let path: str = "fixtures/render_dedup.ign";
+  let source: SourceFile = SourceFile::create(path, "let mut seen = 1;\n");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::WARNING, DiagnosticCode::UNUSED_MUT, "variable 'seen' does not need to be mutable", SourceSpan::new(path, 8, 12));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new(path, 8, 12), "variable 'seen' does not need to be mutable");
+
+  let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
+
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "Warning[A0127]: variable 'seen' does not need to be mutable\n --> fixtures/render_dedup.ign:1:9\n  |\n1 | let mut seen = 1;\n  |         ^^^^\n  |\n",
+  );
 }
 
 @test
@@ -164,8 +185,8 @@ function renderMultilineCaretWidthUsesUnicodeColumns(): void {
   diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("fixtures/render_unicode_multiline.ign", 1, 7), "highlight extends to next line");
 
   let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
-  let expectedCaretLine: String = String::create("     |  ^^^\n");
-  let tooWideCaretLine: String = String::create("     |  ^^^^\n");
+  let expectedCaretLine: String = String::create("  |  ^^^ highlight extends to next line\n");
+  let tooWideCaretLine: String = String::create("  |  ^^^^");
 
   if (!rendered.contains(&expectedCaretLine)) {
     @panic("expected caret width to follow Unicode scalar columns");
