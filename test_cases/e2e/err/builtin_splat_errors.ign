@@ -1,0 +1,28 @@
+// e2e: err
+//
+// `@splat<T[N]>(value)` needs an array type argument, one value of the element
+// type, and an element type that is Copy, since the value is copied into every
+// element. In a static initializer it expands into the constant itself, so it
+// has an element limit.
+@implements(Drop)
+record Handle {
+  public id: i32;
+
+  public drop(&mut self): void {
+    return;
+  }
+}
+
+record Tables {
+  static mut HUGE: u8[65537] = @splat<u8[65537]>(1);
+}
+
+function main(): i32 {
+  let notArray: u8 = @splat<u8>(1);
+  let wrongValue: u8[4] = @splat<u8[4]>(true);
+  let owned: Handle[2] = @splat<Handle[2]>(Handle { id: 1 });
+  let missing: u8[4] = @splat<u8[4]>();
+  let extra: u8[4] = @splat<u8[4]>(1, 2);
+
+  return 0;
+}

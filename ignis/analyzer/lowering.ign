@@ -3375,6 +3375,28 @@ export namespace Lowering {
       });
     }
 
+    if (name.equals("splat")) {
+      let Option::SOME(arrayType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(valueId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *valueId);
+
+      let mut splatHirRef: &mut Hir::HirStore = hir;
+      return splatHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinSplat(Hir::HirBuiltinSplat {
+          ty: arrayType,
+          value: value,
+        }),
+        span: builtinCall.span,
+        typeId: arrayType,
+      });
+    }
+
     if (name.equals("write") || name.equals("writeVolatile")) {
       let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
         return Lowering::errorNode(hir, typeStore, builtinCall.span);

@@ -1160,6 +1160,7 @@ export namespace Analyzer {
         };
 
         let mut parts: Vector<Analyzer::ConstEval::ConstPart> = Vector::new<Analyzer::ConstEval::ConstPart>();
+        let mut report: Analyzer::ConstEval::FoldReport = Analyzer::ConstEval::FoldReport::none();
         let folded: boolean = Analyzer::ConstEval::evalInitializerParts(
           values,
           defStore,
@@ -1170,10 +1171,15 @@ export namespace Analyzer {
           typecheck,
           initializer,
           declaredType,
+          &mut report,
           &mut parts,
         );
 
         if (!folded) {
+          if (Analyzer::ConstEval::reportOversizedSplat(diagnostics, &report)) {
+            continue;
+          }
+
           if (isMutable) {
             Analyzer::ConstEval::reportNonConstantStaticMut(diagnostics, module, initializer, &fieldName);
           }
@@ -1192,6 +1198,41 @@ export namespace Analyzer {
       }
     }
 
+    /// What a failed fold reports besides "not constant": the first `@splat`
+    /// whose non-zero value would expand past `ARRAY_EXPANSION_LIMIT` elements,
+    /// with the span of the call and the length it asked for.
+    record FoldReport {
+      public oversizedSplat: Option<SourceSpan>;
+      public oversizedLength: u64;
+
+      public static none(): FoldReport {
+        return FoldReport {
+          oversizedSplat: Option::NONE,
+          oversizedLength: 0,
+        };
+      }
+    }
+
+    /// A0240 for the oversized `@splat` a failed fold recorded. False when it
+    /// recorded none.
+    function reportOversizedSplat(
+      diagnostics: &mut DiagnosticBag,
+      report: &Analyzer::ConstEval::FoldReport,
+    ): boolean {
+      let Option::SOME(span) = report.oversizedSplat else {
+        return false;
+      };
+
+      let message: String = `'@splat' expands to ${report.oversizedLength} elements, more than the limit of ${Analyzer::Typecheck::ARRAY_EXPANSION_LIMIT}`;
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::SPLAT_TOO_LARGE, message.toStr(), span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, "a constant initializer holds every element, so only a zero value may be larger");
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
+
+      return true;
+    }
+
     /// Folds `exprId`, the initializer of storage typed `expectedType`, into
     /// `parts`: an array literal of a fixed array type and a record literal of
     /// a record type open a bracket and fold each element or field against its
@@ -1208,6 +1249,7 @@ export namespace Analyzer {
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       exprId: Ast::ExpressionId,
       expectedType: Analyzer::TypeId,
+      report: &mut Analyzer::ConstEval::FoldReport,
       parts: &mut Vector<Analyzer::ConstEval::ConstPart>,
     ): boolean {
       let Option::SOME(expression) = module.expressions.get(exprId) else {
@@ -1225,6 +1267,7 @@ export namespace Analyzer {
           typecheck,
           grouped.expression,
           expectedType,
+          report,
           parts,
         );
       }
@@ -1232,6 +1275,22 @@ export namespace Analyzer {
       if (let Ast::Expression::Node::BuiltinCall(call) = expression) {
         if (call.name.equals("zeroed")) {
           return Analyzer::ConstEval::evalZeroedParts(defStore, typeStore, typecheck, exprId, parts);
+        }
+
+        if (call.name.equals("splat")) {
+          return Analyzer::ConstEval::evalSplatParts(
+            values,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            typecheck,
+            exprId,
+            &call,
+            report,
+            parts,
+          );
         }
       }
 
@@ -1277,7 +1336,7 @@ export namespace Analyzer {
             return false;
           };
 
-          if (!Analyzer::ConstEval::evalInitializerParts(values, defStore, typeStore, symbols, module, resolvedBodies, typecheck, *elementId, elementType, parts)) {
+          if (!Analyzer::ConstEval::evalInitializerParts(values, defStore, typeStore, symbols, module, resolvedBodies, typecheck, *elementId, elementType, report, parts)) {
             return false;
           }
 
@@ -1310,7 +1369,7 @@ export namespace Analyzer {
           let mut fieldRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
           fieldRef.push(Analyzer::ConstEval::ConstPart::Field(ownerId, fieldDef.index));
 
-          if (!Analyzer::ConstEval::evalInitializerParts(values, defStore, typeStore, symbols, module, resolvedBodies, typecheck, field.value, fieldDef.fieldType, parts)) {
+          if (!Analyzer::ConstEval::evalInitializerParts(values, defStore, typeStore, symbols, module, resolvedBodies, typecheck, field.value, fieldDef.fieldType, report, parts)) {
             return false;
           }
 
@@ -1327,6 +1386,120 @@ export namespace Analyzer {
       };
 
       partsRef.push(Analyzer::ConstEval::ConstPart::Value(value, expectedType));
+      return true;
+    }
+
+    /// Whether `value` is a constant whose every byte is zero.
+    function isZeroConstValue(value: &Analyzer::ConstEval::ConstValue): boolean {
+      return match (value) {
+        Analyzer::ConstEval::ConstValue::Int(number) -> number == 0,
+        Analyzer::ConstEval::ConstValue::Float(number) -> number == 0.0 && 1.0 / number > 0.0,
+        Analyzer::ConstEval::ConstValue::Bool(flag) -> !flag,
+        Analyzer::ConstEval::ConstValue::Char(character) -> character == '\0',
+        Analyzer::ConstEval::ConstValue::Null -> true,
+        Analyzer::ConstEval::ConstValue::Str(_) -> false,
+      };
+    }
+
+    /// Whether `parts` folds a value whose every byte is zero: one `Zero`, or
+    /// one scalar that is the zero of its type.
+    function isZeroParts(parts: &Vector<Analyzer::ConstEval::ConstPart>): boolean {
+      if (parts.length() != 1) {
+        return false;
+      }
+
+      let Option::SOME(part) = parts.get(0) else {
+        return false;
+      };
+
+      return match (part) {
+        Analyzer::ConstEval::ConstPart::Zero(_) -> true,
+        Analyzer::ConstEval::ConstPart::Value(value, _) -> Analyzer::ConstEval::isZeroConstValue(&value),
+        _ -> false,
+      };
+    }
+
+    /// Folds `@splat<T[N]>(value)` at `exprId` into `parts`. A zero value is
+    /// one `Zero` of the array type, however large it is. Any other value folds
+    /// once against the element type and is written `N` times inside the
+    /// brackets of the array, which is false, with the call recorded in
+    /// `report`, past `ARRAY_EXPANSION_LIMIT` elements.
+    function evalSplatParts(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+      call: &Ast::Expression::BuiltinCall,
+      report: &mut Analyzer::ConstEval::FoldReport,
+      parts: &mut Vector<Analyzer::ConstEval::ConstPart>,
+    ): boolean {
+      let Option::SOME(arrayType) = Analyzer::ConstEval::exprTypeOf(typecheck, exprId) else {
+        return false;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, arrayType);
+      let mut elementType: Option<Analyzer::TypeId> = Option::NONE;
+      let mut size: u64 = 0;
+
+      if (let Option::SOME(Analyzer::Type::FixedArray(element, count)) = typeStore.get(resolved.typeId)) {
+        elementType = Option::SOME(element);
+        size = count;
+      }
+
+      let Option::SOME(element) = elementType else {
+        return false;
+      };
+
+      let Option::SOME(valueId) = call.arguments.get(0) else {
+        return false;
+      };
+
+      let mut elementParts: Vector<Analyzer::ConstEval::ConstPart> = Vector::new<Analyzer::ConstEval::ConstPart>();
+
+      if (!Analyzer::ConstEval::evalInitializerParts(values, defStore, typeStore, symbols, module, resolvedBodies, typecheck, *valueId, element, report, &mut elementParts)) {
+        return false;
+      }
+
+      let mut partsRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
+
+      if (Analyzer::ConstEval::isZeroParts(&elementParts)) {
+        partsRef.push(Analyzer::ConstEval::ConstPart::Zero(arrayType));
+
+        return true;
+      }
+
+      if (size > Analyzer::Typecheck::ARRAY_EXPANSION_LIMIT) {
+        let mut reportRef: &mut Analyzer::ConstEval::FoldReport = report;
+        reportRef.oversizedSplat = Option::SOME(call.span);
+        reportRef.oversizedLength = size;
+
+        return false;
+      }
+
+      partsRef.push(Analyzer::ConstEval::ConstPart::Open);
+
+      let mut copyIndex: u64 = 0;
+
+      while (copyIndex < size) {
+        let mut partIndex: u64 = 0;
+
+        while (partIndex < elementParts.length()) {
+          if (let Option::SOME(part) = elementParts.get(partIndex)) {
+            partsRef.push(Analyzer::ConstEval::copyConstPart(part));
+          }
+
+          partIndex += 1;
+        }
+
+        copyIndex += 1;
+      }
+
+      partsRef.push(Analyzer::ConstEval::ConstPart::Close);
+
       return true;
     }
 
@@ -1493,6 +1666,7 @@ export namespace Analyzer {
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       defId: Analyzer::DefinitionId,
       initializer: Ast::ExpressionId,
+      diagnostics: &mut DiagnosticBag,
     ): void {
       let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
 
@@ -1505,6 +1679,7 @@ export namespace Analyzer {
       };
 
       let mut parts: Vector<Analyzer::ConstEval::ConstPart> = Vector::new<Analyzer::ConstEval::ConstPart>();
+      let mut report: Analyzer::ConstEval::FoldReport = Analyzer::ConstEval::FoldReport::none();
       let folded: boolean = Analyzer::ConstEval::evalInitializerParts(
         values,
         defStore,
@@ -1515,10 +1690,13 @@ export namespace Analyzer {
         typecheck,
         initializer,
         storageType,
+        &mut report,
         &mut parts,
       );
 
       if (!folded) {
+        let _reported: boolean = Analyzer::ConstEval::reportOversizedSplat(diagnostics, &report);
+
         return;
       }
 
@@ -1579,6 +1757,7 @@ export namespace Analyzer {
             typecheck,
             defId,
             constant.value,
+            diagnostics,
           );
         },
         Ast::Item::Node::Record(recordItem) -> {

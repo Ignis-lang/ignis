@@ -7513,6 +7513,10 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinZeroed(state, defStore, typeStore, symbols, module, call);
       }
 
+      if (name.equals("splat")) {
+        return Analyzer::Typecheck::checkBuiltinSplat(state, defStore, typeStore, symbols, module, resolvedBodies, call);
+      }
+
       if (Analyzer::Typecheck::isKnownBuiltinName(name)) {
         let detail: String = `the \`@${name.toStr()}\` builtin`;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
@@ -7553,7 +7557,7 @@ export namespace Analyzer {
         return true;
       }
 
-      if (name.equals("zeroed")) {
+      if (name.equals("zeroed") || name.equals("splat")) {
         return true;
       }
 
@@ -7606,6 +7610,88 @@ export namespace Analyzer {
       }
 
       return Option::SOME(valueType);
+    }
+
+    /// `@splat<T[N]>(value)`: one fixed array type argument and one value, and
+    /// the result is that array with `value` in every element. The value is
+    /// checked against the element type, which has to be Copy since the value
+    /// is copied into each element.
+    function checkBuiltinSplat(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 1) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 1) {
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 1, call.arguments.length());
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+      let Option::SOME(arrayType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
+        let detail: String = `the type argument of \`@${call.name.toStr()}\``;
+        Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+        return Option::NONE;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, arrayType);
+      let mut elementType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Type::FixedArray(element, _)) = typeStore.get(resolved.typeId)) {
+        elementType = Option::SOME(element);
+      }
+
+      let Option::SOME(element) = elementType else {
+        let name: String = typeStore.nameOfResolved(arrayType, &*defStore, &*symbols);
+        let message: String = `'@splat' needs an array type argument such as 'u8[16]', found '${name.toStr()}'`;
+
+        Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::SPLAT_TARGET_NOT_ARRAY, message.toStr());
+        return Option::NONE;
+      };
+
+      let Option::SOME(valueExprId) = call.arguments.get(0) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(actualType) = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        *valueExprId,
+        Option::SOME(element),
+      ) else {
+        return Option::NONE;
+      };
+
+      let valueSpan: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, *valueExprId, call.span);
+
+      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, valueSpan, element, actualType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, valueSpan, element, actualType);
+        return Option::NONE;
+      }
+
+      if (!Analyzer::Typecheck::isCopyType(defStore, typeStore, element)) {
+        let name: String = typeStore.nameOfResolved(element, &*defStore, &*symbols);
+        let message: String = `'@splat' copies its value into every element, but '${name.toStr()}' is not Copy`;
+
+        Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::SPLAT_ELEMENT_NOT_COPY, message.toStr());
+        return Option::NONE;
+      }
+
+      return Option::SOME(arrayType);
     }
 
     /// `@minOf<T>()` / `@maxOf<T>()`: one type argument, no value arguments,
@@ -10127,7 +10213,7 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      if (length > 65536) {
+      if (length > Analyzer::Typecheck::ARRAY_EXPANSION_LIMIT) {
         Analyzer::Typecheck::emitArrayRangeTooLarge(state, range.span, length);
         return Option::NONE;
       }

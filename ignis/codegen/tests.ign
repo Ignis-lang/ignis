@@ -711,6 +711,36 @@ function codegenFillsRuntimeZeroedAggregatesWithTheMemsetBuiltin(): void {
   Test::assert(!codegenContains(&emission.source, "string.h"));
 }
 
+/// `@splat` in a static initializer expands into one constant per element, a
+/// zero value stays `{0}`, and a run-time `@splat` fills its local with
+/// `__builtin_memset` for a byte-sized element and a counted loop otherwise,
+/// never a libc call.
+@test
+function codegenExpandsStaticSplatsAndFillsRuntimeSplatsWithoutLibc(): void {
+  let mut staticEmission: CodegenEmission = codegenEmit(
+    "record Tables {\n  static mut WORDS: u32[3] = @splat<u32[3]>(7);\n  static mut ZEROS: u16[4096] = @splat<u16[4096]>(0);\n}\n\nfunction main(): i32 {\n  return (Tables::WORDS[1] + Tables::ZEROS[2] as u32) as i32;\n}\n",
+  );
+
+  let words: String = codegenStaticName(&mut staticEmission, "WORDS");
+  let zeros: String = codegenStaticName(&mut staticEmission, "ZEROS");
+
+  let wordsGlobal: String = `static u32 ${words.toStr()}[3] = {7U, 7U, 7U};\n`;
+  let zerosGlobal: String = `static u16 ${zeros.toStr()}[4096];\n`;
+
+  Test::assert(staticEmission.source.contains(&wordsGlobal));
+  Test::assert(staticEmission.source.contains(&zerosGlobal));
+
+  let runtimeEmission: CodegenEmission = codegenEmitFreestanding(
+    "@panicHandler\nfunction onPanic(message: str, file: str, line: u32): void {\n  return;\n}\n\n@externName(\"splat_probe\")\nfunction probe(value: u32): u32 {\n  let bytes: u8[32] = @splat<u8[32]>(0xFF);\n  let words: u32[8] = @splat<u32[8]>(value);\n\n  return bytes[3] as u32 + words[2];\n}\n",
+  );
+
+  Test::assert(codegenContains(&runtimeEmission.source, "__builtin_memset(t"));
+  Test::assert(codegenContains(&runtimeEmission.source, ", 32);"));
+  Test::assert(codegenContains(&runtimeEmission.source, "for (u64 "));
+  Test::assert(!codegenContains(&runtimeEmission.source, " memset("));
+  Test::assert(!codegenContains(&runtimeEmission.source, "string.h"));
+}
+
 /// A volatile access to a pointer-typed slot qualifies the slot, not the
 /// pointee: `volatile i32**` would make the load of the pointer itself plain.
 @test

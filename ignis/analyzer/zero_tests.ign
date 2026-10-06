@@ -193,3 +193,55 @@ function zeroedTakesOneTypeArgumentAndNoValueArguments(): void {
   zeroAssertRejected("function main(): i32 {\n  let value: i32 = @zeroed<i32>(1);\n\n  return value;\n}\n", DiagnosticCode::BUILTIN_ARG_COUNT);
   zeroAssertRejected("function main(): i32 {\n  let value: i32 = @zeroed();\n\n  return value;\n}\n", DiagnosticCode::GENERIC_ARITY_MISMATCH);
 }
+
+@test
+function splatAcceptsArraysOfCopyElements(): void {
+  zeroAssertAccepted(
+    "@cLayout\nrecord Gate {\n  public offset: u16;\n  public flags: u8;\n}\n\nfunction main(): i32 {\n  let a: u8[8] = @splat<u8[8]>(1);\n  let b: u32[3] = @splat<u32[3]>(7);\n  let c: Gate[2] = @splat<Gate[2]>(Gate { offset: 1, flags: 2 });\n  let d: f64[2] = @splat<f64[2]>(0.5);\n\n  return a[0] as i32;\n}\n",
+  );
+}
+
+@test
+function splatAcceptsStaticInitializersAtTheElementLimit(): void {
+  zeroAssertAccepted(
+    "record Tables {\n  static mut BIG: u8[65536] = @splat<u8[65536]>(1);\n  static mut ZEROS: u16[100000] = @splat<u16[100000]>(0);\n  static ROWS: u8[3] = @splat<u8[3]>(9);\n}\n\nfunction main(): i32 {\n  return Tables::BIG[0] as i32;\n}\n",
+  );
+}
+
+@test
+function splatRejectsATypeArgumentThatIsNotAnArray(): void {
+  zeroAssertRejected("function main(): i32 {\n  let value: u8 = @splat<u8>(1);\n\n  return 0;\n}\n", "A0241");
+}
+
+@test
+function splatRejectsAValueOfTheWrongType(): void {
+  zeroAssertRejected("function main(): i32 {\n  let value: u8[4] = @splat<u8[4]>(true);\n\n  return 0;\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function splatRejectsElementsThatAreNotCopy(): void {
+  zeroAssertRejected(
+    "@implements(Drop)\nrecord Handle {\n  public id: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nfunction main(): i32 {\n  let handles: Handle[2] = @splat<Handle[2]>(Handle { id: 1 });\n\n  return 0;\n}\n",
+    "A0242",
+  );
+}
+
+@test
+function splatTakesOneTypeArgumentAndOneValueArgument(): void {
+  zeroAssertRejected("function main(): i32 {\n  let value: u8[4] = @splat<u8[4]>();\n\n  return 0;\n}\n", DiagnosticCode::BUILTIN_ARG_COUNT);
+  zeroAssertRejected("function main(): i32 {\n  let value: u8[4] = @splat<u8[4]>(1, 2);\n\n  return 0;\n}\n", DiagnosticCode::BUILTIN_ARG_COUNT);
+  zeroAssertRejected("function main(): i32 {\n  let value: u8[4] = @splat(1);\n\n  return 0;\n}\n", DiagnosticCode::GENERIC_ARITY_MISMATCH);
+}
+
+@test
+function splatRejectsANonZeroStaticInitializerOverTheElementLimit(): void {
+  zeroAssertRejected("record Tables {\n  static mut HUGE: u8[65537] = @splat<u8[65537]>(1);\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", "A0240");
+}
+
+@test
+function splatRejectsANonConstantValueInAStaticMutInitializer(): void {
+  zeroAssertRejected(
+    "function pick(): u8 {\n  return 1;\n}\n\nrecord Tables {\n  static mut MARKS: u8[4] = @splat<u8[4]>(pick());\n}\n\nfunction main(): i32 {\n  return 0;\n}\n",
+    DiagnosticCode::STATIC_MUT_NON_CONSTANT_INITIALIZER,
+  );
+}

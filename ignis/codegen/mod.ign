@@ -2049,6 +2049,7 @@ export namespace CodegenC {
       Lir::Instr::MakeSlice(_) -> "MakeSlice",
       Lir::Instr::InitVector(_) -> "InitVector",
       Lir::Instr::InitZero(_) -> "InitZero",
+      Lir::Instr::InitSplat(_) -> "InitSplat",
       Lir::Instr::Nop -> "Nop",
       Lir::Instr::RuntimeCall(_) -> "RuntimeCall",
       Lir::Instr::TypeIdOf(_) -> "TypeIdOf",
@@ -2877,6 +2878,23 @@ export namespace CodegenC {
         let line: String = `    __builtin_memset(${destination.toStr()}, 0, ${size.toStr()});\n`;
         let mut zeroRef: &mut String = output;
         zeroRef.pushStr(line.toStr());
+      },
+      Lir::Instr::InitSplat(node) -> {
+        let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.destPtr);
+        let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
+        let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.elementType);
+        let mut fill: String = String::new();
+
+        if (CodegenC::isZeroConstant(&node.value)) {
+          fill = `    __builtin_memset(${destination.toStr()}, 0, ${node.count} * sizeof(${elementText.toStr()}));\n`;
+        } else if (CodegenC::isByteSized(typeStore, node.elementType)) {
+          fill = `    __builtin_memset(${destination.toStr()}, ${value.toStr()}, ${node.count});\n`;
+        } else {
+          fill = `    for (u64 splat_index = 0; splat_index < ${node.count}; splat_index++) { ${destination.toStr()}[splat_index] = ${value.toStr()}; }\n`;
+        }
+
+        let mut splatRef: &mut String = output;
+        splatRef.pushStr(fill.toStr());
       },
       Lir::Instr::RuntimeCall(node) -> {
         let mut call: String = String::create("    ");
@@ -4137,6 +4155,36 @@ export namespace CodegenC {
     let valueText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, typeId);
 
     return `sizeof(${valueText.toStr()})`;
+  }
+
+  /// Whether `operand` is a constant whose every byte is zero.
+  function isZeroConstant(operand: &Lir::Operand): boolean {
+    let Lir::Operand::Const(constant) = operand else {
+      return false;
+    };
+
+    return match (constant) {
+      Lir::ConstValue::Int(value, _) -> value == 0,
+      Lir::ConstValue::UInt(value, _) -> value == 0,
+      Lir::ConstValue::Bool(value, _) -> !value,
+      Lir::ConstValue::Null(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// Whether a value of `typeId` is one byte: `u8`, `i8` or `boolean`, so that
+  /// filling an array of it with a value is one `memset`.
+  function isByteSized(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::U8 -> true,
+      Analyzer::Type::I8 -> true,
+      Analyzer::Type::BOOLEAN -> true,
+      _ -> false,
+    };
   }
 
   function isVoidType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
