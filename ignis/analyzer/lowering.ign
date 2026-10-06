@@ -5789,6 +5789,370 @@ export namespace Lowering {
     return Lowering::forOfLoopNode(typeStore, hir, span, &index, condition, body);
   }
 
+  /// The value of an integer literal bound, looking through parentheses. A
+  /// negated literal is not one, which only costs the loop its fast path.
+  function rangeLiteralBound(module: &Ast::Module, exprId: Ast::ExpressionId): Option<u64> {
+    let Option::SOME(expression) = module.expressions.get(exprId) else {
+      return Option::NONE;
+    };
+
+    return match (expression) {
+      Ast::Expression::Node::Literal(literal) -> match (literal.value) {
+        Ast::Expression::LiteralValue::Int(value) -> Option::SOME(value as u64),
+        Ast::Expression::LiteralValue::UInt(value) -> Option::SOME(value),
+        _ -> Option::NONE,
+      },
+      Ast::Expression::Node::Grouped(grouped) -> Lowering::rangeLiteralBound(module, grouped.expression),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The largest value an integer type holds, or `NONE` for any other type.
+  function integerTypeMax(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<u64> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(127),
+      Analyzer::Type::I16 -> Option::SOME(32767),
+      Analyzer::Type::I32 -> Option::SOME(2147483647),
+      Analyzer::Type::I64 -> Option::SOME(9223372036854775807),
+      Analyzer::Type::U8 -> Option::SOME(255),
+      Analyzer::Type::U16 -> Option::SOME(65535),
+      Analyzer::Type::U32 -> Option::SOME(4294967295),
+      Analyzer::Type::U64 -> Option::SOME(18446744073709551615),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// A literal `1` of the integer type `typeId`, reading through aliases.
+  function rangeStepLiteral(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    typeId: Analyzer::TypeId,
+  ): Hir::HirId {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+    let kind: Hir::LiteralValue = Lowering::intLiteralKind(typeStore, 1, resolved.typeId);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Literal(kind),
+      span: span,
+      typeId: typeId,
+    });
+  }
+
+  function allocVariableNode(
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    defId: Analyzer::DefinitionId,
+    typeId: Analyzer::TypeId,
+  ): Hir::HirId {
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(defId),
+      span: span,
+      typeId: typeId,
+    });
+  }
+
+  function allocLetNode(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    defId: Analyzer::DefinitionId,
+    value: Hir::HirId,
+  ): Hir::HirId {
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Let(Hir::HirLet {
+        name: defId,
+        value: Option::SOME(value),
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+  }
+
+  function allocAssignNode(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    target: Hir::HirId,
+    value: Hir::HirId,
+    operation: Option<Hir::BinaryOperation>,
+  ): Hir::HirId {
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Assign(Hir::HirAssign {
+        target: target,
+        value: value,
+        operation: operation,
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+  }
+
+  function allocBlockNode(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    statements: Vector<Hir::HirId>,
+  ): Hir::HirId {
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Block(Hir::HirBlock {
+        statements: statements,
+        expression: Option::NONE,
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+  }
+
+  function allocComparisonNode(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    operation: Hir::BinaryOperation,
+    left: Hir::HirId,
+    right: Hir::HirId,
+  ): Hir::HirId {
+    let booleanTypeId: Analyzer::TypeId = Lowering::booleanType(typeStore);
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Binary(Hir::HirBinary {
+        operation: operation,
+        left: left,
+        right: right,
+      }),
+      span: span,
+      typeId: booleanTypeId,
+    });
+  }
+
+  /// `__i < __end`, or `__i <= __end` for an inclusive range.
+  function rangeCondition(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    counterDef: Analyzer::DefinitionId,
+    endDef: Analyzer::DefinitionId,
+    elementType: Analyzer::TypeId,
+    inclusive: boolean,
+  ): Hir::HirId {
+    let counter: Hir::HirId = Lowering::allocVariableNode(hir, span, counterDef, elementType);
+    let end: Hir::HirId = Lowering::allocVariableNode(hir, span, endDef, elementType);
+
+    if (inclusive) {
+      return Lowering::allocComparisonNode(typeStore, hir, span, Hir::BinaryOperation::LessEqual, counter, end);
+    }
+
+    return Lowering::allocComparisonNode(typeStore, hir, span, Hir::BinaryOperation::LessThan, counter, end);
+  }
+
+  /// `__i += 1`.
+  function rangeAdvance(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    counterDef: Analyzer::DefinitionId,
+    elementType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let target: Hir::HirId = Lowering::allocVariableNode(hir, span, counterDef, elementType);
+    let step: Hir::HirId = Lowering::rangeStepLiteral(defStore, typeStore, hir, span, elementType);
+
+    return Lowering::allocAssignNode(typeStore, hir, span, target, step, Option::SOME(Hir::BinaryOperation::Add));
+  }
+
+  /// The update of an inclusive loop that guards against wrapping:
+  /// `if (__i < __end) { __i += 1; } else { __more = false; }`. The counter
+  /// never moves past `__end`, so the end can be the type's maximum.
+  function rangeFlaggedUpdate(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    counterDef: Analyzer::DefinitionId,
+    endDef: Analyzer::DefinitionId,
+    moreDef: Analyzer::DefinitionId,
+    elementType: Analyzer::TypeId,
+    advance: Hir::HirId,
+  ): Hir::HirId {
+    let below: Hir::HirId = Lowering::rangeCondition(typeStore, hir, span, counterDef, endDef, elementType, false);
+
+    let mut advanceStatements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    advanceStatements.push(advance);
+    let advanceBlock: Hir::HirId = Lowering::allocBlockNode(typeStore, hir, span, advanceStatements);
+
+    let booleanTypeId: Analyzer::TypeId = Lowering::booleanType(typeStore);
+    let moreTarget: Hir::HirId = Lowering::allocVariableNode(hir, span, moreDef, booleanTypeId);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    let falseValue: Hir::HirId = hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Literal(Hir::LiteralValue::Boolean(false)),
+      span: span,
+      typeId: booleanTypeId,
+    });
+
+    let finish: Hir::HirId = Lowering::allocAssignNode(typeStore, hir, span, moreTarget, falseValue, Option::NONE);
+
+    let mut finishStatements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    finishStatements.push(finish);
+    let finishBlock: Hir::HirId = Lowering::allocBlockNode(typeStore, hir, span, finishStatements);
+
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut ifHirRef: &mut Hir::HirStore = hir;
+
+    return ifHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::If(Hir::HirIf {
+        condition: below,
+        thenBranch: advanceBlock,
+        elseBranch: Option::SOME(finishBlock),
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+  }
+
+  /// Desugars a `for ... of` over `start..end` or `start..=end` into a counted
+  /// loop, with no allocation and no value for the range itself:
+  ///
+  /// ```text
+  /// { let mut __i = start; let __end = end;
+  ///   for (; __i < __end; __i += 1) { let <binding> = __i; <body> } }
+  /// ```
+  ///
+  /// The bounds are evaluated once, start first, and the binding is a copy of
+  /// the hidden counter, so writing to it never moves the loop. An inclusive
+  /// range cannot step past its end with a plain `<=` when the end is the
+  /// type's maximum, since the counter would wrap before the test failed. It
+  /// keeps a `__more` flag instead, and steps the counter only while it is
+  /// below the end. Two literal bounds with an end below the maximum cannot
+  /// wrap, so they keep the plain form.
+  function lowerForOfRange(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    forOf: &Ast::Statement::ForOf,
+    binding: &Lowering::ForOfBindingShape,
+    range: &Ast::Expression::Range,
+  ): Hir::HirId {
+    let span: SourceSpan = forOf.span;
+
+    let Option::SOME(startId) = range.start else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+    let Option::SOME(endId) = range.end else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+
+    let elementType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, startId);
+    let synthId: u32 = Lowering::nextSyntheticId(locals);
+
+    let start: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, startId);
+    let end: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, endId);
+
+    let counterName: String = `__for_of_i_${synthId}`;
+    let counterDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, counterName.toStr(), elementType, true);
+    let counterLet: Hir::HirId = Lowering::allocLetNode(typeStore, hir, span, counterDef, start);
+
+    let endName: String = `__for_of_end_${synthId}`;
+    let endDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, endName.toStr(), elementType, false);
+    let endLet: Hir::HirId = Lowering::allocLetNode(typeStore, hir, span, endDef, end);
+
+    let mut prefix: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    prefix.push(counterLet);
+    prefix.push(endLet);
+
+    let mut plainInclusive: boolean = false;
+
+    if (range.inclusive) {
+      if (let Option::SOME(endValue) = Lowering::rangeLiteralBound(module, endId)) {
+        if (let Option::SOME(typeMax) = Lowering::integerTypeMax(defStore, typeStore, elementType)) {
+          plainInclusive = Lowering::rangeLiteralBound(module, startId).isSome() && endValue < typeMax;
+        }
+      }
+    }
+
+    let flagged: boolean = range.inclusive && !plainInclusive;
+    let mut condition: Hir::HirId = Lowering::rangeCondition(typeStore, hir, span, counterDef, endDef, elementType, range.inclusive);
+    let advance: Hir::HirId = Lowering::rangeAdvance(defStore, typeStore, hir, span, counterDef, elementType);
+    let mut update: Hir::HirId = advance;
+
+    if (flagged) {
+      let moreName: String = `__for_of_more_${synthId}`;
+      let moreType: Analyzer::TypeId = Lowering::booleanType(typeStore);
+      let moreDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, moreName.toStr(), moreType, true);
+
+      let startCheck: Hir::HirId = Lowering::rangeCondition(typeStore, hir, span, counterDef, endDef, elementType, true);
+      prefix.push(Lowering::allocLetNode(typeStore, hir, span, moreDef, startCheck));
+
+      condition = Lowering::allocVariableNode(hir, span, moreDef, moreType);
+      update = Lowering::rangeFlaggedUpdate(defStore, typeStore, hir, span, counterDef, endDef, moreDef, elementType, advance);
+    }
+
+    let bindingDef: Analyzer::DefinitionId = Lowering::declarePatternBinding(
+      defStore,
+      symbols,
+      output,
+      locals,
+      forOf.pattern,
+      binding.name.toStr(),
+      elementType,
+    );
+
+    let valueRead: Hir::HirId = Lowering::allocVariableNode(hir, span, counterDef, elementType);
+    let bindingLet: Hir::HirId = Lowering::allocLetNode(typeStore, hir, span, bindingDef, valueRead);
+    let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, forOf.body);
+
+    let mut bodyStatements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    bodyStatements.push(bindingLet);
+    bodyStatements.push(body);
+    let bodyBlock: Hir::HirId = Lowering::allocBlockNode(typeStore, hir, span, bodyStatements);
+
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut loopHirRef: &mut Hir::HirStore = hir;
+    let loopNode: Hir::HirId = loopHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Loop(Hir::HirLoop {
+        condition: Hir::LoopKind::For(Hir::ForLoop {
+          init: Option::NONE,
+          condition: Option::SOME(condition),
+          update: Option::SOME(update),
+        }),
+        body: bodyBlock,
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+
+    return Lowering::forOfBlockNode(typeStore, hir, span, prefix, loopNode);
+  }
+
   /// Desugars `for ... of` into an index loop, mirroring the Rust oracle's
   /// `lower_for_of`. A fixed array compares the induction variable against
   /// its constant length and indexes the array; an iterable record hoists
@@ -5810,6 +6174,12 @@ export namespace Lowering {
     let Option::SOME(binding) = Lowering::forOfBindingShape(module, forOf.pattern) else {
       return Lowering::errorNode(hir, typeStore, span);
     };
+
+    if (let Option::SOME(rangeExprId) = Analyzer::Typecheck::rangeExpressionId(module, forOf.iterable)) {
+      if (let Option::SOME(Ast::Expression::Node::Range(range)) = module.expressions.get(rangeExprId)) {
+        return Lowering::lowerForOfRange(defStore, typeStore, symbols, module, output, locals, hir, forOf, &binding, &range);
+      }
+    }
 
     let iterableType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, forOf.iterable);
     let fixedShape: Option<Lowering::ForOfFixed> = Lowering::forOfFixedShape(defStore, typeStore, iterableType);
