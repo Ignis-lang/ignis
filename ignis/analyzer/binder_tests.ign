@@ -3815,6 +3815,33 @@ function binderAcceptsAlignmentOfOneGibibyte(): void {
   Test::assertEq<u64>(bag.length(), 0);
 }
 
+/// Scenario: `@aligned(N)` written as a hex, binary or separated literal, on a
+/// static field and on a record.
+@test
+function binderReadsAlignmentWrittenInAnyIntegerLiteralForm(): void {
+  let source: str = "@aligned(0x40)\nrecord Block {\n  x: u8;\n}\n\nrecord Tables {\n  @aligned(0x1000) static mut HEX: u64[512];\n  @aligned(0b100000) static mut BINARY: u64[2];\n  @aligned(1_024) static mut SEPARATED: u64[2];\n  @aligned(0X10) static mut UPPER: u64[2];\n}\n";
+  let bag: DiagnosticBag = binderBindSource(source);
+
+  Test::assertEq<u64>(bag.length(), 0);
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "HEX"), 4096);
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "BINARY"), 32);
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "SEPARATED"), 1024);
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "UPPER"), 16);
+}
+
+/// Scenario: a hex `@aligned` that is not a power of two, one above 1 GiB and
+/// one too wide for a `u64`.
+@test
+function binderValidatesHexAlignmentValues(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "record Tables {\n  @aligned(0x1001) static mut ODD: u64[2];\n  @aligned(0xFFFFFFFFFFFFFFFF) static mut HUGE: u64[2];\n  @aligned(0x80000000) static mut OVER: u64[2];\n}\n",
+  );
+
+  binderAssertDiagnostic(&bag, DiagnosticCode::ALIGNMENT_NOT_POWER_OF_TWO, "alignment 4097 is not a power of two");
+  binderAssertDiagnostic(&bag, DiagnosticCode::ALIGNMENT_TOO_LARGE, "alignment 0xFFFFFFFFFFFFFFFF is larger than the 1073741824 bytes the compiler accepts");
+  binderAssertDiagnostic(&bag, DiagnosticCode::ALIGNMENT_TOO_LARGE, "alignment 0x80000000 is larger than the 1073741824 bytes the compiler accepts");
+}
+
 /// Scenario: `@aligned` written with no argument, with two, and with an
 /// argument that is not a decimal integer.
 @test
@@ -3825,7 +3852,7 @@ function binderRejectsMalformedAlignedArguments(): void {
 
   binderAssertDiagnostic(&bag, DiagnosticCode::ATTRIBUTE_ARG_COUNT, "@aligned expects 1 argument(s), got 0");
   binderAssertDiagnostic(&bag, DiagnosticCode::ATTRIBUTE_ARG_COUNT, "@aligned expects 1 argument(s), got 2");
-  binderAssertDiagnostic(&bag, DiagnosticCode::ALIGNMENT_NOT_AN_INTEGER, "@aligned expects a decimal integer, got 'PAGE'");
+  binderAssertDiagnostic(&bag, DiagnosticCode::ALIGNMENT_NOT_AN_INTEGER, "@aligned expects an integer literal, got 'PAGE'");
 }
 
 /// Scenario: `@aligned` on a module-level constant and on an extern constant.

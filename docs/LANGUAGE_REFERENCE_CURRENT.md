@@ -348,16 +348,16 @@ record Kernel {
 
 The type must have a zero value (`A0239`): an integer, a float, `boolean`, `char`, a raw pointer, or a fixed array, record or payload-free enum made of those. A string, a reference, a function value, a slice, a range, a tuple, a generic type, a type that implements `Drop` and an enum with a payload have none. An immutable `static` field written without a value is still an instance field. `@zeroed<T>()` and `@splat<T[N]>(value)` build the same zero or repeated values in an expression, in a `static` initializer or in a function body (see `docs/BUILTINS.md`).
 
-A static field can request an alignment with `@aligned(N)`, so a hardware structure such as a page table can live in a global. `N` is a decimal integer that is a power of two, at most 1073741824 (1 GiB). The global is placed at an address that is a multiple of `N`, and a zero-initialized one stays in zero-initialized storage:
+A static field can request an alignment with `@aligned(N)`, so a hardware structure such as a page table can live in a global. `N` is an integer literal (decimal, `0x` hex or `0b` binary) that is a power of two, at most 1073741824 (1 GiB). The global is placed at an address that is a multiple of `N`, and a zero-initialized one stays in zero-initialized storage:
 
 ```ignis
 record Paging {
-    @aligned(4096) static mut PML4: u64[512];
+    @aligned(0x1000) static mut PML4: u64[512];
     @aligned(64) static ROWS: u8[4] = [1, 2, 3, 4];
 }
 ```
 
-The C compiler applies `N` as written, so an `N` smaller than the type's own alignment lowers it for that global and leaves it misaligned for its type. Use an `N` of at least `@alignOf<T>()`. An immutable static field or constant has storage only when some function takes its address (see above), so the attribute matters only then. `@aligned` is an error (`A0117`) on a module-level or `extern` constant, which a static field is not. An argument that is missing, repeated, not a decimal integer, not a power of two or above 1 GiB is an error (`A0118`, `A0244`, `A0121`, `A0243`).
+An `N` smaller than the type's own alignment has no effect: the global keeps the type's alignment. An immutable static field or constant has storage only when some function takes its address (see above), so the attribute matters only then. `@aligned` is an error (`A0117`) on a module-level or `extern` constant, which a static field is not. An argument that is missing, repeated, not an integer literal, not a power of two or above 1 GiB is an error (`A0118`, `A0244`, `A0121`, `A0243`).
 
 For standard-library records, `::new()` is the canonical constructor naming
 convention. Some std records retain `::init()` aliases for compatibility only;
@@ -816,7 +816,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@directive(...)` -- declare a compile-time-only directive function
 - `@implements(...)` -- lang traits (`Drop`, `Clone`, `Copy`) or user-defined traits
 - `@packed` -- remove struct padding
-- `@aligned(N)` -- set minimum alignment, on a record, a field or a static field. `N` is a decimal power of two, at most 1 GiB
+- `@aligned(N)` -- set minimum alignment, on a record, a field or a static field. `N` is an integer literal that is a power of two, at most 1 GiB
 - `@cLayout` -- give a record a C layout: fields in declaration order, each emitted under its written name. Its C struct name stays mangled and its methods are allowed. The record cannot be generic or implement `Drop`, and every field needs a C representation and a name that is not a C keyword, as in an extern record (see 4.10)
 - `@cold` -- mark function as unlikely to execute
 - `@externName("...")` -- override the C symbol name for a function

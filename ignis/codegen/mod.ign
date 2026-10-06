@@ -3626,14 +3626,35 @@ export namespace CodegenC {
     return text;
   }
 
-  /// The `__attribute__` suffix an `@aligned(N)` asks the C member of a field,
-  /// or the C global of a static field, to carry.
+  /// The `__attribute__` suffix an `@aligned(N)` asks the C member of a field
+  /// to carry.
   function fieldLayoutAttributes(alignment: Option<u64>): String {
     let mut text: String = String::new();
 
     if (let Option::SOME(value) = alignment) {
       let mut textRef: &mut String = &mut text;
       let suffix: String = ` __attribute__((aligned(${value})))`;
+      textRef.pushStr(suffix.toStr());
+    }
+
+    return text;
+  }
+
+  /// The `__attribute__` suffix an `@aligned(N)` asks the C global of a static
+  /// field to carry.
+  ///
+  /// The C compiler applies `aligned(N)` to a variable as written, even when
+  /// `N` is below the type's own alignment, so the attribute asks for the
+  /// larger of `N` and `_Alignof` of the value type `valueType` (the element
+  /// type of an array): a small `N` never lowers the alignment. The compiler
+  /// does not compute layouts, so the C compiler picks the larger one.
+  function staticLayoutAttributes(alignment: Option<u64>, valueType: &String): String {
+    let mut text: String = String::new();
+
+    if (let Option::SOME(value) = alignment) {
+      let mut textRef: &mut String = &mut text;
+      let natural: String = `_Alignof(${valueType.toStr()})`;
+      let suffix: String = ` __attribute__((aligned(${value} > ${natural.toStr()} ? ${value} : ${natural.toStr()})))`;
       textRef.pushStr(suffix.toStr());
     }
 
@@ -5331,7 +5352,8 @@ export namespace CodegenC {
       }
 
       let name: String = CodegenC::mangledName(defStore, symbols, global.defId);
-      let mut declarator: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
+      let mut valueTypeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
+      let mut declarator: String = valueTypeText.clone();
       declarator.pushStr(" ");
       declarator.pushStr(name.toStr());
 
@@ -5339,9 +5361,10 @@ export namespace CodegenC {
       if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, declaredType)) {
         let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
         declarator = `${elementText.toStr()} ${name.toStr()}[${array.size}]`;
+        valueTypeText = elementText;
       }
 
-      declarator.pushStr(CodegenC::fieldLayoutAttributes(alignment).toStr());
+      declarator.pushStr(CodegenC::staticLayoutAttributes(alignment, &valueTypeText).toStr());
 
       // A global that is all zero bytes carries no initializer: C places it in
       // zero-initialized storage, so it occupies no space in the object file.

@@ -10,7 +10,6 @@ from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Id from "@compiler::ids";
 import HashMap from "std::collections";
-import Char from "std::char";
 
 /// Pass-1 binder for the Ignis selfhost compiler.
 ///
@@ -953,8 +952,8 @@ export namespace Analyzer {
     /// The alignment `@aligned(N)` asks for, in bytes.
     ///
     /// Attribute arguments arrive from the parser as raw lexeme text, so the
-    /// count is read back from its decimal digits. A form that does not carry
-    /// exactly one power-of-two decimal argument of at most
+    /// count is read back from its integer literal. A form that does not carry
+    /// exactly one power-of-two integer literal argument of at most
     /// `Analyzer::Binder::MAX_ALIGNMENT` is ignored: `validateAttributes`
     /// reports it and no attribute is emitted.
     function alignmentAttribute(metadata: &Ast::Metadata): Option<u64> {
@@ -976,7 +975,7 @@ export namespace Analyzer {
           continue;
         };
 
-        let Option::SOME(value) = Analyzer::Binder::parseDecimal(argument) else {
+        let Option::SOME(value) = Analyzer::Binder::parseIntegerLiteral(argument) else {
           index += 1;
           continue;
         };
@@ -992,30 +991,85 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
-    /// A non-empty run of ASCII decimal digits read as a `u64`; `NONE` for any
-    /// other text.
-    function parseDecimal(text: &String): Option<u64> {
-      if (text.length() == 0) {
-        return Option::NONE;
+    /// An integer literal as the lexer writes it, read as a `u64`: decimal
+    /// with `_` separators between digits, `0x` hexadecimal or `0b` binary.
+    /// `NONE` for any other text. A value too large for a `u64` saturates at
+    /// twice `Analyzer::Binder::MAX_ALIGNMENT`, which is already past every
+    /// alignment the compiler accepts.
+    function parseIntegerLiteral(text: &String): Option<u64> {
+      let mut radix: u64 = 10;
+      let mut index: u64 = 0;
+
+      if (text.length() > 2) {
+        if (let Option::SOME(first) = text.charAt(0)) {
+          if (let Option::SOME(second) = text.charAt(1)) {
+            if (first == '0' && (second == 'x' || second == 'X')) {
+              radix = 16;
+              index = 2;
+            } else if (first == '0' && (second == 'b' || second == 'B')) {
+              radix = 2;
+              index = 2;
+            }
+          }
+        }
       }
 
       let mut value: u64 = 0;
-      let mut index: u64 = 0;
+      let mut digitCount: u64 = 0;
+      let mut previousWasSeparator: boolean = false;
+      let limit: u64 = Analyzer::Binder::MAX_ALIGNMENT * 2;
 
       while (index < text.length()) {
         let Option::SOME(character) = text.charAt(index) else {
           return Option::NONE;
         };
 
-        let Option::SOME(digit) = Char::asciiDigitValue(character) else {
+        index += 1;
+
+        if (character == '_' && radix == 10 && digitCount > 0 && !previousWasSeparator) {
+          previousWasSeparator = true;
+          continue;
+        }
+
+        let Option::SOME(digit) = Analyzer::Binder::radixDigitValue(character, radix) else {
           return Option::NONE;
         };
 
-        value = value * 10 + digit;
-        index += 1;
+        previousWasSeparator = false;
+        digitCount += 1;
+        value = value * radix + digit;
+
+        if (value > limit) {
+          value = limit;
+        }
+      }
+
+      if (digitCount == 0 || previousWasSeparator) {
+        return Option::NONE;
       }
 
       return Option::SOME(value);
+    }
+
+    /// The value of `character` as a digit of `radix` (2, 10 or 16).
+    function radixDigitValue(character: char, radix: u64): Option<u64> {
+      let mut digit: u64 = 0;
+
+      if (character >= '0' && character <= '9') {
+        digit = (character as u64) - ('0' as u64);
+      } else if (character >= 'a' && character <= 'f') {
+        digit = (character as u64) - ('a' as u64) + 10;
+      } else if (character >= 'A' && character <= 'F') {
+        digit = (character as u64) - ('A' as u64) + 10;
+      } else {
+        return Option::NONE;
+      }
+
+      if (digit >= radix) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(digit);
     }
 
     /// The C symbol named by `@externName("name")`, without its quotes.
@@ -1367,7 +1421,7 @@ export namespace Analyzer {
     }
 
     /// Report every attribute `target` does not accept, and every `@aligned`
-    /// that is not written with exactly one decimal integer that is a power of
+    /// that is not written with exactly one integer literal that is a power of
     /// two and at most `Analyzer::Binder::MAX_ALIGNMENT`.
     function validateAttributes(
       state: &mut Analyzer::Binder::BinderState,
@@ -1397,7 +1451,7 @@ export namespace Analyzer {
     }
 
     /// Report an `@aligned` written with other than one argument, with an
-    /// argument that is not a decimal integer, or with a value that is not a
+    /// argument that is not an integer literal, or with a value that is not a
     /// power of two or is above `Analyzer::Binder::MAX_ALIGNMENT`.
     function validateAlignedAttribute(
       state: &mut Analyzer::Binder::BinderState,
@@ -1414,8 +1468,8 @@ export namespace Analyzer {
         return;
       };
 
-      let Option::SOME(value) = Analyzer::Binder::parseDecimal(argument) else {
-        let message: String = `@aligned expects a decimal integer, got '${argument.toStr()}'`;
+      let Option::SOME(value) = Analyzer::Binder::parseIntegerLiteral(argument) else {
+        let message: String = `@aligned expects an integer literal, got '${argument.toStr()}'`;
         Analyzer::Binder::emitAlignedDiagnostic(state, DiagnosticCode::ALIGNMENT_NOT_AN_INTEGER, message.toStr(), attribute.span);
 
         return;
@@ -1424,7 +1478,7 @@ export namespace Analyzer {
       if (value == 0 || (value & (value - 1)) != 0) {
         Analyzer::Binder::emitAlignmentNotPowerOfTwo(state, value, attribute.span);
       } else if (value > Analyzer::Binder::MAX_ALIGNMENT) {
-        let message: String = `alignment ${value} is larger than the ${Analyzer::Binder::MAX_ALIGNMENT} bytes the compiler accepts`;
+        let message: String = `alignment ${argument.toStr()} is larger than the ${Analyzer::Binder::MAX_ALIGNMENT} bytes the compiler accepts`;
         Analyzer::Binder::emitAlignedDiagnostic(state, DiagnosticCode::ALIGNMENT_TOO_LARGE, message.toStr(), attribute.span);
       }
     }

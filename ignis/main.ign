@@ -4884,8 +4884,8 @@ function buildCompilesZeroInitializedStorageInAFreestandingObject(): void {
 }
 
 /// An `@aligned(N)` static in a freestanding unit is a C global with the
-/// `aligned` attribute and no initializer, so a page table stays in `.bss` at
-/// a page boundary.
+/// `aligned` attribute and no initializer, so a page table written with a hex
+/// alignment stays in `.bss` at a page boundary.
 @test
 function buildAlignsFreestandingStaticsWithoutAnInitializer(): void {
   let Result::OK(workingDirectory) = Env::currentDir() else {
@@ -4912,8 +4912,8 @@ function buildAlignsFreestandingStaticsWithoutAnInitializer(): void {
     return;
   };
 
-  let pageTable: String = String::create("[512] __attribute__((aligned(4096)));\n");
-  let cacheLine: String = String::create("[64] __attribute__((aligned(64)));\n");
+  let pageTable: String = String::create("[512] __attribute__((aligned(4096 > _Alignof(u64) ? 4096 : _Alignof(u64))));\n");
+  let cacheLine: String = String::create("[64] __attribute__((aligned(64 > _Alignof(u8) ? 64 : _Alignof(u8))));\n");
   Test::assert(source.contains(&pageTable));
   Test::assert(source.contains(&cacheLine));
 

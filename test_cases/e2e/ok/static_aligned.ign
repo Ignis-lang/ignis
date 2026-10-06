@@ -1,7 +1,7 @@
 // `@aligned(N)` on a static field places its one global at an address that is a
 // multiple of `N`: a zero-initialized `static mut`, a seeded `static mut` and an
-// immutable static whose address is taken, including an `N` equal to the
-// type's own alignment.
+// immutable static whose address is taken. An `N` below the type's own alignment
+// changes nothing, and `N` can be written as hex, binary or with separators.
 record Page {
   public bytes: u8[4096];
 }
@@ -21,8 +21,14 @@ record Tables {
   static ROWS: u16[4] = [1, 2, 3, 4];
   @aligned(1)
   static mut BYTE: u8;
-  @aligned(8)
+  @aligned(2)
   static mut WORD: u64;
+  @aligned(0x1000)
+  static mut HEX: u64[2];
+  @aligned(0b1000000)
+  static mut BINARY: u32[2];
+  @aligned(1_024)
+  static mut SEPARATED: u32[2];
 }
 
 function addressOf(pointer: *mut u8): u64 {
@@ -56,6 +62,18 @@ function main(): i32 {
 
   if (addressOf(&Tables::WORD as *mut u8) % 8 != 0) {
     return 7;
+  }
+
+  if (addressOf(&Tables::HEX as *mut u8) % 4096 != 0) {
+    return 10;
+  }
+
+  if (addressOf(&Tables::BINARY as *mut u8) % 64 != 0) {
+    return 11;
+  }
+
+  if (addressOf(&Tables::SEPARATED as *mut u8) % 1024 != 0) {
+    return 12;
   }
 
   Tables::PML4[511] = 9;

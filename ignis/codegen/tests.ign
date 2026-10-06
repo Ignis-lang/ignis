@@ -673,9 +673,10 @@ function codegenEmitsZeroInitializedStaticsWithoutAnInitializer(): void {
   Test::assert(!emission.source.contains(&tableSeeded));
 }
 
-/// An `@aligned(N)` on a static field is a C `aligned(N)` attribute on its
-/// global, after the declarator and before any initializer. A zero-initialized
-/// one still has no initializer, so it stays in `.bss`.
+/// An `@aligned(N)` on a static field is a C `aligned` attribute on its global,
+/// after the declarator and before any initializer, asking for the larger of
+/// `N` and the alignment of the value type so a small `N` never lowers it. A
+/// zero-initialized one still has no initializer, so it stays in `.bss`.
 @test
 function codegenAlignsStaticsThroughTheCAlignedAttribute(): void {
   let mut emission: CodegenEmission = codegenEmit(
@@ -688,10 +689,10 @@ function codegenAlignsStaticsThroughTheCAlignedAttribute(): void {
   let rows: String = codegenStaticName(&mut emission, "ROWS");
   let plain: String = codegenStaticName(&mut emission, "PLAIN");
 
-  let pml4Global: String = `static u64 ${pml4.toStr()}[512] __attribute__((aligned(4096)));\n`;
-  let seededGlobal: String = `static u32 ${seeded.toStr()}[2] __attribute__((aligned(64))) = {`;
-  let countGlobal: String = `static u32 ${count.toStr()} __attribute__((aligned(32)));\n`;
-  let rowsGlobal: String = `static const u8 ${rows.toStr()}[4] __attribute__((aligned(16))) = {`;
+  let pml4Global: String = `static u64 ${pml4.toStr()}[512] __attribute__((aligned(4096 > _Alignof(u64) ? 4096 : _Alignof(u64))));\n`;
+  let seededGlobal: String = `static u32 ${seeded.toStr()}[2] __attribute__((aligned(64 > _Alignof(u32) ? 64 : _Alignof(u32)))) = {`;
+  let countGlobal: String = `static u32 ${count.toStr()} __attribute__((aligned(32 > _Alignof(u32) ? 32 : _Alignof(u32))));\n`;
+  let rowsGlobal: String = `static const u8 ${rows.toStr()}[4] __attribute__((aligned(16 > _Alignof(u8) ? 16 : _Alignof(u8)))) = {`;
   let plainGlobal: String = `static u32 ${plain.toStr()};\n`;
 
   Test::assert(emission.source.contains(&pml4Global));
