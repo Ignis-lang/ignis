@@ -1908,8 +1908,20 @@ function ensureParentDirectory(path: &Path::PathBuf): boolean {
     return true;
   }
 
-  if (let Result::ERROR(_) = Fs::createDirAll(&parent)) {
-    Io::eprintln(`error: could not create directory: ${parent.asStr()}`);
+  if (let Result::ERROR(error) = Fs::createDirAll(&parent)) {
+    Io::eprintln(`error: could not create directory ${parent.asStr()}: ${error.errorMessage()}`);
+    return false;
+  }
+
+  return true;
+}
+
+/// Write `contents` to `path`, printing why on stderr when that fails. The
+/// message is part of the default output, never a `--verbose` phase line,
+/// because the run fails because of it.
+function writeArtifact(path: &Path::PathBuf, contents: &String): boolean {
+  if (let Result::ERROR(error) = Fs::writeString(path, contents)) {
+    Io::eprintln(`error: could not write ${path.asStr()}: ${error.errorMessage()}`);
     return false;
   }
 
@@ -2078,11 +2090,13 @@ function runCompile(
   // remaining work is counted per variant.
   if (!checkOnly && compiled.source.length() > 0) {
     if (!ensureParentDirectory(&artifacts.source) || !ensureParentDirectory(&artifacts.object) || !ensureParentDirectory(&artifacts.executable)) {
+      printFailure("Build", compiled.errors + 1, compiled.warnings);
       return 1;
     }
 
-    if (let Result::ERROR(_) = Fs::writeString(&artifacts.source, &compiled.source)) {
+    if (!writeArtifact(&artifacts.source, &compiled.source)) {
       printStatus(`  emit: could not write ${artifacts.source.asStr()}`, verbose);
+      linkErrors += 1;
     } else {
       emitted = true;
       printStatus(`  emit: ${artifacts.source.asStr()}`, verbose);
@@ -4102,11 +4116,12 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   }
 
   if (!ensureParentDirectory(&sourcePath) || !ensureParentDirectory(&objectPath) || !ensureParentDirectory(&libraryPath) || !ensureParentDirectory(&stampPath)) {
+    printFailure("Build", 1, compiled.warnings);
     return 1;
   }
 
-  if (let Result::ERROR(_) = Fs::writeString(&sourcePath, &compiled.source)) {
-    Io::eprintln(`error: could not write ${sourcePath.asStr()}`);
+  if (!writeArtifact(&sourcePath, &compiled.source)) {
+    printFailure("Build", 1, compiled.warnings);
     return 1;
   }
 
@@ -4506,11 +4521,12 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let sourcePath: Path::PathBuf = outputDir.join("ignis_std.c");
 
   if (!ensureParentDirectory(&sourcePath)) {
+    printFailure("Check", 1, compiled.warnings);
     return 1;
   }
 
-  if (let Result::ERROR(_) = Fs::writeString(&sourcePath, &compiled.source)) {
-    Io::eprintln(`error: could not write ${sourcePath.asStr()}`);
+  if (!writeArtifact(&sourcePath, &compiled.source)) {
+    printFailure("Check", 1, compiled.warnings);
     return 1;
   }
 
