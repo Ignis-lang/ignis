@@ -596,6 +596,27 @@ __builtin_memcpy(dest, source, N * sizeof(element_type));
 
 The emitter's copies use the compiler builtin rather than `memcpy`, so a freestanding unit, which has no `<string.h>`, needs no declaration for them. The C compiler may still lower a builtin copy to a call to `memcpy`, so a freestanding program links one, as it does for the copies C itself generates.
 
+### Zero Fill
+
+A `static mut` field written without an initializer, or whose initializer is `@zeroed<T>()` or `@splat<T[N]>(0)`, is a C global with no initializer, so it is placed in zero-initialized storage (`.bss`) and takes no space in the object file:
+
+```c
+static u8 STACK_12[16384];
+static struct Slot_9 SLOTS_13[256];
+```
+
+A zero nested in a larger initializer is `{0}` for an array, record or enum and `0` for a scalar. `@splat<T[N]>(value)` with a non-zero constant value in a static initializer is written out as `N` elements, up to 65536.
+
+In a function body, `@zeroed<T>()` of an aggregate and `@splat<T[N]>(value)` fill an array or record local:
+
+```c
+__builtin_memset(ptr, 0, N * sizeof(element_type));                 // @zeroed, or a zero or one-byte splat
+__builtin_memset(ptr, value, N);                                    // @splat of u8, i8 or boolean
+for (u64 splat_index = 0; splat_index < N; splat_index++) { ptr[splat_index] = value; }
+```
+
+A scalar `@zeroed` is the constant `0`, `0.0`, `false` or `null`. As with copies, the emitter uses the builtin rather than `memset`, so a freestanding unit needs no declaration, and the C compiler may lower a large builtin fill to a call to `memset`, which a freestanding program links.
+
 ## C File Emission Order
 
 The generated C file is structured in this order:
@@ -604,7 +625,7 @@ The generated C file is structured in this order:
 2. **Explicit headers** (from the link plan)
 3. **Type forward declarations** (`typedef struct X X;`)
 4. **Type definitions** (full struct/union bodies)
-5. **Static storage** (`static mut` fields as writable globals, and the immutable static fields and constants whose address is taken as `static const` globals)
+5. **Static storage** (`static mut` fields as writable globals, and the immutable static fields and constants whose address is taken as `static const` globals; see "Zero fill")
 6. **Extern declarations** (runtime function prototypes)
 7. **Drop glue helpers** (`static void ignis_drop_glue_<type>(u8*)`)
 8. **Forward declarations** (function prototypes)

@@ -336,6 +336,18 @@ function rowAt(index: u64): *u8 {
 }
 ```
 
+A `static mut` field written without an initializer starts with every byte zero. The compiler emits it as a C global with no initializer, so it costs no space in the object file and a large table needs no literal:
+
+```ignis
+record Kernel {
+    static mut COUNT: u32;
+    static mut STACK: u8[16384];
+    static mut SLOTS: Slot[256];
+}
+```
+
+The type must have a zero value (`A0239`): an integer, a float, `boolean`, `char`, a raw pointer, or a fixed array, record or payload-free enum made of those. A string, a reference, a function value, a slice, a range, a tuple, a generic type, a type that implements `Drop` and an enum with a payload have none. An immutable `static` field written without a value is still an instance field. `@zeroed<T>()` and `@splat<T[N]>(value)` build the same zero or repeated values in an expression, in a `static` initializer or in a function body (see `docs/BUILTINS.md`).
+
 For standard-library records, `::new()` is the canonical constructor naming
 convention. Some std records retain `::init()` aliases for compatibility only;
 new code should use forms such as `Vector::new<T>()`, `HashMap::new<K, V>()`,

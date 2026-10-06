@@ -287,6 +287,65 @@ Same rules as `@write`. The store is emitted as C `*(T volatile*)(ptr) = value`,
 
 ---
 
+### `@zeroed<T>()`
+
+A value of type `T` whose every byte is zero.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | none |
+| **Returns** | `T` |
+
+```ignis
+record Point {
+    public x: i32;
+    public y: i32;
+}
+
+function origin(): Point {
+    return @zeroed<Point>();
+}
+
+record Tables {
+    static mut STACK: u8[16384] = @zeroed<u8[16384]>();
+}
+```
+
+`T` must have a zero value, otherwise the call is `A0239`. Integers, floats, `boolean`, `char` and raw pointers do (zero, `0.0`, `false`, the null character and `null`), and so do fixed arrays, records and payload-free enums built from them: the first variant of an enum is tag 0. A string, a reference, a function value, a slice, a range, a tuple, a type parameter, a value that implements `Drop` and an enum with a payload do not. The message names the field or element that has no zero.
+
+Anywhere an expression is allowed it is built where it is written: a scalar is its zero constant, and an array or record is a fresh local whose bytes are set to zero with `__builtin_memset`, so a freestanding unit needs no libc call to declare. In the initializer of a `const` or a `static` it is part of the constant that seeds the global: a global that is all zero is declared without an initializer and lands in `.bss`, and a zero nested in a larger initializer is written `{0}`.
+
+---
+
+### `@splat<T[N]>(value)`
+
+An array of `N` elements that all equal `value`.
+
+| | |
+|---|---|
+| **Type arguments** | 1 fixed array type, `T[N]` |
+| **Arguments** | 1 expression (`T`) |
+| **Returns** | `T[N]` |
+
+```ignis
+record Tables {
+    static mut MARKS: u8[8] = @splat<u8[8]>(0xAA);
+}
+
+function filled(value: u32): u32[16] {
+    return @splat<u32[16]>(value);
+}
+```
+
+The type argument has to be a fixed array type (`A0241`). `value` is checked against the element type, so a literal adapts to it, and the element type has to be Copy because the value is copied into every element (`A0242`). `value` is evaluated once.
+
+In a function body the array is a fresh local that is filled with `__builtin_memset` when the element is one byte (`u8`, `i8`, `boolean`) or `value` is a constant zero, and with a counted loop otherwise.
+
+In the initializer of a `const` or a `static` the value has to be a constant. A zero value is the same constant as `@zeroed<T[N]>()`, however large `N` is. Any other value is written out once per element, so the array holds at most 65536 elements, the limit of array ranges, and a larger one is `A0240`.
+
+---
+
 ### `@dropInPlace<T>(ptr)`
 
 Runs drop glue for `T` at the given address.
@@ -534,6 +593,8 @@ For unsigned types, `minOf` returns `0`.
 | `@write<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (store through pointer) |
 | `@readVolatile<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (volatile load through pointer) |
 | `@writeVolatile<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (volatile store through pointer) |
+| `@zeroed<T>()` | 1 type arg | `T` | Yes (`__builtin_memset`, or `{0}` in a static) |
+| `@splat<T[N]>(value)` | 1 array type arg + 1 expr | `T[N]` | Yes (`__builtin_memset` or a fill loop, or a constant in a static) |
 | `@dropInPlace<T>(ptr)` | 1 type arg + 1 expr | `void` | Yes (drop glue call) |
 | `@dropGlue<T>()` | 1 type arg | `(*mut u8) -> void` | Yes (function pointer constant) |
 | `@eq<T>(left, right)` | 1 type arg + 2 refs | `boolean` | Yes |
