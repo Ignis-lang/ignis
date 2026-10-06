@@ -155,6 +155,7 @@ t6 = (struct __ignis_closure_t164){ ignis_raw_tramp_328, NULL, (u8*)t5 };
 | `@packed` | `__attribute__((packed))` |
 | `@aligned(N)` | `__attribute__((aligned(N)))` |
 | `@aligned(N)` on field | `__attribute__((aligned(N)))` on the field |
+| `@aligned(N)` on static field | `__attribute__((aligned(N)))` on the C global, after the declarator |
 | `@cLayout` | Fields named as written (see C-Layout Records) |
 
 ### Record Initialization
@@ -603,6 +604,13 @@ A `static mut` field written without an initializer, or whose initializer is `@z
 ```c
 static u8 STACK_12[16384];
 static struct Slot_9 SLOTS_13[256];
+```
+
+An `@aligned(N)` on the static field adds the C attribute after the declarator, before any initializer, so the global stays in `.bss` and lands on an `N`-byte boundary:
+
+```c
+static u64 PML4_14[512] __attribute__((aligned(4096)));
+static const u8 ROWS_15[4] __attribute__((aligned(64))) = {1U, 2U, 3U, 4U};
 ```
 
 A zero nested in a larger initializer is `{0}` for an array, record or enum and `0` for a scalar. `@splat<T[N]>(value)` with a non-zero constant value in a static initializer is written out as `N` elements, up to 65536.
