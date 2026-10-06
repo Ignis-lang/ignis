@@ -4883,6 +4883,43 @@ function buildCompilesZeroInitializedStorageInAFreestandingObject(): void {
   Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/zero_splat", "freestanding-zero-splat", "freestanding-zero-splat"));
 }
 
+/// An `@aligned(N)` static in a freestanding unit is a C global with the
+/// `aligned` attribute and no initializer, so a page table written with a hex
+/// alignment stays in `.bss` at a page boundary.
+@test
+function buildAlignsFreestandingStaticsWithoutAnInitializer(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/freestanding/aligned_statics");
+  let scratch: Path::PathBuf = checkStdScratchDir("freestanding-aligned-statics");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("freestanding-aligned-statics");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+
+  Test::assert(Fs::exists(artifacts.object.asStr()));
+
+  let Result::OK(source) = Fs::readToString(&artifacts.source) else {
+    Test::fail();
+    return;
+  };
+
+  let pageTable: String = String::create("[512] __attribute__((aligned(4096 > _Alignof(u64) ? 4096 : _Alignof(u64))));\n");
+  let cacheLine: String = String::create("[64] __attribute__((aligned(64 > _Alignof(u8) ? 64 : _Alignof(u8))));\n");
+  Test::assert(source.contains(&pageTable));
+  Test::assert(source.contains(&cacheLine));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
 /// `@splat` in a static initializer and in a function body, for a byte-sized
 /// element and a wider one, compiles in a freestanding object: the run-time
 /// fill is the memset builtin or a counted loop, never a libc call.
