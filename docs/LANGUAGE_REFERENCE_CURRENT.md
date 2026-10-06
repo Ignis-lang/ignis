@@ -148,11 +148,29 @@ function main(): i32 {
 }
 ```
 
+An array can also be built from a range of integer literals: `[0..4]` is `[0, 1, 2, 3]` (see [Section 9.13](#913-ranges)).
+
 Note: fixed-size arrays (`T[N]`) are supported. Dynamic array type syntax (`T[]`) is parsed but currently rejected by semantic analysis.
 
 For practical guidance on when to use fixed-size arrays versus `std::vector::Vector<T>`, and how they relate to `String`, `HashMap`, and `HashSet`, see `docs/STDLIB_DATA_STRUCTURES.md`.
 
-### 3.8 Generic Type Use
+### 3.8 Range Types
+
+`Range<T>` and `RangeInclusive<T>` are builtin types, the types of `a..b` and `a..=b`. `T` is an integer type. A range is a pair of bounds of that type and nothing else: it is Copy, it is never dropped, and its C representation is a struct of two `T` values, one struct per element type, so it needs no standard library. See [Section 9.13](#913-ranges).
+
+```ignis
+function width(span: Range<i32>): i32 {
+    return span.end - span.start;
+}
+
+record Window {
+    public columns: RangeInclusive<u8>;
+}
+```
+
+A record, enum or alias named `Range` or `RangeInclusive` takes precedence over the builtin type of that name.
+
+### 3.9 Generic Type Use
 
 ```ignis
 record Box<T> {
@@ -699,7 +717,7 @@ r = Resource { id: 2 };  // r valid again
 
 ### 6.2 Copy and Structural Copy
 
-Primitive types (`i32`, `boolean`, `char`, pointers, references, etc.) are Copy -- assignment copies the value, and the original remains valid.
+Primitive types (`i32`, `boolean`, `char`, pointers, references, etc.) and ranges (`Range<T>`, `RangeInclusive<T>`) are Copy -- assignment copies the value, and the original remains valid.
 
 Records and enums are structurally Copy if all their fields (or variant payloads) are recursively Copy. No annotation is needed:
 
@@ -972,6 +990,25 @@ for (let x: &i32 of arr) {
 }
 ```
 
+A range is also an iterable. `for (let i of a..b)` is a counted loop with no allocation: the bounds are evaluated once, `a` first, so changing a variable the bounds read from inside the body does not change the loop, and `i` is a copy of a hidden counter. A range value iterates the same way.
+
+```ignis
+for (let i of 0..n) {
+    sum += i;
+}
+
+for (let i: u8 of 0..=255) {     // runs 256 times
+    count += 1;
+}
+
+let span = 2..7;
+for (let i of span) {
+    sum += i;
+}
+```
+
+An inclusive range ends on its end bound even when that is the largest value of the type. An empty range, such as `5..5` or `5..0`, runs zero times. The loop variable binds by value only: `for (let i: &i32 of 0..3)` is an error (`A0232`).
+
 ### 8.7 `defer`
 
 `defer` schedules an expression to run at scope exit. Multiple defers in the same scope execute in LIFO order (last registered, first executed). Deferred expressions run before automatic drops.
@@ -1140,6 +1177,8 @@ Logical: `&& || !`
 Bitwise: `& | ^ ~ << >>`
 
 Assignment: `= += -= *= /= %= &= |= ^= <<= >>=`
+
+Range: `..` `..=` (see [Section 9.13](#913-ranges))
 
 Pipe: `|>` (left-associative, see [Section 9.11](#911-pipe-operator))
 
@@ -1409,6 +1448,50 @@ function render(label: &String): String {
 ```
 
 
+### 9.13 Ranges
+
+`a..b` is the range from `a` up to, and not including, `b`. `a..=b` includes `b`. Both bounds are required and are integers of one type.
+
+```ignis
+let exclusive = 0..4;                    // Range<i32>: 0, 1, 2, 3
+let inclusive: RangeInclusive<u8> = 0..=255;
+```
+
+**Precedence.** A range binds looser than `||` and tighter than `|>`, and is not associative: `a..b..c` is an error. `a + 1..b * 2` is `(a + 1)..(b * 2)`. `a..`, `..b` and `..=b` are rejected, since open-ended ranges are not supported.
+
+**Element type.** The expected type decides first: `for (let i: u8 of 0..=255)` and `let r: Range<u16> = 0..8` type their literals as `u8` and `u16`. Without one, the bounds decide: a literal bound adopts the type of the other bound, and two literals are `i32`. Bounds of two different integer types are an error, and so is a bound that is not an integer (`A0231`). A literal that does not fit the element type is the usual integer overflow error.
+
+**Values.** A range is a value of `Range<T>` or `RangeInclusive<T>` and can be bound, passed, returned and stored in a record field. `a..b` and `a..=b` are different types. `r.start` and `r.end` read its bounds, and no other member exists (`A0238`). A range has no methods. It is Copy and is never dropped.
+
+```ignis
+function total(span: Range<i32>): i32 {
+    let mut sum: i32 = 0;
+
+    for (let i of span) {
+        sum += i;
+    }
+
+    return sum;
+}
+
+let n: i32 = total(1..4);       // 6
+```
+
+**`for` over a range.** See [Section 8.6](#86-for-of). An inclusive range steps with a flag instead of `<=` unless both bounds are literals and the end is below the maximum of the type, so a range ending on the maximum terminates.
+
+**Array ranges.** A vector literal whose only element is a range, `[a..b]` or `[a..=b]`, is the array of its values:
+
+```ignis
+let digits: u8[4] = [0..4];             // [0, 1, 2, 3]
+let signed: i8[256] = [-128..=127];
+
+record Tables {
+    static mut IDS: u64[3] = [1..4];    // a constant initializer, like [1, 2, 3]
+}
+```
+
+The bounds must be integer literals (`A0233`), so the array has a fixed size and its values are checked at compile time. The range must not be empty (`A0236`), may hold at most 65536 elements (`A0235`), and must not be combined with other elements (`A0234`). Every value must fit the element type, which is the expected one or else the narrowest of `i32`, `i64` and `u64`. A parenthesized range, `[(0..3)]`, is an array holding one `Range`.
+
 ## 10. Pattern Syntax
 
 Patterns are used by `match`, `if let`, `while let`, and `let else`.
@@ -1478,6 +1561,7 @@ Common directive builtins:
 - The pipe operator `|>` desugars to a function call with the LHS as the first argument. It supports bare functions, namespace paths, calls with extra args, generic calls, lambdas, and instance method calls. The `_` placeholder controls argument insertion position.
 - The try operator `expr!` unwraps a try-capable enum (marked with `@lang(try)`) or performs early return with the error variant. The function return type must be compatible.
 - User-defined trait checks currently target records.
+- `a..b` and `a..=b` are values of `Range<T>` and `RangeInclusive<T>`; `for (i of a..b)` is a counted loop and `[a..b]` over literal bounds is an array of the values.
 - `T[]` is parsed but rejected semantically (dynamic vectors are not enabled).
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.
 
