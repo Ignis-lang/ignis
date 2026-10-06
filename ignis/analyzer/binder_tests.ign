@@ -3723,6 +3723,123 @@ function binderMarksStaticMutFieldsMutable(): void {
   Test::assertEq<boolean>(binderStaticFieldMutability("record Counter {\n  static mut TOTAL: i32 = 0;\n  static SEED: i32 = 7;\n}\n", "SEED"), false);
 }
 
+/// The alignment the binder recorded for the static field named `name`, `0`
+/// when it asks for none.
+function binderStaticFieldAlignment(source: str, name: str): u64 {
+  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let pass1 = Analyzer::Binder::predeclareRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+  let _pass2 = Analyzer::Binder::completeRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &pass1,
+  );
+
+  let wanted: String = String::create(name);
+  let mut rawId: u64 = 0;
+
+  while (rawId < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    rawId += 1;
+
+    let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(defId) else {
+      continue;
+    };
+
+    let alignment: u64 = variableDef.alignment.unwrapOr(0);
+    let nameSym: Analyzer::SymbolId = variableDef.name;
+
+    let Option::SOME(text) = symbols.resolve(nameSym) else {
+      continue;
+    };
+
+    if (wanted.equals(text)) {
+      return alignment;
+    }
+  }
+
+  @panic("binderStaticFieldAlignment: no static field with that name");
+}
+
+/// Scenario: `@aligned(N)` on a record static field and on an enum static
+/// field, next to a static field that asks for nothing.
+@test
+function binderRecordsTheAlignmentOfStaticFields(): void {
+  let source: str = "record Tables {\n  @aligned(4096) static mut PML4: u64[512];\n  @aligned(64) static ROWS: u8[2] = [1, 2];\n  static mut PLAIN: u32;\n}\n\nenum Mode {\n  A,\n  @aligned(32) LIMIT: u32 = 3;\n}\n";
+
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "PML4"), 4096);
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "ROWS"), 64);
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "LIMIT"), 32);
+  Test::assertEq<u64>(binderStaticFieldAlignment(source, "PLAIN"), 0);
+}
+
+/// Scenario: `@aligned(N)` with an `N` above the largest alignment the
+/// compiler accepts, 1 GiB.
+@test
+function binderRejectsAlignmentAboveOneGibibyte(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "record Tables {\n  @aligned(2147483648) static mut PML4: u64[512];\n}\n",
+  );
+
+  binderAssertDiagnostic(
+    &bag,
+    DiagnosticCode::ALIGNMENT_TOO_LARGE,
+    "alignment 2147483648 is larger than the 1073741824 bytes the compiler accepts",
+  );
+}
+
+/// Scenario: 1 GiB itself is accepted.
+@test
+function binderAcceptsAlignmentOfOneGibibyte(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "record Tables {\n  @aligned(1073741824) static mut PML4: u64[512];\n}\n",
+  );
+
+  Test::assertEq<u64>(bag.length(), 0);
+}
+
+/// Scenario: `@aligned` written with no argument, with two, and with an
+/// argument that is not a decimal integer.
+@test
+function binderRejectsMalformedAlignedArguments(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "record Tables {\n  @aligned static mut BARE: u64[512];\n  @aligned(4096, 8) static mut TWO: u64[512];\n  @aligned(PAGE) static mut NAMED: u64[512];\n}\n",
+  );
+
+  binderAssertDiagnostic(&bag, DiagnosticCode::ATTRIBUTE_ARG_COUNT, "@aligned expects 1 argument(s), got 0");
+  binderAssertDiagnostic(&bag, DiagnosticCode::ATTRIBUTE_ARG_COUNT, "@aligned expects 1 argument(s), got 2");
+  binderAssertDiagnostic(&bag, DiagnosticCode::ALIGNMENT_NOT_AN_INTEGER, "@aligned expects a decimal integer, got 'PAGE'");
+}
+
+/// Scenario: `@aligned` on a module-level constant and on an extern constant.
+/// Spec: neither owns storage the attribute could place.
+@test
+function binderRejectsAlignedOnConstants(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "@aligned(64)\nconst TABLE: u8[4] = [1, 2, 3, 4];\n\nextern __libc {\n  @aligned(64)\n  const environ: i32;\n}\n",
+  );
+
+  Test::assertEq<u64>(bag.length(), 2);
+  binderAssertDiagnostic(&bag, DiagnosticCode::UNKNOWN_ATTRIBUTE, "unknown attribute '@aligned' on constant");
+}
+
 /// Whether the top-level or namespace-scoped function named `name` bound
 /// from `source` is `Public`. Mirrors `binderStaticFieldMutability`'s shape.
 function binderFunctionIsPublic(source: str, name: str): boolean {

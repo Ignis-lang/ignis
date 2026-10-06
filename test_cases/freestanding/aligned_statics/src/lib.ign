@@ -1,0 +1,29 @@
+// Page-aligned, zero-initialized storage in a freestanding unit: the page
+// tables of a kernel. The globals carry no initializer, so they stay in .bss,
+// and their alignment is the C `aligned` attribute.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  return;
+}
+
+record Paging {
+  @aligned(4096)
+  static mut PML4: u64[512];
+  @aligned(4096)
+  static mut PDPT: u64[512];
+  @aligned(64)
+  static mut SCRATCH: u8[64];
+}
+
+@externName("freestanding_pml4_address")
+function pml4Address(): u64 {
+  return @integerFromPointer(&Paging::PML4 as *mut u8);
+}
+
+@externName("freestanding_link_tables")
+function linkTables(): u64 {
+  Paging::PML4[0] = @integerFromPointer(&Paging::PDPT as *mut u8) | 3;
+  Paging::SCRATCH[0] = 1;
+
+  return Paging::PML4[0];
+}

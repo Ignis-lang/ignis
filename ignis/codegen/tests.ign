@@ -673,6 +673,34 @@ function codegenEmitsZeroInitializedStaticsWithoutAnInitializer(): void {
   Test::assert(!emission.source.contains(&tableSeeded));
 }
 
+/// An `@aligned(N)` on a static field is a C `aligned(N)` attribute on its
+/// global, after the declarator and before any initializer. A zero-initialized
+/// one still has no initializer, so it stays in `.bss`.
+@test
+function codegenAlignsStaticsThroughTheCAlignedAttribute(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Tables {\n  @aligned(4096) static mut PML4: u64[512];\n  @aligned(64) static mut SEEDED: u32[2] = [1, 2];\n  @aligned(32) static mut COUNT: u32;\n  @aligned(16) static ROWS: u8[4] = [1, 2, 3, 4];\n  static mut PLAIN: u32;\n}\n\nfunction main(): i32 {\n  Tables::PML4[1] = 2;\n  Tables::SEEDED[1] = 3;\n  Tables::COUNT = 4;\n  Tables::PLAIN = 5;\n  let rows: *u8 = &Tables::ROWS as *u8;\n\n  return Tables::PML4[1] as i32 + *rows as i32;\n}\n",
+  );
+
+  let pml4: String = codegenStaticName(&mut emission, "PML4");
+  let seeded: String = codegenStaticName(&mut emission, "SEEDED");
+  let count: String = codegenStaticName(&mut emission, "COUNT");
+  let rows: String = codegenStaticName(&mut emission, "ROWS");
+  let plain: String = codegenStaticName(&mut emission, "PLAIN");
+
+  let pml4Global: String = `static u64 ${pml4.toStr()}[512] __attribute__((aligned(4096)));\n`;
+  let seededGlobal: String = `static u32 ${seeded.toStr()}[2] __attribute__((aligned(64))) = {`;
+  let countGlobal: String = `static u32 ${count.toStr()} __attribute__((aligned(32)));\n`;
+  let rowsGlobal: String = `static const u8 ${rows.toStr()}[4] __attribute__((aligned(16))) = {`;
+  let plainGlobal: String = `static u32 ${plain.toStr()};\n`;
+
+  Test::assert(emission.source.contains(&pml4Global));
+  Test::assert(emission.source.contains(&seededGlobal));
+  Test::assert(emission.source.contains(&countGlobal));
+  Test::assert(emission.source.contains(&rowsGlobal));
+  Test::assert(emission.source.contains(&plainGlobal));
+}
+
 /// `@zeroed` in a static initializer is the constant `{0}` inside an aggregate,
 /// a scalar folds to its zero constant and an array that is all zero needs no
 /// initializer, so the global is seeded without a function running to fill it.

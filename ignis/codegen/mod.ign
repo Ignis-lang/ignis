@@ -3626,8 +3626,8 @@ export namespace CodegenC {
     return text;
   }
 
-  /// The `__attribute__` suffix a field's `@aligned(N)` asks its C member to
-  /// carry.
+  /// The `__attribute__` suffix an `@aligned(N)` asks the C member of a field,
+  /// or the C global of a static field, to carry.
   function fieldLayoutAttributes(alignment: Option<u64>): String {
     let mut text: String = String::new();
 
@@ -5290,7 +5290,8 @@ export namespace CodegenC {
   /// dispatches to. Everything else the unit defines stays `static`.
   /// One C global per `static mut` field, seeded with its constant
   /// initializer or, when it starts zeroed, declared without one, and one `const` global per immutable static field or constant
-  /// whose address some function takes. Every other static field and constant
+  /// whose address some function takes. A static field's `@aligned(N)` is an
+  /// `aligned(N)` attribute after the declarator, so it precedes any initializer. Every other static field and constant
   /// folds into its uses and needs no storage, so nothing else reaches this
   /// section.
   function emitStaticGlobals(
@@ -5317,10 +5318,12 @@ export namespace CodegenC {
       };
 
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut alignment: Option<u64> = Option::NONE;
       let mut storage: str = "static";
 
       if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(global.defId)) {
         declaredType = variable.declaredType;
+        alignment = variable.alignment;
 
         if (!variable.mutable) {
           storage = "static const";
@@ -5337,6 +5340,8 @@ export namespace CodegenC {
         let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
         declarator = `${elementText.toStr()} ${name.toStr()}[${array.size}]`;
       }
+
+      declarator.pushStr(CodegenC::fieldLayoutAttributes(alignment).toStr());
 
       // A global that is all zero bytes carries no initializer: C places it in
       // zero-initialized storage, so it occupies no space in the object file.

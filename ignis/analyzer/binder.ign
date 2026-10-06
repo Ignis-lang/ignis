@@ -947,12 +947,16 @@ export namespace Analyzer {
       return 0;
     }
 
+    /// The largest alignment `@aligned(N)` accepts, 1 GiB.
+    const MAX_ALIGNMENT: u64 = 1073741824;
+
     /// The alignment `@aligned(N)` asks for, in bytes.
     ///
     /// Attribute arguments arrive from the parser as raw lexeme text, so the
     /// count is read back from its decimal digits. A form that does not carry
-    /// exactly one power-of-two decimal argument is ignored, as in the host,
-    /// which reports it and emits no attribute.
+    /// exactly one power-of-two decimal argument of at most
+    /// `Analyzer::Binder::MAX_ALIGNMENT` is ignored: `validateAttributes`
+    /// reports it and no attribute is emitted.
     function alignmentAttribute(metadata: &Ast::Metadata): Option<u64> {
       let mut index: u64 = 0;
 
@@ -977,7 +981,7 @@ export namespace Analyzer {
           continue;
         };
 
-        if (value == 0 || (value & (value - 1)) != 0) {
+        if (value == 0 || (value & (value - 1)) != 0 || value > Analyzer::Binder::MAX_ALIGNMENT) {
           index += 1;
           continue;
         }
@@ -1362,8 +1366,9 @@ export namespace Analyzer {
       return name.equals("test") || name.equals("externName") || name.equals("cold") || name.equals("deprecated") || name.equals("extension") || name.equals("directive");
     }
 
-    /// Report every attribute `target` does not accept, and every `@aligned(N)`
-    /// whose `N` is not a power of two.
+    /// Report every attribute `target` does not accept, and every `@aligned`
+    /// that is not written with exactly one decimal integer that is a power of
+    /// two and at most `Analyzer::Binder::MAX_ALIGNMENT`.
     function validateAttributes(
       state: &mut Analyzer::Binder::BinderState,
       metadata: &Ast::Metadata,
@@ -1383,18 +1388,57 @@ export namespace Analyzer {
           continue;
         }
 
-        if (attribute.name.equals("aligned") && attribute.arguments.length() == 1) {
-          if (let Option::SOME(argument) = attribute.arguments.get(0)) {
-            if (let Option::SOME(value) = Analyzer::Binder::parseDecimal(argument)) {
-              if (value == 0 || (value & (value - 1)) != 0) {
-                Analyzer::Binder::emitAlignmentNotPowerOfTwo(state, value, attribute.span);
-              }
-            }
-          }
+        if (attribute.name.equals("aligned")) {
+          Analyzer::Binder::validateAlignedAttribute(state, attribute);
         }
 
         index += 1;
       }
+    }
+
+    /// Report an `@aligned` written with other than one argument, with an
+    /// argument that is not a decimal integer, or with a value that is not a
+    /// power of two or is above `Analyzer::Binder::MAX_ALIGNMENT`.
+    function validateAlignedAttribute(
+      state: &mut Analyzer::Binder::BinderState,
+      attribute: &Ast::Attribute,
+    ): void {
+      if (attribute.arguments.length() != 1) {
+        let message: String = `@aligned expects 1 argument(s), got ${attribute.arguments.length()}`;
+        Analyzer::Binder::emitAlignedDiagnostic(state, DiagnosticCode::ATTRIBUTE_ARG_COUNT, message.toStr(), attribute.span);
+
+        return;
+      }
+
+      let Option::SOME(argument) = attribute.arguments.get(0) else {
+        return;
+      };
+
+      let Option::SOME(value) = Analyzer::Binder::parseDecimal(argument) else {
+        let message: String = `@aligned expects a decimal integer, got '${argument.toStr()}'`;
+        Analyzer::Binder::emitAlignedDiagnostic(state, DiagnosticCode::ALIGNMENT_NOT_AN_INTEGER, message.toStr(), attribute.span);
+
+        return;
+      };
+
+      if (value == 0 || (value & (value - 1)) != 0) {
+        Analyzer::Binder::emitAlignmentNotPowerOfTwo(state, value, attribute.span);
+      } else if (value > Analyzer::Binder::MAX_ALIGNMENT) {
+        let message: String = `alignment ${value} is larger than the ${Analyzer::Binder::MAX_ALIGNMENT} bytes the compiler accepts`;
+        Analyzer::Binder::emitAlignedDiagnostic(state, DiagnosticCode::ALIGNMENT_TOO_LARGE, message.toStr(), attribute.span);
+      }
+    }
+
+    function emitAlignedDiagnostic(
+      state: &mut Analyzer::Binder::BinderState,
+      code: str,
+      message: str,
+      span: SourceSpan,
+    ): void {
+      let mut diag: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+      diag.addLabel(LabelKind::PRIMARY, span, message);
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
     }
 
     function emitUnknownAttribute(
@@ -1746,6 +1790,7 @@ export namespace Analyzer {
                   takes: false,
                   noEscape: false,
                   isExtern: false,
+                  alignment: Analyzer::Binder::alignmentAttribute(&b.metadata),
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let staticId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(staticDef));
@@ -1837,6 +1882,8 @@ export namespace Analyzer {
               if (isDuplicate) {
                 emitDuplicateNameDiagnostic(state, "variant name", b.name.toStr(), b.span);
               } else if (b.initializer.isSome()) {
+                Analyzer::Binder::validateAttributes(state, &b.metadata, "field");
+
                 seenSyms.push(sym);
                 let staticDef: Analyzer::VariableDef = Analyzer::VariableDef {
                   name: sym,
@@ -1846,6 +1893,7 @@ export namespace Analyzer {
                   takes: false,
                   noEscape: false,
                   isExtern: false,
+                  alignment: Analyzer::Binder::alignmentAttribute(&b.metadata),
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let staticId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(staticDef));
@@ -1991,6 +2039,7 @@ export namespace Analyzer {
                   takes: Analyzer::Binder::hasAttribute(&b.metadata, "takes"),
                   noEscape: Analyzer::Binder::hasAttribute(&b.metadata, "noescape"),
                   isExtern: false,
+                  alignment: Option::NONE,
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let paramId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(paramDef));
@@ -3012,6 +3061,11 @@ export namespace Analyzer {
         return;
       }
 
+      if (let Option::SOME(alignedSpan) = Analyzer::Binder::attributeSpanNamed(&c.metadata, "aligned")) {
+        let alignedName: String = String::create("aligned");
+        Analyzer::Binder::emitUnknownAttribute(state, &alignedName, "constant", alignedSpan);
+      }
+
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
 
@@ -3023,6 +3077,7 @@ export namespace Analyzer {
         takes: false,
         noEscape: false,
         isExtern: state.insideExtern,
+        alignment: Option::NONE,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(varDef));
