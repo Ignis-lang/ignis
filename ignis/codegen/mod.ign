@@ -576,6 +576,20 @@ export namespace CodegenC {
     return isDigit || isUpper || isLower;
   }
 
+  /// Whether `ty` is `i64` or `u64`. A C integer constant of either type has to
+  /// carry a 64-bit suffix: a bare `137U` is 32 bits wide, so `137U << 40U`
+  /// shifts past its width and is undefined behavior.
+  function isSixtyFourBitType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
+    let Option::SOME(typeNode) = typeStore.get(ty) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I64 | Analyzer::Type::U64 -> true,
+      _ -> false,
+    };
+  }
+
   function formatConst(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -584,16 +598,24 @@ export namespace CodegenC {
     value: &Lir::ConstValue,
   ): String {
     match (value) {
-      Lir::ConstValue::Int(number, _) -> {
+      Lir::ConstValue::Int(number, ty) -> {
         // Its magnitude does not fit any signed C constant, so the decimal
         // spelling is an unsigned constant that GCC warns about.
         if (number == minOf<i64>()) {
           return String::create("INT64_MIN");
         }
 
+        if (CodegenC::isSixtyFourBitType(typeStore, ty)) {
+          return `${number}LL`;
+        }
+
         return `${number}`;
       },
-      Lir::ConstValue::UInt(number, _) -> {
+      Lir::ConstValue::UInt(number, ty) -> {
+        if (CodegenC::isSixtyFourBitType(typeStore, ty)) {
+          return `${number}ULL`;
+        }
+
         return `${number}U`;
       },
       Lir::ConstValue::Float(number, _) -> {
