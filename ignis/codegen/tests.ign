@@ -694,11 +694,11 @@ function codegenSpellsIntegerConstantsWithTheirTypeWidth(): void {
     "const ACCESS: u64 = 0x89;\nconst SIGNED: i64 = 0x89;\nconst NARROW: u32 = 0x89;\n\nfunction main(): i32 {\n  let a: u64 = ACCESS << 40;\n  let b: u64 = ~ACCESS;\n  let c: i64 = SIGNED << 40;\n  let d: i64 = -5000000000;\n  let e: u32 = NARROW << 8;\n\n  return (a >> 40) as i32 + (b >> 63) as i32 + (c >> 40) as i32 + (d >> 40) as i32 + e as i32;\n}\n",
   );
 
-  Test::assert(codegenContains(&emission.source, "137ULL << 40"));
+  Test::assert(codegenContains(&emission.source, "137ULL << ((uint64_t)40ULL & 63ULL)"));
   Test::assert(codegenContains(&emission.source, "~137ULL"));
-  Test::assert(codegenContains(&emission.source, "137LL << 40"));
+  Test::assert(codegenContains(&emission.source, "137LL << ((uint64_t)40LL & 63ULL)"));
   Test::assert(codegenContains(&emission.source, "-5000000000LL"));
-  Test::assert(codegenContains(&emission.source, "137U << 8"));
+  Test::assert(codegenContains(&emission.source, "137U << ((uint64_t)8U & 31ULL)"));
   Test::assert(!codegenContains(&emission.source, "137U << 40"));
 }
 
@@ -1403,4 +1403,74 @@ function codegenReportsNoInlineAsmForPlainUnits(): void {
   let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  return 0;\n}\n");
 
   Test::assert(!emission.usesInlineAsm);
+}
+
+// =========================================================================
+// R27: wrapping integer emission and masked shift counts
+// =========================================================================
+
+/// `+ - *` on a destination at most 32 bits wide compute in `uint64_t` and
+/// decode back to the signed destination width, so signed overflow never
+/// executes in C.
+@test
+function r27CodegenI32AddComputesInUnsignedBits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let a: i32 = 10;\n  let b: i32 = a + a;\n\n  return b;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "((uint64_t)t0 + (uint64_t)t1)"));
+  Test::assert(codegenContains(&emission.source, "& 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648)"));
+  Test::assert(!codegenContains(&emission.source, "t0 + t1"));
+}
+
+/// A `u16` multiply promotes to signed `int` in C, so it has to compute in
+/// `uint64_t` as well: `700 * 700` overflows `int` in the plain form.
+@test
+function r27CodegenU16MultiplyComputesInUnsignedBits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let a: u16 = 700;\n  let b: u16 = a * a;\n\n  return b as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "(u16)((uint64_t)t0 * (uint64_t)t1)"));
+  Test::assert(!codegenContains(&emission.source, "t0 * t1"));
+}
+
+/// Left shifts mask the count to the destination width and compute in
+/// `uint64_t`, so `x << 31` on an `i32` destination cannot raise C shift or
+/// signed overflow UB.
+@test
+function r27CodegenI32ShiftLeftMasksCountAndComputesUnsigned(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let x: i32 = 1;\n  let n: i32 = 31;\n  let y: i32 = x << n;\n\n  return y;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "((uint64_t)t0 << ((uint64_t)t1 & 31ULL))"));
+  Test::assert(codegenContains(&emission.source, "^ 2147483648) - 2147483648)"));
+  Test::assert(!codegenContains(&emission.source, "t0 << t1"));
+}
+
+/// A 64-bit signed left shift also computes in `uint64_t` with a masked
+/// count and decodes the bit pattern to the signed width.
+@test
+function r27CodegenI64ShiftLeftMasksCountAndDecodesSigned(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let s: i64 = 1;\n  let n: i64 = 63;\n  let m: i64 = s << n;\n\n  return m as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "((uint64_t)t0 << ((uint64_t)t1 & 63ULL))"));
+  Test::assert(codegenContains(&emission.source, "& 0x7FFFFFFFFFFFFFFFULL"));
+  Test::assert(codegenContains(&emission.source, "* INT64_MIN"));
+}
+
+/// Right shifts mask the count for both signednesses; a signed right shift
+/// shifts the sign-extended 64-bit pattern.
+@test
+function r27CodegenShiftRightMasksCount(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let s: i32 = -8;\n  let n: i32 = 33;\n  let q: i32 = s >> n;\n  let u: u32 = 8;\n  let un: u32 = 33;\n  let r: u32 = u >> un;\n\n  return q + r as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "(i32)(((i64)t0) >> ((uint64_t)t1 & 31ULL))"));
+  Test::assert(codegenContains(&emission.source, "(u32)((uint64_t)t3 >> ((uint64_t)t4 & 31ULL))"));
+}
+
+/// Unary negation of a signed destination at most 32 bits wide computes the
+/// bit pattern in `uint64_t`, so negating the `i32` minimum is defined.
+@test
+function r27CodegenI32NegateComputesInUnsignedBits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let a: i32 = 5;\n  let b: i32 = -a;\n\n  return b;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "(0ULL - (uint64_t)t0)"));
+  Test::assert(codegenContains(&emission.source, "& 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648)"));
+  Test::assert(!codegenContains(&emission.source, "= -t0;"));
 }

@@ -497,6 +497,240 @@ export namespace CodegenC {
     };
   }
 
+  /// Sign and bit width of an alias-resolved integer type.
+  record IntegerShape {
+    public signed: boolean;
+    public width: u32;
+  }
+
+  /// The `IntegerShape` of `ty`, or NONE when `ty` is not an integer
+  /// primitive.
+  function integerShape(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<CodegenC::IntegerShape> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, ty);
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(CodegenC::IntegerShape { signed: true, width: 8 }),
+      Analyzer::Type::I16 -> Option::SOME(CodegenC::IntegerShape { signed: true, width: 16 }),
+      Analyzer::Type::I32 -> Option::SOME(CodegenC::IntegerShape { signed: true, width: 32 }),
+      Analyzer::Type::I64 -> Option::SOME(CodegenC::IntegerShape { signed: true, width: 64 }),
+      Analyzer::Type::U8 -> Option::SOME(CodegenC::IntegerShape { signed: false, width: 8 }),
+      Analyzer::Type::U16 -> Option::SOME(CodegenC::IntegerShape { signed: false, width: 16 }),
+      Analyzer::Type::U32 -> Option::SOME(CodegenC::IntegerShape { signed: false, width: 32 }),
+      Analyzer::Type::U64 -> Option::SOME(CodegenC::IntegerShape { signed: false, width: 64 }),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The C spelling of the integer type `shape` names.
+  function integerCTypeText(shape: &CodegenC::IntegerShape): String {
+    let mut name: String = String::create("i");
+
+    if (!shape.signed) {
+      name = String::create("u");
+    }
+
+    if (shape.width == 8) {
+      name.pushStr("8");
+    } else if (shape.width == 16) {
+      name.pushStr("16");
+    } else if (shape.width == 32) {
+      name.pushStr("32");
+    } else {
+      name.pushStr("64");
+    }
+
+    return name;
+  }
+
+  /// `((uint64_t)R & <width-1>ULL)`: the shift count masked to the width
+  /// through the count's own bit pattern, so a negative or oversized count
+  /// can never raise C shift UB.
+  function maskedCountText(right: &String, width: u32): String {
+    return `((uint64_t)${right.toStr()} & ${width - 1}ULL)`;
+  }
+
+  /// `2^(width - 1)` as a decimal C literal, the sign bit of the width.
+  function signBitText(width: u32): String {
+    if (width == 8) {
+      return String::create("128");
+    }
+
+    if (width == 16) {
+      return String::create("32768");
+    }
+
+    return String::create("2147483648");
+  }
+
+  /// `2^width - 1` as a C `ULL` literal, the bit mask of the width.
+  function widthMaskText(width: u32): String {
+    if (width == 8) {
+      return String::create("0xFFULL");
+    }
+
+    if (width == 16) {
+      return String::create("0xFFFFULL");
+    }
+
+    return String::create("0xFFFFFFFFULL");
+  }
+
+  /// The destination-width value of a `uint64_t` bit pattern expression:
+  /// a cast for unsigned shapes (defined modulo conversion), a
+  /// mask-and-decode for signed ones so the out-of-range unsigned-to-signed
+  /// conversion never executes, and for the 64-bit signed shape a decode of
+  /// the low 63 bits minus the sign bit. The destination cast narrows the
+  /// decoded value, which is always in range of the type.
+  function normalizedValueText(shape: &CodegenC::IntegerShape, bits: &String): String {
+    let typeText: String = CodegenC::integerCTypeText(shape);
+
+    if (!shape.signed) {
+      return `(${typeText.toStr()})${bits.toStr()}`;
+    }
+
+    if (shape.width == 64) {
+      return `((i64)(${bits.toStr()} & 0x7FFFFFFFFFFFFFFFULL)) + ((i64)(${bits.toStr()} >> 63)) * INT64_MIN`;
+    }
+
+    let sign: String = CodegenC::signBitText(shape.width);
+    let mask: String = CodegenC::widthMaskText(shape.width);
+
+    return `(${typeText.toStr()})((((i64)(${bits.toStr()} & ${mask.toStr()})) ^ ${sign}) - ${sign})`;
+  }
+
+  /// The C value expression for one integer binary operation, or NONE when
+  /// the plain C operator is kept: non-integer destinations, division and
+  /// remainder, and 64-bit `+ - *`, whose wrapping contract is not defined
+  /// yet (docs/ABI_CURRENT.md, "Integer operation widths"). Arithmetic at
+  /// most 32 bits wide and every shift computes in `uint64_t` and
+  /// normalizes to the destination width.
+  function wrappingBinOpValue(
+    node: &Lir::InstrBinOp,
+    left: &String,
+    right: &String,
+    shape: &Option<CodegenC::IntegerShape>,
+  ): Option<String> {
+    let mut shapeValue: CodegenC::IntegerShape = CodegenC::IntegerShape { signed: false, width: 0 };
+
+    if (let Option::SOME(resolved) = *shape) {
+      shapeValue = resolved;
+    } else {
+      return Option::NONE;
+    }
+
+    let opKind: u32 = match (node.op) {
+      Hir::BinaryOperation::Add -> 1,
+      Hir::BinaryOperation::Sub -> 1,
+      Hir::BinaryOperation::Mul -> 1,
+      Hir::BinaryOperation::BitShiftLeft -> 2,
+      Hir::BinaryOperation::BitShiftRight -> 3,
+      _ -> 0,
+    };
+
+    if (opKind == 0) {
+      return Option::NONE;
+    }
+
+    if (opKind == 1) {
+      if (shapeValue.width > 32) {
+        return Option::NONE;
+      }
+
+      let operator: str = CodegenC::binaryOperator(&node.op);
+      let bits: String = `((uint64_t)${left.toStr()} ${operator} (uint64_t)${right.toStr()})`;
+
+      return Option::SOME(CodegenC::normalizedValueText(&shapeValue, &bits));
+    }
+
+    let count: String = CodegenC::maskedCountText(right, shapeValue.width);
+
+    if (opKind == 2) {
+      let bits: String = `((uint64_t)${left.toStr()} << ${count.toStr()})`;
+
+      return Option::SOME(CodegenC::normalizedValueText(&shapeValue, &bits));
+    }
+
+    if (shapeValue.signed) {
+      let typeText: String = CodegenC::integerCTypeText(&shapeValue);
+      let widened: String = `((i64)${left.toStr()})`;
+
+      return Option::SOME(`(${typeText.toStr()})(${widened.toStr()} >> ${count.toStr()})`);
+    }
+
+    let bits: String = `((uint64_t)${left.toStr()} >> ${count.toStr()})`;
+
+    return Option::SOME(CodegenC::normalizedValueText(&shapeValue, &bits));
+  }
+
+  /// The C line for one binary operation. Integer `+ - * << >>` with an
+  /// integer destination use `CodegenC::wrappingBinOpValue`; everything else
+  /// keeps the plain C operator.
+  function binOpLine(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrBinOp,
+    left: &String,
+    right: &String,
+    operator: str,
+    tagSuffix: str,
+  ): String {
+    let mut shape: Option<CodegenC::IntegerShape> = Option::NONE;
+
+    if (let Option::SOME(destination) = function_.temps.get(node.dest.raw() as u64)) {
+      shape = CodegenC::integerShape(defStore, typeStore, destination.ty);
+    }
+
+    if (let Option::SOME(value) = CodegenC::wrappingBinOpValue(node, left, right, &shape)) {
+      return `    t${node.dest.raw()} = ${value.toStr()};\n`;
+    }
+
+    return `    t${node.dest.raw()} = ${left.toStr()}${tagSuffix} ${operator} ${right.toStr()}${tagSuffix};\n`;
+  }
+
+  /// The C line for one unary operation. Negation of a signed integer
+  /// destination at most 32 bits wide computes the bit pattern in
+  /// `uint64_t`, so negating the width's minimum is defined; everything else
+  /// keeps the plain C operator.
+  function unaryOpLine(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrUnaryOp,
+    operand: &String,
+    operator: str,
+  ): String {
+    if (node.op == Hir::UnaryOperation::Neg) {
+      let mut shape: Option<CodegenC::IntegerShape> = Option::NONE;
+
+      if (let Option::SOME(destination) = function_.temps.get(node.dest.raw() as u64)) {
+        shape = CodegenC::integerShape(defStore, typeStore, destination.ty);
+      }
+
+      if (let Option::SOME(shapeValue) = shape) {
+        if (shapeValue.signed && shapeValue.width <= 32) {
+          let bits: String = `(0ULL - (uint64_t)${operand.toStr()})`;
+          let value: String = CodegenC::normalizedValueText(&shapeValue, &bits);
+
+          return `    t${node.dest.raw()} = ${value.toStr()};\n`;
+        }
+      }
+    }
+
+    return `    t${node.dest.raw()} = ${operator}${operand.toStr()};\n`;
+  }
+
   /// A C string literal body with the bytes C cannot carry raw escaped.
   ///
   /// Bytes outside printable ASCII become one hex escape each, so a non-ASCII
@@ -2540,7 +2774,7 @@ export namespace CodegenC {
             tagSuffix = ".tag";
           }
 
-          let line: String = `    t${node.dest.raw()} = ${left.toStr()}${tagSuffix} ${operator} ${right.toStr()}${tagSuffix};\n`;
+          let line: String = CodegenC::binOpLine(defStore, typeStore, function_, &node, &left, &right, operator, tagSuffix);
           let mut outputRef: &mut String = output;
           outputRef.pushStr(line.toStr());
         }
@@ -2548,7 +2782,7 @@ export namespace CodegenC {
       Lir::Instr::UnaryOp(node) -> {
         let operator: str = CodegenC::unaryOperator(&node.op);
         let operand: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.operand);
-        let line: String = `    t${node.dest.raw()} = ${operator}${operand.toStr()};\n`;
+        let line: String = CodegenC::unaryOpLine(defStore, typeStore, function_, &node, &operand, operator);
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },

@@ -430,7 +430,7 @@ function constEvalUnaryNotBool(): void {
 }
 
 @test
-function constEvalNegateUnsignedIsNotConst(): void {
+function constEvalNegateUnsignedWrapsToWidth(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -443,7 +443,7 @@ function constEvalNegateUnsignedIsNotConst(): void {
 
   let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertNotConst(&mut output, itemId);
+  assertConstInt(&mut output, itemId, 4294967289);
 }
 
 @test
@@ -537,7 +537,7 @@ function constEvalDivisionByZeroIsNotConst(): void {
 }
 
 @test
-function constEvalShiftOutOfRangeIsNotConst(): void {
+function constEvalShiftCountMasksToResultWidth(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -557,7 +557,7 @@ function constEvalShiftOutOfRangeIsNotConst(): void {
   let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
-  assertNotConst(&mut output, itemId);
+  assertConstInt(&mut output, itemId, 1);
 }
 
 @test
@@ -1096,4 +1096,330 @@ function main(): i32 {
     Test::assertEq<u64>(summary.count, 0);
     index += 1;
   }
+}
+
+// =========================================================================
+// R27: width-based wrapping constants and masked shift counts
+// =========================================================================
+
+@test
+function r27ConstFoldI32ShiftLeftWrapsToMinimum(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 31);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneExpr,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, -2147483648);
+}
+
+@test
+function r27ConstFoldI8AddWrapsToMinimum(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i8TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i8");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 127);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", i8TypeId, maxExpr);
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let maxRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    maxRef,
+    oneExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i8TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, -128);
+}
+
+@test
+function r27ConstFoldU8AddWrapsToZero(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u8");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 255);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", u8TypeId, maxExpr);
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let maxRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    maxRef,
+    oneExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u8TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 0);
+}
+
+@test
+function r27ConstFoldU16MultiplyWraps(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u16TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u16");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 65535);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", u16TypeId, maxExpr);
+  let threeExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 3);
+  let maxRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Multiply,
+    maxRef,
+    threeExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u16TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 65533);
+}
+
+@test
+function r27ConstFoldU32MultiplyWrapsPastI64(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u32");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 4294967295);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", u32TypeId, maxExpr);
+  let maxLeftRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let maxRightRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Multiply,
+    maxLeftRef,
+    maxRightRef,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 1);
+}
+
+@test
+function r27ConstFoldComparisonReflectsDeclaredWidth(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let booleanTypeId: Ast::TypeId = constEvalAddPathType(&mut module, "boolean");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 2147483647);
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let sumExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    maxExpr,
+    oneExpr,
+  );
+  let zeroExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 0);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::LessThan,
+    sumExpr,
+    zeroExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", booleanTypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstBool(&mut output, itemId, true);
+}
+
+@test
+function r27ConstFoldShiftCountMasksNegative(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let minusOneExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    constEvalAddIntLiteral(&mut module, 1),
+  );
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneExpr,
+    minusOneExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, -2147483648);
+}
+
+@test
+function r27ConstFoldShiftCountMasksLarge(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 32);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneExpr,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 1);
+}
+
+@test
+function r27ConstFoldU64ShiftCountMasks(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u64");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let oneItemId: Ast::ItemId = constEvalAddConstant(&mut module, "ONE", u64TypeId, oneExpr);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 64);
+  let oneRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "ONE");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneRef,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u64TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 1);
+}
+
+@test
+function r27ConstFoldShiftRightCountMasks(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let eightExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 8);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 33);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftRight,
+    eightExpr,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 4);
+}
+
+@test
+function r27ConstFoldBitNotNormalizesWidth(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u8");
+  let zeroExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 0);
+  let valueExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::BitNot,
+    zeroExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u8TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 255);
+}
+
+@test
+function r27ConstFoldI32NegateWrapsAtMinimum(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Declared first: constants fold in declaration order, so `K` reads `M`.
+  let minTypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let minusMaxExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    constEvalAddIntLiteral(&mut module, 2147483647),
+  );
+  let minusOneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let minExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Subtract,
+    minusMaxExpr,
+    minusOneExpr,
+  );
+  let minItemId: Ast::ItemId = constEvalAddConstant(&mut module, "M", minTypeId, minExpr);
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let minRefExpr: Ast::ExpressionId = constEvalAddVariable(&mut module, "M");
+  let valueExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    minRefExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, minItemId, -2147483648);
+  assertConstInt(&mut output, itemId, -2147483648);
 }

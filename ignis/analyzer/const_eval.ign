@@ -347,6 +347,113 @@ export namespace Analyzer {
       return Option::SOME(left + right);
     }
 
+    /// Sign and bit width of the integer type a folded result normalizes
+    /// to. Recovered from the checked expression type with aliases
+    /// resolved, mirroring `exprTypeIsUnsigned`.
+    record IntFoldShape {
+      public signed: boolean;
+      public width: u32;
+    }
+
+    /// The `IntFoldShape` of the alias-resolved type `typeId`, or NONE when
+    /// it is not an integer primitive.
+    function checkedTypeShape(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::ConstEval::IntFoldShape> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::I8 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: true, width: 8 }),
+        Analyzer::Type::I16 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: true, width: 16 }),
+        Analyzer::Type::I32 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: true, width: 32 }),
+        Analyzer::Type::I64 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: true, width: 64 }),
+        Analyzer::Type::U8 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: false, width: 8 }),
+        Analyzer::Type::U16 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: false, width: 16 }),
+        Analyzer::Type::U32 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: false, width: 32 }),
+        Analyzer::Type::U64 -> Option::SOME(Analyzer::ConstEval::IntFoldShape { signed: false, width: 64 }),
+        _ -> Option::NONE,
+      };
+    }
+
+    /// The `IntFoldShape` checked for `exprId`, or NONE when the
+    /// typechecker recorded nothing integer there.
+    function checkedIntegerShape(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::ConstEval::IntFoldShape> {
+      let Option::SOME(typeId) = Analyzer::ConstEval::lookupCheckedExprType(typecheck, exprId) else {
+        return Option::NONE;
+      };
+
+      return Analyzer::ConstEval::checkedTypeShape(defStore, typeStore, typeId);
+    }
+
+    /// Normalizes an `Int` fold result to the integer storage type it
+    /// initializes. The typechecker types a literal pair without the
+    /// storage's expectation, so a folded initializer can still be a step
+    /// wider than the storage it seeds; the storage width decides the final
+    /// value. Non-integer values and storage pass through unchanged.
+    function normalizeValueToStorage(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      value: Analyzer::ConstEval::ConstValue,
+      storageType: Analyzer::TypeId,
+    ): Analyzer::ConstEval::ConstValue {
+      let Analyzer::ConstEval::ConstValue::Int(bits) = value else {
+        return value;
+      };
+
+      let Option::SOME(shape) = Analyzer::ConstEval::checkedTypeShape(defStore, typeStore, storageType) else {
+        return value;
+      };
+
+      return Analyzer::ConstEval::normalizeIntBits(&shape, bits as u64);
+    }
+
+    /// Normalizes a two's-complement bit pattern to `shape`'s width: zero
+    /// bits above the width for unsigned shapes, the width-wise sign
+    /// extension for signed ones, so a folded constant is always in range of
+    /// its type. Every step stays inside `u64`/`i64` ranges.
+    function normalizeIntBits(
+      shape: &Analyzer::ConstEval::IntFoldShape,
+      bits: u64,
+    ): Analyzer::ConstEval::ConstValue {
+      let mut mask: u64 = maxOf<u64>();
+
+      if (shape.width != 64) {
+        mask = ((1 as u64) << shape.width) - 1;
+      }
+
+      let masked: u64 = bits & mask;
+
+      if (!shape.signed) {
+        return Analyzer::ConstEval::ConstValue::Int(masked as i64);
+      }
+
+      let signBit: u64 = (1 as u64) << (shape.width - 1);
+
+      if ((masked & signBit) == 0) {
+        return Analyzer::ConstEval::ConstValue::Int(masked as i64);
+      }
+
+      if (shape.width == 64) {
+        return Analyzer::ConstEval::ConstValue::Int(((masked - signBit) as i64) + minOf<i64>());
+      }
+
+      return Analyzer::ConstEval::ConstValue::Int((masked as i64) - ((signBit << 1) as i64));
+    }
+
     function checkedSubUnsigned(left: u64, right: u64): Option<u64> {
       if (left < right) {
         return Option::NONE;
@@ -423,14 +530,29 @@ export namespace Analyzer {
     /// and a right shift branch on it — the other operations produce the same
     /// bits either way. The caller has already rejected division and
     /// remainder by zero.
+    ///
+    /// R27: when the checked result type carries an `IntFoldShape`, `+ - *`,
+    /// the bitwise operations, and both shifts normalize their result to the
+    /// declared width after the operation — wrapping values, shift counts
+    /// masked to `width - 1` through the count's bit pattern — so a folded
+    /// constant always reflects its declared width. Arithmetic on a 64-bit
+    /// shape and every operation without a recorded shape keeps the checked
+    /// fold below.
     function foldIntBinary(
       operator: Ast::Expression::BinaryOperator,
       left: i64,
       right: i64,
       unsignedFold: boolean,
+      shape: Option<Analyzer::ConstEval::IntFoldShape>,
     ): Option<Analyzer::ConstEval::ConstValue> {
       match (operator) {
         Ast::Expression::BinaryOperator::Add -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            if (shapeValue.width <= 32) {
+              return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left as u64) + (right as u64)));
+            }
+          }
+
           if (unsignedFold) {
             return Analyzer::ConstEval::intFromUnsigned(
               Analyzer::ConstEval::checkedAddUnsigned(left as u64, right as u64),
@@ -439,6 +561,12 @@ export namespace Analyzer {
           return Analyzer::ConstEval::intFromSigned(Analyzer::ConstEval::checkedAddSigned(left, right));
         },
         Ast::Expression::BinaryOperator::Subtract -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            if (shapeValue.width <= 32) {
+              return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left as u64) - (right as u64)));
+            }
+          }
+
           if (unsignedFold) {
             return Analyzer::ConstEval::intFromUnsigned(
               Analyzer::ConstEval::checkedSubUnsigned(left as u64, right as u64),
@@ -447,6 +575,12 @@ export namespace Analyzer {
           return Analyzer::ConstEval::intFromSigned(Analyzer::ConstEval::checkedSubSigned(left, right));
         },
         Ast::Expression::BinaryOperator::Multiply -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            if (shapeValue.width <= 32) {
+              return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left as u64) * (right as u64)));
+            }
+          }
+
           if (unsignedFold) {
             return Analyzer::ConstEval::intFromUnsigned(
               Analyzer::ConstEval::checkedMulUnsigned(left as u64, right as u64),
@@ -497,21 +631,48 @@ export namespace Analyzer {
           return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left >= right));
         },
         Ast::Expression::BinaryOperator::BitAnd -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left as u64) & (right as u64)));
+          }
           return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left & right));
         },
         Ast::Expression::BinaryOperator::BitOr -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left as u64) | (right as u64)));
+          }
           return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left | right));
         },
         Ast::Expression::BinaryOperator::BitXor -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left as u64) ^ (right as u64)));
+          }
           return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left ^ right));
         },
         Ast::Expression::BinaryOperator::ShiftLeft -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            let countMask: u64 = (shapeValue.width - 1) as u64;
+            let bits: u64 = (left as u64) << ((right as u64) & countMask);
+
+            return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, bits));
+          }
+
           if (right < 0 || right > 63) {
             return Option::NONE;
           }
           return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left << right));
         },
         Ast::Expression::BinaryOperator::ShiftRight -> {
+          if (let Option::SOME(shapeValue) = shape) {
+            let countMask: u64 = (shapeValue.width - 1) as u64;
+            let count: u64 = (right as u64) & countMask;
+
+            if (!shapeValue.signed) {
+              return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left as u64) >> count));
+            }
+
+            return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (left >> count) as u64));
+          }
+
           if (right < 0 || right > 63) {
             return Option::NONE;
           }
@@ -591,6 +752,7 @@ export namespace Analyzer {
       left: Option<Analyzer::ConstEval::ConstValue>,
       right: Option<Analyzer::ConstEval::ConstValue>,
       unsignedFold: boolean,
+      shape: Option<Analyzer::ConstEval::IntFoldShape>,
     ): Option<Analyzer::ConstEval::ConstValue> {
       let Option::SOME(leftValue) = left else {
         return Option::NONE;
@@ -616,7 +778,7 @@ export namespace Analyzer {
                 return Option::NONE;
               }
 
-              return Analyzer::ConstEval::foldIntBinary(operator, l, r, unsignedFold);
+              return Analyzer::ConstEval::foldIntBinary(operator, l, r, unsignedFold, shape);
             },
             _ -> {
               return Option::NONE;
@@ -654,10 +816,15 @@ export namespace Analyzer {
     /// Mirrors the Rust `const_eval_unary`. Negating an unsigned value has no
     /// meaning here; leaving it unfolded keeps a wrong constant out of the
     /// program.
+    ///
+    /// R27: with a recorded `IntFoldShape`, negation and bitwise complement
+    /// normalize to the declared width, so an unsigned negation folds to its
+    /// wrapping value and a complement is always in range.
     function foldUnary(
       operator: Ast::Expression::UnaryOperator,
       operand: Option<Analyzer::ConstEval::ConstValue>,
       unsignedFold: boolean,
+      shape: Option<Analyzer::ConstEval::IntFoldShape>,
     ): Option<Analyzer::ConstEval::ConstValue> {
       let Option::SOME(operandValue) = operand else {
         return Option::NONE;
@@ -669,6 +836,12 @@ export namespace Analyzer {
         Analyzer::ConstEval::ConstValue::Int(i) -> {
           match (operator) {
             Ast::Expression::UnaryOperator::Negate -> {
+              if (let Option::SOME(shapeValue) = shape) {
+                if (!shapeValue.signed || shapeValue.width <= 32) {
+                  return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (0 as u64) - (i as u64)));
+                }
+              }
+
               if (unsignedFold) {
                 return Option::NONE;
               }
@@ -681,6 +854,9 @@ export namespace Analyzer {
               return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(i == 0));
             },
             Ast::Expression::UnaryOperator::BitNot -> {
+              if (let Option::SOME(shapeValue) = shape) {
+                return Option::SOME(Analyzer::ConstEval::normalizeIntBits(&shapeValue, (i as u64) ^ maxOf<u64>()));
+              }
               return Option::SOME(Analyzer::ConstEval::ConstValue::Int(~i));
             },
             _ -> {
@@ -817,10 +993,27 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// Whether `exprId` is a literal node.
+    function expressionIsLiteral(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      if (let Option::SOME(expression) = module.expressions.get(exprId)) {
+        if (let Ast::Expression::Node::Literal(_) = expression) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
     /// Mirrors the Rust `const_eval_expression_node` for the expression
     /// shapes in scope: literals, references to earlier constants, binary and
     /// unary folding, const-condition ternaries, and grouping. Everything
     /// else is not const.
+    ///
+    /// R27: `expectedType` is the integer storage the expression initializes,
+    /// when known. The typechecker checks a binary's left operand without an
+    /// expectation, so a pair of literals folds at the default literal width
+    /// regardless of the storage; when both operands are literals, the
+    /// storage's width decides the fold instead.
     function evalExpression(
       values: &mut Analyzer::ConstEval::ConstValueMap,
       defStore: &mut Analyzer::DefinitionStore,
@@ -829,6 +1022,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       exprId: Ast::ExpressionId,
+      expectedType: Option<Analyzer::TypeId>,
     ): Option<Analyzer::ConstEval::ConstValue> {
       let Option::SOME(expression) = module.expressions.get(exprId) else {
         return Option::NONE;
@@ -853,6 +1047,7 @@ export namespace Analyzer {
             resolvedBodies,
             typecheck,
             binaryExpr.left,
+            expectedType,
           );
           let right: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
             values,
@@ -862,10 +1057,24 @@ export namespace Analyzer {
             resolvedBodies,
             typecheck,
             binaryExpr.right,
+            expectedType,
           );
           let unsignedFold: boolean = Analyzer::ConstEval::exprTypeIsUnsigned(typeStore, typecheck, binaryExpr.left);
+          let mut shape: Option<Analyzer::ConstEval::IntFoldShape> = Analyzer::ConstEval::checkedIntegerShape(defStore, typeStore, typecheck, exprId);
 
-          return Analyzer::ConstEval::foldBinary(binaryExpr.operator, left, right, unsignedFold);
+          if (shape.isNone()) {
+            shape = Analyzer::ConstEval::checkedIntegerShape(defStore, typeStore, typecheck, binaryExpr.left);
+          }
+
+          if (Analyzer::ConstEval::expressionIsLiteral(module, binaryExpr.left) && Analyzer::ConstEval::expressionIsLiteral(module, binaryExpr.right)) {
+            if (let Option::SOME(expected) = expectedType) {
+              if (let Option::SOME(expectedShape) = Analyzer::ConstEval::checkedTypeShape(defStore, typeStore, expected)) {
+                shape = Option::SOME(expectedShape);
+              }
+            }
+          }
+
+          return Analyzer::ConstEval::foldBinary(binaryExpr.operator, left, right, unsignedFold, shape);
         },
         Ast::Expression::Node::Ternary(ternary) -> {
           let Option::SOME(condition) = Analyzer::ConstEval::evalExpression(
@@ -876,6 +1085,7 @@ export namespace Analyzer {
             resolvedBodies,
             typecheck,
             ternary.condition,
+            expectedType,
           ) else {
             return Option::NONE;
           };
@@ -893,6 +1103,7 @@ export namespace Analyzer {
                   resolvedBodies,
                   typecheck,
                   ternary.thenBranch,
+                  expectedType,
                 );
               }
 
@@ -904,6 +1115,7 @@ export namespace Analyzer {
                 resolvedBodies,
                 typecheck,
                 ternary.elseBranch,
+                expectedType,
               );
             },
             _ -> {
@@ -924,10 +1136,16 @@ export namespace Analyzer {
             resolvedBodies,
             typecheck,
             unary.operand,
+            expectedType,
           );
           let unsignedFold: boolean = Analyzer::ConstEval::exprTypeIsUnsigned(typeStore, typecheck, unary.operand);
+          let mut shape: Option<Analyzer::ConstEval::IntFoldShape> = Analyzer::ConstEval::checkedIntegerShape(defStore, typeStore, typecheck, exprId);
 
-          return Analyzer::ConstEval::foldUnary(unary.operator, operand, unsignedFold);
+          if (shape.isNone()) {
+            shape = Analyzer::ConstEval::checkedIntegerShape(defStore, typeStore, typecheck, unary.operand);
+          }
+
+          return Analyzer::ConstEval::foldUnary(unary.operator, operand, unsignedFold, shape);
         },
         Ast::Expression::Node::Grouped(grouped) -> {
           return Analyzer::ConstEval::evalExpression(
@@ -938,6 +1156,7 @@ export namespace Analyzer {
             resolvedBodies,
             typecheck,
             grouped.expression,
+            expectedType,
           );
         },
         _ -> {
@@ -1253,11 +1472,12 @@ export namespace Analyzer {
         return true;
       }
 
-      let Option::SOME(value) = Analyzer::ConstEval::evalExpression(values, defStore, typeStore, module, resolvedBodies, typecheck, exprId) else {
+      let Option::SOME(value) = Analyzer::ConstEval::evalExpression(values, defStore, typeStore, module, resolvedBodies, typecheck, exprId, Option::SOME(expectedType)) else {
         return false;
       };
 
-      partsRef.push(Analyzer::ConstEval::ConstPart::Value(value, expectedType));
+      let normalized: Analyzer::ConstEval::ConstValue = Analyzer::ConstEval::normalizeValueToStorage(defStore, typeStore, value, expectedType);
+      partsRef.push(Analyzer::ConstEval::ConstPart::Value(normalized, expectedType));
       return true;
     }
 
@@ -1445,6 +1665,12 @@ export namespace Analyzer {
 
           Analyzer::ConstEval::appendUniqueRaw(storageDefIds, defId.raw());
 
+          let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
+
+          if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(defId)) {
+            declaredType = Option::SOME(variableDef.declaredType);
+          }
+
           let valueOpt: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
             values,
             defStore,
@@ -1453,10 +1679,17 @@ export namespace Analyzer {
             resolvedBodies,
             typecheck,
             constant.value,
+            declaredType,
           );
 
           if (let Option::SOME(value) = valueOpt) {
-            Analyzer::ConstEval::insertConstValue(values, defId.raw(), value);
+            let mut stored: Analyzer::ConstEval::ConstValue = value;
+
+            if (let Option::SOME(storageType) = declaredType) {
+              stored = Analyzer::ConstEval::normalizeValueToStorage(defStore, typeStore, stored, storageType);
+            }
+
+            Analyzer::ConstEval::insertConstValue(values, defId.raw(), stored);
             return;
           }
 

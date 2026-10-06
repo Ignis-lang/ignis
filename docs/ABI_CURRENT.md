@@ -563,6 +563,41 @@ Copy and Drop are mutually exclusive. A type cannot be both.
 - **Copy types**: Primitives, pointers, references, function types, and records/enums where all fields are Copy.
 - **Non-Copy types**: `str`, types with `@implements(Drop)`, types with any non-Copy field.
 
+## Integer Operation Widths
+
+For integer widths up to 32 bits, `+`, `-`, `*` and signed unary `-` compute in `uint64_t` and normalize to the destination's declared width without signed C overflow. Left shifts use unsigned arithmetic at every width, and both shifts mask their counts. The 64-bit signed arithmetic exceptions are listed below:
+
+```c
+/* i32 addition: compute in uint64_t, then decode the 32-bit pattern. */
+t2 = (i32)((((i64)(((uint64_t)t0 + (uint64_t)t1) & 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648);
+
+/* u16 multiplication: the C int promotion of two u16 values can overflow. */
+t2 = (u16)((uint64_t)t0 * (uint64_t)t1);
+
+/* i32 left shift: the count is masked to the width, the shift is unsigned. */
+t2 = (i32)((((i64)(((uint64_t)t0 << ((uint64_t)t1 & 31ULL)) & 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648);
+
+/* i64 left shift: the low 63 bits plus the sign bit times INT64_MIN. */
+t2 = ((i64)(((uint64_t)t0 << ((uint64_t)t1 & 63ULL)) & 0x7FFFFFFFFFFFFFFFULL)) + ((i64)(((uint64_t)t0 << ((uint64_t)t1 & 63ULL)) >> 63)) * INT64_MIN;
+
+/* i32 right shift: the sign-extended 64-bit pattern, count masked. */
+t2 = (i32)(((i64)t0) >> ((uint64_t)t1 & 31ULL));
+
+/* i32 negation: the bit pattern of 0 - x, decoded to the width. */
+t1 = (i32)((((i64)((0ULL - (uint64_t)t0) & 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648);
+```
+
+The signed decode is fully defined C at every width: a mask keeps the pattern inside the width, the XOR-and-subtract (at most 32 bits) or the low-63-bits-plus-sign-times-`INT64_MIN` form (at 64) stays inside `int64_t`, and the final cast narrows an in-range value. Unsigned destinations cast directly; the `uint64_t`-to-narrower-unsigned conversion is defined modulo.
+
+Scope of the contract:
+
+- `+`, `-`, `*`, unary `-` on unsigned types, and `<<` wrap modulo 2^width at every width, 64 included.
+- `+`, `-`, `*` and unary `-` on signed types wrap modulo 2^width at widths up to 32. At 64 bits their overflow remains undefined in emitted C: the plain C operator is emitted, and constant evaluation leaves such an expression not-const.
+- Shift counts are masked to the shifted type's width minus one through the count's own bit pattern, so a negative or oversized count cannot raise C shift UB: `x << 32` on an `i32` shifts by 0, and `-1` shifts by 31.
+- `>>` masks the count the same way; a signed right shift uses the arithmetic right shift of a sign-extended `i64` on the supported GCC/Clang targets. Negative signed right shift is implementation-defined in C, not a portable C guarantee.
+- Division and remainder are outside the contract: division by zero and signed minimum divided by `-1` remain undefined in emitted C; no runtime guard is added here.
+- Constant evaluation normalizes after every operation, so a folded constant always reflects the declared width of the expression that produced it and comparisons over wrapped values fold accordingly.
+
 ## Pointer and Cast Operations
 
 ### Pointer-Integer Casts
