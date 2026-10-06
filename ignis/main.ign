@@ -1069,11 +1069,19 @@ function collectDiagnosticMessages(
 /// to produce, such as the JSON Lines of `--dump-ownership-report` or the drop
 /// schedules gate G7 diffs.
 function printStatus(message: String, verbose: boolean): void {
+  if (let Option::SOME(line) = statusLine(message, verbose)) {
+    Io::eprintln(line);
+  }
+}
+
+/// The phase line `printStatus` prints for `message`: the message itself under
+/// `-v` / `--verbose`, nothing otherwise.
+export function statusLine(message: String, verbose: boolean): Option<String> {
   if (!verbose) {
-    return;
+    return Option::NONE;
   }
 
-  Io::eprintln(message);
+  return Option::SOME(message);
 }
 
 /// How many errors and warnings a run reported, for its summary line.
@@ -2012,21 +2020,58 @@ function discoverFor(
   };
 }
 
-/// Print the path of what a successful build produced: the binary, or the
-/// object of a freestanding library.
-function printBuildArtifact(
-  artifacts: &BuildArtifacts,
-  linksExecutable: boolean,
-  objectOnly: boolean
-): void {
-  if (linksExecutable) {
-    Io::eprintln(`  Binary: ${artifacts.executable.asStr()}`);
-  } else if (objectOnly) {
-    Io::eprintln(`  Object: ${artifacts.object.asStr()}`);
-  }
+/// The closing lines of a build or check: whether it succeeded, the text after
+/// its `✓` or `✗` mark, and the artifact line a successful build adds.
+export record CompileOutcome {
+  public succeeded: boolean;
+  public text: String;
+  public artifact: Option<String>;
 }
 
-/// Print the last lines of a build or check that reported `errors` errors.
+/// The closing lines of a build or check that reported `errors` errors and
+/// `warnings` warnings. A successful build names its binary, or the object of
+/// a freestanding library; a check and a failed run name nothing.
+export function compileOutcome(
+  checkOnly: boolean,
+  errors: u64,
+  warnings: u64,
+  timing: &String,
+  artifacts: &BuildArtifacts,
+  linksExecutable: boolean,
+  objectOnly: boolean,
+): CompileOutcome {
+  if (errors > 0) {
+    return CompileOutcome {
+      succeeded: false,
+      text: formatFailureLine(checkOnly ? "Check" : "Build", errors, warnings),
+      artifact: Option::NONE,
+    };
+  }
+
+  if (checkOnly) {
+    return CompileOutcome {
+      succeeded: true,
+      text: formatSuccessLine("No errors found", ", ", warnings, timing),
+      artifact: Option::NONE,
+    };
+  }
+
+  let mut artifact: Option<String> = Option::NONE;
+
+  if (linksExecutable) {
+    artifact = Option::SOME(`  Binary: ${artifacts.executable.asStr()}`);
+  } else if (objectOnly) {
+    artifact = Option::SOME(`  Object: ${artifacts.object.asStr()}`);
+  }
+
+  return CompileOutcome {
+    succeeded: true,
+    text: formatSuccessLine("Compiled", " with ", warnings, timing),
+    artifact: artifact,
+  };
+}
+
+/// Print the closing lines `compileOutcome` picks.
 function printCompileOutcome(
   checkOnly: boolean,
   errors: u64,
@@ -2036,18 +2081,18 @@ function printCompileOutcome(
   linksExecutable: boolean,
   objectOnly: boolean,
 ): void {
-  if (errors > 0) {
-    printFailure(checkOnly ? "Check" : "Build", errors, warnings);
+  let outcome: CompileOutcome = compileOutcome(checkOnly, errors, warnings, timing, artifacts, linksExecutable, objectOnly);
+
+  if (!outcome.succeeded) {
+    printOutcomeLine("✗", &outcome.text, Terminal::TerminalColor::RED);
     return;
   }
 
-  if (checkOnly) {
-    printSuccess("No errors found", ", ", warnings, timing);
-    return;
-  }
+  printOutcomeLine("✓", &outcome.text, Terminal::TerminalColor::GREEN);
 
-  printSuccess("Compiled", " with ", warnings, timing);
-  printBuildArtifact(artifacts, linksExecutable, objectOnly);
+  if (let Option::SOME(line) = &outcome.artifact) {
+    Io::eprintln(line.clone());
+  }
 }
 
 /// Compile the project `startPath` belongs to.
@@ -2121,8 +2166,9 @@ function runCompile(
         verbose,
       );
       let relinkErrors: u64 = relinked == 0 ? 0 : 1;
+      let relinkTiming: String = buildClockText(&started);
 
-      printCompileOutcome(false, relinkErrors, plan.warnings, &cachedTiming, &artifacts, discovery.bin, objectOnly);
+      printCompileOutcome(false, relinkErrors, plan.warnings, &relinkTiming, &artifacts, discovery.bin, objectOnly);
       return relinked;
     }
 

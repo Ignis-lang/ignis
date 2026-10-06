@@ -5,11 +5,14 @@ import String from "std::string";
 import Test from "std::test";
 
 import DiagnosticBag from "@compiler::diagnostics";
+import BuildArtifacts from "./build/artifacts";
 
 import Format from "./format/api";
 import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./format/config";
 import
+  CompileOutcome,
   comparePathComponents,
+  compileOutcome,
   fmtConfigErrorMessage,
   fmtConfigErrorMessageForPath,
   fmtStdinJsonValidateAndProcessLine,
@@ -18,6 +21,7 @@ import
   formatSuccessLine,
   prepareTestBinaryDirectory,
   replayedReport,
+  statusLine,
   stripAnsiEscapes,
   testBinaryPath,
   validateUtf8From,
@@ -377,4 +381,95 @@ function replayedReportIsPlainOffATerminal(): void {
 
   Test::assertEq<str>(replayedReport(&stored, false).toStr(), "Warning[A0127]: unused\n");
   Test::assertEq<str>(replayedReport(&stored, true).toStr(), stored.toStr());
+}
+
+function outcomeArtifacts(): BuildArtifacts {
+  return BuildArtifacts {
+    source: Path::PathBuf::create("out/demo.c"),
+    object: Path::PathBuf::create("out/demo.o"),
+    executable: Path::PathBuf::create("out/demo"),
+  };
+}
+
+/// Asserts the closing lines `compileOutcome` picks.
+function assertOutcome(
+  outcome: CompileOutcome,
+  succeeded: boolean,
+  text: str,
+  artifact: Option<str>
+): void {
+  Test::assertEq<boolean>(outcome.succeeded, succeeded);
+  Test::assertEq<str>(outcome.text.toStr(), text);
+
+  match (artifact) {
+    Option::SOME(expected) -> {
+      let Option::SOME(actual) = &outcome.artifact else {
+        Test::fail();
+        return;
+      };
+
+      Test::assertEq<str>(actual.toStr(), expected);
+    },
+    Option::NONE -> Test::assert(outcome.artifact.isNone()),
+  };
+}
+
+/// A successful build reports how long it took and where its binary is.
+@test
+function compileOutcomeOfABuildNamesTheBinary(): void {
+  let artifacts: BuildArtifacts = outcomeArtifacts();
+  let timing: String = String::create("1.2s");
+
+  assertOutcome(compileOutcome(false, 0, 2, &timing, &artifacts, true, false), true, "Compiled with 2 warnings (1.2s)", Option::SOME("  Binary: out/demo"));
+}
+
+/// A check emits nothing, so it names no artifact.
+@test
+function compileOutcomeOfACheckNamesNoArtifact(): void {
+  let artifacts: BuildArtifacts = outcomeArtifacts();
+  let timing: String = String::create("75ms");
+
+  assertOutcome(compileOutcome(true, 0, 0, &timing, &artifacts, true, false), true, "No errors found (75ms)", Option::NONE);
+}
+
+/// A failed build or check counts what it reported and names no artifact.
+@test
+function compileOutcomeOfAFailureNamesNoArtifact(): void {
+  let artifacts: BuildArtifacts = outcomeArtifacts();
+  let timing: String = String::create("2.0s");
+
+  assertOutcome(compileOutcome(false, 3, 1, &timing, &artifacts, true, false), false, "Build failed: 3 errors, 1 warning", Option::NONE);
+  assertOutcome(compileOutcome(true, 1, 0, &timing, &artifacts, true, false), false, "Check failed: 1 error", Option::NONE);
+}
+
+/// A reused build reports `cached` where the duration goes.
+@test
+function compileOutcomeOfACachedBuildSaysCached(): void {
+  let artifacts: BuildArtifacts = outcomeArtifacts();
+  let cached: String = String::create("cached");
+
+  assertOutcome(compileOutcome(false, 0, 0, &cached, &artifacts, true, false), true, "Compiled (cached)", Option::SOME("  Binary: out/demo"));
+}
+
+/// A freestanding library links nothing and names its object instead; a
+/// hosted library that emits only C names nothing.
+@test
+function compileOutcomeOfALibraryNamesItsObject(): void {
+  let artifacts: BuildArtifacts = outcomeArtifacts();
+  let timing: String = String::create("1.0s");
+
+  assertOutcome(compileOutcome(false, 0, 0, &timing, &artifacts, false, true), true, "Compiled (1.0s)", Option::SOME("  Object: out/demo.o"));
+  assertOutcome(compileOutcome(false, 0, 0, &timing, &artifacts, false, false), true, "Compiled (1.0s)", Option::NONE);
+}
+
+/// Phase lines are printed only under `-v` / `--verbose`.
+@test
+function statusLineIsShownOnlyWhenVerbose(): void {
+  let Option::SOME(shown) = statusLine(String::create("  lex  : ok (0 errors, 0 warnings)"), true) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(shown.toStr(), "  lex  : ok (0 errors, 0 warnings)");
+  Test::assert(statusLine(String::create("  lex  : ok (0 errors, 0 warnings)"), false).isNone());
 }
