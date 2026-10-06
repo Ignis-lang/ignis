@@ -17,6 +17,8 @@ import
   formatFailureLine,
   formatSuccessLine,
   prepareTestBinaryDirectory,
+  replayedReport,
+  stripAnsiEscapes,
   testBinaryPath,
   validateUtf8From,
 from "./main";
@@ -327,4 +329,52 @@ function formatSuccessLineMentionsWarningsOnlyWhenPresent(): void {
   Test::assertEq<str>(formatSuccessLine("Compiled", " with ", 12, &timing).toStr(), "Compiled with 12 warnings (2m03s)");
   Test::assertEq<str>(formatSuccessLine("Compiled", " with ", 1, &cached).toStr(), "Compiled with 1 warning (cached)");
   Test::assertEq<str>(formatSuccessLine("No errors found", ", ", 2, &timing).toStr(), "No errors found, 2 warnings (2m03s)");
+}
+
+/// The escape character that starts every ANSI styling sequence.
+const ESCAPE_BYTE: u8 = 27;
+
+/// `text` with every `\x1b` replaced by the visible `<ESC>`, so a test can
+/// build styled input from plain literals.
+function withEscapes(text: str): String {
+  let mut result: String = String::new();
+  let source: String = String::create(text);
+  let marker: String = String::create("<ESC>");
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    if (source.substringBytes(index, source.length()).startsWith(marker.toStr())) {
+      result.pushByte(ESCAPE_BYTE);
+      index += marker.length();
+      continue;
+    }
+
+    if (let Option::SOME(byte) = source.byteAt(index)) {
+      result.pushByte(byte);
+    }
+
+    index += 1;
+  }
+
+  return result;
+}
+
+/// Styling sequences are removed and everything between them is kept,
+/// multi-byte characters included.
+@test
+function stripAnsiEscapesKeepsOnlyTheText(): void {
+  let styled: String = withEscapes("<ESC>[31m<ESC>[1mError<ESC>[0m[A0001]: café\n  <ESC>[34m<ESC>[1m|<ESC>[0m\n");
+  let plain: String = stripAnsiEscapes(&styled);
+
+  Test::assertEq<str>(plain.toStr(), "Error[A0001]: café\n  |\n");
+}
+
+/// A warm run replays its stored report with styling on a terminal and as
+/// plain text anywhere else.
+@test
+function replayedReportIsPlainOffATerminal(): void {
+  let stored: String = withEscapes("<ESC>[33m<ESC>[1mWarning<ESC>[0m[A0127]: unused\n");
+
+  Test::assertEq<str>(replayedReport(&stored, false).toStr(), "Warning[A0127]: unused\n");
+  Test::assertEq<str>(replayedReport(&stored, true).toStr(), stored.toStr());
 }

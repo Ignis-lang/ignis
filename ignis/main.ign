@@ -170,32 +170,86 @@ function formatPhaseLine(name: str, errors: u64, warnings: u64): String {
   return `  ${name}: ${status} (${errors} errors, ${warnings} warnings)`;
 }
 
-/// Render and print a diagnostic bag to stderr if it is non-empty.
+/// Render and print a diagnostic bag to stderr if it is non-empty, styled only
+/// when stderr is a terminal.
 function renderBagToStderr(bag: &DiagnosticBag, file: &SourceFile): void {
   if (bag.isEmpty()) {
     return;
   }
 
-  let rendered: String = DiagnosticRenderer::renderBag(bag, file, true);
+  let rendered: String = DiagnosticRenderer::renderBag(bag, file, DiagnosticRenderer::stderrUsesColor());
   Io::eprintln(rendered);
 }
 
 /// Render a diagnostic bag to stderr and keep a copy in the run's report.
 ///
-/// The report is what a reused build replays, so a warm run has to be able to
-/// print exactly the bytes the run that produced the artifacts printed.
+/// The report is what a reused build replays. It always holds the styled
+/// rendering, so a warm run can replay it on a terminal as the cold run would
+/// have printed it there, or strip the styling for anything else.
 function renderBagCollecting(bag: &DiagnosticBag, file: &SourceFile, report: &mut String): void {
   if (bag.isEmpty()) {
     return;
   }
 
-  let rendered: String = DiagnosticRenderer::renderBag(bag, file, true);
+  let styled: String = DiagnosticRenderer::renderBag(bag, file, true);
 
   let mut reportRef: &mut String = report;
-  reportRef.push(&rendered);
+  reportRef.push(&styled);
   reportRef.pushChar('\n');
 
-  Io::eprintln(rendered);
+  if (DiagnosticRenderer::stderrUsesColor()) {
+    Io::eprintln(styled);
+    return;
+  }
+
+  Io::eprintln(DiagnosticRenderer::renderBag(bag, file, false));
+}
+
+/// `text` without its ANSI escape sequences: every `ESC [` up to and including
+/// the sequence's final byte (`@` through `~`) is dropped.
+export function stripAnsiEscapes(text: &String): String {
+  let mut plain: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
+    };
+
+    let nextIsBracket: boolean = match (text.byteAt(index + 1)) {
+      Option::SOME(next) -> next == '[' as u8,
+      Option::NONE -> false,
+    };
+    let startsEscape: boolean = byte == 27 && nextIsBracket;
+
+    if (!startsEscape) {
+      plain.pushByte(byte);
+      index += 1;
+      continue;
+    }
+
+    index += 2;
+
+    while (let Option::SOME(sequenceByte) = text.byteAt(index)) {
+      index += 1;
+
+      if (sequenceByte >= 64 && sequenceByte <= 126) {
+        break;
+      }
+    }
+  }
+
+  return plain;
+}
+
+/// What a warm run prints for a stored report: the styled report as stored
+/// when `useColor`, else the same text without styling.
+export function replayedReport(report: &String, useColor: boolean): String {
+  if (useColor) {
+    return report.clone();
+  }
+
+  return stripAnsiEscapes(report);
 }
 
 /// The C toolchain profile a build runs under.
@@ -369,7 +423,7 @@ function replayBuildReport(reportPath: &Path::PathBuf): void {
     return;
   }
 
-  Io::eprint(report);
+  Io::eprint(replayedReport(&report, DiagnosticRenderer::stderrUsesColor()));
 }
 
 /// Report a reused build in the shape a compiled one reports itself in, so a
@@ -1096,7 +1150,7 @@ export function formatSuccessLine(
 function printOutcomeLine(mark: str, text: &String, color: Terminal::TerminalColor): void {
   let mut styled: String = String::new();
 
-  Terminal::appendStyled(&mut styled, mark, true, color, true);
+  Terminal::appendStyled(&mut styled, mark, DiagnosticRenderer::stderrUsesColor(), color, true);
   styled.pushStr(" ");
   styled.push(text);
   Io::eprintln(styled);
