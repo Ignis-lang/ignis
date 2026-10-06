@@ -147,6 +147,13 @@ export namespace ParserExpressions {
       });
     }
 
+    if (punctuation == Punctuation::RANGE || punctuation == Punctuation::RANGE_INCLUSIVE) {
+      return Option::SOME(BindingPower {
+        left: 28,
+        right: 29,
+      });
+    }
+
     if (punctuation == Punctuation::PIPE_FORWARD) {
       return Option::SOME(BindingPower {
         left: 27,
@@ -2743,6 +2750,11 @@ export namespace ParserExpressions {
       return ParserExpressions::parseGroupedExpression(parserRef);
     }
 
+    if (ParserExpressions::isRangeOperator(&token)) {
+      ParserExpressions::emitOpenEndedRange(parserRef, token.span);
+      return Option::NONE;
+    }
+
     if (let Option::SOME(unary) = ParserExpressions::parsePrefixUnaryExpression(parserRef, token.clone())) {
       return Option::SOME(unary);
     }
@@ -3022,6 +3034,90 @@ export namespace ParserExpressions {
     return Option::SOME(expression);
   }
 
+  function isRangeOperator(token: &Token): boolean {
+    if (token.kindValue() != TokenKind::PUNCTUATION) {
+      return false;
+    }
+
+    let punctuation: Punctuation = token.punctuationValue();
+
+    return punctuation == Punctuation::RANGE || punctuation == Punctuation::RANGE_INCLUSIVE;
+  }
+
+  /// Whether `token` ends an expression, so a range operator that precedes it
+  /// has no upper bound.
+  function endsExpression(token: &Token): boolean {
+    if (token.kindValue() == TokenKind::EOF) {
+      return true;
+    }
+
+    if (token.kindValue() != TokenKind::PUNCTUATION) {
+      return false;
+    }
+
+    let punctuation: Punctuation = token.punctuationValue();
+
+    return punctuation == Punctuation::RIGHT_PAREN || punctuation == Punctuation::RIGHT_BRACKET || punctuation == Punctuation::RIGHT_BRACE || punctuation == Punctuation::LEFT_BRACE || punctuation == Punctuation::SEMICOLON || punctuation == Punctuation::COMMA || punctuation == Punctuation::COLON;
+  }
+
+  function emitOpenEndedRange(parser: &mut ParserShared::State, span: SourceSpan): void {
+    parser.emitDiagnostic(
+      span,
+      DiagnosticCode::EXPECTED_EXPRESSION,
+      "Open-ended ranges are not supported",
+      "write both bounds: 'start..end' or 'start..=end'"
+    );
+  }
+
+  /// Parses the upper bound after `operatorToken` (`..` or `..=`) and builds
+  /// the `Range` for `start`. A range does not chain: `a..b..c` is rejected
+  /// rather than grouped either way, and an upper bound that is missing is
+  /// reported as an open-ended range.
+  function parseRangeTail(
+    parser: &mut ParserShared::State,
+    start: ParsedExpression,
+    operatorToken: Token,
+    power: BindingPower
+  ): Option<ParsedExpression> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    parserRef.skipTrivia();
+
+    let upperBoundToken: Token = parserRef.current();
+
+    if (ParserExpressions::endsExpression(&upperBoundToken)) {
+      ParserExpressions::emitOpenEndedRange(parserRef, operatorToken.span);
+      return Option::NONE;
+    }
+
+    let end = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, power.right)!;
+
+    parserRef.skipTrivia();
+    let followingToken: Token = parserRef.current();
+
+    if (ParserExpressions::isRangeOperator(&followingToken)) {
+      parserRef.emitDiagnostic(
+        followingToken.span,
+        DiagnosticCode::UNEXPECTED_TOKEN,
+        "Ranges cannot be chained",
+        "parenthesize one of the ranges, or write a single range"
+      );
+      return Option::NONE;
+    }
+
+    let span: SourceSpan = ParserShared::mergeSpans(start.span, end.span);
+    let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Range(Ast::Expression::Range {
+      span: span,
+      start: Option::SOME(start.id),
+      end: Option::SOME(end.id),
+      inclusive: operatorToken.punctuationValue() == Punctuation::RANGE_INCLUSIVE,
+    }));
+
+    return Option::SOME(ParsedExpression {
+      id: expressionId,
+      span: span,
+    });
+  }
+
   function parseExpressionWithMinBindingPower(
     parser: &mut ParserShared::State,
     minimumBindingPower: u64
@@ -3088,6 +3184,11 @@ export namespace ParserExpressions {
           id: expressionId,
           span: span,
         };
+        continue;
+      }
+
+      if (ParserExpressions::isRangeOperator(&operatorToken)) {
+        expression = ParserExpressions::parseRangeTail(parserRef, expression, operatorToken, power)!;
         continue;
       }
 

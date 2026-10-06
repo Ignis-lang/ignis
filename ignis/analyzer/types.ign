@@ -36,6 +36,14 @@ export namespace Analyzer {
     public mutable: boolean;
   }
 
+  /// Wrapper record for the Range variant payload: the integer type a range
+  /// yields and whether its end is included. `a..b` and `a..=b` are distinct
+  /// types, since the loop over a value of one has to know which it is.
+  record RangeType {
+    public element: Analyzer::TypeId;
+    public inclusive: boolean;
+  }
+
   /// Wrapper record for the Instance variant payload.
   ///
   /// Represents a generic nominal type applied to concrete type arguments
@@ -46,6 +54,22 @@ export namespace Analyzer {
   record InstanceType {
     public definition: Analyzer::DefinitionId;
     public typeArguments: Vector<Analyzer::TypeId>;
+  }
+
+  /// Whether `name` is one of the two builtin range type names, and which:
+  /// `Range` is the type of `a..b` (`false`), `RangeInclusive` the type of
+  /// `a..=b` (`true`). A declaration with either name takes precedence, so
+  /// the builtin names never shadow a program's own types.
+  function builtinRangeTypeName(name: str): Option<boolean> {
+    if (String::create(name).equals("Range")) {
+      return Option::SOME(false);
+    }
+
+    if (String::create(name).equals("RangeInclusive")) {
+      return Option::SOME(true);
+    }
+
+    return Option::NONE;
   }
 
   @implements(Eq)
@@ -97,6 +121,10 @@ export namespace Analyzer {
     /// so source programs only ever see `Function`.
     RawFunction(Analyzer::FunctionType),
 
+    /// The value of `a..b` or `a..=b`: a pair of bounds of one integer type.
+    /// Compiler-known, so no standard library is needed, and Copy.
+    Range(Analyzer::RangeType),
+
     public name(&self): str {
       return match (self) {
         Analyzer::Type::I8 -> "i8",
@@ -129,6 +157,7 @@ export namespace Analyzer {
         Analyzer::Type::Instance(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Alias(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::RawFunction(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Range(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
       };
     }
 
@@ -168,6 +197,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::I16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -198,6 +228,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::I32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -228,6 +259,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::I64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -258,6 +290,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::U8 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -288,6 +321,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::U16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -318,6 +352,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::U32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -348,6 +383,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::U64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -378,6 +414,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::F32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -408,6 +445,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::F64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -438,6 +476,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::BOOLEAN -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -468,6 +507,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::CHAR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -498,6 +538,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::STR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -528,6 +569,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::VOID -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -558,6 +600,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::NEVER -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -588,6 +631,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::ATOM -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -618,6 +662,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Pointer(p) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -648,6 +693,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Reference(r) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -678,6 +724,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Slice(e) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -708,6 +755,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::FixedArray(e, n) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -738,6 +786,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Tuple(a) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -768,6 +817,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Function(f) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -798,6 +848,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Record(defId) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -828,6 +879,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Enum(defId) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -858,6 +910,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Param(s1) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -888,6 +941,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Instance(i1) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -918,6 +972,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(i2) -> i1.definition.raw() == i2.definition.raw() && Analyzer::Type::typeIdVectorsEqual(&i1.typeArguments, &i2.typeArguments),
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::Alias(a1) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -948,6 +1003,7 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(a2) -> a1.raw() == a2.raw(),
           Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(_) -> false,
         },
         Analyzer::Type::RawFunction(f) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -978,6 +1034,38 @@ export namespace Analyzer {
           Analyzer::Type::Instance(_) -> false,
           Analyzer::Type::Alias(_) -> false,
           Analyzer::Type::RawFunction(g) -> Analyzer::Type::typeIdVectorsEqual(&f.params, &g.params) && f.returnType.raw() == g.returnType.raw(),
+          Analyzer::Type::Range(_) -> false,
+        },
+        Analyzer::Type::Range(a) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::ATOM -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
+          Analyzer::Type::Record(_) -> false,
+          Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
+          Analyzer::Type::RawFunction(_) -> false,
+          Analyzer::Type::Range(b) -> a.element.raw() == b.element.raw() && a.inclusive == b.inclusive,
         },
       };
     }
@@ -1123,6 +1211,11 @@ export namespace Analyzer {
         hasher.writeByte(11);
         hasher.writeU32(defId.raw());
       },
+      Analyzer::Type::Range(range) -> {
+        hasher.writeByte(13);
+        hasher.writeU32(range.element.raw());
+        hasher.writeBoolean(range.inclusive);
+      },
       Analyzer::Type::RawFunction(signature) -> {
         hasher.writeByte(12);
         hasher.writeU64(signature.params.length());
@@ -1248,6 +1341,7 @@ export namespace Analyzer {
         Analyzer::Type::Instance(instance) -> self.internCompound(Analyzer::Type::Instance(instance)),
         Analyzer::Type::Alias(defId) -> self.internCompound(Analyzer::Type::Alias(defId)),
         Analyzer::Type::RawFunction(f) -> self.internCompound(Analyzer::Type::RawFunction(f)),
+        Analyzer::Type::Range(r) -> self.internCompound(Analyzer::Type::Range(r)),
       };
     }
 
@@ -1313,6 +1407,12 @@ export namespace Analyzer {
     /// Returns the canonical id for a slice-of-`element` type.
     public slice(&mut self, element: Analyzer::TypeId): Analyzer::TypeId {
       return self.intern(Analyzer::Type::Slice(element));
+    }
+
+    /// Returns the canonical id for the type of `a..b`, or of `a..=b` when
+    /// `inclusive`, over the integer type `element`.
+    public range(&mut self, element: Analyzer::TypeId, inclusive: boolean): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Range(Analyzer::RangeType { element: element, inclusive: inclusive }));
     }
 
     /// Returns the canonical id for a fixed-array-of-`element` with `length` elements.
@@ -1778,6 +1878,15 @@ export namespace Analyzer {
 
           return self.slice(substitutedElement);
         },
+        Analyzer::Type::Range(range) -> {
+          let substitutedElement: Analyzer::TypeId = self.substitute(range.element, params, args);
+
+          if (substitutedElement.raw() == range.element.raw()) {
+            return typeId;
+          }
+
+          return self.range(substitutedElement, range.inclusive);
+        },
         Analyzer::Type::FixedArray(element, length) -> {
           let substitutedElement: Analyzer::TypeId = self.substitute(element, params, args);
 
@@ -2010,6 +2119,22 @@ export namespace Analyzer {
       return result;
     }
 
+    /// `Range<T>`, or `RangeInclusive<T>` for `a..=b`, the way source spells
+    /// the type of a range value.
+    private rangeNameOf(&self, range: &Analyzer::RangeType, elementName: String): String {
+      let mut result: String = String::create("Range");
+
+      if (range.inclusive) {
+        result = String::create("RangeInclusive");
+      }
+
+      result = result.concat("<");
+      result = result.concat(elementName.toStr());
+      result = result.concat(">");
+
+      return result;
+    }
+
     /// Recursively resolves a `TypeId` to its canonical string name.
     ///
     /// For primitive ids, delegates to `Analyzer::Type::name()`.
@@ -2040,6 +2165,7 @@ export namespace Analyzer {
           Analyzer::Type::Pointer(p) -> self.pointerNameOf(&p),
           Analyzer::Type::Reference(refType) -> self.referenceNameOf(&refType),
           Analyzer::Type::Slice(element) -> self.nameOf(element).concat("[]"),
+          Analyzer::Type::Range(range) -> self.rangeNameOf(&range, self.nameOf(range.element)),
           Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
           Analyzer::Type::Tuple(t) -> self.tupleNameOf(&t.elements),
           Analyzer::Type::Function(f) -> self.functionNameOf(&f),
@@ -2325,6 +2451,7 @@ export namespace Analyzer {
           Analyzer::Type::Pointer(p) -> self.pointerNameOfResolved(&p, defs, syms),
           Analyzer::Type::Reference(refType) -> self.referenceNameOfResolved(&refType, defs, syms),
           Analyzer::Type::Slice(element) -> self.nameOfResolved(element, defs, syms).concat("[]"),
+          Analyzer::Type::Range(range) -> self.rangeNameOf(&range, self.nameOfResolved(range.element, defs, syms)),
           Analyzer::Type::FixedArray(element, length) -> self.nameOfResolved(element, defs, syms)
             .concat("[")
             .concat(String::create(length).toStr())

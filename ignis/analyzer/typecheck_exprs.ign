@@ -3755,6 +3755,12 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkMemberAccessOnInstanceReceiver(state, defStore, typeStore, symbols, exprId, value, receiverType);
       }
 
+      if (peeked.cycleAlias.isNone()) {
+        if (let Option::SOME(Analyzer::Type::Range(range)) = typeStore.get(peeked.typeId)) {
+          return Analyzer::Typecheck::checkRangeFieldAccess(state, exprId, value, range.element);
+        }
+      }
+
       // A receiver that holds no fields at all is a member-access error, not a
       // type mismatch: the reference analyzer reports its own
       // `DotAccessOnNonRecord`/`DotAccessOnEnum` here. Only a cyclic alias and
@@ -3793,6 +3799,25 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::recordExprType(state, exprId, fieldDef.fieldType);
       return Option::SOME(fieldDef.fieldType);
+    }
+
+    /// `start` and `end` of a range value, both of the range's element type.
+    /// A range has no other member, and no methods.
+    function checkRangeFieldAccess(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::MemberAccess,
+      elementType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      if (value.member.equals("start") || value.member.equals("end")) {
+        Analyzer::Typecheck::recordExprType(state, exprId, elementType);
+        return Option::SOME(elementType);
+      }
+
+      let message: String = `a range has the fields 'start' and 'end', not '${value.member.toStr()}'`;
+      Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::RANGE_UNKNOWN_FIELD, message.toStr());
+
+      return Option::NONE;
     }
 
     /// Called after a record field-lookup miss (`checkMemberAccessExpr`).
@@ -5016,6 +5041,10 @@ export namespace Analyzer {
           return Option::SOME(matchType);
         },
         Ast::Expression::Node::Vector(value) -> {
+          if (Analyzer::Typecheck::containsDirectRange(module, &value.elements)) {
+            return Analyzer::Typecheck::checkArrayRange(state, defStore, typeStore, symbols, module, exprId, &value, expected);
+          }
+
           // The expected type decides what the elements are, exactly as it does for
           // any other argument position: without it an unsuffixed literal keeps its
           // default and a `i32[]` annotation reports a mismatch per element.
@@ -5220,6 +5249,9 @@ export namespace Analyzer {
 
           Analyzer::Typecheck::recordExprType(state, exprId, tryType);
           return Option::SOME(tryType);
+        },
+        Ast::Expression::Node::Range(value) -> {
+          return Analyzer::Typecheck::checkRangeExpr(state, defStore, typeStore, symbols, module, resolvedBodies, exprId, &value, expected);
         },
         Ast::Expression::Node::Asm(value) -> {
           let asmType: Analyzer::TypeId = Analyzer::Typecheck::checkInlineAsm(state, defStore, typeStore, symbols, module, resolvedBodies, &value, Option::NONE)!;
@@ -9300,6 +9332,8 @@ export namespace Analyzer {
         Ast::Expression::Node::BuiltinCall(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.arguments),
         Ast::Expression::Node::Tuple(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.elements),
         Ast::Expression::Node::Vector(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.elements),
+        Ast::Expression::Node::Range(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.start)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.end),
         Ast::Expression::Node::RecordInit(value) -> Analyzer::Typecheck::countPipePlaceholdersInFields(module, &value.fields),
         Ast::Expression::Node::Match(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.scrutinee)
           + Analyzer::Typecheck::countPipePlaceholdersInArms(module, &value.arms),
@@ -9743,6 +9777,582 @@ export namespace Analyzer {
       return Option::SOME(resolved.typeId);
     }
 
+    /// The `Range` node an expression is, looking through parentheses, so
+    /// `for (i of (0..4))` reads like `for (i of 0..4)`.
+    function rangeExpressionId(
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): Option<Ast::ExpressionId> {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      return match (expression) {
+        Ast::Expression::Node::Range(_) -> Option::SOME(exprId),
+        Ast::Expression::Node::Grouped(grouped) -> Analyzer::Typecheck::rangeExpressionId(module, grouped.expression),
+        _ -> Option::NONE,
+      };
+    }
+
+    /// A bound of an array range: an integer literal, possibly negated, kept
+    /// as a sign and a magnitude so that every value a literal can take, from
+    /// `-9223372036854775808` to `18446744073709551615`, is representable.
+    record ArrayRangeBound {
+      public negative: boolean;
+      public magnitude: u64;
+    }
+
+    /// The value of a bound that is an integer literal, looking through
+    /// parentheses and one negation. `NONE` for anything else, so a named
+    /// constant or a computed bound is not a bound.
+    function arrayRangeBound(
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::Typecheck::ArrayRangeBound> {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      return match (expression) {
+        Ast::Expression::Node::Literal(literal) -> match (literal.value) {
+          Ast::Expression::LiteralValue::Int(value) -> Option::SOME(Analyzer::Typecheck::ArrayRangeBound {
+            negative: value < 0,
+            magnitude: Analyzer::Typecheck::integerMagnitude(value),
+          }),
+          Ast::Expression::LiteralValue::UInt(value) -> Option::SOME(Analyzer::Typecheck::ArrayRangeBound {
+            negative: false,
+            magnitude: value,
+          }),
+          _ -> Option::NONE,
+        },
+        Ast::Expression::Node::Grouped(grouped) -> Analyzer::Typecheck::arrayRangeBound(module, grouped.expression),
+        Ast::Expression::Node::Unary(unary) -> Analyzer::Typecheck::negatedArrayRangeBound(module, unary.operator, unary.operand),
+        _ -> Option::NONE,
+      };
+    }
+
+    function integerMagnitude(value: i64): u64 {
+      if (value >= 0) {
+        return value as u64;
+      }
+
+      return ((0 - (value + 1)) as u64) + 1;
+    }
+
+    function negatedArrayRangeBound(
+      module: &Ast::Module,
+      operator: Ast::Expression::UnaryOperator,
+      operandId: Ast::ExpressionId,
+    ): Option<Analyzer::Typecheck::ArrayRangeBound> {
+      if (operator != Ast::Expression::UnaryOperator::Negate) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(operand) = Analyzer::Typecheck::arrayRangeBound(module, operandId) else {
+        return Option::NONE;
+      };
+
+      if (operand.negative) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(Analyzer::Typecheck::ArrayRangeBound {
+        negative: operand.magnitude != 0,
+        magnitude: operand.magnitude,
+      });
+    }
+
+    /// Whether `left` is below `right`.
+    function arrayRangeBoundLess(
+      left: &Analyzer::Typecheck::ArrayRangeBound,
+      right: &Analyzer::Typecheck::ArrayRangeBound,
+    ): boolean {
+      if (left.negative != right.negative) {
+        return left.negative;
+      }
+
+      if (left.negative) {
+        return left.magnitude > right.magnitude;
+      }
+
+      return left.magnitude < right.magnitude;
+    }
+
+    /// The bound `offset` above `start`.
+    function arrayRangeBoundAt(
+      start: &Analyzer::Typecheck::ArrayRangeBound,
+      offset: u64,
+    ): Analyzer::Typecheck::ArrayRangeBound {
+      if (!start.negative) {
+        return Analyzer::Typecheck::ArrayRangeBound {
+          negative: false,
+          magnitude: start.magnitude + offset,
+        };
+      }
+
+      if (offset > start.magnitude) {
+        return Analyzer::Typecheck::ArrayRangeBound {
+          negative: false,
+          magnitude: offset - start.magnitude,
+        };
+      }
+
+      return Analyzer::Typecheck::ArrayRangeBound {
+        negative: offset != start.magnitude,
+        magnitude: start.magnitude - offset,
+      };
+    }
+
+    /// How many values `start..end` or `start..=end` yields, saturating at the
+    /// largest `u64`, and zero when the range is empty.
+    function arrayRangeLength(
+      start: &Analyzer::Typecheck::ArrayRangeBound,
+      end: &Analyzer::Typecheck::ArrayRangeBound,
+      inclusive: boolean,
+    ): u64 {
+      if (Analyzer::Typecheck::arrayRangeBoundLess(end, start)) {
+        return 0;
+      }
+
+      let mut distance: u64 = 0;
+
+      if (start.negative == end.negative) {
+        if (start.negative) {
+          distance = start.magnitude - end.magnitude;
+        } else {
+          distance = end.magnitude - start.magnitude;
+        }
+      } else if (start.magnitude > 18446744073709551615 - end.magnitude) {
+        distance = 18446744073709551615;
+      } else {
+        distance = start.magnitude + end.magnitude;
+      }
+
+      if (!inclusive) {
+        return distance;
+      }
+
+      if (distance == 18446744073709551615) {
+        return distance;
+      }
+
+      return distance + 1;
+    }
+
+    /// Whether `bound` is a value of the integer type `typeNode`.
+    function arrayRangeBoundFits(
+      typeNode: &Analyzer::Type,
+      bound: &Analyzer::Typecheck::ArrayRangeBound,
+    ): boolean {
+      if (bound.negative) {
+        if (bound.magnitude > 9223372036854775808) {
+          return false;
+        }
+
+        return Analyzer::Typecheck::signedLiteralFits(typeNode, (0 - ((bound.magnitude - 1) as i64)) - 1);
+      }
+
+      return Analyzer::Typecheck::unsignedLiteralFits(typeNode, bound.magnitude);
+    }
+
+    function arrayRangeBoundText(bound: &Analyzer::Typecheck::ArrayRangeBound): String {
+      let digits: String = String::create(bound.magnitude);
+
+      if (!bound.negative) {
+        return digits;
+      }
+
+      let mut text: String = String::create("-");
+      text.push(&digits);
+
+      return text;
+    }
+
+    /// Whether any of `elements` is a range written directly, without
+    /// parentheses. A parenthesized range is an ordinary element.
+    function containsDirectRange(
+      module: &Ast::Module,
+      elements: &Vector<Ast::ExpressionId>,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < elements.length()) {
+        if (let Option::SOME(elementId) = elements.get(index)) {
+          if (let Option::SOME(Ast::Expression::Node::Range(_)) = module.expressions.get(*elementId)) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// The `Range` an array literal expands, when it is the literal's only
+    /// element: `[a..b]` is the array of the values of `a..b`.
+    function arrayRangeElementId(
+      module: &Ast::Module,
+      literal: &Ast::Expression::VectorLiteral,
+    ): Option<Ast::ExpressionId> {
+      if (literal.elements.length() != 1) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(elementId) = literal.elements.get(0) else {
+        return Option::NONE;
+      };
+
+      if (let Option::SOME(Ast::Expression::Node::Range(_)) = module.expressions.get(*elementId)) {
+        return Option::SOME(*elementId);
+      }
+
+      return Option::NONE;
+    }
+
+    /// The default element type of an array range with no integer type
+    /// expected: the narrowest of `i32`, `i64` and `u64` that holds both ends.
+    function arrayRangeDefaultElementType(
+      typeStore: &mut Analyzer::TypeStore,
+      first: &Analyzer::Typecheck::ArrayRangeBound,
+      last: &Analyzer::Typecheck::ArrayRangeBound,
+    ): Analyzer::TypeId {
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (Analyzer::Typecheck::arrayRangeBoundFits(&Analyzer::Type::I32, first) && Analyzer::Typecheck::arrayRangeBoundFits(&Analyzer::Type::I32, last)) {
+        return typeStoreRef.intern(Analyzer::Type::I32);
+      }
+
+      if (Analyzer::Typecheck::arrayRangeBoundFits(&Analyzer::Type::I64, first) && Analyzer::Typecheck::arrayRangeBoundFits(&Analyzer::Type::I64, last)) {
+        return typeStoreRef.intern(Analyzer::Type::I64);
+      }
+
+      return typeStoreRef.intern(Analyzer::Type::U64);
+    }
+
+    /// Types `[a..b]` and `[a..=b]`: an array of every integer in the range,
+    /// expanded when the program is lowered. The bounds are integer literals,
+    /// so the count and the values are known here, which is what lets the
+    /// array have a fixed size and its values be checked against the element
+    /// type. An expected integer element type decides the type, as it does
+    /// for any array literal, and an unannotated range is the narrowest of
+    /// `i32`, `i64` and `u64` that holds its values.
+    function checkArrayRange(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+      literal: &Ast::Expression::VectorLiteral,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(rangeId) = Analyzer::Typecheck::arrayRangeElementId(module, literal) else {
+        Analyzer::Typecheck::emitArrayRangeMixed(state, literal.span);
+        return Option::NONE;
+      };
+
+      let Option::SOME(Ast::Expression::Node::Range(range)) = module.expressions.get(rangeId) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(startId) = range.start else {
+        return Option::NONE;
+      };
+      let Option::SOME(endId) = range.end else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(start) = Analyzer::Typecheck::arrayRangeBound(module, startId) else {
+        Analyzer::Typecheck::emitArrayRangeBoundNotLiteral(state, Analyzer::Typecheck::expressionSpanOr(module, startId, range.span));
+        return Option::NONE;
+      };
+      let Option::SOME(end) = Analyzer::Typecheck::arrayRangeBound(module, endId) else {
+        Analyzer::Typecheck::emitArrayRangeBoundNotLiteral(state, Analyzer::Typecheck::expressionSpanOr(module, endId, range.span));
+        return Option::NONE;
+      };
+
+      let length: u64 = Analyzer::Typecheck::arrayRangeLength(&start, &end, range.inclusive);
+
+      if (length == 0) {
+        Analyzer::Typecheck::emitArrayRangeEmpty(state, range.span);
+        return Option::NONE;
+      }
+
+      if (length > 65536) {
+        Analyzer::Typecheck::emitArrayRangeTooLarge(state, range.span, length);
+        return Option::NONE;
+      }
+
+      let last: Analyzer::Typecheck::ArrayRangeBound = Analyzer::Typecheck::arrayRangeBoundAt(&start, length - 1);
+      let mut elementType: Analyzer::TypeId = Analyzer::Typecheck::arrayRangeDefaultElementType(typeStore, &start, &last);
+
+      if (let Option::SOME(expectedElement) = Analyzer::Typecheck::expectedElementType(state, defStore, typeStore, literal.span, expected)) {
+        let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedElement);
+
+        if (resolved.cycleAlias.isNone()) {
+          if (let Option::SOME(expectedNode) = typeStore.get(resolved.typeId)) {
+            if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
+              elementType = expectedElement;
+            }
+          }
+        }
+      }
+
+      let resolvedElement: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, elementType);
+
+      let Option::SOME(elementNode) = typeStore.get(resolvedElement.typeId) else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::arrayRangeBoundFits(elementNode, &start)) {
+        let text: String = Analyzer::Typecheck::arrayRangeBoundText(&start);
+        Analyzer::Typecheck::emitArrayRangeValueOverflow(state, defStore, typeStore, symbols, Analyzer::Typecheck::expressionSpanOr(module, startId, range.span), text.toStr(), elementType);
+        return Option::NONE;
+      }
+
+      if (!Analyzer::Typecheck::arrayRangeBoundFits(elementNode, &last)) {
+        let text: String = Analyzer::Typecheck::arrayRangeBoundText(&last);
+        Analyzer::Typecheck::emitArrayRangeValueOverflow(state, defStore, typeStore, symbols, Analyzer::Typecheck::expressionSpanOr(module, endId, range.span), text.toStr(), elementType);
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, startId, elementType);
+      Analyzer::Typecheck::recordExprType(state, endId, elementType);
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let arrayType: Analyzer::TypeId = typeStoreRef.fixedArray(elementType, length);
+      Analyzer::Typecheck::recordExprType(state, exprId, arrayType);
+
+      return Option::SOME(arrayType);
+    }
+
+    /// Types the two bounds of a range and returns the integer type they
+    /// share, which is the type of every value the range yields.
+    ///
+    /// An expected element type decides what an unsuffixed literal bound is.
+    /// Without one the start is typed alone and the end then expects the
+    /// start's type, as the right operand of a binary operator does, and a
+    /// literal start adopts the end's type when only the end names one.
+    function checkRangeBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      range: &Ast::Expression::Range,
+      expectedElement: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(startId) = range.start else {
+        return Option::NONE;
+      };
+      let Option::SOME(endId) = range.end else {
+        return Option::NONE;
+      };
+
+      let startTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        startId,
+        expectedElement,
+      );
+
+      let mut endExpected: Option<Analyzer::TypeId> = expectedElement;
+
+      if (endExpected.isNone()) {
+        if (let Option::SOME(startType) = startTypeOpt) {
+          if (Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, startType)) {
+            endExpected = Option::SOME(startType);
+          }
+        }
+      }
+
+      let endTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        endId,
+        endExpected,
+      );
+
+      let Option::SOME(initialStartType) = startTypeOpt else {
+        return Option::NONE;
+      };
+      let Option::SOME(endType) = endTypeOpt else {
+        return Option::NONE;
+      };
+
+      let mut startType: Analyzer::TypeId = initialStartType;
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, range.span, startType, endType)) {
+        if (Analyzer::Typecheck::coerceIntegerLiteralTo(state, defStore, typeStore, module, startId, endType)) {
+          startType = endType;
+        }
+      }
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, range.span, startType, endType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, range.span, startType, endType);
+        return Option::NONE;
+      }
+
+      if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, range.span, startType)) {
+        Analyzer::Typecheck::emitRangeBoundNotInteger(state, defStore, typeStore, symbols, range.span, startType);
+        return Option::NONE;
+      }
+
+      return Option::SOME(startType);
+    }
+
+    /// The element type an expected `Range<T>` or `RangeInclusive<T>` asks a
+    /// range expression's bounds to have. `NONE` when nothing is expected or
+    /// the expectation is not a range.
+    function expectedRangeElementType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(expectedType) = expected else {
+        return Option::NONE;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(Analyzer::Type::Range(range)) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(range.element);
+    }
+
+    /// Types `a..b` and `a..=b` as a value: a `Range<T>` or `RangeInclusive<T>`
+    /// over the integer type its bounds share. The element is stored without
+    /// its alias, so `Range<Byte>` and `Range<u8>` are one type.
+    function checkRangeExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      range: &Ast::Expression::Range,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let expectedElement: Option<Analyzer::TypeId> = Analyzer::Typecheck::expectedRangeElementType(defStore, typeStore, expected);
+      let elementType: Analyzer::TypeId = Analyzer::Typecheck::checkRangeBounds(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        range,
+        expectedElement,
+      )!;
+
+      let resolvedElement: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, elementType);
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let rangeType: Analyzer::TypeId = typeStoreRef.range(resolvedElement.typeId, range.inclusive);
+
+      Analyzer::Typecheck::recordExprType(state, exprId, rangeType);
+
+      return Option::SOME(rangeType);
+    }
+
+    /// The type a range iterable is expected to have from its binding: an
+    /// annotated by-value binding names the bounds' type, so `for (i: u8 of
+    /// 0..=255)` types its literals as `u8` instead of `i32`.
+    function forOfRangeExpectation(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      forOfStmt: &Ast::Statement::ForOf,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(rangeExprId) = Analyzer::Typecheck::rangeExpressionId(module, forOfStmt.iterable) else {
+        return Option::NONE;
+      };
+      let Option::SOME(Ast::Expression::Node::Range(range)) = module.expressions.get(rangeExprId) else {
+        return Option::NONE;
+      };
+      let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(forOfStmt.pattern) else {
+        return Option::NONE;
+      };
+      let Option::SOME(annotationId) = binding.annotation else {
+        return Option::NONE;
+      };
+
+      if (let Option::SOME(Ast::Type::Node::Reference(_)) = module.types.get(annotationId)) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(annotated) = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        annotationId,
+        Option::SOME(state.currentFunction),
+      ) else {
+        return Option::NONE;
+      };
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      return Option::SOME(typeStoreRef.range(annotated, range.inclusive));
+    }
+
+    /// The span of a `for..of` binding annotated as a `&` or `&mut` reference.
+    function forOfReferenceBindingSpan(
+      module: &Ast::Module,
+      forOfStmt: &Ast::Statement::ForOf,
+    ): Option<SourceSpan> {
+      let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(forOfStmt.pattern) else {
+        return Option::NONE;
+      };
+      let Option::SOME(annotationId) = binding.annotation else {
+        return Option::NONE;
+      };
+
+      if (let Option::SOME(Ast::Type::Node::Reference(_)) = module.types.get(annotationId)) {
+        return Option::SOME(binding.span);
+      }
+
+      return Option::NONE;
+    }
+
+    /// Whether `typeId` is a `Range<T>` or `RangeInclusive<T>`, through aliases.
+    function isRangeType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let Option::SOME(Analyzer::Type::Range(_)) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      return true;
+    }
+
     /// Extract the element type a `for..of` iterable yields, or emit
     /// `FOR_OF_EXPECTS_VECTOR`. Slices and fixed arrays yield their element;
     /// records qualify through the iterable-record protocol.
@@ -9773,6 +10383,14 @@ export namespace Analyzer {
         },
         Analyzer::Type::FixedArray(element, _) -> {
           elementTypeOpt = Option::SOME(element);
+        },
+        Analyzer::Type::Range(range) -> {
+          if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, span, range.element)) {
+            Analyzer::Typecheck::emitRangeBoundNotInteger(state, defStore, typeStore, symbols, span, range.element);
+            return Option::NONE;
+          }
+
+          elementTypeOpt = Option::SOME(range.element);
         },
         Analyzer::Type::Record(defId) -> {
           recordDefId = Option::SOME(defId);
@@ -9907,7 +10525,9 @@ export namespace Analyzer {
     ): void {
       Analyzer::Typecheck::pushScope(state);
 
-      let iterableTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+      let expectedIterable: Option<Analyzer::TypeId> = Analyzer::Typecheck::forOfRangeExpectation(state, defStore, typeStore, symbols, module, forOfStmt);
+
+      let iterableTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
         state,
         defStore,
         typeStore,
@@ -9915,6 +10535,7 @@ export namespace Analyzer {
         module,
         resolvedBodies,
         forOfStmt.iterable,
+        expectedIterable,
       );
 
       let iterableSpan: SourceSpan = match (module.expressions.get(forOfStmt.iterable)) {
@@ -9923,8 +10544,18 @@ export namespace Analyzer {
       };
 
       let mut elementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+      let mut iterableIsRange: boolean = false;
+
       if (let Option::SOME(iterableType) = iterableTypeOpt) {
+        iterableIsRange = Analyzer::Typecheck::isRangeType(defStore, typeStore, iterableType);
         elementTypeOpt = Analyzer::Typecheck::forOfElementType(state, defStore, typeStore, symbols, iterableSpan, iterableType);
+      }
+
+      if (iterableIsRange) {
+        if (let Option::SOME(bindingSpan) = Analyzer::Typecheck::forOfReferenceBindingSpan(module, forOfStmt)) {
+          Analyzer::Typecheck::emitRangeForOfByReference(state, bindingSpan);
+          elementTypeOpt = Option::NONE;
+        }
       }
 
       if (let Option::SOME(elementType) = elementTypeOpt) {

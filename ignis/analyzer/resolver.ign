@@ -1435,6 +1435,59 @@ export namespace Analyzer {
       return tsRef.intern(Analyzer::Type::VOID);
     }
 
+    /// `Range<T>` and `RangeInclusive<T>`, the builtin types of `a..b` and
+    /// `a..=b`, once no declaration of that name was found. The element has to
+    /// be an integer, or an alias that is checked where it is used, since an
+    /// alias is not resolved yet while signatures are.
+    function resolveBuiltinRangeType(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      span: SourceSpan,
+      name: str,
+      inclusive: boolean,
+      args: &Vector<Analyzer::TypeId>,
+    ): Analyzer::TypeId {
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (args.length() != 1) {
+        let message: String = `Wrong number of type arguments for '${name}': expected 1, got ${args.length()}`;
+        emitUndefinedType(state, span, DiagnosticCode::GENERIC_ARITY_MISMATCH, message.toStr());
+        return typeStoreRef.intern(Analyzer::Type::VOID);
+      }
+
+      let Option::SOME(element) = args.get(0) else {
+        return typeStoreRef.intern(Analyzer::Type::VOID);
+      };
+
+      let mut acceptable: boolean = false;
+
+      if (let Option::SOME(elementNode) = typeStoreRef.get(*element)) {
+        acceptable = match (elementNode) {
+          Analyzer::Type::I8
+          | Analyzer::Type::I16
+          | Analyzer::Type::I32
+          | Analyzer::Type::I64
+          | Analyzer::Type::U8
+          | Analyzer::Type::U16
+          | Analyzer::Type::U32
+          | Analyzer::Type::U64
+          | Analyzer::Type::Alias(_) -> true,
+          _ -> false,
+        };
+      }
+
+      if (!acceptable) {
+        let elementName: String = typeStoreRef.nameOfResolved(*element, &*defStore, &*symbols);
+        let message: String = `the element type of '${name}' must be an integer type, found '${elementName.toStr()}'`;
+        emitUndefinedType(state, span, DiagnosticCode::RANGE_ELEMENT_NOT_INTEGER, message.toStr());
+        return typeStoreRef.intern(Analyzer::Type::VOID);
+      }
+
+      return typeStoreRef.range(*element, inclusive);
+    }
+
     /// Dispatch an `Ast::Type::Node` to the appropriate resolution logic.
     ///
     /// Self-recursive. Generic resolution is inlined in the `Generic(g)` arm to
@@ -1601,6 +1654,12 @@ export namespace Analyzer {
           }
 
           let Option::SOME(defId) = defIdOpt else {
+            if (!baseQualified) {
+              if (let Option::SOME(inclusive) = Analyzer::builtinRangeTypeName(baseNameStr.toStr())) {
+                return resolveBuiltinRangeType(state, defStore, typeStore, symbols, gSpan, baseNameStr.toStr(), inclusive, &args);
+              }
+            }
+
             let message: String = `Undefined type '${baseNameStr.toStr()}'`;
             emitUndefinedType(state, basePathSpan, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;

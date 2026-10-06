@@ -1172,6 +1172,10 @@ export namespace Analyzer {
           return false;
         };
 
+        if (let Option::SOME(rangeId) = Analyzer::Typecheck::arrayRangeElementId(module, &literal)) {
+          return Analyzer::ConstEval::evalArrayRangeParts(module, rangeId, elementType, arraySize, parts);
+        }
+
         if (literal.elements.length() != arraySize) {
           return false;
         }
@@ -1235,6 +1239,59 @@ export namespace Analyzer {
       };
 
       partsRef.push(Analyzer::ConstEval::ConstPart::Value(value, expectedType));
+      return true;
+    }
+
+    /// Folds the array range `[a..b]` into one `Value` per integer it yields,
+    /// inside the brackets of the array it initializes. False when the range
+    /// does not yield exactly `arraySize` values, which the typechecker has
+    /// already reported against the declared type.
+    function evalArrayRangeParts(
+      module: &Ast::Module,
+      rangeId: Ast::ExpressionId,
+      elementType: Analyzer::TypeId,
+      arraySize: u64,
+      parts: &mut Vector<Analyzer::ConstEval::ConstPart>,
+    ): boolean {
+      let Option::SOME(Ast::Expression::Node::Range(range)) = module.expressions.get(rangeId) else {
+        return false;
+      };
+      let Option::SOME(startId) = range.start else {
+        return false;
+      };
+      let Option::SOME(endId) = range.end else {
+        return false;
+      };
+      let Option::SOME(start) = Analyzer::Typecheck::arrayRangeBound(module, startId) else {
+        return false;
+      };
+      let Option::SOME(end) = Analyzer::Typecheck::arrayRangeBound(module, endId) else {
+        return false;
+      };
+
+      if (Analyzer::Typecheck::arrayRangeLength(&start, &end, range.inclusive) != arraySize) {
+        return false;
+      }
+
+      let mut partsRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
+      partsRef.push(Analyzer::ConstEval::ConstPart::Open);
+
+      let mut offset: u64 = 0;
+
+      while (offset < arraySize) {
+        let value: Analyzer::Typecheck::ArrayRangeBound = Analyzer::Typecheck::arrayRangeBoundAt(&start, offset);
+        let mut folded: i64 = value.magnitude as i64;
+
+        if (value.negative) {
+          folded = (0 - ((value.magnitude - 1) as i64)) - 1;
+        }
+
+        partsRef.push(Analyzer::ConstEval::ConstPart::Value(Analyzer::ConstEval::ConstValue::Int(folded), elementType));
+        offset += 1;
+      }
+
+      partsRef.push(Analyzer::ConstEval::ConstPart::Close);
+
       return true;
     }
 

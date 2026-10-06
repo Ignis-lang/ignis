@@ -542,9 +542,9 @@
 
 <ternary-expression> ::= <pipe-expression> ( "?" <expression> ":" <expression> )?
 
-<pipe-expression> ::= <or-expression> ( "|>" <pipe-rhs> )*
+<pipe-expression> ::= <range-expression> ( "|>" <pipe-rhs> )*
 
-<pipe-rhs> ::= <or-expression>
+<pipe-rhs> ::= <range-expression>
 
 // `_` in expression position is parsed as a pipe placeholder and is only valid
 // inside the RHS of `|>`. Accepted RHS shapes and their arity rules:
@@ -570,6 +570,17 @@
 // replaces the implicit prepend); more than one `_` in the same RHS is rejected,
 // and a bare `_` as the whole RHS is rejected. `_` does not cross a nested lambda
 // or a nested `|>`, which each open a fresh placeholder scope.
+
+<range-expression> ::= <or-expression> ( ( ".." | "..=" ) <or-expression> )?
+
+// A range binds looser than `||` and tighter than `|>`: `a || b..c || d` is
+// `(a || b)..(c || d)`, and `a..b |> f` pipes the range into `f`. It is not
+// associative: `a..b..c` is an error (I0002). Both bounds are required: `a..`,
+// `..b` and `..=b` are rejected with a targeted error (I0004). `a..b` stops
+// before `b` and `a..=b` ends on it. Both bounds are integers of one type. A
+// range is a value of the builtin type `Range<T>` (`a..b`) or
+// `RangeInclusive<T>` (`a..=b`), and `for (x of a..b)` counts without building
+// one.
 
 <or-expression> ::= <and-expression> ( "||" <and-expression> )*
 <and-expression> ::= <bitwise-or-expression> ( "&&" <bitwise-or-expression> )*
@@ -673,6 +684,14 @@
 <null> ::= "null"
 
 <vector> ::= "[" <expression-list>? "]"
+  | "[" <range-expression> "]"
+
+// A vector literal whose only element is an unparenthesized range, `[a..b]` or
+// `[a..=b]`, is the array of the integers in the range, like an iota. Its bounds
+// must be integer literals, so the array has a fixed size: it is never empty, it
+// holds at most 65536 elements, and every value must fit the element type. A
+// range written next to other elements, `[0..3, 10]`, is an error, and a
+// parenthesized range, `[(0..3)]`, is an ordinary element.
 
 <atom> ::= ":" <identifier>
 
@@ -705,6 +724,9 @@
 <type> ::= <function-type> | <vector-type> | <type-identifier>
 
 <type-identifier> ::= <type-modifier>? (<primitive> | <qualified-identifier>) <generic-type>? "[]"?
+
+// `Range<T>` and `RangeInclusive<T>` are builtin generic types over an integer
+// type `T`. A declaration with either name in scope takes precedence.
 
 <function-type> ::= "(" <type-list>? ")" "->" <type>
 <type-list> ::= <type> ("," <type>)* ","?
@@ -739,7 +761,6 @@
 - `this` — the `this` keyword; only `self` is accepted.
 - `use <path> (as <name>)?;` — the `use` declaration.
 - `directive <name> (...)?;` and `directive <path> (...)? (; | { ... })` — directive declarations.
-- `..` and `..=` as a range operator between expressions.
 - Tuple types `(T, T, ...)`, union types `T | T`, and intersection types `T & T`.
 - `hex` and `binary` as primitive type keywords.
 - `<identifier> as <identifier>` in an import item.

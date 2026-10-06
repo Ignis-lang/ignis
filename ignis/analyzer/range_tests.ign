@@ -1,0 +1,293 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
+
+/// Parses `source` and runs the analyzer over it, asserting the parser stayed
+/// silent so every diagnostic a test sees comes from analysis.
+function rangeAnalyze(source: str): DiagnosticBag {
+  let file: SourceFile = SourceFile::create("range_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  return output.diagnostics;
+}
+
+function rangeCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function rangeFirstErrorCode(bag: &DiagnosticBag): String {
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      return String::create(diagnostic.code);
+    }
+
+    index += 1;
+  }
+
+  return String::create("");
+}
+
+function rangeAssertAccepted(source: str): void {
+  let diagnostics: DiagnosticBag = rangeAnalyze(source);
+  Test::assertEq<u64>(rangeCountErrors(&diagnostics), 0);
+}
+
+function rangeAssertRejected(source: str, code: str): void {
+  let diagnostics: DiagnosticBag = rangeAnalyze(source);
+  Test::assertEq<u64>(rangeCountErrors(&diagnostics), 1);
+  Test::assertEq<str>(rangeFirstErrorCode(&diagnostics).toStr(), code);
+}
+
+@test
+function rangeForOfOverLiteralBoundsTypechecks(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index of 0..10) {\n    let copy: i32 = index;\n  }\n}\n");
+}
+
+@test
+function rangeForOfInclusiveOverLiteralBoundsTypechecks(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index of 0..=10) {\n    let copy: i32 = index;\n  }\n}\n");
+}
+
+@test
+function rangeForOfBindingAnnotationDecidesTheLiteralType(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index: u8 of 0..=255) {\n    let copy: u8 = index;\n  }\n}\n");
+}
+
+@test
+function rangeLiteralStartAdoptsTheTypeOfTheOtherBound(): void {
+  rangeAssertAccepted("function main(limit: u64): void {\n  for (let index of 0..limit) {\n    let copy: u64 = index;\n  }\n}\n");
+}
+
+@test
+function rangeLiteralEndAdoptsTheTypeOfTheOtherBound(): void {
+  rangeAssertAccepted("function main(first: u16): void {\n  for (let index of first..10) {\n    let copy: u16 = index;\n  }\n}\n");
+}
+
+@test
+function rangeParenthesizedRangeIsAnIterable(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index of (0..4)) {\n    let copy: i32 = index;\n  }\n}\n");
+}
+
+@test
+function rangeBoundsOfDifferentTypesAreRejected(): void {
+  rangeAssertRejected("function main(first: u8, last: u32): void {\n  for (let index of first..last) {}\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function rangeBoundsMustBeIntegers(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index of 0.5..2.5) {}\n}\n", "A0231");
+}
+
+@test
+function rangeBooleanBoundsAreRejected(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index of false..true) {}\n}\n", "A0231");
+}
+
+@test
+function rangeLiteralBoundOutsideTheBindingTypeOverflows(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index: u8 of 0..300) {}\n}\n", DiagnosticCode::INTEGER_OVERFLOW);
+}
+
+@test
+function rangeBindingAnnotationMustMatchTheBoundType(): void {
+  rangeAssertRejected("function main(limit: u64): void {\n  for (let index: u8 of 0..limit) {}\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function rangeForOfCannotBindByReference(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index: &i32 of 0..4) {}\n}\n", "A0232");
+}
+
+@test
+function rangeForOfCannotBindByMutableReference(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index: &mut i32 of 0..4) {}\n}\n", "A0232");
+}
+
+@test
+function rangeValueInALetTypechecks(): void {
+  rangeAssertAccepted("function main(): void {\n  let span = 0..4;\n  let first: i32 = span.start;\n  let last: i32 = span.end;\n}\n");
+}
+
+@test
+function rangeAnnotationDecidesTheLiteralType(): void {
+  rangeAssertAccepted("function main(): void {\n  let bytes: RangeInclusive<u8> = 0..=255;\n  let first: u8 = bytes.start;\n}\n");
+}
+
+@test
+function rangeAcceptsParametersReturnsAndRecordFields(): void {
+  rangeAssertAccepted("record Window {\n  public span: Range<u32>;\n}\n\nfunction make(first: i32, last: i32): Range<i32> {\n  return first..last;\n}\n\nfunction width(span: Range<i32>): i32 {\n  return span.end - span.start;\n}\n\nfunction main(): void {\n  let window: Window = Window { span: 1..5 };\n  let total: i32 = width(make(0, 3));\n}\n");
+}
+
+@test
+function rangeIsCopy(): void {
+  rangeAssertAccepted("function take(span: Range<i32>): i32 {\n  return span.start;\n}\n\nfunction main(): void {\n  let span = 0..4;\n  let first: i32 = take(span);\n  let second: i32 = take(span);\n}\n");
+}
+
+@test
+function rangeValueIsAForOfIterable(): void {
+  rangeAssertAccepted("function main(span: Range<u16>): void {\n  for (let index of span) {\n    let copy: u16 = index;\n  }\n}\n");
+}
+
+@test
+function rangeKindsAreDistinctTypes(): void {
+  rangeAssertRejected("function main(): void {\n  let span: Range<i32> = 0..=4;\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function rangeElementTypesAreDistinctTypes(): void {
+  rangeAssertRejected("function take(span: Range<u8>): void {}\n\nfunction main(): void {\n  let wide: u32 = 4;\n  take(0..wide);\n}\n", DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+@test
+function rangeHasNoFieldsBesidesStartAndEnd(): void {
+  rangeAssertRejected("function main(): void {\n  let span = 0..4;\n  let size = span.length;\n}\n", "A0238");
+}
+
+@test
+function rangeAnnotationElementMustBeAnInteger(): void {
+  rangeAssertRejected("function take(span: Range<f64>): void {}\n", "A0237");
+}
+
+@test
+function rangeAnnotationTakesOneTypeArgument(): void {
+  rangeAssertRejected("function take(span: Range<i32, i32>): void {}\n", DiagnosticCode::GENERIC_ARITY_MISMATCH);
+}
+
+@test
+function rangeAnnotationWithAnAliasToANonIntegerIsRejectedWhereItIterates(): void {
+  rangeAssertRejected("type Weight = f64;\n\nfunction main(span: Range<Weight>): void {\n  for (let index of span) {}\n}\n", "A0231");
+}
+
+@test
+function rangeValueForOfCannotBindByReference(): void {
+  rangeAssertRejected("function main(span: Range<i32>): void {\n  for (let index: &i32 of span) {}\n}\n", "A0232");
+}
+
+@test
+function rangeDeclaredTypeShadowsTheBuiltinName(): void {
+  rangeAssertAccepted("record Range {\n  public low: i32;\n}\n\nfunction main(): void {\n  let span: Range = Range { low: 1 };\n  let low: i32 = span.low;\n}\n");
+}
+
+@test
+function rangeArrayLiteralTypechecksAsAFixedArray(): void {
+  rangeAssertAccepted("function main(): void {\n  let items: u8[4] = [0..4];\n  let first: u8 = items[0];\n}\n");
+}
+
+@test
+function rangeInclusiveArrayLiteralTypechecks(): void {
+  rangeAssertAccepted("function main(): void {\n  let items = [1..=3];\n  let sized: i32[3] = items;\n}\n");
+}
+
+@test
+function rangeArrayLiteralAcceptsNegativeBounds(): void {
+  rangeAssertAccepted("function main(): void {\n  let items: i8[4] = [-2..2];\n  let wide: i8[256] = [-128..=127];\n}\n");
+}
+
+@test
+function rangeArrayLiteralOfTheWholeTypeFits(): void {
+  rangeAssertAccepted("function main(): void {\n  let exclusive: u8[256] = [0..256];\n  let inclusive: u8[256] = [0..=255];\n}\n");
+}
+
+@test
+function rangeArrayLiteralWidensWhenTheValuesNeedIt(): void {
+  rangeAssertAccepted("function main(): void {\n  let items: i64[2] = [2147483647..=2147483648];\n}\n");
+}
+
+@test
+function rangeArrayLiteralAtTheSizeLimitIsAccepted(): void {
+  rangeAssertAccepted("function main(): void {\n  let items: i32[65536] = [0..65536];\n}\n");
+}
+
+@test
+function rangeArrayLiteralMustMatchTheDeclaredSize(): void {
+  rangeAssertRejected("function main(): void {\n  let items: u8[3] = [0..4];\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function rangeArrayLiteralValuesMustFitTheElementType(): void {
+  rangeAssertRejected("function main(): void {\n  let items: u8[300] = [0..300];\n}\n", DiagnosticCode::INTEGER_OVERFLOW);
+}
+
+@test
+function rangeArrayLiteralStartMustFitTheElementType(): void {
+  rangeAssertRejected("function main(): void {\n  let items: u8[2] = [-1..1];\n}\n", DiagnosticCode::INTEGER_OVERFLOW);
+}
+
+@test
+function rangeArrayLiteralBoundsMustBeLiterals(): void {
+  rangeAssertRejected("function main(limit: i32): void {\n  let items = [0..limit];\n}\n", "A0233");
+}
+
+@test
+function rangeArrayLiteralBoundsCannotBeNamedConstants(): void {
+  rangeAssertRejected("const LIMIT: i32 = 4;\n\nfunction main(): void {\n  let items = [0..LIMIT];\n}\n", "A0233");
+}
+
+@test
+function rangeArrayLiteralBoundsCannotBeFloats(): void {
+  rangeAssertRejected("function main(): void {\n  let items = [0.5..2.5];\n}\n", "A0233");
+}
+
+@test
+function rangeArrayLiteralCannotMixARangeWithAnElement(): void {
+  rangeAssertRejected("function main(): void {\n  let items = [0..3, 10];\n}\n", "A0234");
+}
+
+@test
+function rangeArrayLiteralCannotHoldTwoRanges(): void {
+  rangeAssertRejected("function main(): void {\n  let items = [0..3, 5..7];\n}\n", "A0234");
+}
+
+@test
+function rangeArrayLiteralCannotBeEmpty(): void {
+  rangeAssertRejected("function main(): void {\n  let items = [3..3];\n}\n", "A0236");
+}
+
+@test
+function rangeArrayLiteralCannotRunBackwards(): void {
+  rangeAssertRejected("function main(): void {\n  let items = [5..=2];\n}\n", "A0236");
+}
+
+@test
+function rangeArrayLiteralOverTheSizeLimitIsRejected(): void {
+  rangeAssertRejected("function main(): void {\n  let items = [0..65537];\n}\n", "A0235");
+}

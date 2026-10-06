@@ -577,6 +577,88 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::FOR_OF_EXPECTS_VECTOR, message.toStr());
     }
 
+    function emitRangeBoundNotInteger(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      span: SourceSpan,
+      got: Analyzer::TypeId,
+    ): void {
+      let message: String = `range bounds must be integers, found '${typeStore.nameOfResolved(got, &*defStore, &*symbols).toStr()}'`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::RANGE_BOUND_NOT_INTEGER, message.toStr());
+    }
+
+    function emitRangeForOfByReference(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::RANGE_FOR_OF_BY_REFERENCE,
+        "a range yields values, so its for-of binding cannot be a reference",
+      );
+    }
+
+    function emitArrayRangeBoundNotLiteral(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::ARRAY_RANGE_BOUND_NOT_LITERAL,
+        "the bounds of an array range must be integer literals",
+      );
+    }
+
+    function emitArrayRangeMixed(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::ARRAY_RANGE_MIXED,
+        "an array range cannot be combined with other elements",
+      );
+    }
+
+    function emitArrayRangeTooLarge(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      length: u64,
+    ): void {
+      let message: String = `array range has ${length} elements, more than the limit of 65536`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ARRAY_RANGE_TOO_LARGE, message.toStr());
+    }
+
+    function emitArrayRangeEmpty(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::ARRAY_RANGE_EMPTY,
+        "an array range must have at least one element",
+      );
+    }
+
+    function emitArrayRangeValueOverflow(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      span: SourceSpan,
+      valueText: str,
+      elementType: Analyzer::TypeId,
+    ): void {
+      let message: String = `array range value ${valueText} overflows type '${typeStore.nameOfResolved(elementType, &*defStore, &*symbols).toStr()}'`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INTEGER_OVERFLOW, message.toStr());
+    }
+
     function emitForOfRequiresCopyOrRef(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1168,6 +1250,12 @@ export namespace Analyzer {
           let mut tsRef: &mut Analyzer::TypeStore = typeStore;
           return tsRef.slice(inner);
         },
+        Analyzer::Type::Range(range) -> {
+          let inner: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, range.element, depth + 1);
+          let inclusive: boolean = range.inclusive;
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.range(inner, inclusive);
+        },
         Analyzer::Type::Instance(instance) -> {
           let mut normalizedArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
           let mut argIndex: u64 = 0;
@@ -1382,6 +1470,9 @@ export namespace Analyzer {
           directAnswer = Option::SOME(true);
         },
         Analyzer::Type::Slice(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Range(_) -> {
           directAnswer = Option::SOME(true);
         },
         Analyzer::Type::Function(_) -> {
@@ -4961,7 +5052,7 @@ export namespace Analyzer {
             generic.base,
           );
           let Option::SOME(baseDefId) = baseOpt else {
-            return Option::NONE;
+            return Analyzer::Typecheck::resolveLocalRangeAnnotation(defStore, typeStore, symbols, module, &generic, enclosing);
           };
 
           let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
@@ -4995,6 +5086,52 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: resolveLocalAnnotation match did not return");
+    }
+
+    /// `Range<T>` and `RangeInclusive<T>` written as a local annotation, which
+    /// is what a generic annotation with no declaration behind its base can
+    /// still be. `NONE` for any other base, a wrong argument count, or an
+    /// element that does not resolve.
+    function resolveLocalRangeAnnotation(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      generic: &Ast::Type::Generic,
+      enclosing: Option<Analyzer::DefinitionId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(generic.base) else {
+        return Option::NONE;
+      };
+
+      if (path.segments.length() != 1 || generic.arguments.length() != 1) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(baseName) = path.segments.get(0) else {
+        return Option::NONE;
+      };
+      let Option::SOME(inclusive) = Analyzer::builtinRangeTypeName(baseName.toStr()) else {
+        return Option::NONE;
+      };
+      let Option::SOME(argumentTypeId) = generic.arguments.get(0) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(element) = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        *argumentTypeId,
+        enclosing,
+      ) else {
+        return Option::NONE;
+      };
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      return Option::SOME(typeStoreRef.range(element, inclusive));
     }
 
     /// The type a literal takes when nothing is expected of it.

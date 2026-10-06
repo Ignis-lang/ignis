@@ -61,8 +61,11 @@ typedef void* null;
 | `&mut T` | `T*` |
 | `T[N]` | `T[N]` (stack allocated; a record field of this type is stored in the record) |
 | `*T[N]`, `&T[N]` | `T*` (the address of the first element) |
+| `Range<T>`, `RangeInclusive<T>` | `struct __ignis_range_<T> { T field_0; T field_1; }` (`start`, then `end`) |
 | `(T1, T2, ...)` | `void*` |
 | `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries and in C-layout record fields |
+
+A range is passed and returned by value as that struct. There is one struct per element type, emitted ahead of the record definitions, and `Range<T>` and `RangeInclusive<T>` share it: whether the end is included is part of the Ignis type and is not stored.
 
 References and pointers both compile to C pointers. The distinction between `*T` and `*mut T`, and between `&T` and `&mut T`, is enforced at compile time only.
 

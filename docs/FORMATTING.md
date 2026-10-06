@@ -35,6 +35,7 @@ This document defines the first canonical formatter policy shipped by `ignis fmt
 - Record initializers use the same rule: single-line canonical output drops the final comma, multiline canonical output adds the final comma.
 - Array literals that initialize a `let`, `const`, `return` or static field use the same rule. One written on a single line stays inline when it fits `line_width` and otherwise wraps one element per line. One written over several lines keeps its rows: elements that started on the same source line stay on one line, reindented, and every row ends with a comma, the last one included. An array literal anywhere else that the source wrote over several lines is kept as written, like a multiline call or record initializer.
 - Import and re-export item lists wrap when the flat form exceeds `line_width`; multiline canonical output adds the final comma before `from`.
+- Range expressions are written without spaces around `..` and `..=` (`0..n`, `a + 1..b * 2`); their bounds keep the spacing of the operators inside them.
 - Single pipe expressions may stay inline when they fit `line_width`; pipe chains with 2+ `|>` always format multiline.
 - There is still no shipped general-purpose wrapping contract for every long expression shape. When the formatter cannot prove a rewrite is safe, it fails rather than guessing.
 

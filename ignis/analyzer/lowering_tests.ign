@@ -944,3 +944,147 @@ function loweringCallThroughAFunctionTypedConstant(): void {
 
   Test::assertSnapshot("lowering-call-through-function-typed-constant", rendered.toStr());
 }
+
+function loweringAssertRenderedContains(rendered: &String, needle: str): void {
+  let expected: String = String::create(needle);
+
+  if (!rendered.contains(&expected)) {
+    Test::fail();
+  }
+}
+
+function loweringAssertRenderedOmits(rendered: &String, needle: str): void {
+  let unexpected: String = String::create(needle);
+
+  if (rendered.contains(&unexpected)) {
+    Test::fail();
+  }
+}
+
+/// A `for ... of` over `a..b` is a counted loop over a hidden counter and a
+/// hidden end: no allocation, no array, and the binding reads the counter.
+@test
+function loweringForOfOverAnExclusiveRangeIsACountedLoop(): void {
+  let rendered: String = loweringRender(
+    "function total(limit: u32): u32 {\n  let mut sum: u32 = 0;\n  for (let item of 0..limit) {\n    sum += item;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_i_0 [mut]) : void");
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_end_0) : void");
+  loweringAssertRenderedContains(&rendered, "Binary(LessThan) : bool");
+  loweringAssertRenderedContains(&rendered, "Assign(Add=) : void");
+  loweringAssertRenderedContains(&rendered, "Let(item) : void");
+  loweringAssertRenderedOmits(&rendered, "__for_of_more");
+  loweringAssertRenderedOmits(&rendered, "Binary(LessEqual)");
+}
+
+/// Two literal bounds whose end is below the type's maximum cannot wrap, so
+/// an inclusive range keeps the plain `<=` test.
+@test
+function loweringForOfOverAnInclusiveRangeWithLiteralBoundsKeepsAPlainComparison(): void {
+  let rendered: String = loweringRender(
+    "function total(): i32 {\n  let mut sum: i32 = 0;\n  for (let item of 1..=9) {\n    sum += item;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Binary(LessEqual) : bool");
+  loweringAssertRenderedOmits(&rendered, "__for_of_more");
+}
+
+/// An inclusive range ending at the type's maximum has to stop on a flag:
+/// stepping the counter past the end would wrap and the loop would never end.
+@test
+function loweringForOfOverAnInclusiveRangeToTheTypeMaximumUsesAContinueFlag(): void {
+  let rendered: String = loweringRender(
+    "function total(): u32 {\n  let mut sum: u32 = 0;\n  for (let item: u8 of 0..=255) {\n    sum += item as u32;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_more_0 [mut]) : void");
+  loweringAssertRenderedContains(&rendered, "Binary(LessEqual) : bool");
+  loweringAssertRenderedContains(&rendered, "Binary(LessThan) : bool");
+  loweringAssertRenderedContains(&rendered, "Literal(Boolean(false)) : bool");
+}
+
+/// A bound that is not a literal could be the maximum at run time, so an
+/// inclusive range over it keeps the flag too.
+@test
+function loweringForOfOverAnInclusiveRangeWithAVariableEndUsesAContinueFlag(): void {
+  let rendered: String = loweringRender(
+    "function total(last: u16): u32 {\n  let mut sum: u32 = 0;\n  for (let item of 0..=last) {\n    sum += item as u32;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_more_0 [mut]) : void");
+}
+
+/// The hidden counter takes the integer type of the bounds, so a `u8` range
+/// steps by a `u8` one.
+@test
+function loweringForOfOverARangeStepsInTheElementType(): void {
+  let rendered: String = loweringRender(
+    "function total(): u32 {\n  let mut sum: u32 = 0;\n  for (let item: u8 of 0..4) {\n    sum += item as u32;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_i_0 [mut]) : void");
+  loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(1)) : u8");
+}
+
+/// `[a..b]` is an ordinary array literal by the time it is lowered: one
+/// literal per value, typed as the element type.
+@test
+function loweringArrayRangeExpandsToItsValues(): void {
+  let rendered: String = loweringRender(
+    "function items(): u8 {\n  let values: u8[3] = [2..5];\n  return values[0];\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "VectorLiteral : u8[3]");
+  loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(2)) : u8");
+  loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(3)) : u8");
+  loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(4)) : u8");
+  loweringAssertRenderedOmits(&rendered, "Literal(UnsignedInt8(5)) : u8");
+}
+
+@test
+function loweringInclusiveArrayRangeIncludesItsEnd(): void {
+  let rendered: String = loweringRender(
+    "function items(): i32 {\n  let values = [-1..=1];\n  return values[0];\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "VectorLiteral : i32[3]");
+  loweringAssertRenderedContains(&rendered, "Literal(Int32(-1)) : i32");
+  loweringAssertRenderedContains(&rendered, "Literal(Int32(0)) : i32");
+  loweringAssertRenderedContains(&rendered, "Literal(Int32(1)) : i32");
+}
+
+/// A range written as a value is the pair of its bounds, typed as the range,
+/// and its fields read the pair by position.
+@test
+function loweringRangeValueIsAPairOfBounds(): void {
+  let rendered: String = loweringRender(
+    "function width(): i32 {\n  let span = 2..7;\n  return span.end - span.start;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "MakeRange : Range<i32>");
+  loweringAssertRenderedContains(&rendered, "FieldAccess");
+}
+
+/// A `for ... of` over a range value reads both bounds out of it once, then
+/// runs the counted loop of a range written in the header.
+@test
+function loweringForOfOverARangeValueReadsItsBoundsOnce(): void {
+  let rendered: String = loweringRender(
+    "function total(span: Range<u32>): u32 {\n  let mut sum: u32 = 0;\n  for (let item of span) {\n    sum += item;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_i_0 [mut]) : void");
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_end_0) : void");
+  loweringAssertRenderedContains(&rendered, "Binary(LessThan) : bool");
+  loweringAssertRenderedOmits(&rendered, "__for_of_more");
+}
+
+@test
+function loweringForOfOverAnInclusiveRangeValueUsesAContinueFlag(): void {
+  let rendered: String = loweringRender(
+    "function total(span: RangeInclusive<u8>): u32 {\n  let mut sum: u32 = 0;\n  for (let item of span) {\n    sum += item as u32;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_more_0 [mut]) : void");
+}

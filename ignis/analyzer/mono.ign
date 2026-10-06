@@ -398,6 +398,11 @@ export namespace Mono {
           kind = 3;
           inner = element;
         },
+        Analyzer::Type::Range(range) -> {
+          kind = 11;
+          inner = range.element;
+          mutable = range.inclusive;
+        },
         Analyzer::Type::FixedArray(element, size) -> {
           kind = 4;
           inner = element;
@@ -462,6 +467,12 @@ export namespace Mono {
 
     if (kind == 3) {
       return String::create("slice_").concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
+    }
+
+    if (kind == 11) {
+      let prefix: str = mutable ? "rangeinclusive" : "range";
+
+      return String::create(prefix).concat("_").concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
     }
 
     if (kind == 4) {
@@ -2589,6 +2600,15 @@ export namespace Mono {
             data: data,
             len: len,
             elementType: Mono::substituteType(defStore, typeStore, symbols, state, subst, sliceNode.elementType),
+          });
+        },
+        Hir::HirKind::MakeRange(rangeNode) -> {
+          let start: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, rangeNode.start);
+          let end: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, rangeNode.end);
+
+          clonedKind = Hir::HirKind::MakeRange(Hir::HirMakeRange {
+            start: start,
+            end: end,
           });
         },
         Hir::HirKind::TypeOf(innerId) -> {
