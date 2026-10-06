@@ -254,6 +254,12 @@ export namespace Hir {
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, dropNode.ptr))
           .concat(")"),
         Hir::HirKind::BuiltinDropGlue(typeId) -> `builtin_drop_glue<${Hir::Display::formatType(types, defs, symbols, typeId)}>()`,
+        Hir::HirKind::BuiltinZeroed(typeId) -> `builtin_zeroed<${Hir::Display::formatType(types, defs, symbols, typeId)}>()`,
+        Hir::HirKind::BuiltinSplat(splat) -> String::create("builtin_splat<")
+          .concat(Hir::Display::formatType(types, defs, symbols, splat.ty))
+          .concat(">(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, splat.value))
+          .concat(")"),
         Hir::HirKind::MakeSlice(makeSlice) -> String::create("make_slice<")
           .concat(Hir::Display::formatType(types, defs, symbols, makeSlice.elementType))
           .concat(">(")
@@ -687,6 +693,15 @@ export namespace Hir {
         Hir::HirKind::BuiltinDropGlue(typeId) -> {
           let head: String = `BuiltinDropGlue(${Hir::Display::formatType(types, defs, symbols, typeId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::BuiltinZeroed(typeId) -> {
+          let head: String = `BuiltinZeroed(${Hir::Display::formatType(types, defs, symbols, typeId)})`;
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::BuiltinSplat(splat) -> {
+          let head: String = `BuiltinSplat(${Hir::Display::formatType(types, defs, symbols, splat.ty)})`;
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, splat.value, indent + 1, out);
         },
         Hir::HirKind::MakeSlice(makeSlice) -> {
           let head: String = `MakeSlice(${Hir::Display::formatType(types, defs, symbols, makeSlice.elementType)})`;

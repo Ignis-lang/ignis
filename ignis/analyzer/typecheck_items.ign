@@ -405,12 +405,50 @@ export namespace Analyzer {
                 valueExprId,
                 binding.span,
               );
+            } else {
+              Analyzer::Typecheck::checkZeroInitializedStatic(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                *staticDefId,
+                &binding.name,
+                binding.span,
+              );
             }
           }
         }
 
         staticIndex += 1;
         patternIndex += 1;
+      }
+    }
+
+    /// A `static mut` field written without an initializer starts with every
+    /// byte zero, so its declared type has to have a zero value (A0239).
+    function checkZeroInitializedStatic(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      staticDefId: Analyzer::DefinitionId,
+      fieldName: &String,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(definition) = defStore.get(staticDefId) else {
+        return;
+      };
+
+      let Analyzer::Definition::Variable(variableDef) = definition else {
+        return;
+      };
+
+      let declaredType: Analyzer::TypeId = variableDef.declaredType;
+
+      if (let Option::SOME(failure) = Analyzer::Typecheck::zeroInitFailure(defStore, typeStore, symbols, declaredType)) {
+        let message: String = `'static mut' field '${fieldName.toStr()}' has no initializer, so it starts zeroed: ${failure.toStr()}`;
+
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_NOT_ZEROABLE, message.toStr());
       }
     }
 

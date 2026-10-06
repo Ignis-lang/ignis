@@ -1620,11 +1620,12 @@ export namespace Analyzer {
     }
 
     /// Whether a field binding declares a static field: the `static` modifier
-    /// and a value. A `static` field written without one keeps its instance
-    /// field binding, which is what the selfhost did before static fields were
-    /// bound at all.
+    /// and a value, or `static mut` alone, which starts zeroed. An immutable
+    /// `static` field written without a value keeps its instance field
+    /// binding, which is what the selfhost did before static fields were bound
+    /// at all.
     function fieldBindingIsStatic(binding: &Ast::Pattern::Binding): boolean {
-      if (binding.initializer.isNone()) {
+      if (binding.initializer.isNone() && !Analyzer::Binder::metadataIsMutable(&binding.metadata)) {
         return false;
       }
 

@@ -135,6 +135,13 @@ export namespace Hir {
     public volatile: boolean;
   }
 
+  /// `@splat<T[N]>(value)`: an array of type `ty` whose every element is a copy
+  /// of `value`.
+  record HirBuiltinSplat {
+    public ty: Analyzer::TypeId;
+    public value: Hir::HirId;
+  }
+
   record HirBuiltinHash {
     public ty: Analyzer::TypeId;
     public value: Hir::HirId;
@@ -397,6 +404,9 @@ export namespace Hir {
     BuiltinEq(Hir::HirBuiltinEq),
     BuiltinDropInPlace(Hir::HirBuiltinDropInPlace),
     BuiltinDropGlue(Analyzer::TypeId),
+    /// `@zeroed<T>()`: a value of the type whose every byte is zero.
+    BuiltinZeroed(Analyzer::TypeId),
+    BuiltinSplat(Hir::HirBuiltinSplat),
     Panic(Hir::HirId),
     Trap,
     BuiltinUnreachable,
@@ -609,6 +619,11 @@ export namespace Hir {
         ptr: Hir::offsetHirId(dropNode.ptr, offset),
       }),
       Hir::HirKind::BuiltinDropGlue(typeId) -> Hir::HirKind::BuiltinDropGlue(typeId),
+      Hir::HirKind::BuiltinZeroed(typeId) -> Hir::HirKind::BuiltinZeroed(typeId),
+      Hir::HirKind::BuiltinSplat(splat) -> Hir::HirKind::BuiltinSplat(Hir::HirBuiltinSplat {
+        ty: splat.ty,
+        value: Hir::offsetHirId(splat.value, offset),
+      }),
       Hir::HirKind::Panic(id) -> Hir::HirKind::Panic(Hir::offsetHirId(id, offset)),
       Hir::HirKind::Trap -> Hir::HirKind::Trap,
       Hir::HirKind::BuiltinUnreachable -> Hir::HirKind::BuiltinUnreachable,
@@ -700,6 +715,7 @@ export namespace Hir {
       Hir::HirKind::Trap -> {},
       Hir::HirKind::BuiltinUnreachable -> {},
       Hir::HirKind::BuiltinDropGlue(_) -> {},
+      Hir::HirKind::BuiltinZeroed(_) -> {},
       Hir::HirKind::Panic(id) -> {
         children.push(id);
       },
@@ -732,6 +748,9 @@ export namespace Hir {
       },
       Hir::HirKind::BuiltinLoad(load) -> {
         children.push(load.ptr);
+      },
+      Hir::HirKind::BuiltinSplat(splat) -> {
+        children.push(splat.value);
       },
       Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
         children.push(dropNode.ptr);

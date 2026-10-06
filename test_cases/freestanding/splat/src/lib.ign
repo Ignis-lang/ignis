@@ -1,0 +1,32 @@
+// `@splat` in a freestanding unit: a static table that expands into constants
+// and run-time fills of a byte-sized and of a wider element. The unit has no
+// <string.h>, so the fill has to be the memset builtin or a loop.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  return;
+}
+
+record Table {
+  static mut MARKS: u8[8] = @splat<u8[8]>(0xAA);
+  static mut WORDS: u32[4] = @splat<u32[4]>(7);
+  static mut SLOTS: u64[4096] = @splat<u64[4096]>(0);
+}
+
+@externName("freestanding_mark")
+function mark(index: u64): u8 {
+  return Table::MARKS[index] + Table::WORDS[index] as u8 + Table::SLOTS[index] as u8;
+}
+
+@externName("freestanding_fill_bytes")
+function fillBytes(value: u8): u8 {
+  let bytes: u8[64] = @splat<u8[64]>(value);
+
+  return bytes[5];
+}
+
+@externName("freestanding_fill_words")
+function fillWords(value: u32): u32 {
+  let words: u32[16] = @splat<u32[16]>(value);
+
+  return words[3] + words[15];
+}
