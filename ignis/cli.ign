@@ -54,6 +54,9 @@ export record CliOptions {
   /// Rebuild even when the build cache reports the artifacts are current,
   /// mirroring the host's `ignis build --force`.
   public force: boolean;
+  /// Print every compiler phase line on stderr in addition to the default
+  /// summary (`-v` / `--verbose`).
+  public verbose: boolean;
   public filter: String;
   public updateSnapshots: boolean;
   /// Print the ownership checker's drop schedules after analysis, mirroring
@@ -107,6 +110,7 @@ export record CliOptions {
       debug: Option::NONE,
       features: Vector::new<String>(),
       force: false,
+      verbose: false,
       filter: String::new(),
       updateSnapshots: false,
       dumpDropSchedule: false,
@@ -193,6 +197,20 @@ export record CliOptions {
     }
 
     return false;
+  }
+
+  /// True for the commands that run the compiler pipeline, which are the ones
+  /// `-v` / `--verbose` has phase lines to print for.
+  public reportsCompilerPhases(&self): boolean {
+    return match (self.command) {
+      CliCommand::BUILD -> true,
+      CliCommand::CHECK -> true,
+      CliCommand::BUILD_STD -> true,
+      CliCommand::CHECK_STD -> true,
+      CliCommand::TEST -> true,
+      CliCommand::TEST_STD -> true,
+      _ -> false,
+    };
   }
 
   /// True for the commands that write artifacts the build cache guards, which
@@ -395,6 +413,10 @@ function cliTestStdAcceptsFlag(argument: &String): boolean {
   }
 
   if (argument.equals("-j") || argument.equals("--jobs") || argument.startsWith("-j") || argument.startsWith("--jobs=")) {
+    return true;
+  }
+
+  if (argument.equals("-v") || argument.equals("--verbose")) {
     return true;
   }
 
@@ -1066,7 +1088,7 @@ function parseInitArgument(
   seen: &mut Vector<String>,
 ): Result<u64, String> {
   let mut optionsRef: &mut CliOptions = options;
-  let mut seenRef: &mut Vector<String> = seen;
+  let seenRef: &mut Vector<String> = seen;
 
   if (argument.equals("--no-git")) {
     if (let Result::ERROR(message) = initNoteFlag(seenRef, "--no-git")) {
@@ -1585,6 +1607,16 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       };
     }
 
+    if (argument.equals("-v") || argument.equals("--verbose")) {
+      if (!options.reportsCompilerPhases()) {
+        return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+      }
+
+      options.verbose = true;
+      index += 1;
+      continue;
+    }
+
     // `check-std` takes only the host `CheckStdCommand`'s output directory.
     if (options.isCheckStdMode()) {
       match (matchValueFlag(arguments, argument, index, "--output-dir", "-o")) {
@@ -1953,6 +1985,8 @@ export function helpText(): String {
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");
   text.pushStr("  -f, --force               Rebuild even when the build cache is current\n");
+  text.pushStr("  -v, --verbose             Also print every compiler phase line on stderr (build, check,\n");
+  text.pushStr("                            build-std, check-std, test, test-std)\n");
   text.pushStr("      --dump-drop-schedule  Print ownership drop schedules after analysis\n");
   text.pushStr("      --dump-ownership-report[=<FN>]\n");
   text.pushStr("                            Print the ownership checker's decisions as JSON Lines on\n");
@@ -2543,6 +2577,54 @@ function cliForceFlagAndItsAliasesSelectARebuild(): void {
   cliPush(&mut testRun, "test");
   cliPush(&mut testRun, "-f");
   Test::assertEq<boolean>(cliParse(&testRun).force, true);
+}
+
+/// `-v` and `--verbose` turn on the phase lines for every command that runs the
+/// compiler pipeline, and leave the default summary-only output otherwise.
+@test
+function cliVerboseFlagSelectsPhaseLines(): void {
+  let mut quietBuild: Vector<String> = Vector::new<String>();
+  cliPush(&mut quietBuild, "build");
+  Test::assertEq<boolean>(cliParse(&quietBuild).verbose, false);
+
+  let mut shortFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortFlag, "build");
+  cliPush(&mut shortFlag, "-v");
+  Test::assertEq<boolean>(cliParse(&shortFlag).verbose, true);
+
+  let mut longFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut longFlag, "check");
+  cliPush(&mut longFlag, "--verbose");
+  Test::assertEq<boolean>(cliParse(&longFlag).verbose, true);
+
+  let mut standardLibrary: Vector<String> = Vector::new<String>();
+  cliPush(&mut standardLibrary, "check-std");
+  cliPush(&mut standardLibrary, "-v");
+  Test::assertEq<boolean>(cliParse(&standardLibrary).verbose, true);
+
+  let mut stdTests: Vector<String> = Vector::new<String>();
+  cliPush(&mut stdTests, "test-std");
+  cliPush(&mut stdTests, "--verbose");
+  Test::assertEq<boolean>(cliParse(&stdTests).verbose, true);
+
+  let mut testRun: Vector<String> = Vector::new<String>();
+  cliPush(&mut testRun, "test");
+  cliPush(&mut testRun, "-v");
+  Test::assertEq<boolean>(cliParse(&testRun).verbose, true);
+}
+
+/// `-v` keeps meaning nothing to the commands that do not run the compiler
+/// pipeline, and `-V` stays the version flag.
+@test
+function cliRejectsVerboseFlagOutsideCompilerCommands(): void {
+  let mut fmtFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut fmtFlag, "fmt");
+  cliPush(&mut fmtFlag, "--verbose");
+  Test::assertEq<str>(cliParseError(&fmtFlag).toStr(), "error: unknown argument: --verbose");
+
+  let mut versionFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut versionFlag, "-V");
+  Test::assertEq<boolean>(cliParse(&versionFlag).verbose, false);
 }
 
 /// `check` emits, compiles and links nothing, so it has no cached artifacts a

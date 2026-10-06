@@ -318,6 +318,9 @@ def parse_error_codes(output: str, case_file: Path) -> list[str]:
 def selfhost_phase_errors(output: str) -> int | None:
   """The lex and parse error counts the selfhost's phase report prints.
 
+  The phase lines print only under `--verbose`, on stderr, which is why the
+  harness passes the flag and reads both streams.
+
   The report is absent when module discovery fails before the phases run, and
   then the parse verdict comes from the diagnostics discovery itself printed.
   """
@@ -339,7 +342,7 @@ def selfhost_verdict(
 ) -> Verdict:
   try:
     completed = subprocess.run(
-      [str(compiler), str(case_file), "-o", str(case_dir / "case_bin")],
+      [str(compiler), str(case_file), "-o", str(case_dir / "case_bin"), "--verbose"],
       cwd=case_dir,
       capture_output=True,
       text=True,

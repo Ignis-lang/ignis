@@ -70,25 +70,31 @@ class CorpusTests(unittest.TestCase):
     )
 
 
-# A fake selfhost: it prints the phase report the harness reads, rejecting a
-# source that mentions SYNTAX_ERROR or SELFHOST_REJECTS and printing nothing at
-# all (no parse verdict) for one that mentions SELFHOST_CRASH.
+# A fake selfhost: like the real one it prints the phase report the harness
+# reads only under `--verbose`, on stderr. It rejects a source that mentions
+# SYNTAX_ERROR or SELFHOST_REJECTS and prints nothing at all (no parse
+# verdict) for one that mentions SELFHOST_CRASH.
 FAKE_SELFHOST = """#!/bin/sh
 case_file="$1"
+
+case " $* " in
+  *" --verbose "*) ;;
+  *) exit 0 ;;
+esac
 
 if grep -q SELFHOST_CRASH "$case_file"; then
   exit 0
 fi
 
 if grep -q -e SYNTAX_ERROR -e SELFHOST_REJECTS "$case_file"; then
-  echo "Error[I0021]: expected an expression"
-  echo "  --> $case_file:1:1"
-  echo "parse: failed (1 errors, 0 warnings)"
+  echo "Error[I0021]: expected an expression" >&2
+  echo "  --> $case_file:1:1" >&2
+  echo "  parse: fail (1 errors, 0 warnings)" >&2
   exit 1
 fi
 
-echo "lex: ok (0 errors, 0 warnings)"
-echo "parse: ok (0 errors, 0 warnings)"
+echo "  lex  : ok (0 errors, 0 warnings)" >&2
+echo "  parse: ok (0 errors, 0 warnings)" >&2
 """
 
 def write_executable(

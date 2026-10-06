@@ -609,6 +609,40 @@ function lintUnusedVariableWarnsAtDeclaration(): void {
   );
 }
 
+/// Asserts that `source` draws exactly one lint carrying `code`, and that both
+/// its primary span and its primary label cover the byte range `[start, end)`.
+function lintAssertSingleLintSpanFromSource(source: str, code: str, start: u64, end: u64): void {
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeSource(source);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+    @panic("lintAssertSingleLintSpanFromSource: missing diagnostic");
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+  Test::assertEq<u64>(diagnostic.primarySpan.start, start);
+  Test::assertEq<u64>(diagnostic.primarySpan.end, end);
+
+  let Option::SOME(label) = diagnostic.labels.get(0) else {
+    @panic("lintAssertSingleLintSpanFromSource: missing label");
+  };
+
+  Test::assertEq<u64>(label.span.start, start);
+  Test::assertEq<u64>(label.span.end, end);
+}
+
+/// Scenario: A0122 points at the binding name, not the whole `let` statement.
+@test
+function lintUnusedVariableSpansTheBindingName(): void {
+  lintAssertSingleLintSpanFromSource(
+    "function main(): void {\n  let value: i32 = 1;\n  return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    30,
+    35,
+  );
+}
+
 /// Scenario: a `_`-prefixed name opts out of the unused-variable lint.
 @test
 function lintUnderscorePrefixedVariableIsClean(): void {
@@ -648,6 +682,17 @@ function lintUnusedMutWarnsOnNeverMutatedLocal(): void {
     DiagnosticCode::UNUSED_MUT,
     Severity::WARNING,
     "variable 'count' does not need to be mutable",
+  );
+}
+
+/// Scenario: A0127 points at the binding name, past the `mut` keyword.
+@test
+function lintUnusedMutSpansTheBindingName(): void {
+  lintAssertSingleLintSpanFromSource(
+    "function main(): i32 {\n  let mut count: i32 = 1;\n  return count;\n}\n",
+    DiagnosticCode::UNUSED_MUT,
+    33,
+    38,
   );
 }
 

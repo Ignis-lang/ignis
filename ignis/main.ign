@@ -6,7 +6,9 @@ import Memory from "std::memory";
 import Path from "std::path";
 import Process from "std::process";
 import Sort from "std::sort";
+import Terminal from "std::terminal";
 import Test from "std::test";
+import Time from "std::time";
 
 import
   Diagnostic,
@@ -148,32 +150,86 @@ function formatPhaseLine(name: str, errors: u64, warnings: u64): String {
   return `  ${name}: ${status} (${errors} errors, ${warnings} warnings)`;
 }
 
-/// Render and print a diagnostic bag to stderr if it is non-empty.
+/// Render and print a diagnostic bag to stderr if it is non-empty, styled only
+/// when stderr is a terminal.
 function renderBagToStderr(bag: &DiagnosticBag, file: &SourceFile): void {
   if (bag.isEmpty()) {
     return;
   }
 
-  let rendered: String = DiagnosticRenderer::renderBag(bag, file, true);
+  let rendered: String = DiagnosticRenderer::renderBag(bag, file, DiagnosticRenderer::stderrUsesColor());
   Io::eprintln(rendered);
 }
 
 /// Render a diagnostic bag to stderr and keep a copy in the run's report.
 ///
-/// The report is what a reused build replays, so a warm run has to be able to
-/// print exactly the bytes the run that produced the artifacts printed.
+/// The report is what a reused build replays. It always holds the styled
+/// rendering, so a warm run can replay it on a terminal as the cold run would
+/// have printed it there, or strip the styling for anything else.
 function renderBagCollecting(bag: &DiagnosticBag, file: &SourceFile, report: &mut String): void {
   if (bag.isEmpty()) {
     return;
   }
 
-  let rendered: String = DiagnosticRenderer::renderBag(bag, file, true);
+  let styled: String = DiagnosticRenderer::renderBag(bag, file, true);
 
   let mut reportRef: &mut String = report;
-  reportRef.push(&rendered);
+  reportRef.push(&styled);
   reportRef.pushChar('\n');
 
-  Io::eprintln(rendered);
+  if (DiagnosticRenderer::stderrUsesColor()) {
+    Io::eprintln(styled);
+    return;
+  }
+
+  Io::eprintln(DiagnosticRenderer::renderBag(bag, file, false));
+}
+
+/// `text` without its ANSI escape sequences: every `ESC [` up to and including
+/// the sequence's final byte (`@` through `~`) is dropped.
+export function stripAnsiEscapes(text: &String): String {
+  let mut plain: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
+    };
+
+    let nextIsBracket: boolean = match (text.byteAt(index + 1)) {
+      Option::SOME(next) -> next == '[' as u8,
+      Option::NONE -> false,
+    };
+    let startsEscape: boolean = byte == 27 && nextIsBracket;
+
+    if (!startsEscape) {
+      plain.pushByte(byte);
+      index += 1;
+      continue;
+    }
+
+    index += 2;
+
+    while (let Option::SOME(sequenceByte) = text.byteAt(index)) {
+      index += 1;
+
+      if (sequenceByte >= 64 && sequenceByte <= 126) {
+        break;
+      }
+    }
+  }
+
+  return plain;
+}
+
+/// What a warm run prints for a stored report: the styled report as stored
+/// when `useColor`, else the same text without styling.
+export function replayedReport(report: &String, useColor: boolean): String {
+  if (useColor) {
+    return report.clone();
+  }
+
+  return stripAnsiEscapes(report);
 }
 
 /// The C toolchain profile a build runs under.
@@ -347,7 +403,7 @@ function replayBuildReport(reportPath: &Path::PathBuf): void {
     return;
   }
 
-  Io::eprint(report);
+  Io::eprint(replayedReport(&report, DiagnosticRenderer::stderrUsesColor()));
 }
 
 /// Report a reused build in the shape a compiled one reports itself in, so a
@@ -360,29 +416,29 @@ function reportReusedBuild(
   linksExecutable: boolean,
   objectOnly: boolean,
   warnings: u64,
-  statusToStderr: boolean,
+  verbose: boolean,
 ): void {
-  printStatus(`  emit: ${artifacts.source.asStr()}`, statusToStderr);
+  printStatus(`  emit: ${artifacts.source.asStr()}`, verbose);
 
   if (linksExecutable) {
-    printStatus(`  link: ${artifacts.executable.asStr()}`, statusToStderr);
+    printStatus(`  link: ${artifacts.executable.asStr()}`, verbose);
   }
 
   if (objectOnly) {
-    printStatus(`  object: ${artifacts.object.asStr()}`, statusToStderr);
+    printStatus(`  object: ${artifacts.object.asStr()}`, verbose);
   }
 
-  printStatus(`  summary: 0 errors, ${warnings} warnings`, statusToStderr);
+  printStatus(`  summary: 0 errors, ${warnings} warnings`, verbose);
 }
 
 /// Report in one line whether a build reused its artifacts, and why it did not.
-function reportCacheDecision(label: str, reason: &String, statusToStderr: boolean): void {
+function reportCacheDecision(label: str, reason: &String, verbose: boolean): void {
   if (reason.length() == 0) {
-    printStatus(`  ${label}: reused`, statusToStderr);
+    printStatus(`  ${label}: reused`, verbose);
     return;
   }
 
-  printStatus(`  ${label}: rebuilding, ${reason.toStr()}`, statusToStderr);
+  printStatus(`  ${label}: rebuilding, ${reason.toStr()}`, verbose);
 }
 
 /// What a run decided to do with the artifacts a previous one left behind.
@@ -493,7 +549,7 @@ function relinkCachedBuild(
   profile: &BuildProfile,
   file: &SourceFile,
   warnings: u64,
-  statusToStderr: boolean,
+  verbose: boolean,
 ): i32 {
   if (!ensureParentDirectory(&artifacts.executable)) {
     return 1;
@@ -515,20 +571,20 @@ function relinkCachedBuild(
     &discovery.stdRoot,
     profile,
     file,
-    statusToStderr,
+    verbose,
     TestRunner::jobLimit(Option::NONE),
     &noInlineAsmUnits,
   );
 
   if (linkErrors > 0) {
     stampInvalidate(stampPath);
-    printStatus(String::create("  summary: 1 errors, 0 warnings"), statusToStderr);
+    printStatus(String::create("  summary: 1 errors, 0 warnings"), verbose);
     return 1;
   }
 
   replayBuildReport(reportPath);
   recordBuildStamp(artifacts, stampPath, fingerprint, true, warnings);
-  printStatus(`  summary: 0 errors, ${warnings} warnings`, statusToStderr);
+  printStatus(`  summary: 0 errors, ${warnings} warnings`, verbose);
   return 0;
 }
 
@@ -614,7 +670,7 @@ function compileObjectUnits(
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
   file: &SourceFile,
-  statusToStderr: boolean,
+  verbose: boolean,
   usesInlineAsm: boolean,
 ): u64 {
   let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
@@ -630,7 +686,7 @@ function compileObjectUnits(
     TestRunner::jobLimit(Option::NONE),
   )) {
     renderBagToStderr(&compileBag, file);
-    printStatus(String::create("  object: failed"), statusToStderr);
+    printStatus(String::create("  object: failed"), verbose);
     return 1;
   }
 
@@ -641,7 +697,7 @@ function compileObjectUnits(
       break;
     };
 
-    printStatus(`  object: ${objectPath.asStr()}`, statusToStderr);
+    printStatus(`  object: ${objectPath.asStr()}`, verbose);
     objectIndex += 1;
   }
 
@@ -719,7 +775,7 @@ function compileAndLinkUnits(
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
   file: &SourceFile,
-  statusToStderr: boolean,
+  verbose: boolean,
   jobs: u64,
   inlineAsmUnits: &Vector<boolean>,
 ): u64 {
@@ -798,7 +854,7 @@ function compileAndLinkUnits(
       jobs,
     )) {
       renderBagToStderr(&compileBag, file);
-      printStatus(String::create("  link: failed"), statusToStderr);
+      printStatus(String::create("  link: failed"), verbose);
       return 1;
     }
   }
@@ -817,11 +873,11 @@ function compileAndLinkUnits(
     &linkFlags,
   )) {
     renderBagToStderr(&linkBag, file);
-    printStatus(String::create("  link: failed"), statusToStderr);
+    printStatus(String::create("  link: failed"), verbose);
     return 1;
   }
 
-  printStatus(`  link: ${outputPath.asStr()}`, statusToStderr);
+  printStatus(`  link: ${outputPath.asStr()}`, verbose);
   return 0;
 }
 
@@ -847,8 +903,9 @@ record CompileOptions {
   public dumpOwnershipReport: boolean;
   /// Limits the ownership report to one function by name; empty keeps all.
   public ownershipReportFunction: String;
-  /// Send progress lines to stderr so stdout carries only report records.
-  public statusToStderr: boolean;
+  /// Print the phase lines (`lex`, `parse`, `analyze`, ...) on stderr, which
+  /// `-v` / `--verbose` asks for. Off, a run prints only its summary.
+  public verbose: boolean;
   /// Set for `ignis test-std`: test names are relative to this std root
   /// rather than to the graph root's directory, and a `@test` in a shipping
   /// std module is a setup error.
@@ -867,7 +924,7 @@ record CompileOptions {
       dumpDropSchedule: false,
       dumpOwnershipReport: false,
       ownershipReportFunction: String::new(),
-      statusToStderr: false,
+      verbose: false,
       stdTestRoot: Option::NONE,
       freestanding: false,
     };
@@ -986,37 +1043,169 @@ function collectDiagnosticMessages(
   }
 }
 
-/// Where a run's progress lines go.
+/// Print one phase line, which only `-v` / `--verbose` shows.
 ///
-/// `--dump-ownership-report` writes JSON Lines to stdout, and a reader piping
-/// that into a JSON tool gets a parse error from the first phase line. With the
-/// flag on, every status line moves to stderr and stdout carries records alone.
-/// `--dump-drop-schedule` keeps writing to stdout, because gate G7 diffs
-/// exactly those bytes against the host.
-function printStatus(message: String, toStderr: boolean): void {
-  if (toStderr) {
-    Io::eprintln(message);
-    return;
+/// Phase lines always go to stderr: stdout is kept for what a command is asked
+/// to produce, such as the JSON Lines of `--dump-ownership-report` or the drop
+/// schedules gate G7 diffs.
+function printStatus(message: String, verbose: boolean): void {
+  if (let Option::SOME(line) = statusLine(message, verbose)) {
+    Io::eprintln(line);
   }
-
-  Io::println(message);
 }
 
-/// Render a module-discovery failure the way the phase lines do.
+/// The phase line `printStatus` prints for `message`: the message itself under
+/// `-v` / `--verbose`, nothing otherwise.
+export function statusLine(message: String, verbose: boolean): Option<String> {
+  if (!verbose) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(message);
+}
+
+/// How many errors and warnings a run reported, for its summary line.
+record BuildTally {
+  public errors: u64;
+  public warnings: u64;
+}
+
+/// Formats an elapsed time the way the Rust compiler reported build times:
+/// `75ms` below one second, `1.2s` below one minute and `2m03s` from there.
+export function formatBuildDuration(millis: u64): String {
+  if (millis < 1000) {
+    return `${millis}ms`;
+  }
+
+  if (millis < 60000) {
+    let seconds: u64 = millis / 1000;
+    let tenths: u64 = (millis % 1000) / 100;
+
+    return `${seconds}.${tenths}s`;
+  }
+
+  let minutes: u64 = millis / 60000;
+  let seconds: u64 = (millis / 1000) % 60;
+  let padding: str = seconds < 10 ? "0" : "";
+
+  return `${minutes}m${padding}${seconds}s`;
+}
+
+/// `count` followed by the singular or plural noun it takes.
+function countedNoun(count: u64, singular: str, plural: str): String {
+  let noun: str = count == 1 ? singular : plural;
+
+  return `${count} ${noun}`;
+}
+
+/// The text of a failed run's last line after its `✗` mark, such as
+/// `Build failed: 3 errors, 1 warning`. A run with no warnings leaves the
+/// warning count out.
+export function formatFailureLine(action: str, errors: u64, warnings: u64): String {
+  let mut line: String = `${action} failed: ${countedNoun(errors, "error", "errors").toStr()}`;
+
+  if (warnings > 0) {
+    line.pushStr(", ");
+    line.pushStr(countedNoun(warnings, "warning", "warnings").toStr());
+  }
+
+  return line;
+}
+
+/// The text of a successful run's last line after its `✓` mark, such as
+/// `Compiled (1.2s)` or `Compiled with 12 warnings (cached)`. `warningJoin` is
+/// the text between the headline and the warning count.
+export function formatSuccessLine(
+  headline: str,
+  warningJoin: str,
+  warnings: u64,
+  timing: &String
+): String {
+  let mut line: String = String::create(headline);
+
+  if (warnings > 0) {
+    line.pushStr(warningJoin);
+    line.pushStr(countedNoun(warnings, "warning", "warnings").toStr());
+  }
+
+  let suffix: String = ` (${timing.toStr()})`;
+  line.push(&suffix);
+  return line;
+}
+
+/// Print a summary line on stderr behind `mark`, which is styled in `color`
+/// the way diagnostics are.
+function printOutcomeLine(mark: str, text: &String, color: Terminal::TerminalColor): void {
+  let mut styled: String = String::new();
+
+  Terminal::appendStyled(&mut styled, mark, DiagnosticRenderer::stderrUsesColor(), color, true);
+  styled.pushStr(" ");
+  styled.push(text);
+  Io::eprintln(styled);
+}
+
+function printFailure(action: str, errors: u64, warnings: u64): void {
+  let text: String = formatFailureLine(action, errors, warnings);
+  printOutcomeLine("✗", &text, Terminal::TerminalColor::RED);
+}
+
+function printSuccess(headline: str, warningJoin: str, warnings: u64, timing: &String): void {
+  let text: String = formatSuccessLine(headline, warningJoin, warnings, timing);
+  printOutcomeLine("✓", &text, Terminal::TerminalColor::GREEN);
+}
+
+/// The moment a command started, for the duration its summary reports.
+function startBuildClock(): Option<Time::MonotonicInstant> {
+  return match (Time::MonotonicInstant::now()) {
+    Result::OK(instant) -> Option::SOME(instant),
+    Result::ERROR(_) -> Option::NONE,
+  };
+}
+
+/// The time since `started`, formatted for a summary line; `0ms` when the clock
+/// could not be read.
+function buildClockText(started: &Option<Time::MonotonicInstant>): String {
+  let Option::SOME(instant) = started else {
+    return formatBuildDuration(0);
+  };
+
+  return match (instant.elapsed()) {
+    Result::OK(duration) -> formatBuildDuration(duration.wholeMillis()),
+    Result::ERROR(_) -> formatBuildDuration(0),
+  };
+}
+
+/// The first line a build or check prints: `Building <name> (<file>)`, where
+/// the file is the project's `ignis.toml`, or the source file in single-file
+/// mode.
+function buildHeaderLine(verb: str, discovery: &DiscoveryResult): String {
+  let mut origin: Path::PathBuf = discovery.entry.clone();
+
+  if (discovery.hasProjectFile) {
+    origin = discovery.root.join("ignis.toml");
+  }
+
+  return `${verb} ${discovery.name.toStr()} (${origin.asStr()})`;
+}
+
+/// Render a module-discovery failure the way the phase lines do, returning what
+/// it counted for the run's summary line.
 function reportDiscoveryFailure(
   diagnostics: &DiagnosticBag,
   file: &SourceFile,
-  statusToStderr: boolean,
-): void {
+  verbose: boolean,
+): BuildTally {
   let discoveryErrors: u64 = countBySeverity(diagnostics, Severity::ERROR);
   let discoveryWarnings: u64 = countBySeverity(diagnostics, Severity::WARNING);
 
-  printStatus(formatPhaseLine("discover", discoveryErrors, discoveryWarnings), statusToStderr);
+  printStatus(formatPhaseLine("discover", discoveryErrors, discoveryWarnings), verbose);
   renderBagToStderr(diagnostics, file);
   printStatus(
     `  summary: ${discoveryErrors} errors, ${discoveryWarnings} warnings`,
-    statusToStderr
+    verbose
   );
+
+  return BuildTally { errors: discoveryErrors, warnings: discoveryWarnings };
 }
 
 /// Parse, analyze, lower and emit every module `discovery` reached.
@@ -1034,7 +1223,7 @@ function compileDiscovered(
   let quiet: boolean = options.quiet;
   let dumpDropSchedule: boolean = options.dumpDropSchedule;
   let dumpOwnershipReport: boolean = options.dumpOwnershipReport;
-  let statusToStderr: boolean = options.statusToStderr;
+  let verbose: boolean = options.verbose;
   let emitCode: boolean = options.emitCode && !options.stopAfterAnalyze;
 
   let mut errorMessages: Vector<String> = Vector::new<String>();
@@ -1112,9 +1301,9 @@ function compileDiscovered(
   }
 
   if (!quiet) {
-    printStatus(formatPhaseLine("lex  ", lexErrors, lexWarnings), statusToStderr);
-    printStatus(formatPhaseLine("parse", parseErrors, parseWarnings), statusToStderr);
-    printStatus(`  roots: ${rootCount}`, statusToStderr);
+    printStatus(formatPhaseLine("lex  ", lexErrors, lexWarnings), verbose);
+    printStatus(formatPhaseLine("parse", parseErrors, parseWarnings), verbose);
+    printStatus(`  roots: ${rootCount}`, verbose);
   }
 
   let frontendErrors: u64 = lexErrors + parseErrors;
@@ -1122,7 +1311,7 @@ function compileDiscovered(
 
   if (frontendErrors > 0) {
     if (!quiet) {
-      printStatus(String::create("  analyze: skipped (frontend errors)"), statusToStderr);
+      printStatus(String::create("  analyze: skipped (frontend errors)"), verbose);
     }
 
     let mut stopped: CompiledProgram = failedCompilation(frontendErrors, frontendWarnings);
@@ -1218,7 +1407,7 @@ function compileDiscovered(
   }
 
   if (!quiet) {
-    printStatus(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings), statusToStderr);
+    printStatus(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings), verbose);
   }
 
   // Lowering runs only over a clean analysis: its inputs assume every
@@ -1226,7 +1415,7 @@ function compileDiscovered(
   // `HirKind::Error` nodes, counted per module.
   if (analyzeErrors > 0) {
     if (!quiet) {
-      printStatus(String::create("  lower: skipped (analyze errors)"), statusToStderr);
+      printStatus(String::create("  lower: skipped (analyze errors)"), verbose);
     }
 
     let mut stopped: CompiledProgram = failedCompilation(
@@ -1324,7 +1513,7 @@ function compileDiscovered(
     }
 
     if (!quiet) {
-      printStatus(`  tests: ${tests.length()} discovered`, statusToStderr);
+      printStatus(`  tests: ${tests.length()} discovered`, verbose);
     }
   }
 
@@ -1403,7 +1592,7 @@ function compileDiscovered(
     collectDiagnosticMessages(&captureDiagnostics, Severity::ERROR, true, &mut errorMessages);
     collectDiagnosticMessages(&captureDiagnostics, Severity::WARNING, false, &mut warningMessages);
   } else {
-    printStatus(formatPhaseLine("capture", captureErrors, captureWarnings), statusToStderr);
+    printStatus(formatPhaseLine("capture", captureErrors, captureWarnings), verbose);
     renderBagCollecting(&captureDiagnostics, file, &mut report);
   }
 
@@ -1446,7 +1635,7 @@ function compileDiscovered(
   let monoGenericNodes: u64 = Mono::countRemainingGenerics(&mut typeStore, &monoResult.hir);
 
   if (!quiet) {
-    printStatus(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`, statusToStderr);
+    printStatus(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`, verbose);
   }
 
   // Ownership and borrow checking runs over the monomorphized HIR, the same
@@ -1508,7 +1697,7 @@ function compileDiscovered(
     collectDiagnosticMessages(&checked.diagnostics, Severity::ERROR, true, &mut errorMessages);
     collectDiagnosticMessages(&checked.diagnostics, Severity::WARNING, false, &mut warningMessages);
   } else {
-    printStatus(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings), statusToStderr);
+    printStatus(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings), verbose);
     renderBagCollecting(&checked.diagnostics, file, &mut report);
   }
 
@@ -1542,8 +1731,8 @@ function compileDiscovered(
   let verifyFindings: Vector<String> = LirVerify::verifyProgram(&mut defStore, &mut typeStore, &lirResult.program);
 
   if (!quiet) {
-    printStatus(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`, statusToStderr);
-    printStatus(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`, statusToStderr);
+    printStatus(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`, verbose);
+    printStatus(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`, verbose);
   }
 
   let verifyMessages: Vector<String> = LirVerify::findingMessages(&verifyFindings);
@@ -1646,7 +1835,7 @@ function compileDiscovered(
   if (!quiet) {
     printStatus(
       `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`,
-      statusToStderr
+      verbose
     );
   }
 
@@ -1761,12 +1950,42 @@ function ensureParentDirectory(path: &Path::PathBuf): boolean {
     return true;
   }
 
-  if (let Result::ERROR(_) = Fs::createDirAll(&parent)) {
-    Io::eprintln(`error: could not create directory: ${parent.asStr()}`);
+  if (let Result::ERROR(error) = Fs::createDirAll(&parent)) {
+    Io::eprintln(`error: could not create directory ${parent.asStr()}: ${error.errorMessage()}`);
     return false;
   }
 
   return true;
+}
+
+/// Write `contents` to `path`, printing why on stderr when that fails. The
+/// message is part of the default output, never a `--verbose` phase line,
+/// because the run fails because of it.
+function writeArtifact(path: &Path::PathBuf, contents: &String): boolean {
+  if (let Result::ERROR(error) = Fs::writeString(path, contents)) {
+    Io::eprintln(`error: could not write ${path.asStr()}: ${error.errorMessage()}`);
+    return false;
+  }
+
+  return true;
+}
+
+/// Discover the module graph a command runs against, reporting what failed
+/// and returning its counts on failure.
+function discoverReporting(
+  startPath: &Path::PathBuf,
+  options: &CliOptions,
+  includeTests: boolean,
+): Result<DiscoveryResult, BuildTally> {
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+
+  return match (Resolver::discover(startPath, &overrides, includeTests)) {
+    Result::OK(value) -> Result::OK(value),
+    Result::ERROR(diagnostics) -> {
+      let file: SourceFile = entrySourceFile(startPath);
+      Result::ERROR(reportDiscoveryFailure(&diagnostics, &file, options.verbose))
+    },
+  };
 }
 
 /// Discover the module graph a command runs against, reporting what failed.
@@ -1775,20 +1994,85 @@ function discoverFor(
   options: &CliOptions,
   includeTests: boolean,
 ): Option<DiscoveryResult> {
-  let overrides: BuildOverrides = buildOverridesFrom(options);
-
-  match (Resolver::discover(startPath, &overrides, includeTests)) {
-    Result::OK(value) -> {
-      return Option::SOME(value);
-    },
-    Result::ERROR(diagnostics) -> {
-      let file: SourceFile = entrySourceFile(startPath);
-      reportDiscoveryFailure(&diagnostics, &file, options.dumpOwnershipReport);
-      return Option::NONE;
-    },
+  return match (discoverReporting(startPath, options, includeTests)) {
+    Result::OK(value) -> Option::SOME(value),
+    Result::ERROR(_) -> Option::NONE,
   };
+}
 
-  return Option::NONE;
+/// The closing lines of a build or check: whether it succeeded, the text after
+/// its `✓` or `✗` mark, and the artifact line a successful build adds.
+export record CompileOutcome {
+  public succeeded: boolean;
+  public text: String;
+  public artifact: Option<String>;
+}
+
+/// The closing lines of a build or check that reported `errors` errors and
+/// `warnings` warnings. A successful build names its binary, or the object of
+/// a freestanding library; a check and a failed run name nothing.
+export function compileOutcome(
+  checkOnly: boolean,
+  errors: u64,
+  warnings: u64,
+  timing: &String,
+  artifacts: &BuildArtifacts,
+  linksExecutable: boolean,
+  objectOnly: boolean,
+): CompileOutcome {
+  if (errors > 0) {
+    return CompileOutcome {
+      succeeded: false,
+      text: formatFailureLine(checkOnly ? "Check" : "Build", errors, warnings),
+      artifact: Option::NONE,
+    };
+  }
+
+  if (checkOnly) {
+    return CompileOutcome {
+      succeeded: true,
+      text: formatSuccessLine("No errors found", ", ", warnings, timing),
+      artifact: Option::NONE,
+    };
+  }
+
+  let mut artifact: Option<String> = Option::NONE;
+
+  if (linksExecutable) {
+    artifact = Option::SOME(`  Binary: ${artifacts.executable.asStr()}`);
+  } else if (objectOnly) {
+    artifact = Option::SOME(`  Object: ${artifacts.object.asStr()}`);
+  }
+
+  return CompileOutcome {
+    succeeded: true,
+    text: formatSuccessLine("Compiled", " with ", warnings, timing),
+    artifact: artifact,
+  };
+}
+
+/// Print the closing lines `compileOutcome` picks.
+function printCompileOutcome(
+  checkOnly: boolean,
+  errors: u64,
+  warnings: u64,
+  timing: &String,
+  artifacts: &BuildArtifacts,
+  linksExecutable: boolean,
+  objectOnly: boolean,
+): void {
+  let outcome: CompileOutcome = compileOutcome(checkOnly, errors, warnings, timing, artifacts, linksExecutable, objectOnly);
+
+  if (!outcome.succeeded) {
+    printOutcomeLine("✗", &outcome.text, Terminal::TerminalColor::RED);
+    return;
+  }
+
+  printOutcomeLine("✓", &outcome.text, Terminal::TerminalColor::GREEN);
+
+  if (let Option::SOME(line) = &outcome.artifact) {
+    Io::eprintln(line.clone());
+  }
 }
 
 /// Compile the project `startPath` belongs to.
@@ -1806,14 +2090,21 @@ function runCompile(
   checkOnly: boolean,
   projectMode: boolean,
 ): i32 {
-  let statusToStderr: boolean = options.dumpOwnershipReport;
+  let started: Option<Time::MonotonicInstant> = startBuildClock();
+  let verbose: boolean = options.verbose;
   let banner: str = checkOnly ? "ignis selfhost check" : "ignis selfhost (partial pipeline)";
-  printStatus(String::create(banner), statusToStderr);
-  printStatus(`  source: ${startPath.asStr()}`, statusToStderr);
+  printStatus(String::create(banner), verbose);
+  printStatus(`  source: ${startPath.asStr()}`, verbose);
 
-  let Option::SOME(discovery) = discoverFor(startPath, options, false) else {
-    return 1;
+  let discovery: DiscoveryResult = match (discoverReporting(startPath, options, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(tally) -> {
+      printFailure(checkOnly ? "Check" : "Build", tally.errors, tally.warnings);
+      return 1;
+    },
   };
+
+  Io::eprintln(buildHeaderLine(checkOnly ? "Checking" : "Building", &discovery));
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
@@ -1830,17 +2121,20 @@ function runCompile(
     let plan: BuildCachePlan = planBuildCache(options, &stampPath, &reportPath, &fingerprint, &artifacts, discovery.bin, objectOnly);
     cacheIsWritable = plan.writable;
 
+    let cachedTiming: String = String::create("cached");
+
     if (plan.reused) {
-      printStatus(String::create("  cache: reused"), statusToStderr);
+      printStatus(String::create("  cache: reused"), verbose);
       replayBuildReport(&reportPath);
-      reportReusedBuild(&artifacts, discovery.bin, objectOnly, plan.warnings, statusToStderr);
+      reportReusedBuild(&artifacts, discovery.bin, objectOnly, plan.warnings, verbose);
+      printCompileOutcome(false, 0, plan.warnings, &cachedTiming, &artifacts, discovery.bin, objectOnly);
       return 0;
     }
 
-    printStatus(`  cache: ${plan.note.toStr()}`, statusToStderr);
+    printStatus(`  cache: ${plan.note.toStr()}`, verbose);
 
     if (plan.relinkOnly) {
-      return relinkCachedBuild(
+      let relinked: i32 = relinkCachedBuild(
         &artifacts,
         &reportPath,
         &stampPath,
@@ -1849,8 +2143,13 @@ function runCompile(
         &profile,
         &file,
         plan.warnings,
-        statusToStderr,
+        verbose,
       );
+      let relinkErrors: u64 = relinked == 0 ? 0 : 1;
+      let relinkTiming: String = buildClockText(&started);
+
+      printCompileOutcome(false, relinkErrors, plan.warnings, &relinkTiming, &artifacts, discovery.bin, objectOnly);
+      return relinked;
     }
 
     stampInvalidate(&stampPath);
@@ -1860,7 +2159,7 @@ function runCompile(
   compileOptions.dumpDropSchedule = options.dumpDropSchedule;
   compileOptions.dumpOwnershipReport = options.dumpOwnershipReport;
   compileOptions.ownershipReportFunction = options.ownershipReportFunction.clone();
-  compileOptions.statusToStderr = options.dumpOwnershipReport;
+  compileOptions.verbose = options.verbose;
   compileOptions.freestanding = profile.freestanding;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
@@ -1871,14 +2170,16 @@ function runCompile(
   // remaining work is counted per variant.
   if (!checkOnly && compiled.source.length() > 0) {
     if (!ensureParentDirectory(&artifacts.source) || !ensureParentDirectory(&artifacts.object) || !ensureParentDirectory(&artifacts.executable)) {
+      printFailure("Build", compiled.errors + 1, compiled.warnings);
       return 1;
     }
 
-    if (let Result::ERROR(_) = Fs::writeString(&artifacts.source, &compiled.source)) {
-      printStatus(`  emit: could not write ${artifacts.source.asStr()}`, statusToStderr);
+    if (!writeArtifact(&artifacts.source, &compiled.source)) {
+      printStatus(`  emit: could not write ${artifacts.source.asStr()}`, verbose);
+      linkErrors += 1;
     } else {
       emitted = true;
-      printStatus(`  emit: ${artifacts.source.asStr()}`, statusToStderr);
+      printStatus(`  emit: ${artifacts.source.asStr()}`, verbose);
 
       let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
       sourcePaths.push(artifacts.source.clone());
@@ -1900,12 +2201,12 @@ function runCompile(
           &discovery.stdRoot,
           &profile,
           &file,
-          statusToStderr,
+          verbose,
           TestRunner::jobLimit(Option::NONE),
           &inlineAsmUnits,
         );
       } else if (objectOnly) {
-        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, statusToStderr, compiled.usesInlineAsm);
+        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, verbose, compiled.usesInlineAsm);
       }
     }
   }
@@ -1919,8 +2220,11 @@ function runCompile(
 
   printStatus(
     `  summary: ${totalErrors} errors, ${compiled.warnings} warnings`,
-    statusToStderr
+    verbose
   );
+
+  let timing: String = buildClockText(&started);
+  printCompileOutcome(checkOnly, totalErrors, compiled.warnings, &timing, &artifacts, discovery.bin, objectOnly);
 
   if (totalErrors > 0) {
     return 1;
@@ -2452,7 +2756,7 @@ function linkTestBinary(
   }
 
   let programIsCached: boolean = cacheIsWritable && reason.length() == 0;
-  reportCacheDecision("object", &reason, true);
+  reportCacheDecision("object", &reason, options.verbose);
 
   if (!programIsCached) {
     stampInvalidate(&stampPath);
@@ -2491,7 +2795,7 @@ function linkTestBinary(
 
   let jobs: u64 = TestRunner::jobLimit(options.jobs);
 
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false, jobs, &inlineAsmUnits) > 0) {
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, options.verbose, jobs, &inlineAsmUnits) > 0) {
     return Option::NONE;
   }
 
@@ -2557,7 +2861,8 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let compileOptions: CompileOptions = testCompileOptions();
+  let mut compileOptions: CompileOptions = testCompileOptions();
+  compileOptions.verbose = options.verbose;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.source.length() == 0) {
@@ -2660,7 +2965,7 @@ function runStdTests(options: &CliOptions): i32 {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(&currentDir);
-      reportDiscoveryFailure(&diagnostics, &startFile, true);
+      reportDiscoveryFailure(&diagnostics, &startFile, options.verbose);
       Io::eprintln(String::create("error: test setup failed"));
       return 1;
     },
@@ -2670,7 +2975,8 @@ function runStdTests(options: &CliOptions): i32 {
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let compileOptions: CompileOptions = stdTestCompileOptions(&discovery.stdRoot);
+  let mut compileOptions: CompileOptions = stdTestCompileOptions(&discovery.stdRoot);
+  compileOptions.verbose = options.verbose;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
@@ -3813,19 +4119,23 @@ function resolveTarget(options: &CliOptions): Option<CommandTarget> {
 /// and writes an umbrella `ignis_std.h` beside the archive; this build writes
 /// no header, because nothing in this pipeline emits one yet.
 function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): i32 {
-  Io::println(String::create("ignis selfhost build-std"));
+  let started: Option<Time::MonotonicInstant> = startBuildClock();
+  let verbose: boolean = options.verbose;
+  printStatus(String::create("ignis selfhost build-std"), verbose);
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
   let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(startPath);
-      reportDiscoveryFailure(&diagnostics, &startFile, false);
+      let tally: BuildTally = reportDiscoveryFailure(&diagnostics, &startFile, verbose);
+      printFailure("Build", tally.errors, tally.warnings);
       return 1;
     },
   };
 
-  Io::println(`  std: ${discovery.stdRoot.asStr()}`);
+  Io::eprintln(`Building std (${discovery.stdRoot.asStr()})`);
+  printStatus(`  std: ${discovery.stdRoot.asStr()}`, verbose);
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
@@ -3862,35 +4172,40 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     recordedWarnings = verdict.warnings;
   }
 
-  reportCacheDecision("cache", &reason, false);
+  reportCacheDecision("cache", &reason, verbose);
 
   if (cacheIsWritable && reason.length() == 0) {
     replayBuildReport(&reportPath);
-    Io::println(`  archive: ${libraryPath.asStr()}`);
-    Io::println(`  summary: 0 errors, ${recordedWarnings} warnings`);
+    printStatus(`  archive: ${libraryPath.asStr()}`, verbose);
+    printStatus(`  summary: 0 errors, ${recordedWarnings} warnings`, verbose);
+    let cachedTiming: String = String::create("cached");
+    printStandardLibraryBuilt(recordedWarnings, &cachedTiming, &libraryPath);
     return 0;
   }
 
   stampInvalidate(&stampPath);
 
-  let compileOptions: CompileOptions = stdCompileOptions();
+  let mut compileOptions: CompileOptions = stdCompileOptions();
+  compileOptions.verbose = verbose;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
-    Io::println(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`);
+    printStatus(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`, verbose);
+    printFailure("Build", compiled.errors > 0 ? compiled.errors : 1, compiled.warnings);
     return 1;
   }
 
   if (!ensureParentDirectory(&sourcePath) || !ensureParentDirectory(&objectPath) || !ensureParentDirectory(&libraryPath) || !ensureParentDirectory(&stampPath)) {
+    printFailure("Build", 1, compiled.warnings);
     return 1;
   }
 
-  if (let Result::ERROR(_) = Fs::writeString(&sourcePath, &compiled.source)) {
-    Io::eprintln(`error: could not write ${sourcePath.asStr()}`);
+  if (!writeArtifact(&sourcePath, &compiled.source)) {
+    printFailure("Build", 1, compiled.warnings);
     return 1;
   }
 
-  Io::println(`  emit: ${sourcePath.asStr()}`);
+  printStatus(`  emit: ${sourcePath.asStr()}`, verbose);
 
   let runtimeDir: Path::PathBuf = discovery.stdRoot.join("runtime");
   let mut includeDirs: Vector<String> = Vector::new<String>();
@@ -3907,7 +4222,8 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     &extraFlags,
   )) {
     renderBagToStderr(&compileBag, &file);
-    Io::println(String::create("  archive: failed"));
+    printStatus(String::create("  archive: failed"), verbose);
+    printFailure("Build", 1, compiled.warnings);
     return 1;
   }
 
@@ -3916,7 +4232,8 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
 
   if (let Result::ERROR(archiveBag) = ArchiveTool::archive("ar", &libraryPath, &objects)) {
     renderBagToStderr(&archiveBag, &file);
-    Io::println(String::create("  archive: failed"));
+    printStatus(String::create("  archive: failed"), verbose);
+    printFailure("Build", 1, compiled.warnings);
     return 1;
   }
 
@@ -3926,9 +4243,21 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     stampWrite(&stampPath, &fingerprint, &noOutput, &noOutput, compiled.warnings);
   }
 
-  Io::println(`  archive: ${libraryPath.asStr()}`);
-  Io::println(`  summary: 0 errors, ${compiled.warnings} warnings`);
+  printStatus(`  archive: ${libraryPath.asStr()}`, verbose);
+  printStatus(`  summary: 0 errors, ${compiled.warnings} warnings`, verbose);
+  let timing: String = buildClockText(&started);
+  printStandardLibraryBuilt(compiled.warnings, &timing, &libraryPath);
   return 0;
+}
+
+/// Print the last lines of a successful `ignis build-std`.
+function printStandardLibraryBuilt(
+  warnings: u64,
+  timing: &String,
+  libraryPath: &Path::PathBuf
+): void {
+  printSuccess("Built standard library", " with ", warnings, timing);
+  Io::eprintln(`  Archive: ${libraryPath.asStr()}`);
 }
 
 /// What `ignis doc` documents: the project `start` belongs to, or `start` as
@@ -4232,22 +4561,27 @@ function convertDocClosures(
 ///
 /// Returns 0 when the library checks cleanly and 1 on any failure.
 function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): i32 {
-  Io::println(String::create("ignis selfhost check-std"));
+  let started: Option<Time::MonotonicInstant> = startBuildClock();
+  let verbose: boolean = options.verbose;
+  printStatus(String::create("ignis selfhost check-std"), verbose);
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
   let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(startPath);
-      reportDiscoveryFailure(&diagnostics, &startFile, false);
+      let tally: BuildTally = reportDiscoveryFailure(&diagnostics, &startFile, verbose);
+      printFailure("Check", tally.errors, tally.warnings);
       return 1;
     },
   };
 
-  Io::println(`  std: ${discovery.stdRoot.asStr()}`);
+  Io::eprintln(`Checking std (${discovery.stdRoot.asStr()})`);
+  printStatus(`  std: ${discovery.stdRoot.asStr()}`, verbose);
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
-  let compileOptions: CompileOptions = stdCompileOptions();
+  let mut compileOptions: CompileOptions = stdCompileOptions();
+  compileOptions.verbose = verbose;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.errors == 0 && compiled.source.length() == 0) {
@@ -4255,7 +4589,8 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   }
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
-    Io::println(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`);
+    printStatus(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`, verbose);
+    printFailure("Check", compiled.errors > 0 ? compiled.errors : 1, compiled.warnings);
     return 1;
   }
 
@@ -4266,16 +4601,20 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let sourcePath: Path::PathBuf = outputDir.join("ignis_std.c");
 
   if (!ensureParentDirectory(&sourcePath)) {
+    printFailure("Check", 1, compiled.warnings);
     return 1;
   }
 
-  if (let Result::ERROR(_) = Fs::writeString(&sourcePath, &compiled.source)) {
-    Io::eprintln(`error: could not write ${sourcePath.asStr()}`);
+  if (!writeArtifact(&sourcePath, &compiled.source)) {
+    printFailure("Check", 1, compiled.warnings);
     return 1;
   }
 
-  Io::println(`  emit: ${sourcePath.asStr()}`);
-  Io::println(`  summary: 0 errors, ${compiled.warnings} warnings`);
+  printStatus(`  emit: ${sourcePath.asStr()}`, verbose);
+  printStatus(`  summary: 0 errors, ${compiled.warnings} warnings`, verbose);
+  let timing: String = buildClockText(&started);
+  printSuccess("No errors found", ", ", compiled.warnings, &timing);
+  Io::eprintln(`  Source: ${sourcePath.asStr()}`);
   return 0;
 }
 

@@ -724,6 +724,26 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// The span a lint on a local binding points at: the binding pattern's own
+    /// span when the id names a `Pattern::Binding`, otherwise `recorded`, the
+    /// span logged when the binding was declared.
+    function bindingReportSpan(
+      module: &Ast::Module,
+      patternRaw: u32,
+      recorded: SourceSpan,
+    ): SourceSpan {
+      let patternId: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(patternRaw);
+      let Option::SOME(pattern) = module.patterns.get(patternId) else {
+        return recorded;
+      };
+
+      if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+        return binding.span;
+      }
+
+      return recorded;
+    }
+
     /// Whether a binding name opts out of the unused lints by starting with
     /// `_`, mirroring the oracle's `name.starts_with('_')`.
     function nameIsUnderscorePrefixed(name: &String): boolean {
@@ -770,16 +790,17 @@ export namespace Analyzer {
           continue;
         }
 
-        let Option::SOME(span) = localUses.spans.get(index) else {
+        let Option::SOME(recordedSpan) = localUses.spans.get(index) else {
           index += 1;
           continue;
         };
+        let span: SourceSpan = Analyzer::Lint::bindingReportSpan(module, *patternRaw, *recordedSpan);
 
         let message: String = `unused variable '${name.toStr()}'`;
         Analyzer::Lint::emitLint(
           diagnostics,
           severity,
-          *span,
+          span,
           DiagnosticCode::UNUSED_VARIABLE,
           message.toStr(),
           message.toStr(),
@@ -843,16 +864,17 @@ export namespace Analyzer {
           continue;
         }
 
-        let Option::SOME(span) = localUses.spans.get(index) else {
+        let Option::SOME(recordedSpan) = localUses.spans.get(index) else {
           index += 1;
           continue;
         };
+        let span: SourceSpan = Analyzer::Lint::bindingReportSpan(module, *patternRaw, *recordedSpan);
 
         let message: String = `variable '${name.toStr()}' does not need to be mutable`;
         Analyzer::Lint::emitLint(
           diagnostics,
           severity,
-          *span,
+          span,
           DiagnosticCode::UNUSED_MUT,
           message.toStr(),
           message.toStr(),

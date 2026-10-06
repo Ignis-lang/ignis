@@ -83,6 +83,7 @@ scripts/selfhost_drop_schedule_parity.py --check-coverage   # every ok fixture h
 
 # Compiling Ignis code
 ignis build                                    # Compile project (reads ignis.toml)
+ignis build -v                                 # Same, also printing every phase line on stderr
 ignis build path/to/file.ign -o out            # Compile single file
 ignis check                                    # Type-check only (no codegen or linking)
 ignis build-std                                # Build standard library archive
@@ -149,7 +150,7 @@ A language feature is safe to use in `ignis/` or `std/` only after compiler supp
 
 ## Compiler Pipeline
 
-The phase lines a build prints (`lex`, `parse`, `analyze`, `capture`, `mono`, `ownership`, `lower`, `lir`, `codegen`, `emit`, `link`) map to these steps, in execution order:
+By default a build or check prints a `Building <name> (<path>)` (or `Checking ...`) header, its diagnostics and one closing line (`✓ Compiled (1.2s)` and the binary path, or `✗ Build failed: N errors`). With `-v` / `--verbose` it also prints the phase lines (`lex`, `parse`, `analyze`, `capture`, `mono`, `ownership`, `lower`, `lir`, `codegen`, `emit`, `link`) on stderr. They map to these steps, in execution order:
 
 ```
 CLI (ignis/cli.ign)
@@ -299,7 +300,7 @@ Snapshot assertions (`std::test::Test::assertSnapshot`) write to the `__snapshot
 
 2. **Forgetting to offset a new `HirKind` variant's ids.** `offsetKind()` in `ignis/hir/node.ign` rewrites `HirId` fields when HIR stores are merged. A variant it does not handle keeps stale ids.
 
-3. **Type invariants after monomorphization.** Post-mono, no `Param` or `Instance` type may remain. The driver reports `countRemainingGenerics()` on the `mono:` line.
+3. **Type invariants after monomorphization.** Post-mono, no `Param` or `Instance` type may remain. The driver reports `countRemainingGenerics()` on the `mono:` line, which `-v` prints.
 
 4. **LIR verification failures.** `verifyProgram()` checks LIR well-formedness after lowering. New instructions have to satisfy it.
 

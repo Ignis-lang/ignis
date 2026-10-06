@@ -323,12 +323,17 @@ def last_lines(text: str, count: int) -> list[str]:
 DIAGNOSTIC_PATTERN = re.compile(r"^\s*(Error|error)\[[A-Z]?\d+\]:")
 C_ERROR_PATTERN = re.compile(r":\s*(error|fatal error):")
 PHASE_REPORT_PATTERN = re.compile(r"\(\d+ errors?, \d+ warnings?\)")
+# The compiler's closing `✓ Compiled ...` / `✗ Build failed: 2 errors` line
+# counts what the run reported and explains none of it.
+OUTCOME_LINE_PATTERN = re.compile(r"^[✓✗] ")
 
 
 def first_problem_line(output: str) -> str:
   """Pick the line that explains the failure, ignoring the phase report."""
   lines = [line.strip() for line in strip_ansi(output).splitlines() if line.strip()]
-  interesting = [line for line in lines if not PHASE_REPORT_PATTERN.search(line)]
+  interesting = [
+    line for line in lines if not PHASE_REPORT_PATTERN.search(line) and not OUTCOME_LINE_PATTERN.match(line)
+  ]
 
   # The C error is more specific than the `gcc compilation failed` wrapper the
   # driver reports around it, so it wins when both are present.
