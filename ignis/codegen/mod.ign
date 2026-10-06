@@ -3130,7 +3130,7 @@ export namespace CodegenC {
         outputRef.pushStr(call.toStr());
       },
       Lir::Instr::SizeOf(node) -> {
-        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
+        let target: String = CodegenC::sizeOfOperandText(defStore, typeStore, symbols, closures, node.ty);
         let line: String = `    t${node.dest.raw()} = sizeof(${target.toStr()});\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
@@ -4286,6 +4286,36 @@ export namespace CodegenC {
     }
 
     return Option::NONE;
+  }
+
+  /// The `sizeof` operand spelling for a queried type.
+  ///
+  /// `formatCType` decays a fixed array to its element pointer because every
+  /// other emitter use reads the array through that pointer, but `sizeof`
+  /// must report the whole array: the C type name carries each dimension,
+  /// outermost first.
+  function sizeOfOperandText(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    typeId: Analyzer::TypeId,
+  ): String {
+    let mut dimensions: String = String::create("");
+    let mut cursor: Analyzer::TypeId = typeId;
+
+    while (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, cursor)) {
+      dimensions.pushStr(`[${array.size}]`.toStr());
+      cursor = array.element;
+    }
+
+    if (dimensions.length() == 0) {
+      return CodegenC::formatCType(defStore, typeStore, symbols, closures, typeId);
+    }
+
+    let element: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, cursor);
+
+    return `${element.toStr()}${dimensions.toStr()}`;
   }
 
   /// The operator that takes a member's address into temp `dest`. A pointer

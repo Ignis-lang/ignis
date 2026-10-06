@@ -1474,3 +1474,39 @@ function r27CodegenI32NegateComputesInUnsignedBits(): void {
   Test::assert(codegenContains(&emission.source, "& 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648)"));
   Test::assert(!codegenContains(&emission.source, "= -t0;"));
 }
+
+/// `@sizeOf` of a fixed array reports the whole array, not the element
+/// pointer every other emitter use decays the array to.
+@test
+function sizeofFixedArrayCodegenEmitsWholeArrayNotElementPointer(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let words: u64 = @sizeOf<u64[4]>();\n  let bytes: u64 = @sizeOf<u8[3]>();\n\n  return (words + bytes) as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "= sizeof(u64[4]);"));
+  Test::assert(codegenContains(&emission.source, "= sizeof(u8[3]);"));
+  Test::assert(!codegenContains(&emission.source, "sizeof(u64*)"));
+  Test::assert(!codegenContains(&emission.source, "sizeof(u8*)"));
+}
+
+/// A nested fixed array spells every dimension on the C type name, in the
+/// order the type nests: an Ignis `u8[2][3]` is an array of 3 of `u8[2]`,
+/// which C names `u8[3][2]`.
+@test
+function sizeofFixedArrayCodegenSpellsNestedDimensionsOnTheCTypeName(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let grid: u64 = @sizeOf<u8[2][3]>();\n\n  return grid as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "= sizeof(u8[3][2]);"));
+}
+
+/// An array of records sizes the mangled record type name times the length.
+@test
+function sizeofFixedArrayCodegenSizesArrayOfRecordsByTheMangledStructName(): void {
+  let mut emission: CodegenEmission = codegenEmit("record Point {\n  x: i32;\n  y: i32;\n}\n\nfunction main(): i32 {\n  let points: u64 = @sizeOf<Point[2]>();\n\n  return points as i32;\n}\n");
+
+  let Option::SOME(structName) = codegenMangledStructName(&mut emission, "Point") else {
+    @panic("the emitted program declares no record named 'Point'");
+  };
+
+  let expected: String = `sizeof(struct ${structName.toStr()}[2]);`;
+
+  Test::assert(codegenContains(&emission.source, expected.toStr()));
+}
