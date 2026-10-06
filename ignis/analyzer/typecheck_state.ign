@@ -1765,6 +1765,204 @@ export namespace Analyzer {
       return true;
     }
 
+    /// Why a value of `typeId` cannot start with every byte zero, or `NONE`
+    /// when it can.
+    ///
+    /// Zero is a value for integers, floats, `boolean`, `char`, raw pointers
+    /// (null), and for fixed arrays, records and payload-free enums built from
+    /// such values: the first variant of an enum is tag 0. It is no value for
+    /// something that must hold one: a string, a reference, a function value,
+    /// a slice, a range, a tuple, a type parameter, anything that runs a drop
+    /// and an enum with a payload. The reason names the offending type, which
+    /// can be a field or an element of `typeId`.
+    function zeroInitFailure(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      typeId: Analyzer::TypeId,
+    ): Option<String> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      let mut reason: String = String::new();
+      let mut element: Option<Analyzer::TypeId> = Option::NONE;
+      let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut enumDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      match (type_) {
+        Analyzer::Type::I8
+        | Analyzer::Type::I16
+        | Analyzer::Type::I32
+        | Analyzer::Type::I64
+        | Analyzer::Type::U8
+        | Analyzer::Type::U16
+        | Analyzer::Type::U32
+        | Analyzer::Type::U64
+        | Analyzer::Type::F32
+        | Analyzer::Type::F64
+        | Analyzer::Type::BOOLEAN
+        | Analyzer::Type::CHAR -> {},
+        Analyzer::Type::Pointer(_) -> {},
+        Analyzer::Type::FixedArray(elementType, _) -> {
+          element = Option::SOME(elementType);
+        },
+        Analyzer::Type::Record(defId) -> {
+          recordDefId = Option::SOME(defId);
+        },
+        Analyzer::Type::Enum(defId) -> {
+          enumDefId = Option::SOME(defId);
+        },
+        Analyzer::Type::STR -> {
+          reason = String::create("a string cannot be null");
+        },
+        Analyzer::Type::Reference(_) -> {
+          reason = String::create("a reference cannot be null");
+        },
+        Analyzer::Type::Function(_) -> {
+          reason = String::create("a function value cannot be null");
+        },
+        Analyzer::Type::RawFunction(_) -> {
+          reason = String::create("a function value cannot be null");
+        },
+        Analyzer::Type::Param(_) -> {
+          reason = String::create("a generic type is not known until it is instantiated");
+        },
+        Analyzer::Type::Instance(_) -> {
+          reason = String::create("a generic type is not known until it is instantiated");
+        },
+        _ -> {
+          reason = String::create("it has no zero value");
+        },
+      };
+
+      if (let Option::SOME(elementType) = element) {
+        return Analyzer::Typecheck::zeroInitFailure(defStore, typeStore, symbols, elementType);
+      }
+
+      if (let Option::SOME(defId) = recordDefId) {
+        return Analyzer::Typecheck::recordZeroInitFailure(defStore, typeStore, symbols, resolved.typeId, defId);
+      }
+
+      if (let Option::SOME(defId) = enumDefId) {
+        return Analyzer::Typecheck::enumZeroInitFailure(defStore, typeStore, symbols, resolved.typeId, defId);
+      }
+
+      if (reason.length() == 0) {
+        return Option::NONE;
+      }
+
+      let name: String = typeStore.nameOfResolved(resolved.typeId, &*defStore, &*symbols);
+      let message: String = `'${name.toStr()}' cannot be zero-initialized: ${reason.toStr()}`;
+
+      return Option::SOME(message);
+    }
+
+    /// `zeroInitFailure` for a record: it must not run a drop, and every
+    /// instance field must itself start at zero.
+    function recordZeroInitFailure(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      typeId: Analyzer::TypeId,
+      defId: Analyzer::DefinitionId,
+    ): Option<String> {
+      let mut implementsDrop: boolean = false;
+      let mut fieldDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
+        implementsDrop = recordDef.implementsDrop;
+        fieldDefIds = Analyzer::Resolver::copyDefinitionIdVector(&recordDef.fields);
+      }
+
+      if (implementsDrop) {
+        let name: String = typeStore.nameOfResolved(typeId, &*defStore, &*symbols);
+        let message: String = `'${name.toStr()}' cannot be zero-initialized: it runs a drop`;
+
+        return Option::SOME(message);
+      }
+
+      let mut fieldIndex: u64 = 0;
+
+      while (fieldIndex < fieldDefIds.length()) {
+        let Option::SOME(fieldDefId) = fieldDefIds.get(fieldIndex) else {
+          fieldIndex += 1;
+          continue;
+        };
+
+        fieldIndex += 1;
+
+        let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldDefId) else {
+          continue;
+        };
+
+        let fieldType: Analyzer::TypeId = fieldDef.fieldType;
+
+        if (let Option::SOME(failure) = Analyzer::Typecheck::zeroInitFailure(defStore, typeStore, symbols, fieldType)) {
+          return Option::SOME(failure);
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    /// `zeroInitFailure` for an enum: it must not run a drop, carry a payload
+    /// or be empty, so that tag 0 names a variant that holds nothing.
+    function enumZeroInitFailure(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      typeId: Analyzer::TypeId,
+      defId: Analyzer::DefinitionId,
+    ): Option<String> {
+      let mut reason: String = String::new();
+      let mut variantDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(defId)) {
+        variantDefIds = Analyzer::Resolver::copyDefinitionIdVector(&enumDef.variants);
+
+        if (enumDef.implementsDrop) {
+          reason = String::create("it runs a drop");
+        }
+      }
+
+      if (variantDefIds.length() == 0) {
+        reason = String::create("it has no variant");
+      }
+
+      let mut variantIndex: u64 = 0;
+
+      while (variantIndex < variantDefIds.length()) {
+        let Option::SOME(variantDefId) = variantDefIds.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        variantIndex += 1;
+
+        if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantDefId)) {
+          if (variantDef.payload.length() > 0) {
+            reason = String::create("an enum with a payload has no zero value");
+          }
+        }
+      }
+
+      if (reason.length() == 0) {
+        return Option::NONE;
+      }
+
+      let name: String = typeStore.nameOfResolved(typeId, &*defStore, &*symbols);
+      let message: String = `'${name.toStr()}' cannot be zero-initialized: ${reason.toStr()}`;
+
+      return Option::SOME(message);
+    }
+
     function requireBooleanType(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,

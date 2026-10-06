@@ -32,6 +32,8 @@ import Vector from "std::vector";
 /// has to seed, so its initializer must fold: a scalar to a `ConstValue`, and an
 /// array or record literal of constants to a flattened `ConstPart` sequence.
 /// One that does not fold is A0230, the only diagnostic this phase reports.
+/// One written without an initializer starts zeroed and folds to a single
+/// `Zero` part.
 /// An immutable static field and a module constant fold the same way when they
 /// can, so taking their address names a read-only global seeded with that
 /// value; one that does not fold is left to its uses.
@@ -63,13 +65,15 @@ export namespace Analyzer {
 
     /// One step of a folded array or record initializer, in source nesting
     /// order. `Open` and `Close` bracket one array or record, `Field` names the
-    /// record field (owner and index) the next step initializes, and `Value`
-    /// is a scalar leaf with the type of the storage it initializes.
+    /// record field (owner and index) the next step initializes, `Value` is a
+    /// scalar leaf with the type of the storage it initializes, and `Zero` is
+    /// storage of the given type whose every byte is zero.
     enum ConstPart {
       Open,
       Close,
       Field(Analyzer::DefinitionId, u32),
       Value(Analyzer::ConstEval::ConstValue, Analyzer::TypeId),
+      Zero(Analyzer::TypeId),
     }
 
     /// Side map from a constant's raw `DefinitionId` to its evaluated value.
@@ -155,6 +159,7 @@ export namespace Analyzer {
         Analyzer::ConstEval::ConstPart::Close -> Analyzer::ConstEval::ConstPart::Close,
         Analyzer::ConstEval::ConstPart::Field(owner, index) -> Analyzer::ConstEval::ConstPart::Field(owner, index),
         Analyzer::ConstEval::ConstPart::Value(value, ty) -> Analyzer::ConstEval::ConstPart::Value(Analyzer::ConstEval::copyConstValue(&value), ty),
+        Analyzer::ConstEval::ConstPart::Zero(ty) -> Analyzer::ConstEval::ConstPart::Zero(ty),
       };
     }
 
@@ -1074,6 +1079,12 @@ export namespace Analyzer {
         }
 
         let Option::SOME(initializer) = initializerOpt else {
+          if (isMutable) {
+            let mut zeroParts: Vector<Analyzer::ConstEval::ConstPart> = Vector::new<Analyzer::ConstEval::ConstPart>();
+            zeroParts.push(Analyzer::ConstEval::ConstPart::Zero(declaredType));
+            Analyzer::ConstEval::insertConstAggregate(values, fieldDefId.raw(), zeroParts);
+          }
+
           continue;
         };
 

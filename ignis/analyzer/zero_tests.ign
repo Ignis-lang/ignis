@@ -1,0 +1,144 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
+
+/// Parses `source` and runs the analyzer over it, asserting the parser stayed
+/// silent so every diagnostic a test sees comes from analysis.
+function zeroAnalyze(source: str): DiagnosticBag {
+  let file: SourceFile = SourceFile::create("zero_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  return output.diagnostics;
+}
+
+function zeroCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function zeroFirstErrorCode(bag: &DiagnosticBag): String {
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      return String::create(diagnostic.code);
+    }
+
+    index += 1;
+  }
+
+  return String::create("");
+}
+
+function zeroAssertAccepted(source: str): void {
+  let diagnostics: DiagnosticBag = zeroAnalyze(source);
+  Test::assertEq<u64>(zeroCountErrors(&diagnostics), 0);
+}
+
+function zeroAssertRejected(source: str, code: str): void {
+  let diagnostics: DiagnosticBag = zeroAnalyze(source);
+  Test::assertEq<u64>(zeroCountErrors(&diagnostics), 1);
+  Test::assertEq<str>(zeroFirstErrorCode(&diagnostics).toStr(), code);
+}
+
+@test
+function zeroStaticMutWithoutInitializerAcceptsScalars(): void {
+  zeroAssertAccepted(
+    "record Zeroed {\n  static mut A: i32;\n  static mut B: u8;\n  static mut C: u64;\n  static mut D: f32;\n  static mut E: f64;\n  static mut F: boolean;\n  static mut G: char;\n  static mut H: *mut u8;\n  static mut I: *i32;\n}\n\nfunction main(): i32 {\n  return Zeroed::A + (Zeroed::B as i32);\n}\n",
+  );
+}
+
+@test
+function zeroStaticMutWithoutInitializerAcceptsArraysRecordsAndPlainEnums(): void {
+  zeroAssertAccepted(
+    "@cLayout\nrecord Point {\n  public x: i32;\n  public y: i32;\n}\n\n@cLayout\nrecord Entry {\n  public offset: u16;\n  public gate: u8[8];\n  public origin: Point;\n}\n\nenum Level {\n  LOW,\n  HIGH,\n}\n\nrecord Zeroed {\n  static mut TABLE: Entry[256];\n  static mut ORIGIN: Point;\n  static mut LEVEL: Level;\n}\n\nfunction main(): i32 {\n  return Zeroed::ORIGIN.x;\n}\n",
+  );
+}
+
+@test
+function zeroStaticMutKeepsItsInitializerWhenItHasOne(): void {
+  zeroAssertAccepted("record Zeroed {\n  static mut A: i32 = 5;\n  static mut B: u8[2] = [1, 2];\n}\n\nfunction main(): i32 {\n  return Zeroed::A;\n}\n");
+}
+
+@test
+function zeroStaticMutWithoutInitializerRejectsStrings(): void {
+  zeroAssertRejected("record Zeroed {\n  static mut NAME: str;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", "A0239");
+}
+
+@test
+function zeroStaticMutWithoutInitializerRejectsReferences(): void {
+  zeroAssertRejected("record Zeroed {\n  static mut LINK: &i32;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", "A0239");
+}
+
+@test
+function zeroStaticMutWithoutInitializerRejectsValuesThatDrop(): void {
+  zeroAssertRejected(
+    "@implements(Drop)\nrecord Handle {\n  public id: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nrecord Zeroed {\n  static mut HANDLE: Handle;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n",
+    "A0239",
+  );
+}
+
+@test
+function zeroStaticMutWithoutInitializerRejectsArraysOfValuesThatDrop(): void {
+  zeroAssertRejected(
+    "@implements(Drop)\nrecord Handle {\n  public id: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nrecord Zeroed {\n  static mut HANDLES: Handle[2];\n}\n\nfunction main(): i32 {\n  return 0;\n}\n",
+    "A0239",
+  );
+}
+
+@test
+function zeroStaticMutWithoutInitializerRejectsRecordsWithANonZeroableField(): void {
+  zeroAssertRejected(
+    "record Named {\n  public id: i32;\n  public name: str;\n}\n\nrecord Zeroed {\n  static mut ENTRY: Named;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n",
+    "A0239",
+  );
+}
+
+@test
+function zeroStaticMutWithoutInitializerRejectsEnumsWithPayloads(): void {
+  zeroAssertRejected(
+    "enum Shape {\n  CIRCLE(i32),\n  EMPTY,\n}\n\nrecord Zeroed {\n  static mut SHAPE: Shape;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n",
+    "A0239",
+  );
+}
+
+@test
+function zeroStaticMutWithoutInitializerRejectsRanges(): void {
+  zeroAssertRejected("record Zeroed {\n  static mut SPAN: Range<i32>;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", "A0239");
+}

@@ -644,6 +644,35 @@ function codegenEmitsAddressedImmutableStaticsAsReadOnlyGlobals(): void {
   Test::assert(!emission.source.contains(&seed));
 }
 
+/// A `static mut` field without an initializer is a C global with none, so the
+/// linker places it in `.bss` and nothing in the unit spells its zero bytes.
+@test
+function codegenEmitsZeroInitializedStaticsWithoutAnInitializer(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Point {\n  public x: i32;\n  public y: i32;\n}\n\nrecord Zeroed {\n  static mut COUNT: u32;\n  static mut TABLE: u8[4096];\n  static mut ORIGIN: Point;\n  static mut CURSOR: *mut u8;\n}\n\nfunction main(): i32 {\n  Zeroed::TABLE[1] = 2;\n  Zeroed::ORIGIN.x = 3;\n  Zeroed::CURSOR = null;\n\n  return (Zeroed::COUNT + Zeroed::TABLE[1] as u32) as i32 + Zeroed::ORIGIN.y;\n}\n",
+  );
+
+  let count: String = codegenStaticName(&mut emission, "COUNT");
+  let table: String = codegenStaticName(&mut emission, "TABLE");
+  let origin: String = codegenStaticName(&mut emission, "ORIGIN");
+  let cursor: String = codegenStaticName(&mut emission, "CURSOR");
+
+  let countGlobal: String = `static u32 ${count.toStr()};\n`;
+  let tableGlobal: String = `static u8 ${table.toStr()}[4096];\n`;
+  let originGlobal: String = ` ${origin.toStr()};\n`;
+  let cursorGlobal: String = `static u8* ${cursor.toStr()};\n`;
+
+  Test::assert(emission.source.contains(&countGlobal));
+  Test::assert(emission.source.contains(&tableGlobal));
+  Test::assert(emission.source.contains(&originGlobal));
+  Test::assert(emission.source.contains(&cursorGlobal));
+  let countSeeded: String = `${count.toStr()} =`;
+  let tableSeeded: String = `${table.toStr()}[4096] =`;
+
+  Test::assert(!emission.source.contains(&countSeeded));
+  Test::assert(!emission.source.contains(&tableSeeded));
+}
+
 /// A volatile access to a pointer-typed slot qualifies the slot, not the
 /// pointee: `volatile i32**` would make the load of the pointer itself plain.
 @test
