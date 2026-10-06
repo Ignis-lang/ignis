@@ -5222,7 +5222,7 @@ export namespace Analyzer {
           return Option::SOME(tryType);
         },
         Ast::Expression::Node::Range(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "range expressions");
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "a range outside a `for..of` iterable");
           return Option::NONE;
         },
         Ast::Expression::Node::Asm(value) -> {
@@ -9749,6 +9749,165 @@ export namespace Analyzer {
       return Option::SOME(resolved.typeId);
     }
 
+    /// The `Range` node an expression is, looking through parentheses, so
+    /// `for (i of (0..4))` reads like `for (i of 0..4)`.
+    function rangeExpressionId(
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): Option<Ast::ExpressionId> {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      return match (expression) {
+        Ast::Expression::Node::Range(_) -> Option::SOME(exprId),
+        Ast::Expression::Node::Grouped(grouped) -> Analyzer::Typecheck::rangeExpressionId(module, grouped.expression),
+        _ -> Option::NONE,
+      };
+    }
+
+    /// Types the two bounds of a range and returns the integer type they
+    /// share, which is the type of every value the range yields.
+    ///
+    /// An expected element type decides what an unsuffixed literal bound is.
+    /// Without one the start is typed alone and the end then expects the
+    /// start's type, as the right operand of a binary operator does, and a
+    /// literal start adopts the end's type when only the end names one.
+    function checkRangeBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      range: &Ast::Expression::Range,
+      expectedElement: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(startId) = range.start else {
+        return Option::NONE;
+      };
+      let Option::SOME(endId) = range.end else {
+        return Option::NONE;
+      };
+
+      let startTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        startId,
+        expectedElement,
+      );
+
+      let mut endExpected: Option<Analyzer::TypeId> = expectedElement;
+
+      if (endExpected.isNone()) {
+        if (let Option::SOME(startType) = startTypeOpt) {
+          if (Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, startType)) {
+            endExpected = Option::SOME(startType);
+          }
+        }
+      }
+
+      let endTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        endId,
+        endExpected,
+      );
+
+      let Option::SOME(initialStartType) = startTypeOpt else {
+        return Option::NONE;
+      };
+      let Option::SOME(endType) = endTypeOpt else {
+        return Option::NONE;
+      };
+
+      let mut startType: Analyzer::TypeId = initialStartType;
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, range.span, startType, endType)) {
+        if (Analyzer::Typecheck::coerceIntegerLiteralTo(state, defStore, typeStore, module, startId, endType)) {
+          startType = endType;
+        }
+      }
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, range.span, startType, endType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, range.span, startType, endType);
+        return Option::NONE;
+      }
+
+      if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, range.span, startType)) {
+        Analyzer::Typecheck::emitRangeBoundNotInteger(state, defStore, typeStore, symbols, range.span, startType);
+        return Option::NONE;
+      }
+
+      return Option::SOME(startType);
+    }
+
+    /// The element type of a `for..of` over a range, or `NONE` when the
+    /// range or its binding is rejected. An annotated by-value binding is the
+    /// expected type of the bounds, so `for (i: u8 of 0..=255)` types its
+    /// literals as `u8`. A reference binding is reported here, since a range
+    /// has no storage to point into.
+    function forOfRangeElementType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      forOfStmt: &Ast::Statement::ForOf,
+      rangeExprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(Ast::Expression::Node::Range(range)) = module.expressions.get(rangeExprId) else {
+        return Option::NONE;
+      };
+
+      let mut expectedElement: Option<Analyzer::TypeId> = Option::NONE;
+      let mut byReference: boolean = false;
+
+      if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(forOfStmt.pattern)) {
+        if (let Option::SOME(annotationId) = binding.annotation) {
+          if (let Option::SOME(Ast::Type::Node::Reference(_)) = module.types.get(annotationId)) {
+            byReference = true;
+            Analyzer::Typecheck::emitRangeForOfByReference(state, binding.span);
+          } else {
+            expectedElement = Analyzer::Typecheck::resolveLocalAnnotation(
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              annotationId,
+              Option::SOME(state.currentFunction),
+            );
+          }
+        }
+      }
+
+      let elementTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkRangeBounds(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        &range,
+        expectedElement,
+      );
+
+      if (byReference) {
+        return Option::NONE;
+      }
+
+      return elementTypeOpt;
+    }
+
     /// Extract the element type a `for..of` iterable yields, or emit
     /// `FOR_OF_EXPECTS_VECTOR`. Slices and fixed arrays yield their element;
     /// records qualify through the iterable-record protocol.
@@ -9913,24 +10072,29 @@ export namespace Analyzer {
     ): void {
       Analyzer::Typecheck::pushScope(state);
 
-      let iterableTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
-        state,
-        defStore,
-        typeStore,
-        symbols,
-        module,
-        resolvedBodies,
-        forOfStmt.iterable,
-      );
-
-      let iterableSpan: SourceSpan = match (module.expressions.get(forOfStmt.iterable)) {
-        Option::SOME(node) -> Ast::Serializer::expressionSpan(node),
-        Option::NONE -> forOfStmt.span,
-      };
-
       let mut elementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
-      if (let Option::SOME(iterableType) = iterableTypeOpt) {
-        elementTypeOpt = Analyzer::Typecheck::forOfElementType(state, defStore, typeStore, symbols, iterableSpan, iterableType);
+
+      if (let Option::SOME(rangeExprId) = Analyzer::Typecheck::rangeExpressionId(module, forOfStmt.iterable)) {
+        elementTypeOpt = Analyzer::Typecheck::forOfRangeElementType(state, defStore, typeStore, symbols, module, resolvedBodies, forOfStmt, rangeExprId);
+      } else {
+        let iterableTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          forOfStmt.iterable,
+        );
+
+        let iterableSpan: SourceSpan = match (module.expressions.get(forOfStmt.iterable)) {
+          Option::SOME(node) -> Ast::Serializer::expressionSpan(node),
+          Option::NONE -> forOfStmt.span,
+        };
+
+        if (let Option::SOME(iterableType) = iterableTypeOpt) {
+          elementTypeOpt = Analyzer::Typecheck::forOfElementType(state, defStore, typeStore, symbols, iterableSpan, iterableType);
+        }
       }
 
       if (let Option::SOME(elementType) = elementTypeOpt) {

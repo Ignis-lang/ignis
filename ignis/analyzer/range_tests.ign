@@ -1,0 +1,148 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
+
+/// Parses `source` and runs the analyzer over it, asserting the parser stayed
+/// silent so every diagnostic a test sees comes from analysis.
+function rangeAnalyze(source: str): DiagnosticBag {
+  let file: SourceFile = SourceFile::create("range_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  return output.diagnostics;
+}
+
+function rangeCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function rangeFirstErrorCode(bag: &DiagnosticBag): String {
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      return String::create(diagnostic.code);
+    }
+
+    index += 1;
+  }
+
+  return String::create("");
+}
+
+function rangeAssertAccepted(source: str): void {
+  let diagnostics: DiagnosticBag = rangeAnalyze(source);
+  Test::assertEq<u64>(rangeCountErrors(&diagnostics), 0);
+}
+
+function rangeAssertRejected(source: str, code: str): void {
+  let diagnostics: DiagnosticBag = rangeAnalyze(source);
+  Test::assertEq<u64>(rangeCountErrors(&diagnostics), 1);
+  Test::assertEq<str>(rangeFirstErrorCode(&diagnostics).toStr(), code);
+}
+
+@test
+function rangeForOfOverLiteralBoundsTypechecks(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index of 0..10) {\n    let copy: i32 = index;\n  }\n}\n");
+}
+
+@test
+function rangeForOfInclusiveOverLiteralBoundsTypechecks(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index of 0..=10) {\n    let copy: i32 = index;\n  }\n}\n");
+}
+
+@test
+function rangeForOfBindingAnnotationDecidesTheLiteralType(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index: u8 of 0..=255) {\n    let copy: u8 = index;\n  }\n}\n");
+}
+
+@test
+function rangeLiteralStartAdoptsTheTypeOfTheOtherBound(): void {
+  rangeAssertAccepted("function main(limit: u64): void {\n  for (let index of 0..limit) {\n    let copy: u64 = index;\n  }\n}\n");
+}
+
+@test
+function rangeLiteralEndAdoptsTheTypeOfTheOtherBound(): void {
+  rangeAssertAccepted("function main(first: u16): void {\n  for (let index of first..10) {\n    let copy: u16 = index;\n  }\n}\n");
+}
+
+@test
+function rangeParenthesizedRangeIsAnIterable(): void {
+  rangeAssertAccepted("function main(): void {\n  for (let index of (0..4)) {\n    let copy: i32 = index;\n  }\n}\n");
+}
+
+@test
+function rangeBoundsOfDifferentTypesAreRejected(): void {
+  rangeAssertRejected("function main(first: u8, last: u32): void {\n  for (let index of first..last) {}\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function rangeBoundsMustBeIntegers(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index of 0.5..2.5) {}\n}\n", "A0231");
+}
+
+@test
+function rangeBooleanBoundsAreRejected(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index of false..true) {}\n}\n", "A0231");
+}
+
+@test
+function rangeLiteralBoundOutsideTheBindingTypeOverflows(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index: u8 of 0..300) {}\n}\n", DiagnosticCode::INTEGER_OVERFLOW);
+}
+
+@test
+function rangeBindingAnnotationMustMatchTheBoundType(): void {
+  rangeAssertRejected("function main(limit: u64): void {\n  for (let index: u8 of 0..limit) {}\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function rangeForOfCannotBindByReference(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index: &i32 of 0..4) {}\n}\n", "A0232");
+}
+
+@test
+function rangeForOfCannotBindByMutableReference(): void {
+  rangeAssertRejected("function main(): void {\n  for (let index: &mut i32 of 0..4) {}\n}\n", "A0232");
+}
+
+@test
+function rangeOutsideAForOfIsNotYetAValue(): void {
+  rangeAssertRejected("function main(): void {\n  let span = 0..4;\n}\n", DiagnosticCode::UNSUPPORTED_CONSTRUCT);
+}
