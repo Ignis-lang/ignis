@@ -31,10 +31,17 @@ import Vector from "std::vector";
 /// A `static mut` field is the one static field with storage the emitter always
 /// has to seed, so its initializer must fold: a scalar to a `ConstValue`, and an
 /// array or record literal of constants to a flattened `ConstPart` sequence.
-/// One that does not fold is A0230, the only diagnostic this phase reports.
+/// One that does not fold is A0230.
 /// An immutable static field and a module constant fold the same way when they
 /// can, so taking their address names a read-only global seeded with that
-/// value; one that does not fold is left to its uses.
+/// value. One that does not fold has no storage: its reads lower the
+/// initializer at each use, so taking its address would hand out a pointer
+/// into the current frame. That is A0239. The single-module path reports it
+/// here: after the fold walk, the module's expression arena is scanned once
+/// for references to such a definition. The program path defers the scan to
+/// analyzeProgram, which runs it per module against the union of every
+/// module's storage ids and the const maps merged in dependency order, so an
+/// imported definition is judged by its defining module's fold verdict.
 ///
 /// Scoped out relative to the Rust oracle:
 ///   - function-body and local-statement walking (selfhost constants are
@@ -98,6 +105,11 @@ export namespace Analyzer {
     record ConstEvalOutput {
       public diagnostics: DiagnosticBag;
       public values: Analyzer::ConstEval::ConstValueMap;
+      /// Raw definition ids of every immutable static field and constant this
+      /// module collects, folded or not. The program path unions them across
+      /// modules so an imported definition is checked against its defining
+      /// module's fold verdict.
+      public storageDefIds: Vector<u32>;
     }
 
     function copyConstValue(
@@ -999,8 +1011,10 @@ export namespace Analyzer {
     /// A `static mut` field always has storage of its own, so the emitter needs
     /// the constant that storage starts at and an initializer that does not fold
     /// is A0230. An immutable static field gets storage only when its address is
-    /// taken; one whose initializer does not fold is skipped without a
-    /// diagnostic and keeps lowering that expression at each use.
+    /// taken; one whose initializer does not fold is left without storage and
+    /// keeps lowering that expression at each use, which is correct for a
+    /// by-value read — the address check after the fold walk reports A0239
+    /// where a reference takes its address.
     ///
     /// `fieldPatternIds` is walked with the binder's own static-field filter, so
     /// the k-th static field it accepts is the k-th id the binder pushed into
@@ -1019,6 +1033,7 @@ export namespace Analyzer {
       ownerItemId: Ast::ItemId,
       fieldPatternIds: &Vector<Ast::PatternId>,
       enumMembers: boolean,
+      storageDefIds: &mut Vector<u32>,
     ): void {
       let Option::SOME(ownerDefId) = Analyzer::ConstEval::constantItemDef(pass1, pass2, ownerItemId) else {
         return;
@@ -1063,6 +1078,10 @@ export namespace Analyzer {
         if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(fieldDefId)) {
           isMutable = variableDef.mutable;
           declaredType = variableDef.declaredType;
+        }
+
+        if (!isMutable) {
+          Analyzer::ConstEval::appendUniqueRaw(storageDefIds, fieldDefId.raw());
         }
 
         let mut initializerOpt: Option<Ast::ExpressionId> = Option::NONE;
@@ -1412,6 +1431,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       itemId: Ast::ItemId,
+      storageDefIds: &mut Vector<u32>,
     ): void {
       let Option::SOME(item) = module.items.get(itemId) else {
         return;
@@ -1422,6 +1442,8 @@ export namespace Analyzer {
           let Option::SOME(defId) = Analyzer::ConstEval::constantItemDef(pass1, pass2, itemId) else {
             return;
           };
+
+          Analyzer::ConstEval::appendUniqueRaw(storageDefIds, defId.raw());
 
           let valueOpt: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
             values,
@@ -1465,6 +1487,7 @@ export namespace Analyzer {
             itemId,
             &recordItem.fields,
             false,
+            storageDefIds,
           );
         },
         Ast::Item::Node::Enum(enumItem) -> {
@@ -1482,6 +1505,7 @@ export namespace Analyzer {
             itemId,
             &enumItem.variants,
             true,
+            storageDefIds,
           );
         },
         Ast::Item::Node::Namespace(namespaceItem) -> {
@@ -1497,6 +1521,7 @@ export namespace Analyzer {
             resolvedBodies,
             typecheck,
             &namespaceItem.items,
+            storageDefIds,
           );
         },
         Ast::Item::Node::Export(exportItem) -> {
@@ -1513,6 +1538,7 @@ export namespace Analyzer {
               resolvedBodies,
               typecheck,
               innerItemId,
+              storageDefIds,
             );
           }
         },
@@ -1532,6 +1558,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       itemIds: &Vector<Ast::ItemId>,
+      storageDefIds: &mut Vector<u32>,
     ): void {
       let mut index: u64 = 0;
 
@@ -1553,7 +1580,302 @@ export namespace Analyzer {
           resolvedBodies,
           typecheck,
           *itemId,
+          storageDefIds,
         );
+
+        index += 1;
+      }
+    }
+
+    // =========================================================================
+    // Addresses of immutable storage with a nonconstant initializer
+    // =========================================================================
+
+    function appendUniqueRaw(raws: &mut Vector<u32>, raw: u32): void {
+      if (Analyzer::ConstEval::containsRaw(&*raws, raw)) {
+        return;
+      }
+
+      raws.push(raw);
+    }
+
+    function containsRaw(raws: &Vector<u32>, raw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < raws.length()) {
+        if (let Option::SOME(candidate) = raws.get(index)) {
+          if (*candidate == raw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether `defId` names immutable static-field or constant storage whose
+    /// initializer did not fold, so its address has no global to name. A
+    /// reference to it lowers the initializer at the use site, and taking the
+    /// address would point into that use's frame. Locals never reach here:
+    /// their ids are never collected into `storageDefIds`.
+    function isUnaddressableStorageUse(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      storageDefIds: &Vector<u32>,
+      defId: Analyzer::DefinitionId,
+    ): boolean {
+      if (!Analyzer::ConstEval::containsRaw(storageDefIds, defId.raw())) {
+        return false;
+      }
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
+        if (variable.mutable || variable.isExtern) {
+          return false;
+        }
+      }
+
+      if (Analyzer::ConstEval::findConstValue(values, defId.raw()).isSome()) {
+        return false;
+      }
+
+      return Analyzer::ConstEval::findConstAggregate(&*values, defId.raw()).isNone();
+    }
+
+    /// A0239 at the reference expression naming `writtenName`.
+    function reportNonConstantStorageAddress(
+      diagnostics: &mut DiagnosticBag,
+      span: SourceSpan,
+      writtenName: &String,
+    ): void {
+      let message: String = `cannot take the address of '${writtenName.toStr()}': its initializer is not a constant expression`;
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::STATIC_ADDRESS_NON_CONSTANT_INITIALIZER, message.toStr(), span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, "an immutable static or constant with a nonconstant initializer is rebuilt at each use, so this address would point into a stack copy");
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
+    }
+
+    /// The written text of the expression a reference targets: a bare name or
+    /// a `::` path as written. NONE for anything else.
+    function writtenNameOfExpression(
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): Option<String> {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      match (expression) {
+        Ast::Expression::Node::Variable(variable) -> {
+          return Option::SOME(variable.name.clone());
+        },
+        Ast::Expression::Node::Path(path) -> {
+          let mut joined: String = String::new();
+          let mut index: u64 = 0;
+
+          while (index < path.segments.length()) {
+            if (let Option::SOME(segment) = path.segments.get(index)) {
+              if (joined.length() > 0) {
+                joined = `${joined.toStr()}::${segment.toStr()}`;
+              } else {
+                joined = segment.clone();
+              }
+            }
+
+            index += 1;
+          }
+
+          return Option::SOME(joined);
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    /// The checked type of `exprId`, or NONE when the typechecker recorded
+    /// none. A local walk over the parallel `ExprTypeMap` vectors: importing
+    /// the lowering module's identical lookup would close a module cycle.
+    function lookupCheckedExprType(
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
+          continue;
+        };
+
+        if (*nodeId != exprId.raw()) {
+          continue;
+        }
+
+        let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index) else {
+          return Option::NONE;
+        };
+
+        return Option::SOME(*typeId);
+      }
+
+      return Option::NONE;
+    }
+
+    /// Whether the checked type of `exprId` is a pointer or a slice. Indexing
+    /// or field access through such a value addresses the pointee, not the
+    /// storage the base name holds, so a descent into a place stops there.
+    function placeBaseIsReferenceLike(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(typeId) = Analyzer::ConstEval::lookupCheckedExprType(typecheck, exprId) else {
+        return false;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::Pointer(_) -> true,
+        Analyzer::Type::Slice(_) -> true,
+        _ -> false,
+      };
+    }
+
+    /// The expression whose resolved definition the target of a reference
+    /// names: place wrappers — grouping, field access, indexing — unwrap down
+    /// to the base, so `&S.value` and `&S.rows[1]` check the storage `S`
+    /// names. A descent stops at a pointer or slice base, where the wrapper
+    /// addresses the pointee rather than the base's own storage; NONE there
+    /// leaves the target unchecked. The typechecker already rejects a grouped
+    /// place as a reference target (A0029), so the grouped arm is defensive.
+    function addressBaseExpression(
+      module: &Ast::Module,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): Option<Ast::ExpressionId> {
+      let mut current: Ast::ExpressionId = exprId;
+      let mut steps: u64 = 0;
+
+      while (steps < module.expressions.length()) {
+        steps += 1;
+
+        let Option::SOME(expression) = module.expressions.get(current) else {
+          return Option::NONE;
+        };
+
+        match (expression) {
+          Ast::Expression::Node::Grouped(grouped) -> {
+            current = grouped.expression;
+          },
+          Ast::Expression::Node::MemberAccess(access) -> {
+            if (Analyzer::ConstEval::placeBaseIsReferenceLike(defStore, typeStore, typecheck, access.object)) {
+              return Option::NONE;
+            }
+
+            current = access.object;
+          },
+          Ast::Expression::Node::VectorAccess(access) -> {
+            if (Analyzer::ConstEval::placeBaseIsReferenceLike(defStore, typeStore, typecheck, access.vector)) {
+              return Option::NONE;
+            }
+
+            current = access.vector;
+          },
+          _ -> {
+            return Option::SOME(current);
+          },
+        };
+      }
+
+      return Option::NONE;
+    }
+
+    /// Checks one `&target`: a shared reference to an immutable static field
+    /// or constant whose initializer did not fold is A0239, judged at the
+    /// base the place unwraps to. `&mut` on the same target is the
+    /// typechecker's immutable-place error, not this one.
+    function checkReferenceTarget(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      storageDefIds: &Vector<u32>,
+      reference: &Ast::Expression::Reference,
+    ): void {
+      if (reference.mutable) {
+        return;
+      }
+
+      let Option::SOME(baseId) = Analyzer::ConstEval::addressBaseExpression(module, defStore, typeStore, typecheck, reference.target) else {
+        return;
+      };
+
+      let Option::SOME(resolvedRef) = Analyzer::ResolverBodies::findExprRef(&resolvedBodies.bodyResolution, baseId.raw()) else {
+        return;
+      };
+
+      let Analyzer::ResolverBodies::ResolvedRef::Definition(defId) = resolvedRef else {
+        return;
+      };
+
+      if (!Analyzer::ConstEval::isUnaddressableStorageUse(values, defStore, storageDefIds, defId)) {
+        return;
+      }
+
+      if (let Option::SOME(writtenName) = Analyzer::ConstEval::writtenNameOfExpression(module, baseId)) {
+        Analyzer::ConstEval::reportNonConstantStorageAddress(diagnostics, reference.span, &writtenName);
+      }
+    }
+
+    /// Scans the module's expression arena for shared references to an
+    /// immutable static field or constant whose initializer did not fold:
+    /// A0239, one per reference, in arena order. The arena holds every
+    /// expression of the module — function, method and closure bodies plus
+    /// initializer expressions included — so nothing has to be reached by a
+    /// traversal from the roots. References that body resolution did not
+    /// record are skipped. Runs after the value walk, so the fold verdicts
+    /// are final.
+    ///
+    /// The unit path scans against the module's own ids and values. The
+    /// program path (analyzeProgram) calls this after every module has
+    /// contributed to the union storage ids and the merged const maps, so an
+    /// imported definition is judged by its defining module's fold verdict:
+    /// cross-module constants that fold stay accepted, dynamic ones are
+    /// rejected.
+    function checkStorageAddresses(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      storageDefIds: &Vector<u32>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < module.expressions.length()) {
+        let exprId: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(index as u32);
+
+        if (let Option::SOME(Ast::Expression::Node::Reference(reference)) = module.expressions.get(exprId)) {
+          Analyzer::ConstEval::checkReferenceTarget(values, diagnostics, defStore, typeStore, module, resolvedBodies, typecheck, storageDefIds, &reference);
+        }
 
         index += 1;
       }
@@ -1561,7 +1883,9 @@ export namespace Analyzer {
 
     /// Const-eval phase entry point. Walks the module's root items in
     /// declaration order; that ordering is the cycle protection, because a
-    /// reference to a not-yet-evaluated constant is simply not const.
+    /// reference to a not-yet-evaluated constant is simply not const. The
+    /// address scan runs here against the module's own ids and values — the
+    /// unit path.
     function evalModule(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -1572,8 +1896,39 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
     ): Analyzer::ConstEval::ConstEvalOutput {
+      return Analyzer::ConstEval::evalModuleCore(defStore, typeStore, symbols, module, pass1, pass2, resolvedBodies, typecheck, true);
+    }
+
+    /// The same fold walk with the address scan deferred, for the program
+    /// path: analyzeProgram scans each module's arena after every module has
+    /// contributed to the union storage ids and the merged const maps.
+    function evalModuleDeferringAddresses(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    ): Analyzer::ConstEval::ConstEvalOutput {
+      return Analyzer::ConstEval::evalModuleCore(defStore, typeStore, symbols, module, pass1, pass2, resolvedBodies, typecheck, false);
+    }
+
+    function evalModuleCore(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      checkAddresses: boolean,
+    ): Analyzer::ConstEval::ConstEvalOutput {
       let mut values: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap::empty();
       let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+      let mut storageDefIds: Vector<u32> = Vector::new<u32>();
 
       Analyzer::ConstEval::evalItems(
         &mut values,
@@ -1587,11 +1942,26 @@ export namespace Analyzer {
         resolvedBodies,
         typecheck,
         &module.roots,
+        &mut storageDefIds,
       );
+
+      if (checkAddresses) {
+        Analyzer::ConstEval::checkStorageAddresses(
+          &mut values,
+          &mut diagnostics,
+          defStore,
+          typeStore,
+          module,
+          resolvedBodies,
+          typecheck,
+          &storageDefIds,
+        );
+      }
 
       return Analyzer::ConstEval::ConstEvalOutput {
         diagnostics: diagnostics,
         values: values,
+        storageDefIds: storageDefIds,
       };
     }
   }

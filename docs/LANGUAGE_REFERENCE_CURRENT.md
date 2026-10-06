@@ -336,6 +336,8 @@ function rowAt(index: u64): *u8 {
 }
 ```
 
+Taking the address of an immutable static field or constant whose initializer is not a constant expression is an error (A0239). Such a value has no storage of its own: it is rebuilt from its initializer at every use, so its address would point into the current frame and dangle once the function returns. The rule covers subobject addresses too — `&Table::CELL.value` and `&Table::ROWS[1]` are rejected when the initializer of `CELL` or `ROWS` is not constant — and it applies across module boundaries: an imported definition is judged by the initializer in the module that declares it, so an imported constant that folds stays addressable while a dynamic one does not. Indexing or field access through a static whose value is a pointer or a slice addresses the pointee, not the static's storage, and is not affected. A parenthesized reference target is rejected as a non-lvalue before this rule runs (A0029).
+
 For standard-library records, `::new()` is the canonical constructor naming
 convention. Some std records retain `::init()` aliases for compatibility only;
 new code should use forms such as `Vector::new<T>()`, `HashMap::new<K, V>()`,
