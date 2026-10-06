@@ -414,6 +414,10 @@ export namespace CodegenC {
       Analyzer::Type::Slice(_) -> {
         shape = 4;
       },
+      Analyzer::Type::Range(range) -> {
+        shape = 6;
+        pointee = range.element;
+      },
       _ -> {},
     };
 
@@ -431,6 +435,12 @@ export namespace CodegenC {
 
     if (shape == 5) {
       return CodegenC::rawFunctionTypeName(typeId);
+    }
+
+    if (shape == 6) {
+      let name: String = CodegenC::rangeStructName(defStore, typeStore, pointee);
+
+      return `struct ${name.toStr()}`;
     }
 
     if (shape == 1) {
@@ -4134,6 +4144,95 @@ export namespace CodegenC {
     return `__ignis_slice_t${typeId.raw()}`;
   }
 
+  /// The C struct of every range over the integer type `element`, which
+  /// reads through an alias. `a..b` and `a..=b` share it: whether the end is
+  /// included is known to the compiler and is not stored.
+  function rangeStructName(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    element: Analyzer::TypeId,
+  ): String {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, element);
+    let mut elementName: String = String::create("i32");
+
+    if (let Option::SOME(elementNode) = typeStore.get(resolved.typeId)) {
+      elementName = String::create(elementNode.name());
+    }
+
+    return `__ignis_range_${elementName.toStr()}`;
+  }
+
+  /// One `{ start, end }` struct per integer type some range in the store is
+  /// over. Emitted ahead of the record definitions, since a record can hold a
+  /// range by value and the struct has to be complete by then. The members
+  /// are named by position like any struct that is not a C-layout record.
+  function emitRangeTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    let mut emitted: Vector<String> = Vector::new<String>();
+    let mut rawId: u32 = 0;
+    let typeCount: u64 = typeStore.length();
+
+    while ((rawId as u64) < typeCount) {
+      let typeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(rawId);
+      let mut element: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+        if (let Analyzer::Type::Range(range) = typeNode) {
+          element = Option::SOME(range.element);
+        }
+      }
+
+      let Option::SOME(elementType) = element else {
+        rawId += 1;
+        continue;
+      };
+
+      if (typeStore.containsTypeParam(elementType)) {
+        rawId += 1;
+        continue;
+      }
+
+      let name: String = CodegenC::rangeStructName(defStore, typeStore, elementType);
+      let mut seen: boolean = false;
+      let mut emittedIndex: u64 = 0;
+
+      while (emittedIndex < emitted.length()) {
+        if (let Option::SOME(previous) = emitted.get(emittedIndex)) {
+          if (previous.equals(name.toStr())) {
+            seen = true;
+          }
+        }
+
+        emittedIndex += 1;
+      }
+
+      if (seen) {
+        rawId += 1;
+        continue;
+      }
+
+      if (emitted.length() == 0) {
+        let mut headerRef: &mut String = output;
+        headerRef.pushStr("\n// Range types\n");
+      }
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, elementType);
+      let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, resolved.typeId);
+      let definition: String = `struct ${name.toStr()} {\n    ${elementText.toStr()} field_0;\n    ${elementText.toStr()} field_1;\n};\n`;
+
+      let mut outputRef: &mut String = output;
+      outputRef.pushStr(definition.toStr());
+      emitted.push(name);
+
+      rawId += 1;
+    }
+  }
+
   /// One `{ data, len }` struct per concrete slice type in the store, as the
   /// host emits. Slices over a type parameter belong to generic templates
   /// monomorphization already replaced and get no struct.
@@ -5274,6 +5373,8 @@ export namespace CodegenC {
     // After the closure structs: a C function pointer may take a closure by
     // value, which a declarator can name only once the struct is declared.
     CodegenC::emitRawFunctionTypedefs(defStore, typeStore, symbols, &mut source, closures);
+
+    CodegenC::emitRangeTypes(defStore, typeStore, symbols, &mut source, closures);
 
     source.pushStr("\n// Type definitions\n");
 

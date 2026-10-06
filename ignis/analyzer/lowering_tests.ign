@@ -1053,3 +1053,38 @@ function loweringInclusiveArrayRangeIncludesItsEnd(): void {
   loweringAssertRenderedContains(&rendered, "Literal(Int32(0)) : i32");
   loweringAssertRenderedContains(&rendered, "Literal(Int32(1)) : i32");
 }
+
+/// A range written as a value is the pair of its bounds, typed as the range,
+/// and its fields read the pair by position.
+@test
+function loweringRangeValueIsAPairOfBounds(): void {
+  let rendered: String = loweringRender(
+    "function width(): i32 {\n  let span = 2..7;\n  return span.end - span.start;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "MakeRange : Range<i32>");
+  loweringAssertRenderedContains(&rendered, "FieldAccess");
+}
+
+/// A `for ... of` over a range value reads both bounds out of it once, then
+/// runs the counted loop of a range written in the header.
+@test
+function loweringForOfOverARangeValueReadsItsBoundsOnce(): void {
+  let rendered: String = loweringRender(
+    "function total(span: Range<u32>): u32 {\n  let mut sum: u32 = 0;\n  for (let item of span) {\n    sum += item;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_i_0 [mut]) : void");
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_end_0) : void");
+  loweringAssertRenderedContains(&rendered, "Binary(LessThan) : bool");
+  loweringAssertRenderedOmits(&rendered, "__for_of_more");
+}
+
+@test
+function loweringForOfOverAnInclusiveRangeValueUsesAContinueFlag(): void {
+  let rendered: String = loweringRender(
+    "function total(span: RangeInclusive<u8>): u32 {\n  let mut sum: u32 = 0;\n  for (let item of span) {\n    sum += item as u32;\n  }\n\n  return sum;\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "Let(__for_of_more_0 [mut]) : void");
+}

@@ -1,6 +1,7 @@
-// A counted loop over a range allocates nothing and needs no runtime, and an
-// array range fills a static table at compile time, so a freestanding unit
-// uses both without a standard library.
+// A counted loop over a range allocates nothing and needs no runtime, a range
+// value is a plain struct of its two bounds, and an array range fills a static
+// table at compile time, so a freestanding unit uses all three without a
+// standard library.
 @panicHandler
 function onPanic(message: str, file: str, line: u32): void {
   return;
@@ -19,6 +20,21 @@ function sum(limit: u32): u32 {
   }
 
   return total;
+}
+
+function sumSpan(span: Range<u32>): u32 {
+  let mut total: u32 = 0;
+
+  for (let index of span) {
+    total += index;
+  }
+
+  return total;
+}
+
+@externName("freestanding_range_span")
+function span(first: u32, last: u32): u32 {
+  return sumSpan(first..last);
 }
 
 @externName("freestanding_range_bytes")

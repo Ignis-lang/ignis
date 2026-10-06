@@ -124,6 +124,7 @@ export namespace LirLowering {
       Hir::HirKind::VectorLiteral(_) -> "VectorLiteral",
       Hir::HirKind::TupleLiteral(_) -> "TupleLiteral",
       Hir::HirKind::MakeSlice(_) -> "MakeSlice",
+      Hir::HirKind::MakeRange(_) -> "MakeRange",
       Hir::HirKind::TypeOf(_) -> "TypeOf",
       Hir::HirKind::SizeOf(_) -> "SizeOf",
       Hir::HirKind::AlignOf(_) -> "AlignOf",
@@ -1876,6 +1877,44 @@ export namespace LirLowering {
           data: data,
           len: len,
           elementType: sliceNode.elementType,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::MakeRange(rangeNode) -> {
+        let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+
+        let mut fieldOperands: Vector<Lir::InitRecordField> = Vector::new<Lir::InitRecordField>();
+        fieldOperands.push(Lir::InitRecordField {
+          fieldIndex: 0,
+          value: LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, rangeNode.start),
+        });
+        fieldOperands.push(Lir::InitRecordField {
+          fieldIndex: 1,
+          value: LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, rangeNode.end),
+        });
+
+        let mut rangePtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let rangePtrType: Analyzer::TypeId = rangePtrTypeStoreRef.pointer(nodeType);
+        let rangePtr: Lir::TempId = LirLowering::freshTemp(function_, rangePtrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+          dest: rangePtr,
+          local: local,
+          mutable: true,
+        }));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::InitRecord(Lir::InstrInitRecord {
+          destPtr: Lir::Operand::Temp(rangePtr),
+          fields: fieldOperands,
+          recordType: nodeType,
+        }));
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: dest,
+          source: local,
         }));
 
         return Lir::Operand::Temp(dest);

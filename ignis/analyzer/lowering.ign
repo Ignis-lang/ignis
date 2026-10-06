@@ -1665,7 +1665,7 @@ export namespace Lowering {
         return *piped;
       },
       Ast::Expression::Node::Range(range) -> {
-        return Lowering::errorNode(hir, typeStore, range.span);
+        return Lowering::lowerRangeValue(defStore, typeStore, symbols, module, output, locals, hir, exprId, &range);
       },
       Ast::Expression::Node::Try(tryExpr) -> {
         return Lowering::lowerTryExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &tryExpr);
@@ -2801,6 +2801,25 @@ export namespace Lowering {
         kind: Hir::HirKind::Dereference(base),
         span: memberAccess.span,
         typeId: referent,
+      });
+    }
+
+    if (let Option::SOME(range) = Lowering::rangeTypeOf(defStore, typeStore, accessType)) {
+      let mut rangeFieldIndex: u32 = 0;
+
+      if (memberAccess.member.equals("end")) {
+        rangeFieldIndex = 1;
+      }
+
+      let mut rangeHirRef: &mut Hir::HirStore = hir;
+
+      return rangeHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+          base: accessBase,
+          fieldIndex: rangeFieldIndex,
+        }),
+        span: memberAccess.span,
+        typeId: range.element,
       });
     }
 
@@ -6115,6 +6134,60 @@ export namespace Lowering {
     });
   }
 
+  /// `a..b` as a value: the pair of its bounds, typed as the range.
+  function lowerRangeValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    range: &Ast::Expression::Range,
+  ): Hir::HirId {
+    let Option::SOME(startId) = range.start else {
+      return Lowering::errorNode(hir, typeStore, range.span);
+    };
+    let Option::SOME(endId) = range.end else {
+      return Lowering::errorNode(hir, typeStore, range.span);
+    };
+
+    let rangeType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+    let start: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, startId);
+    let end: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, endId);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::MakeRange(Hir::HirMakeRange {
+        start: start,
+        end: end,
+      }),
+      span: range.span,
+      typeId: rangeType,
+    });
+  }
+
+  /// The range type `typeId` is, through aliases.
+  function rangeTypeOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Analyzer::RangeType> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(Analyzer::Type::Range(range)) = typeStore.get(resolved.typeId) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(range);
+  }
+
   /// Desugars a `for ... of` over `start..end` or `start..=end` into a counted
   /// loop, with no allocation and no value for the range itself:
   ///
@@ -6157,18 +6230,6 @@ export namespace Lowering {
     let start: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, startId);
     let end: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, endId);
 
-    let counterName: String = `__for_of_i_${synthId}`;
-    let counterDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, counterName.toStr(), elementType, true);
-    let counterLet: Hir::HirId = Lowering::allocLetNode(typeStore, hir, span, counterDef, start);
-
-    let endName: String = `__for_of_end_${synthId}`;
-    let endDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, endName.toStr(), elementType, false);
-    let endLet: Hir::HirId = Lowering::allocLetNode(typeStore, hir, span, endDef, end);
-
-    let mut prefix: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
-    prefix.push(counterLet);
-    prefix.push(endLet);
-
     let mut plainInclusive: boolean = false;
 
     if (range.inclusive) {
@@ -6179,8 +6240,110 @@ export namespace Lowering {
       }
     }
 
-    let flagged: boolean = range.inclusive && !plainInclusive;
-    let mut condition: Hir::HirId = Lowering::rangeCondition(typeStore, hir, span, counterDef, endDef, elementType, range.inclusive);
+    let prefix: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    return Lowering::lowerRangeLoop(defStore, typeStore, symbols, module, output, locals, hir, forOf, binding, start, end, elementType, range.inclusive, plainInclusive, synthId, prefix);
+  }
+
+  /// Desugars a `for ... of` over a range value, `Range<T>` or
+  /// `RangeInclusive<T>`: the loop of `lowerForOfRange`, with the bounds read
+  /// out of the value once. Nothing is known about the bounds, so an
+  /// inclusive range always takes the flag form.
+  function lowerForOfRangeValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    forOf: &Ast::Statement::ForOf,
+    binding: &Lowering::ForOfBindingShape,
+    iterableType: Analyzer::TypeId,
+    range: Analyzer::RangeType,
+  ): Hir::HirId {
+    let span: SourceSpan = forOf.span;
+    let synthId: u32 = Lowering::nextSyntheticId(locals);
+
+    let iterable: Lowering::ForOfIterable = Lowering::lowerForOfIterable(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      forOf.iterable,
+      iterableType,
+      span,
+      synthId,
+    );
+
+    let mut prefix: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    if (let Option::SOME(temporary) = iterable.temporary) {
+      prefix.push(temporary);
+    }
+
+    let mut startHirRef: &mut Hir::HirStore = hir;
+    let start: Hir::HirId = startHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+        base: iterable.value,
+        fieldIndex: 0,
+      }),
+      span: span,
+      typeId: range.element,
+    });
+
+    let mut endHirRef: &mut Hir::HirStore = hir;
+    let end: Hir::HirId = endHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+        base: iterable.value,
+        fieldIndex: 1,
+      }),
+      span: span,
+      typeId: range.element,
+    });
+
+    return Lowering::lowerRangeLoop(defStore, typeStore, symbols, module, output, locals, hir, forOf, binding, start, end, range.element, range.inclusive, false, synthId, prefix);
+  }
+
+  /// The counted loop both range shapes share, over bounds already lowered.
+  /// `prefix` holds the statements the shape needed ahead of the loop.
+  function lowerRangeLoop(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    forOf: &Ast::Statement::ForOf,
+    binding: &Lowering::ForOfBindingShape,
+    start: Hir::HirId,
+    end: Hir::HirId,
+    elementType: Analyzer::TypeId,
+    inclusive: boolean,
+    plainInclusive: boolean,
+    synthId: u32,
+    initialPrefix: Vector<Hir::HirId>,
+  ): Hir::HirId {
+    let span: SourceSpan = forOf.span;
+
+    let counterName: String = `__for_of_i_${synthId}`;
+    let counterDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, counterName.toStr(), elementType, true);
+    let counterLet: Hir::HirId = Lowering::allocLetNode(typeStore, hir, span, counterDef, start);
+
+    let endName: String = `__for_of_end_${synthId}`;
+    let endDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, endName.toStr(), elementType, false);
+    let endLet: Hir::HirId = Lowering::allocLetNode(typeStore, hir, span, endDef, end);
+
+    let mut prefix: Vector<Hir::HirId> = initialPrefix;
+    prefix.push(counterLet);
+    prefix.push(endLet);
+
+    let flagged: boolean = inclusive && !plainInclusive;
+    let mut condition: Hir::HirId = Lowering::rangeCondition(typeStore, hir, span, counterDef, endDef, elementType, inclusive);
     let advance: Hir::HirId = Lowering::rangeAdvance(defStore, typeStore, hir, span, counterDef, elementType);
     let mut update: Hir::HirId = advance;
 
@@ -6262,6 +6425,11 @@ export namespace Lowering {
     }
 
     let iterableType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, forOf.iterable);
+
+    if (let Option::SOME(range) = Lowering::rangeTypeOf(defStore, typeStore, iterableType)) {
+      return Lowering::lowerForOfRangeValue(defStore, typeStore, symbols, module, output, locals, hir, forOf, &binding, iterableType, range);
+    }
+
     let fixedShape: Option<Lowering::ForOfFixed> = Lowering::forOfFixedShape(defStore, typeStore, iterableType);
     let recordShape: Option<Lowering::ForOfRecord> = Lowering::forOfRecordShape(defStore, typeStore, symbols, iterableType);
 

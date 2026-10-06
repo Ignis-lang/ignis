@@ -143,8 +143,68 @@ function rangeForOfCannotBindByMutableReference(): void {
 }
 
 @test
-function rangeOutsideAForOfIsNotYetAValue(): void {
-  rangeAssertRejected("function main(): void {\n  let span = 0..4;\n}\n", DiagnosticCode::UNSUPPORTED_CONSTRUCT);
+function rangeValueInALetTypechecks(): void {
+  rangeAssertAccepted("function main(): void {\n  let span = 0..4;\n  let first: i32 = span.start;\n  let last: i32 = span.end;\n}\n");
+}
+
+@test
+function rangeAnnotationDecidesTheLiteralType(): void {
+  rangeAssertAccepted("function main(): void {\n  let bytes: RangeInclusive<u8> = 0..=255;\n  let first: u8 = bytes.start;\n}\n");
+}
+
+@test
+function rangeAcceptsParametersReturnsAndRecordFields(): void {
+  rangeAssertAccepted("record Window {\n  public span: Range<u32>;\n}\n\nfunction make(first: i32, last: i32): Range<i32> {\n  return first..last;\n}\n\nfunction width(span: Range<i32>): i32 {\n  return span.end - span.start;\n}\n\nfunction main(): void {\n  let window: Window = Window { span: 1..5 };\n  let total: i32 = width(make(0, 3));\n}\n");
+}
+
+@test
+function rangeIsCopy(): void {
+  rangeAssertAccepted("function take(span: Range<i32>): i32 {\n  return span.start;\n}\n\nfunction main(): void {\n  let span = 0..4;\n  let first: i32 = take(span);\n  let second: i32 = take(span);\n}\n");
+}
+
+@test
+function rangeValueIsAForOfIterable(): void {
+  rangeAssertAccepted("function main(span: Range<u16>): void {\n  for (let index of span) {\n    let copy: u16 = index;\n  }\n}\n");
+}
+
+@test
+function rangeKindsAreDistinctTypes(): void {
+  rangeAssertRejected("function main(): void {\n  let span: Range<i32> = 0..=4;\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function rangeElementTypesAreDistinctTypes(): void {
+  rangeAssertRejected("function take(span: Range<u8>): void {}\n\nfunction main(): void {\n  let wide: u32 = 4;\n  take(0..wide);\n}\n", DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+@test
+function rangeHasNoFieldsBesidesStartAndEnd(): void {
+  rangeAssertRejected("function main(): void {\n  let span = 0..4;\n  let size = span.length;\n}\n", "A0238");
+}
+
+@test
+function rangeAnnotationElementMustBeAnInteger(): void {
+  rangeAssertRejected("function take(span: Range<f64>): void {}\n", "A0237");
+}
+
+@test
+function rangeAnnotationTakesOneTypeArgument(): void {
+  rangeAssertRejected("function take(span: Range<i32, i32>): void {}\n", DiagnosticCode::GENERIC_ARITY_MISMATCH);
+}
+
+@test
+function rangeAnnotationWithAnAliasToANonIntegerIsRejectedWhereItIterates(): void {
+  rangeAssertRejected("type Weight = f64;\n\nfunction main(span: Range<Weight>): void {\n  for (let index of span) {}\n}\n", "A0231");
+}
+
+@test
+function rangeValueForOfCannotBindByReference(): void {
+  rangeAssertRejected("function main(span: Range<i32>): void {\n  for (let index: &i32 of span) {}\n}\n", "A0232");
+}
+
+@test
+function rangeDeclaredTypeShadowsTheBuiltinName(): void {
+  rangeAssertAccepted("record Range {\n  public low: i32;\n}\n\nfunction main(): void {\n  let span: Range = Range { low: 1 };\n  let low: i32 = span.low;\n}\n");
 }
 
 @test

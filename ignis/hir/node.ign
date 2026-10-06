@@ -114,6 +114,14 @@ export namespace Hir {
     public elementType: Analyzer::TypeId;
   }
 
+  /// The value of `a..b` or `a..=b`: the pair of its bounds, typed as the
+  /// range's `Range<T>` or `RangeInclusive<T>`. Field 0 is the start and
+  /// field 1 the end.
+  record HirMakeRange {
+    public start: Hir::HirId;
+    public end: Hir::HirId;
+  }
+
   record HirBuiltinLoad {
     public ty: Analyzer::TypeId;
     public ptr: Hir::HirId;
@@ -376,6 +384,7 @@ export namespace Hir {
     VectorLiteral(Vector<Hir::HirId>),
     TupleLiteral(Vector<Hir::HirId>),
     MakeSlice(Hir::HirMakeSlice),
+    MakeRange(Hir::HirMakeRange),
 
     TypeOf(Hir::HirId),
     SizeOf(Analyzer::TypeId),
@@ -563,6 +572,10 @@ export namespace Hir {
         data: Hir::offsetHirId(makeSlice.data, offset),
         len: Hir::offsetHirId(makeSlice.len, offset),
         elementType: makeSlice.elementType,
+      }),
+      Hir::HirKind::MakeRange(makeRange) -> Hir::HirKind::MakeRange(Hir::HirMakeRange {
+        start: Hir::offsetHirId(makeRange.start, offset),
+        end: Hir::offsetHirId(makeRange.end, offset),
       }),
       Hir::HirKind::TypeOf(id) -> Hir::HirKind::TypeOf(Hir::offsetHirId(id, offset)),
       Hir::HirKind::SizeOf(typeId) -> Hir::HirKind::SizeOf(typeId),
@@ -810,6 +823,10 @@ export namespace Hir {
       Hir::HirKind::MakeSlice(makeSlice) -> {
         children.push(makeSlice.data);
         children.push(makeSlice.len);
+      },
+      Hir::HirKind::MakeRange(makeRange) -> {
+        children.push(makeRange.start);
+        children.push(makeRange.end);
       },
       Hir::HirKind::FieldAccess(access) -> {
         children.push(access.base);
