@@ -5221,6 +5221,10 @@ export namespace Analyzer {
           Analyzer::Typecheck::recordExprType(state, exprId, tryType);
           return Option::SOME(tryType);
         },
+        Ast::Expression::Node::Range(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "range expressions");
+          return Option::NONE;
+        },
         Ast::Expression::Node::Asm(value) -> {
           let asmType: Analyzer::TypeId = Analyzer::Typecheck::checkInlineAsm(state, defStore, typeStore, symbols, module, resolvedBodies, &value, Option::NONE)!;
 
@@ -9300,6 +9304,8 @@ export namespace Analyzer {
         Ast::Expression::Node::BuiltinCall(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.arguments),
         Ast::Expression::Node::Tuple(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.elements),
         Ast::Expression::Node::Vector(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.elements),
+        Ast::Expression::Node::Range(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.start)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.end),
         Ast::Expression::Node::RecordInit(value) -> Analyzer::Typecheck::countPipePlaceholdersInFields(module, &value.fields),
         Ast::Expression::Node::Match(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.scrutinee)
           + Analyzer::Typecheck::countPipePlaceholdersInArms(module, &value.arms),

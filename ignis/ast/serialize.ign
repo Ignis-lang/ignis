@@ -318,6 +318,10 @@ export namespace Ast {
         return String::create("Try");
       }
 
+      if (let Ast::Expression::Node::Range(value) = node) {
+        return Ast::Serializer::renderRangeExpression(&value);
+      }
+
       if (let Ast::Expression::Node::Asm(value) = node) {
         return Ast::Serializer::renderAsm(&value);
       }
@@ -688,6 +692,18 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderExpressionId(node.left).toStr());
       output.pushStr(" right=");
       output.pushStr(Ast::Serializer::renderExpressionId(node.right).toStr());
+      return output;
+    }
+
+    function renderRangeExpression(node: &Ast::Expression::Range): String {
+      let mut output: String = String::create("Range span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" start=");
+      output.pushStr(Ast::Serializer::renderOptionalExpressionId(node.start).toStr());
+      output.pushStr(" end=");
+      output.pushStr(Ast::Serializer::renderOptionalExpressionId(node.end).toStr());
+      output.pushStr(" inclusive=");
+      output.pushStr(Ast::Serializer::renderBoolean(node.inclusive).toStr());
       return output;
     }
 
@@ -1456,6 +1472,10 @@ export namespace Ast {
       }
 
       if (let Ast::Expression::Node::Try(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Range(value) = node) {
         return value.span;
       }
 

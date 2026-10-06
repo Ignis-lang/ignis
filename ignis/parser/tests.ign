@@ -5735,3 +5735,81 @@ function parserRejectsAnAsmWithoutABody(): void {
   Test::assert(diagnostics.length() >= 1);
   assertDiagnosticAt(&diagnostics, 0, "I0001", "Expected LeftBrace");
 }
+
+function renderParsedSource(path: str, text: str, diagnostics: &mut DiagnosticBag): String {
+  let mut module: Ast::Module = Ast::Module::init();
+  let source: SourceFile = SourceFile::create(path, text);
+  Parser::parseInto(&source, &mut module, diagnostics);
+
+  return Ast::Serializer::render(&module);
+}
+
+@test
+function parserParsesAnExclusiveRange(): void {
+  let mut diagnostics = DiagnosticBag::init();
+  let rendered: String = renderParsedSource("fixtures/parser_range_exclusive.ign", "const R: i32 = 0..10;", &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "Range span=fixtures/parser_range_exclusive.ign:15-20 start=expression#0 end=expression#1 inclusive=false");
+}
+
+@test
+function parserParsesAnInclusiveRange(): void {
+  let mut diagnostics = DiagnosticBag::init();
+  let rendered: String = renderParsedSource("fixtures/parser_range_inclusive.ign", "const R: i32 = 0..=10;", &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "Range span=fixtures/parser_range_inclusive.ign:15-21 start=expression#0 end=expression#1 inclusive=true");
+}
+
+@test
+function parserRangeBindsLooserThanArithmeticAndTighterThanPipe(): void {
+  let mut diagnostics = DiagnosticBag::init();
+  let rendered: String = renderParsedSource("fixtures/parser_range_precedence.ign", "const R: i32 = a + 1..b * 2 || c;", &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "Range span=");
+  assertRenderedContains(&rendered, "operator=Add");
+  assertRenderedContains(&rendered, "operator=Or");
+}
+
+@test
+function parserRangeSitsInsideAForOfHeader(): void {
+  let mut diagnostics = DiagnosticBag::init();
+  let rendered: String = renderParsedSource("fixtures/parser_range_for_of.ign", "function main(n: i32): void { for (let i of 0..n) {} }", &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  assertRenderedContains(&rendered, "Range span=");
+}
+
+@test
+function parserRejectsAChainedRange(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_chained.ign", "const R: i32 = 0..5..10;");
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0002", "Ranges cannot be chained");
+}
+
+@test
+function parserRejectsAnOpenEndedRangeWithoutAnUpperBound(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_open_end.ign", "const R: i32 = 3..;");
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");
+}
+
+@test
+function parserRejectsAnOpenEndedRangeWithoutALowerBound(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_open_start.ign", "const R: i32 = ..3;");
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");
+}
+
+@test
+function parserRejectsAnOpenEndedInclusiveRange(): void {
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_open_inclusive.ign", "function main(): void { for (let i of 0..=) {} }");
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");
+}

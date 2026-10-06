@@ -834,6 +834,10 @@ export namespace Format {
       return Format::formatPipeChain(module, &steps, source, config, indentLevel);
     }
 
+    if (let Ast::Expression::Node::Range(range) = node) {
+      return Format::formatRangeExpression(module, &range, parentPrecedence, source, config);
+    }
+
     if (let Ast::Expression::Node::PipePlaceholder(_) = node) {
       return Result::OK(String::create("_"));
     }
@@ -1571,6 +1575,37 @@ export namespace Format {
     }
 
     return Format::formatBlockBody(module, &block.statements, block.tail, &block.span, source, config, indentLevel);
+  }
+
+  /// Renders `start..end` or `start..=end` without spaces around the
+  /// operator. A range ranks with `||`, so a bound that is itself a `||`
+  /// stays unparenthesized: the parser binds the operator looser than it.
+  function formatRangeExpression(
+    module: &Ast::Module,
+    range: &Ast::Expression::Range,
+    parentPrecedence: u8,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let mut formatted: String = String::new();
+
+    if (let Option::SOME(startId) = range.start) {
+      let startText: String = Format::formatExpressionNode(module, startId, 2, source, config, 0)!;
+      formatted.push(&startText);
+    }
+
+    if (range.inclusive) {
+      formatted.pushStr("..=");
+    } else {
+      formatted.pushStr("..");
+    }
+
+    if (let Option::SOME(endId) = range.end) {
+      let endText: String = Format::formatExpressionNode(module, endId, 2, source, config, 0)!;
+      formatted.push(&endText);
+    }
+
+    return Result::OK(Format::wrapWhenBelowParent(formatted, parentPrecedence, 2));
   }
 
   function flattenPipeChain(
