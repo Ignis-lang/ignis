@@ -1,0 +1,146 @@
+// `@zeroed<T>()` is a value of type `T` whose every byte is zero. In a `let` it
+// is built at run time, fresh on every evaluation, and in the initializer of a
+// static it is part of the constant that seeds the global.
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+record Pair {
+  public id: u32;
+  public origin: Point;
+}
+
+enum Level {
+  LOW,
+  HIGH,
+}
+
+record Tables {
+  static mut STACK: u8[256] = @zeroed<u8[256]>();
+  static mut PAIR: Pair = Pair { id: 7, origin: @zeroed<Point>() };
+  static ROWS: u8[4] = @zeroed<u8[4]>();
+  static COUNT: i32 = @zeroed<i32>();
+}
+
+function checkScalars(): i32 {
+  let counter: u32 = @zeroed<u32>();
+  let cursor: *mut u8 = @zeroed<*mut u8>();
+  let ratio: f64 = @zeroed<f64>();
+  let flag: boolean = @zeroed<boolean>();
+  let level: Level = @zeroed<Level>();
+
+  if (counter != 0) {
+    return 1;
+  }
+
+  if (cursor != null) {
+    return 2;
+  }
+
+  if (ratio != 0.0) {
+    return 3;
+  }
+
+  if (flag) {
+    return 4;
+  }
+
+  if (level != Level::LOW) {
+    return 5;
+  }
+
+  return 0;
+}
+
+function checkAggregates(): i32 {
+  let table: u16[64] = @zeroed<u16[64]>();
+  let origin: Point = @zeroed<Point>();
+  let pair: Pair = @zeroed<Pair>();
+
+  if (table[0] != 0 || table[63] != 0) {
+    return 10;
+  }
+
+  if (origin.x != 0 || origin.y != 0) {
+    return 11;
+  }
+
+  if (pair.id != 0 || pair.origin.x != 0 || pair.origin.y != 0) {
+    return 12;
+  }
+
+  return 0;
+}
+
+function checkFreshEveryTime(): i32 {
+  let mut scratch: u8[16] = @zeroed<u8[16]>();
+  scratch[3] = 9;
+  scratch = @zeroed<u8[16]>();
+
+  if (scratch[3] != 0) {
+    return 20;
+  }
+
+  let mut round: i32 = 0;
+
+  while (round < 3) {
+    let mut origin: Point = @zeroed<Point>();
+
+    if (origin.x != 0) {
+      return 21;
+    }
+
+    origin.x = 5;
+    round += 1;
+  }
+
+  return 0;
+}
+
+function checkStatics(): i32 {
+  if (Tables::STACK[0] != 0 || Tables::STACK[255] != 0) {
+    return 30;
+  }
+
+  if (Tables::PAIR.id != 7 || Tables::PAIR.origin.x != 0 || Tables::PAIR.origin.y != 0) {
+    return 31;
+  }
+
+  let rows: *u8 = &Tables::ROWS as *u8;
+
+  if (*rows != 0 || Tables::COUNT != 0) {
+    return 32;
+  }
+
+  Tables::STACK[255] = 3;
+  Tables::PAIR.origin.y = 4;
+
+  if (Tables::STACK[255] != 3 || Tables::PAIR.origin.y != 4) {
+    return 33;
+  }
+
+  return 0;
+}
+
+function main(): i32 {
+  let scalars: i32 = checkScalars();
+
+  if (scalars != 0) {
+    return scalars;
+  }
+
+  let aggregates: i32 = checkAggregates();
+
+  if (aggregates != 0) {
+    return aggregates;
+  }
+
+  let fresh: i32 = checkFreshEveryTime();
+
+  if (fresh != 0) {
+    return fresh;
+  }
+
+  return checkStatics();
+}

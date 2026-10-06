@@ -136,6 +136,7 @@ export namespace LirLowering {
       Hir::HirKind::BuiltinEq(_) -> "BuiltinEq",
       Hir::HirKind::BuiltinDropInPlace(_) -> "BuiltinDropInPlace",
       Hir::HirKind::BuiltinDropGlue(_) -> "BuiltinDropGlue",
+      Hir::HirKind::BuiltinZeroed(_) -> "BuiltinZeroed",
       Hir::HirKind::Panic(_) -> "Panic",
       Hir::HirKind::Trap -> "Trap",
       Hir::HirKind::BuiltinUnreachable -> "BuiltinUnreachable",
@@ -306,6 +307,56 @@ export namespace LirLowering {
     }
 
     return Analyzer::ConstEval::findConstAggregate(&*constValues, defId.raw()).isSome();
+  }
+
+  /// `@zeroed<T>()`: the zero constant of a scalar `T`. Any other `T` is a
+  /// fresh slot whose bytes are set to zero and then read back as the value, so
+  /// each evaluation yields its own zeroed copy.
+  function lowerZeroed(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    valueType: Analyzer::TypeId,
+    nodeSpan: SourceSpan,
+  ): Lir::Operand {
+    if (let Option::SOME(scalar) = Analyzer::ConstEval::scalarZeroValue(defStore, typeStore, valueType)) {
+      return LirLowering::constOperand(typeStore, scalar, valueType);
+    }
+
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, valueType);
+    let storageType: Analyzer::TypeId = resolved.typeId;
+    let mut pointee: Analyzer::TypeId = storageType;
+
+    if (let Option::SOME(Analyzer::Type::FixedArray(element, _)) = typeStore.get(storageType)) {
+      pointee = element;
+    }
+
+    let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, storageType);
+
+    let mut pointerTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let pointerType: Analyzer::TypeId = pointerTypeStoreRef.pointer(pointee);
+    let pointer: Lir::TempId = LirLowering::freshTemp(function_, pointerType, nodeSpan);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+      dest: pointer,
+      local: local,
+      mutable: true,
+    }));
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::InitZero(Lir::InstrInitZero {
+      destPtr: Lir::Operand::Temp(pointer),
+      ty: storageType,
+    }));
+
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, valueType, nodeSpan);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+      dest: dest,
+      source: local,
+    }));
+
+    return Lir::Operand::Temp(dest);
   }
 
   /// `&NAME` for an immutable static field or constant: the address of its
@@ -2050,6 +2101,9 @@ export namespace LirLowering {
         }));
 
         return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::BuiltinZeroed(ty) -> {
+        return LirLowering::lowerZeroed(defStore, typeStore, function_, state, ty, nodeSpan);
       },
       Hir::HirKind::TypeOf(innerId) -> {
         let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);

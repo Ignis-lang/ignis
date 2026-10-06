@@ -731,6 +731,66 @@ export namespace Analyzer {
     /// Whether an expression's checked type is an unsigned integer, mirroring
     /// the Rust `const_operand_is_unsigned` (no alias resolution, matching
     /// `TypeStore::is_unsigned`).
+    /// The checked type of expression `exprId`, when typecheck recorded one.
+    function exprTypeOf(
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
+          continue;
+        };
+
+        if (*nodeId != exprId.raw()) {
+          continue;
+        }
+
+        if (let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index)) {
+          return Option::SOME(*typeId);
+        }
+
+        return Option::NONE;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The constant a scalar type is when every byte is zero: `0`, `0.0`,
+    /// `false`, the null character or `null`. `NONE` for an aggregate or a type
+    /// with no zero value.
+    function scalarZeroValue(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::I8 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::I16 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::I32 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::I64 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::U8 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::U16 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::U32 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::U64 -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(0)),
+        Analyzer::Type::F32 -> Option::SOME(Analyzer::ConstEval::ConstValue::Float(0.0)),
+        Analyzer::Type::F64 -> Option::SOME(Analyzer::ConstEval::ConstValue::Float(0.0)),
+        Analyzer::Type::BOOLEAN -> Option::SOME(Analyzer::ConstEval::ConstValue::Bool(false)),
+        Analyzer::Type::CHAR -> Option::SOME(Analyzer::ConstEval::ConstValue::Char('\0')),
+        Analyzer::Type::Pointer(_) -> Option::SOME(Analyzer::ConstEval::ConstValue::Null),
+        _ -> Option::NONE,
+      };
+    }
+
     function exprTypeIsUnsigned(
       typeStore: &mut Analyzer::TypeStore,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
@@ -932,6 +992,17 @@ export namespace Analyzer {
             typecheck,
             grouped.expression,
           );
+        },
+        Ast::Expression::Node::BuiltinCall(call) -> {
+          if (!call.name.equals("zeroed")) {
+            return Option::NONE;
+          }
+
+          let Option::SOME(zeroType) = Analyzer::ConstEval::exprTypeOf(typecheck, exprId) else {
+            return Option::NONE;
+          };
+
+          return Analyzer::ConstEval::scalarZeroValue(defStore, typeStore, zeroType);
         },
         _ -> {
           return Option::NONE;
@@ -1158,6 +1229,12 @@ export namespace Analyzer {
         );
       }
 
+      if (let Ast::Expression::Node::BuiltinCall(call) = expression) {
+        if (call.name.equals("zeroed")) {
+          return Analyzer::ConstEval::evalZeroedParts(defStore, typeStore, typecheck, exprId, parts);
+        }
+      }
+
       let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
       let mut arrayElement: Option<Analyzer::TypeId> = Option::NONE;
       let mut arraySize: u64 = 0;
@@ -1250,6 +1327,45 @@ export namespace Analyzer {
       };
 
       partsRef.push(Analyzer::ConstEval::ConstPart::Value(value, expectedType));
+      return true;
+    }
+
+    /// Whether `parts` is exactly one `Zero`.
+    function isSingleZero(parts: &Vector<Analyzer::ConstEval::ConstPart>): boolean {
+      if (parts.length() != 1) {
+        return false;
+      }
+
+      if (let Option::SOME(Analyzer::ConstEval::ConstPart::Zero(_)) = parts.get(0)) {
+        return true;
+      }
+
+      return false;
+    }
+
+    /// Folds `@zeroed<T>()` at `exprId` into `parts`: the scalar zero of `T`, or
+    /// one `Zero` part for storage of an aggregate type. False when typecheck
+    /// recorded no type for the call, which it reports itself.
+    function evalZeroedParts(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+      parts: &mut Vector<Analyzer::ConstEval::ConstPart>,
+    ): boolean {
+      let Option::SOME(zeroType) = Analyzer::ConstEval::exprTypeOf(typecheck, exprId) else {
+        return false;
+      };
+
+      let mut partsRef: &mut Vector<Analyzer::ConstEval::ConstPart> = parts;
+
+      if (let Option::SOME(scalar) = Analyzer::ConstEval::scalarZeroValue(defStore, typeStore, zeroType)) {
+        partsRef.push(Analyzer::ConstEval::ConstPart::Value(scalar, zeroType));
+        return true;
+      }
+
+      partsRef.push(Analyzer::ConstEval::ConstPart::Zero(zeroType));
+
       return true;
     }
 
@@ -1402,7 +1518,11 @@ export namespace Analyzer {
         &mut parts,
       );
 
-      if (!folded || parts.length() < 2) {
+      if (!folded) {
+        return;
+      }
+
+      if (parts.length() < 2 && !Analyzer::ConstEval::isSingleZero(&parts)) {
         return;
       }
 

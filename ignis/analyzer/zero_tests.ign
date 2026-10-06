@@ -142,3 +142,54 @@ function zeroStaticMutWithoutInitializerRejectsEnumsWithPayloads(): void {
 function zeroStaticMutWithoutInitializerRejectsRanges(): void {
   zeroAssertRejected("record Zeroed {\n  static mut SPAN: Range<i32>;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", "A0239");
 }
+
+@test
+function zeroedAcceptsScalarsArraysRecordsAndPlainEnums(): void {
+  zeroAssertAccepted(
+    "record Point {\n  public x: i32;\n  public y: i32;\n}\n\nenum Level {\n  LOW,\n  HIGH,\n}\n\nfunction main(): i32 {\n  let a: u32 = @zeroed<u32>();\n  let b: f64 = @zeroed<f64>();\n  let c: boolean = @zeroed<boolean>();\n  let d: *mut u8 = @zeroed<*mut u8>();\n  let e: u8[32] = @zeroed<u8[32]>();\n  let f: Point = @zeroed<Point>();\n  let g: Level = @zeroed<Level>();\n\n  return a as i32;\n}\n",
+  );
+}
+
+@test
+function zeroedTakesTheTypeOfItsTypeArgument(): void {
+  zeroAssertRejected("function main(): i32 {\n  let value: u8 = @zeroed<u32>();\n\n  return 0;\n}\n", DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function zeroedAcceptsStaticInitializers(): void {
+  zeroAssertAccepted(
+    "record Point {\n  public x: i32;\n  public y: i32;\n}\n\nrecord Tables {\n  static mut STACK: u8[64] = @zeroed<u8[64]>();\n  static mut ORIGIN: Point = @zeroed<Point>();\n  static mut COUNT: u32 = @zeroed<u32>();\n  static ROWS: u8[4] = @zeroed<u8[4]>();\n}\n\nfunction main(): i32 {\n  return Tables::ORIGIN.x;\n}\n",
+  );
+}
+
+@test
+function zeroedRejectsStrings(): void {
+  zeroAssertRejected("function main(): i32 {\n  let name: str = @zeroed<str>();\n\n  return 0;\n}\n", "A0239");
+}
+
+@test
+function zeroedRejectsReferences(): void {
+  zeroAssertRejected("function main(): i32 {\n  let link: &i32 = @zeroed<&i32>();\n\n  return 0;\n}\n", "A0239");
+}
+
+@test
+function zeroedRejectsValuesThatDrop(): void {
+  zeroAssertRejected(
+    "@implements(Drop)\nrecord Handle {\n  public id: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nfunction main(): i32 {\n  let handle: Handle = @zeroed<Handle>();\n\n  return 0;\n}\n",
+    "A0239",
+  );
+}
+
+@test
+function zeroedRejectsEnumsWithPayloads(): void {
+  zeroAssertRejected(
+    "enum Shape {\n  CIRCLE(i32),\n  EMPTY,\n}\n\nfunction main(): i32 {\n  let shape: Shape = @zeroed<Shape>();\n\n  return 0;\n}\n",
+    "A0239",
+  );
+}
+
+@test
+function zeroedTakesOneTypeArgumentAndNoValueArguments(): void {
+  zeroAssertRejected("function main(): i32 {\n  let value: i32 = @zeroed<i32>(1);\n\n  return value;\n}\n", DiagnosticCode::BUILTIN_ARG_COUNT);
+  zeroAssertRejected("function main(): i32 {\n  let value: i32 = @zeroed();\n\n  return value;\n}\n", DiagnosticCode::GENERIC_ARITY_MISMATCH);
+}

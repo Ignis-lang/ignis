@@ -1,0 +1,39 @@
+// Zero-filled storage in a freestanding unit: a `static mut` field without an
+// initializer and `@zeroed` in a static and in a function body. The unit has
+// no <string.h>, so the run-time fill has to be the memset builtin.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  return;
+}
+
+record Slot {
+  public base: u64;
+  public flags: u16;
+}
+
+record Kernel {
+  static mut STACK: u8[16384];
+  static mut SLOTS: Slot[256];
+  static mut BOOT: Slot = @zeroed<Slot>();
+}
+
+@externName("freestanding_stack_top")
+function stackTop(): *mut u8 {
+  return (&Kernel::STACK as *mut u8) + 16384;
+}
+
+@externName("freestanding_slot_flags")
+function slotFlags(index: u64): u16 {
+  let blank: Slot = @zeroed<Slot>();
+
+  Kernel::SLOTS[index].flags = blank.flags + 1;
+
+  return Kernel::SLOTS[index].flags + Kernel::BOOT.flags;
+}
+
+@externName("freestanding_scratch_sum")
+function scratchSum(): u32 {
+  let scratch: u32[128] = @zeroed<u32[128]>();
+
+  return scratch[0] + scratch[127];
+}

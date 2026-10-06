@@ -2048,6 +2048,7 @@ export namespace CodegenC {
       Lir::Instr::GetElementPtr(_) -> "GetElementPtr",
       Lir::Instr::MakeSlice(_) -> "MakeSlice",
       Lir::Instr::InitVector(_) -> "InitVector",
+      Lir::Instr::InitZero(_) -> "InitZero",
       Lir::Instr::Nop -> "Nop",
       Lir::Instr::RuntimeCall(_) -> "RuntimeCall",
       Lir::Instr::TypeIdOf(_) -> "TypeIdOf",
@@ -2869,6 +2870,13 @@ export namespace CodegenC {
 
           elementIndex += 1;
         }
+      },
+      Lir::Instr::InitZero(node) -> {
+        let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.destPtr);
+        let size: String = CodegenC::zeroFillSize(defStore, typeStore, symbols, closures, node.ty);
+        let line: String = `    __builtin_memset(${destination.toStr()}, 0, ${size.toStr()});\n`;
+        let mut zeroRef: &mut String = output;
+        zeroRef.pushStr(line.toStr());
       },
       Lir::Instr::RuntimeCall(node) -> {
         let mut call: String = String::create("    ");
@@ -4108,6 +4116,27 @@ export namespace CodegenC {
     let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
 
     return `    __builtin_memcpy(${destination.toStr()}, ${source.toStr()}, ${array.size} * sizeof(${elementText.toStr()}));\n`;
+  }
+
+  /// The C expression for the byte count of a value of `typeId`: an array is
+  /// its element count times the element size, anything else its own size.
+  /// Naming `sizeof` of the array type would need its declarator spelled out.
+  function zeroFillSize(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    typeId: Analyzer::TypeId,
+  ): String {
+    if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, typeId)) {
+      let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+
+      return `${array.size} * sizeof(${elementText.toStr()})`;
+    }
+
+    let valueText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, typeId);
+
+    return `sizeof(${valueText.toStr()})`;
   }
 
   function isVoidType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
