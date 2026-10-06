@@ -1529,6 +1529,10 @@ export namespace Lowering {
         return Lowering::lowerMatchExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &matchExpr);
       },
       Ast::Expression::Node::Vector(vectorLiteral) -> {
+        if (let Option::SOME(rangeId) = Analyzer::Typecheck::arrayRangeElementId(module, &vectorLiteral)) {
+          return Lowering::lowerArrayRange(defStore, typeStore, module, output, hir, exprId, &vectorLiteral, rangeId);
+        }
+
         let elements: Vector<Hir::HirId> = Lowering::lowerExpressionList(
           defStore,
           typeStore,
@@ -1675,6 +1679,82 @@ export namespace Lowering {
     };
 
     return Lowering::errorNode(hir, typeStore, SourceSpan::new("", 0, 0));
+  }
+
+  /// The HIR literal of an array range value, in the integer type
+  /// `elementType`, reading through an alias.
+  function arrayRangeLiteralKind(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    value: &Analyzer::Typecheck::ArrayRangeBound,
+    elementType: Analyzer::TypeId,
+  ): Hir::LiteralValue {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, elementType);
+
+    if (value.negative) {
+      return Lowering::intLiteralKind(typeStore, (0 - ((value.magnitude - 1) as i64)) - 1, resolved.typeId);
+    }
+
+    if (value.magnitude > 9223372036854775807) {
+      return Lowering::uintLiteralKind(typeStore, value.magnitude, resolved.typeId);
+    }
+
+    return Lowering::intLiteralKind(typeStore, value.magnitude as i64, resolved.typeId);
+  }
+
+  /// Expands `[a..b]` into the array literal of its values. The typechecker
+  /// accepted only literal bounds, so the values are written out here and
+  /// nothing after lowering knows the array was a range.
+  function lowerArrayRange(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    literal: &Ast::Expression::VectorLiteral,
+    rangeId: Ast::ExpressionId,
+  ): Hir::HirId {
+    let arrayType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+    let Option::SOME(Ast::Expression::Node::Range(range)) = module.expressions.get(rangeId) else {
+      return Lowering::errorNode(hir, typeStore, literal.span);
+    };
+    let Option::SOME(startId) = range.start else {
+      return Lowering::errorNode(hir, typeStore, literal.span);
+    };
+    let Option::SOME(start) = Analyzer::Typecheck::arrayRangeBound(module, startId) else {
+      return Lowering::errorNode(hir, typeStore, literal.span);
+    };
+
+    let Option::SOME(Analyzer::Type::FixedArray(elementType, length)) = typeStore.get(arrayType) else {
+      return Lowering::errorNode(hir, typeStore, literal.span);
+    };
+
+    let mut elements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut offset: u64 = 0;
+
+    while (offset < length) {
+      let value: Analyzer::Typecheck::ArrayRangeBound = Analyzer::Typecheck::arrayRangeBoundAt(&start, offset);
+      let kind: Hir::LiteralValue = Lowering::arrayRangeLiteralKind(defStore, typeStore, &value, elementType);
+
+      let mut elementHirRef: &mut Hir::HirStore = hir;
+      elements.push(elementHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Literal(kind),
+        span: range.span,
+        typeId: elementType,
+      }));
+
+      offset += 1;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::VectorLiteral(elements),
+      span: literal.span,
+      typeId: arrayType,
+    });
   }
 
   /// Lowers a name reference (a `Variable` expression, or the single-segment

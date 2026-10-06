@@ -1026,3 +1026,30 @@ function loweringForOfOverARangeStepsInTheElementType(): void {
   loweringAssertRenderedContains(&rendered, "Let(__for_of_i_0 [mut]) : void");
   loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(1)) : u8");
 }
+
+/// `[a..b]` is an ordinary array literal by the time it is lowered: one
+/// literal per value, typed as the element type.
+@test
+function loweringArrayRangeExpandsToItsValues(): void {
+  let rendered: String = loweringRender(
+    "function items(): u8 {\n  let values: u8[3] = [2..5];\n  return values[0];\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "VectorLiteral : u8[3]");
+  loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(2)) : u8");
+  loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(3)) : u8");
+  loweringAssertRenderedContains(&rendered, "Literal(UnsignedInt8(4)) : u8");
+  loweringAssertRenderedOmits(&rendered, "Literal(UnsignedInt8(5)) : u8");
+}
+
+@test
+function loweringInclusiveArrayRangeIncludesItsEnd(): void {
+  let rendered: String = loweringRender(
+    "function items(): i32 {\n  let values = [-1..=1];\n  return values[0];\n}\n",
+  );
+
+  loweringAssertRenderedContains(&rendered, "VectorLiteral : i32[3]");
+  loweringAssertRenderedContains(&rendered, "Literal(Int32(-1)) : i32");
+  loweringAssertRenderedContains(&rendered, "Literal(Int32(0)) : i32");
+  loweringAssertRenderedContains(&rendered, "Literal(Int32(1)) : i32");
+}
