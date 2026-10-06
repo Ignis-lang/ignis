@@ -1206,6 +1206,27 @@ function codegenFreestandingUnitDeclaresTheExternFunctionsItCalls(): void {
   Test::assert(codegenContains(&emission.source, "platform_register_handler(t"));
 }
 
+/// The program the extern object address tests compile: extern constants, one
+/// scalar, one array, with getters taking their addresses.
+const CODEGEN_EXTERN_OBJECT_ADDRESS_SOURCE: str = "extern Linker {\n  const kernel_end: u64;\n  const kernel_flags: u32;\n  const kernel_page_tables: u64[4];\n}\n\n@externName(\"freestanding_kernel_end_ptr\")\nfunction kernelEndPtr(): *u64 {\n  return &Linker::kernel_end as *u64;\n}\n\n@externName(\"freestanding_kernel_flags_ptr\")\nfunction kernelFlagsPtr(): *u32 {\n  return &Linker::kernel_flags as *u32;\n}\n\n@externName(\"freestanding_kernel_page_tables_base_ptr\")\nfunction kernelPageTablesBasePtr(): *u64 {\n  return &Linker::kernel_page_tables as *u64;\n}\n\n@externName(\"freestanding_kernel_page_table_ptr\")\nfunction kernelPageTablePtr(index: u64): *u64 {\n  return &Linker::kernel_page_tables[index] as *u64;\n}\n";
+
+/// A freestanding extern object's address is the C symbol itself, never a
+/// copy spilled into the getter's frame: the scalar address is `&kernel_end`,
+/// an array's address is its decayed first-element pointer, and an element's
+/// address indexes the real object. No frame copy of the object is emitted.
+@test
+function codegenFreestandingExternObjectAddressIsTheSymbol(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(CODEGEN_EXTERN_OBJECT_ADDRESS_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "extern u64 kernel_end;"));
+  Test::assert(codegenContains(&emission.source, "extern u64 kernel_page_tables[4];"));
+  Test::assert(codegenContains(&emission.source, "(void*)&kernel_end"));
+  Test::assert(codegenContains(&emission.source, "(void*)kernel_page_tables"));
+  Test::assert(codegenContains(&emission.source, "&(kernel_page_tables["));
+  Test::assert(!codegenContains(&emission.source, "l0 = kernel_end;"));
+  Test::assert(!codegenContains(&emission.source, "__builtin_memcpy(l0, kernel_page_tables"));
+}
+
 /// A hosted unit leaves extern functions to the headers it includes, whose
 /// spelling of a parameter type would conflict with a second declaration.
 @test
