@@ -15,6 +15,8 @@ const HOVER_TEST_UTIL: str = "/// Doubles a value.\nexport function double(value
 
 const HOVER_TEST_MAIN: str = "import double from \"./util\";\n\n/// Adds two numbers.\nfunction add(left: i32, right: i32): i32 {\n  return left + right;\n}\n\nrecord Point {\n  /// Horizontal.\n  public x: i32;\n  public y: i32;\n\n  public length(&self): i32 {\n    return self.x + self.y;\n  }\n}\n\nfunction main(): i32 {\n  let mut total: i32 = add(1, 2);\n  {\n    let mut total: i64 = 5;\n    let copy: i64 = total;\n    total = copy + 1;\n  }\n  let point: Point = Point { x: 1, y: 2 };\n  total = total + point.x + point.length() + double(4);\n  return total;\n}\n";
 
+const HOVER_TEST_ASM_MAIN: str = "import double from \"./util\";\n\nfunction main(): i32 {\n  let mut leaf: u32 = 0;\n\n  asm (leaf inout eax) -> (vendorStart: u32 in ebx) {\n    cpuid\n  }\n\n  return vendorStart as i32 + double(0);\n}\n\nfunction probeExpression(): u64 {\n  let value: u64 = asm pure (21 in rax) -> (half: u64 in rax) { nop };\n\n  return value;\n}\n";
+
 /// The source of the module the test indexes, and its index.
 record HoverTestFile {
   public text: String;
@@ -267,4 +269,29 @@ function hoverIndexFindsNothingInsideAnEdit(): void {
 
   let renamed: String = spliced(&file.text, call + 3, "x", call + 3);
   Test::assert(file.index.hoverAtIn(&renamed, call).isNone());
+}
+
+/// A statement `asm` output is a local: its name in the `asm` header and
+/// its uses show the binding the resolver keyed under the synthetic output
+/// id. A plain `inout` input still belongs to its original `let`.
+@test
+function asmOutputBindingHoverShowsTheHeaderBinding(): void {
+  let file: HoverTestFile = hoverTestIndex("asm_output_binding", HOVER_TEST_ASM_MAIN);
+  let binding: str = "main\n\n```ignis\nlet vendorStart: u32\n```\n\n*Defined in `main.ign`*";
+
+  Test::assertEq<str>(hoverTextAt(&file, "vendorStart", 1, 0).toStr(), binding);
+  Test::assertEq<str>(hoverTextAt(&file, "vendorStart", 2, 0).toStr(), binding);
+  Test::assertEq<str>(
+    hoverTextAt(&file, "leaf inout", 1, 1).toStr(),
+    "main\n\n```ignis\nlet mut leaf: u32\n```\n\n*Defined in `main.ign`*",
+  );
+}
+
+/// The output of an `asm` expression binds nothing: its header name is a
+/// hole only and gets no local site.
+@test
+function asmOutputBindingExpressionOutputsBindNothing(): void {
+  let file: HoverTestFile = hoverTestIndex("asm_output_binding_expr", HOVER_TEST_ASM_MAIN);
+
+  Test::assertEq<str>(hoverTextAt(&file, "half", 1, 3).toStr(), "<none>");
 }
