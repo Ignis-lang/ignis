@@ -1,0 +1,27 @@
+// e2e: err
+//
+// The address of an immutable static field or constant is only a real global
+// when its initializer is constant. One that is not folds nowhere, so its
+// address would point into a stack copy of a value rebuilt at every use.
+
+function base(): u64 {
+  return 7;
+}
+
+const K: u64 = base();
+
+record Table {
+  static VALUE: u64 = base();
+}
+
+function takeStatic(): *u64 {
+  return &Table::VALUE as *u64;
+}
+
+function takeConstant(): *u64 {
+  return &K as *u64;
+}
+
+function main(): i32 {
+  return (*takeStatic() + *takeConstant()) as i32;
+}

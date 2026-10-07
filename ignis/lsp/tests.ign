@@ -830,6 +830,85 @@ function analysisReportsUnknownStdManifestKeysOnTheManifest(): void {
   Test::assertEq<u64>(fixedFiles.length(), 0);
 }
 
+/// The diagnostics of every file in `files` carrying the code `code`.
+function lspTestDiagnosticsWithCode(
+  files: &Vector<FileDiagnostics>,
+  code: str
+): Vector<LspDiagnostic> {
+  let codeText: String = String::create(code);
+  let mut found: Vector<LspDiagnostic> = Vector::new<LspDiagnostic>();
+  let mut fileIndex: u64 = 0;
+
+  while (fileIndex < files.length()) {
+    if (let Option::SOME(file) = files.get(fileIndex)) {
+      let mut diagnosticIndex: u64 = 0;
+
+      while (diagnosticIndex < file.diagnostics.length()) {
+        if (let Option::SOME(diagnostic) = file.diagnostics.get(diagnosticIndex)) {
+          if (diagnostic.code.equals(&codeText)) {
+            found.push(LspDiagnostic {
+              start: diagnostic.start,
+              end: diagnostic.end,
+              severity: diagnostic.severity,
+              code: diagnostic.code.clone(),
+              message: diagnostic.message.clone(),
+            });
+          }
+        }
+
+        diagnosticIndex += 1;
+      }
+    }
+
+    fileIndex += 1;
+  }
+
+  return found;
+}
+
+/// The editor analysis stops at `Analyzer::analyzeProgram`, before the capture
+/// pass the compiler driver runs over the HIR, so a capturing closure passed
+/// to a function-typed extern parameter gets no A0217 in the language server
+/// while `ignis check` rejects the same source.
+@test
+function lspCaptureDiagnosticLimitationDoesNotReportA0217ForCapturingCallback(): void {
+  let source: Path::PathBuf = lspTestProject("capturelimitation");
+  let helper: Path::PathBuf = lspTestWrite(
+    &source,
+    "helper.ign",
+    "export function helperValue(): i32 {\n  let unused: i32 = 3;\n  return 7;\n}\n",
+  );
+  let main: Path::PathBuf = lspTestWrite(
+    &source,
+    "main.ign",
+    "import helperValue from \"./helper\";\n\nextern LibC {\n  function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;\n}\n\nfunction main(): i32 {\n  let mut values: i32[2] = [2, 1];\n  let direction: i32 = -1;\n\n  LibC::qsort((&mut values[0]) as *mut u8, 2, 4, (left: *u8, right: *u8): i32 -> direction * (*(left as *i32) - *(right as *i32)));\n\n  return helperValue() + values[0];\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&main);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&main, &key, &stdPath, &sources);
+
+  // The helper's unused-variable warning proves the project was analyzed
+  // through the lint phase, so the missing A0217 below is a real gap and not
+  // an analysis that silently did nothing.
+  let helperText: String = helper.toString();
+  let helperDiagnostics: Vector<LspDiagnostic> = lspTestDiagnosticsOf(&files, &helperText);
+
+  Test::assertEq<u64>(helperDiagnostics.length(), 1);
+
+  let Option::SOME(control) = helperDiagnostics.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(control.code.toStr(), "A0122");
+
+  // No file carries A0217, although `ignis check` reports it for this exact
+  // source after the HIR capture pass.
+  Test::assertEq<u64>(lspTestDiagnosticsWithCode(&files, "A0217").length(), 0);
+}
+
 @test
 function serverAnalyzesTheProjectFileWhenItIsOpened(): void {
   let source: Path::PathBuf = lspTestProject("openproject");

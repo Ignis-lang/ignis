@@ -820,11 +820,11 @@ function codegenSpellsIntegerConstantsWithTheirTypeWidth(): void {
     "const ACCESS: u64 = 0x89;\nconst SIGNED: i64 = 0x89;\nconst NARROW: u32 = 0x89;\n\nfunction main(): i32 {\n  let a: u64 = ACCESS << 40;\n  let b: u64 = ~ACCESS;\n  let c: i64 = SIGNED << 40;\n  let d: i64 = -5000000000;\n  let e: u32 = NARROW << 8;\n\n  return (a >> 40) as i32 + (b >> 63) as i32 + (c >> 40) as i32 + (d >> 40) as i32 + e as i32;\n}\n",
   );
 
-  Test::assert(codegenContains(&emission.source, "137ULL << 40"));
+  Test::assert(codegenContains(&emission.source, "137ULL << ((uint64_t)40ULL & 63ULL)"));
   Test::assert(codegenContains(&emission.source, "~137ULL"));
-  Test::assert(codegenContains(&emission.source, "137LL << 40"));
+  Test::assert(codegenContains(&emission.source, "137LL << ((uint64_t)40LL & 63ULL)"));
   Test::assert(codegenContains(&emission.source, "-5000000000LL"));
-  Test::assert(codegenContains(&emission.source, "137U << 8"));
+  Test::assert(codegenContains(&emission.source, "137U << ((uint64_t)8U & 31ULL)"));
   Test::assert(!codegenContains(&emission.source, "137U << 40"));
 }
 
@@ -1332,6 +1332,27 @@ function codegenFreestandingUnitDeclaresTheExternFunctionsItCalls(): void {
   Test::assert(codegenContains(&emission.source, "platform_register_handler(t"));
 }
 
+/// The program the extern object address tests compile: extern constants, one
+/// scalar, one array, with getters taking their addresses.
+const CODEGEN_EXTERN_OBJECT_ADDRESS_SOURCE: str = "extern Linker {\n  const kernel_end: u64;\n  const kernel_flags: u32;\n  const kernel_page_tables: u64[4];\n}\n\n@externName(\"freestanding_kernel_end_ptr\")\nfunction kernelEndPtr(): *u64 {\n  return &Linker::kernel_end as *u64;\n}\n\n@externName(\"freestanding_kernel_flags_ptr\")\nfunction kernelFlagsPtr(): *u32 {\n  return &Linker::kernel_flags as *u32;\n}\n\n@externName(\"freestanding_kernel_page_tables_base_ptr\")\nfunction kernelPageTablesBasePtr(): *u64 {\n  return &Linker::kernel_page_tables as *u64;\n}\n\n@externName(\"freestanding_kernel_page_table_ptr\")\nfunction kernelPageTablePtr(index: u64): *u64 {\n  return &Linker::kernel_page_tables[index] as *u64;\n}\n";
+
+/// A freestanding extern object's address is the C symbol itself, never a
+/// copy spilled into the getter's frame: the scalar address is `&kernel_end`,
+/// an array's address is its decayed first-element pointer, and an element's
+/// address indexes the real object. No frame copy of the object is emitted.
+@test
+function codegenFreestandingExternObjectAddressIsTheSymbol(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(CODEGEN_EXTERN_OBJECT_ADDRESS_SOURCE);
+
+  Test::assert(codegenContains(&emission.source, "extern u64 kernel_end;"));
+  Test::assert(codegenContains(&emission.source, "extern u64 kernel_page_tables[4];"));
+  Test::assert(codegenContains(&emission.source, "(void*)&kernel_end"));
+  Test::assert(codegenContains(&emission.source, "(void*)kernel_page_tables"));
+  Test::assert(codegenContains(&emission.source, "&(kernel_page_tables["));
+  Test::assert(!codegenContains(&emission.source, "l0 = kernel_end;"));
+  Test::assert(!codegenContains(&emission.source, "__builtin_memcpy(l0, kernel_page_tables"));
+}
+
 /// A hosted unit leaves extern functions to the headers it includes, whose
 /// spelling of a parameter type would conflict with a second declaration.
 @test
@@ -1481,6 +1502,56 @@ function codegenEscapesInlineAsmBodiesAndClobbers(): void {
   Test::assert(!codegenContains(&emission.source, "and {this}"));
 }
 
+/// Slashes inside a double-quoted assembler string are data: `//` and
+/// `/* */` survive into the template, comments outside quotes are still
+/// dropped, and `%`, `|` and `{{`/`}}` keep their escapes inside quotes.
+@test
+function asmQuotedCommentsCodegenKeepsQuotedCommentsInTemplate(): void {
+  let quoted: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"a//b\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(quoted.usesInlineAsm);
+  Test::assert(codegenContains(&quoted.source, "\\n    .ascii \\\"a//b\\\"\\n  "));
+
+  let blocked: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"a/*b*/c\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&blocked.source, ".ascii \\\"a/*b*/c\\\""));
+
+  let real: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"a//b\" // gone\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&real.source, ".ascii \\\"a//b\\\""));
+  Test::assert(!codegenContains(&real.source, "gone"));
+
+  let escaped: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"x\\\"y\\\\\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&escaped.source, ".ascii \\\"x\\\\\\\"y\\\\\\\\\\\""));
+
+  let machine: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"100% |a| {{b}}\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&machine.source, ".ascii \\\"100%% %|a%| %{b%}\\\""));
+}
+
+/// A quote opened before a hole stays open after it: the tail's `//` is still
+/// assembler data, and both holes keep their operand substitutions.
+@test
+function asmQuotedCommentsCodegenCarriesStateAcrossHoles(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let port: u8 = 0;\n\n  asm (port in al) {\n    out \"{port} //x\", {port}\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(emission.usesInlineAsm);
+  Test::assert(codegenContains(&emission.source, " out \\\"%[port] //x\\\", %[port]"));
+}
+
 /// A `pure` asm is not volatile, so the C compiler may drop it when its
 /// output goes unused.
 @test
@@ -1529,4 +1600,110 @@ function codegenReportsNoInlineAsmForPlainUnits(): void {
   let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  return 0;\n}\n");
 
   Test::assert(!emission.usesInlineAsm);
+}
+
+// =========================================================================
+// R27: wrapping integer emission and masked shift counts
+// =========================================================================
+
+/// `+ - *` on a destination at most 32 bits wide compute in `uint64_t` and
+/// decode back to the signed destination width, so signed overflow never
+/// executes in C.
+@test
+function r27CodegenI32AddComputesInUnsignedBits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let a: i32 = 10;\n  let b: i32 = a + a;\n\n  return b;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "((uint64_t)t0 + (uint64_t)t1)"));
+  Test::assert(codegenContains(&emission.source, "& 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648)"));
+  Test::assert(!codegenContains(&emission.source, "t0 + t1"));
+}
+
+/// A `u16` multiply promotes to signed `int` in C, so it has to compute in
+/// `uint64_t` as well: `700 * 700` overflows `int` in the plain form.
+@test
+function r27CodegenU16MultiplyComputesInUnsignedBits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let a: u16 = 700;\n  let b: u16 = a * a;\n\n  return b as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "(u16)((uint64_t)t0 * (uint64_t)t1)"));
+  Test::assert(!codegenContains(&emission.source, "t0 * t1"));
+}
+
+/// Left shifts mask the count to the destination width and compute in
+/// `uint64_t`, so `x << 31` on an `i32` destination cannot raise C shift or
+/// signed overflow UB.
+@test
+function r27CodegenI32ShiftLeftMasksCountAndComputesUnsigned(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let x: i32 = 1;\n  let n: i32 = 31;\n  let y: i32 = x << n;\n\n  return y;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "((uint64_t)t0 << ((uint64_t)t1 & 31ULL))"));
+  Test::assert(codegenContains(&emission.source, "^ 2147483648) - 2147483648)"));
+  Test::assert(!codegenContains(&emission.source, "t0 << t1"));
+}
+
+/// A 64-bit signed left shift also computes in `uint64_t` with a masked
+/// count and decodes the bit pattern to the signed width.
+@test
+function r27CodegenI64ShiftLeftMasksCountAndDecodesSigned(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let s: i64 = 1;\n  let n: i64 = 63;\n  let m: i64 = s << n;\n\n  return m as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "((uint64_t)t0 << ((uint64_t)t1 & 63ULL))"));
+  Test::assert(codegenContains(&emission.source, "& 0x7FFFFFFFFFFFFFFFULL"));
+  Test::assert(codegenContains(&emission.source, "* INT64_MIN"));
+}
+
+/// Right shifts mask the count for both signednesses; a signed right shift
+/// shifts the sign-extended 64-bit pattern.
+@test
+function r27CodegenShiftRightMasksCount(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let s: i32 = -8;\n  let n: i32 = 33;\n  let q: i32 = s >> n;\n  let u: u32 = 8;\n  let un: u32 = 33;\n  let r: u32 = u >> un;\n\n  return q + r as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "(i32)(((i64)t0) >> ((uint64_t)t1 & 31ULL))"));
+  Test::assert(codegenContains(&emission.source, "(u32)((uint64_t)t3 >> ((uint64_t)t4 & 31ULL))"));
+}
+
+/// Unary negation of a signed destination at most 32 bits wide computes the
+/// bit pattern in `uint64_t`, so negating the `i32` minimum is defined.
+@test
+function r27CodegenI32NegateComputesInUnsignedBits(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let a: i32 = 5;\n  let b: i32 = -a;\n\n  return b;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "(0ULL - (uint64_t)t0)"));
+  Test::assert(codegenContains(&emission.source, "& 0xFFFFFFFFULL)) ^ 2147483648) - 2147483648)"));
+  Test::assert(!codegenContains(&emission.source, "= -t0;"));
+}
+
+/// `@sizeOf` of a fixed array reports the whole array, not the element
+/// pointer every other emitter use decays the array to.
+@test
+function sizeofFixedArrayCodegenEmitsWholeArrayNotElementPointer(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let words: u64 = @sizeOf<u64[4]>();\n  let bytes: u64 = @sizeOf<u8[3]>();\n\n  return (words + bytes) as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "= sizeof(u64[4]);"));
+  Test::assert(codegenContains(&emission.source, "= sizeof(u8[3]);"));
+  Test::assert(!codegenContains(&emission.source, "sizeof(u64*)"));
+  Test::assert(!codegenContains(&emission.source, "sizeof(u8*)"));
+}
+
+/// A nested fixed array spells every dimension on the C type name, in the
+/// order the type nests: an Ignis `u8[2][3]` is an array of 3 of `u8[2]`,
+/// which C names `u8[3][2]`.
+@test
+function sizeofFixedArrayCodegenSpellsNestedDimensionsOnTheCTypeName(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 {\n  let grid: u64 = @sizeOf<u8[2][3]>();\n\n  return grid as i32;\n}\n");
+
+  Test::assert(codegenContains(&emission.source, "= sizeof(u8[3][2]);"));
+}
+
+/// An array of records sizes the mangled record type name times the length.
+@test
+function sizeofFixedArrayCodegenSizesArrayOfRecordsByTheMangledStructName(): void {
+  let mut emission: CodegenEmission = codegenEmit("record Point {\n  x: i32;\n  y: i32;\n}\n\nfunction main(): i32 {\n  let points: u64 = @sizeOf<Point[2]>();\n\n  return points as i32;\n}\n");
+
+  let Option::SOME(structName) = codegenMangledStructName(&mut emission, "Point") else {
+    @panic("the emitted program declares no record named 'Point'");
+  };
+
+  let expected: String = `sizeof(struct ${structName.toStr()}[2]);`;
+
+  Test::assert(codegenContains(&emission.source, expected.toStr()));
 }

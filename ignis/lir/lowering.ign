@@ -310,6 +310,23 @@ export namespace LirLowering {
     return Analyzer::ConstEval::findConstAggregate(&*constValues, defId.raw()).isSome();
   }
 
+  /// Whether `defId` names an `extern` object: a symbol the C side owns, whose
+  /// address is the object itself, never a copy spilled into this frame. Its
+  /// value reads stay `GlobalRef`, and no global initializer is seeded for it:
+  /// the freestanding emitter declares the symbol instead of defining it.
+  function isExternObject(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let defsRef: &mut Analyzer::DefinitionStore = defStore;
+
+    if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defsRef.get(defId)) {
+      return variable.isExtern;
+    }
+
+    return false;
+  }
+
   /// `@zeroed<T>()`: the zero constant of a scalar `T`. Any other `T` is a
   /// fresh slot whose bytes are set to zero and then read back as the value, so
   /// each evaluation yields its own zeroed copy.
@@ -418,7 +435,9 @@ export namespace LirLowering {
   }
 
   /// `&NAME` for an immutable static field or constant: the address of its
-  /// read-only global, which `collectStaticGlobals` emits.
+  /// read-only global, which `collectStaticGlobals` emits. An `extern` object
+  /// shares this path: no global is seeded for it, the emitter declares the
+  /// symbol, and the address names the object the C side owns.
   function lowerConstantAddress(
     typeStore: &mut Analyzer::TypeStore,
     function_: &mut Lir::FunctionLir,
@@ -2649,6 +2668,13 @@ export namespace LirLowering {
         }));
 
         return Lir::Operand::Temp(staticPtr);
+      }
+
+      // An `extern` object is storage the C side owns: its address is the
+      // symbol itself, never a copy spilled into this frame. An extern array
+      // keeps the first-element decay of a C array's name.
+      if (LirLowering::isExternObject(defStore, defId)) {
+        return LirLowering::lowerConstantAddress(typeStore, function_, state, defId, nodeType, nodeSpan);
       }
 
       // An immutable static or constant is folded into its reads, so a spilled

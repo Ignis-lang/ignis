@@ -284,3 +284,5 @@ Start the Language Server Protocol process.
 ```bash
 ignis lsp
 ```
+
+Known limitation: the language server does not yet report `A0217` for a capturing closure passed to a function-typed extern parameter. The CLI reaches that diagnostic in the capture pass it runs over the HIR, a stage the editor analysis does not perform, so run `ignis check` to validate FFI boundaries even when the editor is silent.
