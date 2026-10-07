@@ -1,0 +1,22 @@
+// The closure is created in another module and escapes there with a Copy
+// capture, so its environment drop has to survive the module boundary. The
+// closure value also crosses the opaque libc qsort call, so the C optimizer
+// cannot prove the heap environment dead. When the drop does not survive, the
+// fixture runner's LeakSanitizer fails this case.
+import makeAdder from "./closure_cross_module/helper";
+
+extern LibC {
+  function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;
+}
+
+function keepOrder(left: *u8, right: *u8): i32 {
+  return 0;
+}
+
+function main(): i32 {
+  let mut add = makeAdder(4);
+
+  LibC::qsort((&mut add) as *mut u8, 1, 1, keepOrder);
+
+  return add(2) == 6 ? 42 : 1;
+}

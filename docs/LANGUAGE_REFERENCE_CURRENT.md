@@ -697,6 +697,10 @@ function main(): i32 {
 }
 ```
 
+### 5.4 Environment Lifetime
+
+An escaping closure's environment is heap-allocated and freed when the closure value is dropped, even when every capture is `Copy` and needs no drop of its own. This holds whichever modules create and use the closure. In a freestanding build the allocation and the free go through the program's `@allocHandler` and `@freeHandler`. Capture-free closures need no environment; non-escaping captured closures use a stack environment and never heap-allocate.
+
 ## 6. Ownership and Borrowing
 
 Ignis tracks ownership of values that need cleanup (types with `@implements(Drop)` or containing such types). Non-Copy types are moved by default; using a value after it has been moved, dropped, or freed is a compile-time error.
