@@ -650,12 +650,17 @@ export namespace Format {
     }
 
     if (let Ast::Expression::Node::Assignment(assignment) = node) {
-      // A `match` on the right of an assignment stays unparenthesized, so it
-      // is offered precedence 0 rather than the assignment's own 1.
+      // A `match` or a bare lambda on the right of an assignment stays
+      // unparenthesized — the parser binds `=` looser than both — so they are
+      // offered precedence 0 rather than the assignment's own 1.
       let mut valuePrecedence: u8 = 1;
 
       if (let Option::SOME(valueNode) = module.expressions.get(assignment.value)) {
         if (let Ast::Expression::Node::Match(_) = valueNode) {
+          valuePrecedence = 0;
+        }
+
+        if (let Ast::Expression::Node::Lambda(_) = valueNode) {
           valuePrecedence = 0;
         }
       }

@@ -77,42 +77,17 @@ export namespace Format {
     return result;
   }
 
-  /// `@inline`/`@inline(always)`/`@inline(never)` are `Ast::Modifier` values on
-  /// the selfhost (unlike the host, which keeps them as attributes), so they
-  /// render as their own attribute lines here to match the host's output.
-  ///
-  /// `Meta`/`Declare` are not rendered: their exact source syntax is not yet
-  /// confirmed against a host fixture, and guessing risks corrupting output.
-  function formatModifierAttributeLines(
-    modifiers: &Vector<Ast::Modifier>,
+  /// Attributes render as their own `@` lines. The `inline` family arrives as
+  /// `Ast::Modifier` values (written with the `inline` keyword — the lexer
+  /// makes `inline` a keyword, so an `@inline` attribute cannot even parse)
+  /// and renders as keywords in `formatModifierKeywords` below, so `export
+  /// inline function` keeps its written order.
+  function formatDeclarationPrefix(
+    metadata: &Ast::Metadata,
     config: &FormatterConfig,
     indentLevel: u64
   ): String {
-    let prefix: String = config.indentString(indentLevel);
-    let mut result: String = String::new();
-    let mut index: u64 = 0;
-
-    while (index < modifiers.length()) {
-      let Option::SOME(modifier) = modifiers.get(index) else {
-        index += 1;
-        continue;
-      };
-
-      if (*modifier == Ast::Modifier::Inline) {
-        result.push(&prefix);
-        result.pushStr("@inline\n");
-      } else if (*modifier == Ast::Modifier::InlineAlways) {
-        result.push(&prefix);
-        result.pushStr("@inline(always)\n");
-      } else if (*modifier == Ast::Modifier::InlineNever) {
-        result.push(&prefix);
-        result.pushStr("@inline(never)\n");
-      }
-
-      index += 1;
-    }
-
-    return result;
+    return Format::formatAttributes(&metadata.attributes, config, indentLevel);
   }
 
   function formatModifierKeywords(modifiers: &Vector<Ast::Modifier>): String {
@@ -133,22 +108,17 @@ export namespace Format {
         result.pushStr("static ");
       } else if (*modifier == Ast::Modifier::Mutable) {
         result.pushStr("mut ");
+      } else if (*modifier == Ast::Modifier::Inline) {
+        result.pushStr("inline ");
+      } else if (*modifier == Ast::Modifier::InlineAlways) {
+        result.pushStr("inline(always) ");
+      } else if (*modifier == Ast::Modifier::InlineNever) {
+        result.pushStr("inline(never) ");
       }
 
       index += 1;
     }
 
-    return result;
-  }
-
-  function formatDeclarationPrefix(
-    metadata: &Ast::Metadata,
-    config: &FormatterConfig,
-    indentLevel: u64
-  ): String {
-    let mut result: String = Format::formatAttributes(&metadata.attributes, config, indentLevel);
-    let modifierLines: String = Format::formatModifierAttributeLines(&metadata.modifiers, config, indentLevel);
-    result.push(&modifierLines);
     return result;
   }
 
