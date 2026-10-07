@@ -1376,6 +1376,56 @@ function codegenEscapesInlineAsmBodiesAndClobbers(): void {
   Test::assert(!codegenContains(&emission.source, "and {this}"));
 }
 
+/// Slashes inside a double-quoted assembler string are data: `//` and
+/// `/* */` survive into the template, comments outside quotes are still
+/// dropped, and `%`, `|` and `{{`/`}}` keep their escapes inside quotes.
+@test
+function asmQuotedCommentsCodegenKeepsQuotedCommentsInTemplate(): void {
+  let quoted: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"a//b\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(quoted.usesInlineAsm);
+  Test::assert(codegenContains(&quoted.source, "\\n    .ascii \\\"a//b\\\"\\n  "));
+
+  let blocked: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"a/*b*/c\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&blocked.source, ".ascii \\\"a/*b*/c\\\""));
+
+  let real: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"a//b\" // gone\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&real.source, ".ascii \\\"a//b\\\""));
+  Test::assert(!codegenContains(&real.source, "gone"));
+
+  let escaped: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"x\\\"y\\\\\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&escaped.source, ".ascii \\\"x\\\\\\\"y\\\\\\\\\\\""));
+
+  let machine: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  asm () {\n    .ascii \"100% |a| {{b}}\"\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(codegenContains(&machine.source, ".ascii \\\"100%% %|a%| %{b%}\\\""));
+}
+
+/// A quote opened before a hole stays open after it: the tail's `//` is still
+/// assembler data, and both holes keep their operand substitutions.
+@test
+function asmQuotedCommentsCodegenCarriesStateAcrossHoles(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let port: u8 = 0;\n\n  asm (port in al) {\n    out \"{port} //x\", {port}\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assert(emission.usesInlineAsm);
+  Test::assert(codegenContains(&emission.source, " out \\\"%[port] //x\\\", %[port]"));
+}
+
 /// A `pure` asm is not volatile, so the C compiler may drop it when its
 /// output goes unused.
 @test

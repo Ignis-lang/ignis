@@ -1228,16 +1228,46 @@ export namespace Format {
   }
 
   /// The byte just past the embedded body whose `{` is at `open`.
+  ///
+  /// It follows the lexer: the body opens at the first `{` outside the
+  /// header's parentheses, `{{` and `}}` are escaped braces, comments hide
+  /// their braces, and each `{ ... }` hole holds ordinary code. A
+  /// double-quoted assembler string hides its `//` and `/* */` — slashes in
+  /// one are data, so `commentEndOffset` runs only outside a quote. The
+  /// quote state is tracked with backslash escapes across the holes that
+  /// split the body, and braces keep their meaning inside a quote.
   function embedBodyEndOffset(source: &String, open: u64): Option<u64> {
     let mut cursor: u64 = open + 1;
+    let mut inQuote: boolean = false;
 
     while (cursor < source.length()) {
       let byte: u8 = source.byteAt(cursor).unwrapOr(0);
       let next: u8 = source.byteAt(cursor + 1).unwrapOr(0);
 
-      if (let Option::SOME(afterComment) = Format::commentEndOffset(source, cursor)) {
-        cursor = afterComment;
+      if (byte == '\\' as u8 && inQuote) {
+        // The escape is for the quote state alone: only an escaped quote or
+        // backslash is consumed as a pair, so braces and holes keep the
+        // meaning they always had after a backslash.
+        if (next == '"' as u8 || next == '\\' as u8) {
+          cursor += 2;
+        } else {
+          cursor += 1;
+        }
+
         continue;
+      }
+
+      if (byte == '"' as u8) {
+        inQuote = !inQuote;
+        cursor += 1;
+        continue;
+      }
+
+      if (!inQuote) {
+        if (let Option::SOME(afterComment) = Format::commentEndOffset(source, cursor)) {
+          cursor = afterComment;
+          continue;
+        }
       }
 
       if ((byte == '{' as u8 || byte == '}' as u8) && next == byte) {

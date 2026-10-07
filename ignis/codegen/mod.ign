@@ -2346,10 +2346,13 @@ export namespace CodegenC {
 
   /// The text of an asm body chunk as a GCC asm template, before C string
   /// escaping. `//` and `/* */` comments are Ignis comments and are dropped,
-  /// since the assembler reads neither. `%`, `|`, and the braces `{{` and
-  /// `}}` stand for are escaped, because GCC gives them meaning in a
+  /// since the assembler reads neither — but only outside a double-quoted
+  /// assembler string, where slashes are data. `inQuote` carries the quote
+  /// state across the chunks a body is split into by its holes, so a string
+  /// opened before a hole stays quoted after it. `%`, `|`, and the braces
+  /// `{{` and `}}` stand for are escaped, because GCC gives them meaning in a
   /// template.
-  function inlineAsmTemplateText(chunk: &String): String {
+  function inlineAsmTemplateText(chunk: &String, inQuote: &mut boolean): String {
     let mut result: String = String::create("");
     let mut index: u64 = 0;
 
@@ -2365,7 +2368,32 @@ export namespace CodegenC {
         next = following;
       }
 
-      if (byte == '/' as u8 && next == '/' as u8) {
+      if (*inQuote) {
+        if (byte == '\\' as u8) {
+          result.pushByte(byte);
+          index += 1;
+
+          // The escape is for the quote state alone: only an escaped quote
+          // or backslash is consumed as a pair, so `%`, `|` and brace
+          // escaping keeps running after any other backslash.
+          if (let Option::SOME(escaped) = chunk.byteAt(index)) {
+            if (escaped == '"' as u8 || escaped == '\\' as u8) {
+              result.pushByte(escaped);
+              index += 1;
+            }
+          }
+
+          continue;
+        }
+
+        if (byte == '"' as u8) {
+          *inQuote = false;
+        }
+      } else if (byte == '"' as u8) {
+        *inQuote = true;
+      }
+
+      if (byte == '/' as u8 && next == '/' as u8 && !*inQuote) {
         while (index < chunk.length()) {
           let Option::SOME(commentByte) = chunk.byteAt(index) else {
             break;
@@ -2381,7 +2409,7 @@ export namespace CodegenC {
         continue;
       }
 
-      if (byte == '/' as u8 && next == '*' as u8) {
+      if (byte == '/' as u8 && next == '*' as u8 && !*inQuote) {
         index += 2;
 
         while (index < chunk.length()) {
@@ -2622,11 +2650,12 @@ export namespace CodegenC {
     }
 
     let mut asmTemplate: String = String::create("");
+    let mut inQuote: boolean = false;
     index = 0;
 
     while (index < node.chunks.length()) {
       if (let Option::SOME(chunk) = node.chunks.get(index)) {
-        let chunkText: String = CodegenC::inlineAsmTemplateText(chunk);
+        let chunkText: String = CodegenC::inlineAsmTemplateText(chunk, &mut inQuote);
         asmTemplate.push(&chunkText);
       }
 

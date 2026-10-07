@@ -1,0 +1,21 @@
+// Slashes inside a quoted assembler string are assembler data: the quoted
+// comments survive into the template, and the `.ascii` bytes sit between a
+// jump and its label so they are never executed.
+function main(): i32 {
+  asm () {
+    jmp 1f
+    .ascii "a//b/*c\"d\\"
+1:
+  }
+
+  let mut value: u8 = 0;
+
+  asm (value inout al) {
+    jmp 2f
+    .ascii "{value} // still data"
+2:
+    mov {value}, 65
+  }
+
+  return value as i32;
+}

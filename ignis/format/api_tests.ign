@@ -1128,6 +1128,40 @@ function apiFormatsAnAsmExpression(): void {
   );
 }
 
+/// `//` and `/*` inside a double-quoted assembler string are data: they can
+/// neither hide the body's closing `}` nor the rest of the body, which stays
+/// verbatim. Braces keep their grammar inside a quote, so a literal one is
+/// the `}}` escape.
+@test
+function asmQuotedCommentsFormatKeepsBodyVerbatim(): void {
+  let line: String = formatOrFail(
+    "function main(): i32 {\n  asm () {\n    mov eax, \"// }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  Test::assertEq<str>(
+    line.toStr(),
+    "function main(): i32 {\n  asm () {\n    mov eax, \"// }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  let block: String = formatOrFail(
+    "function main(): i32 {\n  asm () {\n    mov eax, \"/* }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  Test::assertEq<str>(
+    block.toStr(),
+    "function main(): i32 {\n  asm () {\n    mov eax, \"/* }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  let crossed: String = formatOrFail(
+    "function main(): i32 {\n  let port: u8 = 0;\n\n  asm (port in al) {\n    out \"{port} // }}\", {port}\n  }\n\n  return 0;\n}\n"
+  );
+
+  Test::assertEq<str>(
+    crossed.toStr(),
+    "function main(): i32 {\n  let port: u8 = 0;\n\n  asm (port in al) {\n    out \"{port} // }}\", {port}\n  }\n\n  return 0;\n}\n"
+  );
+}
+
 /// An array literal written over several lines keeps one row per source line,
 /// reindented, and every row ends with a comma, the trailing one included.
 @test
