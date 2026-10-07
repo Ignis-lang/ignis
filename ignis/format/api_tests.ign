@@ -1128,6 +1128,40 @@ function apiFormatsAnAsmExpression(): void {
   );
 }
 
+/// `//` and `/*` inside a double-quoted assembler string are data: they can
+/// neither hide the body's closing `}` nor the rest of the body, which stays
+/// verbatim. Braces keep their grammar inside a quote, so a literal one is
+/// the `}}` escape.
+@test
+function asmQuotedCommentsFormatKeepsBodyVerbatim(): void {
+  let line: String = formatOrFail(
+    "function main(): i32 {\n  asm () {\n    mov eax, \"// }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  Test::assertEq<str>(
+    line.toStr(),
+    "function main(): i32 {\n  asm () {\n    mov eax, \"// }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  let block: String = formatOrFail(
+    "function main(): i32 {\n  asm () {\n    mov eax, \"/* }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  Test::assertEq<str>(
+    block.toStr(),
+    "function main(): i32 {\n  asm () {\n    mov eax, \"/* }}\"\n  }\n\n  return 0;\n}\n"
+  );
+
+  let crossed: String = formatOrFail(
+    "function main(): i32 {\n  let port: u8 = 0;\n\n  asm (port in al) {\n    out \"{port} // }}\", {port}\n  }\n\n  return 0;\n}\n"
+  );
+
+  Test::assertEq<str>(
+    crossed.toStr(),
+    "function main(): i32 {\n  let port: u8 = 0;\n\n  asm (port in al) {\n    out \"{port} // }}\", {port}\n  }\n\n  return 0;\n}\n"
+  );
+}
+
 /// An array literal written over several lines keeps one row per source line,
 /// reindented, and every row ends with a comma, the trailing one included.
 @test
@@ -1218,4 +1252,60 @@ function igniosRegressionFormatterRoundTripsEveryCompoundAssignmentToken(): void
 
     Test::assertEq<str>(reformatted.toStr(), formatted.toStr());
   }
+}
+
+// ---------------------------------------------------------------------------
+// R15: bare lambda assignment right-hand sides and `export inline` ordering.
+// ---------------------------------------------------------------------------
+
+/// A bare lambda on the right of an assignment stays unparenthesized: the
+/// parser binds `=` looser than a lambda, so the extra wrapping parens the
+/// layout used to add were a token-shape drift the safety check rejected.
+@test
+function formatterR15FormatsABareLambdaAssignmentWithoutExtraParens(): void {
+  let formatted: String = formatOrFail("function main(): void { x = (a: i32): i32 -> a + 1; }\n");
+  let lambdaText: String = String::create("x = (a: i32): i32 -> a + 1;");
+  let wrappedParens: String = String::create("((a: i32)");
+
+  if (!formatted.contains(&lambdaText) || formatted.contains(&wrappedParens)) {
+    Test::fail();
+  }
+
+  let secondPass: String = formatOrFail(formatted.toStr());
+  Test::assertEq<str>(secondPass.toStr(), formatted.toStr());
+}
+
+/// `inline` written as a keyword keeps its written place in front of
+/// `function`, after `export`; the formatter must not rewrite it into an
+/// `@inline` attribute line, which also moved `export` in front of it.
+@test
+function formatterR15KeepsExportInlineKeywordOrdering(): void {
+  let formatted: String = formatOrFail("export inline function add(a: i32, b: i32): i32 { return a + b; }\n");
+  let expectedHeader: String = String::create("export inline function add(a: i32, b: i32): i32 {");
+  let attributeForm: String = String::create("@inline");
+
+  if (!formatted.contains(&expectedHeader) || formatted.contains(&attributeForm)) {
+    Test::fail();
+  }
+
+  let secondPass: String = formatOrFail(formatted.toStr());
+  Test::assertEq<str>(secondPass.toStr(), formatted.toStr());
+}
+
+/// The `inline` family only exists as the keyword form: the lexer makes
+/// `inline` a keyword, so an `@inline` attribute cannot parse. The keyword
+/// form, including its `always`/`never` modes, must not be rewritten into
+/// any `@`-prefixed line.
+@test
+function formatterR15KeepsInlineAlwaysKeywordAsWritten(): void {
+  let formatted: String = formatOrFail("inline(always) function f(): void { return; }\n");
+  let keywordForm: String = String::create("inline(always) function f(): void {");
+  let attributeForm: String = String::create("@inline");
+
+  if (!formatted.contains(&keywordForm) || formatted.contains(&attributeForm)) {
+    Test::fail();
+  }
+
+  let secondPass: String = formatOrFail(formatted.toStr());
+  Test::assertEq<str>(secondPass.toStr(), formatted.toStr());
 }

@@ -1070,3 +1070,93 @@ function lexerReportsUnterminatedAsmBody(): void {
   assertLiteralToken(&mut tokens, LiteralKind::EMBED_NO_HOLE, "{ nop");
   Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
 }
+
+/// `//` and `/*` inside a double-quoted assembler string are data, not
+/// comments: they cannot swallow the closing quote, a hole or the body's
+/// `}`. Braces keep their grammar inside a quote, so a literal one is the
+/// `}}` escape.
+@test
+function asmQuotedCommentsLexerKeepsQuotedCommentsInChunks(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm () { mov eax, \"// }}\" }\nx");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_NO_HOLE, "{ mov eax, \"// }}\" }");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+
+  let blocked: LexResult = lexText("fixtures/asm.ign", "asm () { mov eax, \"/* }}\" }\nx");
+  let mut blockedTokens: TokenStream = blocked.tokens;
+
+  Test::assertEq<u64>(blocked.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(blockedTokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(blockedTokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(blockedTokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut blockedTokens, LiteralKind::EMBED_NO_HOLE, "{ mov eax, \"/* }}\" }");
+  Test::assertEq<TokenKind>(blockedTokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(blockedTokens.bump().kindValue(), TokenKind::EOF);
+}
+
+/// `\\"` and `\\\\` keep the assembler quote open: only an unescaped `\"`
+/// closes it. The escape is for the quote state alone, so `\\{` still opens
+/// a hole after the backslash.
+@test
+function asmQuotedCommentsLexerTracksEscapes(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm () { mov eax, \"a\\\"b\\\\c//x\" }\nx");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_NO_HOLE, "{ mov eax, \"a\\\"b\\\\c//x\" }");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+
+  let holed: LexResult = lexText("fixtures/asm.ign", "asm (v: u8 in al) { out \"\\{v}\" }\nx");
+  let mut holedTokens: TokenStream = holed.tokens;
+
+  Test::assertEq<u64>(holed.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(holedTokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(holedTokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(holedTokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(holedTokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Keyword>(holedTokens.bump().keywordValue(), Keyword::UINT8_TYPE);
+  Test::assertEq<Keyword>(holedTokens.bump().keywordValue(), Keyword::IN);
+  Test::assertEq<TokenKind>(holedTokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(holedTokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut holedTokens, LiteralKind::EMBED_HEAD, "{ out \"\\{");
+  Test::assertEq<TokenKind>(holedTokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  assertLiteralToken(&mut holedTokens, LiteralKind::EMBED_TAIL, "}\" }");
+  Test::assertEq<TokenKind>(holedTokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(holedTokens.bump().kindValue(), TokenKind::EOF);
+}
+
+/// A quote opened before a hole stays open after it: the tail's `//` is
+/// still inside the assembler string, the quote closes in a later chunk, and
+/// a literal brace in one is the `}}` escape.
+@test
+function asmQuotedCommentsLexerCarriesStateAcrossHoles(): void {
+  let result: LexResult = lexText("fixtures/asm.ign", "asm (v: u8 in al) { out \"{v} // }}\", {v} }\nx");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::ASM);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::UINT8_TYPE);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::IN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_HEAD, "{ out \"{");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_MIDDLE, "} // }}\", {");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  assertLiteralToken(&mut tokens, LiteralKind::EMBED_TAIL, "} }");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}

@@ -336,6 +336,8 @@ function rowAt(index: u64): *u8 {
 }
 ```
 
+Taking the address of an immutable static field or constant whose initializer is not a constant expression is an error (A0245). Such a value has no storage of its own: it is rebuilt from its initializer at every use, so its address would point into the current frame and dangle once the function returns. The rule covers subobject addresses too — `&Table::CELL.value` and `&Table::ROWS[1]` are rejected when the initializer of `CELL` or `ROWS` is not constant — and it applies across module boundaries: an imported definition is judged by the initializer in the module that declares it, so an imported constant that folds stays addressable while a dynamic one does not. Indexing or field access through a static whose value is a pointer or a slice addresses the pointee, not the static's storage, and is not affected. A parenthesized reference target is rejected as a non-lvalue before this rule runs (A0029).
+
 A `static mut` field written without an initializer starts with every byte zero. The compiler emits it as a C global with no initializer, so it costs no space in the object file and a large table needs no literal:
 
 ```ignis
@@ -1210,6 +1212,15 @@ Range: `..` `..=` (see [Section 9.13](#913-ranges))
 Pipe: `|>` (left-associative, see [Section 9.11](#911-pipe-operator))
 
 Other: cast `expr as Type`, postfix `x++`, `x--`, prefix `++x`, `--x`.
+
+**Integer operation widths.** Arithmetic obeys the declared width of the result type, not the width C would promote to:
+
+- `+`, `-`, `*`, unary `-` on unsigned types, and `<<` wrap modulo 2^width at every width: the result is the low `width` bits of the mathematical value, sign-decoded for signed types. `2147483647 + 1` on an `i32` is `-2147483648`, `65535 * 3` on a `u16` is `65533`, and negating the `i32` minimum wraps to itself.
+- `+`, `-`, `*` and unary `-` on signed types wrap the same way at widths up to 32 bits. At 64 bits their overflow remains undefined in the emitted C and is not covered by this guarantee.
+- Shift counts are masked to the shifted type's width minus one through the count's own bit pattern, at every width: `x << 32` on an `i32` shifts by 0, a count of `-1` shifts by 31, and a `u8` shift masks its count to 7.
+- `>>` is arithmetic (sign fill) on signed types and logical on unsigned ones.
+- Division and remainder are outside this contract: division by zero and signed minimum divided by `-1` remain undefined in the emitted C; no runtime guard is added here.
+- Constant evaluation folds the same way: every operation normalizes to the declared width before the next one reads it, so `(2147483647 + 1) < 0` folds to `true`.
 
 ### 9.6 Try operator `!`
 

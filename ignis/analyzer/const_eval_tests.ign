@@ -1,8 +1,9 @@
 import Test from "std::test";
 
-import SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag, Severity, SourceFile, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
 
 function constEvalDummySpan(): SourceSpan {
   return SourceSpan::new("const_eval_tests.ign", 0, 0);
@@ -252,6 +253,61 @@ function assertNotConst(output: &mut Analyzer::AnalyzerOutput, itemId: Ast::Item
   }
 }
 
+function constEvalCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function constEvalFirstErrorCode(output: &Analyzer::AnalyzerOutput): str {
+  let mut index: u64 = 0;
+
+  while (index < output.diagnostics.length()) {
+    let Option::SOME(diagnostic) = output.diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      return diagnostic.code;
+    }
+
+    index += 1;
+  }
+
+  return "";
+}
+
+/// Parses and analyzes `source` through the full analyzer, the way a user
+/// module goes through it, so diagnostics from every phase are visible.
+function constEvalAnalyzeSource(source: str): Analyzer::AnalyzerOutput {
+  let file: SourceFile = SourceFile::create("const_eval_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(constEvalCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(constEvalCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  return Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+}
+
 @test
 function constEvalIntLiteral(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -374,7 +430,7 @@ function constEvalUnaryNotBool(): void {
 }
 
 @test
-function constEvalNegateUnsignedIsNotConst(): void {
+function constEvalNegateUnsignedWrapsToWidth(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -387,7 +443,7 @@ function constEvalNegateUnsignedIsNotConst(): void {
 
   let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertNotConst(&mut output, itemId);
+  assertConstInt(&mut output, itemId, 4294967289);
 }
 
 @test
@@ -481,7 +537,7 @@ function constEvalDivisionByZeroIsNotConst(): void {
 }
 
 @test
-function constEvalShiftOutOfRangeIsNotConst(): void {
+function constEvalShiftCountMasksToResultWidth(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -501,7 +557,7 @@ function constEvalShiftOutOfRangeIsNotConst(): void {
   let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
-  assertNotConst(&mut output, itemId);
+  assertConstInt(&mut output, itemId, 1);
 }
 
 @test
@@ -654,4 +710,744 @@ function constEvalGroupedLiteralFolds(): void {
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertConstInt(&mut output, itemId, 5);
+}
+
+// ===========================================================================
+// Address of an immutable static or constant with a nonconstant initializer
+// ===========================================================================
+
+@test
+function constEvalAddressOfNonConstantStaticIsRejected(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Table {
+  static VALUE: u64 = base();
+}
+
+function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let p: *u64 = &Table::VALUE as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
+}
+
+@test
+function constEvalAddressOfNonConstantModuleConstantIsRejected(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `function base(): u64 {
+  return 7;
+}
+
+const K: u64 = base();
+
+function main(): i32 {
+  let p: *u64 = &K as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
+}
+
+@test
+function constEvalAddressOfConstantStaticIsAccepted(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Table {
+  static ROWS: u8[4] = [1, 2, 3, 4];
+}
+
+function main(): i32 {
+  let p: *u8 = &Table::ROWS as *u8;
+  return *(p + 1) as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 0);
+}
+
+@test
+function constEvalZeroableStaticMutAndStaticAddressCheckCoexist(): void {
+  // One record exercises both merged features at once: a `static mut` field
+  // without an initializer folds to a zero part (the upstream zeroable rule,
+  // which would report A0239 for a non-zeroable type), while the immutable
+  // static whose initializer does not fold must report the distinct static
+  // address code A0245, never A0239.
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Table {
+  static mut COUNTER: u32;
+  static VALUE: u64 = base();
+}
+
+function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let p: *u64 = &Table::VALUE as *u64;
+  return Table::COUNTER as i32 + *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
+}
+
+@test
+function constEvalNonConstantStaticReadIsAccepted(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Table {
+  static VALUE: u64 = base();
+}
+
+function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let v: u64 = Table::VALUE;
+  return v as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 0);
+}
+
+@test
+function constEvalAddressOfNonConstantLocalIsAccepted(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let x: u64 = base();
+  let p: *u64 = &x as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 0);
+}
+
+// ===========================================================================
+// Address place wrappers: grouped and subobject places name the same storage
+// ===========================================================================
+
+/// A grouped place is rejected by the typechecker's lvalue rule (A0029), so
+/// no valid shared reference reaches the const-eval descent through a
+/// grouping. The descent still runs on the invalid program and adds its own
+/// A0245; this pins the two-diagnostic outcome.
+@test
+function constEvalAddressOfGroupedPlaceIsRejectedAsNonLvalue(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Table {
+  static VALUE: u64 = base();
+}
+
+function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let p: *u64 = &(Table::VALUE) as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 2);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0029");
+}
+
+@test
+function constEvalAddressOfNonConstantStaticElementIsRejected(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Table {
+  static ROWS: u64[4] = [base(), base(), base(), base()];
+}
+
+function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let p: *u64 = &Table::ROWS[1] as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
+}
+
+@test
+function constEvalAddressOfNonConstantStaticFieldIsRejected(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Cell {
+  value: u64;
+}
+
+record Table {
+  static CELL: Cell = Cell { value: base() };
+}
+
+function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let p: *u64 = &Table::CELL.value as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
+}
+
+/// Indexing through a pointer-valued static addresses the pointee, not the
+/// static's own storage, so it is not an address of the static even when the
+/// static's initializer did not fold.
+@test
+function constEvalAddressThroughPointerValuedStaticIsAccepted(): void {
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `const OTHER: u64 = 5;
+
+record Table {
+  static SLOT: *u64 = &OTHER as *u64;
+}
+
+function main(): i32 {
+  let p: *u64 = &Table::SLOT[0] as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 0);
+}
+
+// ===========================================================================
+// Cross-module addresses through the program path
+// ===========================================================================
+
+function constEvalParseModule(fileName: str, source: str): Ast::Module {
+  let file: SourceFile = SourceFile::create(fileName, source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(constEvalCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(constEvalCountErrors(&parsed.parseDiagnostics), 0);
+
+  return parsed.module;
+}
+
+function constEvalModuleInfo(index: u64, path: str): Analyzer::Imports::ModuleInfo {
+  return Analyzer::Imports::ModuleInfo {
+    index: index,
+    pathText: String::create(path),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  };
+}
+
+function constEvalAnalyzeProgram(
+  definitionSource: str,
+  consumerSource: str
+): Vector<Analyzer::ModuleAnalysisRecord> {
+  let definitions: Ast::Module = constEvalParseModule("a.ign", definitionSource);
+  let consumer: Ast::Module = constEvalParseModule("b.ign", consumerSource);
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(definitions);
+  modules.push(consumer);
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(constEvalModuleInfo(0, "a.ign"));
+  infos.push(constEvalModuleInfo(1, "b.ign"));
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let noPrelude: Vector<String> = Vector::new<String>();
+
+  return Analyzer::analyzeProgram(&mut defStore, &mut typeStore, &mut symbols, &modules, &infos, &noPrelude);
+}
+
+// One module's diagnostics summary, for program-path assertions.
+record ConstEvalDiagnosticsSummary {
+  count: u64;
+  code: str;
+}
+
+function constEvalRecordFirstErrorCountAndCode(
+  moduleRecord: &Analyzer::ModuleAnalysisRecord
+): ConstEvalDiagnosticsSummary {
+  let mut count: u64 = 0;
+  let mut code: str = "";
+  let mut index: u64 = 0;
+
+  while (index < moduleRecord.output.diagnostics.length()) {
+    let Option::SOME(diagnostic) = moduleRecord.output.diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      if (count == 0) {
+        code = diagnostic.code;
+      }
+
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return ConstEvalDiagnosticsSummary { count: count, code: code };
+}
+
+@test
+function constEvalProgramAddressOfImportedDynamicConstantIsRejected(): void {
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = constEvalAnalyzeProgram(
+    `export function base(): u64 {
+  return 7;
+}
+
+export const K: u64 = base();
+`.toStr(),
+    `import K from "a.ign";
+
+function main(): i32 {
+  let p: *u64 = &K as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(records.length(), 2);
+
+  let Option::SOME(definitions) = records.get(0) else {
+    Test::fail();
+    return;
+  };
+  let definitionSummary: ConstEvalDiagnosticsSummary = constEvalRecordFirstErrorCountAndCode(&definitions);
+  Test::assertEq<u64>(definitionSummary.count, 0);
+
+  let Option::SOME(consumer) = records.get(1) else {
+    Test::fail();
+    return;
+  };
+  let consumerSummary: ConstEvalDiagnosticsSummary = constEvalRecordFirstErrorCountAndCode(&consumer);
+  Test::assertEq<u64>(consumerSummary.count, 1);
+  Test::assertEq<str>(consumerSummary.code, "A0245");
+}
+
+@test
+function constEvalProgramAddressOfImportedDynamicStaticFieldIsRejected(): void {
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = constEvalAnalyzeProgram(
+    `export function base(): u64 {
+  return 7;
+}
+
+export record Table {
+  static VALUE: u64 = base();
+}
+`.toStr(),
+    `import Table from "a.ign";
+
+function main(): i32 {
+  let p: *u64 = &Table::VALUE as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(records.length(), 2);
+
+  let Option::SOME(definitions) = records.get(0) else {
+    Test::fail();
+    return;
+  };
+  let definitionSummary: ConstEvalDiagnosticsSummary = constEvalRecordFirstErrorCountAndCode(&definitions);
+  Test::assertEq<u64>(definitionSummary.count, 0);
+
+  let Option::SOME(consumer) = records.get(1) else {
+    Test::fail();
+    return;
+  };
+  let consumerSummary: ConstEvalDiagnosticsSummary = constEvalRecordFirstErrorCountAndCode(&consumer);
+  Test::assertEq<u64>(consumerSummary.count, 1);
+  Test::assertEq<str>(consumerSummary.code, "A0245");
+}
+
+/// A cross-module constant that folds has a read-only global in its defining
+/// module, so its address stays accepted in the importer.
+@test
+function constEvalProgramAddressOfImportedFoldingConstantIsAccepted(): void {
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = constEvalAnalyzeProgram(
+    `export const K: u64 = 5;
+`.toStr(),
+    `import K from "a.ign";
+
+function main(): i32 {
+  let p: *u64 = &K as *u64;
+  return *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(records.length(), 2);
+
+  let mut index: u64 = 0;
+
+  while (index < records.length()) {
+    let Option::SOME(moduleRecord) = records.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let summary: ConstEvalDiagnosticsSummary = constEvalRecordFirstErrorCountAndCode(&moduleRecord);
+    Test::assertEq<u64>(summary.count, 0);
+    index += 1;
+  }
+}
+
+// =========================================================================
+// R27: width-based wrapping constants and masked shift counts
+// =========================================================================
+
+@test
+function r27ConstFoldI32ShiftLeftWrapsToMinimum(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 31);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneExpr,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, -2147483648);
+}
+
+@test
+function r27ConstFoldI8AddWrapsToMinimum(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i8TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i8");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 127);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", i8TypeId, maxExpr);
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let maxRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    maxRef,
+    oneExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i8TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, -128);
+}
+
+@test
+function r27ConstFoldU8AddWrapsToZero(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u8");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 255);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", u8TypeId, maxExpr);
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let maxRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    maxRef,
+    oneExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u8TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 0);
+}
+
+@test
+function r27ConstFoldU16MultiplyWraps(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u16TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u16");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 65535);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", u16TypeId, maxExpr);
+  let threeExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 3);
+  let maxRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Multiply,
+    maxRef,
+    threeExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u16TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 65533);
+}
+
+@test
+function r27ConstFoldU32MultiplyWrapsPastI64(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u32");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 4294967295);
+  let maxItemId: Ast::ItemId = constEvalAddConstant(&mut module, "MAX", u32TypeId, maxExpr);
+  let maxLeftRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let maxRightRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "MAX");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Multiply,
+    maxLeftRef,
+    maxRightRef,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 1);
+}
+
+@test
+function r27ConstFoldComparisonReflectsDeclaredWidth(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let booleanTypeId: Ast::TypeId = constEvalAddPathType(&mut module, "boolean");
+  let maxExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 2147483647);
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let sumExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    maxExpr,
+    oneExpr,
+  );
+  let zeroExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 0);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::LessThan,
+    sumExpr,
+    zeroExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", booleanTypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstBool(&mut output, itemId, true);
+}
+
+@test
+function r27ConstFoldShiftCountMasksNegative(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let minusOneExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    constEvalAddIntLiteral(&mut module, 1),
+  );
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneExpr,
+    minusOneExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, -2147483648);
+}
+
+@test
+function r27ConstFoldShiftCountMasksLarge(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 32);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneExpr,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 1);
+}
+
+@test
+function r27ConstFoldU64ShiftCountMasks(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u64");
+  let oneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let oneItemId: Ast::ItemId = constEvalAddConstant(&mut module, "ONE", u64TypeId, oneExpr);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 64);
+  let oneRef: Ast::ExpressionId = constEvalAddVariable(&mut module, "ONE");
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    oneRef,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u64TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 1);
+}
+
+@test
+function r27ConstFoldShiftRightCountMasks(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let eightExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 8);
+  let amountExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 33);
+  let valueExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftRight,
+    eightExpr,
+    amountExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 4);
+}
+
+@test
+function r27ConstFoldBitNotNormalizesWidth(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "u8");
+  let zeroExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 0);
+  let valueExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::BitNot,
+    zeroExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", u8TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, itemId, 255);
+}
+
+@test
+function r27ConstFoldI32NegateWrapsAtMinimum(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Declared first: constants fold in declaration order, so `K` reads `M`.
+  let minTypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let minusMaxExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    constEvalAddIntLiteral(&mut module, 2147483647),
+  );
+  let minusOneExpr: Ast::ExpressionId = constEvalAddIntLiteral(&mut module, 1);
+  let minExpr: Ast::ExpressionId = constEvalAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Subtract,
+    minusMaxExpr,
+    minusOneExpr,
+  );
+  let minItemId: Ast::ItemId = constEvalAddConstant(&mut module, "M", minTypeId, minExpr);
+
+  let i32TypeId: Ast::TypeId = constEvalAddPathType(&mut module, "i32");
+  let minRefExpr: Ast::ExpressionId = constEvalAddVariable(&mut module, "M");
+  let valueExpr: Ast::ExpressionId = constEvalAddUnary(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    minRefExpr,
+  );
+  let itemId: Ast::ItemId = constEvalAddConstant(&mut module, "K", i32TypeId, valueExpr);
+
+  let mut output: Analyzer::AnalyzerOutput = constEvalAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertConstInt(&mut output, minItemId, -2147483648);
+  assertConstInt(&mut output, itemId, -2147483648);
 }

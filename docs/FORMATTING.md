@@ -160,5 +160,5 @@ Example:
 - Canonical layouts are pinned by the `@test` functions in `ignis/format/*_tests.ign` (`api_tests.ign`, `layout_items_tests.ign`, `layout_expressions_tests.ign`, `layout_statements_tests.ign`, `comments_tests.ign`, `config_tests.ign`, `safety_tests.ign` and others).
 - `ignis/format/corpus_tests.ign` formats the real files under `ignis/` and `std/` and requires each to come back byte for byte. Files under `test_cases/` and `example/` must format cleanly and stably, but not necessarily byte for byte.
 - CLI parsing for `fmt` (explicit files, `--project`, `--check`, style overrides) is covered in `ignis/cli.ign`, and config-error messages and the `--stdin-json` line protocol in `ignis/main_tests.ign`.
-- CI runs `ignis fmt --check` over `std/`, `ignis/` and `example/` (except `example/add.ign`).
+- CI runs `ignis fmt --check` over `std/`, `ignis/` and `example/`.
 - Shipped CLI features today include project mode, single-file mode, multiple explicit file paths, `--check`, `--stdin-json`, `--emit diff`, and `--sort-imports`.

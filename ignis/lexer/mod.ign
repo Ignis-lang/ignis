@@ -88,12 +88,20 @@ record LexerScanner {
   /// at depth zero; otherwise it closes a block written inside it.
   frames: Vector<LexerFrame>;
 
+  /// Whether a double-quoted assembler string is open inside the embedded body
+  /// being scanned.
+  ///
+  /// `//` and `/*` inside such a string are data, not comments, and the quote
+  /// can stay open across a hole, so the state outlives one chunk scan.
+  private inAsmQuote: boolean;
+
   public static create(file: &SourceFile): LexerScanner {
     return LexerScanner {
       cursor: SourceCursor::create(file),
       diagnostics: DiagnosticBag::init(),
       tokens: TokenStream::create(),
       frames: Vector::new<LexerFrame>(),
+      inAsmQuote: false,
     };
   }
 
@@ -548,12 +556,15 @@ record LexerScanner {
 
   /// Scans an embedded body from the `{` that opens it.
   private scanEmbedHead(&mut self, start: SourceMark): void {
+    self.inAsmQuote = false;
+
     if (self.scanEmbedChunk(start)) {
       self.pushFrame(LexerFrameKind::EMBED_HOLE);
       self.emitLiteral(start, LiteralKind::EMBED_HEAD);
       return;
     }
 
+    self.inAsmQuote = false;
     self.emitLiteral(start, LiteralKind::EMBED_NO_HOLE);
   }
 
@@ -565,6 +576,7 @@ record LexerScanner {
       return;
     }
 
+    self.inAsmQuote = false;
     self.emitLiteral(start, LiteralKind::EMBED_TAIL);
   }
 
@@ -572,10 +584,16 @@ record LexerScanner {
   /// closing the body.
   ///
   /// `{{` and `}}` stand for literal braces and stay in the chunk, and so do
-  /// `//` and `/* */` comments, whose braces count for nothing. Returns
-  /// whether a hole follows the chunk. On an unterminated body it reports the
-  /// diagnostic itself and returns false, which leaves the caller emitting a
-  /// closing token over the recovered span.
+  /// `//` and `/* */` comments, whose braces count for nothing — but only
+  /// outside a double-quoted assembler string. Inside one, slashes are data,
+  /// and an unescaped quote toggles the quote state. A `\\` inside a quote
+  /// escapes the next byte for that state alone: only `\\"` and `\\\\` are
+  /// consumed as pairs, so braces and holes keep their meaning after a
+  /// backslash. The quote state lives on the scanner, so it survives the
+  /// hole boundaries that split a body into chunks. Returns whether a hole
+  /// follows the chunk. On an unterminated body it reports the diagnostic
+  /// itself and returns false, which leaves the caller emitting a closing
+  /// token over the recovered span.
   private scanEmbedChunk(&mut self, start: SourceMark): boolean {
     while (let Option::SOME(next) = self.cursor.peekChar()) {
       if (next == '{' || next == '}') {
@@ -588,7 +606,28 @@ record LexerScanner {
         return next == '{';
       }
 
-      if (next == '/') {
+      if (next == '"') {
+        self.cursor.advanceChar();
+        self.inAsmQuote = !self.inAsmQuote;
+        continue;
+      }
+
+      if (next == '\\' && self.inAsmQuote) {
+        self.cursor.advanceChar();
+
+        // The escape is for the quote state alone: only an escaped quote or
+        // backslash is consumed as a pair, so `\{` and `\}}` keep the brace
+        // and hole meaning they always had.
+        if (let Option::SOME(escaped) = self.cursor.peekChar()) {
+          if (escaped == '"' || escaped == '\\') {
+            self.cursor.advanceChar();
+          }
+        }
+
+        continue;
+      }
+
+      if (next == '/' && !self.inAsmQuote) {
         self.cursor.advanceChar();
 
         if (self.matchAscii('/')) {

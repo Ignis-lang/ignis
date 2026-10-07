@@ -504,6 +504,9 @@ record ModuleHoverTables {
   public parameters: HashMap<u32, Option<Analyzer::TypeId>>;
   /// The `let` statement that binds a pattern directly.
   public letStatements: HashMap<u32, ByteRange>;
+  /// The name of each statement `asm` output, keyed by the synthetic
+  /// pattern id `Analyzer::InlineAsm::outputBinding` reserves for it.
+  public asmOutputs: HashMap<u32, String>;
 }
 
 /// An index under construction.
@@ -637,6 +640,7 @@ export function buildFileHoverIndex(
   collectCallees(&mut tables, module);
   collectLetStatements(&mut tables, module);
   collectPatternHovers(&mut collector, text, module, analysis, program, defs, types, symbols);
+  collectAsmOutputHovers(&mut collector, &mut tables, text, module, analysis);
   collectExpressionHovers(&mut collector, &tables, module, analysis, program, defs, types, symbols);
   pairLocals(&mut collector, &tables, module, defs, types, symbols);
 
@@ -655,6 +659,7 @@ function moduleHoverTables(analysis: &Analyzer::AnalyzerOutput): ModuleHoverTabl
     localMutable: HashMap::new<u32, boolean>(),
     parameters: HashMap::new<u32, Option<Analyzer::TypeId>>(),
     letStatements: HashMap::new<u32, ByteRange>(),
+    asmOutputs: HashMap::new<u32, String>(),
   };
   let mut index: u64 = 0;
 
@@ -1379,6 +1384,59 @@ function localSlot(local: &Analyzer::ResolverBodies::LocalId): u64 {
   return (local.enclosingFn.raw() as u64) * HOVER_KEY_UNIT + (local.index as u64);
 }
 
+/// Registers the binding site of each output a statement `asm` declares. An
+/// output has no pattern of its own, so the resolver keys its local under
+/// the id `Analyzer::InlineAsm::outputBinding` reserves, and the name is
+/// found inside the output's span. The outputs of an `asm` expression bind
+/// nothing and get no sites.
+function collectAsmOutputHovers(
+  collector: &mut HoverCollector,
+  tables: &mut ModuleHoverTables,
+  text: &String,
+  module: &Ast::Module,
+  analysis: &Analyzer::AnalyzerOutput,
+): void {
+  let mut collectorRef: &mut HoverCollector = collector;
+  let mut tablesRef: &mut ModuleHoverTables = tables;
+  let bodies: &Analyzer::ResolverBodies::BodyResolutionMap = &analysis.resolvedBodies.bodyResolution;
+  let mut raw: u32 = 0;
+
+  while ((raw as u64) < module.statements.length()) {
+    match (module.statements.get(Id::fromRaw<Ast::StatementTag>(raw))) {
+      Option::SOME(Ast::Statement::Node::Asm(asmNode)) -> {
+        let mut outputIndex: u64 = 0;
+
+        while (outputIndex < asmNode.outputs.length()) {
+          if (let Option::SOME(output) = asmNode.outputs.get(outputIndex)) {
+            let bindingId: Ast::PatternId = Analyzer::InlineAsm::outputBinding(Id::fromRaw<Ast::StatementTag>(raw), outputIndex);
+            let resolved: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(bodies, bindingId.raw());
+
+            if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(local)) = &resolved) {
+              if (spanInFile(&collectorRef.path, output.span)) {
+                let start: u64 = findWord(text, output.span.start, output.span.end, &output.name).unwrapOr(output.span.start);
+
+                collectorRef.locals.push(LocalSite {
+                  start: start,
+                  end: start + output.name.length(),
+                  slot: localSlot(&local),
+                  pattern: bindingId.raw(),
+                  isBinding: true,
+                });
+                tablesRef.asmOutputs.insert(bindingId.raw(), output.name.clone());
+              }
+            }
+          }
+
+          outputIndex += 1;
+        }
+      },
+      _ -> {},
+    };
+
+    raw += 1;
+  }
+}
+
 /// Adds the local binding sites and the enum variants path patterns name.
 function collectPatternHovers(
   collector: &mut HoverCollector,
@@ -1834,9 +1892,25 @@ function localBindingText(
   types: &Analyzer::TypeStore,
   symbols: &Analyzer::SymbolTable,
 ): String {
-  let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(Id::fromRaw<Ast::PatternTag>(pattern)) else {
-    return String::new();
-  };
+  // An `asm` output binds no pattern, so its local is keyed by a synthetic
+  // id outside the pattern store; its name comes from the `asm` header.
+  // The guard also keeps the store lookup from a range the arena rejects.
+  let isSynthetic: boolean = (pattern as u64) >= module.patterns.length();
+  let mut name: String = String::new();
+
+  if (isSynthetic) {
+    let Option::SOME(asmName) = tables.asmOutputs.get(&pattern) else {
+      return String::new();
+    };
+
+    name = (*asmName).clone();
+  } else {
+    let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(Id::fromRaw<Ast::PatternTag>(pattern)) else {
+      return String::new();
+    };
+
+    name = binding.name.clone();
+  }
 
   let parameter: Option<&Option<Analyzer::TypeId>> = tables.parameters.get(&pattern);
   let mut typeId: Option<Analyzer::TypeId> = Option::NONE;
@@ -1857,7 +1931,7 @@ function localBindingText(
     Option::SOME(flag) -> *flag,
     Option::NONE -> false,
   };
-  return localHoverText(&binding.name, &typeText, mutable, parameter.isSome(), filePath);
+  return localHoverText(&name, &typeText, mutable, parameter.isSome(), filePath);
 }
 
 /// The positions of `keys` in ascending, stable order: a bottom-up merge sort.

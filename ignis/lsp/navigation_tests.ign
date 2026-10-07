@@ -16,6 +16,8 @@ const NAVIGATION_TEST_UTIL: str = "/// Doubles a value.\nexport function double(
 
 const NAVIGATION_TEST_MAIN: str = "import double from \"./util\";\n\nnamespace Shapes {\n  const LIMIT: i32 = 4;\n\n  function area(side: i32): i32 {\n    return side * side;\n  }\n}\n\nrecord Point {\n  public x: i32;\n  public y: i32;\n\n  public length(&self): i32 {\n    return self.x + self.y;\n  }\n\n  public static origin(): Point {\n    return Point { x: 0, y: 0 };\n  }\n}\n\nenum Mode {\n  FAST,\n  SLOW,\n\n  public static pick(): Mode {\n    return Mode::FAST;\n  }\n\n  public isFast(&self): boolean {\n    return true;\n  }\n}\n\nfunction main(): i32 {\n  let point: Point = Point::origin();\n  let total: i32 = double(point.x) + point.length();\n  let mode: Mode = Mode::pick();\n\n  if (mode.isFast()) {\n    return total + Shapes::area(Shapes::LIMIT);\n  }\n\n  return total;\n}\n";
 
+const NAVIGATION_TEST_ASM_MAIN: str = "import double from \"./util\";\n\nfunction main(): i32 {\n  let mut leaf: u32 = 0;\n\n  asm (leaf inout eax) -> (vendorStart: u32 in ebx) {\n    cpuid\n  }\n\n  return vendorStart as i32 + double(0);\n}\n\nfunction probeExpression(): u64 {\n  let value: u64 = asm pure (21 in rax) -> (half: u64 in rax) { nop };\n\n  return value;\n}\n";
+
 /// The analyzed fixture: both sources, the path of `main.ign`, and the
 /// navigation data.
 record NavigationFixture {
@@ -26,8 +28,8 @@ record NavigationFixture {
 }
 
 /// Writes `main.ign` and `util.ign` into a scratch directory and analyzes
-/// them with `main.ign` open.
-function navigationFixture(tag: str): NavigationFixture {
+/// them with `main.ign` open, using `mainText` as the open buffer.
+function navigationFixtureWithMain(tag: str, mainText: str): NavigationFixture {
   let directory: String = `/tmp/ignis_lsp_navigation_${tag}_${Process::id()}`;
   let root: Path::PathBuf = Path::PathBuf::fromString(&directory);
 
@@ -36,7 +38,7 @@ function navigationFixture(tag: str): NavigationFixture {
   }
 
   let utilText: String = String::create(NAVIGATION_TEST_UTIL);
-  let mainText: String = String::create(NAVIGATION_TEST_MAIN);
+  let mainTextString: String = String::create(mainText);
   let mainPath: Path::PathBuf = root.join("main.ign");
   let utilPath: Path::PathBuf = root.join("util.ign");
 
@@ -44,7 +46,7 @@ function navigationFixture(tag: str): NavigationFixture {
     Test::fail();
   }
 
-  if (let Result::ERROR(_) = Fs::writeString(&mainPath, &mainText)) {
+  if (let Result::ERROR(_) = Fs::writeString(&mainPath, &mainTextString)) {
     Test::fail();
   }
 
@@ -54,7 +56,7 @@ function navigationFixture(tag: str): NavigationFixture {
   };
 
   let mut sources: SourceOverrides = SourceOverrides::none();
-  sources.set(&path, &mainText);
+  sources.set(&path, &mainTextString);
 
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
@@ -73,11 +75,16 @@ function navigationFixture(tag: str): NavigationFixture {
   };
 
   return NavigationFixture {
-    mainText: mainText,
+    mainText: mainTextString,
     utilText: utilText,
     mainPath: path.toString(),
     navigation: navigation,
   };
+}
+
+/// The default fixture, with the shared `main.ign` as the open buffer.
+function navigationFixture(tag: str): NavigationFixture {
+  return navigationFixtureWithMain(tag, NAVIGATION_TEST_MAIN);
 }
 
 /// The byte offset `delta` bytes into the first `needle` of `text`.
@@ -309,4 +316,27 @@ function navigationOutlinesTheDocument(): void {
     "Shapes:3[LIMIT:14 area:12] Point:23[x:8 y:8 length:6 origin:6] Mode:10[FAST:22 SLOW:22 pick:6] main:12",
   );
   Test::assertEq<u64>(SymbolKind::STRUCT, 23);
+}
+
+/// A statement `asm` output leads back to its name in the `asm` header, and
+/// the output of an `asm` expression is no target at all.
+@test
+function asmOutputBindingNavigationPointsAtTheHeaderName(): void {
+  let fixture: NavigationFixture = navigationFixtureWithMain("asm_output_binding", NAVIGATION_TEST_ASM_MAIN);
+  let local: u64 = targetAt(&fixture, "vendorStart as i32", 1);
+
+  Test::assert(isLocalTarget(local));
+
+  let Option::SOME(file) = fixture.navigation.fileOf(&fixture.mainPath) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(declaration) = file.localDeclaration(local) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(fixture.mainText.substringBytes(declaration.start, declaration.end).toStr(), "vendorStart");
+  Test::assertEq<str>(referencesAt(&fixture, "vendorStart as i32", 1, true).toStr(), "vendorStart@main* vendorStart@main");
+  Test::assertEq<u64>(targetAt(&fixture, "half", 1), 0);
 }
