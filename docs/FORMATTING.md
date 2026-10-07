@@ -16,6 +16,7 @@ This document defines the first canonical formatter policy shipped by `ignis fmt
 - Use the effective `indent_width` for all indentation, including printer-owned comments and directive branches.
 - When `use_tabs = true`, each indentation level is emitted as a tab while `indent_width` still defines the logical width used by layout decisions.
 - Normalize spacing around `:`, `=`, `+`, `-`, and commas.
+- Compound assignments are preserved exactly: the formatter prints back every assignment operator the parser accepts (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `~=`) and plain `=` verbatim.
 - Keep generic angle brackets tight: `identity<T>`, not `identity < T >`.
 - Print string and template literals verbatim. Whitespace inside a template's `${ }` slots is left as written.
 - Print an `asm` header on one line in canonical layout, `asm pure (value in rax, other inout rbx) -> (result: u8 in al) clobber(memory, flags) { ... }`, and its body verbatim from `{` to `}`: spacing, line breaks and comments inside the body are not reformatted or reindented. The header is not wrapped at `line_width`.

@@ -1,0 +1,60 @@
+// A cross-module escaping closure with a Copy capture in a freestanding unit.
+// The handlers count their calls and the exported entry asserts the counts
+// balance, so a lost environment drop fails through the exit code.
+import makeAdder from "./helper";
+
+record Heap {
+  static mut BYTES: u8[256] = @splat<u8[256]>(0);
+  static mut OFFSET: u64 = 0;
+  static mut ALLOC_CALLS: u64 = 0;
+  static mut FREE_CALLS: u64 = 0;
+}
+
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  return;
+}
+
+@allocHandler
+function allocate(size: u64, align: u64): *mut u8 {
+  let aligned: u64 = (Heap::OFFSET + align - 1) / align * align;
+
+  if (aligned + size > 256) {
+    return null;
+  }
+
+  let base: u64 = @integerFromPointer(&Heap::BYTES as *mut u8);
+  let slot: *mut u8 = @pointerFromInteger<*mut u8>(base + aligned);
+  Heap::OFFSET = aligned + size;
+  Heap::ALLOC_CALLS = Heap::ALLOC_CALLS + 1;
+
+  return slot;
+}
+
+@freeHandler
+function release(pointer: *mut u8): void {
+  Heap::FREE_CALLS = Heap::FREE_CALLS + 1;
+}
+
+@externName("ignis_test_run")
+function run(): i32 {
+  let mut answer: i32 = 0;
+  {
+    let add = makeAdder(40);
+    answer = add(2);
+  }
+
+  if (Heap::ALLOC_CALLS == 0) {
+    return 1;
+  }
+
+  if (Heap::ALLOC_CALLS != Heap::FREE_CALLS) {
+    return 2;
+  }
+
+  if (answer != 42) {
+    return 3;
+  }
+
+  return 0;
+}

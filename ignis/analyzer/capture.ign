@@ -1734,6 +1734,7 @@ export namespace Capture {
       let mut escapeBody: Hir::HirId = *escapingId;
       let mut escapeReturnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut escapeThunk: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut escapeDropDef: Option<Analyzer::DefinitionId> = Option::NONE;
       let mut escapeIsClosure: boolean = false;
 
       if (let Option::SOME(node) = hir.get(*escapingId)) {
@@ -1747,6 +1748,7 @@ export namespace Capture {
           escapeBody = closureNode.body;
           escapeReturnType = closureNode.returnType;
           escapeThunk = closureNode.thunkDef;
+          escapeDropDef = closureNode.dropDef;
           escapeIsClosure = true;
         }
       }
@@ -1775,7 +1777,11 @@ export namespace Capture {
           captures: escapeCaptures,
           escapes: true,
           thunkDef: escapeThunk,
-          dropDef: Option::NONE,
+          // Escape analysis runs over the whole program store, so it also
+          // reports closures an earlier module's pass finalized, whose drop
+          // function already exists. Erasing it here would leave the escaped
+          // value with no drop at its MakeClosure site.
+          dropDef: escapeDropDef,
           captureOverrides: escapeOverrides,
         }),
         span: escapeSpan,

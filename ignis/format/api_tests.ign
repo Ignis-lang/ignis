@@ -1230,6 +1230,30 @@ function apiFormatsNestedMultilineArrayLiteralsIdempotently(): void {
   Test::assertEq<str>(second.toStr(), first.toStr());
 }
 
+/// Every compound-assignment token the parser accepts (`+=`, `-=`, `*=`, `/=`,
+/// `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `~=`) plus plain `=` as the control
+/// must survive a public `formatSource` round trip: safety validation passes,
+/// the canonical output keeps the operator exactly as written, and a second
+/// pass is idempotent.
+@test
+function igniosRegressionFormatterRoundTripsEveryCompoundAssignmentToken(): void {
+  let operators: str[12] = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "~=", "="];
+
+  for (let operator of operators) {
+    let mut sourceText: String = String::create("function main(): void {\n  let mut x: i32 = 1;\n  x ");
+    sourceText.pushStr(operator);
+    sourceText.pushStr(" 2;\n  return;\n}\n");
+
+    let formatted: String = formatOrFail(sourceText.toStr());
+
+    Test::assertEq<str>(formatted.toStr(), sourceText.toStr());
+
+    let reformatted: String = formatOrFail(formatted.toStr());
+
+    Test::assertEq<str>(reformatted.toStr(), formatted.toStr());
+  }
+}
+
 // ---------------------------------------------------------------------------
 // R15: bare lambda assignment right-hand sides and `export inline` ordering.
 // ---------------------------------------------------------------------------
