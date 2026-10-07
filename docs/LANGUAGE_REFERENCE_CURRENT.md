@@ -336,7 +336,30 @@ function rowAt(index: u64): *u8 {
 }
 ```
 
-Taking the address of an immutable static field or constant whose initializer is not a constant expression is an error (A0239). Such a value has no storage of its own: it is rebuilt from its initializer at every use, so its address would point into the current frame and dangle once the function returns. The rule covers subobject addresses too — `&Table::CELL.value` and `&Table::ROWS[1]` are rejected when the initializer of `CELL` or `ROWS` is not constant — and it applies across module boundaries: an imported definition is judged by the initializer in the module that declares it, so an imported constant that folds stays addressable while a dynamic one does not. Indexing or field access through a static whose value is a pointer or a slice addresses the pointee, not the static's storage, and is not affected. A parenthesized reference target is rejected as a non-lvalue before this rule runs (A0029).
+Taking the address of an immutable static field or constant whose initializer is not a constant expression is an error (A0245). Such a value has no storage of its own: it is rebuilt from its initializer at every use, so its address would point into the current frame and dangle once the function returns. The rule covers subobject addresses too — `&Table::CELL.value` and `&Table::ROWS[1]` are rejected when the initializer of `CELL` or `ROWS` is not constant — and it applies across module boundaries: an imported definition is judged by the initializer in the module that declares it, so an imported constant that folds stays addressable while a dynamic one does not. Indexing or field access through a static whose value is a pointer or a slice addresses the pointee, not the static's storage, and is not affected. A parenthesized reference target is rejected as a non-lvalue before this rule runs (A0029).
+
+A `static mut` field written without an initializer starts with every byte zero. The compiler emits it as a C global with no initializer, so it costs no space in the object file and a large table needs no literal:
+
+```ignis
+record Kernel {
+    static mut COUNT: u32;
+    static mut STACK: u8[16384];
+    static mut SLOTS: Slot[256];
+}
+```
+
+The type must have a zero value (`A0239`): an integer, a float, `boolean`, `char`, a raw pointer, or a fixed array, record or payload-free enum made of those. A string, a reference, a function value, a slice, a range, a tuple, a generic type, a type that implements `Drop` and an enum with a payload have none. An immutable `static` field written without a value is still an instance field. `@zeroed<T>()` and `@splat<T[N]>(value)` build the same zero or repeated values in an expression, in a `static` initializer or in a function body (see `docs/BUILTINS.md`).
+
+A static field can request an alignment with `@aligned(N)`, so a hardware structure such as a page table can live in a global. `N` is an integer literal (decimal, `0x` hex or `0b` binary) that is a power of two, at most 1073741824 (1 GiB). The global is placed at an address that is a multiple of `N`, and a zero-initialized one stays in zero-initialized storage:
+
+```ignis
+record Paging {
+    @aligned(0x1000) static mut PML4: u64[512];
+    @aligned(64) static ROWS: u8[4] = [1, 2, 3, 4];
+}
+```
+
+An `N` smaller than the type's own alignment has no effect: the global keeps the type's alignment. An immutable static field or constant has storage only when some function takes its address (see above), so the attribute matters only then. `@aligned` is an error (`A0117`) on a module-level or `extern` constant, which a static field is not. An argument that is missing, repeated, not an integer literal, not a power of two or above 1 GiB is an error (`A0118`, `A0244`, `A0121`, `A0243`).
 
 For standard-library records, `::new()` is the canonical constructor naming
 convention. Some std records retain `::init()` aliases for compatibility only;
@@ -795,7 +818,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@directive(...)` -- declare a compile-time-only directive function
 - `@implements(...)` -- lang traits (`Drop`, `Clone`, `Copy`) or user-defined traits
 - `@packed` -- remove struct padding
-- `@aligned(N)` -- set minimum alignment
+- `@aligned(N)` -- set minimum alignment, on a record, a field or a static field. `N` is an integer literal that is a power of two, at most 1 GiB
 - `@cLayout` -- give a record a C layout: fields in declaration order, each emitted under its written name. Its C struct name stays mangled and its methods are allowed. The record cannot be generic or implement `Drop`, and every field needs a C representation and a name that is not a C keyword, as in an extern record (see 4.10)
 - `@cold` -- mark function as unlikely to execute
 - `@externName("...")` -- override the C symbol name for a function

@@ -1,0 +1,67 @@
+// A `static mut` field written without an initializer starts with every byte
+// zero: reads see zero, null and false, and writes stick. The zero state needs
+// no literal, so a large table costs nothing in the source.
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+record Zeroed {
+  static mut COUNTER: u32;
+  static mut TABLE: u16[4096];
+  static mut ORIGIN: Point;
+  static mut CURSOR: *mut u8;
+  static mut RATIO: f64;
+  static mut READY: boolean;
+}
+
+function checkZeroState(): i32 {
+  if (Zeroed::COUNTER != 0) {
+    return 1;
+  }
+
+  if (Zeroed::TABLE[0] != 0 || Zeroed::TABLE[4095] != 0) {
+    return 2;
+  }
+
+  if (Zeroed::ORIGIN.x != 0 || Zeroed::ORIGIN.y != 0) {
+    return 3;
+  }
+
+  if (Zeroed::CURSOR != null) {
+    return 4;
+  }
+
+  if (Zeroed::RATIO != 0.0) {
+    return 5;
+  }
+
+  if (Zeroed::READY) {
+    return 6;
+  }
+
+  return 0;
+}
+
+function main(): i32 {
+  let state: i32 = checkZeroState();
+
+  if (state != 0) {
+    return state;
+  }
+
+  Zeroed::COUNTER = 7;
+  Zeroed::TABLE[4095] = 9;
+  Zeroed::ORIGIN.y = 3;
+  Zeroed::READY = true;
+
+  if (Zeroed::COUNTER != 7 || Zeroed::TABLE[4095] != 9 || Zeroed::TABLE[4094] != 0) {
+    return 10;
+  }
+
+  if (Zeroed::ORIGIN.y != 3 || Zeroed::ORIGIN.x != 0 || !Zeroed::READY) {
+    return 11;
+  }
+
+  return 0;
+}

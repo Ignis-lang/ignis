@@ -978,6 +978,7 @@ export namespace Mono {
         let clonedMutable: boolean = variableDef.mutable;
         let clonedTakes: boolean = variableDef.takes;
         let clonedNoEscape: boolean = variableDef.noEscape;
+        let clonedAlignment: Option<u64> = variableDef.alignment;
 
         let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
         cloned = Option::SOME(defStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
@@ -988,6 +989,7 @@ export namespace Mono {
           takes: clonedTakes,
           noEscape: clonedNoEscape,
           isExtern: false,
+          alignment: clonedAlignment,
         })));
       }
     }
@@ -2681,6 +2683,17 @@ export namespace Mono {
         Hir::HirKind::BuiltinDropGlue(ty) -> {
           clonedKind = Hir::HirKind::BuiltinDropGlue(Mono::substituteType(defStore, typeStore, symbols, state, subst, ty));
         },
+        Hir::HirKind::BuiltinZeroed(ty) -> {
+          clonedKind = Hir::HirKind::BuiltinZeroed(Mono::substituteType(defStore, typeStore, symbols, state, subst, ty));
+        },
+        Hir::HirKind::BuiltinSplat(splatNode) -> {
+          let value: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, splatNode.value);
+
+          clonedKind = Hir::HirKind::BuiltinSplat(Hir::HirBuiltinSplat {
+            ty: Mono::substituteType(defStore, typeStore, symbols, state, subst, splatNode.ty),
+            value: value,
+          });
+        },
         Hir::HirKind::Panic(messageId) -> {
           clonedKind = Hir::HirKind::Panic(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, messageId));
         },
@@ -3354,6 +3367,7 @@ export namespace Mono {
       let mut mutable: boolean = false;
       let mut fieldIndex: u32 = 0;
       let mut fieldAlignment: Option<u64> = Option::NONE;
+      let mut variableAlignment: Option<u64> = Option::NONE;
       let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut tagValue: u32 = 0;
 
@@ -3398,6 +3412,7 @@ export namespace Mono {
             takes = variableDef.takes;
             noEscape = variableDef.noEscape;
             isExtern = variableDef.isExtern;
+            variableAlignment = variableDef.alignment;
           },
           Analyzer::Definition::Field(fieldDef) -> {
             kind = 4;
@@ -3485,6 +3500,7 @@ export namespace Mono {
           takes: takes,
           noEscape: noEscape,
           isExtern: isExtern,
+          alignment: variableAlignment,
         }));
 
         rawId += 1;

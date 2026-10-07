@@ -644,6 +644,132 @@ function codegenEmitsAddressedImmutableStaticsAsReadOnlyGlobals(): void {
   Test::assert(!emission.source.contains(&seed));
 }
 
+/// A `static mut` field without an initializer is a C global with none, so the
+/// linker places it in `.bss` and nothing in the unit spells its zero bytes.
+@test
+function codegenEmitsZeroInitializedStaticsWithoutAnInitializer(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Point {\n  public x: i32;\n  public y: i32;\n}\n\nrecord Zeroed {\n  static mut COUNT: u32;\n  static mut TABLE: u8[4096];\n  static mut ORIGIN: Point;\n  static mut CURSOR: *mut u8;\n}\n\nfunction main(): i32 {\n  Zeroed::TABLE[1] = 2;\n  Zeroed::ORIGIN.x = 3;\n  Zeroed::CURSOR = null;\n\n  return (Zeroed::COUNT + Zeroed::TABLE[1] as u32) as i32 + Zeroed::ORIGIN.y;\n}\n",
+  );
+
+  let count: String = codegenStaticName(&mut emission, "COUNT");
+  let table: String = codegenStaticName(&mut emission, "TABLE");
+  let origin: String = codegenStaticName(&mut emission, "ORIGIN");
+  let cursor: String = codegenStaticName(&mut emission, "CURSOR");
+
+  let countGlobal: String = `static u32 ${count.toStr()};\n`;
+  let tableGlobal: String = `static u8 ${table.toStr()}[4096];\n`;
+  let originGlobal: String = ` ${origin.toStr()};\n`;
+  let cursorGlobal: String = `static u8* ${cursor.toStr()};\n`;
+
+  Test::assert(emission.source.contains(&countGlobal));
+  Test::assert(emission.source.contains(&tableGlobal));
+  Test::assert(emission.source.contains(&originGlobal));
+  Test::assert(emission.source.contains(&cursorGlobal));
+  let countSeeded: String = `${count.toStr()} =`;
+  let tableSeeded: String = `${table.toStr()}[4096] =`;
+
+  Test::assert(!emission.source.contains(&countSeeded));
+  Test::assert(!emission.source.contains(&tableSeeded));
+}
+
+/// An `@aligned(N)` on a static field is a C `aligned` attribute on its global,
+/// after the declarator and before any initializer, asking for the larger of
+/// `N` and the alignment of the value type so a small `N` never lowers it. A
+/// zero-initialized one still has no initializer, so it stays in `.bss`.
+@test
+function codegenAlignsStaticsThroughTheCAlignedAttribute(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Tables {\n  @aligned(4096) static mut PML4: u64[512];\n  @aligned(64) static mut SEEDED: u32[2] = [1, 2];\n  @aligned(32) static mut COUNT: u32;\n  @aligned(16) static ROWS: u8[4] = [1, 2, 3, 4];\n  static mut PLAIN: u32;\n}\n\nfunction main(): i32 {\n  Tables::PML4[1] = 2;\n  Tables::SEEDED[1] = 3;\n  Tables::COUNT = 4;\n  Tables::PLAIN = 5;\n  let rows: *u8 = &Tables::ROWS as *u8;\n\n  return Tables::PML4[1] as i32 + *rows as i32;\n}\n",
+  );
+
+  let pml4: String = codegenStaticName(&mut emission, "PML4");
+  let seeded: String = codegenStaticName(&mut emission, "SEEDED");
+  let count: String = codegenStaticName(&mut emission, "COUNT");
+  let rows: String = codegenStaticName(&mut emission, "ROWS");
+  let plain: String = codegenStaticName(&mut emission, "PLAIN");
+
+  let pml4Global: String = `static u64 ${pml4.toStr()}[512] __attribute__((aligned(4096 > _Alignof(u64) ? 4096 : _Alignof(u64))));\n`;
+  let seededGlobal: String = `static u32 ${seeded.toStr()}[2] __attribute__((aligned(64 > _Alignof(u32) ? 64 : _Alignof(u32)))) = {`;
+  let countGlobal: String = `static u32 ${count.toStr()} __attribute__((aligned(32 > _Alignof(u32) ? 32 : _Alignof(u32))));\n`;
+  let rowsGlobal: String = `static const u8 ${rows.toStr()}[4] __attribute__((aligned(16 > _Alignof(u8) ? 16 : _Alignof(u8)))) = {`;
+  let plainGlobal: String = `static u32 ${plain.toStr()};\n`;
+
+  Test::assert(emission.source.contains(&pml4Global));
+  Test::assert(emission.source.contains(&seededGlobal));
+  Test::assert(emission.source.contains(&countGlobal));
+  Test::assert(emission.source.contains(&rowsGlobal));
+  Test::assert(emission.source.contains(&plainGlobal));
+}
+
+/// `@zeroed` in a static initializer is the constant `{0}` inside an aggregate,
+/// a scalar folds to its zero constant and an array that is all zero needs no
+/// initializer, so the global is seeded without a function running to fill it.
+@test
+function codegenSeedsStaticInitializersWithZeroedAsBracedZero(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Point {\n  public x: i32;\n  public y: i32;\n}\n\nrecord Pair {\n  public id: u32;\n  public origin: Point;\n}\n\nrecord Tables {\n  static mut PAIR: Pair = Pair { id: 7, origin: @zeroed<Point>() };\n  static mut TABLE: u8[16] = @zeroed<u8[16]>();\n  static mut COUNT: u32 = @zeroed<u32>();\n}\n\nfunction main(): i32 {\n  return (Tables::PAIR.id + Tables::TABLE[1] as u32 + Tables::COUNT) as i32;\n}\n",
+  );
+
+  let pair: String = codegenStaticName(&mut emission, "PAIR");
+  let table: String = codegenStaticName(&mut emission, "TABLE");
+  let count: String = codegenStaticName(&mut emission, "COUNT");
+
+  let pairGlobal: String = ` ${pair.toStr()} = {.field_0 = 7U, .field_1 = {0}};\n`;
+  let tableGlobal: String = `static u8 ${table.toStr()}[16];\n`;
+  let countGlobal: String = `static u32 ${count.toStr()} = 0U;\n`;
+
+  Test::assert(emission.source.contains(&pairGlobal));
+  Test::assert(emission.source.contains(&tableGlobal));
+  Test::assert(emission.source.contains(&countGlobal));
+}
+
+/// A run-time `@zeroed` of an aggregate fills its local through
+/// `__builtin_memset`, which needs no declaration: a freestanding unit has no
+/// `<string.h>`, and naming `memset` would call a libc function.
+@test
+function codegenFillsRuntimeZeroedAggregatesWithTheMemsetBuiltin(): void {
+  let emission: CodegenEmission = codegenEmitFreestanding(
+    "@panicHandler\nfunction onPanic(message: str, file: str, line: u32): void {\n  return;\n}\n\nrecord Point {\n  public x: i32;\n  public y: i32;\n}\n\n@externName(\"zero_probe\")\nfunction probe(): i32 {\n  let table: u16[64] = @zeroed<u16[64]>();\n  let origin: Point = @zeroed<Point>();\n  let counter: u32 = @zeroed<u32>();\n\n  return table[3] as i32 + origin.y + counter as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "__builtin_memset(t"));
+  Test::assert(codegenContains(&emission.source, ", 0, 64 * sizeof(u16));"));
+  Test::assert(codegenContains(&emission.source, ", 0, sizeof(struct Point_"));
+  Test::assert(!codegenContains(&emission.source, " memset("));
+  Test::assert(!codegenContains(&emission.source, "string.h"));
+}
+
+/// `@splat` in a static initializer expands into one constant per element, a
+/// zero value stays `{0}`, and a run-time `@splat` fills its local with
+/// `__builtin_memset` for a byte-sized element and a counted loop otherwise,
+/// never a libc call.
+@test
+function codegenExpandsStaticSplatsAndFillsRuntimeSplatsWithoutLibc(): void {
+  let mut staticEmission: CodegenEmission = codegenEmit(
+    "record Tables {\n  static mut WORDS: u32[3] = @splat<u32[3]>(7);\n  static mut ZEROS: u16[4096] = @splat<u16[4096]>(0);\n}\n\nfunction main(): i32 {\n  return (Tables::WORDS[1] + Tables::ZEROS[2] as u32) as i32;\n}\n",
+  );
+
+  let words: String = codegenStaticName(&mut staticEmission, "WORDS");
+  let zeros: String = codegenStaticName(&mut staticEmission, "ZEROS");
+
+  let wordsGlobal: String = `static u32 ${words.toStr()}[3] = {7U, 7U, 7U};\n`;
+  let zerosGlobal: String = `static u16 ${zeros.toStr()}[4096];\n`;
+
+  Test::assert(staticEmission.source.contains(&wordsGlobal));
+  Test::assert(staticEmission.source.contains(&zerosGlobal));
+
+  let runtimeEmission: CodegenEmission = codegenEmitFreestanding(
+    "@panicHandler\nfunction onPanic(message: str, file: str, line: u32): void {\n  return;\n}\n\n@externName(\"splat_probe\")\nfunction probe(value: u32): u32 {\n  let bytes: u8[32] = @splat<u8[32]>(0xFF);\n  let words: u32[8] = @splat<u32[8]>(value);\n\n  return bytes[3] as u32 + words[2];\n}\n",
+  );
+
+  Test::assert(codegenContains(&runtimeEmission.source, "__builtin_memset(t"));
+  Test::assert(codegenContains(&runtimeEmission.source, ", 32);"));
+  Test::assert(codegenContains(&runtimeEmission.source, "for (u64 "));
+  Test::assert(!codegenContains(&runtimeEmission.source, " memset("));
+  Test::assert(!codegenContains(&runtimeEmission.source, "string.h"));
+}
+
 /// A volatile access to a pointer-typed slot qualifies the slot, not the
 /// pointee: `volatile i32**` would make the load of the pointer itself plain.
 @test

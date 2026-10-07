@@ -1,0 +1,128 @@
+// `@splat<T[N]>(value)` is an array of `N` elements that all equal `value`. In
+// a `let` it is filled at run time, and in the initializer of a static it
+// expands into the constant that seeds the global, one element after another.
+@cLayout
+record Gate {
+  public offset: u16;
+  public flags: u8;
+}
+
+record Counter {
+  static mut CALLS: i32 = 0;
+}
+
+record Tables {
+  static mut MARKS: u8[8] = @splat<u8[8]>(0xAA);
+  static mut WORDS: u32[3] = @splat<u32[3]>(7);
+  static mut GATES: Gate[2] = @splat<Gate[2]>(Gate { offset: 4, flags: 1 });
+  static mut ZEROS: u16[4096] = @splat<u16[4096]>(0);
+  static mut BIG: u8[65536] = @splat<u8[65536]>(1);
+  static LIMITS: i64[3] = @splat<i64[3]>(-5);
+}
+
+function checkRuntime(): i32 {
+  let bytes: u8[32] = @splat<u8[32]>(0xFF);
+  let words: u32[5] = @splat<u32[5]>(1000);
+  let flags: boolean[4] = @splat<boolean[4]>(true);
+  let ratios: f64[3] = @splat<f64[3]>(0.5);
+  let gates: Gate[3] = @splat<Gate[3]>(Gate { offset: 9, flags: 2 });
+  let zeros: u32[16] = @splat<u32[16]>(0);
+
+  if (bytes[0] != 0xFF || bytes[31] != 0xFF) {
+    return 1;
+  }
+
+  if (words[0] != 1000 || words[4] != 1000) {
+    return 2;
+  }
+
+  if (!flags[0] || !flags[3]) {
+    return 3;
+  }
+
+  if (ratios[1] != 0.5) {
+    return 4;
+  }
+
+  if (gates[2].offset != 9 || gates[0].flags != 2) {
+    return 5;
+  }
+
+  if (zeros[0] != 0 || zeros[15] != 0) {
+    return 6;
+  }
+
+  return 0;
+}
+
+function pick(): u8 {
+  Counter::CALLS += 1;
+
+  return 77;
+}
+
+function checkEvaluatedOnce(): i32 {
+  let table: u8[4] = @splat<u8[4]>(pick());
+
+  if (table[0] != 77 || table[3] != 77) {
+    return 10;
+  }
+
+  if (Counter::CALLS != 1) {
+    return 11;
+  }
+
+  return 0;
+}
+
+function checkStatics(): i32 {
+  if (Tables::MARKS[0] != 0xAA || Tables::MARKS[7] != 0xAA) {
+    return 20;
+  }
+
+  if (Tables::WORDS[1] != 7) {
+    return 21;
+  }
+
+  if (Tables::GATES[1].offset != 4 || Tables::GATES[0].flags != 1) {
+    return 22;
+  }
+
+  if (Tables::ZEROS[0] != 0 || Tables::ZEROS[4095] != 0) {
+    return 23;
+  }
+
+  if (Tables::BIG[0] != 1 || Tables::BIG[65535] != 1) {
+    return 24;
+  }
+
+  let limits: *i64 = &Tables::LIMITS as *i64;
+
+  if (*limits != -5) {
+    return 25;
+  }
+
+  Tables::MARKS[3] = 1;
+
+  if (Tables::MARKS[3] != 1 || Tables::MARKS[4] != 0xAA) {
+    return 26;
+  }
+
+  return 0;
+}
+
+function main(): i32 {
+  let runtime: i32 = checkRuntime();
+
+  if (runtime != 0) {
+    return runtime;
+  }
+
+  let once: i32 = checkEvaluatedOnce();
+
+  if (once != 0) {
+    return once;
+  }
+
+  return checkStatics();
+}

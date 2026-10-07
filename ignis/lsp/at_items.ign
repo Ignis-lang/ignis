@@ -42,6 +42,8 @@ function pushBuiltins(items: &mut Vector<AtItem>): void {
   pushAtItem(itemsRef, "write", true, "@write<T>(ptr, value)", "Stores a value of type `T` through a pointer.", "Performs an untyped store through a raw pointer. Takes the pointer and the value to write.");
   pushAtItem(itemsRef, "readVolatile", true, "@readVolatile<T>(ptr)", "Loads a value of type `T` from a pointer with a volatile access.", "Like `@read`, but the load is never elided, merged or reordered across other volatile accesses. Emits C `*(volatile T*)ptr`.");
   pushAtItem(itemsRef, "writeVolatile", true, "@writeVolatile<T>(ptr, value)", "Stores a value of type `T` through a pointer with a volatile access.", "Like `@write`, but the store is never elided, merged or reordered across other volatile accesses. Emits C `*(volatile T*)ptr = value`.");
+  pushAtItem(itemsRef, "zeroed", true, "@zeroed<T>()", "Returns a value of type `T` whose every byte is zero.", "`T` must have a zero value: integers, floats, `boolean`, `char`, raw pointers, and arrays, records and payload-free enums of them. In a static initializer it is part of the constant; in a function body it is filled with `__builtin_memset`.");
+  pushAtItem(itemsRef, "splat", true, "@splat<T[N]>(value)", "Returns an array of `N` elements that all equal `value`.", "`T` must be Copy. In a static initializer `value` must be constant and the array holds at most 65536 elements unless `value` is zero. In a function body it is filled with `__builtin_memset` or a loop.");
   pushAtItem(itemsRef, "dropInPlace", true, "@dropInPlace<T>(ptr)", "Calls the drop glue for type `T` on the value behind `ptr`.", "Used for manual resource cleanup through raw pointers. Only valid for types that implement Drop.");
   pushAtItem(itemsRef, "dropGlue", true, "@dropGlue<T>()", "Returns the drop glue function pointer for type `T`.", "Returns `(*mut u8) -> void`. Used for passing drop functions to allocators and containers.");
   pushAtItem(itemsRef, "hash", true, "@hash<T>(value, hasher)", "Hashes `value` with the concrete `Hash` implementation for `T`.", "Used by std collections to force concrete hash dispatch after monomorphization.");
@@ -60,7 +62,7 @@ function pushDirectives(items: &mut Vector<AtItem>): void {
   pushAtItem(itemsRef, "trap", true, "@trap()", "Emits a hardware trap instruction.", "Low-level crash with no message. Return type is `Never`. Use for impossible states.");
   pushAtItem(itemsRef, "unreachable", true, "@unreachable()", "Marks a code point as unreachable for the optimizer.", "Emits `__builtin_unreachable()`. Return type is `Never`. No safety check — undefined behavior if reached.");
   pushAtItem(itemsRef, "packed", false, "@packed", "Removes field padding from a record (tightly packed layout).", "Valid on: record.");
-  pushAtItem(itemsRef, "aligned", false, "@aligned(N)", "Sets minimum alignment to `N` bytes.", "Valid on: record, field. `N` must be a power of two.");
+  pushAtItem(itemsRef, "aligned", false, "@aligned(N)", "Sets minimum alignment to `N` bytes.", "Valid on: record, field, static field. `N` is an integer literal, a power of two, at most 1073741824.");
   pushAtItem(itemsRef, "cLayout", false, "@cLayout", "Gives a record a C layout: fields in declaration order, each emitted under its written name.", "Valid on: record. The C struct name stays mangled and methods are allowed. Not on generic records or records implementing `Drop`. Records inside an `extern` block have a C layout already.");
   pushAtItem(itemsRef, "implements", false, "@implements(TraitName)", "Declares that a record implements a trait.", "Valid on: record. Accepts one or more trait names: `@implements(Drop)`, `@implements(Clone, Copy)`.");
   pushAtItem(itemsRef, "lang", false, "@lang(try)", "Marks a declaration with compiler-recognized language semantics.", "Currently used for language hooks such as `try`-capable records.");
@@ -156,6 +158,14 @@ export function atItemSnippet(item: &AtItem): Option<String> {
 
   if (name.equals("write") || name.equals("writeVolatile")) {
     return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3:value})"));
+  }
+
+  if (name.equals("zeroed")) {
+    return Option::SOME(name.concat("<${1:T}>()"));
+  }
+
+  if (name.equals("splat")) {
+    return Option::SOME(name.concat("<${1:T[N]}>(${2:value})"));
   }
 
   if (name.equals("integerFromPointer")) {

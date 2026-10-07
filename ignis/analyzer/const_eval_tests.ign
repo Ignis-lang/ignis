@@ -735,7 +735,7 @@ function main(): i32 {
   );
 
   Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
-  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0239");
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
 }
 
 @test
@@ -755,7 +755,7 @@ function main(): i32 {
   );
 
   Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
-  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0239");
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
 }
 
 @test
@@ -773,6 +773,34 @@ function main(): i32 {
   );
 
   Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 0);
+}
+
+@test
+function constEvalZeroableStaticMutAndStaticAddressCheckCoexist(): void {
+  // One record exercises both merged features at once: a `static mut` field
+  // without an initializer folds to a zero part (the upstream zeroable rule,
+  // which would report A0239 for a non-zeroable type), while the immutable
+  // static whose initializer does not fold must report the distinct static
+  // address code A0245, never A0239.
+  let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
+    `record Table {
+  static mut COUNTER: u32;
+  static VALUE: u64 = base();
+}
+
+function base(): u64 {
+  return 7;
+}
+
+function main(): i32 {
+  let p: *u64 = &Table::VALUE as *u64;
+  return Table::COUNTER as i32 + *p as i32;
+}
+`.toStr(),
+  );
+
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
 }
 
 @test
@@ -821,7 +849,7 @@ function main(): i32 {
 /// A grouped place is rejected by the typechecker's lvalue rule (A0029), so
 /// no valid shared reference reaches the const-eval descent through a
 /// grouping. The descent still runs on the invalid program and adds its own
-/// A0239; this pins the two-diagnostic outcome.
+/// A0245; this pins the two-diagnostic outcome.
 @test
 function constEvalAddressOfGroupedPlaceIsRejectedAsNonLvalue(): void {
   let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
@@ -863,7 +891,7 @@ function main(): i32 {
   );
 
   Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
-  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0239");
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
 }
 
 @test
@@ -889,7 +917,7 @@ function main(): i32 {
   );
 
   Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
-  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0239");
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
 }
 
 /// Indexing through a pointer-valued static addresses the pointee, not the
@@ -1025,7 +1053,7 @@ function main(): i32 {
   };
   let consumerSummary: ConstEvalDiagnosticsSummary = constEvalRecordFirstErrorCountAndCode(&consumer);
   Test::assertEq<u64>(consumerSummary.count, 1);
-  Test::assertEq<str>(consumerSummary.code, "A0239");
+  Test::assertEq<str>(consumerSummary.code, "A0245");
 }
 
 @test
@@ -1063,7 +1091,7 @@ function main(): i32 {
   };
   let consumerSummary: ConstEvalDiagnosticsSummary = constEvalRecordFirstErrorCountAndCode(&consumer);
   Test::assertEq<u64>(consumerSummary.count, 1);
-  Test::assertEq<str>(consumerSummary.code, "A0239");
+  Test::assertEq<str>(consumerSummary.code, "A0245");
 }
 
 /// A cross-module constant that folds has a read-only global in its defining
