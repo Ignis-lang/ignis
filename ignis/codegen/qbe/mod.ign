@@ -254,22 +254,6 @@ export namespace CodegenQbe {
     };
   }
 
-  /// Whether the nominal behind `defId` carries `@implements(Drop)`.
-  function hasDropTrait(
-    defStore: &mut Analyzer::DefinitionStore,
-    defId: Analyzer::DefinitionId,
-  ): boolean {
-    let Option::SOME(definition) = defStore.get(defId) else {
-      return false;
-    };
-
-    return match (definition) {
-      Analyzer::Definition::Record(recordDef) -> recordDef.implementsDrop,
-      Analyzer::Definition::Enum(enumDef) -> enumDef.implementsDrop,
-      _ -> false,
-    };
-  }
-
   /// Whether a value of `ty` needs drop glue. Closures and droppable nominals
   /// are out of scope, so a drop instruction over one fails the unit closed.
   function needsDrop(
@@ -317,37 +301,6 @@ export namespace CodegenQbe {
           return Option::NONE;
         },
       };
-    }
-
-    return Option::NONE;
-  }
-
-  /// The storage type of field `fieldIndex` of the record `recordId`, laid
-  /// out with the same rule the C emitter's structs use.
-  function fieldStorageType(
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    recordId: Analyzer::DefinitionId,
-    fieldIndex: u64,
-  ): Option<Analyzer::TypeId> {
-    let Option::SOME(definition) = defStore.get(recordId) else {
-      return Option::NONE;
-    };
-
-    if (let Analyzer::Definition::Record(recordDef) = definition) {
-      let mut index: u64 = 0;
-
-      while (index < recordDef.fields.length()) {
-        if (let Option::SOME(fieldId) = recordDef.fields.get(index)) {
-          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
-            if (fieldDef.index as u64 == fieldIndex) {
-              return Option::SOME(Hir::recordFieldStorageType(defStore, typeStore, recordId, fieldDef.fieldType));
-            }
-          }
-        }
-
-        index += 1;
-      }
     }
 
     return Option::NONE;
@@ -1160,23 +1113,6 @@ export namespace CodegenQbe {
     return "alloc16";
   }
 
-  /// The data-item text for one scalar value at the top level of a global
-  /// initializer. Strings become references to their interned symbol, zero
-  /// and undefined become plain zeros.
-  function qbeDataValue(
-    emitter: &mut CodegenQbe::Emitter,
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    value: &Lir::Operand,
-  ): Option<String> {
-    let Lir::Operand::Const(constValue) = value else {
-      CodegenQbe::failNamed(emitter, "GlobalInit");
-      return Option::NONE;
-    };
-
-    return CodegenQbe::constText(emitter, &constValue);
-  }
-
   /// The recursive type declarations the unit needs: every record in the
   /// selected LIR functions, plus the slice and fixed-array shapes those records
   /// reach through their fields. Each declaration is emitted once, before its
@@ -1917,42 +1853,6 @@ export namespace CodegenQbe {
       emitter.out.pushStr(line.toStr());
       index += 1;
     }
-  }
-
-  /// Loads the value of one local slot into a fresh temp of the local's own
-  /// class, or hands back the slot address for an aggregate.
-  function qbeLoadLocal(
-    emitter: &mut CodegenQbe::Emitter,
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    function_: &Lir::FunctionLir,
-    local: Lir::LocalId,
-  ): Option<String> {
-    let localOperand: Lir::Operand = Lir::Operand::Local(local);
-    let Option::SOME(localType) = CodegenQbe::operandType(defStore, function_, &localOperand) else {
-      return Option::NONE;
-    };
-
-    if (CodegenQbe::isAggregateType(defStore, typeStore, localType)) {
-      return Option::SOME(`%l${local.raw()}`);
-    }
-
-    let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, localType) else {
-      CodegenQbe::failNamed(emitter, "Load");
-      return Option::NONE;
-    };
-
-    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, localType) else {
-      CodegenQbe::failNamed(emitter, "Load");
-      return Option::NONE;
-    };
-
-    let fresh: String = CodegenQbe::freshTemp(emitter);
-    let line: String = `    ${fresh.toStr()} =${cls.toStr()} ${load.toStr()} %l${local.raw()}\n`;
-
-    emitter.out.pushStr(line.toStr());
-
-    return Option::SOME(fresh);
   }
 
   /// Stores one scalar into a byte address already computed: the typed store
@@ -2833,36 +2733,6 @@ export namespace CodegenQbe {
     let prefix: String = `${destName.toStr()} =${reference.toStr()} `;
 
     CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &prefix);
-  }
-
-  function qbeEmitRuntimeCall(
-    emitter: &mut CodegenQbe::Emitter,
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    symbols: &mut Analyzer::SymbolTable,
-    function_: &Lir::FunctionLir,
-    node: &Lir::InstrRuntimeCall,
-  ): void {
-    let mut args: Vector<String> = Vector::new<String>();
-    let mut index: u64 = 0;
-
-    while (index < node.args.length()) {
-      if (let Option::SOME(argument) = node.args.get(index)) {
-        let text: String = CodegenQbe::qbeCallArg(emitter, defStore, typeStore, symbols, function_, argument);
-
-        if (emitter.error.isSome()) {
-          return;
-        }
-
-        args.push(text);
-      }
-
-      index += 1;
-    }
-
-    let noPrefix: String = String::create("");
-
-    CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &node.name, &args, &noPrefix);
   }
 
   function qbeEmitCast(
@@ -4010,13 +3880,4 @@ export namespace CodegenQbe {
       functions: functions,
     };
   }
-  /// The `TypeId` of the record `defId` names, for the type-declaration walk.
-  function recordTypeId(
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    defId: Analyzer::DefinitionId,
-  ): Analyzer::TypeId {
-    return typeStore.recordType(defId);
-  }
-
 }

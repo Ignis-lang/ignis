@@ -744,47 +744,9 @@ function compileAndLinkQuietly(
     unitIndex += 1;
   }
 
-  // A qbe fixture lowers and assembles its `.ssa` units first; a failing
-  // toolchain step avoids the link, and nothing is printed either way.
   if (qbeIsQbeTarget(profile.backend.toStr())) {
-    let mut unitIndex: u64 = 0;
-
-    while (unitIndex < sourcePaths.length() && unitIndex < objectPaths.length()) {
-      let Option::SOME(sourcePath) = sourcePaths.get(unitIndex) else {
-        break;
-      };
-      let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
-        break;
-      };
-
-      let assemblyPath: Path::PathBuf = artifactsAssemblyPathFor(objectPath);
-
-      match (QbeTool::lowerToAssembly("qbe", sourcePath, &assemblyPath)) {
-        Result::OK(_) -> {},
-        Result::ERROR(_) -> {
-          return 1;
-        },
-      };
-
-      match (QbeTool::assembleObject(cc, &assemblyPath, objectPath, &includeDirs, &extraFlags)) {
-        Result::OK(_) -> {},
-        Result::ERROR(_) -> {
-          return 1;
-        },
-      };
-
-      unitIndex += 1;
-    }
-
-    let archives: Vector<String> = Vector::new<String>();
-    let libs: Vector<String> = toolchainLinkLibraries(profile);
-    let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
-
-    if (let Result::ERROR(_) = Linker::link(cc, outputPath, &objects, &archives, &libs, &linkFlags)) {
-      return 1;
-    }
-
-    return 0;
+    let file: SourceFile = SourceFile::create("", "");
+    return assembleAndLinkUnits(sourcePaths, objectPaths, outputPath, stdRoot, profile, &file, false, true);
   }
 
   if (let Result::ERROR(_) = CCompiler::compileObjects(
@@ -810,11 +772,6 @@ function compileAndLinkQuietly(
   return 0;
 }
 
-/// The assembly path the qbe backend writes for one unit.
-function artifactsAssemblyPathFor(objectPath: &Path::PathBuf): Path::PathBuf {
-  return artifactsAssemblyPath(objectPath);
-}
-
 /// Lower every emitted QBE IL unit to assembly, assemble it into an object
 /// with the build's C driver and link the executable.
 ///
@@ -832,6 +789,7 @@ function assembleAndLinkUnits(
   profile: &BuildProfile,
   file: &SourceFile,
   verbose: boolean,
+  quiet: boolean,
 ): u64 {
   let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
   let extraFlags: Vector<String> = toolchainCompileFlags(profile);
@@ -848,29 +806,29 @@ function assembleAndLinkUnits(
     };
 
     // The assembly path mirrors the object path, so two units never collide.
-    let assemblyPath: Path::PathBuf = artifactsAssemblyPathFor(objectPath);
+    let assemblyPath: Path::PathBuf = artifactsAssemblyPath(objectPath);
 
     match (QbeTool::lowerToAssembly("qbe", sourcePath, &assemblyPath)) {
       Result::OK(_) -> {},
       Result::ERROR(lowerBag) -> {
-        renderBagToStderr(&lowerBag, file);
-        printStatus(String::create("  qbe: failed"), verbose);
+        if (!quiet) { renderBagToStderr(&lowerBag, file); }
+        printStatus(String::create("  qbe: failed"), verbose && !quiet);
         return 1;
       },
     };
 
-    printStatus(`  qbe: ${assemblyPath.asStr()}`, verbose);
+    printStatus(`  qbe: ${assemblyPath.asStr()}`, verbose && !quiet);
 
     match (QbeTool::assembleObject(profile.cc.toStr(), &assemblyPath, objectPath, &includeDirs, &extraFlags)) {
       Result::OK(_) -> {},
       Result::ERROR(compileBag) -> {
-        renderBagToStderr(&compileBag, file);
-        printStatus(String::create("  object: failed"), verbose);
+        if (!quiet) { renderBagToStderr(&compileBag, file); }
+        printStatus(String::create("  object: failed"), verbose && !quiet);
         return 1;
       },
     };
 
-    printStatus(`  object: ${objectPath.asStr()}`, verbose);
+    printStatus(`  object: ${objectPath.asStr()}`, verbose && !quiet);
     objects.push(objectPath.toString());
     unitIndex += 1;
   }
@@ -881,12 +839,14 @@ function assembleAndLinkUnits(
   let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
   if (let Result::ERROR(linkBag) = Linker::link(profile.cc.toStr(), outputPath, &objects, &archives, &libs, &linkFlags)) {
-    renderBagToStderr(&linkBag, file);
-    printStatus(String::create("  link: failed"), verbose);
+    if (!quiet) {
+      renderBagToStderr(&linkBag, file);
+    }
+    printStatus(String::create("  link: failed"), verbose && !quiet);
     return 1;
   }
 
-  printStatus(`  link: ${outputPath.asStr()}`, verbose);
+  printStatus(`  link: ${outputPath.asStr()}`, verbose && !quiet);
   return 0;
 }
 
@@ -1343,11 +1303,6 @@ function reportDiscoveryFailure(
   return BuildTally { errors: discoveryErrors, warnings: discoveryWarnings };
 }
 
-/// Parse, analyze, lower and emit every module `discovery` reached.
-///
-/// `collectTests` gathers the project's `@test` functions and leaves the entry
-/// wrapper out of the emitted unit, because the test harness owns `main` in
-/// that build.
 function qbeExportRoots(
   defStore: &mut Analyzer::DefinitionStore,
   program: &Lir::LirProgram,
@@ -1380,6 +1335,11 @@ function qbeExportRoots(
   return roots;
 }
 
+/// Parse, analyze, lower and emit every module `discovery` reached.
+///
+/// `collectTests` gathers the project's `@test` functions and leaves the entry
+/// wrapper out of the emitted unit, because the test harness owns `main` in
+/// that build.
 function compileDiscovered(
   discovery: &DiscoveryResult,
   file: &SourceFile,
@@ -2445,6 +2405,7 @@ function runCompile(
           &profile,
           &file,
           verbose,
+          false,
         );
       } else if (discovery.bin) {
         linkErrors += compileAndLinkUnits(
