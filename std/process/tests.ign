@@ -1,5 +1,6 @@
 import Env from "std::env";
 import Io from "std::io";
+import LibC from "std::libc";
 import Path from "std::path";
 import Process from "std::process";
 import String from "std::string";
@@ -309,6 +310,67 @@ function spawnCapturingReportsAMissingProgram(): void {
       let mut running: Process::Child = child;
 
       match (running.wait()) {
+        Result::OK(_) -> Test::fail(),
+        Result::ERROR(error) -> assertIsNotFoundIoError(error),
+      };
+    },
+    Result::ERROR(error) -> assertIsNotFoundIoError(error),
+  };
+}
+
+/// Polls `child` with `tryWait` until it exits, counting the polls that found
+/// it still running.
+function pollUntilExit(
+  child: &mut Process::Child,
+  runningPolls: &mut u64
+): Result<Process::Output, Io::IoError> {
+  let mut childRef: &mut Process::Child = child;
+  let mut pollsRef: &mut u64 = runningPolls;
+
+  while (true) {
+    if (let Option::SOME(result) = childRef.tryWait()) {
+      return result;
+    }
+
+    *pollsRef += 1;
+    let _slept: i32 = LibC::Process::usleep(5000);
+  }
+
+  @panic("unreachable: pollUntilExit left its loop");
+}
+
+@test
+function tryWaitReportsARunningChildThenItsOutput(): void {
+  let command: Process::Command = shellCommand("sleep 0.2; printf out; printf err 1>&2; exit 3");
+  let Result::OK(child) = command.spawnCapturing() else {
+    Test::fail();
+    return;
+  };
+  let mut running: Process::Child = child;
+  let mut runningPolls: u64 = 0;
+
+  match (pollUntilExit(&mut running, &mut runningPolls)) {
+    Result::OK(output) -> {
+      assertOutputStatus(&output, 3, false);
+      assertOutputStdout(&output, "out");
+      assertOutputStderr(&output, "err");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  Test::assert(runningPolls > 0);
+}
+
+@test
+function tryWaitReportsAMissingProgram(): void {
+  let command: Process::Command = Process::command("/nonexistent/ignis-process-binary");
+
+  match (command.spawnCapturing()) {
+    Result::OK(child) -> {
+      let mut running: Process::Child = child;
+      let mut runningPolls: u64 = 0;
+
+      match (pollUntilExit(&mut running, &mut runningPolls)) {
         Result::OK(_) -> Test::fail(),
         Result::ERROR(error) -> assertIsNotFoundIoError(error),
       };

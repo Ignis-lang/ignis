@@ -221,22 +221,7 @@ function processCommandChildFail(errorFd: i32, rawErrno: i32): void {
 /// while bytes on the pipe contain the child setup/exec `errno`. This function
 /// owns and closes `errorReadFd` before returning.
 function processCommandWaitForExec(pid: i32, errorReadFd: i32, rawStatusOut: &mut i32): i32 {
-  let mut childErrno: i32 = 0;
-  let mut bytesRead: i64 = -1;
-
-  while (true) {
-    bytesRead = LibC::File::read(errorReadFd, (&mut childErrno) as *mut void, @sizeOf<i32>());
-
-    if (bytesRead == -1 && LibC::Errno::get() == LibC::Errno::EINTR) {
-      continue;
-    }
-
-    break;
-  }
-
-  let readErrno: i32 = bytesRead == -1 ? LibC::Errno::get() : 0;
-  LibC::File::close(errorReadFd);
-
+  let execErrno: i32 = processCommandDrainExecPipe(errorReadFd);
   let mut rawStatus: i32 = 0;
   let mut waitResult: i32 = -1;
 
@@ -254,6 +239,36 @@ function processCommandWaitForExec(pid: i32, errorReadFd: i32, rawStatusOut: &mu
     return LibC::Errno::get();
   }
 
+  if (execErrno != 0) {
+    return execErrno;
+  }
+
+  @write<i32>(rawStatusOut as *mut i32, rawStatus);
+  return 0;
+}
+
+/// Reads the exec-status pipe of a spawned child to its end and closes it.
+///
+/// The pipe is close-on-exec, so it reaches end-of-file as soon as `execvp`
+/// succeeds; a failed `execvp` writes its errno first. Returns 0 after a
+/// successful exec, the errno the child reported, or the error the read hit.
+function processCommandDrainExecPipe(errorReadFd: i32): i32 {
+  let mut childErrno: i32 = 0;
+  let mut bytesRead: i64 = -1;
+
+  while (true) {
+    bytesRead = LibC::File::read(errorReadFd, (&mut childErrno) as *mut void, @sizeOf<i32>());
+
+    if (bytesRead == -1 && LibC::Errno::get() == LibC::Errno::EINTR) {
+      continue;
+    }
+
+    break;
+  }
+
+  let readErrno: i32 = bytesRead == -1 ? LibC::Errno::get() : 0;
+  LibC::File::close(errorReadFd);
+
   if (bytesRead > 0) {
     return childErrno == 0 ? LibC::Errno::EIO : childErrno;
   }
@@ -262,8 +277,46 @@ function processCommandWaitForExec(pid: i32, errorReadFd: i32, rawStatusOut: &mu
     return readErrno == 0 ? LibC::Errno::EIO : readErrno;
   }
 
-  @write<i32>(rawStatusOut as *mut i32, rawStatus);
   return 0;
+}
+
+/// Reads a reaped child's captured stdout and stderr, closing both
+/// descriptors, into the `Output` `Child::wait` and `Child::tryWait` return.
+function processChildCollectOutput(
+  stdoutFd: i32,
+  stderrFd: i32,
+  rawStatus: i32
+): Result<Process::Output, Io::IoError> {
+  let mut stdout: String = String::new();
+
+  match (processCommandReadAll(stdoutFd)) {
+    Result::OK(value) -> stdout = value,
+    Result::ERROR(error) -> {
+      LibC::File::close(stdoutFd);
+      LibC::File::close(stderrFd);
+      return Result::ERROR(error);
+    },
+  };
+
+  LibC::File::close(stdoutFd);
+
+  let mut stderr: String = String::new();
+
+  match (processCommandReadAll(stderrFd)) {
+    Result::OK(value) -> stderr = value,
+    Result::ERROR(error) -> {
+      LibC::File::close(stderrFd);
+      return Result::ERROR(error);
+    },
+  };
+
+  LibC::File::close(stderrFd);
+
+  return Result::OK(Process::Output {
+    status: processExitStatusFromRaw(rawStatus),
+    stdout: stdout,
+    stderr: stderr,
+  });
 }
 
 /// Reads a seekable temporary output file into an owned `String`.
@@ -431,36 +484,56 @@ export namespace Process {
         return Result::ERROR(Io::IoError::fromErrno(rawErrno));
       }
 
-      let mut stdout: String = String::new();
+      return processChildCollectOutput(self.stdoutFd, self.stderrFd, rawStatus);
+    }
 
-      match (processCommandReadAll(self.stdoutFd)) {
-        Result::OK(value) -> stdout = value,
-        Result::ERROR(error) -> {
+    /// Checks whether the child has exited, without blocking while it runs.
+    ///
+    /// Returns `NONE` while the child is still running and what `wait` would
+    /// return once it has exited. After a `SOME` the child is reaped and its
+    /// descriptors are closed, so neither `tryWait` nor `wait` may be called on
+    /// it again. The first call blocks only until `execvp` has run.
+    public tryWait(&mut self): Option<Result<Output, Io::IoError>> {
+      if (self.errorReadFd != -1) {
+        let execErrno: i32 = processCommandDrainExecPipe(self.errorReadFd);
+        self.errorReadFd = -1;
+
+        if (execErrno != 0) {
+          let mut failedStatus: i32 = 0;
+          let _reaped: i32 = LibC::Wait::waitpid(self.pid, (&mut failedStatus) as *mut i32, 0);
+
           LibC::File::close(self.stdoutFd);
           LibC::File::close(self.stderrFd);
-          return Result::ERROR(error);
-        },
-      };
+          return Option::SOME(Result::ERROR(Io::IoError::fromErrno(execErrno)));
+        }
+      }
 
-      LibC::File::close(self.stdoutFd);
+      let mut rawStatus: i32 = 0;
+      let mut waitResult: i32 = -1;
 
-      let mut stderr: String = String::new();
+      while (true) {
+        waitResult = LibC::Wait::waitpid(self.pid, (&mut rawStatus) as *mut i32, LibC::Wait::WNOHANG);
 
-      match (processCommandReadAll(self.stderrFd)) {
-        Result::OK(value) -> stderr = value,
-        Result::ERROR(error) -> {
-          LibC::File::close(self.stderrFd);
-          return Result::ERROR(error);
-        },
-      };
+        if (waitResult == -1 && LibC::Errno::get() == LibC::Errno::EINTR) {
+          continue;
+        }
 
-      LibC::File::close(self.stderrFd);
+        break;
+      }
 
-      return Result::OK(Output {
-        status: processExitStatusFromRaw(rawStatus),
-        stdout: stdout,
-        stderr: stderr,
-      });
+      if (waitResult == 0) {
+        return Option::NONE;
+      }
+
+      if (waitResult == -1) {
+        let waitErrno: i32 = LibC::Errno::get();
+
+        LibC::File::close(self.stdoutFd);
+        LibC::File::close(self.stderrFd);
+        return Option::SOME(Result::ERROR(Io::IoError::fromErrno(waitErrno)));
+      }
+
+      return Option::SOME(processChildCollectOutput(self.stdoutFd, self.stderrFd, rawStatus));
     }
   }
 
