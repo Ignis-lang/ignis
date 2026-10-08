@@ -1,0 +1,49 @@
+import Test from "std::test";
+import QbeLane from "./qbe_lane";
+
+@test
+function qbeLaneRejectsDuplicateFixtureNames(): void {
+  let manifest: String = String::create("add.ign\nadd.ign\n");
+  Test::assertEq<boolean>(QbeLane::manifestValid(&manifest, false), false);
+}
+
+@test
+function qbeLaneRequiresMissingFeatureForEverySkip(): void {
+  let invalid: String = String::create("closure.ign\t\n");
+  let valid: String = String::create("closure.ign\tMakeClosure\n");
+  Test::assertEq<boolean>(QbeLane::manifestValid(&invalid, true), false);
+  Test::assertEq<boolean>(QbeLane::manifestValid(&valid, true), true);
+}
+
+@test
+function qbeLaneComparesExitCodeAndBothStreams(): void {
+  let stdout: String = String::create("ok\n");
+  let stderr: String = String::create("warning\n");
+  let empty: String = String::new();
+  Test::assertEq<boolean>(QbeLane::outputsMatch(7, &stdout, &stderr, 7, &stdout, &stderr), true);
+  Test::assertEq<boolean>(QbeLane::outputsMatch(7, &stdout, &stderr, 0, &stdout, &stderr), false);
+  Test::assertEq<boolean>(QbeLane::outputsMatch(7, &stdout, &stderr, 7, &empty, &stderr), false);
+  Test::assertEq<boolean>(QbeLane::outputsMatch(7, &stdout, &stderr, 7, &stdout, &empty), false);
+}
+
+@test
+function qbeLaneRejectsPathsEscapingTheCorpus(): void {
+  let escape: String = String::create("../outside.ign\n");
+  let absolute: String = String::create("/tmp/outside.ign\n");
+  let valid: String = String::create("arithmetic.ign\n");
+  Test::assertEq<boolean>(QbeLane::manifestValid(&escape, false), false);
+  Test::assertEq<boolean>(QbeLane::manifestValid(&absolute, false), false);
+  Test::assertEq<boolean>(QbeLane::manifestValid(&valid, false), true);
+}
+
+@test
+function qbeLaneSkipsOnlyBackendDiagnostics(): void {
+  let unsupported: String = String::create("Error[B4004]: not supported by the qbe target yet: MakeClosure\n");
+  let crash: String = String::create("panic: not supported by the qbe target yet: MakeClosure\n");
+  let frontend: String = String::create("Error[A0001]: not supported by the qbe target yet: MakeClosure\n");
+  let tool: String = String::create("Error[B4005]: qbe failed\n  = note: not supported by the qbe target yet: MakeClosure\n");
+  Test::assertEq<boolean>(QbeLane::missingFeature(&unsupported).isSome(), true);
+  Test::assertEq<boolean>(QbeLane::missingFeature(&crash).isNone(), true);
+  Test::assertEq<boolean>(QbeLane::missingFeature(&frontend).isNone(), true);
+  Test::assertEq<boolean>(QbeLane::missingFeature(&tool).isNone(), true);
+}

@@ -1,0 +1,300 @@
+import Fs from "std::fs";
+import Io from "std::io";
+import Path from "std::path";
+import Process from "std::process";
+import Vector from "std::vector";
+
+import FixtureCase, FixtureKind, FixtureTests from "../ignis/build/fixture_tests";
+
+/// Differential fixture runner. Inventory changes require an explicit invocation.
+export namespace QbeLane {
+  function lines(text: &String): Vector<String> {
+    return text.split((byte: u8): boolean -> {
+  return byte == 10;
+});
+  }
+
+  function fixtureName(line: &String): String {
+    let columns: Vector<String> = line.split((byte: u8): boolean -> {
+  return byte == 9;
+});
+    if (let Option::SOME(name) = columns.get(0)) {
+      return name.trimAsciiWhitespace();
+    }
+    return String::new();
+  }
+
+  /// Reject ambiguous inventories and paths outside the fixture directory.
+  function manifestValid(manifest: &String, skips: boolean): boolean {
+    let entries: Vector<String> = QbeLane::lines(manifest);
+    let mut names: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+    while (index < entries.length()) {
+      let Option::SOME(raw) = entries.get(index) else {
+        return false;
+      };
+      index += 1;
+      let line: String = raw.trimAsciiWhitespace();
+      if (line.length() == 0 || line.startsWith("#")) {
+        continue;
+      }
+      let columns: Vector<String> = line.split((byte: u8): boolean -> {
+  return byte == 9;
+});
+      if (columns.length() != (skips ? 2 : 1)) {
+        return false;
+      }
+      let name: String = QbeLane::fixtureName(&line);
+      let traversal: String = String::create("..");
+      if (name.length() < 5 || name.startsWith("/") || name.contains(&traversal)) {
+        return false;
+      }
+      let extension: String = name.substringBytes(name.length() - 4, name.length());
+      if (!extension.equals(".ign")) {
+        return false;
+      }
+      if (skips) {
+        let Option::SOME(reason) = columns.get(1) else {
+          return false;
+        };
+        if (reason.trimAsciiWhitespace().length() == 0) {
+          return false;
+        }
+      }
+      let mut previous: u64 = 0;
+      while (previous < names.length()) {
+        let Option::SOME(existing) = names.get(previous) else {
+          return false;
+        };
+        if (name.equals(existing)) {
+          return false;
+        }
+        previous += 1;
+      }
+      names.push(name);
+    }
+    return true;
+  }
+
+  function outputsMatch(
+    cCode: i32,
+    cStdout: &String,
+    cStderr: &String,
+    qbeCode: i32,
+    qbeStdout: &String,
+    qbeStderr: &String
+  ): boolean {
+    return cCode == qbeCode && cStdout.equals(qbeStdout) && cStderr.equals(qbeStderr);
+  }
+
+  function includes(manifest: &String, name: &String): boolean {
+    let entries: Vector<String> = QbeLane::lines(manifest);
+    let mut index: u64 = 0;
+    while (index < entries.length()) {
+      let Option::SOME(line) = entries.get(index) else {
+        return false;
+      };
+      index += 1;
+      if (QbeLane::fixtureName(line).equals(name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function entryCount(manifest: &String): u64 {
+    let entries: Vector<String> = QbeLane::lines(manifest);
+    let mut count: u64 = 0;
+    let mut index: u64 = 0;
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        let line: String = entry.trimAsciiWhitespace();
+        if (line.length() > 0 && !line.startsWith("#")) {
+          count += 1;
+        }
+      }
+      index += 1;
+    }
+    return count;
+  }
+
+  function compile(
+    compiler: &String,
+    source: &Path::PathBuf,
+    target: str,
+    executable: &String
+  ): Result<Process::Output, Io::IoError> {
+    let mut command: Process::Command = Process::command(compiler.toStr());
+    command.arg("build");
+    command.arg(source.asStr());
+    command.arg("--std-path");
+    command.arg("std");
+    command.arg("--target");
+    command.arg(target);
+    command.arg("-o");
+    command.arg(executable.toStr());
+    return command.output();
+  }
+
+  /// Only the backend's explicit unsupported diagnostic qualifies as a skip.
+  function missingFeature(stderr: &String): Option<String> {
+    let diagnostic: String = String::create("Error[B4004]: ");
+    let marker: String = diagnostic.concat("not supported by the qbe target yet: ");
+    let entries: Vector<String> = QbeLane::lines(stderr);
+    let mut index: u64 = 0;
+    while (index < entries.length()) {
+      let Option::SOME(raw) = entries.get(index) else {
+        return Option::NONE;
+      };
+      index += 1;
+      let line: String = raw.trimAsciiWhitespace();
+      if (line.startsWith(marker.toStr()) && line.length() > marker.length()) {
+        return Option::SOME(line.substringBytes(diagnostic.length(), line.length()));
+      }
+    }
+    return Option::NONE;
+  }
+
+  function readManifest(path: str): Option<String> {
+    return match (Fs::readToString(path)) {
+      Result::OK(text) -> Option::SOME(text),
+      Result::ERROR(_) -> Option::NONE,
+    };
+  }
+}
+
+/// Run from the repository root; artifacts remain under build/qbe-lane.
+function main(): i32 {
+  let args: Vector<String> = Process::args();
+  let Option::SOME(compiler) = args.get(1) else {
+    Io::eprintln("usage: qbe-lane <compiler> [--inventory]");
+    return 2;
+  };
+  let mut inventory: boolean = false;
+  if (let Option::SOME(option) = args.get(2)) {
+    if (!option.equals("--inventory") || args.length() != 3) {
+      Io::eprintln("usage: qbe-lane <compiler> [--inventory]");
+      return 2;
+    }
+    inventory = true;
+  }
+  let mut supported: String = String::new();
+  let mut skipped: String = String::new();
+  if (!inventory) {
+    let Option::SOME(allowed) = QbeLane::readManifest("test_cases/qbe_supported.txt") else {
+      Io::eprintln("missing test_cases/qbe_supported.txt; run --inventory first");
+      return 1;
+    };
+    let Option::SOME(excluded) = QbeLane::readManifest("test_cases/qbe_skip.tsv") else {
+      Io::eprintln("missing test_cases/qbe_skip.tsv; run --inventory first");
+      return 1;
+    };
+    supported = allowed;
+    skipped = excluded;
+    if (!QbeLane::manifestValid(&supported, false) || !QbeLane::manifestValid(&skipped, true)) {
+      Io::eprintln("invalid QBE fixture inventory");
+      return 1;
+    }
+  }
+  let mut roots: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  roots.push(Path::PathBuf::create("test_cases/e2e/ok"));
+  let cases: Vector<FixtureCase> = FixtureTests::discover(&roots);
+  if (cases.length() == 0) {
+    Io::eprintln("empty QBE fixture corpus");
+    return 1;
+  }
+  if (!inventory && QbeLane::entryCount(&supported) + QbeLane::entryCount(&skipped) != cases.length()) {
+    Io::eprintln("QBE inventory does not cover the current corpus; rerun --inventory");
+    return 1;
+  }
+  let work: String = `build/qbe-lane/run-${Process::id()}`;
+  if (Fs::createDirAll(&work).isError()) {
+    return 1;
+  }
+  let mut passed: u64 = 0;
+  let mut skippedCount: u64 = 0;
+  let mut index: u64 = 0;
+  while (index < cases.length()) {
+    let Option::SOME(fixture) = cases.get(index) else {
+      return 1;
+    };
+    let path: String = fixture.path.toString();
+    let name: String = path.substringBytes(18, path.length());
+    index += 1;
+    if (!inventory) {
+      let allowed: boolean = QbeLane::includes(&supported, &name);
+      let excluded: boolean = QbeLane::includes(&skipped, &name);
+      if (allowed == excluded) {
+        Io::eprintln(`fixture must occur in exactly one inventory: ${name.toStr()}`);
+        return 1;
+      }
+      if (excluded) {
+        skippedCount += 1;
+        continue;
+      }
+    }
+    if (inventory && (fixture.mode.kind != FixtureKind::PROGRAM || fixture.skipReason.length() > 0)) {
+      skipped.pushStr(`${name.toStr()}\tfixture requires diagnostic or expected-failure harness\n`.toStr());
+      skippedCount += 1;
+      continue;
+    }
+    let qbeBinary: String = `${work.toStr()}/qbe-${index}`;
+    let cBinary: String = `${work.toStr()}/c-${index}`;
+    let Result::OK(qbeBuild) = QbeLane::compile(compiler, &fixture.path, "qbe", &qbeBinary) else {
+      Io::eprintln(`cannot start compiler: ${name.toStr()}`);
+      return 1;
+    };
+    if (!qbeBuild.status().success) {
+      let stderr: String = qbeBuild.stderr();
+      if (inventory) {
+        if (let Option::SOME(reason) = QbeLane::missingFeature(&stderr)) {
+          skipped.pushStr(`${name.toStr()}\t${reason.toStr()}\n`.toStr());
+          skippedCount += 1;
+          continue;
+        }
+      }
+      Io::eprintln(`QBE build failed: ${name.toStr()}\n${stderr.toStr()}`);
+      return 1;
+    }
+    let Result::OK(cBuild) = QbeLane::compile(compiler, &fixture.path, "c", &cBinary) else {
+      return 1;
+    };
+    if (!cBuild.status().success) {
+      Io::eprintln(`C reference build failed: ${name.toStr()}\n${cBuild.stderr().toStr()}`);
+      return 1;
+    }
+    let qbeCommand: Process::Command = Process::command(qbeBinary.toStr());
+    let cCommand: Process::Command = Process::command(cBinary.toStr());
+    let Result::OK(qbeRun) = qbeCommand.output() else {
+      return 1;
+    };
+    let Result::OK(cRun) = cCommand.output() else {
+      return 1;
+    };
+    let cOut: String = cRun.stdout();
+    let cErr: String = cRun.stderr();
+    let qbeOut: String = qbeRun.stdout();
+    let qbeErr: String = qbeRun.stderr();
+    if (!QbeLane::outputsMatch(cRun.status().code, &cOut, &cErr, qbeRun.status().code, &qbeOut, &qbeErr)) {
+      Io::eprintln(`C/QBE runtime mismatch: ${name.toStr()} (C ${cRun.status().code}, QBE ${qbeRun.status().code})`);
+      return 1;
+    }
+    if (inventory) {
+      supported.pushStr(`${name.toStr()}\n`.toStr());
+    }
+    passed += 1;
+    Io::println(`PASS ${name.toStr()}`);
+  }
+  if (passed == 0) {
+    Io::eprintln("QBE lane must run at least one supported fixture");
+    return 1;
+  }
+  if (inventory) {
+    if (Fs::writeString("test_cases/qbe_supported.txt", &supported).isError() || Fs::writeString("test_cases/qbe_skip.tsv", &skipped).isError()) {
+      Io::eprintln("cannot write QBE fixture inventory");
+      return 1;
+    }
+  }
+  Io::println(`QBE: ${passed} passed; C reference: ${passed} passed; ${skippedCount} skipped; ${cases.length()} total`);
+  return 0;
+}
