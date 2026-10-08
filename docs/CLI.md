@@ -28,6 +28,32 @@ Commands:
 `ignis --help` lists every command and flag. Without a command, `ignis <path>`
 builds the path.
 
+## Progress output
+
+`build`, `check`, `build-std`, `check-std`, `test` and `test-std` can show a
+live line at the bottom of stderr while they run: the current phase
+(`discover`, `parse`, `analyze`, `lower`, `mono`, `ownership`, `lir`,
+`codegen`, `cc`, `link`, `test`), a bar when the phase counts steps (modules,
+C units, tests), what it is on and the elapsed time:
+
+```
+⠼ lower      ███████████░░░░░░░░░ 112/198  ignis/parser/statements.ign  6.3s
+```
+
+The line is redrawn in place, at most every 80 ms, and never reaches the last
+column of the terminal, whose width is read before each redraw. Diagnostics
+and other output are printed above it, and it is erased before the closing
+`✓`/`✗` line, so what stays on screen is what a run without it prints.
+
+`--progress <MODE>` (or `--progress=<MODE>`) chooses when it is drawn:
+
+- `auto` (default): when stderr is a terminal and `TERM` is not `dumb`.
+- `live`: always, even when stderr is a file or a pipe.
+- `plain`: never.
+
+With the line off, stdout and stderr carry exactly the bytes they would
+without it, which is what CI logs, editors and the fixture baselines see.
+
 ## `ignis init`
 
 Initializes a project directory with:

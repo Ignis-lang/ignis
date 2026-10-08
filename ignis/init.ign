@@ -7,6 +7,8 @@ import Process from "std::process";
 import String from "std::string";
 import Vector from "std::vector";
 
+import Output from "@compiler::output";
+
 /// Everything `ignis init` reads from its command line, with the defaults the
 /// host's `InitCommand` declares.
 export record InitOptions {
@@ -519,7 +521,7 @@ function initResolveProjectRoot(name: &String): Option<Path::PathBuf> {
   let currentDir: Path::PathBuf = match (Env::currentDir()) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
-      Io::eprintln(`Error: Failed to resolve current directory: ${initIoErrorText(&error).toStr()}`);
+      Output::message(`Error: Failed to resolve current directory: ${initIoErrorText(&error).toStr()}`);
       return Option::NONE;
     },
   };
@@ -533,7 +535,7 @@ function initResolveProjectRoot(name: &String): Option<Path::PathBuf> {
   let canonical: Path::PathBuf = match (Fs::canonicalize(&root)) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
-      Io::eprintln(`Error: Failed to canonicalize project path '${root.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      Output::message(`Error: Failed to canonicalize project path '${root.asStr()}': ${initIoErrorText(&error).toStr()}`);
       return Option::NONE;
     },
   };
@@ -579,19 +581,19 @@ function initDetectStdPath(projectRoot: &Path::PathBuf): Option<String> {
 function initWriteNewFile(path: &Path::PathBuf, content: &String): boolean {
   if (let Option::SOME(parent) = path.parent()) {
     if (let Result::ERROR(error) = Fs::createDirAll(&parent)) {
-      Io::eprintln(`Error: Failed to create parent directory for '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      Output::message(`Error: Failed to create parent directory for '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
       return false;
     }
   }
 
   if (Fs::exists(path.asStr())) {
     let error: Io::IoError = Io::IoError::fromErrno(LibC::Errno::EEXIST);
-    Io::eprintln(`Error: Failed to create file '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
+    Output::message(`Error: Failed to create file '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
     return false;
   }
 
   if (let Result::ERROR(error) = Fs::writeString(path, content)) {
-    Io::eprintln(`Error: Failed to create file '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
+    Output::message(`Error: Failed to create file '${path.asStr()}': ${initIoErrorText(&error).toStr()}`);
     return false;
   }
 
@@ -611,13 +613,13 @@ function initGitRepository(projectRoot: &Path::PathBuf): boolean {
   let status: Process::ExitStatus = match (command.run()) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
-      Io::eprintln(`Error: Failed to initialize git repository at '${projectRoot.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      Output::message(`Error: Failed to initialize git repository at '${projectRoot.asStr()}': ${initIoErrorText(&error).toStr()}`);
       return false;
     },
   };
 
   if (!status.success) {
-    Io::eprintln(`Error: 'git init' failed in '${projectRoot.asStr()}'`);
+    Output::message(`Error: 'git init' failed in '${projectRoot.asStr()}'`);
     return false;
   }
 
@@ -631,7 +633,7 @@ function initGitRepository(projectRoot: &Path::PathBuf): boolean {
 /// Returns 0 on success and 1 on any failure, after printing why.
 export function runInit(options: &InitOptions): i32 {
   let Option::SOME(name) = &options.name else {
-    Io::eprintln(String::create("error: init requires a project name"));
+    Output::message(String::create("error: init requires a project name"));
     return 1;
   };
 
@@ -641,25 +643,25 @@ export function runInit(options: &InitOptions): i32 {
 
   if (Fs::exists(projectRoot.asStr())) {
     if (!initIsDirectory(&projectRoot)) {
-      Io::eprintln(`Error: Path exists but is not a directory: '${projectRoot.asStr()}'`);
+      Output::message(`Error: Path exists but is not a directory: '${projectRoot.asStr()}'`);
       return 1;
     }
   } else {
     if (let Result::ERROR(error) = Fs::createDirAll(&projectRoot)) {
-      Io::eprintln(`Error: Failed to create project directory '${projectRoot.asStr()}': ${initIoErrorText(&error).toStr()}`);
+      Output::message(`Error: Failed to create project directory '${projectRoot.asStr()}': ${initIoErrorText(&error).toStr()}`);
       return 1;
     }
   }
 
   let Option::SOME(packageName) = initPackageName(&projectRoot) else {
-    Io::eprintln(`Error: Could not determine project name from path '${projectRoot.asStr()}'`);
+    Output::message(`Error: Could not determine project name from path '${projectRoot.asStr()}'`);
     return 1;
   };
 
   let sourceDirPath: Path::PathBuf = projectRoot.join(options.sourceDir.toStr());
 
   if (let Result::ERROR(error) = Fs::createDirAll(&sourceDirPath)) {
-    Io::eprintln(`Error: Failed to create source directory '${sourceDirPath.asStr()}': ${initIoErrorText(&error).toStr()}`);
+    Output::message(`Error: Failed to create source directory '${sourceDirPath.asStr()}': ${initIoErrorText(&error).toStr()}`);
     return 1;
   }
 
@@ -668,12 +670,12 @@ export function runInit(options: &InitOptions): i32 {
   let manifestPath: Path::PathBuf = projectRoot.join("ignis.toml");
 
   if (Fs::exists(manifestPath.asStr())) {
-    Io::eprintln(`Error: Refusing to overwrite existing file '${manifestPath.asStr()}'`);
+    Output::message(`Error: Refusing to overwrite existing file '${manifestPath.asStr()}'`);
     return 1;
   }
 
   if (Fs::exists(entryPath.asStr())) {
-    Io::eprintln(`Error: Refusing to overwrite existing file '${entryPath.asStr()}'`);
+    Output::message(`Error: Refusing to overwrite existing file '${entryPath.asStr()}'`);
     return 1;
   }
 
@@ -691,7 +693,7 @@ export function runInit(options: &InitOptions): i32 {
 
   if (!options.quiet) {
     let kind: str = options.lib ? "library" : "binary";
-    Io::println(`Initialized Ignis ${kind} project '${packageName.toStr()}' at ${projectRoot.asStr()}`);
+    Output::data(`Initialized Ignis ${kind} project '${packageName.toStr()}' at ${projectRoot.asStr()}`);
   }
 
   return 0;

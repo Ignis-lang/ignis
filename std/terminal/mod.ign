@@ -34,6 +34,7 @@
 //! | Screen control | `Terminal::Screen::clear`, `clearLine` | You need simple full-screen or line clearing |
 //! | Cursor control | `Terminal::Cursor::{moveTo, save, restore, hide, show}` | You need TUI-style cursor positioning or visibility control |
 //! | Capability checks | `isInputTerminal`, `isOutputTerminal`, `isErrorTerminal` | You need to branch on whether a file descriptor is a terminal |
+//! | Window size | `outputSize`, `errorSize` | You need to fit a line to the terminal's width |
 //!
 //! ## Design boundary
 //!
@@ -87,7 +88,7 @@
 //! }
 //! ```
 
-import LibC from "std::libc";
+import CType, LibC from "std::libc";
 
 /// Builds a Control Sequence Introducer (CSI) escape sequence.
 ///
@@ -162,6 +163,7 @@ function ansiSgr(code: i32): String {
 /// - Composable text styles
 /// - Screen and cursor helpers
 /// - File-descriptor terminal capability checks
+/// - Terminal window size queries
 ///
 /// ## What it does not provide
 ///
@@ -754,5 +756,53 @@ export namespace Terminal {
     @configFlag(@platform("linux") || @platform("macos"))
     function isErrorTerminal(): boolean {
     return LibC::File::isatty(LibC::File::STDERR_FILENO) != 0;
+  }
+
+  /// A terminal window's size in character cells.
+  record TerminalSize {
+    public rows: u16;
+    public columns: u16;
+  }
+
+  /// The size of the terminal stdout is attached to, or `NONE` when stdout is
+  /// not a terminal or the terminal reports no width.
+  ///
+  /// The size can change between calls when the window is resized, so a caller
+  /// that redraws a line asks again before each redraw.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let columns: u16 = match (Terminal::outputSize()) {
+  ///   Option::SOME(size) -> size.columns,
+  ///   Option::NONE -> 80,
+  /// };
+  /// ```
+  @configFlag(@platform("linux") || @platform("macos"))
+  function outputSize(): Option<Terminal::TerminalSize> {
+    return Terminal::windowSizeOf(LibC::File::STDOUT_FILENO);
+  }
+
+  /// The size of the terminal stderr is attached to, or `NONE` when stderr is
+  /// not a terminal or the terminal reports no width.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function errorSize(): Option<Terminal::TerminalSize> {
+    return Terminal::windowSizeOf(LibC::File::STDERR_FILENO);
+  }
+
+  @configFlag(@platform("linux") || @platform("macos"))
+  function windowSizeOf(fd: CType::CInt): Option<Terminal::TerminalSize> {
+    let mut size: CType::WinSize = CType::WinSize {
+      rows: 0,
+      columns: 0,
+      xPixels: 0,
+      yPixels: 0,
+    };
+
+    if (LibC::File::windowSize(fd, (&mut size) as *mut CType::WinSize) != 0 || size.columns == 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(Terminal::TerminalSize { rows: size.rows, columns: size.columns });
   }
 }

@@ -1,9 +1,9 @@
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import Output from "@compiler::output";
 
 import Env from "std::env";
 import Fs from "std::fs";
-import Io from "std::io";
 import LibC from "std::libc";
 import Memory from "std::memory";
 import Path from "std::path";
@@ -670,6 +670,7 @@ export namespace TestRunner {
         });
       }
 
+      Output::advanceOuter(&testCase.fqName);
       waitCursor += 1;
     }
 
@@ -963,6 +964,7 @@ export namespace TestRunner {
         break;
       }
 
+      Output::pulse();
       let _slept: i32 = LibC::Process::usleep(PROCESS_POLL_INTERVAL_MICROS);
     }
 
@@ -1147,6 +1149,8 @@ export namespace TestRunner {
   /// Print the run in the host's shape: one line per test, a failure section,
   /// then the totals. Returns the number of failures.
   function report(outcomes: &Vector<TestOutcome>, binaryPath: &Path::PathBuf): u64 {
+    Output::endProgress();
+
     let total: u64 = outcomes.length();
     let passed: u64 = TestRunner::countPassed(outcomes);
     let failed: u64 = total - passed;
@@ -1158,12 +1162,12 @@ export namespace TestRunner {
       };
       let status: String = TestRunner::statusText(outcome);
 
-      Io::eprintln(`  - ${outcome.fqName.toStr()} ... ${status.toStr()}`);
+      Output::message(`  - ${outcome.fqName.toStr()} ... ${status.toStr()}`);
       index += 1;
     }
 
     if (failed > 0) {
-      Io::eprintln(TestRunner::sectionHeader("Failures"));
+      Output::message(TestRunner::sectionHeader("Failures"));
 
       let mut failureIndex: u64 = 0;
 
@@ -1185,29 +1189,29 @@ export namespace TestRunner {
             break;
           };
 
-          Io::println(`  ${line.toStr()}`);
+          Output::data(`  ${line.toStr()}`);
           lineIndex += 1;
         }
 
-        Io::println(String::new());
+        Output::data(String::new());
         failureIndex += 1;
       }
     }
 
-    Io::eprintln(TestRunner::sectionHeader("Summary"));
+    Output::message(TestRunner::sectionHeader("Summary"));
 
     let summary: Vector<String> = TestRunner::summaryLines(outcomes);
     let mut summaryIndex: u64 = 0;
 
     while (summaryIndex < summary.length()) {
       if (let Option::SOME(line) = summary.get(summaryIndex)) {
-        Io::eprintln(`  - ${line.toStr()}`);
+        Output::message(`  - ${line.toStr()}`);
       }
 
       summaryIndex += 1;
     }
 
-    Io::eprintln(`  Test binary: ${binaryPath.asStr()}`);
+    Output::message(`  Test binary: ${binaryPath.asStr()}`);
 
     return failed;
   }

@@ -1,7 +1,7 @@
 //!
 //! # LibC I/O
 //!
-//! POSIX file-descriptor operations from `unistd.h` and `fcntl.h`,
+//! POSIX file-descriptor operations from `unistd.h`, `fcntl.h` and `sys/ioctl.h`,
 //! exposed as `LibC::File`.
 //!
 //! ## Constants
@@ -42,6 +42,7 @@
 //! | `isatty`  | Test if fd refers to a terminal                    |
 //! | `fcntl`   | Run `fcntl(fd, cmd)`                               |
 //! | `fcntlArg`| Run `fcntl(fd, cmd, arg)`                          |
+//! | `windowSize` | Read a terminal's size (`TIOCGWINSZ`)           |
 //!
 //! Most functions return -1 on error. `read` returns 0 on EOF.
 //!
@@ -124,6 +125,21 @@ extern __fcntl {
   /// POSIX `fcntl(fd, cmd, arg)` for integer descriptor-flag commands.
   @externName("fcntl")
   function fcntlArg(fd: CType::CInt, cmd: CType::CInt, arg: CType::CInt): CType::CInt;
+}
+
+@configFlag(@platform("linux") || @platform("macos"))
+extern __ioctl {
+  /// `ioctl` request that reads a terminal's window size.
+  const TIOCGWINSZ: CType::CULong;
+
+  /// POSIX `ioctl(fd, TIOCGWINSZ, size)`. `ioctl` is variadic; this binding
+  /// fixes the one argument shape the window-size request takes.
+  @externName("ioctl")
+  function ioctlWindowSize(
+    fd: CType::CInt,
+    request: CType::CULong,
+    size: *mut CType::WinSize
+  ): CType::CInt;
 }
 
 /// POSIX file descriptors (unistd.h / fcntl.h)
@@ -258,5 +274,11 @@ namespace LibC::File {
   /// Performs `fcntl(fd, cmd, arg)` for commands that require an integer value.
   function fcntlArg(fd: CType::CInt, cmd: CType::CInt, arg: CType::CInt): CType::CInt {
     return __fcntl::fcntlArg(fd, cmd, arg);
+  }
+
+  /// Fills `size` with the window size of the terminal `fd` refers to.
+  /// Returns 0 on success and -1 when `fd` is not a terminal.
+  function windowSize(fd: CType::CInt, size: *mut CType::WinSize): CType::CInt {
+    return __ioctl::ioctlWindowSize(fd, __ioctl::TIOCGWINSZ, size);
   }
 }

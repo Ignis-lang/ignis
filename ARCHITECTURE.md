@@ -50,6 +50,7 @@ ignis/                            # The compiler (project file: ignis.toml)
   build/                          # Discovery, build cache, C compiler/archiver/linker calls, test runner, fixtures
   config/                         # ignis.toml loading
   diagnostics/                    # Diagnostic codes, model, rendering
+  output/                         # The only writer of stdout/stderr: messages (stderr) and data (stdout)
   format/                         # Canonical source formatter
   doc/                            # API documentation extraction
   lsp/                            # Language server
