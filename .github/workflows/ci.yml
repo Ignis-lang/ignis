@@ -128,7 +128,8 @@ jobs:
 
       # Every step from here runs stage1: stage0 is built from the committed C
       # seed with gcc alone, and compiles `ignis/main.ign` once. This job never
-      # depends on the Rust host or on a network download; the official binary
+      # depends on the Rust host. Stage construction needs no network download;
+      # QBE test-tool provisioning below does. The official binary
       # gets its own check in `official-stage0-gate` below. stage1 is the
       # cheapest selfhost binary that exercises the compiler under test, so
       # PRs get it instead of stage2/stage3 or the rest of the ladder
@@ -174,6 +175,14 @@ jobs:
         env:
           IGNIS_LSP_COMPILER: build/bootstrap/stage1/ignis
         run: python3 scripts/tests/test_selfhost_lsp.py -v
+
+      - name: Install QBE 1.2 for executable backend tests
+        run: |
+          curl -fsSL https://c9x.me/compile/release/qbe-1.2.tar.xz -o "$RUNNER_TEMP/qbe-1.2.tar.xz"
+          echo "a6d50eb952525a234bf76ba151861f73b7a382ac952d985f2b9af1df5368225d  $RUNNER_TEMP/qbe-1.2.tar.xz" | sha256sum --check
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/qbe-1.2.tar.xz"
+          make -C "$RUNNER_TEMP/qbe-1.2"
+          echo "$RUNNER_TEMP/qbe-1.2" >> "$GITHUB_PATH"
 
       # The nightly's G3, run against stage1 instead of stage2: the suite has
       # to pass outright under stage1. This is the job's only run of the
