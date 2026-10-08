@@ -577,7 +577,11 @@ function resolverLoadProject(
 
   let targetTriple: String = resolverTargetTriple(&resolved.targetTriple, overrides);
   let debug: boolean = overrides.debug.unwrapOr(resolved.debug);
-  let target: String = resolverTargetBackend(&configPath, &resolved.target, overrides)!;
+
+  // Before backend selection existed, every stored target built with C;
+  // init still emits legacy targets. CLI overrides retain strict validation.
+  let declaredBackend: String = String::create(qbeIsQbeTarget(resolved.target.toStr()) ? "qbe" : "c");
+  let target: String = resolverTargetBackend(&configPath, &declaredBackend, overrides)!;
 
   let mut outDir: Path::PathBuf = match (&resolved.outDir) {
     Option::SOME(path) -> path.clone(),

@@ -127,32 +127,72 @@ function driverCommandLineTargetOverridesProjectFile(): void {
   Test::assertEq<str>(discovery.target.toStr(), "qbe");
 }
 
-/// An unknown target in the project file is a clear config error, not a
-/// silently different backend.
+/// Scratch root for one target-selection test, kept inside the repository's
+/// `build/qbe-f25/` directory instead of the system temp directory.
+function driverF25TestRoot(tag: str): Path::PathBuf {
+  let name: String = `f25_target_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::create("build/qbe-f25").join(name.toStr());
+  driverEnsureDir(&root);
+
+  return root;
+}
+
+/// A legacy `target = "iir"` stored in `ignis.toml` still builds with the C
+/// backend: pre-qbe compilers accepted every stored value and built it with
+/// C, and `ignis init` still emits this value.
 @test
-function driverRejectsUnknownProjectTarget(): void {
-  let root: Path::PathBuf = driverTestRoot("target_toml_bad");
-  driverWriteTargetProject(&root, "target = \"wasm\"\n");
+function driverReadsLegacyIirTargetAsC(): void {
+  let root: Path::PathBuf = driverF25TestRoot("iir");
+  driverWriteTargetProject(&root, "target = \"iir\"\n");
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let bag: DiagnosticBag = match (Resolver::discover(&root, &overrides, false)) {
-    Result::OK(_) -> {
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
       Test::fail();
       return;
     },
-    Result::ERROR(value) -> value,
   };
 
-  Test::assertEq<u64>(bag.length(), 1);
+  Test::assertEq<str>(discovery.target.toStr(), "c");
+}
 
-  let Option::SOME(diagnostic) = bag.get(0) else {
-    Test::fail();
-    return;
+/// A legacy `target = "none"` stored in `ignis.toml` still builds with the C
+/// backend, the same way the pre-qbe compilers treated it.
+@test
+function driverReadsLegacyNoneTargetAsC(): void {
+  let root: Path::PathBuf = driverF25TestRoot("none");
+  driverWriteTargetProject(&root, "target = \"none\"\n");
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
   };
 
-  Test::assertEq<str>(diagnostic.code, "B2004");
-  Test::assertEq<boolean>(driverContains(diagnostic.messageText(), "unknown build target"), true);
-  Test::assertEq<boolean>(driverContains(diagnostic.messageText(), "wasm"), true);
+  Test::assertEq<str>(discovery.target.toStr(), "c");
+}
+
+/// Any stored target other than `qbe` falls back to the C backend, matching
+/// the pre-qbe behavior that accepted every stored value and built it with C.
+@test
+function driverStoredNonQbeTargetFallsBackToC(): void {
+  let root: Path::PathBuf = driverF25TestRoot("wasm");
+  driverWriteTargetProject(&root, "target = \"wasm\"\n");
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(discovery.target.toStr(), "c");
 }
 
 /// An unknown `--target` value from the command line is rejected the same way.
