@@ -24,6 +24,7 @@ import Config, ResolvedProject from "@compiler::config";
 import ParseOutput, Parser from "@compiler::parser";
 import Hir from "@compiler::hir";
 import Id from "@compiler::ids";
+import Output from "@compiler::output";
 
 import Format from "./format/api";
 import _ from "./format/config";
@@ -158,7 +159,7 @@ function renderBagToStderr(bag: &DiagnosticBag, file: &SourceFile): void {
   }
 
   let rendered: String = DiagnosticRenderer::renderBag(bag, file, DiagnosticRenderer::stderrUsesColor());
-  Io::eprintln(rendered);
+  Output::message(rendered);
 }
 
 /// Render a diagnostic bag to stderr and keep a copy in the run's report.
@@ -178,11 +179,11 @@ function renderBagCollecting(bag: &DiagnosticBag, file: &SourceFile, report: &mu
   reportRef.pushChar('\n');
 
   if (DiagnosticRenderer::stderrUsesColor()) {
-    Io::eprintln(styled);
+    Output::message(styled);
     return;
   }
 
-  Io::eprintln(DiagnosticRenderer::renderBag(bag, file, false));
+  Output::message(DiagnosticRenderer::renderBag(bag, file, false));
 }
 
 /// `text` without its ANSI escape sequences: every `ESC [` up to and including
@@ -403,7 +404,7 @@ function replayBuildReport(reportPath: &Path::PathBuf): void {
     return;
   }
 
-  Io::eprint(replayedReport(&report, DiagnosticRenderer::stderrUsesColor()));
+  Output::messageNoNewline(replayedReport(&report, DiagnosticRenderer::stderrUsesColor()));
 }
 
 /// Report a reused build in the shape a compiled one reports itself in, so a
@@ -1050,7 +1051,7 @@ function collectDiagnosticMessages(
 /// schedules gate G7 diffs.
 function printStatus(message: String, verbose: boolean): void {
   if (let Option::SOME(line) = statusLine(message, verbose)) {
-    Io::eprintln(line);
+    Output::message(line);
   }
 }
 
@@ -1141,7 +1142,7 @@ function printOutcomeLine(mark: str, text: &String, color: Terminal::TerminalCol
   Terminal::appendStyled(&mut styled, mark, DiagnosticRenderer::stderrUsesColor(), color, true);
   styled.pushStr(" ");
   styled.push(text);
-  Io::eprintln(styled);
+  Output::message(styled);
 }
 
 function printFailure(action: str, errors: u64, warnings: u64): void {
@@ -1244,15 +1245,15 @@ function compileDiscovered(
 
   while (orderIndex < discovery.order.length()) {
     let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
-      Io::eprintln("error: discovery order is incomplete");
+      Output::message("error: discovery order is incomplete");
       return failedCompilation(1, 0);
     };
     let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
-      Io::eprintln("error: discovery order references a missing module");
+      Output::message("error: discovery order references a missing module");
       return failedCompilation(1, 0);
     };
     let Result::OK(moduleText) = Fs::readToString(&node.path) else {
-      Io::eprintln(`error: cannot read source file: ${node.path.toString().toStr()}`);
+      Output::message(`error: cannot read source file: ${node.path.toString().toStr()}`);
       return failedCompilation(1, 0);
     };
 
@@ -1277,7 +1278,7 @@ function compileDiscovered(
     }
 
     if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
-      Io::eprintln(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
+      Output::message(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
       return failedCompilation(1, 0);
     }
 
@@ -1349,11 +1350,11 @@ function compileDiscovered(
 
   while (recordIndex < records.length()) {
     let Option::SOME(analysisRecord) = records.get(recordIndex) else {
-      Io::eprintln("error: analysis records are incomplete");
+      Output::message("error: analysis records are incomplete");
       return failedCompilation(frontendErrors + 1, frontendWarnings);
     };
     let Option::SOME(moduleFile) = files.get(recordIndex) else {
-      Io::eprintln("error: analysis records do not align with parsed modules");
+      Output::message("error: analysis records do not align with parsed modules");
       return failedCompilation(frontendErrors + 1, frontendWarnings);
     };
 
@@ -1482,7 +1483,7 @@ function compileDiscovered(
         if (shippingTests.length() > 0) {
           let moduleName: String = TestRunner::moduleSegments(modulePath, &sourceRoot);
           let message: String = `error: std::${moduleName.toStr()} contains @test in a shipping source module; move std tests into the sibling tests.ign file`;
-          Io::eprintln(message);
+          Output::message(message);
           return failedCompilation(1, 0);
         }
       }
@@ -1668,8 +1669,8 @@ function compileDiscovered(
       filter,
     );
 
-    Io::eprint(Borrowck::OwnershipReport::renderSummary(&reports, filter));
-    Io::print(Borrowck::OwnershipReport::renderJson(&reports));
+    Output::messageNoNewline(Borrowck::OwnershipReport::renderSummary(&reports, filter));
+    Output::dataNoNewline(Borrowck::OwnershipReport::renderJson(&reports));
   }
 
   if (dumpDropSchedule) {
@@ -1687,7 +1688,7 @@ function compileDiscovered(
       workingDirectory.toStr(),
     );
 
-    Io::println(`\n${dump}`);
+    Output::data(`\n${dump}`);
   }
 
   let ownershipErrors: u64 = countBySeverity(&checked.diagnostics, Severity::ERROR);
@@ -1743,7 +1744,7 @@ function compileDiscovered(
     if (let Option::SOME(message) = verifyMessages.get(verifyIndex)) {
       let line: String = `error: ${message.toStr()}`;
 
-      Io::eprintln(line.clone());
+      Output::message(line.clone());
 
       if (quiet) {
         errorMessages.push(message.clone());
@@ -1951,7 +1952,7 @@ function ensureParentDirectory(path: &Path::PathBuf): boolean {
   }
 
   if (let Result::ERROR(error) = Fs::createDirAll(&parent)) {
-    Io::eprintln(`error: could not create directory ${parent.asStr()}: ${error.errorMessage()}`);
+    Output::message(`error: could not create directory ${parent.asStr()}: ${error.errorMessage()}`);
     return false;
   }
 
@@ -1963,7 +1964,7 @@ function ensureParentDirectory(path: &Path::PathBuf): boolean {
 /// because the run fails because of it.
 function writeArtifact(path: &Path::PathBuf, contents: &String): boolean {
   if (let Result::ERROR(error) = Fs::writeString(path, contents)) {
-    Io::eprintln(`error: could not write ${path.asStr()}: ${error.errorMessage()}`);
+    Output::message(`error: could not write ${path.asStr()}: ${error.errorMessage()}`);
     return false;
   }
 
@@ -2071,7 +2072,7 @@ function printCompileOutcome(
   printOutcomeLine("✓", &outcome.text, Terminal::TerminalColor::GREEN);
 
   if (let Option::SOME(line) = &outcome.artifact) {
-    Io::eprintln(line.clone());
+    Output::message(line.clone());
   }
 }
 
@@ -2104,7 +2105,7 @@ function runCompile(
     },
   };
 
-  Io::eprintln(buildHeaderLine(checkOnly ? "Checking" : "Building", &discovery));
+  Output::message(buildHeaderLine(checkOnly ? "Checking" : "Building", &discovery));
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
@@ -2762,7 +2763,7 @@ function linkTestBinary(
     stampInvalidate(&stampPath);
 
     if (let Result::ERROR(_) = Fs::writeString(programPath.asStr(), &compiled.source)) {
-      Io::eprintln(`error: could not write ${programPath.asStr()}`);
+      Output::message(`error: could not write ${programPath.asStr()}`);
       return Option::NONE;
     }
   }
@@ -2770,7 +2771,7 @@ function linkTestBinary(
   let harness: String = TestRunner::harnessSource(selected);
 
   if (let Result::ERROR(_) = Fs::writeString(harnessPath.asStr(), &harness)) {
-    Io::eprintln(`error: could not write ${harnessPath.asStr()}`);
+    Output::message(`error: could not write ${harnessPath.asStr()}`);
     return Option::NONE;
   }
 
@@ -2835,7 +2836,7 @@ export function prepareTestBinaryDirectory(binaryPath: &String): boolean {
   };
 
   if (let Result::ERROR(_) = Fs::createDirAll(&directory)) {
-    Io::eprintln(`error: could not create ${directory.asStr()}`);
+    Output::message(`error: could not create ${directory.asStr()}`);
     return false;
   }
 
@@ -2853,7 +2854,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   };
   let timeoutSeconds: u64 = TestRunner::resolvedTimeoutSeconds(options.testTimeout);
 
-  Io::eprintln(`Testing ${TestRunner::runHeader(startPath, &partition).toStr()}\n`);
+  Output::message(`Testing ${TestRunner::runHeader(startPath, &partition).toStr()}\n`);
 
   let Option::SOME(discovery) = discoverFor(startPath, options, true) else {
     return 1;
@@ -2866,7 +2867,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.source.length() == 0) {
-    Io::eprintln(String::create("error: test setup failed"));
+    Output::message(String::create("error: test setup failed"));
     return 1;
   }
 
@@ -2876,10 +2877,10 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   let selected: Vector<TestCase> = plan.tests;
   let selectedFixtures: Vector<FixtureCase> = plan.fixtures;
 
-  Io::eprintln(TestRunner::sectionHeader("Planning"));
+  Output::message(TestRunner::sectionHeader("Planning"));
 
   if (selected.length() == 0 && selectedFixtures.length() == 0) {
-    Io::eprintln(String::create("  - No tests selected"));
+    Output::message(String::create("  - No tests selected"));
     return 0;
   }
 
@@ -2887,7 +2888,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   while (plannedIndex < selected.length()) {
     if (let Option::SOME(testCase) = selected.get(plannedIndex)) {
-      Io::eprintln(`  - ${testCase.fqName.toStr()}`);
+      Output::message(`  - ${testCase.fqName.toStr()}`);
     }
 
     plannedIndex += 1;
@@ -2897,7 +2898,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   while (plannedFixtureIndex < selectedFixtures.length()) {
     if (let Option::SOME(fixture) = selectedFixtures.get(plannedFixtureIndex)) {
-      Io::eprintln(`  - ${fixture.name.toStr()}`);
+      Output::message(`  - ${fixture.name.toStr()}`);
     }
 
     plannedFixtureIndex += 1;
@@ -2910,11 +2911,11 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   let binaryPathText: String = testBinaryPath(&discovery.outDir, &discovery.name, &options.outputPath);
 
   let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected, &binaryPathText) else {
-    Io::eprintln(String::create("error: test setup failed"));
+    Output::message(String::create("error: test setup failed"));
     return 1;
   };
 
-  Io::eprintln(TestRunner::sectionHeader("Running"));
+  Output::message(TestRunner::sectionHeader("Running"));
 
   let mut outcomes: Vector<TestOutcome> = TestRunner::execute(
     &binaryPath,
@@ -2956,7 +2957,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 /// discovery or analysis error.
 function runStdTests(options: &CliOptions): i32 {
   let Result::OK(currentDir) = Env::currentDir() else {
-    Io::eprintln(String::create("error: the current directory could not be read"));
+    Output::message(String::create("error: the current directory could not be read"));
     return 1;
   };
 
@@ -2966,12 +2967,12 @@ function runStdTests(options: &CliOptions): i32 {
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(&currentDir);
       reportDiscoveryFailure(&diagnostics, &startFile, options.verbose);
-      Io::eprintln(String::create("error: test setup failed"));
+      Output::message(String::create("error: test setup failed"));
       return 1;
     },
   };
 
-  Io::eprintln(`Testing std ${discovery.stdRoot.asStr()}\n`);
+  Output::message(`Testing std ${discovery.stdRoot.asStr()}\n`);
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
@@ -2980,7 +2981,7 @@ function runStdTests(options: &CliOptions): i32 {
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
-    Io::eprintln(String::create("error: test setup failed"));
+    Output::message(String::create("error: test setup failed"));
     return 1;
   }
 
@@ -2989,10 +2990,10 @@ function runStdTests(options: &CliOptions): i32 {
   let plan: TestPlan = TestRunner::buildPlan(&compiled.tests, &noFixtures, &options.filter, &noPartition);
   let selected: Vector<TestCase> = plan.tests;
 
-  Io::eprintln(TestRunner::sectionHeader("Planning"));
+  Output::message(TestRunner::sectionHeader("Planning"));
 
   if (selected.length() == 0) {
-    Io::eprintln(String::create("  - No tests selected"));
+    Output::message(String::create("  - No tests selected"));
     return 0;
   }
 
@@ -3000,7 +3001,7 @@ function runStdTests(options: &CliOptions): i32 {
 
   while (plannedIndex < selected.length()) {
     if (let Option::SOME(testCase) = selected.get(plannedIndex)) {
-      Io::eprintln(`  - ${testCase.fqName.toStr()}`);
+      Output::message(`  - ${testCase.fqName.toStr()}`);
     }
 
     plannedIndex += 1;
@@ -3014,16 +3015,16 @@ function runStdTests(options: &CliOptions): i32 {
   let requestedBinaryPath: Path::PathBuf = Path::PathBuf::fromString(&binaryPathText);
 
   if (!ensureParentDirectory(&requestedBinaryPath)) {
-    Io::eprintln(String::create("error: test setup failed"));
+    Output::message(String::create("error: test setup failed"));
     return 1;
   }
 
   let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected, &binaryPathText) else {
-    Io::eprintln(String::create("error: test setup failed"));
+    Output::message(String::create("error: test setup failed"));
     return 1;
   };
 
-  Io::eprintln(TestRunner::sectionHeader("Running"));
+  Output::message(TestRunner::sectionHeader("Running"));
 
   let outcomes: Vector<TestOutcome> = TestRunner::execute(
     &binaryPath,
@@ -3053,7 +3054,7 @@ enum FmtInput {
 
 /// The formatter configuration failure message the host CLI prints for one
 /// not scoped to a particular file being formatted, minus the `Error: `
-/// prefix `Io::eprintln` callers add.
+/// prefix `Output::message` callers add.
 export function fmtConfigErrorMessage(bag: &DiagnosticBag): String {
   let Option::SOME(diagnostic) = bag.get(0) else {
     return String::create("formatter configuration failed: unknown formatter configuration error");
@@ -3065,12 +3066,12 @@ export function fmtConfigErrorMessage(bag: &DiagnosticBag): String {
 /// Reports a formatter configuration failure the way the host CLI reports
 /// one that is not scoped to a particular file being formatted.
 function printFmtConfigError(bag: &DiagnosticBag): void {
-  Io::eprintln(`Error: ${fmtConfigErrorMessage(bag).toStr()}`);
+  Output::message(`Error: ${fmtConfigErrorMessage(bag).toStr()}`);
 }
 
 /// The formatter configuration failure message the host CLI prints for one
 /// scoped to the file being formatted, minus the `Error: ` prefix
-/// `Io::eprintln` callers add.
+/// `Output::message` callers add.
 export function fmtConfigErrorMessageForPath(path: &Path::PathBuf, bag: &DiagnosticBag): String {
   return `${path.asStr()}: ${fmtConfigErrorMessage(bag).toStr()}`;
 }
@@ -3078,7 +3079,7 @@ export function fmtConfigErrorMessageForPath(path: &Path::PathBuf, bag: &Diagnos
 /// Reports a formatter configuration failure scoped to the file being
 /// formatted, the way the host CLI's per-file config resolution does.
 function printFmtConfigErrorForPath(path: &Path::PathBuf, bag: &DiagnosticBag): void {
-  Io::eprintln(`Error: ${fmtConfigErrorMessageForPath(path, bag).toStr()}`);
+  Output::message(`Error: ${fmtConfigErrorMessageForPath(path, bag).toStr()}`);
 }
 
 /// Builds the overrides `Format::Config::load` applies on top of whatever a
@@ -3236,7 +3237,7 @@ function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
     let configPath: Path::PathBuf = root.join("ignis.toml");
 
     if (!Fs::exists(configPath.asStr())) {
-      Io::eprintln(`Error: No ignis.toml found in '${root.asStr()}'`);
+      Output::message(`Error: No ignis.toml found in '${root.asStr()}'`);
       return Option::NONE;
     }
 
@@ -3262,7 +3263,7 @@ function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
       let path: Path::PathBuf = Path::PathBuf::fromString(raw);
 
       if (!Fs::exists(path.asStr())) {
-        Io::eprintln(`Error: File not found: '${path.asStr()}'`);
+        Output::message(`Error: File not found: '${path.asStr()}'`);
         return Option::NONE;
       }
 
@@ -3276,7 +3277,7 @@ function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
   let cwd: Path::PathBuf = match (Env::currentDir()) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
-      Io::eprintln(String::create("Error: Failed to get current directory"));
+      Output::message(String::create("Error: Failed to get current directory"));
       return Option::NONE;
     },
   };
@@ -3290,8 +3291,8 @@ function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
       },
     },
     Option::NONE -> {
-      Io::eprintln(String::create("Error: No ignis.toml found"));
-      Io::eprintln(String::create("Hint: Run 'ignis init' to create a project, or provide a file path."));
+      Output::message(String::create("Error: No ignis.toml found"));
+      Output::message(String::create("Hint: Run 'ignis init' to create a project, or provide a file path."));
       return Option::NONE;
     },
   };
@@ -3306,7 +3307,7 @@ function printFmtDiffForFile(path: &Path::PathBuf, formatted: &String): void {
   };
 
   let pathText: String = path.toString();
-  Io::print(Format::unifiedDiff(&pathText, &original, formatted));
+  Output::dataNoNewline(Format::unifiedDiff(&pathText, &original, formatted));
 }
 
 /// Splits a path string on `/`, dropping empty components (leading slash,
@@ -3516,7 +3517,7 @@ function runFmtExplicitFiles(
     let outcome: Format::FormatOutcome = match (Format::formatFile(path, &formatOptions)) {
       Result::OK(value) -> value,
       Result::ERROR(error) -> {
-        Io::eprintln(`Error: ${path.asStr()}: ${error.describe().toStr()}`);
+        Output::message(`Error: ${path.asStr()}: ${error.describe().toStr()}`);
         return 1;
       },
     };
@@ -3541,7 +3542,7 @@ function runFmtExplicitFiles(
         continue;
       };
 
-      Io::eprintln(`Check failed: ${file.asStr()}`);
+      Output::message(`Check failed: ${file.asStr()}`);
       dirtyIndex += 1;
     }
 
@@ -3573,7 +3574,7 @@ function runFmtProject(
   };
 
   let Option::SOME(files) = collectProjectIgnFiles(&sourceDir) else {
-    Io::eprintln(String::create("Error: Failed to collect project files"));
+    Output::message(String::create("Error: Failed to collect project files"));
     return 1;
   };
 
@@ -3591,7 +3592,7 @@ function runFmtProject(
     let outcome: Format::FormatOutcome = match (Format::formatFile(file, &formatOptions)) {
       Result::OK(value) -> value,
       Result::ERROR(error) -> {
-        Io::eprintln(`Error: ${file.asStr()}: ${error.describe().toStr()}`);
+        Output::message(`Error: ${file.asStr()}: ${error.describe().toStr()}`);
         return 1;
       },
     };
@@ -3616,7 +3617,7 @@ function runFmtProject(
         continue;
       };
 
-      Io::eprintln(`Check failed: ${file.asStr()}`);
+      Output::message(`Check failed: ${file.asStr()}`);
       dirtyIndex += 1;
     }
 
@@ -3796,7 +3797,7 @@ function processFmtStdinRequest(
   emitDiff: boolean
 ): FmtStdinLineResult {
   let response: Format::StdinResponse = Format::processStdinRequest(request, formatterConfig, emitDiff);
-  Io::println(Format::renderStdinResponse(&response));
+  Output::data(Format::renderStdinResponse(&response));
   return FmtStdinLineResult { changed: response.changed, hadError: response.hasError };
 }
 
@@ -3812,7 +3813,7 @@ function printFmtStdinParseError(error: String): FmtStdinLineResult {
     error: error,
   };
 
-  Io::println(Format::renderStdinResponse(&response));
+  Output::data(Format::renderStdinResponse(&response));
   return FmtStdinLineResult { changed: false, hadError: true };
 }
 
@@ -3989,7 +3990,7 @@ function runFmtStdinJson(options: &CliOptions): i32 {
       if (reachedEnd) {
         if (pending.length() > 0) {
           let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&pending, &formatterConfig, emitDiff) else {
-            Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+            Output::message("Error: Failed to read stdin: stream did not contain valid UTF-8");
             return 1;
           };
 
@@ -4008,7 +4009,7 @@ function runFmtStdinJson(options: &CliOptions): i32 {
       let outcome: FmtStdinReadOutcome = fmtReadStdinChunk(buf, bufSize);
 
       if (let Option::SOME(message) = outcome.readError) {
-        Io::eprintln(`Error: Failed to read stdin: ${message.toStr()}`);
+        Output::message(`Error: Failed to read stdin: ${message.toStr()}`);
         return 1;
       }
 
@@ -4027,7 +4028,7 @@ function runFmtStdinJson(options: &CliOptions): i32 {
     scannedUpTo = 0;
 
     let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&line, &formatterConfig, emitDiff) else {
-      Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+      Output::message("Error: Failed to read stdin: stream did not contain valid UTF-8");
       return 1;
     };
 
@@ -4088,7 +4089,7 @@ record CommandTarget {
 function resolveTarget(options: &CliOptions): Option<CommandTarget> {
   let Option::SOME(pathText) = &options.path else {
     let Result::OK(currentDir) = Env::currentDir() else {
-      Io::eprintln(String::create("error: the current directory could not be read"));
+      Output::message(String::create("error: the current directory could not be read"));
       return Option::NONE;
     };
 
@@ -4101,7 +4102,7 @@ function resolveTarget(options: &CliOptions): Option<CommandTarget> {
   let path: Path::PathBuf = Path::PathBuf::fromString(&pathText);
 
   let Result::OK(metadata) = Fs::metadata(&path) else {
-    Io::eprintln(`error: path not found: ${path.asStr()}`);
+    Output::message(`error: path not found: ${path.asStr()}`);
     return Option::NONE;
   };
 
@@ -4134,7 +4135,7 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     },
   };
 
-  Io::eprintln(`Building std (${discovery.stdRoot.asStr()})`);
+  Output::message(`Building std (${discovery.stdRoot.asStr()})`);
   printStatus(`  std: ${discovery.stdRoot.asStr()}`, verbose);
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
@@ -4257,7 +4258,7 @@ function printStandardLibraryBuilt(
   libraryPath: &Path::PathBuf
 ): void {
   printSuccess("Built standard library", " with ", warnings, timing);
-  Io::eprintln(`  Archive: ${libraryPath.asStr()}`);
+  Output::message(`  Archive: ${libraryPath.asStr()}`);
 }
 
 /// What `ignis doc` documents: the project `start` belongs to, or `start` as
@@ -4277,7 +4278,7 @@ function resolveDocTarget(options: &CliOptions): Option<DocTarget> {
     let root: Path::PathBuf = Path::PathBuf::fromString(&projectText);
 
     if (!Fs::exists(root.join("ignis.toml").asStr())) {
-      Io::eprintln(`Error: No ignis.toml found in '${projectText.toStr()}'`);
+      Output::message(`Error: No ignis.toml found in '${projectText.toStr()}'`);
       return Option::NONE;
     }
 
@@ -4288,7 +4289,7 @@ function resolveDocTarget(options: &CliOptions): Option<DocTarget> {
     let path: Path::PathBuf = Path::PathBuf::fromString(&pathText);
 
     if (!Fs::exists(path.asStr())) {
-      Io::eprintln(`Error: File not found: '${pathText.toStr()}'`);
+      Output::message(`Error: File not found: '${pathText.toStr()}'`);
       return Option::NONE;
     }
 
@@ -4296,13 +4297,13 @@ function resolveDocTarget(options: &CliOptions): Option<DocTarget> {
   }
 
   let Result::OK(currentDir) = Env::currentDir() else {
-    Io::eprintln(String::create("Error: Failed to get current directory"));
+    Output::message(String::create("Error: Failed to get current directory"));
     return Option::NONE;
   };
 
   if (Config::findProjectFile(&currentDir).isNone()) {
-    Io::eprintln(String::create("Error: No ignis.toml found"));
-    Io::eprintln(String::create("Hint: Run 'ignis init' to create a project, or provide a file path."));
+    Output::message(String::create("Error: No ignis.toml found"));
+    Output::message(String::create("Hint: Run 'ignis init' to create a project, or provide a file path."));
     return Option::NONE;
   }
 
@@ -4339,7 +4340,7 @@ function parseDocSources(docDiscovery: &DocDiscovery): Option<DocSources> {
       return Option::NONE;
     };
     let Result::OK(moduleText) = Fs::readToString(&node.path) else {
-      Io::eprintln(`error: cannot read source file: ${node.path.toString().toStr()}`);
+      Output::message(`error: cannot read source file: ${node.path.toString().toStr()}`);
       return Option::NONE;
     };
 
@@ -4353,7 +4354,7 @@ function parseDocSources(docDiscovery: &DocDiscovery): Option<DocSources> {
     renderBagToStderr(&output.parseDiagnostics, &moduleFile);
 
     if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
-      Io::eprintln(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
+      Output::message(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
       return Option::NONE;
     }
 
@@ -4417,14 +4418,14 @@ function runDoc(options: &CliOptions): i32 {
   };
 
   let Option::SOME(outputText) = &options.outputPath else {
-    Io::println(json);
+    Output::data(json);
     return 0;
   };
 
   let outputPath: Path::PathBuf = Path::PathBuf::fromString(&outputText);
 
   if (let Result::ERROR(_) = Fs::writeString(&outputPath, &json)) {
-    Io::eprintln(`Error: Could not write '${outputText.toStr()}'`);
+    Output::message(`Error: Could not write '${outputText.toStr()}'`);
     return 1;
   }
 
@@ -4576,7 +4577,7 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     },
   };
 
-  Io::eprintln(`Checking std (${discovery.stdRoot.asStr()})`);
+  Output::message(`Checking std (${discovery.stdRoot.asStr()})`);
   printStatus(`  std: ${discovery.stdRoot.asStr()}`, verbose);
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
@@ -4585,7 +4586,7 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.errors == 0 && compiled.source.length() == 0) {
-    Io::eprintln(String::create("error: code generation produced no C for the standard library"));
+    Output::message(String::create("error: code generation produced no C for the standard library"));
   }
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
@@ -4614,7 +4615,7 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   printStatus(`  summary: 0 errors, ${compiled.warnings} warnings`, verbose);
   let timing: String = buildClockText(&started);
   printSuccess("No errors found", ", ", compiled.warnings, &timing);
-  Io::eprintln(`  Source: ${sourcePath.asStr()}`);
+  Output::message(`  Source: ${sourcePath.asStr()}`);
   return 0;
 }
 
@@ -5195,18 +5196,18 @@ function main(): i32 {
   let options: CliOptions = match (parseArguments(&args)) {
     Result::OK(value) -> value,
     Result::ERROR(message) -> {
-      Io::eprintln(message);
+      Output::message(message);
       return 2;
     },
   };
 
   if (let CliCommand::HELP = options.command) {
-    Io::println(helpText());
+    Output::data(helpText());
     return 0;
   }
 
   if (let CliCommand::VERSION = options.command) {
-    Io::println(versionText());
+    Output::data(versionText());
     return 0;
   }
 

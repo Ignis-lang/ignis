@@ -1,0 +1,50 @@
+//! The only place the compiler writes to its standard streams.
+//!
+//! Every command prints through `Output`, so a later change to how text reaches
+//! the terminal (a live progress line, a plain backend for pipes) lives here
+//! instead of at every call site.
+//!
+//! Two kinds of text go through it:
+//!
+//! - **Messages** (stderr): headers, phase lines, diagnostics, summaries, test
+//!   results and errors, everything meant for the person running the command.
+//! - **Data** (stdout): what a command is asked to produce, such as `fmt --emit
+//!   diff`, the `fmt --stdin-json` responses, `--dump-ownership-report` JSON
+//!   or `--help`. Its bytes are a contract with scripts, editors and the gates.
+//!
+//! The language server's protocol stream is not data in this sense: it writes
+//! to its own descriptor (`ignis/lsp/server.ign`).
+
+import Io from "std::io";
+
+export namespace Output {
+  /// Print `text` and a newline as a message, on stderr.
+  function message(text: String): void {
+    Io::eprintln(text);
+  }
+
+  /// Print `text` and a newline as a message, on stderr.
+  function message(text: str): void {
+    Io::eprintln(text);
+  }
+
+  /// Print `text` as a message without adding a newline, on stderr.
+  function messageNoNewline(text: String): void {
+    Io::eprint(text);
+  }
+
+  /// Print `text` and a newline as data, on stdout.
+  function data(text: String): void {
+    Io::println(text);
+  }
+
+  /// Print `text` and a newline as data, on stdout.
+  function data(text: str): void {
+    Io::println(text);
+  }
+
+  /// Print `text` as data without adding a newline, on stdout.
+  function dataNoNewline(text: String): void {
+    Io::print(text);
+  }
+}

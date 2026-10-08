@@ -25,6 +25,7 @@ ignis/                # The compiler (Ignis sources, project file: ignis.toml)
   build/              # Module discovery, build cache, C compiler/linker/archiver calls, test runner, fixtures
   config/             # ignis.toml loading
   diagnostics/        # Diagnostic codes, model, rendering
+  output/             # The only writer of stdout/stderr: messages (stderr) and data (stdout)
   format/             # Formatter (ignis fmt)
   doc/                # API documentation extraction (ignis doc)
   lsp/                # Language server (ignis lsp)
