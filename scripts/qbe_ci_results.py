@@ -42,9 +42,8 @@ def parse_lines(text):
 
 
 def expected_catalog(corpus_dir, fail):
-    """The ordered fixture catalog: per-directory byte-sorted pre-order walk
-    over the corpus, skipping __snapshots__ directories and non-.ign files —
-    the same walk the Ignis runner's FixtureTests::discover performs."""
+    """Collect fixture paths, then sort their full UTF-8 byte representations
+    like FixtureTests::discover; exclude __snapshots__ and non-.ign files."""
     entries = []
 
     def walk(directory):
@@ -63,6 +62,7 @@ def expected_catalog(corpus_dir, fail):
                 entries.append(os.path.relpath(path, corpus_dir).replace(os.sep, "/"))
 
     walk(corpus_dir)
+    entries.sort(key=os.fsencode)
     return entries
 
 

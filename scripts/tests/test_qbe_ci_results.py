@@ -20,12 +20,12 @@ TEMP_ROOT = os.path.join(PROJECT_ROOT, "build", "qbe-ci-worker")
 
 SHARDS = 4
 
-# Ordered catalog as the runner's discover() produces it: per-directory
-# byte-sorted pre-order walk, __snapshots__ directories excluded. The nested
-# case exercises both the subdirectory ordering and the relative-name join.
+# discover() sorts complete relative paths after collection. A file sharing
+# a directory's stem sorts before that directory's children.
 CATALOG = [
     "arithmetic_add.ign",
     "callback_fold.ign",
+    "closure_cross_module.ign",
     "closure_cross_module/helper.ign",
     "closure_cross_module/main.ign",
     "match_nested.ign",
@@ -36,6 +36,7 @@ CATALOG = [
 SUPPORTED = [
     "arithmetic_add.ign",
     "callback_fold.ign",
+    "closure_cross_module.ign",
     "closure_cross_module/helper.ign",
     "closure_cross_module/main.ign",
     "record_field_default.ign",
