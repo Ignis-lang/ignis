@@ -927,6 +927,105 @@ export namespace CodegenC {
   }
 
   /// `<return> <name>(<params>)`, shared by the prototype and the definition.
+  function formatCReturnType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    typeId: Analyzer::TypeId,
+  ): String {
+    if (let Option::SOME(_) = CodegenC::fixedArrayShape(typeStore, typeId)) {
+      return `struct __ignis_array_return_${typeId.raw()}`;
+    }
+    return CodegenC::formatCType(defStore, typeStore, symbols, closures, typeId);
+  }
+
+  function callDestination(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    dest: Lir::TempId,
+  ): String {
+    if (let Option::SOME(typeId) = function_.tempType(dest)) {
+      if (let Option::SOME(_) = CodegenC::fixedArrayShape(typeStore, typeId)) {
+        return `__ignis_array_value_${dest.raw()}`;
+      }
+    }
+    return `t${dest.raw()}`;
+  }
+
+  function isArrayCallResult(function_: &Lir::FunctionLir, tempIndex: u64): boolean {
+    let mut blockIndex: u64 = 0;
+    while (blockIndex < function_.blocks.length()) {
+      if (let Option::SOME(block) = function_.blocks.get(blockIndex)) {
+        let mut instructionIndex: u64 = 0;
+        while (instructionIndex < block.instructions.length()) {
+          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+            let mut destination: Option<Lir::TempId> = Option::NONE;
+            match (instruction) {
+              Lir::Instr::Call(node) -> { destination = node.dest; },
+              Lir::Instr::CallClosure(node) -> { destination = node.dest; },
+              _ -> {},
+            };
+            if (let Option::SOME(dest) = destination) {
+              if ((dest.raw() as u64) == tempIndex) {
+                return true;
+              }
+            }
+          }
+          instructionIndex += 1;
+        }
+      }
+      blockIndex += 1;
+    }
+    return false;
+  }
+
+  function bindArrayCallResult(
+    typeStore: &mut Analyzer::TypeStore,
+    output: &mut String,
+    function_: &Lir::FunctionLir,
+    dest: Option<Lir::TempId>,
+  ): void {
+    if (let Option::SOME(temp) = dest) {
+      if (let Option::SOME(typeId) = function_.tempType(temp)) {
+        if (let Option::SOME(_) = CodegenC::fixedArrayShape(typeStore, typeId)) {
+          let line: String = `    t${temp.raw()} = __ignis_array_value_${temp.raw()}.data;\n`;
+          let mut outputRef: &mut String = output;
+          outputRef.pushStr(line.toStr());
+        }
+      }
+    }
+  }
+
+  function emitArrayReturnTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    forwardOnly: boolean,
+  ): void {
+    let count: u64 = typeStore.length();
+    let mut rawId: u32 = 0;
+    while ((rawId as u64) < count) {
+      let typeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(rawId);
+      rawId += 1;
+      if (typeStore.containsTypeParam(typeId)) {
+        continue;
+      }
+      let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, typeId) else {
+        continue;
+      };
+      let mut line: String = `struct __ignis_array_return_${typeId.raw()};\n`;
+      if (!forwardOnly) {
+        let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+        line = `struct __ignis_array_return_${typeId.raw()} { ${elementText.toStr()} data[${array.size}]; };\n`;
+      }
+      let mut outputRef: &mut String = output;
+      outputRef.pushStr(line.toStr());
+    }
+  }
+
   function functionSignature(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -934,7 +1033,7 @@ export namespace CodegenC {
     closures: &CodegenC::ClosureTables,
     function_: &Lir::FunctionLir,
   ): String {
-    let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, function_.returnType);
+    let returnText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, function_.returnType);
     let name: String = CodegenC::mangledName(defStore, symbols, function_.defId);
 
     let mut signature: String = `${returnText.toStr()} ${name.toStr()}(`;
@@ -3004,7 +3103,8 @@ export namespace CodegenC {
 
         if (let Option::SOME(dest) = node.dest) {
           if (!CodegenC::tempIsVoid(typeStore, function_, dest)) {
-            let assignment: String = `t${dest.raw()} = `;
+            let target: String = CodegenC::callDestination(typeStore, function_, dest);
+            let assignment: String = `${target.toStr()} = `;
             call.pushStr(assignment.toStr());
 
             // The header spells the returned pointer's parameters its own
@@ -3051,6 +3151,7 @@ export namespace CodegenC {
 
         let mut outputRef: &mut String = output;
         outputRef.pushStr(call.toStr());
+        CodegenC::bindArrayCallResult(typeStore, output, function_, node.dest);
       },
       Lir::Instr::PanicMessage(node) -> {
         let mut line: String = String::new();
@@ -3261,7 +3362,7 @@ export namespace CodegenC {
 
         if (let Option::SOME(typeNode) = typeStore.get(node.closureType)) {
           if (let Analyzer::Type::Function(functionType) = typeNode) {
-            returnText = CodegenC::formatCType(defStore, typeStore, symbols, closures, functionType.returnType);
+            returnText = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, functionType.returnType);
 
             let params: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&functionType.params);
             let mut paramIndex: u64 = 0;
@@ -3308,7 +3409,8 @@ export namespace CodegenC {
 
         if (let Option::SOME(dest) = node.dest) {
           if (!CodegenC::tempIsVoid(typeStore, function_, dest)) {
-            let assignment: String = `t${dest.raw()} = `;
+            let target: String = CodegenC::callDestination(typeStore, function_, dest);
+            let assignment: String = `${target.toStr()} = `;
             call.pushStr(assignment.toStr());
           }
         }
@@ -3332,6 +3434,7 @@ export namespace CodegenC {
 
         let mut outputRef: &mut String = output;
         outputRef.pushStr(call.toStr());
+        CodegenC::bindArrayCallResult(typeStore, output, function_, node.dest);
       },
       // The drop function of an escaping closure frees its own heap
       // environment (see `FreeEnv`), so the caller never has to know where
@@ -3639,7 +3742,13 @@ export namespace CodegenC {
 
         if (let Option::SOME(operand) = value) {
           let text: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &operand);
-          let line: String = `    return ${text.toStr()};\n`;
+          let mut line: String = `    return ${text.toStr()};\n`;
+          if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, function_.returnType)) {
+            let target: String = String::create("__ignis_array_result.data");
+            let copy: String = CodegenC::arrayCopyLine(defStore, typeStore, symbols, closures, &target, &text, &array);
+            // C cannot return an array; copy before the callee's stack frame ends.
+            line = `${copy.toStr()}    return __ignis_array_result;\n`;
+          }
           outputRef.pushStr(line.toStr());
         } else {
           outputRef.pushStr("    return;\n");
@@ -4034,6 +4143,11 @@ export namespace CodegenC {
 
     headerRef.pushStr(signature.toStr());
     headerRef.pushStr(" {\n");
+    if (let Option::SOME(_) = CodegenC::fixedArrayShape(typeStore, function_.returnType)) {
+      let resultText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, function_.returnType);
+      let resultLine: String = `    ${resultText.toStr()} __ignis_array_result;\n`;
+      headerRef.pushStr(resultLine.toStr());
+    }
 
     let mut localIndex: u64 = 0;
 
@@ -4073,6 +4187,15 @@ export namespace CodegenC {
 
           let mut tempRef: &mut String = output;
           tempRef.pushStr(line.toStr());
+          if (CodegenC::isArrayCallResult(function_, tempIndex)) {
+            let Option::SOME(_) = CodegenC::fixedArrayShape(typeStore, temp.ty) else {
+              tempIndex += 1;
+              continue;
+            };
+            let resultText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, temp.ty);
+            let resultLine: String = `    ${resultText.toStr()} __ignis_array_value_${tempIndex};\n`;
+            tempRef.pushStr(resultLine.toStr());
+          }
         }
       }
 
@@ -4735,7 +4858,7 @@ export namespace CodegenC {
 
       if (let Option::SOME(typeNode) = typeStore.get(signatureType)) {
         if (let Analyzer::Type::Function(functionType) = typeNode) {
-          returnText = CodegenC::formatCType(defStore, typeStore, symbols, closures, functionType.returnType);
+          returnText = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, functionType.returnType);
 
           let params: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&functionType.params);
           let mut paramIndex: u64 = 0;
@@ -4962,7 +5085,7 @@ export namespace CodegenC {
         continue;
       };
 
-      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, signature.returnType);
+      let returnText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, signature.returnType);
       let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &signature.params);
       let name: String = CodegenC::mangledName(defStore, symbols, *defId);
       let line: String = `extern ${returnText.toStr()} ${name.toStr()}(${paramText.toStr()});\n`;
@@ -5086,7 +5209,7 @@ export namespace CodegenC {
         headerRef.pushStr("\n// C function pointer types\n");
       }
 
-      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, resultType);
+      let returnText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, resultType);
       let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &params);
       let name: String = CodegenC::rawFunctionTypeName(typeId);
       let line: String = `typedef ${returnText.toStr()} (*${name.toStr()})(${paramText.toStr()});\n`;
@@ -5285,7 +5408,7 @@ export namespace CodegenC {
         continue;
       };
 
-      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, resultType);
+      let returnText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, resultType);
       let wrapper: String = CodegenC::rawThunkWrapperName(defStore, symbols, thunk);
       let thunkName: String = CodegenC::mangledName(defStore, symbols, thunk);
       let params: CodegenC::AdapterParams = CodegenC::adapterParams(defStore, typeStore, symbols, closures, &paramTypes);
@@ -5335,7 +5458,7 @@ export namespace CodegenC {
         continue;
       };
 
-      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, resultType);
+      let returnText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, resultType);
       let trampoline: String = CodegenC::rawTrampolineName(rawType);
       let typeName: String = CodegenC::rawFunctionTypeName(rawType);
       let params: CodegenC::AdapterParams = CodegenC::adapterParams(defStore, typeStore, symbols, closures, &paramTypes);
@@ -5831,6 +5954,7 @@ export namespace CodegenC {
     // value (e.g. a field declared `(i32) -> i32`), which needs the closure
     // struct to be a *complete* type by the time the record's own definition
     // is emitted — the reverse order left that field incomplete.
+    CodegenC::emitArrayReturnTypes(defStore, typeStore, symbols, &mut source, closures, true);
     CodegenC::emitClosureSignatureStructs(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::internRecordFieldStorageTypes(defStore, typeStore, &typeDefs);
@@ -5870,6 +5994,7 @@ export namespace CodegenC {
     CodegenC::emitClosureEnvStructs(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures);
+    CodegenC::emitArrayReturnTypes(defStore, typeStore, symbols, &mut source, closures, false);
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
 

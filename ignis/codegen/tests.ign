@@ -18,6 +18,25 @@ import LirLowering from "@compiler::lir::lowering";
 import CodegenC from "./mod";
 import CodegenReserved from "./reserved";
 
+@test
+function codegenReturnsFixedArraysInOwnedResultStorage(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function identity(values: i32[4], first: boolean): i32[4] { if (first) { return values; } return values; }\nfunction main(): i32 { let values: i32[4] = @splat<i32[4]>(7); let returned: i32[4] = identity(values, true); return returned[0] + returned[3]; }\n",
+  );
+  Test::assert(codegenContains(&emission.source, "struct __ignis_array_return_"));
+  Test::assert(codegenContains(&emission.source, "return __ignis_array_result;"));
+  Test::assert(codegenContains(&emission.source, "__ignis_array_value_"));
+  Test::assert(codegenContains(&emission.source, "(i32* t0, boolean t1)"));
+  Test::assert(codegenContains(&emission.source, " {\n    struct __ignis_array_return_"));
+  Test::assert(codegenContains(&emission.source, "i32 l0[4];"));
+
+  let external: CodegenEmission = codegenEmitFreestanding(
+    "extern Platform { function invoke(callback: (i32[4]) -> i32[4], values: i32[4]): i32[4]; }\nfunction identity(values: i32[4]): i32[4] { return values; }\nfunction main(): i32 { let values: i32[4] = @splat<i32[4]>(7); let returned: i32[4] = Platform::invoke(identity, values); return returned[0] + returned[3]; }\n",
+  );
+  Test::assert(codegenContains(&external.source, "extern struct __ignis_array_return_"));
+  Test::assert(codegenContains(&external.source, "typedef struct __ignis_array_return_"));
+}
+
 function codegenCountErrors(bag: &DiagnosticBag): u64 {
   let mut count: u64 = 0;
   let mut index: u64 = 0;
