@@ -50,6 +50,9 @@ export record CliOptions {
   public stdPath: Option<String>;
   public cc: Option<String>;
   public targetTriple: Option<String>;
+  /// The backend the build lowers to (`--target c|qbe`); absent leaves the
+  /// project file's own `target` in charge.
+  public target: Option<String>;
   public optLevel: Option<u64>;
   public debug: Option<boolean>;
   public features: Vector<String>;
@@ -110,6 +113,7 @@ export record CliOptions {
       stdPath: Option::NONE,
       cc: Option::NONE,
       targetTriple: Option::NONE,
+      target: Option::NONE,
       optLevel: Option::NONE,
       debug: Option::NONE,
       features: Vector::new<String>(),
@@ -1741,6 +1745,23 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    // The build target selects the backend a run lowers to; `init --target`
+    // keeps its own template meanings (c, iir, none) upstream in the init
+    // parser, so this branch only sees build commands.
+    if (argument.equals("--target")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--target", "a build target"));
+      };
+
+      if (!value.equals("c") && !value.equals("qbe")) {
+        return Result::ERROR(`error: invalid value '${value.toStr()}' for '--target': expected c or qbe`);
+      }
+
+      options.target = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
     if (argument.equals("--target-triple")) {
       let Option::SOME(value) = arguments.get(index + 1) else {
         return Result::ERROR(cliMissingValue("--target-triple", "a target triple"));
@@ -2027,6 +2048,7 @@ export function helpText(): String {
   text.pushStr("      --std-path <DIR>      Override the standard library root\n");
   text.pushStr("      --cc <CC>             Override [build] cc\n");
   text.pushStr("      --target-triple <T>   Override the target triple directives are answered with\n");
+  text.pushStr("      --target <T>         Build for a backend: c (default) or qbe\n");
   text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");

@@ -139,7 +139,16 @@ droppable locals. A freestanding program provides both symbols at link time.
 - `out_dir` - Build output directory.
 - `opt_level` - Optimization level (`0`..`3`).
 - `debug` - Include debug information.
-- `target` - Target backend (currently only `"c"` is accepted by project resolver).
+- `target` - Target backend: `"c"` (default) or `"qbe"`. The command line
+  override `--target c|qbe` wins over the project file. An unknown value is a
+  `B2004` config error; the `qbe` target rejects freestanding builds
+  (`B4004`).
+
+  A `qbe` build emits its translation unit as QBE IL (`.ssa`), lowers it to
+  assembly with the `qbe` tool (resolved through `PATH`, the way `ar` is),
+  assembles it into an object with `[build] cc`, and links with the ordinary
+  link step. A failing `qbe` run reports the exit status and the tool's
+  stdout and stderr, and the link never runs.
 - `cc` - C compiler executable.
 - `cflags` - Extra C compiler/linker flags.
 - `emit` - Extra artifacts (`"c"`, `"obj"`).

@@ -2,6 +2,7 @@ import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
 
+import qbeIsQbeTarget from "./qbe";
 import BuildLayout from "./layout";
 
 /// Where a build writes the translation unit, the object and the executable.
@@ -11,19 +12,51 @@ export record BuildArtifacts {
   public executable: Path::PathBuf;
 }
 
+/// The translation-unit extension a backend emits: QBE IL for `qbe`, C for
+/// everything else.
+function artifactsSourceExtension(backend: str): str {
+  if (qbeIsQbeTarget(backend)) {
+    return "ssa";
+  }
+
+  return "c";
+}
+
+/// The assembly file the qbe backend writes for one unit: the object's own
+/// path with a `.s` extension, so parallel units never collide.
+export function artifactsAssemblyPath(objectPath: &Path::PathBuf): Path::PathBuf {
+  let objectText: String = objectPath.toString();
+  let lastDotOpt: Option<u64> = objectText.findLastByte((byte: u8): boolean -> {
+    return byte == 46;
+  });
+
+  let mut dotIndex: u64 = objectText.length();
+
+  if (let Option::SOME(dotPos) = lastDotOpt) {
+    if (dotPos > 0) {
+      dotIndex = dotPos;
+    }
+  }
+
+  let stem: String = objectText.substringBytes(0, dotIndex);
+  return Path::PathBuf::create(stem.concat(".s").toStr());
+}
+
 /// The paths a single-file build writes.
 ///
 /// They stay in the working directory, which is where the bootstrap ladder and
 /// the parity harness expect the emitted C to appear. `outputPath` is what `-o`
 /// named, and the executable falls back to `selfhost_out` without it.
-export function singleFileArtifacts(outputPath: &Option<String>): BuildArtifacts {
+export function singleFileArtifacts(backend: str, outputPath: &Option<String>): BuildArtifacts {
   let executableText: String = match (outputPath) {
     Option::SOME(value) -> value.clone(),
     Option::NONE -> String::create("selfhost_out"),
   };
 
+  let sourceName: String = String::create("selfhost_emit.").concat(artifactsSourceExtension(backend));
+
   return BuildArtifacts {
-    source: Path::PathBuf::create("selfhost_emit.c"),
+    source: Path::PathBuf::create(sourceName.toStr()),
     object: Path::PathBuf::create("selfhost_emit.o"),
     executable: Path::PathBuf::fromString(&executableText),
   };
@@ -35,12 +68,13 @@ export function singleFileArtifacts(outputPath: &Option<String>): BuildArtifacts
 /// per-module trees the layout describes hold a single unit named after the
 /// package. Without `-o` the executable is the layout's own `bin/<name>`.
 export function projectArtifacts(
+  backend: str,
   name: &String,
   outDir: &Path::PathBuf,
   outputPath: &Option<String>,
 ): BuildArtifacts {
   let layout: BuildLayout = BuildLayout::new(name.toStr(), outDir);
-  let sourceName: String = name.concat(".c");
+  let sourceName: String = name.concat(".").concat(artifactsSourceExtension(backend));
   let objectName: String = name.concat(".o");
 
   let mut executable: Path::PathBuf = layout.binPath();
@@ -86,7 +120,7 @@ function artifactsProjectBuildUsesTheLayoutBinaryPath(): void {
   let name: String = String::create("myapp");
   let outputPath: Option<String> = Option::NONE;
   let outDir: Path::PathBuf = artifactsProjectOutDir();
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &outDir, &outputPath);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &outDir, &outputPath);
 
   let sourceText: String = artifacts.source.toString();
   let objectText: String = artifacts.object.toString();
@@ -103,7 +137,7 @@ function artifactsProjectBuildHonoursTheOutputOverride(): void {
   let name: String = String::create("myapp");
   let outputPath: Option<String> = Option::SOME(String::create("/tmp/ignis_artifacts_test/elsewhere/ignis"));
   let outDir: Path::PathBuf = artifactsProjectOutDir();
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &outDir, &outputPath);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &outDir, &outputPath);
 
   let sourceText: String = artifacts.source.toString();
   let executableText: String = artifacts.executable.toString();
@@ -117,7 +151,7 @@ function artifactsProjectBuildHonoursTheOutputOverride(): void {
 @test
 function artifactsSingleFileBuildStaysInTheWorkingDirectory(): void {
   let none: Option<String> = Option::NONE;
-  let defaults: BuildArtifacts = singleFileArtifacts(&none);
+  let defaults: BuildArtifacts = singleFileArtifacts("c", &none);
 
   let sourceText: String = defaults.source.toString();
   let objectText: String = defaults.object.toString();
@@ -128,7 +162,7 @@ function artifactsSingleFileBuildStaysInTheWorkingDirectory(): void {
   Test::assertEq<str>(executableText.toStr(), "selfhost_out");
 
   let outputPath: Option<String> = Option::SOME(String::create("build/bootstrap/stage2/ignis"));
-  let overridden: BuildArtifacts = singleFileArtifacts(&outputPath);
+  let overridden: BuildArtifacts = singleFileArtifacts("c", &outputPath);
   let overriddenText: String = overridden.executable.toString();
 
   Test::assertEq<str>(overriddenText.toStr(), "build/bootstrap/stage2/ignis");

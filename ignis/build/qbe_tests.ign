@@ -1,0 +1,221 @@
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Diagnostic, DiagnosticBag from "@compiler::diagnostics";
+import QbeTool from "./qbe";
+
+function qbeContains(text: str, needle: str): boolean {
+  let haystack: String = String::create(text);
+  let pin: String = String::create(needle);
+  return haystack.contains(&pin);
+}
+
+function qbeNoteText(diagnostic: &Diagnostic): str {
+  let Option::SOME(note) = diagnostic.notes.get(0) else {
+    return "";
+  };
+
+  return note.messageText();
+}
+
+/// Minimal QBE IL that lowers cleanly: one exported typed function doing an
+/// integer add, which also gives the assembly step real code to assemble.
+const ADD_SSA: str = "export function w $add(w %a, w %b) {\n@start\n\t%r =w add %a, %b\n\tret %r\n}\n";
+
+/// QBE IL the tool must reject: the returned value names no defined temporary.
+const BAD_SSA: str = "export function w $bad() {\n@start\n\tret %undefined\n}\n";
+
+function qbeTestDir(tag: str): Path::PathBuf {
+  let name: String = `ignis_qbe_tests_${tag}_${Process::id()}`;
+  return Path::PathBuf::create("/tmp").join(name.toStr());
+}
+
+function qbeWriteText(path: &Path::PathBuf, text: str): void {
+  let value: String = String::create(text);
+  match (Fs::writeString(path, &value)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+function qbeRemoveFile(path: &Path::PathBuf): void {
+  let _removed = Fs::removeFile(path);
+}
+
+/// A valid IL file lowers through the installed `qbe` into a non-empty
+/// assembly file.
+@test
+function qbeLowerToAssemblyProducesAssembly(): void {
+  let dir: Path::PathBuf = qbeTestDir("lower_ok");
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let ssaPath: Path::PathBuf = dir.join("add.ssa");
+  let assemblyPath: Path::PathBuf = dir.join("add.s");
+  qbeWriteText(&ssaPath, ADD_SSA);
+  defer qbeRemoveFile(&assemblyPath);
+
+  let result: Result<boolean, DiagnosticBag> = QbeTool::lowerToAssembly("qbe", &ssaPath, &assemblyPath);
+
+  let mut lowered: boolean = false;
+  if (let Result::OK(_) = result) {
+    lowered = true;
+  }
+  Test::assertEq<boolean>(lowered, true);
+
+  let assemblyText: String = match (Fs::readToString(&assemblyPath)) {
+    Result::OK(text) -> text,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assert(assemblyText.length() > 0);
+
+  let addPin: String = String::create("add");
+  Test::assertEq<boolean>(assemblyText.contains(&addPin), true);
+}
+
+/// A lowering failure keeps the tool's diagnostics: a B4005 error whose
+/// message carries the exit status and whose notes carry the tool's output.
+@test
+function qbeLowerFailureKeepsToolDiagnostics(): void {
+  let dir: Path::PathBuf = qbeTestDir("lower_bad");
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let ssaPath: Path::PathBuf = dir.join("bad.ssa");
+  let assemblyPath: Path::PathBuf = dir.join("bad.s");
+  qbeWriteText(&ssaPath, BAD_SSA);
+
+  let result: Result<boolean, DiagnosticBag> = QbeTool::lowerToAssembly("qbe", &ssaPath, &assemblyPath);
+
+  let mut bag: DiagnosticBag = match (result) {
+    Result::OK(_) -> {
+      Test::fail();
+      return;
+    },
+    Result::ERROR(value) -> value,
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, "B4005");
+  Test::assertEq<boolean>(qbeContains(diagnostic.messageText(), "exit code"), true);
+  Test::assert(diagnostic.notes.length() > 0);
+  let noteText: str = qbeNoteText(&diagnostic);
+  Test::assertEq<boolean>(qbeContains(noteText, "qbe:"), true);
+}
+
+/// A spawn failure (tool missing) is a B4005 diagnostic, never a panic.
+@test
+function qbeLowerWithMissingToolFailsCleanly(): void {
+  let dir: Path::PathBuf = qbeTestDir("lower_missing");
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let ssaPath: Path::PathBuf = dir.join("add.ssa");
+  let assemblyPath: Path::PathBuf = dir.join("add.s");
+  qbeWriteText(&ssaPath, ADD_SSA);
+
+  let result: Result<boolean, DiagnosticBag> = QbeTool::lowerToAssembly("/nonexistent/ignis-qbe-missing", &ssaPath, &assemblyPath);
+
+  let mut bag: DiagnosticBag = match (result) {
+    Result::OK(_) -> {
+      Test::fail();
+      return;
+    },
+    Result::ERROR(value) -> value,
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, "B4005");
+}
+
+/// Assembly the lowering step produced assembles into a real object with the
+/// build's C driver, which is the step that feeds the existing linker.
+@test
+function qbeAssemblesAssemblyIntoObject(): void {
+  let dir: Path::PathBuf = qbeTestDir("assemble_ok");
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let ssaPath: Path::PathBuf = dir.join("add.ssa");
+  let assemblyPath: Path::PathBuf = dir.join("add.s");
+  let objectPath: Path::PathBuf = dir.join("add.o");
+  qbeWriteText(&ssaPath, ADD_SSA);
+
+  match (QbeTool::lowerToAssembly("qbe", &ssaPath, &assemblyPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let includeDirs: Vector<String> = Vector::new<String>();
+  let extraFlags: Vector<String> = Vector::new<String>();
+
+  match (QbeTool::assembleObject("gcc", &assemblyPath, &objectPath, &includeDirs, &extraFlags)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(Fs::exists(objectPath.asStr()), true);
+  defer qbeRemoveFile(&objectPath);
+
+  // A broken assembly input must fail the same way a broken C unit does.
+  let brokenPath: Path::PathBuf = dir.join("broken.s");
+  let brokenObjectPath: Path::PathBuf = dir.join("broken.o");
+  qbeWriteText(&brokenPath, "\tnot assembly at all\n");
+  defer qbeRemoveFile(&brokenObjectPath);
+
+  let brokenResult: Result<boolean, DiagnosticBag> = QbeTool::assembleObject("gcc", &brokenPath, &brokenObjectPath, &includeDirs, &extraFlags);
+
+  let mut brokenFailed: boolean = false;
+  if (let Result::ERROR(_) = brokenResult) {
+    brokenFailed = true;
+  }
+  Test::assertEq<boolean>(brokenFailed, true);
+}

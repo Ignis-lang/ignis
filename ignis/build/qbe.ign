@@ -1,0 +1,148 @@
+import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Vector from "std::vector";
+
+import CCompiler from "./c_compiler";
+
+/// Diagnostic codes the QBE toolchain steps report.
+export namespace QbeDiagnosticCode {
+  /// `qbe` failed to lower the IL, or could not be started at all.
+  const LOWER_FAILED: str = "B4005";
+  /// The selected backend cannot build the requested mode (unknown target,
+  /// qbe freestanding).
+  const UNSUPPORTED_BACKEND: str = "B4004";
+}
+
+function qbeSingleDiagnostic(code: str, message: str): DiagnosticBag {
+  let span: SourceSpan = SourceSpan::new("", 0, 0);
+  let diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}
+
+/// True when the named build target selects the QBE backend.
+export function qbeIsQbeTarget(target: str): boolean {
+  return String::create(target).equals("qbe");
+}
+
+export namespace QbeTool {
+  /// The driver-level admission check for a selected backend.
+  ///
+  /// `c` builds anything. `qbe` builds hosted executables only for now:
+  /// freestanding mode relies on C runtime semantics the QBE path does not
+  /// implement yet, so the build is rejected with a clear diagnostic instead
+  /// of emitting wrong code.
+  function checkTargetAllowed(target: str, freestanding: boolean): Result<boolean, DiagnosticBag> {
+    if (qbeIsQbeTarget(target)) {
+      if (freestanding) {
+        return Result::ERROR(qbeSingleDiagnostic(
+          QbeDiagnosticCode::UNSUPPORTED_BACKEND,
+          "the qbe target does not support freestanding builds yet; use the c target or set std = true",
+        ));
+      }
+
+      return Result::OK(true);
+    }
+
+    if (String::create(target).equals("c")) {
+      return Result::OK(true);
+    }
+
+    let message: String = String::create("unknown build target '")
+      .concat(target)
+      .concat("' (supported: c, qbe)");
+    return Result::ERROR(qbeSingleDiagnostic(QbeDiagnosticCode::UNSUPPORTED_BACKEND, message.toStr()));
+  }
+
+  /// Lower one QBE IL file to assembly with the installed `qbe`.
+  ///
+  /// A failing `qbe` run keeps everything the process reported — the exit
+  /// status in the diagnostic message and its stdout and stderr as notes — so
+  /// a broken IL is debuggable from the build output alone.
+  function lowerToAssembly(
+    qbe: str,
+    ssaPath: &Path::PathBuf,
+    assemblyPath: &Path::PathBuf,
+  ): Result<boolean, DiagnosticBag> {
+    let mut command: Process::Command = Process::Command::new(qbe);
+    command.arg(ssaPath.asStr());
+    command.arg("-o");
+    command.arg(assemblyPath.asStr());
+
+    match (command.output()) {
+      Result::OK(out) -> {
+        let status: Process::ExitStatus = out.status();
+
+        if (status.success) {
+          return Result::OK(true);
+        }
+
+        return Result::ERROR(qbeLowerFailureDiagnostic(out, ssaPath));
+      },
+      Result::ERROR(ioErr) -> {
+        let message: String = String::create("qbe could not be started: ").concat(ioErr.errorMessage());
+        return Result::ERROR(qbeSingleDiagnostic(QbeDiagnosticCode::LOWER_FAILED, message.toStr()));
+      },
+    };
+
+    @panic("unreachable: QbeTool::lowerToAssembly match did not return");
+  }
+
+  /// Assemble one assembly file into an object with the build's C driver.
+  ///
+  /// `cc -c` accepts assembly input as readily as C, so the assemble step and
+  /// the project's own flags go through the same compiler wrapper the C
+  /// backend uses, and `[build] cc` keeps governing every toolchain step.
+  function assembleObject(
+    cc: str,
+    assemblyPath: &Path::PathBuf,
+    objectPath: &Path::PathBuf,
+    includeDirs: &Vector<String>,
+    extraFlags: &Vector<String>,
+  ): Result<boolean, DiagnosticBag> {
+    return CCompiler::compileObject(cc, assemblyPath, objectPath, includeDirs, extraFlags);
+  }
+}
+
+/// The diagnostic a failed `qbe` run reports: the exit status in the message,
+/// the tool's stderr and stdout as notes in that order.
+function qbeLowerFailureDiagnostic(out: Process::Output, ssaPath: &Path::PathBuf): DiagnosticBag {
+  let status: Process::ExitStatus = out.status();
+  let stderrText: String = out.stderr();
+  let stdoutText: String = out.stdout();
+
+  let mut message: String = String::create("qbe lowering failed for ")
+    .concat(ssaPath.asStr())
+    .concat(" with exit code ")
+    .concat(status.code);
+
+  if (stderrText.length() > 0) {
+    let trimmed: String = stderrText.trimAsciiWhitespace();
+    message.pushStr(": ");
+    message.push(&trimmed);
+  }
+
+  let span: SourceSpan = SourceSpan::new("", 0, 0);
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    QbeDiagnosticCode::LOWER_FAILED,
+    message.toStr(),
+    span,
+  );
+
+  if (stderrText.length() > 0) {
+    diagnostic.addNote(stderrText.toStr());
+  }
+
+  if (stdoutText.length() > 0) {
+    diagnostic.addNote(stdoutText.toStr());
+  }
+
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}

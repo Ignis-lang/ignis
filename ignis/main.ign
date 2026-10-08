@@ -39,6 +39,7 @@ import _ from "./analyzer/escape";
 import Capture from "./analyzer/capture";
 import RuntimeHandlers from "./analyzer/runtime_handlers";
 import CodegenC from "./codegen/mod";
+import CodegenQbe from "./codegen/qbe/mod";
 import Mono from "./analyzer/mono";
 import LirLowering from "./lir/lowering";
 import LirVerify from "./lir/verify";
@@ -51,12 +52,14 @@ import Doc from "./doc/mod";
 import BuildLayout from "./build/layout";
 import
   BuildArtifacts,
+  artifactsAssemblyPath,
   projectArtifacts,
   singleFileArtifacts,
   stdArtifactBase,
 from "./build/artifacts";
 import ArchiveTool from "./build/archive";
 import CCompiler from "./build/c_compiler";
+import QbeTool, qbeIsQbeTarget from "./build/qbe";
 import Linker from "./build/linker";
 import BuildOverrides, DiscoveryResult, DocDiscovery, Resolver from "./build/resolver";
 import
@@ -241,6 +244,8 @@ record BuildProfile {
   public cflags: Vector<String>;
   /// The project's `[build] cc`, the driver every toolchain step is invoked with.
   public cc: String;
+  /// The backend the build lowers to: `c` (default) or `qbe`.
+  public backend: String;
   /// A `std = false` build: every unit is compiled with `-ffreestanding` and
   /// without the std runtime headers, and nothing links `libm`.
   public freestanding: boolean;
@@ -273,6 +278,7 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
     debug: discovery.flags.debug,
     cflags: buildProfileCloneStrings(&discovery.cflags),
     cc: discovery.cc.clone(),
+    backend: discovery.target.clone(),
     freestanding: false,
   };
 
@@ -342,6 +348,7 @@ function programBuildFingerprint(
   return stampProgramFingerprint(
     IGNIS_VERSION,
     discovery.flags.targetTriple.toStr(),
+    profile.backend.toStr(),
     profile.cc.toStr(),
     profileHash.toStr(),
     manifestHash.toStr(),
@@ -737,6 +744,49 @@ function compileAndLinkQuietly(
     unitIndex += 1;
   }
 
+  // A qbe fixture lowers and assembles its `.ssa` units first; a failing
+  // toolchain step avoids the link, and nothing is printed either way.
+  if (qbeIsQbeTarget(profile.backend.toStr())) {
+    let mut unitIndex: u64 = 0;
+
+    while (unitIndex < sourcePaths.length() && unitIndex < objectPaths.length()) {
+      let Option::SOME(sourcePath) = sourcePaths.get(unitIndex) else {
+        break;
+      };
+      let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
+        break;
+      };
+
+      let assemblyPath: Path::PathBuf = artifactsAssemblyPathFor(objectPath);
+
+      match (QbeTool::lowerToAssembly("qbe", sourcePath, &assemblyPath)) {
+        Result::OK(_) -> {},
+        Result::ERROR(_) -> {
+          return 1;
+        },
+      };
+
+      match (QbeTool::assembleObject(cc, &assemblyPath, objectPath, &includeDirs, &extraFlags)) {
+        Result::OK(_) -> {},
+        Result::ERROR(_) -> {
+          return 1;
+        },
+      };
+
+      unitIndex += 1;
+    }
+
+    let archives: Vector<String> = Vector::new<String>();
+    let libs: Vector<String> = toolchainLinkLibraries(profile);
+    let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+
+    if (let Result::ERROR(_) = Linker::link(cc, outputPath, &objects, &archives, &libs, &linkFlags)) {
+      return 1;
+    }
+
+    return 0;
+  }
+
   if (let Result::ERROR(_) = CCompiler::compileObjects(
     cc,
     sourcePaths,
@@ -757,6 +807,86 @@ function compileAndLinkQuietly(
     return 1;
   }
 
+  return 0;
+}
+
+/// The assembly path the qbe backend writes for one unit.
+function artifactsAssemblyPathFor(objectPath: &Path::PathBuf): Path::PathBuf {
+  return artifactsAssemblyPath(objectPath);
+}
+
+/// Lower every emitted QBE IL unit to assembly, assemble it into an object
+/// with the build's C driver and link the executable.
+///
+/// `qbe` never touches the existing linker inputs: its `.s` output becomes an
+/// ordinary object, so the link step and the libraries it pulls in are exactly
+/// the ones a C build uses.
+///
+/// Returns 0 when every toolchain step succeeds and 1 when any one fails; a
+/// failing step avoids the link entirely.
+function assembleAndLinkUnits(
+  sourcePaths: &Vector<Path::PathBuf>,
+  objectPaths: &Vector<Path::PathBuf>,
+  outputPath: &Path::PathBuf,
+  stdRoot: &Path::PathBuf,
+  profile: &BuildProfile,
+  file: &SourceFile,
+  verbose: boolean,
+): u64 {
+  let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
+  let extraFlags: Vector<String> = toolchainCompileFlags(profile);
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  let mut unitIndex: u64 = 0;
+
+  while (unitIndex < sourcePaths.length() && unitIndex < objectPaths.length()) {
+    let Option::SOME(sourcePath) = sourcePaths.get(unitIndex) else {
+      break;
+    };
+    let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
+      break;
+    };
+
+    // The assembly path mirrors the object path, so two units never collide.
+    let assemblyPath: Path::PathBuf = artifactsAssemblyPathFor(objectPath);
+
+    match (QbeTool::lowerToAssembly("qbe", sourcePath, &assemblyPath)) {
+      Result::OK(_) -> {},
+      Result::ERROR(lowerBag) -> {
+        renderBagToStderr(&lowerBag, file);
+        printStatus(String::create("  qbe: failed"), verbose);
+        return 1;
+      },
+    };
+
+    printStatus(`  qbe: ${assemblyPath.asStr()}`, verbose);
+
+    match (QbeTool::assembleObject(profile.cc.toStr(), &assemblyPath, objectPath, &includeDirs, &extraFlags)) {
+      Result::OK(_) -> {},
+      Result::ERROR(compileBag) -> {
+        renderBagToStderr(&compileBag, file);
+        printStatus(String::create("  object: failed"), verbose);
+        return 1;
+      },
+    };
+
+    printStatus(`  object: ${objectPath.asStr()}`, verbose);
+    objects.push(objectPath.toString());
+    unitIndex += 1;
+  }
+
+  let archives: Vector<String> = Vector::new<String>();
+  let libs: Vector<String> = toolchainLinkLibraries(profile);
+
+  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+
+  if (let Result::ERROR(linkBag) = Linker::link(profile.cc.toStr(), outputPath, &objects, &archives, &libs, &linkFlags)) {
+    renderBagToStderr(&linkBag, file);
+    printStatus(String::create("  link: failed"), verbose);
+    return 1;
+  }
+
+  printStatus(`  link: ${outputPath.asStr()}`, verbose);
   return 0;
 }
 
@@ -1218,6 +1348,38 @@ function reportDiscoveryFailure(
 /// `collectTests` gathers the project's `@test` functions and leaves the entry
 /// wrapper out of the emitted unit, because the test harness owns `main` in
 /// that build.
+function qbeExportRoots(
+  defStore: &mut Analyzer::DefinitionStore,
+  program: &Lir::LirProgram,
+  infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  externalSymbols: &Vector<u32>,
+): Vector<u32> {
+  let mut roots: Vector<u32> = Vector::new<u32>();
+  let mut index: u64 = 0;
+  while (index < program.functions.length()) {
+    if (let Option::SOME(function_) = program.functions.functionAt(index)) {
+      let defId: Analyzer::DefinitionId = function_.defId;
+      let mut isStd: boolean = false;
+      if (let Option::SOME(moduleIndex) = defStore.defModuleOf(defId)) {
+        let mut infoIndex: u64 = 0;
+        while (infoIndex < infos.length()) {
+          if (let Option::SOME(info) = infos.get(infoIndex)) {
+            if (info.index == moduleIndex && info.kind == Analyzer::Imports::ModuleKind::STD) {
+              isStd = true;
+            }
+          }
+          infoIndex += 1;
+        }
+      }
+      if (CodegenC::hasRaw(externalSymbols, defId.raw()) || (!isStd && CodegenC::isExportedSymbol(defStore, defId))) {
+        roots.push(defId.raw());
+      }
+    }
+    index += 1;
+  }
+  return roots;
+}
+
 function compileDiscovered(
   discovery: &DiscoveryResult,
   file: &SourceFile,
@@ -1851,15 +2013,45 @@ function compileDiscovered(
 
   Output::beginPhase("codegen", 0);
 
-  let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
-    &mut defStore,
-    &mut typeStore,
-    &mut symbols,
-    &lirResult.program,
-    &externalSymbols,
-    &infos,
-    &mut hooks,
-  );
+  let mut emitResult: CodegenC::EmitOutput = CodegenC::EmitOutput {
+    source: String::new(),
+    unsupported: 0,
+    functions: 0,
+    usesInlineAsm: false,
+  };
+
+  if (qbeIsQbeTarget(discovery.target.toStr())) {
+    let qbeRoots: Vector<u32> = qbeExportRoots(&mut defStore, &lirResult.program, &infos, &externalSymbols);
+    let qbe: CodegenQbe::EmitOutput = CodegenQbe::emitProgram(
+      &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &qbeRoots,
+    );
+    if (let Option::SOME(message) = &qbe.error) {
+      let diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "B4004", message.toStr(), SourceSpan::new("", 0, 0));
+      let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+      diagnostics.push(diagnostic);
+      if (quiet) {
+        collectDiagnosticMessages(&diagnostics, Severity::ERROR, false, &mut errorMessages);
+      } else {
+        renderBagCollecting(&diagnostics, file, &mut report);
+      }
+      return CompiledProgram {
+        source: String::new(),
+        tests: tests,
+        errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors + 1,
+        warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
+        errorMessages: errorMessages,
+        warningMessages: warningMessages,
+        report: report,
+        usesInlineAsm: false,
+      };
+    }
+    emitResult.source = qbe.source;
+    emitResult.functions = qbe.functions;
+  } else {
+    emitResult = CodegenC::emitProgram(
+      &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &externalSymbols, &infos, &mut hooks,
+    );
+  }
 
   if (!quiet) {
     printStatus(
@@ -1943,6 +2135,7 @@ function buildOverridesFrom(options: &CliOptions): BuildOverrides {
   overrides.features = buildProfileCloneStrings(&options.features);
   overrides.stdPath = cloneOptionalText(&options.stdPath);
   overrides.targetTriple = cloneOptionalText(&options.targetTriple);
+  overrides.target = cloneOptionalText(&options.target);
   overrides.cc = cloneOptionalText(&options.cc);
   overrides.outDir = cloneOptionalText(&options.outDir);
   return overrides;
@@ -2151,8 +2344,18 @@ function runCompile(
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   profile.freestanding = !discovery.stdEnabled;
 
+  // The qbe backend builds hosted executables only for now; anything else it
+  // cannot build is rejected before a single toolchain step runs.
+  if (!checkOnly) {
+    if (let Result::ERROR(backendBag) = QbeTool::checkTargetAllowed(profile.backend.toStr(), profile.freestanding)) {
+      renderBagToStderr(&backendBag, &file);
+      printFailure("Build", 1, 0);
+      return 1;
+    }
+  }
+
   let objectOnly: boolean = profile.freestanding && !discovery.bin;
-  let artifacts: BuildArtifacts = projectMode ? projectArtifacts(&discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(&options.outputPath);
+  let artifacts: BuildArtifacts = projectMode ? projectArtifacts(profile.backend.toStr(), &discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(profile.backend.toStr(), &options.outputPath);
   let stampPath: Path::PathBuf = stampPathForObject(&artifacts.object);
   let reportPath: Path::PathBuf = stampReportPathForObject(&artifacts.object);
   let fingerprint: BuildFingerprint = programBuildFingerprint(&discovery, &profile);
@@ -2233,7 +2436,17 @@ function runCompile(
       let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
       inlineAsmUnits.push(compiled.usesInlineAsm);
 
-      if (discovery.bin) {
+      if (qbeIsQbeTarget(profile.backend.toStr()) && discovery.bin) {
+        linkErrors += assembleAndLinkUnits(
+          &sourcePaths,
+          &objectPaths,
+          &artifacts.executable,
+          &discovery.stdRoot,
+          &profile,
+          &file,
+          verbose,
+        );
+      } else if (discovery.bin) {
         linkErrors += compileAndLinkUnits(
           &sourcePaths,
           &objectPaths,
@@ -4767,7 +4980,7 @@ function buildWritesAFreestandingObjectForAStdlessLibrary(): void {
 
   let name: String = String::create("freestanding-no-std");
   let noOutput: Option<String> = Option::NONE;
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
 
   Test::assertEq<boolean>(Fs::exists(artifacts.object.asStr()), true);
   Test::assertEq<boolean>(Fs::exists(artifacts.executable.asStr()), false);
@@ -4805,7 +5018,7 @@ function buildRoutesAFreestandingObjectThroughItsRuntimeHandlers(): void {
 
   let name: String = String::create("freestanding-handlers");
   let noOutput: Option<String> = Option::NONE;
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
 
   Test::assertEq<boolean>(Fs::exists(artifacts.object.asStr()), true);
 
@@ -4843,7 +5056,7 @@ function buildPassesTheProjectRelativePanicFileToTheRuntimeHandler(): void {
 
   let name: String = String::create("freestanding-handlers");
   let noOutput: Option<String> = Option::NONE;
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
 
   let Result::OK(source) = Fs::readToString(&artifacts.source) else {
     Test::fail();
@@ -4887,7 +5100,7 @@ function igniosRegressionBuildRunsAFreestandingCrossModuleClosureWithBalancedAll
 
   let name: String = String::create("freestanding-closure-cross-module");
   let noOutput: Option<String> = Option::NONE;
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
 
   Test::assertEq<boolean>(Fs::exists(artifacts.object.asStr()), true);
 
@@ -4956,7 +5169,7 @@ function freestandingFixtureBuildsObject(
 
   let name: String = String::create(packageName);
   let noOutput: Option<String> = Option::NONE;
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
   let built: boolean = status == 0 && Fs::exists(artifacts.object.asStr());
 
   let _removed = Fs::removeDirAll(&scratch);
@@ -5022,7 +5235,7 @@ function buildAlignsFreestandingStaticsWithoutAnInitializer(): void {
 
   let name: String = String::create("freestanding-aligned-statics");
   let noOutput: Option<String> = Option::NONE;
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
 
   Test::assert(Fs::exists(artifacts.object.asStr()));
 
@@ -5068,7 +5281,7 @@ function buildKeepsAVolatileReadOfAnUnwrittenPointerSlotAtO2(): void {
 
   let name: String = String::create("freestanding-volatile-pointer-slot");
   let noOutput: Option<String> = Option::NONE;
-  let artifacts: BuildArtifacts = projectArtifacts(&name, &scratch, &noOutput);
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
 
   let Result::OK(assembly) = Fs::readToString(&artifacts.object) else {
     Test::fail();
