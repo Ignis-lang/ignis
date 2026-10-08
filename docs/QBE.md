@@ -9,7 +9,7 @@ nix develop
 ignis build --target qbe program.ign
 ```
 
-Project configuration selects the same backend with `[build] target = "qbe"`. The pipeline writes `.ssa` IL, runs `qbe` to produce `.s` assembly, assembles it into an object, then links it. An unsupported construct is a compilation error with the prefix `not supported by the qbe target yet: `; failed emission must not produce a runnable artifact.
+Project configuration selects the same backend with `[build] target = "qbe"`. Other stored target values retain the legacy C fallback; the command-line `--target` override accepts only `c` or `qbe`. The pipeline writes `.ssa` IL, runs `qbe` to produce `.s` assembly, assembles it into an object, then links it. An unsupported construct is a compilation error with the prefix `not supported by the qbe target yet: `; failed emission must not produce a runnable artifact.
 
 ## Representation and ABI
 
@@ -58,9 +58,22 @@ Runner regression tests:
 (cd scripts/qbe && ignis test --filter '::qbeLane')
 ```
 
-## Verification of this slice
+## Parallel CI verification
 
-Measured on hosted AMD64 with QBE 1.2 and the installed Ignis 0.4.0 compiler:
+The QBE differential workflow prepares one compiler, lane runner and checksum-verified QBE 1.2 toolchain, then runs four independent shard jobs. Each shard regenerates its observed inventory and compares the supported programs against C. A final aggregation job rejects missing, failed or cancelled shards, inconsistent catalogs, overlapping or missing cases, and classifications that differ from the committed inventories.
+
+Shard membership uses the zero-based index in the deterministic fixture catalog modulo four. Sharded runs write reports only; they never regenerate the tracked inventories:
+
+```sh
+build/qbe-lane/runner build/selfhost/ignis --inventory --shard 0 4 --report-dir build/qbe-results/inventory/0
+build/qbe-lane/runner build/selfhost/ignis --shard 0 4 --report-dir build/qbe-results/lane/0
+```
+
+Repeat with indexes 1, 2 and 3 for complete coverage. A successful individual shard is not a complete lane result: all shard reports must pass aggregation. The completion marker is written only after that shard finishes its checks.
+
+## Initial slice verification
+
+The following measurements precede the subsequent PR review corrections. They were recorded on hosted AMD64 with QBE 1.2 and the installed Ignis 0.4.0 compiler; final review-fix and sharded CI results must be reported separately:
 
 | Check | Result |
 | --- | --- |
@@ -89,7 +102,7 @@ Independent bounded public-CLI probes passed for default/config/override selecti
 - Inline assembly.
 - Freestanding runtime handlers and assembler/linker-only toolchains.
 - Generic edge cases and expansion of the supported fixture inventory.
-- Floating-point instructions, raw closure/function-pointer adapters, aggregate globals and runtime bridge calls.
+- Floating-point instructions, raw closure/function-pointer adapters, unsupported aggregate global initializers and runtime bridge calls.
 - Zero-sized and over-aligned aggregate ABI/storage.
 - Volatile memory operations; ordinary QBE loads/stores must not silently replace them.
 

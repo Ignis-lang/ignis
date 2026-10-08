@@ -47,3 +47,225 @@ function qbeLaneSkipsOnlyBackendDiagnostics(): void {
   Test::assertEq<boolean>(QbeLane::missingFeature(&frontend).isNone(), true);
   Test::assertEq<boolean>(QbeLane::missingFeature(&tool).isNone(), true);
 }
+
+function s(text: str): String {
+  return String::create(text);
+}
+
+function laneArgs(values: &Vector<String>): Vector<String> {
+  let mut args: Vector<String> = Vector::new<String>();
+  args.push(s("qbe-lane"));
+  let mut index: u64 = 0;
+  while (index < values.length()) {
+    let Option::SOME(value) = values.get(index) else {
+      Test::fail();
+      return args;
+    };
+    index += 1;
+    args.push(value.clone());
+  }
+  return args;
+}
+
+@test
+function qbeLaneParsesUnshardedInvocation(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(s("./target/ignis"));
+  let args: Vector<String> = laneArgs(&values);
+  let Result::OK(options) = QbeLane::parseLaneOptions(&args) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<boolean>(options.inventory, false);
+  Test::assertEq<u64>(options.shardIndex, 0);
+  Test::assertEq<u64>(options.shardCount, 0);
+  Test::assertEq<boolean>(options.reportDir.length() == 0, true);
+}
+
+@test
+function qbeLaneParsesInventoryInvocation(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(s("./target/ignis"));
+  values.push(s("--inventory"));
+  let args: Vector<String> = laneArgs(&values);
+  let Result::OK(options) = QbeLane::parseLaneOptions(&args) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<boolean>(options.inventory, true);
+  Test::assertEq<u64>(options.shardCount, 0);
+}
+
+@test
+function qbeLaneParsesShardFlagsInAnyOrder(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(s("./target/ignis"));
+  values.push(s("--report-dir"));
+  values.push(s("build/reports/inventory-0"));
+  values.push(s("--shard"));
+  values.push(s("2"));
+  values.push(s("4"));
+  let args: Vector<String> = laneArgs(&values);
+  let Result::OK(options) = QbeLane::parseLaneOptions(&args) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<u64>(options.shardIndex, 2);
+  Test::assertEq<u64>(options.shardCount, 4);
+  Test::assertEq<boolean>(options.reportDir.equals("build/reports/inventory-0"), true);
+  values.push(s("--inventory"));
+  let withInventory: Vector<String> = laneArgs(&values);
+  let Result::OK(shardedInventory) = QbeLane::parseLaneOptions(&withInventory) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<boolean>(shardedInventory.inventory, true);
+  Test::assertEq<u64>(shardedInventory.shardCount, 4);
+}
+
+@test
+function qbeLaneRejectsPartialShardFlags(): void {
+  let mut shardOnly: Vector<String> = Vector::new<String>();
+  shardOnly.push(s("./target/ignis"));
+  shardOnly.push(s("--shard"));
+  shardOnly.push(s("0"));
+  shardOnly.push(s("4"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&shardOnly).isError(), true);
+  let mut reportOnly: Vector<String> = Vector::new<String>();
+  reportOnly.push(s("./target/ignis"));
+  reportOnly.push(s("--report-dir"));
+  reportOnly.push(s("build/reports/inventory-0"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&reportOnly).isError(), true);
+}
+
+@test
+function qbeLaneRejectsDuplicateUnknownAndExtraArguments(): void {
+  let mut duplicateInventory: Vector<String> = Vector::new<String>();
+  duplicateInventory.push(s("./target/ignis"));
+  duplicateInventory.push(s("--inventory"));
+  duplicateInventory.push(s("--inventory"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&duplicateInventory).isError(), true);
+  let mut duplicateShard: Vector<String> = Vector::new<String>();
+  duplicateShard.push(s("./target/ignis"));
+  duplicateShard.push(s("--shard"));
+  duplicateShard.push(s("0"));
+  duplicateShard.push(s("4"));
+  duplicateShard.push(s("--report-dir"));
+  duplicateShard.push(s("build/r"));
+  duplicateShard.push(s("--shard"));
+  duplicateShard.push(s("1"));
+  duplicateShard.push(s("4"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&duplicateShard).isError(), true);
+  let mut unknown: Vector<String> = Vector::new<String>();
+  unknown.push(s("./target/ignis"));
+  unknown.push(s("--inventori"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&unknown).isError(), true);
+  let mut extra: Vector<String> = Vector::new<String>();
+  extra.push(s("./target/ignis"));
+  extra.push(s("--inventory"));
+  extra.push(s("extra"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&extra).isError(), true);
+}
+
+@test
+function qbeLaneRejectsInvalidShardRanges(): void {
+  let mut zeroCount: Vector<String> = Vector::new<String>();
+  zeroCount.push(s("./target/ignis"));
+  zeroCount.push(s("--shard"));
+  zeroCount.push(s("0"));
+  zeroCount.push(s("0"));
+  zeroCount.push(s("--report-dir"));
+  zeroCount.push(s("build/r"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&zeroCount).isError(), true);
+  let mut indexEqualsCount: Vector<String> = Vector::new<String>();
+  indexEqualsCount.push(s("./target/ignis"));
+  indexEqualsCount.push(s("--shard"));
+  indexEqualsCount.push(s("4"));
+  indexEqualsCount.push(s("4"));
+  indexEqualsCount.push(s("--report-dir"));
+  indexEqualsCount.push(s("build/r"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&indexEqualsCount).isError(), true);
+  let mut indexAboveCount: Vector<String> = Vector::new<String>();
+  indexAboveCount.push(s("./target/ignis"));
+  indexAboveCount.push(s("--shard"));
+  indexAboveCount.push(s("5"));
+  indexAboveCount.push(s("4"));
+  indexAboveCount.push(s("--report-dir"));
+  indexAboveCount.push(s("build/r"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&indexAboveCount).isError(), true);
+  let mut nonNumeric: Vector<String> = Vector::new<String>();
+  nonNumeric.push(s("./target/ignis"));
+  nonNumeric.push(s("--shard"));
+  nonNumeric.push(s("x"));
+  nonNumeric.push(s("4"));
+  nonNumeric.push(s("--report-dir"));
+  nonNumeric.push(s("build/r"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&nonNumeric).isError(), true);
+  let mut missingValues: Vector<String> = Vector::new<String>();
+  missingValues.push(s("./target/ignis"));
+  missingValues.push(s("--shard"));
+  missingValues.push(s("0"));
+  missingValues.push(s("--report-dir"));
+  missingValues.push(s("build/r"));
+  Test::assertEq<boolean>(QbeLane::parseLaneOptions(&missingValues).isError(), true);
+}
+
+@test
+function qbeLaneParsesUnsignedDecimalsOnly(): void {
+  let five: String = s("5");
+  let Option::SOME(value) = QbeLane::parseUnsigned(&five) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<u64>(value, 5);
+  let maximum: String = s("18446744073709551615");
+  let Option::SOME(largest) = QbeLane::parseUnsigned(&maximum) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<u64>(largest, 18446744073709551615);
+  let empty: String = String::new();
+  Test::assertEq<boolean>(QbeLane::parseUnsigned(&empty).isNone(), true);
+  let signed: String = s("-1");
+  Test::assertEq<boolean>(QbeLane::parseUnsigned(&signed).isNone(), true);
+  let garbled: String = s("12x");
+  Test::assertEq<boolean>(QbeLane::parseUnsigned(&garbled).isNone(), true);
+  let overflow: String = s("18446744073709551616");
+  Test::assertEq<boolean>(QbeLane::parseUnsigned(&overflow).isNone(), true);
+}
+
+@test
+function qbeLaneSelectsCasesByIndexModuloCount(): void {
+  Test::assertEq<boolean>(QbeLane::selectsCase(0, 0, 4), true);
+  Test::assertEq<boolean>(QbeLane::selectsCase(1, 0, 4), false);
+  Test::assertEq<boolean>(QbeLane::selectsCase(5, 1, 4), true);
+  Test::assertEq<boolean>(QbeLane::selectsCase(7, 3, 4), true);
+  Test::assertEq<boolean>(QbeLane::selectsCase(9, 0, 0), true);
+  Test::assertEq<boolean>(QbeLane::selectsCase(9, 1, 0), true);
+}
+
+@test
+function qbeLaneCompleteDocumentHasSixDecimalLines(): void {
+  let document: String = QbeLane::completeDocument(0, 4, 173, 44, 30, 14);
+  let expected: String = s("0\n4\n173\n44\n30\n14\n");
+  Test::assertEq<boolean>(document.equals(expected.toStr()), true);
+}
+
+@test
+function qbeLaneSkipLineJoinsNameAndReason(): void {
+  let name: String = s("e2e/ok/add.ign");
+  let reason: String = s("MakeClosure");
+  let line: String = QbeLane::skipLine(&name, &reason);
+  let expected: String = s("e2e/ok/add.ign\tMakeClosure\n");
+  Test::assertEq<boolean>(line.equals(expected.toStr()), true);
+}
+
+@test
+function qbeLaneReadsSkipReasonFromCommittedManifest(): void {
+  let manifest: String = s("# comment\nadd.ign\nsub.ign\tMakeClosure\n");
+  let name: String = s("sub.ign");
+  let reason: String = QbeLane::manifestSkipReason(&manifest, &name);
+  Test::assertEq<boolean>(reason.equals("MakeClosure"), true);
+  let missing: String = s("mul.ign");
+  Test::assertEq<boolean>(QbeLane::manifestSkipReason(&manifest, &missing).length() == 0, true);
+}
