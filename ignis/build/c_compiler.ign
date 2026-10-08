@@ -1,7 +1,10 @@
 import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+import Output from "@compiler::output";
 
 import Env from "std::env";
 import Fs from "std::fs";
+import Io from "std::io";
+import LibC from "std::libc";
 import Path from "std::path";
 import Process from "std::process";
 import String from "std::string";
@@ -67,6 +70,10 @@ function toolchainErrorDiag(code: str, error: &ToolchainError): DiagnosticBag {
 /// `Result::ERROR` containing a `DiagnosticBag` with a `B4001` error on failure.
 ///
 /// Mirrors the Rust oracle `compile_to_object` in `crates/ignis_driver/src/link.rs`.
+/// Interval between checks on a running C compiler while the live progress
+/// line is on, in microseconds.
+const COMPILER_POLL_INTERVAL_MICROS: u32 = 20000;
+
 export namespace CCompiler {
   /// The optimization and debug flags a build profile asks the C toolchain for,
   /// followed by the project's own `[build] cflags`.
@@ -191,6 +198,8 @@ export namespace CCompiler {
     let mut spawnCursor: u64 = 0;
     let mut waitCursor: u64 = 0;
 
+    Output::beginPhase("cc", unitCount);
+
     while (waitCursor < unitCount) {
       while (spawnCursor < unitCount && (spawnCursor - waitCursor) < window) {
         let Option::SOME(sourcePath) = sourcePaths.get(spawnCursor) else {
@@ -239,9 +248,16 @@ export namespace CCompiler {
       }
 
       let mut failure: Option<String> = Option::NONE;
+      let mut unitText: String = String::new();
+
+      if (let Option::SOME(sourcePath) = sourcePaths.get(waitCursor)) {
+        unitText = sourcePath.toString();
+      }
+
+      Output::setDetail(&unitText);
 
       if (waitCursor < children.length()) {
-        let mut child: &mut Process::Child = match (children.getMut(waitCursor)) {
+        let child: &mut Process::Child = match (children.getMut(waitCursor)) {
           Option::SOME(value) -> value,
           Option::NONE -> @panic("unreachable: CCompiler::compileObjects lost a compiler slot"),
         };
@@ -249,7 +265,7 @@ export namespace CCompiler {
         if (child.pid == -1) {
           failure = Option::SOME(String::create("could not start the C compiler"));
         } else {
-          match (child.wait()) {
+          match (CCompiler::waitForCompiler(child)) {
             Result::OK(out) -> {
               let status: Process::ExitStatus = out.status();
 
@@ -286,10 +302,32 @@ export namespace CCompiler {
         return Result::ERROR(toolchainErrorDiag(ToolchainDiagnosticCode::COMPILE_FAILED, &error));
       }
 
+      Output::advance(&unitText);
       waitCursor += 1;
     }
 
     return Result::OK(true);
+  }
+
+  /// `child.wait()`, except that while the live progress line is on it polls
+  /// instead of blocking, so the line keeps moving during a long compile.
+  function waitForCompiler(child: &mut Process::Child): Result<Process::Output, Io::IoError> {
+    let mut childRef: &mut Process::Child = child;
+
+    if (!Output::isLive()) {
+      return childRef.wait();
+    }
+
+    while (true) {
+      if (let Option::SOME(result) = childRef.tryWait()) {
+        return result;
+      }
+
+      Output::pulse();
+      let _slept: i32 = LibC::Process::usleep(COMPILER_POLL_INTERVAL_MICROS);
+    }
+
+    @panic("unreachable: CCompiler::waitForCompiler left its polling loop");
   }
 }
 

@@ -151,7 +151,7 @@ A language feature is safe to use in `ignis/` or `std/` only after compiler supp
 
 ## Compiler Pipeline
 
-By default a build or check prints a `Building <name> (<path>)` (or `Checking ...`) header, its diagnostics and one closing line (`✓ Compiled (1.2s)` and the binary path, or `✗ Build failed: N errors`). With `-v` / `--verbose` it also prints the phase lines (`lex`, `parse`, `analyze`, `capture`, `mono`, `ownership`, `lower`, `lir`, `codegen`, `emit`, `link`) on stderr. They map to these steps, in execution order:
+Every write to stdout or stderr goes through `ignis/output/` (`Output::message` for stderr, `Output::data` for stdout), never `Io::print*` directly: it draws the live progress line (`--progress=auto|live|plain`, see `docs/CLI.md`) and erases it around other output. By default a build or check prints a `Building <name> (<path>)` (or `Checking ...`) header, its diagnostics and one closing line (`✓ Compiled (1.2s)` and the binary path, or `✗ Build failed: N errors`). With `-v` / `--verbose` it also prints the phase lines (`lex`, `parse`, `analyze`, `capture`, `mono`, `ownership`, `lower`, `lir`, `codegen`, `emit`, `link`) on stderr. They map to these steps, in execution order:
 
 ```
 CLI (ignis/cli.ign)

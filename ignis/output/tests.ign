@@ -1,0 +1,91 @@
+import Test from "std::test";
+
+import Output from "@compiler::output";
+
+function frameOf(
+  phase: str,
+  done: u64,
+  total: u64,
+  detail: str,
+  elapsedMillis: u64
+): Output::LiveLineFrame {
+  return Output::LiveLineFrame {
+    spinner: 0,
+    phase: String::create(phase),
+    done: done,
+    total: total,
+    detail: String::create(detail),
+    elapsedMillis: elapsedMillis,
+  };
+}
+
+@test
+function liveLineShowsPhaseBarDetailAndElapsedTime(): void {
+  let frame: Output::LiveLineFrame = frameOf("analyze", 5, 20, "ignis/main.ign", 4200);
+  let line: String = Output::renderLiveLine(&frame, 120, false);
+
+  Test::assertEq<str>(line.toStr(), "⠋ analyze    █████░░░░░░░░░░░░░░░ 5/20  ignis/main.ign  4.2s");
+}
+
+@test
+function liveLineWithoutStepsShowsNoBar(): void {
+  let frame: Output::LiveLineFrame = frameOf("gcc", 0, 0, "build/ignis.c", 61000);
+  let line: String = Output::renderLiveLine(&frame, 120, false);
+
+  Test::assertEq<str>(line.toStr(), "⠋ gcc         build/ignis.c  1m01s");
+}
+
+@test
+function liveLineDropsTheBarBeforeTheDetail(): void {
+  let frame: Output::LiveLineFrame = frameOf("analyze", 5, 20, "ignis/main.ign", 4200);
+  let line: String = Output::renderLiveLine(&frame, 40, false);
+
+  Test::assertEq<str>(line.toStr(), "⠋ analyze     ignis/main.ign  4.2s");
+}
+
+@test
+function liveLineKeepsTheTailOfALongDetail(): void {
+  let frame: Output::LiveLineFrame = frameOf("analyze", 0, 0, "ignis/analyzer/borrowck.ign", 4200);
+  let line: String = Output::renderLiveLine(&frame, 30, false);
+
+  Test::assertEq<str>(line.toStr(), "⠋ analyze     …owck.ign  4.2s");
+}
+
+@test
+function liveLineOnAVeryNarrowTerminalKeepsOnlyThePhase(): void {
+  let frame: Output::LiveLineFrame = frameOf("ownership", 1, 2, "ignis/main.ign", 4200);
+  let line: String = Output::renderLiveLine(&frame, 8, false);
+
+  Test::assertEq<str>(line.toStr(), "⠋ owner");
+}
+
+/// Scenario: whatever the width, the line never reaches the last column, so
+/// the terminal never wraps it and one carriage return erases all of it.
+@test
+function liveLineNeverReachesTheLastColumn(): void {
+  let frame: Output::LiveLineFrame = frameOf("ownership", 3120, 6770, "ignis/analyzer/borrowck_ñandú.ign", 754000);
+  let mut columns: u64 = 1;
+
+  while (columns <= 160) {
+    let line: String = Output::renderLiveLine(&frame, columns, false);
+    let budget: u64 = columns - 1;
+
+    Test::assert(Output::displayWidth(&line) <= budget);
+    columns += 1;
+  }
+}
+
+@test
+function elapsedTimeSwitchesToMinutesAtOneMinute(): void {
+  Test::assertEq<str>(Output::formatElapsed(0).toStr(), "0.0s");
+  Test::assertEq<str>(Output::formatElapsed(59999).toStr(), "59.9s");
+  Test::assertEq<str>(Output::formatElapsed(60000).toStr(), "1m00s");
+  Test::assertEq<str>(Output::formatElapsed(128930).toStr(), "2m08s");
+}
+
+@test
+function displayWidthCountsScalarsNotBytes(): void {
+  let text: String = String::create("█░é a");
+
+  Test::assertEq<u64>(Output::displayWidth(&text), 5);
+}

@@ -1,8 +1,7 @@
 //! The only place the compiler writes to its standard streams.
 //!
-//! Every command prints through `Output`, so a later change to how text reaches
-//! the terminal (a live progress line, a plain backend for pipes) lives here
-//! instead of at every call site.
+//! Every command prints through `Output`, so how text reaches the terminal is
+//! decided here instead of at every call site.
 //!
 //! Two kinds of text go through it:
 //!
@@ -14,37 +13,555 @@
 //!
 //! The language server's protocol stream is not data in this sense: it writes
 //! to its own descriptor (`ignis/lsp/server.ign`).
+//!
+//! ## The live line
+//!
+//! A long command can show one line at the bottom of stderr that is redrawn in
+//! place: the running phase, how far it is, what it is on and the elapsed
+//! time. It is off unless `configureProgress` turns it on, which the driver
+//! does for `--progress=live`, or for `--progress=auto` when stderr is a
+//! terminal whose `TERM` is not `dumb`. While it is off nothing here writes a
+//! byte more than the text it is given.
+//!
+//! While it is on, every message and data write erases the line first and
+//! draws it again afterwards, so printed text stays in the scrollback above
+//! it. The compiler has no threads: the line only moves when the running code
+//! calls `advance` or `pulse`, which redraw at most every
+//! `REDRAW_INTERVAL_MILLIS`.
 
+import Env from "std::env";
 import Io from "std::io";
+import Terminal from "std::terminal";
+import Time from "std::time";
+
+/// Minimum time between two redraws of the live line, in milliseconds.
+const REDRAW_INTERVAL_MILLIS: u64 = 80;
+
+/// Columns assumed when the terminal does not report its width.
+const FALLBACK_COLUMNS: u64 = 80;
+
+/// Cells of the progress bar.
+const BAR_WIDTH: u64 = 20;
+
+/// Columns the phase name is padded to.
+const PHASE_WIDTH: u64 = 10;
+
+/// The narrowest detail worth showing; below it the detail is left out.
+const MINIMUM_DETAIL_WIDTH: u64 = 8;
+
+/// Bytes kept of a phase name.
+const PHASE_CAPACITY: u64 = 32;
+
+/// Bytes kept of a detail; a longer one keeps its tail.
+const DETAIL_CAPACITY: u64 = 256;
+
+/// The live line's state.
+///
+/// It lives in static fields because diagnostics and phase lines are printed
+/// from deep inside the pipeline, which has no handle to pass down. Static
+/// fields hold only zero-initializable values, so the phase and detail text
+/// are kept as bytes.
+record LiveState {
+  static mut ENABLED: boolean;
+  static mut ACTIVE: boolean;
+  static mut OUTER: boolean;
+  static mut VISIBLE: boolean;
+  static mut CLOCK_STARTED: boolean;
+  static mut STARTED: Time::MonotonicInstant;
+  static mut LAST_DRAW_MILLIS: u64;
+  static mut FRAME: u64;
+  static mut DONE: u64;
+  static mut TOTAL: u64;
+  static mut PHASE: u8[32];
+  static mut PHASE_LENGTH: u64;
+  static mut DETAIL: u8[256];
+  static mut DETAIL_LENGTH: u64;
+}
 
 export namespace Output {
+  /// How a command reports progress, as `--progress` selects it.
+  enum ProgressMode {
+    /// The live line when stderr is a terminal whose `TERM` is not `dumb`.
+    AUTO,
+    /// The live line, wherever stderr goes.
+    LIVE,
+    /// No live line.
+    PLAIN,
+  }
+
+  /// Everything one frame of the live line shows.
+  record LiveLineFrame {
+    /// Advances the spinner; any value is valid.
+    public spinner: u64;
+    public phase: String;
+    /// Steps the phase has finished, out of `total`.
+    public done: u64;
+    /// Steps the phase has; 0 shows no bar.
+    public total: u64;
+    /// What the phase is on, such as a module path. Its tail is kept when the
+    /// line is too narrow for all of it.
+    public detail: String;
+    public elapsedMillis: u64;
+  }
+
   /// Print `text` and a newline as a message, on stderr.
   function message(text: String): void {
+    eraseLiveLine();
     Io::eprintln(text);
+    redrawLiveLine();
   }
 
   /// Print `text` and a newline as a message, on stderr.
   function message(text: str): void {
+    eraseLiveLine();
     Io::eprintln(text);
+    redrawLiveLine();
   }
 
   /// Print `text` as a message without adding a newline, on stderr.
   function messageNoNewline(text: String): void {
+    eraseLiveLine();
     Io::eprint(text);
+    redrawLiveLine();
   }
 
   /// Print `text` and a newline as data, on stdout.
   function data(text: String): void {
+    eraseLiveLine();
     Io::println(text);
+    redrawLiveLine();
   }
 
   /// Print `text` and a newline as data, on stdout.
   function data(text: str): void {
+    eraseLiveLine();
     Io::println(text);
+    redrawLiveLine();
   }
 
   /// Print `text` as data without adding a newline, on stdout.
   function dataNoNewline(text: String): void {
+    eraseLiveLine();
     Io::print(text);
+    redrawLiveLine();
   }
+
+  /// Turn the live line on or off for the rest of the process, and start the
+  /// clock its elapsed time counts from.
+  function configureProgress(mode: Output::ProgressMode): void {
+    LiveState::ENABLED = match (mode) {
+      Output::ProgressMode::AUTO -> Terminal::isErrorTerminal() && !terminalIsDumb(),
+      Output::ProgressMode::LIVE -> true,
+      Output::ProgressMode::PLAIN -> false,
+    };
+
+    if (let Result::OK(now) = Time::MonotonicInstant::now()) {
+      LiveState::STARTED = now;
+      LiveState::CLOCK_STARTED = true;
+    }
+  }
+
+  /// True when `configureProgress` turned the live line on.
+  function isLive(): boolean {
+    return LiveState::ENABLED;
+  }
+
+  /// Show `phase` on the live line, with a bar of `total` steps when `total`
+  /// is not 0. Does nothing while the live line is off.
+  function beginPhase(phase: str, total: u64): void {
+    if (!LiveState::ENABLED || LiveState::OUTER) {
+      return;
+    }
+
+    startPhase(phase, total);
+  }
+
+  /// Show `phase` like `beginPhase`, for work that runs the pipeline again
+  /// for each of its steps, such as fixtures in a test run. Until
+  /// `endProgress`, the nested `beginPhase`, `setDetail` and `advance` calls
+  /// leave the line alone and only `advanceOuter` counts steps; `pulse` still
+  /// moves the spinner.
+  function beginOuterPhase(phase: str, total: u64): void {
+    if (!LiveState::ENABLED) {
+      return;
+    }
+
+    startPhase(phase, total);
+    LiveState::OUTER = true;
+  }
+
+  /// Count one finished step of the phase `beginOuterPhase` started.
+  function advanceOuter(detail: &String): void {
+    if (!LiveState::ACTIVE || !LiveState::OUTER) {
+      return;
+    }
+
+    countStep(detail);
+  }
+
+  /// Show `detail` after the running phase, redrawing when one is due.
+  function setDetail(detail: &String): void {
+    if (!LiveState::ACTIVE || LiveState::OUTER) {
+      return;
+    }
+
+    LiveState::DETAIL_LENGTH = storeTail((&mut LiveState::DETAIL) as *mut u8, DETAIL_CAPACITY, detail);
+    drawLiveLine(false);
+  }
+
+  /// Count one finished step of the running phase, now on `detail`,
+  /// redrawing when one is due.
+  function advance(detail: &String): void {
+    if (!LiveState::ACTIVE || LiveState::OUTER) {
+      return;
+    }
+
+    countStep(detail);
+  }
+
+  /// Redraw the live line when one is due, so the spinner and the elapsed
+  /// time move while a long step runs. Costs one clock read when no redraw is
+  /// due and nothing while the live line is off.
+  function pulse(): void {
+    if (!LiveState::ACTIVE) {
+      return;
+    }
+
+    drawLiveLine(false);
+  }
+
+  /// Erase the live line for good, before a command's closing lines.
+  function endProgress(): void {
+    eraseLiveLine();
+    LiveState::ACTIVE = false;
+    LiveState::OUTER = false;
+  }
+
+  /// One frame of the live line, at most `columns - 1` columns wide so the
+  /// terminal never wraps it, styled when `useColor` is true.
+  ///
+  /// Parts are left out as the line narrows: first the detail, then the bar.
+  function renderLiveLine(frame: &Output::LiveLineFrame, columns: u64, useColor: boolean): String {
+    let budget: u64 = columns > 1 ? columns - 1 : 0;
+
+    let phase: String = padRight(&frame.phase, PHASE_WIDTH);
+    let headWidth: u64 = 2 + displayWidth(&phase);
+    let elapsed: String = formatElapsed(frame.elapsedMillis);
+    let tailWidth: u64 = 2 + displayWidth(&elapsed);
+
+    let mut progress: String = String::new();
+
+    if (frame.total > 0) {
+      let done: u64 = frame.done < frame.total ? frame.done : frame.total;
+      let filled: u64 = done * BAR_WIDTH / frame.total;
+
+      progress.pushStr(" ");
+      progress.pushRepeated("█", filled);
+      progress.pushRepeated("░", BAR_WIDTH - filled);
+      let counts: String = ` ${done}/${frame.total}`;
+      progress.push(&counts);
+    }
+
+    if (headWidth + displayWidth(&progress) + tailWidth > budget) {
+      progress = String::new();
+    }
+
+    if (headWidth + tailWidth > budget) {
+      let mut head: String = String::create(spinnerFrame(frame.spinner));
+      head.pushStr(" ");
+      head.push(&frame.phase);
+      return keepHead(&head, budget);
+    }
+
+    let usedWidth: u64 = headWidth + displayWidth(&progress) + tailWidth;
+    let detailRoom: u64 = budget - usedWidth > 2 ? budget - usedWidth - 2 : 0;
+    let mut detail: String = String::new();
+
+    if (frame.detail.length() > 0 && detailRoom >= MINIMUM_DETAIL_WIDTH) {
+      detail = keepTail(&frame.detail, detailRoom);
+    }
+
+    let mut line: String = String::new();
+    Terminal::appendStyled(&mut line, spinnerFrame(frame.spinner), useColor, Terminal::TerminalColor::CYAN, false);
+    line.pushStr(" ");
+    appendBold(&mut line, &phase, useColor);
+    line.push(&progress);
+
+    if (detail.length() > 0) {
+      line.pushStr("  ");
+      appendDim(&mut line, &detail, useColor);
+    }
+
+    line.pushStr("  ");
+    line.push(&elapsed);
+    return line;
+  }
+
+  /// `millis` the way the live line shows elapsed time: `4.2s` below one
+  /// minute and `2m03s` from there.
+  function formatElapsed(millis: u64): String {
+    if (millis < 60000) {
+      return `${millis / 1000}.${(millis % 1000) / 100}s`;
+    }
+
+    let minutes: u64 = millis / 60000;
+    let seconds: u64 = (millis / 1000) % 60;
+    let padding: str = seconds < 10 ? "0" : "";
+
+    return `${minutes}m${padding}${seconds}s`;
+  }
+
+  /// The columns `text` takes on a terminal, counting one per Unicode scalar.
+  /// Wide characters such as CJK take two, which this undercounts.
+  function displayWidth(text: &String): u64 {
+    let mut width: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      if (let Option::SOME(byte) = text.byteAt(index)) {
+        if ((byte & 192) != 128) {
+          width += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return width;
+  }
+}
+
+function startPhase(phase: str, total: u64): void {
+  let phaseText: String = String::create(phase);
+  LiveState::PHASE_LENGTH = storeTail((&mut LiveState::PHASE) as *mut u8, PHASE_CAPACITY, &phaseText);
+  LiveState::DETAIL_LENGTH = 0;
+  LiveState::DONE = 0;
+  LiveState::TOTAL = total;
+  LiveState::ACTIVE = true;
+
+  drawLiveLine(true);
+}
+
+function countStep(detail: &String): void {
+  LiveState::DONE += 1;
+  LiveState::DETAIL_LENGTH = storeTail((&mut LiveState::DETAIL) as *mut u8, DETAIL_CAPACITY, detail);
+  drawLiveLine(false);
+}
+
+function terminalIsDumb(): boolean {
+  return match (Env::get("TERM")) {
+    Option::SOME(term) -> term.equals("dumb"),
+    Option::NONE -> false,
+  };
+}
+
+function eraseLiveLine(): void {
+  if (!LiveState::VISIBLE) {
+    return;
+  }
+
+  let mut sequence: String = String::create("\r");
+  let clear: String = Terminal::Screen::clearLine();
+  sequence.push(&clear);
+  Io::eprint(sequence);
+  LiveState::VISIBLE = false;
+}
+
+function redrawLiveLine(): void {
+  if (!LiveState::ACTIVE) {
+    return;
+  }
+
+  drawLiveLine(true);
+}
+
+/// Draw the live line unless it is current: drawn less than
+/// `REDRAW_INTERVAL_MILLIS` ago and `force` is false.
+function drawLiveLine(force: boolean): void {
+  let now: u64 = elapsedMillis();
+
+  if (!force && LiveState::VISIBLE && now - LiveState::LAST_DRAW_MILLIS < REDRAW_INTERVAL_MILLIS) {
+    return;
+  }
+
+  LiveState::LAST_DRAW_MILLIS = now;
+  LiveState::FRAME += 1;
+
+  let columns: u64 = match (Terminal::errorSize()) {
+    Option::SOME(size) -> size.columns as u64,
+    Option::NONE -> FALLBACK_COLUMNS,
+  };
+  let frame: Output::LiveLineFrame = Output::LiveLineFrame {
+    spinner: LiveState::FRAME,
+    phase: String::create((&mut LiveState::PHASE) as *mut u8, LiveState::PHASE_LENGTH),
+    done: LiveState::DONE,
+    total: LiveState::TOTAL,
+    detail: String::create((&mut LiveState::DETAIL) as *mut u8, LiveState::DETAIL_LENGTH),
+    elapsedMillis: now,
+  };
+
+  let mut line: String = String::create("\r");
+  let clear: String = Terminal::Screen::clearLine();
+  let rendered: String = Output::renderLiveLine(&frame, columns, true);
+  line.push(&clear);
+  line.push(&rendered);
+
+  Io::eprint(line);
+  LiveState::VISIBLE = true;
+}
+
+function elapsedMillis(): u64 {
+  if (!LiveState::CLOCK_STARTED) {
+    return 0;
+  }
+
+  return match (LiveState::STARTED.elapsed()) {
+    Result::OK(duration) -> duration.wholeMillis(),
+    Result::ERROR(_) -> LiveState::LAST_DRAW_MILLIS,
+  };
+}
+
+/// Copy the last `capacity` bytes of `text` into `target`, starting on a
+/// character boundary, and return how many were copied.
+function storeTail(target: *mut u8, capacity: u64, text: &String): u64 {
+  let mut start: u64 = text.length() > capacity ? text.length() - capacity : 0;
+
+  while (start < text.length() && isContinuationByte(text, start)) {
+    start += 1;
+  }
+
+  let mut index: u64 = start;
+
+  while (index < text.length()) {
+    if (let Option::SOME(byte) = text.byteAt(index)) {
+      @write<u8>(target + (index - start), byte);
+    }
+
+    index += 1;
+  }
+
+  return text.length() - start;
+}
+
+function isContinuationByte(text: &String, index: u64): boolean {
+  return match (text.byteAt(index)) {
+    Option::SOME(byte) -> (byte & 192) == 128,
+    Option::NONE -> false,
+  };
+}
+
+/// The last `width` columns of `text`, behind `…` when anything was cut.
+function keepTail(text: &String, width: u64): String {
+  if (Output::displayWidth(text) <= width) {
+    return text.clone();
+  }
+
+  if (width == 0) {
+    return String::new();
+  }
+
+  let mut kept: u64 = 0;
+  let mut start: u64 = text.length();
+
+  while (start > 0 && kept < width - 1) {
+    start -= 1;
+
+    if (!isContinuationByte(text, start)) {
+      kept += 1;
+    }
+  }
+
+  let mut result: String = String::create("…");
+  let tail: String = text.substringBytes(start, text.length());
+  result.push(&tail);
+  return result;
+}
+
+/// The first `width` columns of `text`.
+function keepHead(text: &String, width: u64): String {
+  let mut kept: u64 = 0;
+  let mut end: u64 = 0;
+
+  while (end < text.length()) {
+    if (!isContinuationByte(text, end)) {
+      if (kept == width) {
+        break;
+      }
+
+      kept += 1;
+    }
+
+    end += 1;
+  }
+
+  return text.substringBytes(0, end);
+}
+
+function padRight(text: &String, width: u64): String {
+  let mut padded: String = text.clone();
+  let current: u64 = Output::displayWidth(text);
+
+  if (current < width) {
+    padded.pushRepeated(" ", width - current);
+  }
+
+  return padded;
+}
+
+function appendBold(line: &mut String, text: &String, useColor: boolean): void {
+  let mut lineRef: &mut String = line;
+
+  if (!useColor) {
+    lineRef.push(text);
+    return;
+  }
+
+  let styled: String = Terminal::styledText(text.toStr(), Terminal::TerminalAttribute::BOLD);
+  lineRef.push(&styled);
+}
+
+function appendDim(line: &mut String, text: &String, useColor: boolean): void {
+  let mut lineRef: &mut String = line;
+
+  if (!useColor) {
+    lineRef.push(text);
+    return;
+  }
+
+  let styled: String = Terminal::styledText(text.toStr(), Terminal::TerminalAttribute::DIM);
+  lineRef.push(&styled);
+}
+
+function spinnerFrame(frame: u64): str {
+  let index: u64 = frame % 8;
+
+  if (index == 0) {
+    return "⠋";
+  }
+
+  if (index == 1) {
+    return "⠙";
+  }
+
+  if (index == 2) {
+    return "⠹";
+  }
+
+  if (index == 3) {
+    return "⠸";
+  }
+
+  if (index == 4) {
+    return "⠼";
+  }
+
+  if (index == 5) {
+    return "⠴";
+  }
+
+  if (index == 6) {
+    return "⠦";
+  }
+
+  return "⠧";
 }

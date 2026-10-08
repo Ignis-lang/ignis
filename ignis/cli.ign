@@ -2,6 +2,8 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
+import Output from "@compiler::output";
+
 import InitOptions, initIsValidTarget from "./init";
 
 /// The version this compiler reports, kept equal to the host compiler's
@@ -57,6 +59,8 @@ export record CliOptions {
   /// Print every compiler phase line on stderr in addition to the default
   /// summary (`-v` / `--verbose`).
   public verbose: boolean;
+  /// When the live progress line is drawn on stderr (`--progress`).
+  public progress: Output::ProgressMode;
   public filter: String;
   public updateSnapshots: boolean;
   /// Print the ownership checker's drop schedules after analysis, mirroring
@@ -111,6 +115,7 @@ export record CliOptions {
       features: Vector::new<String>(),
       force: false,
       verbose: false,
+      progress: Output::ProgressMode::AUTO,
       filter: String::new(),
       updateSnapshots: false,
       dumpDropSchedule: false,
@@ -420,7 +425,28 @@ function cliTestStdAcceptsFlag(argument: &String): boolean {
     return true;
   }
 
+  if (argument.equals("--progress") || argument.startsWith("--progress=")) {
+    return true;
+  }
+
   return argument.equals("--feature") || argument.equals("--features") || argument.equals("--update-snapshots");
+}
+
+/// The `--progress` mode `value` names.
+function parseProgressMode(value: &String): Result<Output::ProgressMode, String> {
+  if (value.equals("auto")) {
+    return Result::OK(Output::ProgressMode::AUTO);
+  }
+
+  if (value.equals("live")) {
+    return Result::OK(Output::ProgressMode::LIVE);
+  }
+
+  if (value.equals("plain")) {
+    return Result::OK(Output::ProgressMode::PLAIN);
+  }
+
+  return Result::ERROR(`error: invalid progress mode '${value.toStr()}': expected auto, live or plain`);
 }
 
 function cliMissingValue(flag: str, expected: str): String {
@@ -1616,6 +1642,27 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (options.reportsCompilerPhases()) {
+      match (matchValueFlag(arguments, argument, index, "--progress", "--progress")) {
+        Result::ERROR(_) -> {
+          return Result::ERROR(cliMissingValue("--progress", "auto, live or plain"));
+        },
+        Result::OK(matched) -> {
+          if (let Option::SOME(flag) = matched) {
+            match (parseProgressMode(&flag.value)) {
+              Result::OK(mode) -> options.progress = mode,
+              Result::ERROR(message) -> {
+                return Result::ERROR(message);
+              },
+            };
+
+            index = flag.next;
+            continue;
+          }
+        },
+      };
+    }
+
     // `check-std` takes only the host `CheckStdCommand`'s output directory.
     if (options.isCheckStdMode()) {
       match (matchValueFlag(arguments, argument, index, "--output-dir", "-o")) {
@@ -1986,6 +2033,8 @@ export function helpText(): String {
   text.pushStr("  -f, --force               Rebuild even when the build cache is current\n");
   text.pushStr("  -v, --verbose             Also print every compiler phase line on stderr (build, check,\n");
   text.pushStr("                            build-std, check-std, test, test-std)\n");
+  text.pushStr("      --progress <MODE>     Live progress line on stderr for the same commands: auto\n");
+  text.pushStr("                            (default; when stderr is a terminal), live or plain\n");
   text.pushStr("      --dump-drop-schedule  Print ownership drop schedules after analysis\n");
   text.pushStr("      --dump-ownership-report[=<FN>]\n");
   text.pushStr("                            Print the ownership checker's decisions as JSON Lines on\n");
@@ -2610,6 +2659,63 @@ function cliVerboseFlagSelectsPhaseLines(): void {
   cliPush(&mut testRun, "test");
   cliPush(&mut testRun, "-v");
   Test::assertEq<boolean>(cliParse(&testRun).verbose, true);
+}
+
+/// `--progress` picks the live line's mode for the commands that run the
+/// compiler pipeline, in both spellings, and defaults to `auto`.
+@test
+function cliProgressFlagSelectsMode(): void {
+  let mut defaultBuild: Vector<String> = Vector::new<String>();
+  cliPush(&mut defaultBuild, "build");
+  let defaultOptions: CliOptions = cliParse(&defaultBuild);
+  Test::assertEq<str>(cliProgressName(&defaultOptions), "auto");
+
+  let mut separateValue: Vector<String> = Vector::new<String>();
+  cliPush(&mut separateValue, "check");
+  cliPush(&mut separateValue, "--progress");
+  cliPush(&mut separateValue, "plain");
+  let separateOptions: CliOptions = cliParse(&separateValue);
+  Test::assertEq<str>(cliProgressName(&separateOptions), "plain");
+
+  let mut attachedValue: Vector<String> = Vector::new<String>();
+  cliPush(&mut attachedValue, "test");
+  cliPush(&mut attachedValue, "--progress=live");
+  let attachedOptions: CliOptions = cliParse(&attachedValue);
+  Test::assertEq<str>(cliProgressName(&attachedOptions), "live");
+
+  let mut stdTests: Vector<String> = Vector::new<String>();
+  cliPush(&mut stdTests, "test-std");
+  cliPush(&mut stdTests, "--progress=plain");
+  let stdTestOptions: CliOptions = cliParse(&stdTests);
+  Test::assertEq<str>(cliProgressName(&stdTestOptions), "plain");
+}
+
+/// An unknown `--progress` mode or a missing one is an error, and the flag
+/// means nothing to the commands that do not run the compiler pipeline.
+@test
+function cliRejectsInvalidProgressFlags(): void {
+  let mut unknownMode: Vector<String> = Vector::new<String>();
+  cliPush(&mut unknownMode, "build");
+  cliPush(&mut unknownMode, "--progress=fancy");
+  Test::assertEq<str>(cliParseError(&unknownMode).toStr(), "error: invalid progress mode 'fancy': expected auto, live or plain");
+
+  let mut missingMode: Vector<String> = Vector::new<String>();
+  cliPush(&mut missingMode, "build");
+  cliPush(&mut missingMode, "--progress");
+  Test::assertEq<str>(cliParseError(&missingMode).toStr(), "error: --progress requires auto, live or plain");
+
+  let mut fmtFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut fmtFlag, "fmt");
+  cliPush(&mut fmtFlag, "--progress=plain");
+  Test::assertEq<str>(cliParseError(&fmtFlag).toStr(), "error: unknown argument: --progress=plain");
+}
+
+function cliProgressName(options: &CliOptions): str {
+  return match (options.progress) {
+    Output::ProgressMode::AUTO -> "auto",
+    Output::ProgressMode::LIVE -> "live",
+    Output::ProgressMode::PLAIN -> "plain",
+  };
 }
 
 /// `-v` keeps meaning nothing to the commands that do not run the compiler

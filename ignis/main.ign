@@ -865,6 +865,8 @@ function compileAndLinkUnits(
 
   let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
+  Output::beginPhase("link", 0);
+
   if (let Result::ERROR(linkBag) = Linker::link(
     cc,
     outputPath,
@@ -1137,6 +1139,8 @@ export function formatSuccessLine(
 /// Print a summary line on stderr behind `mark`, which is styled in `color`
 /// the way diagnostics are.
 function printOutcomeLine(mark: str, text: &String, color: Terminal::TerminalColor): void {
+  Output::endProgress();
+
   let mut styled: String = String::new();
 
   Terminal::appendStyled(&mut styled, mark, DiagnosticRenderer::stderrUsesColor(), color, true);
@@ -1243,6 +1247,10 @@ function compileDiscovered(
   let mut rootCount: u64 = 0;
   let mut orderIndex: u64 = 0;
 
+  let progressRoot: String = `${discovery.root.asStr()}/`;
+
+  Output::beginPhase("parse", discovery.order.length());
+
   while (orderIndex < discovery.order.length()) {
     let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
       Output::message("error: discovery order is incomplete");
@@ -1260,6 +1268,8 @@ function compileDiscovered(
     let modulePath: String = node.path.toString();
     let moduleFile: SourceFile = SourceFile::create(modulePath.toStr(), moduleText.toStr());
     let mut output: ParseOutput = Parser::parseFileWithFlags(&moduleFile, &discovery.flags);
+    let progressText: String = progressPath(&modulePath, &progressRoot);
+    Output::advance(&progressText);
 
     lexErrors += countBySeverity(&output.lexDiagnostics, Severity::ERROR);
     lexWarnings += countBySeverity(&output.lexDiagnostics, Severity::WARNING);
@@ -1334,6 +1344,8 @@ function compileDiscovered(
 
     preludeIndex += 1;
   }
+
+  Output::beginPhase("analyze", 0);
 
   let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
     &mut defStore,
@@ -1525,6 +1537,8 @@ function compileDiscovered(
   let mut lowerIndex: u64 = 0;
   let mut programHir: Hir::HirStore = Hir::HirStore::init();
 
+  Output::beginPhase("lower", records.length());
+
   while (lowerIndex < records.length()) {
     let Option::SOME(analysisRecord) = records.get(lowerIndex) else {
       lowerIndex += 1;
@@ -1534,6 +1548,12 @@ function compileDiscovered(
       lowerIndex += 1;
       continue;
     };
+
+    if (let Option::SOME(modulePath) = modulePaths.get(lowerIndex)) {
+      let moduleText: String = modulePath.toString();
+      let progressText: String = progressPath(&moduleText, &progressRoot);
+      Output::advance(&progressText);
+    }
 
     let moduleNodeStart: u64 = programHir.nodes.length();
 
@@ -1625,6 +1645,8 @@ function compileDiscovered(
     handlerRootIndex += 1;
   }
 
+  Output::beginPhase("mono", 0);
+
   let monoResult: Mono::MonoOutput = Mono::runWithRoots(
     &mut defStore,
     &mut typeStore,
@@ -1642,6 +1664,8 @@ function compileDiscovered(
   // Ownership and borrow checking runs over the monomorphized HIR, the same
   // program LIR lowering is about to walk: its drop schedules are keyed by
   // the nodes that walk visits.
+  Output::beginPhase("ownership", 0);
+
   let checked: Borrowck::BorrowckOutput = Borrowck::checkModuleReporting(
     &mut defStore,
     &mut typeStore,
@@ -1720,6 +1744,8 @@ function compileDiscovered(
   }
 
   let programConstValues: Analyzer::ConstEval::ConstValueMap = collectProgramConstValues(&records);
+
+  Output::beginPhase("lir", 0);
 
   let mut lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
     &mut defStore,
@@ -1822,6 +1848,8 @@ function compileDiscovered(
   hooks.sources = files;
   hooks.projectRoot = discovery.root.toString();
   hooks.stdRoot = discovery.stdRoot.toString();
+
+  Output::beginPhase("codegen", 0);
 
   let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
@@ -1971,6 +1999,16 @@ function writeArtifact(path: &Path::PathBuf, contents: &String): boolean {
   return true;
 }
 
+/// `path` relative to `rootPrefix` (a directory ending in `/`) when it lies
+/// inside it, as the live progress line shows module paths.
+function progressPath(path: &String, rootPrefix: &String): String {
+  if (path.startsWith(rootPrefix.toStr())) {
+    return path.substringBytes(rootPrefix.length(), path.length());
+  }
+
+  return path.clone();
+}
+
 /// Discover the module graph a command runs against, reporting what failed
 /// and returning its counts on failure.
 function discoverReporting(
@@ -1978,6 +2016,8 @@ function discoverReporting(
   options: &CliOptions,
   includeTests: boolean,
 ): Result<DiscoveryResult, BuildTally> {
+  Output::beginPhase("discover", 0);
+
   let overrides: BuildOverrides = buildOverridesFrom(options);
 
   return match (Resolver::discover(startPath, &overrides, includeTests)) {
@@ -2916,6 +2956,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   };
 
   Output::message(TestRunner::sectionHeader("Running"));
+  Output::beginOuterPhase("test", selected.length() + selectedFixtures.length());
 
   let mut outcomes: Vector<TestOutcome> = TestRunner::execute(
     &binaryPath,
@@ -2936,6 +2977,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     };
 
     outcomes.push(runFixture(fixture, startPath, &discovery, options, timeoutSeconds));
+    Output::advanceOuter(&fixture.name);
     fixtureIndex += 1;
   }
 
@@ -3025,6 +3067,7 @@ function runStdTests(options: &CliOptions): i32 {
   };
 
   Output::message(TestRunner::sectionHeader("Running"));
+  Output::beginOuterPhase("test", selected.length());
 
   let outcomes: Vector<TestOutcome> = TestRunner::execute(
     &binaryPath,
@@ -5201,6 +5244,18 @@ function main(): i32 {
     },
   };
 
+  if (options.reportsCompilerPhases()) {
+    Output::configureProgress(options.progress);
+  }
+
+  let status: i32 = runCommand(&options);
+
+  Output::endProgress();
+  return status;
+}
+
+/// Run the command `options` selects and return the process exit code.
+function runCommand(options: &CliOptions): i32 {
   if (let CliCommand::HELP = options.command) {
     Output::data(helpText());
     return 0;
@@ -5212,15 +5267,15 @@ function main(): i32 {
   }
 
   if (let CliCommand::BUILD_STD = options.command) {
-    return runBuildStd(&options);
+    return runBuildStd(options);
   }
 
   if (let CliCommand::CHECK_STD = options.command) {
-    return runCheckStd(&options);
+    return runCheckStd(options);
   }
 
   if (let CliCommand::FMT = options.command) {
-    return runFmt(&options);
+    return runFmt(options);
   }
 
   if (let CliCommand::LSP = options.command) {
@@ -5228,7 +5283,7 @@ function main(): i32 {
   }
 
   if (let CliCommand::DOC = options.command) {
-    return runDoc(&options);
+    return runDoc(options);
   }
 
   if (let CliCommand::INIT = options.command) {
@@ -5236,15 +5291,15 @@ function main(): i32 {
   }
 
   if (let CliCommand::TEST_STD = options.command) {
-    return runStdTests(&options);
+    return runStdTests(options);
   }
 
-  let Option::SOME(target) = resolveTarget(&options) else {
+  let Option::SOME(target) = resolveTarget(options) else {
     return 1;
   };
 
   if (let CliCommand::TEST = options.command) {
-    return runProjectTests(&target.path, &options);
+    return runProjectTests(&target.path, options);
   }
 
   let checkOnly: boolean = match (options.command) {
@@ -5252,5 +5307,5 @@ function main(): i32 {
     _ -> false,
   };
 
-  return runCompile(&target.path, &options, checkOnly, target.projectMode);
+  return runCompile(&target.path, options, checkOnly, target.projectMode);
 }
