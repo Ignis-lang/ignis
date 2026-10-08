@@ -1,0 +1,3965 @@
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Borrowck from "@compiler::analyzer::borrowck";
+import Hir from "@compiler::hir";
+import Lir from "@compiler::lir";
+
+import CodegenC from "../mod";
+import Id from "@compiler::ids";
+
+/// LIR -> QBE IL emission for the Ignis selfhost compiler.
+///
+/// The IL text this module writes is the input of the QBE compiler
+/// (https://c9x.me/compile/doc/il.html). It is one whole program, std
+/// included, the same single-unit model the C emitter uses, so symbol names
+/// only have to be unique inside the unit and reuse the C emitter's naming:
+/// same mangled names, same reserved-word guard, same linkage rule.
+///
+/// Value representation. Scalars live in QBE temporaries of class `w` (every
+/// integer up to 32 bits, boolean, char, atom) or `l` (64-bit integers, str,
+/// every pointer), and always hold their declared width: a producer of a
+/// narrow temp normalizes the result with `extsb`/`extub`/`extsh`/`extuh`,
+/// so consumers never see garbage in the unused bits. Aggregates -- records,
+/// fieldless enums' storage, fixed arrays, slices -- live only in stack slots
+/// and every aggregate value is the address of its storage. That one rule
+/// makes `.field` and `->field` the same pointer arithmetic while preserving
+/// QBE's native aggregate ABI for parameters and return values.
+///
+/// Aggregate ABI. QBE 1.2 has its own aggregate convention, verified against
+/// the real binary: `type :name = { ... }` declares the layout,
+/// `function :name $f(...)` returns an aggregate through QBE's hidden return
+/// slot, `%r =:name call $f(...)` captures the result into QBE-managed caller
+/// storage, and aggregate parameters are spelled `(:name %p)`. An aggregate
+/// value in a temp is the address of that storage, which is the same rule
+/// locals follow.
+///
+/// Control flow. The LIR is already basic blocks with explicit gotos, and
+/// QBE lowers its input to SSA itself, so temps map one to one and there is
+/// no phi work here. Addressable locals need stack slots -- QBE has no
+/// addressable temporaries -- so every local gets one slot hoisted into the
+/// entry block, which also gives `AddrOfLocal` its answer.
+///
+/// Fail closed. An instruction this emitter does not lower stops the whole
+/// unit with `not supported by the qbe target yet: <instr>` and an empty
+/// source, never a partial program: the driver treats an error as a build
+/// failure, and a silent wrong-code path would be worse than one.
+///
+/// Out of scope for the first slice (each fails closed): closures and their
+/// drop glue, drop glue of any kind, enums with payloads, inline asm,
+/// freestanding mode, floating point, runtime type ids.
+export namespace CodegenQbe {
+  /// The emitted IL plus what the run measured. An error carries the exact
+  /// unsupported-instruction message and leaves `source` empty.
+  record EmitOutput {
+    public source: String;
+    public error: Option<String>;
+    public functions: u64;
+  }
+
+  /// The byte size and the byte alignment of one type, the pair the layout
+  /// rules answer.
+  record TypeLayout {
+    public size: u64;
+    public alignment: u64;
+  }
+
+  /// Mutable state of one emission run.
+  record Emitter {
+    /// The function bodies.
+    public out: String;
+    /// The data section: globals, string literals, panic message strings.
+    public data: String;
+    /// The first unsupported instruction, if any.
+    public error: Option<String>;
+    /// Interned string literals, deduplicated by content.
+    public literals: Vector<String>;
+    /// Counter for the emitter's own temporaries, kept apart from the LIR's
+    /// `t0..tN` by the `v` prefix.
+    public fresh: u64;
+    /// Whether the shared panic format string was emitted.
+    public hasPanicFormat: boolean;
+
+    public static init(): CodegenQbe::Emitter {
+      return CodegenQbe::Emitter {
+        out: String::create(""),
+        data: String::create("# Data\n"),
+        error: Option::NONE,
+        literals: Vector::new<String>(),
+        fresh: 0,
+        hasPanicFormat: false,
+      };
+    }
+  }
+
+  /// Records the first unsupported instruction. The unit fails closed, so
+  /// later emissions are skipped by the callers checking `emitter.error`.
+  function failFor(emitter: &mut CodegenQbe::Emitter, instruction: &Lir::Instr): void {
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let name: str = CodegenC::instructionName(instruction);
+
+    let message: String = `not supported by the qbe target yet: ${name}`;
+
+    emitter.error = Option::SOME(message);
+  }
+
+  /// Records a failure with an explicit instruction name, for the places
+  /// where an otherwise supported instruction meets an unsupported operand
+  /// type, such as a record argument crossing an extern call.
+  function failNamed(emitter: &mut CodegenQbe::Emitter, name: str): void {
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let message: String = `not supported by the qbe target yet: ${name}`;
+
+    emitter.error = Option::SOME(message);
+  }
+
+  /// `ty` with every type alias resolved away, or the input unchanged when
+  /// the chain cycles.
+  function resolveType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, ty);
+
+    if (resolved.cycleAlias.isSome()) {
+      return ty;
+    }
+
+    return resolved.typeId;
+  }
+
+  /// The QBE class of a scalar temporary: `w` for everything up to 32 bits,
+  /// `l` for 64-bit integers, str and every pointer. Aggregates, void and
+  /// floats answer NONE: aggregates travel as addresses, void has no value,
+  /// and floats are out of scope.
+  function scalarClass(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<str> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME("w"),
+      Analyzer::Type::I16 -> Option::SOME("w"),
+      Analyzer::Type::I32 -> Option::SOME("w"),
+      Analyzer::Type::I64 -> Option::SOME("l"),
+      Analyzer::Type::U8 -> Option::SOME("w"),
+      Analyzer::Type::U16 -> Option::SOME("w"),
+      Analyzer::Type::U32 -> Option::SOME("w"),
+      Analyzer::Type::U64 -> Option::SOME("l"),
+      Analyzer::Type::BOOLEAN -> Option::SOME("w"),
+      Analyzer::Type::CHAR -> Option::SOME("w"),
+      Analyzer::Type::ATOM -> Option::SOME("w"),
+      Analyzer::Type::STR -> Option::SOME("l"),
+      Analyzer::Type::Pointer(_) -> Option::SOME("l"),
+      Analyzer::Type::Reference(_) -> Option::SOME("l"),
+      Analyzer::Type::RawFunction(_) -> Option::SOME("l"),
+      Analyzer::Type::Enum(enumDef) -> {
+        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+          return Option::SOME("w");
+        }
+
+        return Option::NONE;
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Whether every variant of the enum behind `defId` carries no payload.
+  /// A fieldless enum is its tag, so it lowers as one `u32` scalar; any
+  /// payload variant makes the whole type unsupported.
+  function enumIsFieldless(
+    defStore: &mut Analyzer::DefinitionStore,
+    enumDef: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(enumDef) else {
+      return false;
+    };
+
+    if (let Analyzer::Definition::Enum(enumDefNode) = definition) {
+      let mut index: u64 = 0;
+
+      while (index < enumDefNode.variants.length()) {
+        if (let Option::SOME(variantId) = enumDefNode.variants.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+            if (variantDef.payload.length() > 0) {
+              return false;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return true;
+    }
+
+    return false;
+  }
+
+  /// Whether `ty` is a signed integer. Division, remainder, right shifts and
+  /// comparisons pick their signed or unsigned form from this.
+  function isSignedInteger(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> true,
+      Analyzer::Type::I16 -> true,
+      Analyzer::Type::I32 -> true,
+      Analyzer::Type::I64 -> true,
+      _ -> false,
+    };
+  }
+
+  /// Whether `ty` is one of the aggregates: record, enum storage, fixed
+  /// array, slice. Such a value is the address of its storage. A fieldless
+  /// enum is its tag, a scalar, so it does not count.
+  function isAggregateType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::Record(_) -> true,
+      Analyzer::Type::Enum(enumDef) -> !CodegenQbe::enumIsFieldless(defStore, enumDef),
+      Analyzer::Type::FixedArray(_, _) -> true,
+      Analyzer::Type::Slice(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// Whether the nominal behind `defId` carries `@implements(Drop)`.
+  function hasDropTrait(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Record(recordDef) -> recordDef.implementsDrop,
+      Analyzer::Definition::Enum(enumDef) -> enumDef.implementsDrop,
+      _ -> false,
+    };
+  }
+
+  /// Whether a value of `ty` needs drop glue. Closures and droppable nominals
+  /// are out of scope, so a drop instruction over one fails the unit closed.
+  function needsDrop(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    if (Borrowck::needsDropType(defStore, typeStore, ty)) {
+      return true;
+    }
+
+    return Hir::typeIsFunction(typeStore, ty);
+  }
+
+  /// The nominal a type names, looked through any number of pointers and
+  /// references.
+  function nominalBehind(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut current: Analyzer::TypeId = ty;
+
+    while (true) {
+      let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, current);
+
+      let Option::SOME(typeNode) = typeStore.get(resolved) else {
+        return Option::NONE;
+      };
+
+      match (typeNode) {
+        Analyzer::Type::Record(defId) -> {
+          return Option::SOME(defId);
+        },
+        Analyzer::Type::Enum(defId) -> {
+          return Option::SOME(defId);
+        },
+        Analyzer::Type::Pointer(pointer) -> {
+          current = pointer.pointee;
+        },
+        Analyzer::Type::Reference(reference) -> {
+          current = reference.referent;
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+    }
+
+    return Option::NONE;
+  }
+
+  /// The storage type of field `fieldIndex` of the record `recordId`, laid
+  /// out with the same rule the C emitter's structs use.
+  function fieldStorageType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordId: Analyzer::DefinitionId,
+    fieldIndex: u64,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(recordId) else {
+      return Option::NONE;
+    };
+
+    if (let Analyzer::Definition::Record(recordDef) = definition) {
+      let mut index: u64 = 0;
+
+      while (index < recordDef.fields.length()) {
+        if (let Option::SOME(fieldId) = recordDef.fields.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+            if (fieldDef.index as u64 == fieldIndex) {
+              return Option::SOME(Hir::recordFieldStorageType(defStore, typeStore, recordId, fieldDef.fieldType));
+            }
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  /// One `@aligned(N)` request folded with the natural alignment it applies
+  /// to, the way the C emitter's `aligned` attribute does.
+  function raisedAlignment(natural: u64, requested: Option<u64>): u64 {
+    let mut alignment: u64 = natural;
+
+    if (alignment < 1) {
+      alignment = 1;
+    }
+
+    if (let Option::SOME(request) = requested) {
+      if (request > alignment) {
+        alignment = request;
+      }
+    }
+
+    return alignment;
+  }
+
+  /// `value` rounded up to the next multiple of `alignment`.
+  function alignUp(value: u64, alignment: u64): u64 {
+    if (alignment <= 1) {
+      return value;
+    }
+
+    let remainder: u64 = value % alignment;
+
+    if (remainder == 0) {
+      return value;
+    }
+
+    return value + (alignment - remainder);
+  }
+
+  /// The size in bytes of a value of `ty`, computed by the emitter's own
+  /// layout. Unsupported types fail the unit closed through `emitter.error`.
+  function typeSize(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): u64 {
+    return CodegenQbe::typeLayout(emitter, defStore, typeStore, ty).size;
+  }
+
+  /// The alignment in bytes of a value of `ty`.
+  function typeAlign(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): u64 {
+    return CodegenQbe::typeLayout(emitter, defStore, typeStore, ty).alignment;
+  }
+
+  /// The `(size, alignment)` of `ty`. Scalars are their width; a record is
+  /// laid out field by field like the C ABI lays out structs; an enum is its
+  /// 4-byte tag; a slice is the `{ data, len }` pair.
+  function typeLayout(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): CodegenQbe::TypeLayout {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
+    };
+
+    match (typeNode) {
+      Analyzer::Type::I8 -> {
+        return CodegenQbe::TypeLayout { size: 1, alignment: 1 };
+      },
+      Analyzer::Type::U8 -> {
+        return CodegenQbe::TypeLayout { size: 1, alignment: 1 };
+      },
+      Analyzer::Type::BOOLEAN -> {
+        return CodegenQbe::TypeLayout { size: 1, alignment: 1 };
+      },
+      Analyzer::Type::I16 -> {
+        return CodegenQbe::TypeLayout { size: 2, alignment: 2 };
+      },
+      Analyzer::Type::U16 -> {
+        return CodegenQbe::TypeLayout { size: 2, alignment: 2 };
+      },
+      Analyzer::Type::I32 -> {
+        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
+      },
+      Analyzer::Type::U32 -> {
+        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
+      },
+      Analyzer::Type::CHAR -> {
+        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
+      },
+      Analyzer::Type::ATOM -> {
+        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
+      },
+      Analyzer::Type::I64 -> {
+        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
+      },
+      Analyzer::Type::U64 -> {
+        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
+      },
+      Analyzer::Type::STR -> {
+        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
+      },
+      Analyzer::Type::Pointer(_) -> {
+        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
+      },
+      Analyzer::Type::Reference(_) -> {
+        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
+      },
+      Analyzer::Type::RawFunction(_) -> {
+        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
+      },
+      Analyzer::Type::Enum(enumDef) -> {
+        if (!CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+          CodegenQbe::failNamed(emitter, "InitEnumVariant");
+          return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+        }
+
+        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
+      },
+      Analyzer::Type::Slice(_) -> {
+        return CodegenQbe::TypeLayout { size: 16, alignment: 8 };
+      },
+      Analyzer::Type::FixedArray(element, count) -> {
+        let elementSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, element);
+        let elementAlign: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, element);
+
+        if (emitter.error.isSome()) {
+          return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+        }
+
+        return CodegenQbe::TypeLayout { size: elementSize * count, alignment: elementAlign };
+      },
+      Analyzer::Type::Record(recordDef) -> {
+        return CodegenQbe::recordLayout(emitter, defStore, typeStore, recordDef);
+      },
+      _ -> {
+        CodegenQbe::failNamed(emitter, "SizeOf");
+        return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+      },
+    };
+  }
+
+  /// The `(size, alignment)` of the record behind `defId`, with every field
+  /// placed at its declared-order offset. `@packed` drops the inter-field
+  /// padding and the trailing one, `@aligned(N)` and a field's own
+  /// `@aligned(N)` raise alignments, and a record with no fields stays sized
+  /// zero like the reference lays it out.
+  function recordLayout(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordDef: Analyzer::DefinitionId,
+  ): CodegenQbe::TypeLayout {
+    let Option::SOME(definition) = defStore.get(recordDef) else {
+      return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+    };
+
+    if (let Analyzer::Definition::Record(recData) = definition) {
+      let mut offset: u64 = 0;
+      let mut alignment: u64 = 1;
+
+      alignment = CodegenQbe::raisedAlignment(1, recData.alignment);
+
+      let mut index: u64 = 0;
+
+      while (index < recData.fields.length()) {
+        let Option::SOME(fieldId) = recData.fields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+          index += 1;
+          continue;
+        };
+
+        let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, recordDef, fieldDef.fieldType);
+        let fieldSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, storageType);
+        let fieldNatural: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, storageType);
+        let fieldAlignment: u64 = CodegenQbe::raisedAlignment(recData.packed ? 1 : fieldNatural, fieldDef.alignment);
+
+        if (emitter.error.isSome()) {
+          return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+        }
+
+        offset = CodegenQbe::alignUp(offset, fieldAlignment);
+
+        if (fieldAlignment > alignment) {
+          alignment = fieldAlignment;
+        }
+
+        offset = offset + fieldSize;
+        index += 1;
+      }
+
+      offset = CodegenQbe::alignUp(offset, alignment);
+
+      return CodegenQbe::TypeLayout { size: offset, alignment: alignment };
+    }
+
+    return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+  }
+
+  /// The byte offset of field `fieldIndex` inside its record.
+  function fieldOffset(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordDef: Analyzer::DefinitionId,
+    fieldIndex: u64,
+  ): u64 {
+    let Option::SOME(definition) = defStore.get(recordDef) else {
+      return 0;
+    };
+
+    if (let Analyzer::Definition::Record(recData) = definition) {
+      let mut offset: u64 = 0;
+      let mut currentIndex: u64 = 0;
+
+      while (currentIndex < recData.fields.length()) {
+        let Option::SOME(fieldId) = recData.fields.get(currentIndex) else {
+          currentIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+          currentIndex += 1;
+          continue;
+        };
+
+        let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, recordDef, fieldDef.fieldType);
+        let fieldSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, storageType);
+        let fieldNatural: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, storageType);
+        let fieldAlignment: u64 = CodegenQbe::raisedAlignment(recData.packed ? 1 : fieldNatural, fieldDef.alignment);
+
+        if (emitter.error.isSome()) {
+          return 0;
+        }
+
+        offset = CodegenQbe::alignUp(offset, fieldAlignment);
+
+        if (fieldDef.index as u64 == fieldIndex) {
+          return offset;
+        }
+
+        offset = offset + fieldSize;
+        currentIndex += 1;
+      }
+    }
+
+    return 0;
+  }
+
+  /// Interns a string literal and answers its data symbol. Literals are
+  /// NUL-terminated byte strings, deduplicated by content so the same text
+  /// shares one symbol.
+  function internString(emitter: &mut CodegenQbe::Emitter, text: &String): String {
+    let mut index: u64 = 0;
+
+    while (index < emitter.literals.length()) {
+      if (let Option::SOME(existing) = emitter.literals.get(index)) {
+        if (existing.equals(text)) {
+          return `$str_${index}`;
+        }
+      }
+
+      index += 1;
+    }
+
+    let id: u64 = emitter.literals.length();
+
+    emitter.literals.push(text.clone());
+
+    let symbol: String = `$str_${id}`;
+    let escaped: String = CodegenQbe::stringLiteralItems(text);
+    let line: String = `data $str_${id} = { ${escaped.toStr()} }\n`;
+
+    emitter.data.pushStr(line.toStr());
+
+    return symbol;
+  }
+
+  /// The data-section items for one string literal: runs of printable bytes
+  /// stay one `b "..."` item each and every escaped byte becomes its own
+  /// `b N` item, so no escape can run into the byte that follows it. The
+  /// terminating NUL closes the list.
+  function stringLiteralItems(text: &String): String {
+    let mut items: String = String::create("");
+    let mut chunk: String = String::create("");
+    let mut index: u64 = 0;
+    let mut hasChunk: boolean = false;
+
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      let isPlain: boolean = byte >= 32 && byte <= 126 && byte != 34 && byte != 92;
+
+      if (isPlain) {
+        chunk.pushByte(byte);
+        hasChunk = true;
+      } else {
+        if (hasChunk) {
+          if (items.length() > 0) {
+            items.pushStr(", ");
+          }
+
+          let chunkItem: String = `b "${chunk.toStr()}"`;
+
+          items.pushStr(chunkItem.toStr());
+          chunk = String::create("");
+          hasChunk = false;
+        }
+
+        let item: str = CodegenQbe::escapedByteItem(byte);
+
+        if (items.length() > 0) {
+          items.pushStr(", ");
+        }
+
+        items.pushStr(item);
+      }
+
+      index += 1;
+    }
+
+    if (hasChunk) {
+      if (items.length() > 0) {
+        items.pushStr(", ");
+      }
+
+      let chunkItem: String = `b "${chunk.toStr()}"`;
+
+      items.pushStr(chunkItem.toStr());
+    }
+
+    if (items.length() > 0) {
+      items.pushStr(", ");
+    }
+
+    items.pushStr("b 0");
+
+    return items;
+  }
+
+  /// One escaped byte as a data item: named escapes for the common controls,
+  /// a hex escape for everything else.
+  function escapedByteItem(byte: u8): str {
+    if (byte == 10) {
+      return "b \"\\n\"";
+    }
+
+    if (byte == 13) {
+      return "b \"\\r\"";
+    }
+
+    if (byte == 9) {
+      return "b \"\\t\"";
+    }
+
+    let digits: String = String::create("0123456789abcdef");
+    let Option::SOME(high) = digits.byteAt((byte / 16) as u64) else {
+      return "b 0";
+    };
+    let Option::SOME(low) = digits.byteAt((byte % 16) as u64) else {
+      return "b 0";
+    };
+    let mut item: String = String::create("b \"\\x");
+
+    item.pushByte(high);
+    item.pushByte(low);
+    item.pushStr("\"");
+
+    return item.toStr();
+  }
+
+  /// The QBE immediate for a scalar constant. A str constant is the data
+  /// symbol its bytes were interned under. Aggregates and floats answer NONE:
+  /// their callers fail the unit closed or handle the zero case themselves.
+  function constText(emitter: &mut CodegenQbe::Emitter, value: &Lir::ConstValue): Option<String> {
+    return match (value) {
+      Lir::ConstValue::Int(number, _) -> Option::SOME(`${number}`),
+      Lir::ConstValue::UInt(number, _) -> Option::SOME(`${number}`),
+      Lir::ConstValue::Bool(flag, _) -> {
+        if (flag) {
+          return Option::SOME(String::create("1"));
+        }
+
+        return Option::SOME(String::create("0"));
+      },
+      Lir::ConstValue::Char(scalar, _) -> Option::SOME(`${scalar}`),
+      Lir::ConstValue::Atom(scalar, _) -> Option::SOME(`${scalar}`),
+      Lir::ConstValue::Str(text, _) -> {
+        let symbol: String = CodegenQbe::internString(emitter, &text);
+
+        return Option::SOME(symbol);
+      },
+      Lir::ConstValue::Null(_) -> Option::SOME(String::create("0")),
+      Lir::ConstValue::Undef(_) -> Option::SOME(String::create("0")),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Whether `operand` is a constant this emitter can spell as an immediate.
+  function constTextOf(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): Option<String> {
+    let Lir::Operand::Const(value) = operand else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(operandType) = CodegenQbe::operandType(defStore, function_, operand) else {
+      return Option::NONE;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, operandType)) {
+      return Option::NONE;
+    }
+
+    if (CodegenQbe::scalarClass(defStore, typeStore, operandType).isNone()) {
+      return Option::NONE;
+    }
+
+    return CodegenQbe::constText(emitter, &value);
+  }
+
+  /// A fresh temporary name, `%vN`, for the emitter's own values.
+  function freshTemp(emitter: &mut CodegenQbe::Emitter): String {
+    let name: String = `%v${emitter.fresh}`;
+
+    emitter.fresh += 1;
+
+    return name;
+  }
+
+  function operandType(
+    defStore: &mut Analyzer::DefinitionStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): Option<Analyzer::TypeId> {
+    if (let Lir::Operand::GlobalRef(defId) = operand) {
+      if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
+        return Option::SOME(variable.declaredType);
+      }
+      if (let Option::SOME(Analyzer::Definition::Field(field)) = defStore.get(defId)) {
+        return Option::SOME(field.fieldType);
+      }
+      return Option::NONE;
+    }
+    return CodegenC::operandType(function_, operand);
+  }
+
+  /// Renders `operand` for a value position of class `cls`.
+  ///
+  /// A temp is its QBE temporary. A scalar local is loaded into a fresh
+  /// temporary first, since locals are slots. A scalar constant is the
+  /// immediate itself. An aggregate local or temp is its storage address,
+  /// which is the value representation aggregates have. A str constant is
+  /// its data symbol.
+  function valueOperand(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): Option<String> {
+    match (operand) {
+      Lir::Operand::Temp(temp) -> {
+        return Option::SOME(`%t${temp.raw()}`);
+      },
+      Lir::Operand::Local(local) -> {
+        let Option::SOME(localType) = CodegenQbe::operandType(defStore, function_, operand) else {
+          return Option::NONE;
+        };
+
+        if (CodegenQbe::isAggregateType(defStore, typeStore, localType)) {
+          return Option::SOME(`%l${local.raw()}`);
+        }
+
+        let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, localType) else {
+          return Option::NONE;
+        };
+
+        let Option::SOME(cls) = CodegenQbe::scalarClass(defStore, typeStore, localType) else {
+          return Option::NONE;
+        };
+
+        let fresh: String = CodegenQbe::freshTemp(emitter);
+        let line: String = `    ${fresh.toStr()} =${cls} ${load} %l${local.raw()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+
+        return Option::SOME(fresh);
+      },
+      Lir::Operand::Const(_) -> {
+        let value: Option<String> = CodegenQbe::constTextOf(emitter, defStore, typeStore, function_, operand);
+        if (value.isNone()) { CodegenQbe::failNamed(emitter, "Constant"); }
+        return value;
+      },
+      Lir::Operand::FuncRef(defId) -> {
+        let name: String = CodegenC::mangledName(defStore, symbols, defId);
+        return Option::SOME(`$${name.toStr()}`);
+      },
+      Lir::Operand::GlobalRef(defId) -> {
+        let name: String = CodegenC::mangledName(defStore, symbols, defId);
+        let address: String = `$${name.toStr()}`;
+        let Option::SOME(ty) = CodegenQbe::operandType(defStore, function_, operand) else {
+          CodegenQbe::failNamed(emitter, "GlobalRef");
+          return Option::NONE;
+        };
+        if (CodegenQbe::isAggregateType(defStore, typeStore, ty)) {
+          return Option::SOME(address);
+        }
+        let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, ty) else {
+          CodegenQbe::failNamed(emitter, "GlobalRef"); return Option::NONE;
+        };
+        let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, ty) else {
+          CodegenQbe::failNamed(emitter, "GlobalRef"); return Option::NONE;
+        };
+        let fresh: String = CodegenQbe::freshTemp(emitter);
+        let line: String = `    ${fresh.toStr()} =${cls.toStr()} ${load.toStr()} ${address.toStr()}\n`;
+        emitter.out.pushStr(line.toStr());
+        return Option::SOME(fresh);
+      },
+    };
+  }
+
+  /// The typed load for a scalar of `ty`: narrow loads sign- or
+  /// zero-extend, so a loaded narrow value is already normalized.
+  function loadOp(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<String> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(String::create("loadsb")),
+      Analyzer::Type::U8 -> Option::SOME(String::create("loadub")),
+      Analyzer::Type::BOOLEAN -> Option::SOME(String::create("loadub")),
+      Analyzer::Type::I16 -> Option::SOME(String::create("loadsh")),
+      Analyzer::Type::U16 -> Option::SOME(String::create("loaduh")),
+      Analyzer::Type::I32 -> Option::SOME(String::create("loadsw")),
+      Analyzer::Type::U32 -> Option::SOME(String::create("loaduw")),
+      Analyzer::Type::CHAR -> Option::SOME(String::create("loaduw")),
+      Analyzer::Type::ATOM -> Option::SOME(String::create("loaduw")),
+      Analyzer::Type::I64 -> Option::SOME(String::create("loadl")),
+      Analyzer::Type::U64 -> Option::SOME(String::create("loadl")),
+      Analyzer::Type::STR -> Option::SOME(String::create("loadl")),
+      Analyzer::Type::Pointer(_) -> Option::SOME(String::create("loadl")),
+      Analyzer::Type::Reference(_) -> Option::SOME(String::create("loadl")),
+      Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("loadl")),
+      Analyzer::Type::Enum(enumDef) -> {
+        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+          return Option::SOME(String::create("loaduw"));
+        }
+
+        return Option::NONE;
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The typed store for a scalar of `ty`, the store-side pair of `loadOp`.
+  function storeOp(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<String> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(String::create("storeb")),
+      Analyzer::Type::U8 -> Option::SOME(String::create("storeb")),
+      Analyzer::Type::BOOLEAN -> Option::SOME(String::create("storeb")),
+      Analyzer::Type::I16 -> Option::SOME(String::create("storeh")),
+      Analyzer::Type::U16 -> Option::SOME(String::create("storeh")),
+      Analyzer::Type::I32 -> Option::SOME(String::create("storew")),
+      Analyzer::Type::U32 -> Option::SOME(String::create("storew")),
+      Analyzer::Type::CHAR -> Option::SOME(String::create("storew")),
+      Analyzer::Type::ATOM -> Option::SOME(String::create("storew")),
+      Analyzer::Type::I64 -> Option::SOME(String::create("storel")),
+      Analyzer::Type::U64 -> Option::SOME(String::create("storel")),
+      Analyzer::Type::STR -> Option::SOME(String::create("storel")),
+      Analyzer::Type::Pointer(_) -> Option::SOME(String::create("storel")),
+      Analyzer::Type::Reference(_) -> Option::SOME(String::create("storel")),
+      Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("storel")),
+      Analyzer::Type::Enum(enumDef) -> {
+        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+          return Option::SOME(String::create("storew"));
+        }
+
+        return Option::NONE;
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The QBE type reference for an aggregate, or an empty string for the
+  /// scalars, which never name a type. Records use the mangled record name,
+  /// slices and fixed arrays get synthetic names keyed by the type id.
+  function qbeTypeRef(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+  ): String {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return String::create("");
+    };
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        let name: String = CodegenC::structName(defStore, symbols, defId);
+
+        return `:${name.toStr()}_${defId.raw()}`;
+      },
+      Analyzer::Type::Slice(_) -> {
+        return `:ignis_slice_${resolved.raw()}`;
+      },
+      Analyzer::Type::FixedArray(_, _) -> {
+        return `:ignis_array_${resolved.raw()}`;
+      },
+      _ -> {
+        return String::create("");
+      },
+    };
+    return String::new();
+  }
+
+  /// The QBE value class letter for a scalar: `w` for everything up to 32
+  /// bits, `l` for 64-bit values and pointers. Aggregates and floats answer
+  /// NONE, and their callers fail the unit closed.
+  function qbeClass(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<String> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(String::create("w")),
+      Analyzer::Type::U8 -> Option::SOME(String::create("w")),
+      Analyzer::Type::BOOLEAN -> Option::SOME(String::create("w")),
+      Analyzer::Type::I16 -> Option::SOME(String::create("w")),
+      Analyzer::Type::U16 -> Option::SOME(String::create("w")),
+      Analyzer::Type::I32 -> Option::SOME(String::create("w")),
+      Analyzer::Type::U32 -> Option::SOME(String::create("w")),
+      Analyzer::Type::CHAR -> Option::SOME(String::create("w")),
+      Analyzer::Type::ATOM -> Option::SOME(String::create("w")),
+      Analyzer::Type::I64 -> Option::SOME(String::create("l")),
+      Analyzer::Type::U64 -> Option::SOME(String::create("l")),
+      Analyzer::Type::STR -> Option::SOME(String::create("l")),
+      Analyzer::Type::Pointer(_) -> Option::SOME(String::create("l")),
+      Analyzer::Type::Reference(_) -> Option::SOME(String::create("l")),
+      Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("l")),
+      Analyzer::Type::Enum(enumDef) -> {
+        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+          return Option::SOME(String::create("w"));
+        }
+
+        return Option::NONE;
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The QBE data-item letter for a scalar of `ty`, by byte width: `b` for
+  /// one-byte values, `h` for two, `w` for four, `l` for eight.
+  function qbeItemLetter(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<String> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(String::create("b")),
+      Analyzer::Type::U8 -> Option::SOME(String::create("b")),
+      Analyzer::Type::BOOLEAN -> Option::SOME(String::create("b")),
+      Analyzer::Type::I16 -> Option::SOME(String::create("h")),
+      Analyzer::Type::U16 -> Option::SOME(String::create("h")),
+      Analyzer::Type::I32 -> Option::SOME(String::create("w")),
+      Analyzer::Type::U32 -> Option::SOME(String::create("w")),
+      Analyzer::Type::CHAR -> Option::SOME(String::create("w")),
+      Analyzer::Type::ATOM -> Option::SOME(String::create("w")),
+      Analyzer::Type::I64 -> Option::SOME(String::create("l")),
+      Analyzer::Type::U64 -> Option::SOME(String::create("l")),
+      Analyzer::Type::STR -> Option::SOME(String::create("l")),
+      Analyzer::Type::Pointer(_) -> Option::SOME(String::create("l")),
+      Analyzer::Type::Reference(_) -> Option::SOME(String::create("l")),
+      Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("l")),
+      Analyzer::Type::Enum(enumDef) -> {
+        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+          return Option::SOME(String::create("w"));
+        }
+
+        return Option::NONE;
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The sign-extension op that re-normalizes a `w`-class value of `ty`, or
+  /// NONE when the width already fills the class. Consumers never see garbage
+  /// in the unused bits, so every narrow producer ends with one of these.
+  function qbeExtOp(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<String> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(String::create("extsb")),
+      Analyzer::Type::U8 -> Option::SOME(String::create("extub")),
+      Analyzer::Type::BOOLEAN -> Option::NONE,
+      Analyzer::Type::I16 -> Option::SOME(String::create("extsh")),
+      Analyzer::Type::U16 -> Option::SOME(String::create("extuh")),
+      Analyzer::Type::CHAR -> Option::NONE,
+      Analyzer::Type::ATOM -> Option::NONE,
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Emits `%dest =<w> <ext> <value>` when `ty` is a narrow integer, so the
+  /// temp named `value` reads back as its declared width.
+  function qbeNormalize(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    value: &String,
+  ): String {
+    if (emitter.error.isSome()) {
+      return value.clone();
+    }
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, ty) else {
+      CodegenQbe::failNamed(emitter, "Normalize");
+      return value.clone();
+    };
+
+    if (!(cls.equals("w"))) {
+      return value.clone();
+    }
+
+    let Option::SOME(ext) = CodegenQbe::qbeExtOp(defStore, typeStore, ty) else {
+      return value.clone();
+    };
+
+    let fresh: String = CodegenQbe::freshTemp(emitter);
+    let line: String = `    ${fresh.toStr()} =${cls.toStr()} ${ext.toStr()} ${value.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+
+    return fresh;
+  }
+
+  /// The stack-slot op for one local or aggregate temp: `alloc4` up to four
+  /// bytes, `alloc8` up to eight, `alloc16` beyond that and for every
+  /// aggregate, which keeps 16-byte alignment for possibly-nested records.
+  function qbeSlotOp(size: u64): str {
+    if (size <= 4) {
+      return "alloc4";
+    }
+
+    if (size <= 8) {
+      return "alloc8";
+    }
+
+    return "alloc16";
+  }
+
+  /// The data-item text for one scalar value at the top level of a global
+  /// initializer. Strings become references to their interned symbol, zero
+  /// and undefined become plain zeros.
+  function qbeDataValue(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    value: &Lir::Operand,
+  ): Option<String> {
+    let Lir::Operand::Const(constValue) = value else {
+      CodegenQbe::failNamed(emitter, "GlobalInit");
+      return Option::NONE;
+    };
+
+    return CodegenQbe::constText(emitter, &constValue);
+  }
+
+  /// The recursive type declarations the unit needs: every record in the
+  /// selected LIR functions, plus the slice and fixed-array shapes those records
+  /// reach through their fields. Each declaration is emitted once, before its
+  /// first use, dependencies first.
+  function qbeEmitTypeDeclarations(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    emitted: &mut Vector<u32>,
+    ty: Analyzer::TypeId,
+  ): void {
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+    let raw: u32 = resolved.raw();
+    let mut seen: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < emitted.length()) {
+      if (let Option::SOME(existing) = emitted.get(index)) {
+        if (*existing == raw) {
+          seen = true;
+        }
+      }
+
+      index += 1;
+    }
+
+    if (seen) {
+      return;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return;
+    };
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        emitted.push(raw);
+        CodegenQbe::qbeEmitRecordDeclaration(emitter, defStore, typeStore, symbols, emitted, defId);
+      },
+      Analyzer::Type::Slice(elementType) -> {
+        CodegenQbe::qbeEmitTypeDeclarations(emitter, defStore, typeStore, symbols, emitted, elementType);
+        emitted.push(raw);
+
+        let line: String = `type :ignis_slice_${raw} = { l, l }\n`;
+
+        emitter.data.pushStr(line.toStr());
+      },
+      Analyzer::Type::FixedArray(elementType, _) -> {
+        CodegenQbe::qbeEmitTypeDeclarations(emitter, defStore, typeStore, symbols, emitted, elementType);
+        emitted.push(raw);
+      },
+      _ -> {},
+    };
+  }
+
+  /// The `type :name = align A { items }` declaration of one record. Items
+  /// carry explicit `b N` padding so the QBE layout matches the emitter's own
+  /// field offsets byte for byte. Unaligned members force the SysV memory
+  /// class, represented by a QBE opaque type; aligned packed records retain
+  /// their field classes so foreign calls can still use registers.
+  function qbeEmitRecordDeclaration(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    emitted: &mut Vector<u32>,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId) else {
+      return;
+    };
+
+    let layout: CodegenQbe::TypeLayout = CodegenQbe::recordLayout(emitter, defStore, typeStore, defId);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    if (layout.size == 0) {
+      CodegenQbe::failNamed(emitter, "ZeroSizedRecord");
+      return;
+    }
+    if (layout.alignment > 16) {
+      CodegenQbe::failNamed(emitter, "OveralignedRecord");
+      return;
+    }
+
+    let name: String = CodegenC::structName(defStore, symbols, defId);
+
+    let mut unaligned: boolean = false;
+    let mut fieldIndex: u64 = 0;
+    while (fieldIndex < recordDef.fields.length()) {
+      if (let Option::SOME(fieldId) = recordDef.fields.get(fieldIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Field(field)) = defStore.get(*fieldId)) {
+          let ty: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, defId, field.fieldType);
+          let alignment: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, ty);
+          if (CodegenQbe::fieldOffset(emitter, defStore, typeStore, defId, fieldIndex) % alignment != 0) {
+            unaligned = true;
+          }
+        }
+      }
+      fieldIndex += 1;
+    }
+    if (unaligned) {
+      let line: String = `type :${name.toStr()}_${defId.raw()} = align ${layout.alignment} { ${layout.size} }\n`;
+
+      emitter.data.pushStr(line.toStr());
+      return;
+    }
+
+    let mut items: String = String::create("");
+    let mut cursor: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < recordDef.fields.length()) {
+      let Option::SOME(fieldId) = recordDef.fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+        index += 1;
+        continue;
+      };
+
+      let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, defId, fieldDef.fieldType);
+      let fieldNatural: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, storageType);
+      let fieldAlignment: u64 = CodegenQbe::raisedAlignment(recordDef.packed ? 1 : fieldNatural, fieldDef.alignment);
+      let target: u64 = CodegenQbe::alignUp(cursor, fieldAlignment);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      if (target > cursor) {
+        if (items.length() > 0) {
+          items.pushStr(",");
+        }
+        let pad: String = ` b ${target - cursor}`;
+
+        items.pushStr(pad.toStr());
+      }
+
+      cursor = target;
+
+      let item: String = CodegenQbe::qbeTypeItem(emitter, defStore, typeStore, symbols, emitted, storageType);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      if (items.length() > 0) {
+        items.pushStr(",");
+      }
+      items.pushStr(" ");
+      items.pushStr(item.toStr());
+
+      cursor = cursor + CodegenQbe::typeSize(emitter, defStore, typeStore, storageType);
+      index += 1;
+    }
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    if (layout.size > cursor) {
+      if (items.length() > 0) {
+        items.pushStr(",");
+      }
+      let pad: String = ` b ${layout.size - cursor}`;
+
+      items.pushStr(pad.toStr());
+    }
+
+    let line: String = `type :${name.toStr()}_${defId.raw()} = align ${layout.alignment} {${items.toStr()} }\n`;
+
+    emitter.data.pushStr(line.toStr());
+  }
+
+  /// One data item inside a type body: a scalar letter or an aggregate type
+  /// reference, with array counts spelled the QBE way, `<item> <count>`.
+  function qbeTypeItem(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    emitted: &mut Vector<u32>,
+    ty: Analyzer::TypeId,
+  ): String {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      CodegenQbe::failNamed(emitter, "TypeDecl");
+      return String::create("b");
+    };
+
+    match (typeNode) {
+      Analyzer::Type::FixedArray(elementType, count) -> {
+        let element: String = CodegenQbe::qbeTypeItem(emitter, defStore, typeStore, symbols, emitted, elementType);
+
+        return `${element.toStr()} ${count}`;
+      },
+      _ -> {
+        CodegenQbe::qbeEmitTypeDeclarations(emitter, defStore, typeStore, symbols, emitted, resolved);
+
+        let Option::SOME(letter) = CodegenQbe::qbeItemLetter(defStore, typeStore, resolved) else {
+          let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, resolved);
+
+          if (reference.length() == 0) {
+            CodegenQbe::failNamed(emitter, "TypeDecl");
+            return String::create("b");
+          }
+
+          return reference;
+        };
+
+        return letter;
+      },
+    };
+    return String::new();
+  }
+
+  /// The `data` section: one `data $symbol = align A { items }` global per
+  /// module-level initializer, walking the flattened parts the LIR carries
+  /// and filling the gaps between fields with zero bytes.
+  function qbeEmitGlobals(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    program: &Lir::LirProgram,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < program.globalInits.length()) {
+      let Option::SOME(init) = program.globalInits.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      CodegenQbe::qbeEmitOneGlobal(emitter, defStore, typeStore, symbols, init);
+      index += 1;
+    }
+  }
+
+  function qbeEmitOneGlobal(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    init: &Lir::GlobalInit,
+  ): void {
+    let Option::SOME(definition) = defStore.get(init.defId) else {
+      return;
+    };
+
+    let mut variableTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+    let mut declaredAlignment: u64 = 1;
+
+    if (let Analyzer::Definition::Variable(variableDef) = definition) {
+      variableTypeOpt = Option::SOME(variableDef.declaredType);
+      declaredAlignment = CodegenQbe::raisedAlignment(1, variableDef.alignment);
+    }
+
+    let Option::SOME(variableType) = variableTypeOpt else {
+      return;
+    };
+
+    let name: String = CodegenC::mangledName(defStore, symbols, init.defId);
+    let layout: CodegenQbe::TypeLayout = CodegenQbe::typeLayout(emitter, defStore, typeStore, variableType);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let mut items: String = String::create("");
+    let mut cursor: u64 = 0;
+    let mut partIndex: u64 = 0;
+    let currentRecord: Analyzer::DefinitionId = init.defId;
+
+    while (partIndex < init.parts.length()) {
+      let Option::SOME(part) = init.parts.get(partIndex) else {
+        partIndex += 1;
+        continue;
+      };
+
+      match (part) {
+        Lir::GlobalInitPart::Open -> {},
+        Lir::GlobalInitPart::Close -> {},
+        Lir::GlobalInitPart::Field(_, fieldIndex) -> {
+          let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(currentRecord) else {
+            CodegenQbe::failNamed(emitter, "GlobalInit");
+            return;
+          };
+
+          let Option::SOME(fieldId) = recordDef.fields.get(fieldIndex as u64) else {
+            CodegenQbe::failNamed(emitter, "GlobalInit");
+            return;
+          };
+
+          let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+            CodegenQbe::failNamed(emitter, "GlobalInit");
+            return;
+          };
+
+          let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, currentRecord, fieldDef.fieldType);
+          let fieldNatural: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, storageType);
+          let fieldAlignment: u64 = CodegenQbe::raisedAlignment(fieldNatural, fieldDef.alignment);
+          let target: u64 = CodegenQbe::alignUp(cursor, fieldAlignment);
+
+          if (emitter.error.isSome()) {
+            return;
+          }
+
+          if (target > cursor) {
+            let pad: String = `z ${target - cursor}, `;
+
+            items.pushStr(pad.toStr());
+          }
+
+          cursor = target;
+        },
+        Lir::GlobalInitPart::Value(value) -> {
+          let Lir::Operand::Const(constValue) = value else {
+            CodegenQbe::failNamed(emitter, "GlobalInit");
+            return;
+          };
+
+          let Option::SOME(text) = CodegenQbe::constText(emitter, &constValue) else {
+            return;
+          };
+
+          let itemType: Analyzer::TypeId = Lir::constValueType(&constValue);
+
+          if (let Option::SOME(reference) = CodegenQbe::qbeTypeRefIfAggregate(emitter, defStore, typeStore, symbols, itemType)) {
+            let item: String = `${reference.toStr()} ${text.toStr()}, `;
+
+            items.pushStr(item.toStr());
+          } else {
+            let Option::SOME(letter) = CodegenQbe::qbeItemLetter(defStore, typeStore, itemType) else {
+              CodegenQbe::failNamed(emitter, "GlobalInit");
+              return;
+            };
+
+            let item: String = `${letter.toStr()} ${text.toStr()}, `;
+
+            items.pushStr(item.toStr());
+          }
+
+          if (emitter.error.isSome()) {
+            return;
+          }
+
+          cursor = cursor + CodegenQbe::qbeItemSize(emitter, defStore, typeStore, itemType);
+        },
+        Lir::GlobalInitPart::Zero(zeroType) -> {
+          let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, zeroType);
+
+          if (emitter.error.isSome()) {
+            return;
+          }
+
+          let item: String = `z ${size}, `;
+
+          items.pushStr(item.toStr());
+          cursor = cursor + size;
+        },
+      };
+
+      partIndex += 1;
+    }
+
+    if (layout.size > cursor) {
+      let pad: String = `z ${layout.size - cursor}`;
+
+      items.pushStr(pad.toStr());
+    }
+
+    let alignment: u64 = layout.alignment > declaredAlignment ? layout.alignment : declaredAlignment;
+    let line: String = `data $${name.toStr()} = align ${alignment} { ${items.toStr()} }\n`;
+
+    emitter.data.pushStr(line.toStr());
+  }
+
+  /// The byte size QBE consumes for one data item of `ty`: a scalar letter's
+  /// width, or the whole aggregate for a type reference.
+  function qbeItemSize(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): u64 {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    if (let Option::SOME(letter) = CodegenQbe::qbeItemLetter(defStore, typeStore, resolved)) {
+      return match (letter.equals("b")) {
+        true -> 1,
+        false -> match (letter.equals("h")) {
+          true -> 2,
+          false -> match (letter.equals("w")) {
+            true -> 4,
+            false -> 8,
+          },
+        },
+      };
+    }
+
+    return CodegenQbe::typeSize(emitter, defStore, typeStore, resolved);
+  }
+
+  /// The `:name` reference for `ty` when it is an aggregate, NONE otherwise.
+  function qbeTypeRefIfAggregate(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+  ): Option<String> {
+    let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, ty);
+
+    if (reference.length() == 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(reference);
+  }
+
+  /// Per-function emission state: stack slots the prepass reserved for
+  /// aggregate temps, keyed by the temp's raw id.
+  record QbeFuncCtx {
+    public slotTemps: Vector<u32>;
+    public slotNames: Vector<String>;
+
+    public static init(): CodegenQbe::QbeFuncCtx {
+      return CodegenQbe::QbeFuncCtx {
+        slotTemps: Vector::new<u32>(),
+        slotNames: Vector::new<String>(),
+      };
+    }
+
+    public reserve(&mut self, tempRaw: u32, slot: String): void {
+      self.slotTemps.push(tempRaw);
+      self.slotNames.push(slot);
+    }
+
+    public slotFor(&self, tempRaw: u32): Option<String> {
+      let mut index: u64 = 0;
+
+      while (index < self.slotTemps.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(existing) = self.slotTemps.get(index)) {
+          if (*existing == tempRaw) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          if (let Option::SOME(name) = self.slotNames.get(index)) {
+            return Option::SOME(name.clone());
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+  }
+
+  /// Reserves one stack slot per aggregate temp the function's instructions
+  /// produce outside of calls: the destinations of `MakeSlice`, whose slice
+  /// value has to live somewhere addressable. Call results with an aggregate
+  /// type need no slot; QBE itself hands back caller storage for them.
+  function qbeReserveSlots(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    context: &mut CodegenQbe::QbeFuncCtx,
+  ): void {
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        let Option::SOME(instruction) = block.instructions.get(instrIndex) else {
+          instrIndex += 1;
+          continue;
+        };
+
+        if (let Lir::Instr::MakeSlice(node) = instruction) {
+          let destOperand: Lir::Operand = Lir::Operand::Temp(node.dest);
+          let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+            instrIndex += 1;
+            continue;
+          };
+
+          let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, destType);
+
+          if (reference.length() == 0) {
+            instrIndex += 1;
+            continue;
+          }
+
+          let slot: String = CodegenQbe::freshTemp(emitter);
+          let line: String = `    ${slot.toStr()} =l alloc16 16\n`;
+
+          emitter.out.pushStr(line.toStr());
+          context.reserve(node.dest.raw(), slot);
+        }
+
+        instrIndex += 1;
+      }
+
+      blockIndex += 1;
+    }
+  }
+
+  /// The QBE text for a scalar return or parameter class, or the aggregate
+  /// type reference with its trailing space. Void answers an empty string.
+  function qbeTypeText(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+  ): String {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+    if (CodegenC::isVoidType(typeStore, resolved)) {
+      return String::create("");
+    }
+    if (let Option::SOME(Analyzer::Type::NEVER) = typeStore.get(resolved)) {
+      return String::create("");
+    }
+
+    if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, ty)) {
+      let text: String = `${cls.toStr()} `;
+
+      return text;
+    }
+
+    let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, ty);
+
+    if (reference.length() == 0) {
+      CodegenQbe::failNamed(emitter, "Function");
+      return String::create("");
+    }
+
+    let text: String = `${reference.toStr()} `;
+
+    return text;
+  }
+
+  /// The signature line of one function: linkage, return class or type, the
+  /// mangled symbol, and every parameter with its class or aggregate type.
+  /// Parameters arrive as the temps `t0..tN`, so the header spells those
+  /// names directly.
+  function qbeFunctionHeader(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    externalSymbols: &Vector<u32>,
+  ): String {
+    let name: String = CodegenC::mangledName(defStore, symbols, function_.defId);
+    let mut linkage: String = String::create("function ");
+
+    if (CodegenC::isExportedSymbol(defStore, function_.defId)) {
+      linkage = String::create("export function ");
+    } else {
+      if (CodegenC::hasRaw(externalSymbols, function_.defId.raw())) {
+        linkage = String::create("export function ");
+      }
+    }
+
+    let returnText: String = CodegenQbe::qbeTypeText(emitter, defStore, typeStore, symbols, function_.returnType);
+
+    if (emitter.error.isSome()) {
+      return String::create("");
+    }
+
+    let mut header: String = `${linkage.toStr()}${returnText.toStr()}$${name.toStr()}(`;
+
+    let mut index: u64 = 0;
+
+    while (index < function_.params.length()) {
+      let Option::SOME(paramDef) = function_.params.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut paramType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(*paramDef)) {
+        paramType = Option::SOME(variableDef.declaredType);
+      }
+
+      let Option::SOME(foundType) = paramType else {
+        CodegenQbe::failNamed(emitter, "Function");
+        return String::create("");
+      };
+
+      if (index > 0) {
+        header.pushStr(", ");
+      }
+
+      let tempName: String = `%t${index}`;
+
+      if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, foundType)) {
+        let text: String = `${cls.toStr()} ${tempName.toStr()}`;
+
+        header.pushStr(text.toStr());
+      } else {
+        let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, foundType);
+
+        if (reference.length() == 0) {
+          CodegenQbe::failNamed(emitter, "Function");
+          return String::create("");
+        }
+
+        let text: String = `${reference.toStr()} ${tempName.toStr()}`;
+
+        header.pushStr(text.toStr());
+      }
+
+      index += 1;
+    }
+
+    if (function_.isVariadic) {
+      if (function_.params.length() > 0) {
+        header.pushStr(", ");
+      }
+
+      header.pushStr("...");
+    }
+
+    header.pushStr(") {\n");
+
+    return header;
+  }
+
+  /// One `alloc` line per local slot, in declaration order, so `%l0..` match
+  /// the LIR local ids. Scalars get 4- or 8-byte slots; every aggregate gets
+  /// a 16-byte-aligned slot sized by the emitter's own layout.
+  function qbeEmitLocalSlots(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < function_.locals.length()) {
+      let Option::SOME(local) = function_.locals.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, local.ty);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      let mut slotOp: str = CodegenQbe::qbeSlotOp(size);
+
+      if (CodegenQbe::isAggregateType(defStore, typeStore, local.ty)) {
+        slotOp = "alloc16";
+      }
+
+      let line: String = `    %l${index} =l ${slotOp} ${size}\n`;
+
+      emitter.out.pushStr(line.toStr());
+      index += 1;
+    }
+  }
+
+  /// Loads the value of one local slot into a fresh temp of the local's own
+  /// class, or hands back the slot address for an aggregate.
+  function qbeLoadLocal(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    local: Lir::LocalId,
+  ): Option<String> {
+    let localOperand: Lir::Operand = Lir::Operand::Local(local);
+    let Option::SOME(localType) = CodegenQbe::operandType(defStore, function_, &localOperand) else {
+      return Option::NONE;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, localType)) {
+      return Option::SOME(`%l${local.raw()}`);
+    }
+
+    let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, localType) else {
+      CodegenQbe::failNamed(emitter, "Load");
+      return Option::NONE;
+    };
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, localType) else {
+      CodegenQbe::failNamed(emitter, "Load");
+      return Option::NONE;
+    };
+
+    let fresh: String = CodegenQbe::freshTemp(emitter);
+    let line: String = `    ${fresh.toStr()} =${cls.toStr()} ${load.toStr()} %l${local.raw()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+
+    return Option::SOME(fresh);
+  }
+
+  /// Stores one scalar into a byte address already computed: the typed store
+  /// the value class asks for. Aggregates never come through here.
+  function qbeStoreScalarAt(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    value: &String,
+    address: &String,
+  ): void {
+    let Option::SOME(store) = CodegenQbe::storeOp(defStore, typeStore, ty) else {
+      CodegenQbe::failNamed(emitter, "Store");
+      return;
+    };
+
+    let line: String = `    ${store.toStr()} ${value.toStr()}, ${address.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  /// Copies `size` bytes from the address of `value` into `address`: the one
+  /// aggregate store, spelled as a libc `memcpy` call.
+  function qbeMemcpy(
+    emitter: &mut CodegenQbe::Emitter,
+    address: &String,
+    value: &String,
+    size: u64,
+  ): void {
+    let line: String = `    call $memcpy(l ${address.toStr()}, l ${value.toStr()}, l ${size})\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  /// `%to =l add %from, <offset>` for a nonzero offset, a plain copy when the
+  /// field sits at zero.
+  function qbeAddressOffset(
+    emitter: &mut CodegenQbe::Emitter,
+    origin: &String,
+    offset: u64,
+  ): String {
+    let fresh: String = CodegenQbe::freshTemp(emitter);
+    let mut line: String = String::create("");
+
+    if (offset == 0) {
+      line = `    ${fresh.toStr()} =l copy ${origin.toStr()}\n`;
+    } else {
+      line = `    ${fresh.toStr()} =l add ${origin.toStr()}, ${offset}\n`;
+    }
+
+    emitter.out.pushStr(line.toStr());
+
+    return fresh;
+  }
+
+  /// Widens a scalar to `l` class for pointer arithmetic: `l` values pass
+  /// through, narrow integers sign- or zero-extend by their signedness.
+  function qbeWidenToLong(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    value: &String,
+  ): String {
+    if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, ty)) {
+      if (cls.equals("l")) {
+        return value.clone();
+      }
+    }
+
+    let mut ext: String = String::create("extsw");
+
+    if (!CodegenQbe::isSignedInteger(defStore, typeStore, ty)) {
+      ext = String::create("extuw");
+    }
+
+    let fresh: String = CodegenQbe::freshTemp(emitter);
+    let line: String = `    ${fresh.toStr()} =l ${ext.toStr()} ${value.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+
+    return fresh;
+  }
+
+  /// Emits one LIR instruction. Scalars travel through typed loads, stores
+  /// and class-matched arithmetic; aggregates are addresses and move as
+  /// `memcpy`; anything out of scope fails the unit closed.
+  function qbeEmitInstruction(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    context: &mut CodegenQbe::QbeFuncCtx,
+    instruction: &Lir::Instr,
+  ): void {
+    match (instruction) {
+      Lir::Instr::Nop -> {},
+      Lir::Instr::Trap(_) -> {
+        CodegenQbe::failFor(emitter, instruction);
+      },
+      Lir::Instr::Load(node) -> {
+        CodegenQbe::qbeEmitLoad(emitter, defStore, typeStore, function_, &node);
+      },
+      Lir::Instr::Store(node) -> {
+        CodegenQbe::qbeEmitStore(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::LoadPtr(node) -> {
+        CodegenQbe::qbeEmitLoadPtr(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::StorePtr(node) -> {
+        CodegenQbe::qbeEmitStorePtr(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::BuiltinLoad(node) -> {
+        if (node.volatile) { CodegenQbe::failFor(emitter, instruction); return; }
+        let view: Lir::InstrLoadPtr = Lir::InstrLoadPtr { dest: node.dest, ptr: Lir::copyOperand(&node.ptr) };
+
+        CodegenQbe::qbeEmitLoadPtr(emitter, defStore, typeStore, symbols, function_, &view);
+      },
+      Lir::Instr::BuiltinStore(node) -> {
+        if (node.volatile) { CodegenQbe::failFor(emitter, instruction); return; }
+        let view: Lir::InstrStorePtr = Lir::InstrStorePtr { ptr: Lir::copyOperand(&node.ptr), value: Lir::copyOperand(&node.value) };
+
+        CodegenQbe::qbeEmitStorePtr(emitter, defStore, typeStore, symbols, function_, &view);
+      },
+      Lir::Instr::Copy(node) -> {
+        CodegenQbe::qbeEmitCopy(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::BinOp(node) -> {
+        CodegenQbe::qbeEmitBinOp(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::UnaryOp(node) -> {
+        CodegenQbe::qbeEmitUnaryOp(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::Call(node) -> {
+        CodegenQbe::qbeEmitCall(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::RuntimeCall(_) -> {
+        CodegenQbe::failFor(emitter, instruction);
+      },
+      Lir::Instr::Cast(node) -> {
+        CodegenQbe::qbeEmitCast(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::BitCast(node) -> {
+        CodegenQbe::qbeEmitCast(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::AddrOfLocal(node) -> {
+        let line: String = `    %t${node.dest.raw()} =l copy %l${node.local.raw()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Instr::AddrOfGlobal(node) -> {
+        let name: String = CodegenC::mangledName(defStore, symbols, node.def);
+        let line: String = `    %t${node.dest.raw()} =l copy $${name.toStr()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Instr::GetElementPtr(node) -> {
+        CodegenQbe::qbeEmitGetElementPtr(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::MakeSlice(node) -> {
+        CodegenQbe::qbeEmitMakeSlice(emitter, defStore, typeStore, symbols, function_, context, &node);
+      },
+      Lir::Instr::InitZero(node) -> {
+        CodegenQbe::qbeEmitInitZero(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::InitSplat(node) -> {
+        CodegenQbe::qbeEmitInitSplat(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::SizeOf(node) -> {
+        let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.ty);
+        let line: String = `    %t${node.dest.raw()} =l copy ${size}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Instr::AlignOf(node) -> {
+        let alignment: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, node.ty);
+        let line: String = `    %t${node.dest.raw()} =l copy ${alignment}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Instr::MaxOf(node) -> {
+        CodegenQbe::qbeEmitMaxMin(emitter, defStore, typeStore, &node, true);
+      },
+      Lir::Instr::MinOf(node) -> {
+        CodegenQbe::qbeEmitMaxMin(emitter, defStore, typeStore, &node, false);
+      },
+      Lir::Instr::PanicMessage(node) -> {
+        CodegenQbe::qbeEmitPanic(emitter, &node.message);
+      },
+      Lir::Instr::Drop(node) -> {
+        CodegenQbe::qbeEmitDrop(emitter, defStore, typeStore, function_, node.local);
+      },
+      Lir::Instr::DropInPlace(node) -> {
+        CodegenQbe::qbeEmitDropInPlace(emitter, defStore, typeStore, node.ty);
+      },
+      Lir::Instr::MarkMoved(_) -> {},
+      Lir::Instr::GetFieldPtr(node) -> {
+        CodegenQbe::qbeEmitGetFieldPtr(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::InitRecord(node) -> {
+        CodegenQbe::qbeEmitInitRecord(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::InitEnumVariant(node) -> {
+        let enumDef: Analyzer::DefinitionId = CodegenQbe::enumDefOf(emitter, defStore, typeStore, node.enumType);
+        if (node.payload.length() > 0 || !CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+          CodegenQbe::failFor(emitter, instruction);
+        } else {
+          if (let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr)) {
+            let line: String = `    storew ${node.variantTag}, ${address.toStr()}\n`;
+            emitter.out.pushStr(line.toStr());
+          }
+        }
+      },
+      Lir::Instr::EnumGetTag(node) -> {
+        CodegenQbe::qbeEmitEnumGetTag(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::BuiltinEq(node) -> {
+        CodegenQbe::qbeEmitBuiltinEq(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      _ -> {
+        CodegenQbe::failFor(emitter, instruction);
+      },
+    };
+  }
+
+  function qbeEmitLoad(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrLoad,
+  ): void {
+    let sourceOperand: Lir::Operand = Lir::Operand::Local(node.source);
+    let Option::SOME(localType) = CodegenQbe::operandType(defStore, function_, &sourceOperand) else {
+      CodegenQbe::failNamed(emitter, "Load");
+      return;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, localType)) {
+      let line: String = `    %t${node.dest.raw()} =l copy %l${node.source.raw()}\n`;
+
+      emitter.out.pushStr(line.toStr());
+      return;
+    }
+
+    let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, localType) else {
+      CodegenQbe::failNamed(emitter, "Load");
+      return;
+    };
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, localType) else {
+      CodegenQbe::failNamed(emitter, "Load");
+      return;
+    };
+
+    let line: String = `    %t${node.dest.raw()} =${cls.toStr()} ${load.toStr()} %l${node.source.raw()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitStore(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrStore,
+  ): void {
+    let destOperand: Lir::Operand = Lir::Operand::Local(node.dest);
+    let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "Store");
+      return;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, destType)) {
+      let Option::SOME(valueAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.value) else {
+        return;
+      };
+
+      let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, destType);
+      let slot: String = `%l${node.dest.raw()}`;
+
+      CodegenQbe::qbeMemcpy(emitter, &slot, &valueAddress, size);
+      return;
+    }
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.value) else {
+      return;
+    };
+
+    let slot: String = `%l${node.dest.raw()}`;
+
+    CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, destType, &value, &slot);
+  }
+
+  function qbeEmitLoadPtr(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrLoadPtr,
+  ): void {
+    let destOperand: Lir::Operand = Lir::Operand::Temp(node.dest);
+    let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "LoadPtr");
+      return;
+    };
+
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.ptr) else {
+      return;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, destType)) {
+      let line: String = `    %t${node.dest.raw()} =l loadl ${pointer.toStr()}\n`;
+
+      emitter.out.pushStr(line.toStr());
+      return;
+    }
+
+    let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, destType) else {
+      CodegenQbe::failNamed(emitter, "LoadPtr");
+      return;
+    };
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, destType) else {
+      CodegenQbe::failNamed(emitter, "LoadPtr");
+      return;
+    };
+
+    let line: String = `    %t${node.dest.raw()} =${cls.toStr()} ${load.toStr()} ${pointer.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitStorePtr(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrStorePtr,
+  ): void {
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.ptr) else {
+      return;
+    };
+
+    let Option::SOME(valueType) = CodegenQbe::operandType(defStore, function_, &node.value) else {
+      CodegenQbe::failNamed(emitter, "StorePtr");
+      return;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, valueType)) {
+      let Option::SOME(valueAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.value) else {
+        return;
+      };
+
+      let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, valueType);
+
+      CodegenQbe::qbeMemcpy(emitter, &pointer, &valueAddress, size);
+      return;
+    }
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.value) else {
+      return;
+    };
+
+    CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, valueType, &value, &pointer);
+  }
+
+  function qbeEmitCopy(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrCopy,
+  ): void {
+    let destOperand: Lir::Operand = Lir::Operand::Temp(node.dest);
+    let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "Copy");
+      return;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, destType)) {
+      let Option::SOME(sourceAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+        return;
+      };
+
+      let line: String = `    %t${node.dest.raw()} =l copy ${sourceAddress.toStr()}\n`;
+
+      emitter.out.pushStr(line.toStr());
+      return;
+    }
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+      return;
+    };
+
+    let normalized: String = CodegenQbe::qbeNormalize(emitter, defStore, typeStore, destType, &value);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, destType) else {
+      CodegenQbe::failNamed(emitter, "Copy");
+      return;
+    };
+
+    let line: String = `    %t${node.dest.raw()} =${cls.toStr()} copy ${normalized.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  /// The QBE comparison mnemonic for one Hir binary operation over operands
+  /// of `ty`: `c<cmp><class>`, signed or unsigned by the operand type.
+  function qbeCompareOp(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    op: &Hir::BinaryOperation,
+    ty: Analyzer::TypeId,
+  ): String {
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, ty) else {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return String::create("ceqw");
+    };
+
+    let signed: boolean = CodegenQbe::isSignedInteger(defStore, typeStore, ty);
+    let mut stem: String = String::create("eq");
+
+    match (op) {
+      Hir::BinaryOperation::Equal -> {
+        stem = String::create("eq");
+      },
+      Hir::BinaryOperation::NotEqual -> {
+        stem = String::create("ne");
+      },
+      Hir::BinaryOperation::LessThan -> {
+        if (signed) {
+          stem = String::create("slt");
+        } else {
+          stem = String::create("ult");
+        }
+      },
+      Hir::BinaryOperation::LessEqual -> {
+        if (signed) {
+          stem = String::create("sle");
+        } else {
+          stem = String::create("ule");
+        }
+      },
+      Hir::BinaryOperation::GreaterThan -> {
+        if (signed) {
+          stem = String::create("sgt");
+        } else {
+          stem = String::create("ugt");
+        }
+      },
+      Hir::BinaryOperation::GreaterEqual -> {
+        if (signed) {
+          stem = String::create("sge");
+        } else {
+          stem = String::create("uge");
+        }
+      },
+      _ -> {
+        CodegenQbe::failNamed(emitter, "BinOp");
+      },
+    };
+
+    return `c${stem.toStr()}${cls.toStr()}`;
+  }
+
+  /// The plain arithmetic mnemonic for one Hir binary operation, with the
+  /// signedness the operand type asks for on div, mod and right shifts.
+  function qbeArithOp(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    op: &Hir::BinaryOperation,
+    ty: Analyzer::TypeId,
+  ): String {
+    let signed: boolean = CodegenQbe::isSignedInteger(defStore, typeStore, ty);
+
+    return match (op) {
+      Hir::BinaryOperation::Add -> String::create("add"),
+      Hir::BinaryOperation::Sub -> String::create("sub"),
+      Hir::BinaryOperation::Mul -> String::create("mul"),
+      Hir::BinaryOperation::Div -> {
+        if (signed) {
+          return String::create("div");
+        }
+
+        return String::create("udiv");
+      },
+      Hir::BinaryOperation::Mod -> {
+        if (signed) {
+          return String::create("rem");
+        }
+
+        return String::create("urem");
+      },
+      Hir::BinaryOperation::BitAnd -> String::create("and"),
+      Hir::BinaryOperation::BitOr -> String::create("or"),
+      Hir::BinaryOperation::BitXor -> String::create("xor"),
+      Hir::BinaryOperation::BitShiftLeft -> String::create("shl"),
+      Hir::BinaryOperation::BitShiftRight -> {
+        if (signed) {
+          return String::create("sar");
+        }
+
+
+        return String::create("shr");
+      },
+      Hir::BinaryOperation::And -> String::create("and"),
+      Hir::BinaryOperation::Or -> String::create("or"),
+      _ -> {
+        CodegenQbe::failNamed(emitter, "BinOp");
+        String::create("")
+      },
+    };
+  }
+
+  function qbeEmitBinOp(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrBinOp,
+  ): void {
+    let destOperand: Lir::Operand = Lir::Operand::Temp(node.dest);
+    let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, destType)) {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return;
+    }
+
+    let Option::SOME(leftType) = CodegenQbe::operandType(defStore, function_, &node.left) else {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return;
+    };
+
+    let Option::SOME(left) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
+      return;
+    };
+
+    let Option::SOME(right) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.right) else {
+      return;
+    };
+
+    let dest: String = `%t${node.dest.raw()}`;
+    let mut isCompare: boolean = false;
+
+    match (node.op) {
+      Hir::BinaryOperation::Equal -> {
+        isCompare = true;
+      },
+      Hir::BinaryOperation::NotEqual -> {
+        isCompare = true;
+      },
+      Hir::BinaryOperation::LessThan -> {
+        isCompare = true;
+      },
+      Hir::BinaryOperation::LessEqual -> {
+        isCompare = true;
+      },
+      Hir::BinaryOperation::GreaterThan -> {
+        isCompare = true;
+      },
+      Hir::BinaryOperation::GreaterEqual -> {
+        isCompare = true;
+      },
+      _ -> {},
+    };
+
+    if (isCompare) {
+      let compare: String = CodegenQbe::qbeCompareOp(emitter, defStore, typeStore, &node.op, leftType);
+      let line: String = `    ${dest.toStr()} =w ${compare.toStr()} ${left.toStr()}, ${right.toStr()}\n`;
+
+      emitter.out.pushStr(line.toStr());
+      return;
+    }
+
+    let arith: String = CodegenQbe::qbeArithOp(emitter, defStore, typeStore, &node.op, leftType);
+
+    if (arith.length() == 0) {
+      return;
+    }
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, destType) else {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return;
+    };
+
+    let mut rightText: String = right.clone();
+
+    match (node.op) {
+      Hir::BinaryOperation::BitShiftLeft -> {
+        rightText = CodegenQbe::qbeMaskShift(emitter, defStore, typeStore, destType, &right);
+      },
+      Hir::BinaryOperation::BitShiftRight -> {
+        rightText = CodegenQbe::qbeMaskShift(emitter, defStore, typeStore, destType, &right);
+      },
+      _ -> {},
+    };
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let line: String = `    ${dest.toStr()} =${cls.toStr()} ${arith.toStr()} ${left.toStr()}, ${rightText.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+
+    CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, destType, &dest);
+  }
+
+  /// Masks a shift count to the width of the shifted value, matching the
+  /// masked-shift semantics the C backend gets from the hardware.
+  function qbeMaskShift(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    count: &String,
+  ): String {
+    if (CodegenQbe::qbeClass(defStore, typeStore, ty).isNone()) {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return count.clone();
+    }
+
+    let width: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, ty) * 8;
+    if (width == 0) {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return count.clone();
+    }
+    let mask: u64 = width - 1;
+
+    let fresh: String = CodegenQbe::freshTemp(emitter);
+    let line: String = `    ${fresh.toStr()} =w and ${count.toStr()}, ${mask}\n`;
+
+    emitter.out.pushStr(line.toStr());
+
+    return fresh;
+  }
+
+  /// Re-normalizes a narrow result already sitting in `dest`, so consumers
+  /// read the declared width and not the garbage above it.
+  function qbeNormalizeInPlace(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    dest: &String,
+  ): void {
+    let Option::SOME(ext) = CodegenQbe::qbeExtOp(defStore, typeStore, ty) else {
+      return;
+    };
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, ty) else {
+      return;
+    };
+
+    let fresh: String = CodegenQbe::freshTemp(emitter);
+    let extend: String = `    ${fresh.toStr()} =${cls.toStr()} ${ext.toStr()} ${dest.toStr()}\n`;
+    let copyBack: String = `    ${dest.toStr()} =${cls.toStr()} copy ${fresh.toStr()}\n`;
+
+    emitter.out.pushStr(extend.toStr());
+    emitter.out.pushStr(copyBack.toStr());
+  }
+
+  function qbeEmitUnaryOp(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrUnaryOp,
+  ): void {
+    let destOperand: Lir::Operand = Lir::Operand::Temp(node.dest);
+    let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "UnaryOp");
+      return;
+    };
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.operand) else {
+      return;
+    };
+
+    let dest: String = `%t${node.dest.raw()}`;
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, destType) else {
+      CodegenQbe::failNamed(emitter, "UnaryOp");
+      return;
+    };
+
+    match (node.op) {
+      Hir::UnaryOperation::Not -> {
+        let line: String = `    ${dest.toStr()} =w xor ${value.toStr()}, 1\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Hir::UnaryOperation::Neg -> {
+        let line: String = `    ${dest.toStr()} =${cls.toStr()} sub 0, ${value.toStr()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+        CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, destType, &dest);
+      },
+      Hir::UnaryOperation::BitNot -> {
+        let line: String = `    ${dest.toStr()} =${cls.toStr()} xor ${value.toStr()}, -1\n`;
+
+        emitter.out.pushStr(line.toStr());
+        CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, destType, &dest);
+      },
+    };
+  }
+
+  /// The classed text of one call argument: `w`/`l` for scalars, the
+  /// aggregate type reference for records, slices and arrays.
+  function qbeCallArg(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    argument: &Lir::Operand,
+  ): String {
+    let Option::SOME(argumentType) = CodegenC::operandType(function_, argument) else {
+      CodegenQbe::failNamed(emitter, "Call");
+      return String::create("");
+    };
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, argument) else {
+      return String::create("");
+    };
+
+    if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, argumentType)) {
+      return `${cls.toStr()} ${value.toStr()}`;
+    }
+
+    let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, argumentType);
+
+    if (reference.length() == 0) {
+      CodegenQbe::failNamed(emitter, "Call");
+      return String::create("");
+    }
+
+    return `${reference.toStr()} ${value.toStr()}`;
+  }
+
+  /// The `call` line for `name` over `args`, with the destination prefix the
+  /// return class asks for.
+  function qbeCallLine(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    name: &String,
+    args: &Vector<String>,
+    destPrefix: &String,
+  ): void {
+    let mut call: String = String::create("    ");
+
+    call.pushStr(destPrefix.toStr());
+    let head: String = `call $${name.toStr()}(`;
+
+    call.pushStr(head.toStr());
+
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        if (index > 0) {
+          call.pushStr(", ");
+        }
+
+        call.pushStr(argument.toStr());
+      }
+
+      index += 1;
+    }
+
+    call.pushStr(")\n");
+
+    emitter.out.pushStr(call.toStr());
+  }
+
+  function qbeEmitCall(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrCall,
+  ): void {
+    let name: String = CodegenC::mangledName(defStore, symbols, node.callee);
+    let mut args: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < node.args.length()) {
+      if (let Option::SOME(argument) = node.args.get(index)) {
+        let text: String = CodegenQbe::qbeCallArg(emitter, defStore, typeStore, symbols, function_, argument);
+
+        if (emitter.error.isSome()) {
+          return;
+        }
+
+        args.push(text);
+      }
+
+      index += 1;
+    }
+
+    // Typed extern wrappers do not retain the C prototype's variadic flag.
+    // For this integer-only slice the variadic call convention also matches
+    // fixed prototypes, while ensuring the SysV vector-register count is zero.
+    if (args.length() > 0 && CodegenC::isExternFunction(defStore, node.callee)) {
+      args.push(String::create("..."));
+    }
+    let noPrefix: String = String::create("");
+
+    let Option::SOME(dest) = node.dest else {
+      CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &noPrefix);
+      return;
+    };
+
+    let destOperand: Lir::Operand = Lir::Operand::Temp(dest);
+    let Option::SOME(returnType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "Call");
+      return;
+    };
+
+    let destName: String = `%t${dest.raw()}`;
+
+    let resolvedReturn: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, returnType);
+    let mut neverReturns: boolean = false;
+    if (let Option::SOME(Analyzer::Type::NEVER) = typeStore.get(resolvedReturn)) {
+      neverReturns = true;
+    }
+    if (CodegenC::isVoidType(typeStore, returnType) || neverReturns) {
+      CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &noPrefix);
+      return;
+    }
+
+    if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, returnType)) {
+      let prefix: String = `${destName.toStr()} =${cls.toStr()} `;
+
+      CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &prefix);
+      CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, returnType, &destName);
+      return;
+    }
+
+    let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, returnType);
+
+    if (reference.length() == 0) {
+      CodegenQbe::failNamed(emitter, "Call");
+      return;
+    }
+
+    let prefix: String = `${destName.toStr()} =${reference.toStr()} `;
+
+    CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &prefix);
+  }
+
+  function qbeEmitRuntimeCall(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrRuntimeCall,
+  ): void {
+    let mut args: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < node.args.length()) {
+      if (let Option::SOME(argument) = node.args.get(index)) {
+        let text: String = CodegenQbe::qbeCallArg(emitter, defStore, typeStore, symbols, function_, argument);
+
+        if (emitter.error.isSome()) {
+          return;
+        }
+
+        args.push(text);
+      }
+
+      index += 1;
+    }
+
+    let noPrefix: String = String::create("");
+
+    CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &node.name, &args, &noPrefix);
+  }
+
+  function qbeEmitCast(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrCast,
+  ): void {
+    let Option::SOME(sourceType) = CodegenQbe::operandType(defStore, function_, &node.source) else {
+      CodegenQbe::failNamed(emitter, "Cast");
+      return;
+    };
+
+    let sourceResolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, sourceType);
+    let targetResolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, node.targetType);
+    let Option::SOME(sourceNode) = typeStore.get(sourceResolved) else {
+      CodegenQbe::failNamed(emitter, "Cast");
+      return;
+    };
+
+    let mut sourceIsFloat: boolean = false;
+
+    match (sourceNode) {
+      Analyzer::Type::F32 -> {
+        sourceIsFloat = true;
+      },
+      Analyzer::Type::F64 -> {
+        sourceIsFloat = true;
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(targetNode) = typeStore.get(targetResolved) else {
+      CodegenQbe::failNamed(emitter, "Cast");
+      return;
+    };
+
+    let mut targetIsFloat: boolean = false;
+
+    match (targetNode) {
+      Analyzer::Type::F32 -> {
+        targetIsFloat = true;
+      },
+      Analyzer::Type::F64 -> {
+        targetIsFloat = true;
+      },
+      _ -> {},
+    };
+
+    if (sourceIsFloat || targetIsFloat) {
+      CodegenQbe::failNamed(emitter, "Cast");
+      return;
+    }
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+      return;
+    };
+
+    let dest: String = `%t${node.dest.raw()}`;
+
+    let mut sourceIsBool: boolean = false;
+
+    match (sourceNode) {
+      Analyzer::Type::BOOLEAN -> {
+        sourceIsBool = true;
+      },
+      _ -> {},
+    };
+
+    let mut targetIsBool: boolean = false;
+
+    match (targetNode) {
+      Analyzer::Type::BOOLEAN -> {
+        targetIsBool = true;
+      },
+      _ -> {},
+    };
+
+    if (targetIsBool) {
+      let mut sourceCls: String = String::create("w");
+
+      if (let Option::SOME(found) = CodegenQbe::qbeClass(defStore, typeStore, sourceResolved)) {
+        sourceCls = found;
+      }
+
+      let mut compare: String = String::create("cnew");
+
+      if (sourceCls.equals("l")) {
+        compare = String::create("cnel");
+      }
+
+      let line: String = `    ${dest.toStr()} =w ${compare.toStr()} ${value.toStr()}, 0\n`;
+
+      emitter.out.pushStr(line.toStr());
+      return;
+    }
+
+    if (sourceIsBool) {
+      let Option::SOME(targetCls) = CodegenQbe::qbeClass(defStore, typeStore, targetResolved) else {
+        CodegenQbe::failNamed(emitter, "Cast");
+        return;
+      };
+
+      let operation: str = targetCls.equals("l") ? "extuw" : "copy";
+      let line: String = `    ${dest.toStr()} =${targetCls.toStr()} ${operation} ${value.toStr()}\n`;
+
+      emitter.out.pushStr(line.toStr());
+      return;
+    }
+
+    if (let Option::SOME(sourceCls) = CodegenQbe::qbeClass(defStore, typeStore, sourceResolved)) {
+      if (let Option::SOME(targetCls) = CodegenQbe::qbeClass(defStore, typeStore, targetResolved)) {
+        let mut line: String = String::create("");
+
+        if (sourceCls.equals("l")) {
+          line = `    ${dest.toStr()} =${targetCls.toStr()} copy ${value.toStr()}\n`;
+
+          emitter.out.pushStr(line.toStr());
+          CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, targetResolved, &dest);
+          return;
+        }
+
+        if (targetCls.equals("l")) {
+          let widened: String = CodegenQbe::qbeWidenToLong(emitter, defStore, typeStore, sourceResolved, &value);
+          let up: String = `    ${dest.toStr()} =l copy ${widened.toStr()}\n`;
+
+          emitter.out.pushStr(up.toStr());
+          return;
+        }
+
+        line = `    ${dest.toStr()} =w copy ${value.toStr()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+        CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, targetResolved, &dest);
+        return;
+      }
+    }
+
+    let line: String = `    ${dest.toStr()} =l copy ${value.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitGetElementPtr(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrGetElementPtr,
+  ): void {
+    let Option::SOME(baseType) = CodegenQbe::operandType(defStore, function_, &node.base) else {
+      CodegenQbe::failNamed(emitter, "GetElementPtr");
+      return;
+    };
+
+    let resolvedBase: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, baseType);
+    let Option::SOME(baseNode) = typeStore.get(resolvedBase) else {
+      CodegenQbe::failNamed(emitter, "GetElementPtr");
+      return;
+    };
+
+    let Option::SOME(baseAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.base) else {
+      return;
+    };
+
+    let mut dataAddress: String = baseAddress.clone();
+
+    match (baseNode) {
+      Analyzer::Type::Slice(_) -> {
+        let fresh: String = CodegenQbe::freshTemp(emitter);
+        let load: String = `    ${fresh.toStr()} =l loadl ${baseAddress.toStr()}\n`;
+
+        emitter.out.pushStr(load.toStr());
+        dataAddress = fresh;
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(indexType) = CodegenQbe::operandType(defStore, function_, &node.index) else {
+      CodegenQbe::failNamed(emitter, "GetElementPtr");
+      return;
+    };
+
+    let Option::SOME(index) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.index) else {
+      return;
+    };
+
+    let widened: String = CodegenQbe::qbeWidenToLong(emitter, defStore, typeStore, indexType, &index);
+    let elementSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.elementType);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let dest: String = `%t${node.dest.raw()}`;
+    let mut line: String = String::create("");
+
+    if (elementSize == 1) {
+      line = `    ${dest.toStr()} =l add ${dataAddress.toStr()}, ${widened.toStr()}\n`;
+    } else {
+      let scaled: String = CodegenQbe::freshTemp(emitter);
+      let mul: String = `    ${scaled.toStr()} =l mul ${widened.toStr()}, ${elementSize}\n`;
+
+      emitter.out.pushStr(mul.toStr());
+      line = `    ${dest.toStr()} =l add ${dataAddress.toStr()}, ${scaled.toStr()}\n`;
+    }
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitMakeSlice(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    context: &mut CodegenQbe::QbeFuncCtx,
+    node: &Lir::InstrMakeSlice,
+  ): void {
+    let Option::SOME(slot) = context.slotFor(node.dest.raw()) else {
+      CodegenQbe::failNamed(emitter, "MakeSlice");
+      return;
+    };
+
+    let Option::SOME(data) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.data) else {
+      return;
+    };
+
+    let Option::SOME(lenType) = CodegenQbe::operandType(defStore, function_, &node.len) else {
+      CodegenQbe::failNamed(emitter, "MakeSlice");
+      return;
+    };
+
+    let Option::SOME(len) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.len) else {
+      return;
+    };
+
+    let lenLong: String = CodegenQbe::qbeWidenToLong(emitter, defStore, typeStore, lenType, &len);
+    let dataLine: String = `    storel ${data.toStr()}, ${slot.toStr()}\n`;
+
+    emitter.out.pushStr(dataLine.toStr());
+
+    let tail: String = CodegenQbe::qbeAddressOffset(emitter, &slot, 8);
+    let lenLine: String = `    storel ${lenLong.toStr()}, ${tail.toStr()}\n`;
+
+    emitter.out.pushStr(lenLine.toStr());
+
+    let line: String = `    %t${node.dest.raw()} =l copy ${slot.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitInitZero(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrInitZero,
+  ): void {
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr) else {
+      return;
+    };
+
+    let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.ty);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let line: String = `    call $memset(l ${pointer.toStr()}, w 0, l ${size})\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitInitSplat(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrInitSplat,
+  ): void {
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr) else {
+      return;
+    };
+
+    let elementSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.elementType);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, node.elementType)) {
+      CodegenQbe::failNamed(emitter, "InitSplat");
+      return;
+    }
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.value) else {
+      return;
+    };
+
+    if (elementSize == 1) {
+      let total: u64 = node.count;
+      let line: String = `    call $memset(l ${pointer.toStr()}, w ${value.toStr()}, l ${total})\n`;
+
+      emitter.out.pushStr(line.toStr());
+      return;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < node.count) {
+      let target: String = CodegenQbe::qbeAddressOffset(emitter, &pointer, index * elementSize);
+
+      CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, node.elementType, &value, &target);
+      index += 1;
+    }
+  }
+
+  /// `@maxOf(T)` / `@minOf(T)`: the integer bounds, spelled as immediates in
+  /// the destination's class.
+  function qbeEmitMaxMin(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    node: &Lir::InstrTypeQuery,
+    isMax: boolean,
+  ): void {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, node.ty);
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      CodegenQbe::failNamed(emitter, "MaxOf");
+      return;
+    };
+
+    let mut text: String = String::create("");
+
+    match (typeNode) {
+      Analyzer::Type::I8 -> {
+        if (isMax) {
+          text = String::create("127");
+        } else {
+          text = String::create("-128");
+        }
+      },
+      Analyzer::Type::U8 -> {
+        text = String::create(isMax ? "255" : "0");
+      },
+      Analyzer::Type::I16 -> {
+        if (isMax) {
+          text = String::create("32767");
+        } else {
+          text = String::create("-32768");
+        }
+      },
+      Analyzer::Type::U16 -> {
+        text = String::create(isMax ? "65535" : "0");
+      },
+      Analyzer::Type::I32 -> {
+        if (isMax) {
+          text = String::create("2147483647");
+        } else {
+          text = String::create("-2147483648");
+        }
+      },
+      Analyzer::Type::U32 -> {
+        text = String::create(isMax ? "4294967295" : "0");
+      },
+      Analyzer::Type::I64 -> {
+        if (isMax) {
+          text = String::create("9223372036854775807");
+        } else {
+          text = String::create("-9223372036854775808");
+        }
+      },
+      Analyzer::Type::U64 -> {
+        text = String::create(isMax ? "18446744073709551615" : "0");
+      },
+      _ -> {
+        CodegenQbe::failNamed(emitter, "MaxOf");
+        return;
+      },
+    };
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, resolved) else {
+      CodegenQbe::failNamed(emitter, "MaxOf");
+      return;
+    };
+
+    let dest: String = `%t${node.dest.raw()}`;
+    let line: String = `    ${dest.toStr()} =${cls.toStr()} copy ${text.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+    CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, resolved, &dest);
+  }
+
+  /// A panic prints its message over `dprintf(2, ...)` and exits with the
+  /// runtime's panic code; no runtime symbols are needed.
+  function qbeEmitPanic(emitter: &mut CodegenQbe::Emitter, message: &String): void {
+    let format: String = String::create("panic: %s\n");
+
+    if (!emitter.hasPanicFormat) {
+      emitter.hasPanicFormat = true;
+      CodegenQbe::internString(emitter, &format);
+    }
+
+    let formatSymbol: String = CodegenQbe::internString(emitter, &format);
+    let messageSymbol: String = CodegenQbe::internString(emitter, message);
+
+    let print: String = `    call $dprintf(w 2, l ${formatSymbol.toStr()}, ..., l ${messageSymbol.toStr()})\n`;
+    let exit: String = `    call $exit(w 101)\n`;
+
+    emitter.out.pushStr(print.toStr());
+
+    emitter.out.pushStr(exit.toStr());
+  }
+
+  function qbeEmitDrop(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    local: Lir::LocalId,
+  ): void {
+    let localOperand: Lir::Operand = Lir::Operand::Local(local);
+    let Option::SOME(localType) = CodegenQbe::operandType(defStore, function_, &localOperand) else {
+      return;
+    };
+
+    if (CodegenQbe::needsDrop(defStore, typeStore, localType)) {
+      CodegenQbe::failNamed(emitter, "Drop");
+    }
+  }
+
+  function qbeEmitDropInPlace(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): void {
+    if (CodegenQbe::needsDrop(defStore, typeStore, ty)) {
+      CodegenQbe::failNamed(emitter, "DropInPlace");
+    }
+  }
+
+  function qbeEmitGetFieldPtr(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrGetFieldPtr,
+  ): void {
+    let Option::SOME(baseType) = CodegenQbe::operandType(defStore, function_, &node.base) else {
+      CodegenQbe::failNamed(emitter, "GetFieldPtr");
+      return;
+    };
+
+    let Option::SOME(recordDef) = CodegenQbe::nominalBehind(defStore, typeStore, baseType) else {
+      CodegenQbe::failNamed(emitter, "GetFieldPtr");
+      return;
+    };
+
+    let Option::SOME(baseAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.base) else {
+      return;
+    };
+
+    let offset: u64 = CodegenQbe::fieldOffset(emitter, defStore, typeStore, recordDef, node.fieldIndex);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let address: String = CodegenQbe::qbeAddressOffset(emitter, &baseAddress, offset);
+    let line: String = `    %t${node.dest.raw()} =l copy ${address.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitInitRecord(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrInitRecord,
+  ): void {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, node.recordType);
+    let Option::SOME(Analyzer::Type::Record(recordDef)) = typeStore.get(resolved) else {
+      CodegenQbe::failNamed(emitter, "InitRecord");
+      return;
+    };
+
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr) else {
+      return;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < node.fields.length()) {
+      let Option::SOME(field) = node.fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let offset: u64 = CodegenQbe::fieldOffset(emitter, defStore, typeStore, recordDef, field.fieldIndex);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      let address: String = CodegenQbe::qbeAddressOffset(emitter, &pointer, offset);
+
+      let Option::SOME(valueType) = CodegenQbe::operandType(defStore, function_, &field.value) else {
+        CodegenQbe::failNamed(emitter, "InitRecord");
+        return;
+      };
+
+      if (CodegenQbe::isAggregateType(defStore, typeStore, valueType)) {
+        let Option::SOME(valueAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &field.value) else {
+          return;
+        };
+
+        let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, valueType);
+
+        CodegenQbe::qbeMemcpy(emitter, &address, &valueAddress, size);
+      } else {
+        let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &field.value) else {
+          return;
+        };
+
+        CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, valueType, &value, &address);
+      }
+
+      index += 1;
+    }
+  }
+
+  function qbeEmitEnumGetTag(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrEnumGetTag,
+  ): void {
+    let Option::SOME(sourceType) = CodegenQbe::operandType(defStore, function_, &node.source) else {
+      CodegenQbe::failNamed(emitter, "EnumGetTag");
+      return;
+    };
+
+    let enumDefId: Analyzer::DefinitionId = CodegenQbe::enumDefOf(emitter, defStore, typeStore, sourceType);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    if (!CodegenQbe::enumIsFieldless(defStore, enumDefId)) {
+      CodegenQbe::failNamed(emitter, "EnumGetTag");
+      return;
+    }
+
+    let Option::SOME(tag) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+      return;
+    };
+
+    let line: String = `    %t${node.dest.raw()} =w copy ${tag.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function enumDefOf(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Analyzer::DefinitionId {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+    let Option::SOME(Analyzer::Type::Enum(enumDef)) = typeStore.get(resolved) else {
+      CodegenQbe::failNamed(emitter, "EnumGetTag");
+      return Id::fromRaw<Analyzer::DefinitionTag>(0);
+    };
+
+    return enumDef;
+  }
+
+  function qbeEmitBuiltinEq(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrBuiltinEq,
+  ): void {
+    match (node.kind) {
+      Lir::BuiltinEqKind::Primitive -> {
+        let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, node.ty) else {
+          CodegenQbe::failNamed(emitter, "BuiltinEq");
+          return;
+        };
+
+        let Option::SOME(left) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
+          return;
+        };
+
+        let Option::SOME(right) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.right) else {
+          return;
+        };
+
+        let compare: String = `ceq${cls.toStr()}`;
+        let line: String = `    %t${node.dest.raw()} =w ${compare.toStr()} ${left.toStr()}, ${right.toStr()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::BuiltinEqKind::Str -> {
+        let Option::SOME(left) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
+          return;
+        };
+
+        let Option::SOME(right) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.right) else {
+          return;
+        };
+
+        let call: String = CodegenQbe::freshTemp(emitter);
+        let compare: String = `    ${call.toStr()} =w call $strcmp(l ${left.toStr()}, l ${right.toStr()})\n`;
+        let line: String = `    %t${node.dest.raw()} =w ceqw ${call.toStr()}, 0\n`;
+
+        emitter.out.pushStr(compare.toStr());
+        emitter.out.pushStr(line.toStr());
+      },
+      _ -> {
+        CodegenQbe::failNamed(emitter, "BuiltinEq");
+      },
+    };
+  }
+
+  /// Emits one block terminator: `jmp`, a `jnz` over an evaluated condition,
+  /// a `ret` of the normalized return value, or `hlt` for unreachable.
+  function qbeEmitTerminator(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    terminator: &Lir::Terminator,
+  ): void {
+    match (terminator) {
+      Lir::Terminator::Goto(target) -> {
+        let line: String = `    jmp @b${target.raw()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Terminator::Branch(node) -> {
+        let Option::SOME(condition) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.condition) else {
+          return;
+        };
+
+        let line: String = `    jnz ${condition.toStr()}, @b${node.thenBlock.raw()}, @b${node.elseBlock.raw()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Terminator::Return(value) -> {
+        let Option::SOME(operand) = value else {
+          emitter.out.pushStr("    ret\n");
+          return;
+        };
+
+        if (CodegenC::isVoidType(typeStore, function_.returnType)) {
+          CodegenQbe::qbeEmitValueForEffect(emitter, defStore, typeStore, symbols, function_, &operand);
+          emitter.out.pushStr("    ret\n");
+          return;
+        }
+
+        let Option::SOME(text) = CodegenQbe::qbeReturnValue(emitter, defStore, typeStore, symbols, function_, &operand) else {
+          return;
+        };
+
+        let line: String = `    ret ${text.toStr()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Terminator::Unreachable -> {
+        emitter.out.pushStr("    hlt\n");
+      },
+    };
+  }
+
+  /// Evaluates an operand only for its side effects, when a void function
+  /// returns a value the LIR still carries.
+  function qbeEmitValueForEffect(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): void {
+    CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, operand);
+  }
+
+  /// The return text for one operand: a normalized scalar temp or immediate,
+  /// or the aggregate address `ret` hands to QBE's hidden return slot.
+  function qbeReturnValue(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): Option<String> {
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, operand) else {
+      return Option::NONE;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, function_.returnType)) {
+      return Option::SOME(value);
+    }
+
+    let normalized: String = CodegenQbe::qbeNormalize(emitter, defStore, typeStore, function_.returnType, &value);
+
+    if (emitter.error.isSome()) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(normalized);
+  }
+
+  function instructionDiverges(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    instruction: &Lir::Instr,
+  ): boolean {
+    if (let Lir::Instr::PanicMessage(_) = instruction) {
+      return true;
+    }
+    if (let Lir::Instr::Call(node) = instruction) {
+      let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+      if (let Option::SOME(Analyzer::Definition::Function(definition)) = defStore.get(node.callee)) {
+        returnType = Option::SOME(definition.returnType);
+      }
+      if (let Option::SOME(Analyzer::Definition::Method(definition)) = defStore.get(node.callee)) {
+        returnType = Option::SOME(definition.returnType);
+      }
+      if (let Option::SOME(ty) = returnType) {
+        let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+        if (let Option::SOME(Analyzer::Type::NEVER) = typeStore.get(resolved)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// One whole function body: locals as stack slots in the entry block,
+  /// parameters stored from their arrival temps, and every block with its
+  /// instructions and terminator. Extern functions are skipped: the symbol
+  /// resolves at link time.
+  function qbeEmitFunction(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    externalSymbols: &Vector<u32>,
+  ): boolean {
+    if (CodegenC::isExternFunction(defStore, function_.defId)) {
+      return false;
+    }
+
+    let header: String = CodegenQbe::qbeFunctionHeader(emitter, defStore, typeStore, symbols, function_, externalSymbols);
+
+    if (emitter.error.isSome()) {
+      let name: String = CodegenC::mangledName(defStore, symbols, function_.defId);
+      let Option::SOME(message) = &emitter.error else {
+        return false;
+      };
+      let contextual: String = `${message.toStr()} (${name.toStr()})`;
+      emitter.error = Option::SOME(contextual);
+      return false;
+    }
+
+    emitter.out.pushStr(header.toStr());
+    emitter.out.pushStr("@start\n");
+
+    let mut context: CodegenQbe::QbeFuncCtx = CodegenQbe::QbeFuncCtx::init();
+
+    CodegenQbe::qbeEmitLocalSlots(emitter, defStore, typeStore, function_);
+    CodegenQbe::qbeReserveSlots(emitter, defStore, typeStore, symbols, function_, &mut context);
+
+    if (emitter.error.isSome()) {
+      return false;
+    }
+
+    let entry: u32 = function_.entryBlock.raw();
+    let entryJump: String = `    jmp @b${entry}\n`;
+    emitter.out.pushStr(entryJump.toStr());
+    let mut index: u64 = 0;
+
+    while (index < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let label: String = `@b${index}\n`;
+
+      emitter.out.pushStr(label.toStr());
+
+      let mut instrIndex: u64 = 0;
+      let mut diverged: boolean = false;
+
+      while (instrIndex < block.instructions.length()) {
+        let Option::SOME(instruction) = block.instructions.get(instrIndex) else {
+          instrIndex += 1;
+          continue;
+        };
+
+        CodegenQbe::qbeEmitInstruction(emitter, defStore, typeStore, symbols, function_, &mut context, instruction);
+        if (CodegenQbe::instructionDiverges(defStore, typeStore, instruction)) {
+          diverged = true;
+          break;
+        }
+        instrIndex += 1;
+      }
+
+      if (diverged) {
+        emitter.out.pushStr("    hlt\n");
+      } else {
+        CodegenQbe::qbeEmitTerminator(emitter, defStore, typeStore, symbols, function_, &block.terminator);
+      }
+      index += 1;
+    }
+
+    emitter.out.pushStr("}\n\n");
+
+    return true;
+  }
+
+  /// The fixed process entry: `$main` receives argc/argv, runs the std
+  /// runtime init when this unit defines it, calls the user main and returns
+  /// its i32 (or 0 for a void main).
+  function qbeEmitEntryWrapper(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    program: &Lir::LirProgram,
+  ): boolean {
+    let Option::SOME(entryDef) = program.entryPoint else {
+      return false;
+    };
+
+    let Option::SOME(entry) = program.functions.get(entryDef) else {
+      return false;
+    };
+
+    if (!CodegenC::isVoidType(typeStore, entry.returnType)) {
+      if (CodegenQbe::qbeClass(defStore, typeStore, entry.returnType).isNone()) {
+        CodegenQbe::failNamed(emitter, "EntryPoint");
+        return false;
+      }
+
+      if (!(CodegenQbe::qbeClass(defStore, typeStore, entry.returnType).unwrapOr(String::create("")).equals("w"))) {
+        CodegenQbe::failNamed(emitter, "EntryPoint");
+        return false;
+      }
+    }
+
+    let name: String = CodegenC::mangledName(defStore, symbols, entryDef);
+    let mut callBody: String = `call $${name.toStr()}()`;
+
+    if (entry.params.length() == 2) {
+      callBody = `call $${name.toStr()}(w %argc, l %argv)`;
+    }
+
+    let mut body: String = String::create("");
+
+    if (CodegenQbe::hasRuntimeInit(defStore)) {
+      body = String::create("    call $ignis_runtime_init(w %argc, l %argv)\n");
+    }
+
+    let head: String = String::create("export function w $main(w %argc, l %argv) {\n@start\n");
+    let mut wrapper: String = `${head.toStr()}${body.toStr()}`;
+
+    if (CodegenC::isVoidType(typeStore, entry.returnType)) {
+      wrapper = `${wrapper.toStr()}    ${callBody.toStr()}\n    ret 0\n}\n`;
+    } else {
+      wrapper = `${wrapper.toStr()}    %r =w ${callBody.toStr()}\n    ret %r\n}\n`;
+    }
+
+    emitter.out.pushStr(wrapper.toStr());
+
+    return true;
+  }
+
+  /// Whether this unit carries the std runtime init definition, which only a
+  /// build with std linked does; standalone units skip the call.
+  function hasRuntimeInit(defStore: &mut Analyzer::DefinitionStore): boolean {
+    let mut index: u64 = 0;
+
+    while (index < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+      if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId)) {
+        if (let Option::SOME(name) = &functionDef.externName) {
+          if (name.equals("ignis_runtime_init")) {
+            return true;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function addReachable(reachable: &mut Vector<u32>, defId: Analyzer::DefinitionId): void {
+    let mut index: u64 = 0;
+    while (index < reachable.length()) {
+      if (let Option::SOME(raw) = reachable.get(index)) {
+        if (*raw == defId.raw()) {
+          return;
+        }
+      }
+      index += 1;
+    }
+    reachable.push(defId.raw());
+  }
+
+  function addOperandFunction(reachable: &mut Vector<u32>, operand: &Lir::Operand): void {
+    if (let Lir::Operand::FuncRef(defId) = operand) {
+      CodegenQbe::addReachable(reachable, defId);
+    }
+  }
+
+  function addOperandFunctions(reachable: &mut Vector<u32>, operands: &Vector<Lir::Operand>): void {
+    let mut index: u64 = 0;
+    while (index < operands.length()) {
+      if (let Option::SOME(operand) = operands.get(index)) {
+        CodegenQbe::addOperandFunction(reachable, operand);
+      }
+      index += 1;
+    }
+  }
+
+  function addInstructionFunctions(reachable: &mut Vector<u32>, instruction: &Lir::Instr): void {
+    match (instruction) {
+      Lir::Instr::Call(node) -> {
+        CodegenQbe::addReachable(reachable, node.callee);
+        CodegenQbe::addOperandFunctions(reachable, &node.args);
+      },
+      Lir::Instr::RuntimeCall(node) -> { CodegenQbe::addOperandFunctions(reachable, &node.args); },
+      Lir::Instr::Store(node) -> { CodegenQbe::addOperandFunction(reachable, &node.value); },
+      Lir::Instr::StorePtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.value); CodegenQbe::addOperandFunction(reachable, &node.ptr); },
+      Lir::Instr::LoadPtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.ptr); },
+      Lir::Instr::BuiltinLoad(node) -> { CodegenQbe::addOperandFunction(reachable, &node.ptr); },
+      Lir::Instr::BuiltinStore(node) -> { CodegenQbe::addOperandFunction(reachable, &node.value); CodegenQbe::addOperandFunction(reachable, &node.ptr); },
+      Lir::Instr::Copy(node) -> { CodegenQbe::addOperandFunction(reachable, &node.source); },
+      Lir::Instr::Cast(node) -> { CodegenQbe::addOperandFunction(reachable, &node.source); },
+      Lir::Instr::UnaryOp(node) -> { CodegenQbe::addOperandFunction(reachable, &node.operand); },
+      Lir::Instr::BinOp(node) -> { CodegenQbe::addOperandFunction(reachable, &node.left); CodegenQbe::addOperandFunction(reachable, &node.right); },
+      Lir::Instr::BuiltinEq(node) -> { CodegenQbe::addOperandFunction(reachable, &node.left); CodegenQbe::addOperandFunction(reachable, &node.right); },
+      Lir::Instr::GetElementPtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.base); CodegenQbe::addOperandFunction(reachable, &node.index); },
+      Lir::Instr::GetFieldPtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.base); },
+      Lir::Instr::InitRecord(node) -> {
+        let mut index: u64 = 0;
+        while (index < node.fields.length()) {
+          if (let Option::SOME(field) = node.fields.get(index)) { CodegenQbe::addOperandFunction(reachable, &field.value); }
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  // The hosted mono roots include C-only std entrypoints such as snprintfDouble.
+  // A binary needs only the entry, harness roots, runtime initialization and
+  // their dependencies; a library without an entry keeps all of its definitions.
+  function reachableFunctions(
+    defStore: &mut Analyzer::DefinitionStore,
+    program: &Lir::LirProgram,
+    externalSymbols: &Vector<u32>,
+  ): Vector<u32> {
+    let mut reachable: Vector<u32> = Vector::new<u32>();
+    if (let Option::SOME(entry) = program.entryPoint) {
+      CodegenQbe::addReachable(&mut reachable, entry);
+    }
+    let mut index: u64 = 0;
+    while (index < program.functions.length()) {
+      if (let Option::SOME(function_) = program.functions.functionAt(index)) {
+        if ((program.entryPoint.isNone() && externalSymbols.length() == 0) || CodegenC::hasRaw(externalSymbols, function_.defId.raw())) {
+          CodegenQbe::addReachable(&mut reachable, function_.defId);
+        }
+        if (program.entryPoint.isSome() || externalSymbols.length() > 0) {
+          if (let Option::SOME(Analyzer::Definition::Function(definition)) = defStore.get(function_.defId)) {
+            if (let Option::SOME(name) = &definition.externName) {
+              if (name.equals("ignis_runtime_init")) {
+                CodegenQbe::addReachable(&mut reachable, function_.defId);
+              }
+            }
+          }
+        }
+      }
+      index += 1;
+    }
+    let mut cursor: u64 = 0;
+    while (cursor < reachable.length()) {
+      let Option::SOME(raw) = reachable.get(cursor) else {
+        break;
+      };
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*raw);
+      if (let Option::SOME(function_) = program.functions.get(defId)) {
+        let mut blockIndex: u64 = 0;
+        while (blockIndex < function_.blocks.length()) {
+          if (let Option::SOME(block) = function_.blocks.get(blockIndex)) {
+            let mut instructionIndex: u64 = 0;
+            while (instructionIndex < block.instructions.length()) {
+              if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+                CodegenQbe::addInstructionFunctions(&mut reachable, instruction);
+              }
+              instructionIndex += 1;
+            }
+            if (let Lir::Terminator::Return(Option::SOME(value)) = &block.terminator) {
+              CodegenQbe::addOperandFunction(&mut reachable, &value);
+            }
+          }
+          blockIndex += 1;
+        }
+      }
+      cursor += 1;
+    }
+    return reachable;
+  }
+
+  /// The QBE IL for the whole program, or the first unsupported instruction.
+  /// A run that meets anything unsupported fails closed: `source` stays empty
+  /// and `error` carries the exact instruction name, so the driver reports a
+  /// build failure instead of emitting wrong code.
+  function emitProgram(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    program: &Lir::LirProgram,
+    externalSymbols: &Vector<u32>,
+  ): CodegenQbe::EmitOutput {
+    let mut emitter: CodegenQbe::Emitter = CodegenQbe::Emitter::init();
+    let reachable: Vector<u32> = CodegenQbe::reachableFunctions(defStore, program, externalSymbols);
+
+    // Type declarations first: aggregate signatures and aggregate call
+    // results reference them by name.
+    let mut emittedTypes: Vector<u32> = Vector::new<u32>();
+    let mut typeIndex: u64 = 0;
+    while (typeIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(typeIndex) else {
+        break;
+      };
+      if (CodegenC::isExternFunction(defStore, function_.defId) || !CodegenC::hasRaw(&reachable, function_.defId.raw())) {
+        typeIndex += 1;
+        continue;
+      }
+      CodegenQbe::qbeEmitTypeDeclarations(&mut emitter, defStore, typeStore, symbols, &mut emittedTypes, function_.returnType);
+      let mut localIndex: u64 = 0;
+      while (localIndex < function_.locals.length()) {
+        if (let Option::SOME(local) = function_.locals.get(localIndex)) {
+          CodegenQbe::qbeEmitTypeDeclarations(&mut emitter, defStore, typeStore, symbols, &mut emittedTypes, local.ty);
+        }
+        localIndex += 1;
+      }
+      let mut tempIndex: u64 = 0;
+      while (tempIndex < function_.temps.length()) {
+        if (let Option::SOME(temp) = function_.temps.get(tempIndex)) {
+          CodegenQbe::qbeEmitTypeDeclarations(&mut emitter, defStore, typeStore, symbols, &mut emittedTypes, temp.ty);
+        }
+        tempIndex += 1;
+      }
+      typeIndex += 1;
+    }
+    let mut globalIndex: u64 = 0;
+    while (globalIndex < program.globalInits.length()) {
+      if (let Option::SOME(global) = program.globalInits.get(globalIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(global.defId)) {
+          CodegenQbe::qbeEmitTypeDeclarations(&mut emitter, defStore, typeStore, symbols, &mut emittedTypes, variable.declaredType);
+        }
+      }
+      globalIndex += 1;
+    }
+
+    CodegenQbe::qbeEmitGlobals(&mut emitter, defStore, typeStore, symbols, program);
+
+    if (emitter.error.isSome()) {
+      return CodegenQbe::EmitOutput {
+        source: String::create(""),
+        error: emitter.error,
+        functions: 0,
+      };
+    }
+
+    let mut functions: u64 = 0;
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      if (CodegenC::hasRaw(&reachable, function_.defId.raw()) && CodegenQbe::qbeEmitFunction(&mut emitter, defStore, typeStore, symbols, function_, externalSymbols)) {
+        functions += 1;
+      }
+
+      if (emitter.error.isSome()) {
+        return CodegenQbe::EmitOutput {
+          source: String::create(""),
+          error: emitter.error,
+          functions: 0,
+        };
+      }
+
+      functionIndex += 1;
+    }
+
+    CodegenQbe::qbeEmitEntryWrapper(&mut emitter, defStore, typeStore, symbols, program);
+
+    if (emitter.error.isSome()) {
+      return CodegenQbe::EmitOutput {
+        source: String::create(""),
+        error: emitter.error,
+        functions: 0,
+      };
+    }
+
+    let head: String = String::create("# Types\n");
+
+    return CodegenQbe::EmitOutput {
+      source: `${head.toStr()}${emitter.data.toStr()}# Code\n${emitter.out.toStr()}`,
+      error: Option::NONE,
+      functions: functions,
+    };
+  }
+
+  /// The `TypeId` of the record `defId` names, for the type-declaration walk.
+  function recordTypeId(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    defId: Analyzer::DefinitionId,
+  ): Analyzer::TypeId {
+    return typeStore.recordType(defId);
+  }
+}
