@@ -1,0 +1,553 @@
+//! The Ignis data layout, computed once for every backend.
+//!
+//! Each Ignis type has one canonical C representation, and its layout is the
+//! one the platform C ABI gives that representation:
+//!
+//! | Ignis type | Canonical C representation |
+//! | --- | --- |
+//! | integers, `boolean`, `char`, atoms | the scalar of the same width |
+//! | `str`, pointers, references, raw functions | a pointer |
+//! | `[T; N]` | `T[N]`, stored inline |
+//! | record | a struct of its fields in declared order, then one `u8` drop-state byte when it implements `Drop` |
+//! | enum | `struct { u32 tag; union { struct { payload... } variant_<tag>; ... } payload; }`, then the drop-state byte when it implements `Drop` |
+//! | slice | `struct { T* data; u64 len; }` |
+//! | range | `struct { T field_0; T field_1; }` |
+//! | closure | `struct { call; drop_fn; env; }`, three pointers |
+//!
+//! `@packed`, `@aligned(N)` and a field's own `@aligned(N)` adjust the struct
+//! layout the way GCC applies the matching attributes. The C backend spells
+//! these representations and asserts this layout in every unit it emits, so
+//! the C compiler checks it; every other backend reads its layout from here.
+
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+
+export namespace Abi {
+  /// The byte size and the byte alignment of one type.
+  record Layout {
+    public size: u64;
+    public alignment: u64;
+  }
+
+  /// Where every part of a record sits.
+  record RecordLayout {
+    public layout: Abi::Layout;
+    /// The offset of each field, in the record's declared field order.
+    public fieldOffsets: Vector<u64>;
+    /// The offset of the drop-state byte of a record that implements `Drop`.
+    public dropStateOffset: Option<u64>;
+  }
+
+  /// Where the payload fields of one enum variant sit, measured from the start
+  /// of the enum. `void` payloads have no storage and no entry.
+  record VariantLayout {
+    public tagValue: u32;
+    public fieldOffsets: Vector<u64>;
+  }
+
+  /// Where every part of an enum sits. The `u32` tag is always at offset 0.
+  record EnumLayout {
+    public layout: Abi::Layout;
+    /// The offset of the payload union. Equal to the tag size when no variant
+    /// carries a payload.
+    public payloadOffset: u64;
+    /// One entry per variant, in declared order.
+    public variants: Vector<Abi::VariantLayout>;
+    /// The offset of the drop-state byte of an enum that implements `Drop`.
+    public dropStateOffset: Option<u64>;
+  }
+
+  /// The size of the tag every enum starts with.
+  const ENUM_TAG_SIZE: u64 = 4;
+
+  /// The size and alignment of a pointer on the hosted 64-bit targets.
+  const POINTER_SIZE: u64 = 8;
+
+  /// `value` rounded up to the next multiple of `alignment`.
+  function alignUp(value: u64, alignment: u64): u64 {
+    if (alignment <= 1) {
+      return value;
+    }
+
+    let remainder: u64 = value % alignment;
+
+    if (remainder == 0) {
+      return value;
+    }
+
+    return value + (alignment - remainder);
+  }
+
+  /// A natural alignment raised by an `@aligned(N)` request. A request below
+  /// the natural alignment never lowers it.
+  function raisedAlignment(natural: u64, requested: Option<u64>): u64 {
+    let mut alignment: u64 = natural;
+
+    if (alignment < 1) {
+      alignment = 1;
+    }
+
+    if (let Option::SOME(request) = requested) {
+      if (request > alignment) {
+        alignment = request;
+      }
+    }
+
+    return alignment;
+  }
+
+  function scalar(size: u64): Result<Abi::Layout, String> {
+    return Result::OK(Abi::Layout { size: size, alignment: size });
+  }
+
+  /// `ty` with every alias followed, or `ty` itself when the alias chain is
+  /// cyclic.
+  function resolveType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, ty);
+
+    if (resolved.cycleAlias.isSome()) {
+      return ty;
+    }
+
+    return resolved.typeId;
+  }
+
+  /// Whether `ty` is `void`, which a payload or a value slot never stores.
+  function isVoid(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    let resolved: Analyzer::TypeId = Abi::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::VOID -> true,
+      _ -> false,
+    };
+  }
+
+  /// The layout of a value of `ty`. The error names the type form that has no
+  /// storage after monomorphization: `void`, `never`, tuples, generic
+  /// parameters and uninstantiated generics.
+  function typeLayout(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Result<Abi::Layout, String> {
+    let resolved: Analyzer::TypeId = Abi::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return Result::ERROR(String::create("unknown type"));
+    };
+
+    match (typeNode) {
+      Analyzer::Type::I8 -> {
+        return Abi::scalar(1);
+      },
+      Analyzer::Type::U8 -> {
+        return Abi::scalar(1);
+      },
+      Analyzer::Type::BOOLEAN -> {
+        return Abi::scalar(1);
+      },
+      Analyzer::Type::I16 -> {
+        return Abi::scalar(2);
+      },
+      Analyzer::Type::U16 -> {
+        return Abi::scalar(2);
+      },
+      Analyzer::Type::I32 -> {
+        return Abi::scalar(4);
+      },
+      Analyzer::Type::U32 -> {
+        return Abi::scalar(4);
+      },
+      Analyzer::Type::F32 -> {
+        return Abi::scalar(4);
+      },
+      Analyzer::Type::CHAR -> {
+        return Abi::scalar(4);
+      },
+      Analyzer::Type::ATOM -> {
+        return Abi::scalar(4);
+      },
+      Analyzer::Type::I64 -> {
+        return Abi::scalar(8);
+      },
+      Analyzer::Type::U64 -> {
+        return Abi::scalar(8);
+      },
+      Analyzer::Type::F64 -> {
+        return Abi::scalar(8);
+      },
+      Analyzer::Type::STR -> {
+        return Abi::scalar(Abi::POINTER_SIZE);
+      },
+      Analyzer::Type::Pointer(_) -> {
+        return Abi::scalar(Abi::POINTER_SIZE);
+      },
+      Analyzer::Type::Reference(_) -> {
+        return Abi::scalar(Abi::POINTER_SIZE);
+      },
+      Analyzer::Type::RawFunction(_) -> {
+        return Abi::scalar(Abi::POINTER_SIZE);
+      },
+      Analyzer::Type::Function(_) -> {
+        return Result::OK(Abi::Layout { size: 3 * Abi::POINTER_SIZE, alignment: Abi::POINTER_SIZE });
+      },
+      Analyzer::Type::Slice(_) -> {
+        return Result::OK(Abi::Layout { size: 2 * Abi::POINTER_SIZE, alignment: Abi::POINTER_SIZE });
+      },
+      Analyzer::Type::Range(range) -> {
+        let element: Abi::Layout = match (Abi::typeLayout(defStore, typeStore, range.element)) {
+          Result::OK(value) -> value,
+          Result::ERROR(message) -> {
+            return Result::ERROR(message);
+          },
+        };
+
+        let secondOffset: u64 = Abi::alignUp(element.size, element.alignment);
+
+        return Result::OK(Abi::Layout {
+          size: Abi::alignUp(secondOffset + element.size, element.alignment),
+          alignment: element.alignment,
+        });
+      },
+      Analyzer::Type::FixedArray(element, count) -> {
+        let elementLayout: Abi::Layout = match (Abi::typeLayout(defStore, typeStore, element)) {
+          Result::OK(value) -> value,
+          Result::ERROR(message) -> {
+            return Result::ERROR(message);
+          },
+        };
+
+        return Result::OK(Abi::Layout { size: elementLayout.size * count, alignment: elementLayout.alignment });
+      },
+      Analyzer::Type::Record(recordDef) -> {
+        return match (Abi::recordLayout(defStore, typeStore, recordDef)) {
+          Result::OK(value) -> Result::OK(value.layout),
+          Result::ERROR(message) -> Result::ERROR(message),
+        };
+      },
+      Analyzer::Type::Enum(enumDef) -> {
+        return match (Abi::enumLayout(defStore, typeStore, enumDef)) {
+          Result::OK(value) -> Result::OK(value.layout),
+          Result::ERROR(message) -> Result::ERROR(message),
+        };
+      },
+      Analyzer::Type::VOID -> {
+        return Result::ERROR(String::create("void"));
+      },
+      Analyzer::Type::NEVER -> {
+        return Result::ERROR(String::create("never"));
+      },
+      Analyzer::Type::Tuple(_) -> {
+        return Result::ERROR(String::create("tuple"));
+      },
+      _ -> {
+        return Result::ERROR(String::create("generic type"));
+      },
+    };
+  }
+
+  /// The layout of the record behind `recordDef`: its fields in declared
+  /// order, then the drop-state byte when it implements `Drop`.
+  function recordLayout(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordDef: Analyzer::DefinitionId,
+  ): Result<Abi::RecordLayout, String> {
+    let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut packed: boolean = false;
+    let mut requested: Option<u64> = Option::NONE;
+    let mut implementsDrop: boolean = false;
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordData)) = defStore.get(recordDef)) {
+      packed = recordData.packed;
+      requested = recordData.alignment;
+      implementsDrop = recordData.implementsDrop;
+
+      let mut copyIndex: u64 = 0;
+
+      while (copyIndex < recordData.fields.length()) {
+        if (let Option::SOME(fieldId) = recordData.fields.get(copyIndex)) {
+          fields.push(*fieldId);
+        }
+
+        copyIndex += 1;
+      }
+    } else {
+      return Result::ERROR(String::create("unknown record"));
+    }
+
+    let mut offset: u64 = 0;
+    let mut alignment: u64 = 1;
+    let mut fieldOffsets: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < fields.length()) {
+      let Option::SOME(fieldId) = fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
+      let mut fieldRequest: Option<u64> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+        declaredType = Option::SOME(fieldDef.fieldType);
+        fieldRequest = fieldDef.alignment;
+      }
+
+      let Option::SOME(fieldType) = declaredType else {
+        return Result::ERROR(String::create("unknown field"));
+      };
+
+      let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, recordDef, fieldType);
+      let fieldLayout: Abi::Layout = match (Abi::typeLayout(defStore, typeStore, storageType)) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+      };
+
+      let fieldAlignment: u64 = Abi::raisedAlignment(packed ? 1 : fieldLayout.alignment, fieldRequest);
+
+      offset = Abi::alignUp(offset, fieldAlignment);
+      fieldOffsets.push(offset);
+
+      if (fieldAlignment > alignment) {
+        alignment = fieldAlignment;
+      }
+
+      offset = offset + fieldLayout.size;
+      index += 1;
+    }
+
+    let mut dropStateOffset: Option<u64> = Option::NONE;
+
+    if (implementsDrop) {
+      dropStateOffset = Option::SOME(offset);
+      offset = offset + 1;
+    }
+
+    alignment = Abi::raisedAlignment(alignment, requested);
+
+    return Result::OK(Abi::RecordLayout {
+      layout: Abi::Layout { size: Abi::alignUp(offset, alignment), alignment: alignment },
+      fieldOffsets: fieldOffsets,
+      dropStateOffset: dropStateOffset,
+    });
+  }
+
+  /// The offset of the field whose declared index is `fieldIndex`.
+  function recordFieldOffset(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordDef: Analyzer::DefinitionId,
+    fieldIndex: u64,
+  ): Result<u64, String> {
+    let layout: Abi::RecordLayout = match (Abi::recordLayout(defStore, typeStore, recordDef)) {
+      Result::OK(value) -> value,
+      Result::ERROR(message) -> {
+        return Result::ERROR(message);
+      },
+    };
+
+    let mut position: Option<u64> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordData)) = defStore.get(recordDef)) {
+      let mut index: u64 = 0;
+
+      while (index < recordData.fields.length()) {
+        if (let Option::SOME(fieldId) = recordData.fields.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+            if (fieldDef.index as u64 == fieldIndex) {
+              position = Option::SOME(index);
+            }
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    let Option::SOME(found) = position else {
+      return Result::ERROR(String::create("unknown field"));
+    };
+
+    let Option::SOME(offset) = layout.fieldOffsets.get(found) else {
+      return Result::ERROR(String::create("unknown field"));
+    };
+
+    return Result::OK(*offset);
+  }
+
+  /// The layout of the enum behind `enumDef`: the `u32` tag, the union of the
+  /// variants' payload structs, then the drop-state byte when it implements
+  /// `Drop`.
+  function enumLayout(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    enumDef: Analyzer::DefinitionId,
+  ): Result<Abi::EnumLayout, String> {
+    let mut variantIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut implementsDrop: boolean = false;
+
+    if (let Option::SOME(Analyzer::Definition::Enum(enumData)) = defStore.get(enumDef)) {
+      implementsDrop = enumData.implementsDrop;
+
+      let mut copyIndex: u64 = 0;
+
+      while (copyIndex < enumData.variants.length()) {
+        if (let Option::SOME(variantId) = enumData.variants.get(copyIndex)) {
+          variantIds.push(*variantId);
+        }
+
+        copyIndex += 1;
+      }
+    } else {
+      return Result::ERROR(String::create("unknown enum"));
+    }
+
+    // Each variant's payload is a struct of its own; the union is as large and
+    // as aligned as the largest and the most aligned of them.
+    let mut unionSize: u64 = 0;
+    let mut unionAlignment: u64 = 1;
+    let mut tags: Vector<u32> = Vector::new<u32>();
+    let mut relativeOffsets: Vector<Vector<u64>> = Vector::new<Vector<u64>>();
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variantIds.length()) {
+      let Option::SOME(variantId) = variantIds.get(variantIndex) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      let mut tagValue: u32 = 0;
+      let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+        tagValue = variantDef.tagValue;
+
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantDef.payload.length()) {
+          if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+            payload.push(*payloadType);
+          }
+
+          payloadIndex += 1;
+        }
+      }
+
+      let mut structOffset: u64 = 0;
+      let mut structAlignment: u64 = 1;
+      let mut offsets: Vector<u64> = Vector::new<u64>();
+      let mut fieldIndex: u64 = 0;
+
+      while (fieldIndex < payload.length()) {
+        let Option::SOME(payloadType) = payload.get(fieldIndex) else {
+          fieldIndex += 1;
+          continue;
+        };
+
+        if (Abi::isVoid(defStore, typeStore, *payloadType)) {
+          fieldIndex += 1;
+          continue;
+        }
+
+        let fieldLayout: Abi::Layout = match (Abi::typeLayout(defStore, typeStore, *payloadType)) {
+          Result::OK(value) -> value,
+          Result::ERROR(message) -> {
+            return Result::ERROR(message);
+          },
+        };
+
+        structOffset = Abi::alignUp(structOffset, fieldLayout.alignment);
+        offsets.push(structOffset);
+        structOffset = structOffset + fieldLayout.size;
+
+        if (fieldLayout.alignment > structAlignment) {
+          structAlignment = fieldLayout.alignment;
+        }
+
+        fieldIndex += 1;
+      }
+
+      let structSize: u64 = Abi::alignUp(structOffset, structAlignment);
+
+      if (structSize > unionSize) {
+        unionSize = structSize;
+      }
+
+      if (offsets.length() > 0 && structAlignment > unionAlignment) {
+        unionAlignment = structAlignment;
+      }
+
+      tags.push(tagValue);
+      relativeOffsets.push(offsets);
+      variantIndex += 1;
+    }
+
+    let mut alignment: u64 = Abi::ENUM_TAG_SIZE;
+
+    if (unionAlignment > alignment) {
+      alignment = unionAlignment;
+    }
+
+    let payloadOffset: u64 = Abi::alignUp(Abi::ENUM_TAG_SIZE, unionAlignment);
+    let mut end: u64 = payloadOffset + unionSize;
+    let mut variants: Vector<Abi::VariantLayout> = Vector::new<Abi::VariantLayout>();
+    let mut layoutIndex: u64 = 0;
+
+    while (layoutIndex < tags.length()) {
+      let mut tagValue: u32 = 0;
+
+      if (let Option::SOME(tag) = tags.get(layoutIndex)) {
+        tagValue = *tag;
+      }
+
+      let mut absolute: Vector<u64> = Vector::new<u64>();
+
+      if (let Option::SOME(offsets) = relativeOffsets.get(layoutIndex)) {
+        let mut offsetIndex: u64 = 0;
+
+        while (offsetIndex < offsets.length()) {
+          if (let Option::SOME(offset) = offsets.get(offsetIndex)) {
+            absolute.push(payloadOffset + *offset);
+          }
+
+          offsetIndex += 1;
+        }
+      }
+
+      variants.push(Abi::VariantLayout { tagValue: tagValue, fieldOffsets: absolute });
+      layoutIndex += 1;
+    }
+
+    let mut dropStateOffset: Option<u64> = Option::NONE;
+
+    if (implementsDrop) {
+      dropStateOffset = Option::SOME(end);
+      end = end + 1;
+    }
+
+    return Result::OK(Abi::EnumLayout {
+      layout: Abi::Layout { size: Abi::alignUp(end, alignment), alignment: alignment },
+      payloadOffset: payloadOffset,
+      variants: variants,
+      dropStateOffset: dropStateOffset,
+    });
+  }
+}
