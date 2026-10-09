@@ -26,7 +26,7 @@ By contrast, user-defined compile-time directives are declaration attributes,
 not builtin expressions. They are declared with `@directive(...)`, use
 `std::compile`, and execute under a default-deny sandbox.
 
-Legacy `__builtin_*` names are deprecated; use directive form (`@read`, `@write`, `@dropInPlace`, `@dropGlue`, etc.).
+Use the documented directive forms (`@read`, `@write`, `@dropInPlace`, `@dropGlue`, etc.); names emitted by the C backend are not Ignis source-level APIs.
 
 ### Argument Types
 
@@ -346,6 +346,22 @@ In the initializer of a `const` or a `static` the value has to be a constant. A 
 
 ---
 
+### `@sliceFromParts<T>(data, len)`
+
+Builds a non-owning `T[]` slice from a data pointer and an element count.
+
+| | |
+|---|---|
+| **Type arguments** | 1 element type |
+| **Arguments** | 2 expressions (data pointer, length) |
+| **Returns** | `T[]` |
+
+This low-level operation does not allocate or copy elements. The caller must ensure the
+pointer covers the stated number of elements and that the backing storage remains valid
+for every use of the slice; construction alone does not prove either condition.
+
+---
+
 ### `@dropInPlace<T>(ptr)`
 
 Runs drop glue for `T` at the given address.
@@ -426,6 +442,33 @@ Supported categories today:
 - records and enums implementing canonical `std::hash::Eq`
 
 Unsupported equality must be rejected during analysis before code generation.
+
+---
+
+### `@hash<T>(value, hasher)`
+
+Feeds `value` into a hasher using the concrete hash path for `T`.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | 2 expressions (`&T`, a hasher value) |
+| **Returns** | `void` |
+
+```ignis
+import Hasher from "std::hash";
+
+let mut hasher: Hasher = Hasher::new();
+
+@hash<Key>(&key, (&mut hasher) as &mut Hasher);
+```
+
+The first argument is checked expecting `&T`; the hasher argument is checked on its own.
+For primitive `T` the call emits the matching `std::hash::Hasher` write method
+(`writeStr`, `writeU64`, `writeByte`, and so on); for a record or enum it emits a call to
+that type's `hash` method — the `std::hash::Hash` trait implementation
+(`ignis/codegen/mod.ign`, `Lir::Instr::BuiltinHash`). `std::collections` uses it to force
+concrete hash dispatch after monomorphization.
 
 ---
 
@@ -512,27 +555,6 @@ Use `@trap()` when you want a safe, debuggable crash. Use `@unreachable()` only 
 
 These are called like regular functions but resolved by the compiler.
 
-### `typeOf(expression)`
-
-Returns a runtime type identifier for a value.
-
-| | |
-|---|---|
-| **Arguments** | 1 expression |
-| **Returns** | `u32` |
-
-```ignis
-function main(): i32 {
-    let x: i32 = 42;
-    let id: u32 = typeOf(x);
-    return id as i32;
-}
-```
-
-Returns a unique numeric identifier for the type of the expression.
-
----
-
 ### `maxOf<T>()`
 
 Returns the maximum representable value for a numeric type.
@@ -573,6 +595,14 @@ function main(): i32 {
 
 For unsigned types, `minOf` returns `0`.
 
+### `typeOf` — reserved but unsupported
+
+`typeOf` is a builtin name the language reserves, but the current self-hosted analyzer
+does not type it: a use of `@typeOf` is rejected as an unsupported construct, and the bare
+`typeOf(...)` form is not accepted either (`ignis/analyzer/typecheck_tests.ign`,
+`typecheckKnownButUntypedBuiltinNamesItself`). There is no way today to obtain a type
+identifier as a value, and no form that puts a type where a type is expected.
+
 ---
 
 ## Summary
@@ -595,9 +625,11 @@ For unsigned types, `minOf` returns `0`.
 | `@writeVolatile<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (volatile store through pointer) |
 | `@zeroed<T>()` | 1 type arg | `T` | Yes (`__builtin_memset`, or `{0}` in a static) |
 | `@splat<T[N]>(value)` | 1 array type arg + 1 expr | `T[N]` | Yes (`__builtin_memset` or a fill loop, or a constant in a static) |
+| `@sliceFromParts<T>(data, len)` | 1 type arg + 2 exprs | `T[]` | Yes (slice construction) |
 | `@dropInPlace<T>(ptr)` | 1 type arg + 1 expr | `void` | Yes (drop glue call) |
 | `@dropGlue<T>()` | 1 type arg | `(*mut u8) -> void` | Yes (function pointer constant) |
 | `@eq<T>(left, right)` | 1 type arg + 2 refs | `boolean` | Yes |
+| `@hash<T>(value, hasher)` | 1 type arg + 2 exprs | `void` | Yes (hasher write method or `hash` call) |
 | `@panic("msg")` | 1 string literal | `Never` | Yes (fprintf + exit) |
 | `@trap()` | none | `Never` | Yes (`__builtin_trap`) |
 | `@unreachable()` | none | `Never` | No (`__builtin_unreachable`) |
@@ -606,9 +638,11 @@ For unsigned types, `minOf` returns `0`.
 
 | Builtin | Arguments | Return type | Emits runtime code |
 |---------|-----------|:---:|:---:|
-| `typeOf(expr)` | 1 expression | `u32` | Yes |
 | `maxOf<T>()` | 1 type arg | `T` | Yes (C constant) |
 | `minOf<T>()` | 1 type arg | `T` | Yes (C constant) |
+
+`typeOf` is reserved but unsupported; see its section above. `sizeOf`, `alignOf`,
+`maxOf` and `minOf` are also accepted written without the `@` prefix in callee position.
 
 ## Compile-Time Directives
 

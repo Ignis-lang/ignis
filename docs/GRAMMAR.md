@@ -1,4 +1,12 @@
-## Version 0.2
+# Ignis Grammar
+
+The compiler on `main` implements the grammar in **Version 0.4** below (workspace version
+0.4.0). The Version 0.2 section is kept only as a historical record of an early draft; it
+does not describe the current language — its `<tuple-type>` production, `<use>`, `this`,
+and the `hex`/`binary` primitives were never shipped, and tuple types still cannot be
+spelled (see the reserved list).
+
+## Version 0.2 (historical, superseded)
 
 ```
 <program> ::= (<declaration>)* <EOF>
@@ -227,7 +235,7 @@
 ```
 
 
-## Version 0.3
+## Version 0.4 (current)
 
 ```
 <program> ::= (<declaration>)* <EOF>
@@ -299,6 +307,9 @@
   | "@" "implements" "(" <identifier> ("," <identifier>)* ")"
   | "@" "lang" "(" "try" ")"
   | "@" "langHook" "(" <string> ")"
+  | "@" "panicHandler"
+  | "@" "allocHandler"
+  | "@" "freeHandler"
   | "@" "takes"
   | "@" "noescape"
   | "@" ("allow" | "warn" | "deny") "(" <identifier> ")"
@@ -310,6 +321,16 @@
 // `@langHook("name")` applies to a namespace. `@takes` and `@noescape` are
 // parameter attributes (see <parameter>). `@cLayout` applies to a non-generic
 // record that does not implement `Drop`.
+//
+// `@panicHandler`, `@allocHandler` and `@freeHandler` apply to a function
+// definition in a freestanding build only (`[ignis] std = false` in
+// `ignis.toml`); every one of them is rejected in a hosted build and on an
+// extern declaration. They take no arguments. The required signatures are
+//   @panicHandler (message: str, file: str, line: u32): void   (or never)
+//   @allocHandler (size: u64, align: u64): *mut u8
+//   @freeHandler  (pointer: *mut u8): void
+// `@allocHandler` requires a `@freeHandler` and vice versa, and there can be
+// at most one function of each kind in the whole program.
 
 // Compile-time selection. These are resolved by the parser: the discarded
 // branch or item is skipped and never reaches the AST.
@@ -761,7 +782,10 @@
 - `this` — the `this` keyword; only `self` is accepted.
 - `use <path> (as <name>)?;` — the `use` declaration.
 - `directive <name> (...)?;` and `directive <path> (...)? (; | { ... })` — directive declarations.
-- Tuple types `(T, T, ...)`, union types `T | T`, and intersection types `T & T`.
+- Tuple types `(T, T, ...)`, union types `T | T`, and intersection types `T & T`. Tuple
+  *patterns* and *expressions* parse, but `(...)` in type position always requires `->`
+  (a function type); the host and self-hosted parsers both reject a parenthesized type
+  list without one.
 - `hex` and `binary` as primitive type keywords.
 - `<identifier> as <identifier>` in an import item.
 - `...` (variadic) and `?` (optional) on a function parameter.

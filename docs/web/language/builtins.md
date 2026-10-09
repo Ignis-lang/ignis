@@ -25,8 +25,11 @@ function main(): i32 {
 | `@sizeOf<T>()` | `u64` | Size in bytes, as the backend lays the type out. Emits C `sizeof` |
 | `@alignOf<T>()` | `u64` | Required alignment. Emits C `_Alignof` |
 | `@typeName<T>()` | `str` | The type's name, resolved to a literal at compile time |
-| `typeOf(expr)` | type | The type of an expression, for use where a type is expected |
 | `maxOf<T>()`, `minOf<T>()` | `T` | The bounds of a numeric type |
+
+`@typeOf` is a reserved builtin name, but the current compiler does not support it yet: a
+use of `@typeOf` is rejected as an unsupported construct, and there is no form that puts a
+type where a type is expected.
 
 ## Reinterpreting values
 
@@ -46,10 +49,39 @@ so they belong in FFI glue and in the low-level parts of a library, not in ordin
 | --- | --- |
 | `@read<T>(ptr)` | Reads a `T` through a raw pointer |
 | `@write<T>(ptr, value)` | Writes a `T` through a raw pointer |
+| `@readVolatile<T>(ptr)` | Reads a `T` through a volatile load the compiler never elides or merges |
+| `@writeVolatile<T>(ptr, value)` | Writes a `T` through a volatile store with the same guarantees |
 | `@dropInPlace<T>(ptr)` | Runs the drop code for the value at that address |
 | `@dropGlue<T>()` | The drop function for a type, as a value |
-| `@sliceFromParts(...)` | Builds a slice from a pointer and a length |
-| `@hash<T>(value)`, `@eq<T>(left, right)` | The canonical hash and equality for a type |
+| `@sliceFromParts<T>(data, len)` | Builds a `T[]` slice from a data pointer and a length |
+| `@hash<T>(value, hasher)` | Hashes `value` (passed as `&T`) with the concrete `Hash` implementation for `T`; the call itself returns nothing |
+| `@eq<T>(left, right)` | The canonical equality for a type, returning `boolean` |
+
+The volatile pair exists for memory-mapped device registers and memory shared with code
+the compiler cannot see. They take the same arguments as `@read` and `@write`, and the
+same rules: the pointer must be `*mut T`, and a literal `null` pointer is a compile-time
+error. The C compiler never elides a volatile access, merges it with another one, or
+reorders it relative to other volatile accesses — but volatile is not synchronization: the
+accesses are not atomic, they are not memory barriers, and they order nothing except other
+volatile accesses. Use real synchronization primitives for shared state between threads.
+
+## Zero and fill
+
+`@zeroed<T>()` is a value of `T` whose every byte is zero, and `@splat<T[N]>(value)` is a
+fixed array of `N` copies of `value`:
+
+```ignis
+record Tables {
+    static mut STACK: u8[16384] = @zeroed<u8[16384]>();
+    static mut MARKS: u8[8] = @splat<u8[8]>(0xAA);
+}
+```
+
+`@zeroed` requires a type with a zero value (`A0239`): integers, floats, `boolean`, `char`,
+raw pointers, and fixed arrays, records and payload-free enums built from those. A string,
+a reference, a function value, a slice, a range, or anything implementing `Drop` has no
+zero. `@splat` requires a fixed array type argument (`A0241`) and a `Copy` element type
+(`A0242`), and a constant `@splat` holds at most 65536 elements (`A0240`).
 
 ## Stopping the program
 

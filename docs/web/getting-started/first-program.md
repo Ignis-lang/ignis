@@ -42,8 +42,10 @@ exits with 101.
 
 ```bash
 ignis build          # compile the project described by ignis.toml
-./build/hello-app    # run the linked binary
+./build/bin/hello-app    # run the linked binary
 ```
+
+The binary lands in `build/bin/`, named after the project in `ignis.toml`.
 
 `ignis build` accepts a path if you want to compile a single file without a project:
 
@@ -61,4 +63,5 @@ ignis check
 
 The compiler parsed the file, ran its analysis phases, lowered the result through two intermediate
 representations, emitted C, and handed that C to GCC. Nothing is interpreted and there is no
-runtime beyond a small C support library.
+interpreter or virtual machine. The runtime is implemented in Ignis, compiled to C, and
+linked with the system libraries.
