@@ -113,3 +113,78 @@ function cliHelpAlignsBuildTargetDescription(): void {
   let help: String = helpText();
   Test::assert(cliTestContains(help.toStr(), "--target <T>          Build for a backend:"));
 }
+
+/// `-c` stops the build after the object file and `-o` names it, the way a C
+/// toolchain spells the same request.
+@test
+function cliParsesEmitObjectWithAnOutputPath(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+  arguments.push(String::create("build"));
+  arguments.push(String::create("sample.ign"));
+  arguments.push(String::create("-c"));
+  arguments.push(String::create("-o"));
+  arguments.push(String::create("sample.o"));
+
+  let options: CliOptions = match (parseArguments(&arguments)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(options.emitObject, true);
+
+  let Option::SOME(outputPath) = options.outputPath else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(outputPath.toStr(), "sample.o");
+}
+
+/// `--emit-object` is the long spelling of `-c`, and neither one needs `-o`.
+@test
+function cliParsesLongEmitObjectFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+  arguments.push(String::create("build"));
+  arguments.push(String::create("--emit-object"));
+
+  let options: CliOptions = match (parseArguments(&arguments)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(options.emitObject, true);
+  Test::assertEq<boolean>(options.outputPath.isNone(), true);
+}
+
+/// `check` writes no object, so asking for one is an error instead of a
+/// silently ignored flag.
+@test
+function cliRejectsEmitObjectWithCheck(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+  arguments.push(String::create("check"));
+  arguments.push(String::create("sample.ign"));
+  arguments.push(String::create("-c"));
+
+  let Result::ERROR(message) = parseArguments(&arguments) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "error: --emit-object is a build option: only build writes an object");
+}
+
+/// The help text documents `-c` on the same column as every other build flag.
+@test
+function cliHelpAlignsEmitObjectDescription(): void {
+  let help: String = helpText();
+  Test::assert(cliTestContains(help.toStr(), "-c, --emit-object         Compile to an object file and do not link"));
+}

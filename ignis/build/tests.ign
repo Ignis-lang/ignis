@@ -10,6 +10,7 @@ import DiagnosticBag from "@compiler::diagnostics";
 import
   BuildArtifacts,
   artifactsAssemblyPath,
+  artifactsEmitObject,
   projectArtifacts,
   singleFileArtifacts,
 from "./artifacts";
@@ -317,4 +318,25 @@ function driverQbeTargetRejectsFreestandingBuilds(): void {
   Test::assertEq<str>(diagnostic.code, "B4004");
   Test::assert(driverContains(diagnostic.messageText(), "freestanding"));
   Test::assert(driverContains(diagnostic.messageText(), "qbe"));
+}
+
+/// With `--emit-object` the object takes the `-o` path, because nothing is
+/// linked to it; without the flag `-o` keeps naming the binary.
+@test
+function driverEmitObjectTakesTheOutputPath(): void {
+  let none: Option<String> = Option::NONE;
+  let outputPath: Option<String> = Option::SOME(String::create("sample.o"));
+
+  let linkedArtifacts: BuildArtifacts = singleFileArtifacts("c", &outputPath);
+  let linked: BuildArtifacts = artifactsEmitObject(&linkedArtifacts, &outputPath, false);
+  Test::assertEq<str>(linked.object.toString().toStr(), "selfhost_emit.o");
+  Test::assertEq<str>(linked.executable.toString().toStr(), "sample.o");
+
+  let emitted: BuildArtifacts = artifactsEmitObject(&linkedArtifacts, &outputPath, true);
+  Test::assertEq<str>(emitted.object.toString().toStr(), "sample.o");
+
+  // Without `-o` the object keeps the layout path the build already chose.
+  let noOutput: BuildArtifacts = singleFileArtifacts("c", &none);
+  let defaulted: BuildArtifacts = artifactsEmitObject(&noOutput, &none, true);
+  Test::assertEq<str>(defaulted.object.toString().toStr(), "selfhost_emit.o");
 }

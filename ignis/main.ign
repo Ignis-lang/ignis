@@ -53,6 +53,7 @@ import BuildLayout from "./build/layout";
 import
   BuildArtifacts,
   artifactsAssemblyPath,
+  artifactsEmitObject,
   projectArtifacts,
   singleFileArtifacts,
   stdArtifactBase,
@@ -746,7 +747,7 @@ function compileAndLinkQuietly(
 
   if (qbeIsQbeTarget(profile.backend.toStr())) {
     let file: SourceFile = SourceFile::create("", "");
-    return assembleAndLinkUnits(sourcePaths, objectPaths, outputPath, stdRoot, profile, &file, false, true);
+    return assembleUnits(sourcePaths, objectPaths, outputPath, stdRoot, profile, &file, false, true, true);
   }
 
   if (let Result::ERROR(_) = CCompiler::compileObjects(
@@ -773,7 +774,8 @@ function compileAndLinkQuietly(
 }
 
 /// Lower every emitted QBE IL unit to assembly, assemble it into an object
-/// with the build's C driver and link the executable.
+/// with the build's C driver and, when `linkExecutable` asks for it, link the
+/// executable.
 ///
 /// `qbe` never touches the existing linker inputs: its `.s` output becomes an
 /// ordinary object, so the link step and the libraries it pulls in are exactly
@@ -781,7 +783,7 @@ function compileAndLinkQuietly(
 ///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails; a
 /// failing step avoids the link entirely.
-function assembleAndLinkUnits(
+function assembleUnits(
   sourcePaths: &Vector<Path::PathBuf>,
   objectPaths: &Vector<Path::PathBuf>,
   outputPath: &Path::PathBuf,
@@ -790,6 +792,7 @@ function assembleAndLinkUnits(
   file: &SourceFile,
   verbose: boolean,
   quiet: boolean,
+  linkExecutable: boolean,
 ): u64 {
   let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
   let extraFlags: Vector<String> = toolchainCompileFlags(profile);
@@ -831,6 +834,10 @@ function assembleAndLinkUnits(
     printStatus(`  object: ${objectPath.asStr()}`, verbose && !quiet);
     objects.push(objectPath.toString());
     unitIndex += 1;
+  }
+
+  if (!linkExecutable) {
+    return 0;
   }
 
   let archives: Vector<String> = Vector::new<String>();
@@ -2314,14 +2321,17 @@ function runCompile(
     }
   }
 
-  let objectOnly: boolean = profile.freestanding && !discovery.bin;
-  let artifacts: BuildArtifacts = projectMode ? projectArtifacts(profile.backend.toStr(), &discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(profile.backend.toStr(), &options.outputPath);
+  let objectOnly: boolean = (profile.freestanding && !discovery.bin) || options.emitObject;
+  let layoutArtifacts: BuildArtifacts = projectMode ? projectArtifacts(profile.backend.toStr(), &discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(profile.backend.toStr(), &options.outputPath);
+  let artifacts: BuildArtifacts = artifactsEmitObject(&layoutArtifacts, &options.outputPath, options.emitObject);
   let stampPath: Path::PathBuf = stampPathForObject(&artifacts.object);
   let reportPath: Path::PathBuf = stampReportPathForObject(&artifacts.object);
   let fingerprint: BuildFingerprint = programBuildFingerprint(&discovery, &profile);
   let mut cacheIsWritable: boolean = false;
 
-  if (!checkOnly) {
+  // `--emit-object` writes one object and nothing else, so the binary cache has
+  // nothing to reuse or relink and the object is always rebuilt.
+  if (!checkOnly && !options.emitObject) {
     let plan: BuildCachePlan = planBuildCache(options, &stampPath, &reportPath, &fingerprint, &artifacts, discovery.bin, objectOnly);
     cacheIsWritable = plan.writable;
 
@@ -2396,8 +2406,22 @@ function runCompile(
       let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
       inlineAsmUnits.push(compiled.usesInlineAsm);
 
-      if (qbeIsQbeTarget(profile.backend.toStr()) && discovery.bin) {
-        linkErrors += assembleAndLinkUnits(
+      if (objectOnly && qbeIsQbeTarget(profile.backend.toStr())) {
+        linkErrors += assembleUnits(
+          &sourcePaths,
+          &objectPaths,
+          &artifacts.object,
+          &discovery.stdRoot,
+          &profile,
+          &file,
+          verbose,
+          false,
+          false,
+        );
+      } else if (objectOnly) {
+        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, verbose, compiled.usesInlineAsm);
+      } else if (qbeIsQbeTarget(profile.backend.toStr()) && discovery.bin) {
+        linkErrors += assembleUnits(
           &sourcePaths,
           &objectPaths,
           &artifacts.executable,
@@ -2406,6 +2430,7 @@ function runCompile(
           &file,
           verbose,
           false,
+          true,
         );
       } else if (discovery.bin) {
         linkErrors += compileAndLinkUnits(
@@ -2420,8 +2445,6 @@ function runCompile(
           TestRunner::jobLimit(Option::NONE),
           &inlineAsmUnits,
         );
-      } else if (objectOnly) {
-        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, verbose, compiled.usesInlineAsm);
       }
     }
   }
