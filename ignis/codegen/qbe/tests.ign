@@ -1,0 +1,481 @@
+import Test from "std::test";
+import Fs from "std::fs";
+import Io from "std::io";
+import Path from "std::path";
+import Process from "std::process";
+import QbeTool from "@compiler::build::qbe";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import SourceFile, DiagnosticBag, Severity from "@compiler::diagnostics";
+import Borrowck from "@compiler::analyzer::borrowck";
+import Capture from "@compiler::analyzer::capture";
+import Lowering from "@compiler::analyzer::lowering";
+import Mono from "@compiler::analyzer::mono";
+import LirLowering from "@compiler::lir::lowering";
+import CodegenQbe from "./mod";
+
+function qbeCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      Io::eprintln(diagnostic.messageText());
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function qbeContains(haystack: &String, needle: str): boolean {
+  let target: String = String::create(needle);
+
+  return haystack.contains(&target);
+}
+
+/// One emitted QBE IL unit plus the stores that produced it.
+record QbeEmission {
+  public source: String;
+  public error: Option<String>;
+  public functions: u64;
+  public defStore: Analyzer::DefinitionStore;
+  public symbols: Analyzer::SymbolTable;
+}
+
+/// Runs `source` through the whole pipeline the driver uses and returns the
+/// QBE IL it emitted. Parse, analyzer and ownership errors are rejected, so an
+/// emitted unit only ever describes a program the rest of the pipeline accepts.
+function qbeEmit(source: str): QbeEmission {
+  return qbeEmitWithHarnessRoot(source, "");
+}
+
+function qbeEmitWithHarnessRoot(source: str, rootName: str): QbeEmission {
+  let file: SourceFile = SourceFile::create("qbe_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(qbeCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(qbeCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(qbeCountErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(&mut defStore, &mut typeStore, &mut symbols, &mut hir);
+
+  Test::assertEq<u64>(qbeCountErrors(&captureDiagnostics), 0);
+
+  let noHandlers: Vector<u32> = Vector::new<u32>();
+  let monoResult: Mono::MonoOutput = Mono::runWithRoots(&mut defStore, &mut typeStore, &mut symbols, &hir, false, &noHandlers);
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &monoResult.hir,
+  );
+
+  Test::assertEq<u64>(qbeCountErrors(&checked.diagnostics), 0);
+
+  let constValues: &Analyzer::ConstEval::ConstValueMap = &output.constValues.values;
+
+  let lowered: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &monoResult.hir,
+    &checked.dropSchedules,
+    constValues,
+  );
+
+  let mut externalSymbols: Vector<u32> = Vector::new<u32>();
+  let mut functionIndex: u64 = 0;
+  while (functionIndex < lowered.program.functions.length()) {
+    if (let Option::SOME(function_) = lowered.program.functions.functionAt(functionIndex)) {
+      if (let Option::SOME(Analyzer::Definition::Function(definition)) = defStore.get(function_.defId)) {
+        if (let Option::SOME(name) = symbols.resolve(definition.name)) {
+          let text: String = String::create(name);
+          if (text.equals(rootName)) {
+            externalSymbols.push(function_.defId.raw());
+          }
+        }
+      }
+    }
+    functionIndex += 1;
+  }
+  let emitted: CodegenQbe::EmitOutput = CodegenQbe::emitProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &lowered.program,
+    &externalSymbols,
+  );
+
+  return QbeEmission {
+    source: emitted.source,
+    error: emitted.error,
+    functions: emitted.functions,
+    defStore: defStore,
+    symbols: symbols,
+  };
+}
+
+function qbeRunExpected(source: str, expectedCode: i32): void {
+  qbeRunExpectedLinked(source, expectedCode, "", "", "");
+}
+
+function qbeRunExpectedLinked(
+  source: str,
+  expectedCode: i32,
+  nativeSource: str,
+  foreignRoot: str,
+  expectedStderr: str
+): void {
+  let emission: QbeEmission = qbeEmitWithHarnessRoot(source, foreignRoot);
+  if (let Option::SOME(error) = &emission.error) {
+    Io::eprintln(error.toStr());
+    Test::fail();
+    return;
+  }
+  let work: String = `build/qbe-construct-${Process::id()}`;
+  let directory: Path::PathBuf = Path::PathBuf::create(work.toStr());
+  Test::assert(Fs::createDirAll(&directory).isOk());
+  let il: Path::PathBuf = directory.join("unit.ssa");
+  let assembly: Path::PathBuf = directory.join("unit.s");
+  let object: Path::PathBuf = directory.join("unit.o");
+  let executable: Path::PathBuf = directory.join("program");
+  Test::assert(Fs::writeString(&il, &emission.source).isOk());
+  let lowered: Result<boolean, DiagnosticBag> = QbeTool::lowerToAssembly("qbe", &il, &assembly);
+  if (let Result::ERROR(bag) = lowered) {
+    if (let Option::SOME(diagnostic) = bag.get(0)) {
+      Io::eprintln(diagnostic.messageText());
+    }
+    Io::eprintln(emission.source.toStr());
+    Test::fail();
+    return;
+  }
+  let flags: Vector<String> = Vector::new<String>();
+  Test::assert(QbeTool::assembleObject("cc", &assembly, &object, &flags, &flags).isOk());
+  let mut link: Process::Command = Process::command("cc");
+  link.arg(object.asStr());
+  let nativeText: String = String::create(nativeSource);
+  if (nativeText.length() > 0) {
+    let native: Path::PathBuf = directory.join("native.c");
+    let text: String = String::create(nativeSource);
+    Test::assert(Fs::writeString(&native, &text).isOk());
+    link.arg(native.asStr());
+  }
+  link.arg("-o");
+  link.arg(executable.asStr());
+  let Result::OK(linked) = link.output() else {
+    Test::fail();
+    return;
+  };
+  if (!linked.status().success) {
+    Io::eprintln(linked.stderr().toStr());
+    Test::fail();
+    return;
+  }
+  let command: Process::Command = Process::command(executable.asStr());
+  let Result::OK(output) = command.output() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i32>(output.status().code, expectedCode);
+  Test::assertEq<str>(output.stdout().toStr(), "");
+  Test::assertEq<str>(output.stderr().toStr(), expectedStderr);
+}
+
+@test
+function qbeEmitsIntegerLocalsAndArithmetic(): void {
+  qbeRunExpected("function addOne(value: i32): i32 { let doubled: i32 = value + value; return doubled + 1; } function main(): i32 { return addOne(20); }", 41);
+}
+
+@test
+function qbeEmitsBooleanIntegerCasts(): void {
+  qbeRunExpected("function widen(flag: boolean): u64 { return flag as u64; } function main(): i32 { if (widen(true) != 1 || widen(false) != 0) { return 1; } return 0; }", 0);
+}
+
+@test
+function qbeEmitsSignedNarrowArithmetic(): void {
+  qbeRunExpected("function main(): i32 { let a: i8 = 100; let b: i8 = 100; let c: i8 = a + b; return c == -56 ? 0 : 1; }", 0);
+}
+
+@test
+function qbeMasksShiftCountsByDeclaredWidth(): void {
+  qbeRunExpected("function main(): i32 { let narrow: u8 = 1; if ((narrow << 9) != 2) { return 1; } let middle: u16 = 1; if ((middle << 17) != 2) { return 2; } let wide: u64 = 1; let count: u64 = 64; if ((wide << count) != 1) { return 3; } return 0; }", 0);
+}
+
+@test
+function qbeEmitsUnsignedIntegerBounds(): void {
+  qbeRunExpected("function main(): i32 { return @minOf<u8>() as i32; }", 0);
+  qbeRunExpected("function main(): i32 { if (@minOf<u16>() != 0) { return 1; } return 0; }", 0);
+  qbeRunExpected("function main(): i32 { if (@minOf<u32>() != 0) { return 1; } return 0; }", 0);
+  qbeRunExpected("function main(): i32 { if (@minOf<u64>() != 0) { return 1; } return 0; }", 0);
+  qbeRunExpected("function main(): i32 { if (@maxOf<u8>() != 255 || @maxOf<u16>() != 65535 || @maxOf<u32>() != 4294967295 || @maxOf<u64>() != 18446744073709551615) { return 1; } return 0; }", 0);
+}
+
+@test
+function qbeEmitsUnsignedNarrowArithmetic(): void {
+  qbeRunExpected("function main(): i32 { let a: u8 = 200; let b: u8 = 100; let c: u8 = a + b; let d: u32 = c as u32; let e: u64 = d as u64; return e == 44 ? 0 : 1; }", 0);
+}
+
+@test
+function qbeEmitsSixtyFourBitArithmetic(): void {
+  qbeRunExpected("function main(): i32 { let a: i64 = 10000000000; let b: i64 = a * 3; let c: u64 = 18446744073709551615; return b == 30000000000 && c > 0 ? 0 : 1; }", 0);
+}
+
+@test
+function qbeEmitsComparisonsBranchesAndLoops(): void {
+  qbeRunExpected("function classify(value: i32): i32 { if (value < 10) { return 1; } return 0; } function sumTo(limit: i32): i32 { let mut total: i32 = 0; let mut i: i32 = 0; while (i < limit) { total = total + i; i = i + 1; } return total; } function main(): i32 { return classify(5) + sumTo(4); }", 7);
+}
+
+@test
+function qbeSkipsExternalLibraryDefinitions(): void {
+  let emission: QbeEmission = qbeEmit("@externName(\"prebuilt\") function prebuilt(value: f64): f64 { return value; } function main(): i32 { return 3; }");
+  Test::assert(emission.error.isNone());
+  Test::assert(!qbeContains(&emission.source, "$prebuilt"));
+  Test::assertEq<u64>(emission.functions, 1);
+}
+
+@test
+function qbeEmitsCalls(): void {
+  qbeRunExpected("extern LibC { function abs(value: i32): i32; } function twice(value: i32): i32 { return value * 2; } function main(): i32 { return twice(abs(-5)); }", 10);
+}
+
+@test
+function qbeFailsClosedOnUnsupportedRecordLayouts(): void {
+  let empty: QbeEmission = qbeEmit("record Empty {} function main(): i32 { let value: Empty = Empty {}; return 0; }");
+  Test::assert(empty.error.isSome());
+  Test::assert(empty.source.length() == 0);
+  let aligned: QbeEmission = qbeEmit("@aligned(32) record Wide { public x: i32; } function main(): i32 { let value: Wide = Wide { x: 42 }; return value.x; }");
+  Test::assert(aligned.error.isSome());
+  Test::assert(aligned.source.length() == 0);
+}
+
+@test
+function qbeEmitsUnreachableTerminator(): void {
+  qbeRunExpected("function main(): i32 { let flag: boolean = false; if (flag) { @unreachable(); } return 42; }", 42);
+}
+
+@test
+function qbeEmitsVariadicExternCalls(): void {
+  let source: str = "extern Native { @externName(\"dprintf\") function printValue(descriptor: i32, format: str, value: i32): i32; } function main(): i32 { Native::printValue(2, \"number: %d\\n\", 42); return 0; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, ", ...)"));
+  qbeRunExpectedLinked(source, 0, "", "", "number: 42\n");
+}
+
+@test
+function qbeStopsAfterDivergingInitializers(): void {
+  qbeRunExpectedLinked("function main(): i32 { let value: u64 = @panic(\"init\"); return value as i32; }", 101, "", "", "panic: init\n");
+  qbeRunExpectedLinked("function stop(): never { @panic(\"stop\"); } function main(): i32 { let value: i32 = stop(); return value; }", 101, "", "", "panic: stop\n");
+}
+
+@test
+function qbeEmitsPanicExitAndStderr(): void {
+  qbeRunExpectedLinked("function main(): i32 { @panic(\"bail\"); }", 101, "", "", "panic: bail\n");
+}
+
+@test
+function qbeEmitsPackedRecordLayout(): void {
+  qbeRunExpected("@packed @aligned(8) record PackedAligned { a: i32; b: i8; c: i16; } function main(): i32 { return (@sizeOf<PackedAligned>() * 10 + @alignOf<PackedAligned>()) as i32; }", 88);
+  qbeRunExpected("@packed record Compact { a: i32; b: i8; } function main(): i32 { return (@sizeOf<Compact>() * 10 + @alignOf<Compact>()) as i32; }", 51);
+}
+
+@test
+function qbeEmitsRecordsAsAggregates(): void {
+  qbeRunExpected("record Point { public x: i32; public y: i32; } function main(): i32 { let p: Point = Point { x: 7, y: 8 }; let q: Point = p; return q.x + q.y; }", 15);
+}
+
+@test
+function qbeNativeRecordAbiMatchesC(): void {
+  let source: str = "record Plain { public x: i32; public y: i32; } @packed record Packed { public x: u8; public y: i32; } record Byte { public x: u8; } @externName(\"qbeAddPlain\") function qbeAddPlain(value: Plain): i32 { return value.x + value.y; } extern Native { function nativeMake(value: i32): Plain; function nativeSum(value: Plain): i32; function nativePacked(value: Packed): i32; function nativeByte(value: Byte): i32; function nativeExercise(): i32; } function main(): i32 { return nativeSum(nativeMake(3)) + nativePacked(Packed { x: 2, y: 30 }) + nativeByte(Byte { x: 1 }) + nativeExercise(); }";
+  let native: str = "#include <stdint.h>\ntypedef struct { int32_t x, y; } Plain;\ntypedef struct __attribute__((packed)) { uint8_t x; int32_t y; } Packed;\ntypedef struct { uint8_t x; } Byte;\nextern int32_t qbeAddPlain(Plain);\nPlain nativeMake(int32_t value) { return (Plain){value, value + 1}; }\nint32_t nativeSum(Plain value) { return value.x + value.y; }\nint32_t nativePacked(Packed value) { return value.x + value.y; }\nint32_t nativeByte(Byte value) { return value.x; }\nint32_t nativeExercise(void) { return qbeAddPlain((Plain){1, 1}); }\n";
+  qbeRunExpectedLinked(source, 42, native, "qbeAddPlain", "");
+}
+
+@test
+function qbeEmitsNativeRecordArgumentsAndReturns(): void {
+  let source: str = "record Point { public x: i32; public y: i32; } function makePoint(value: i32): Point { return Point { x: value, y: value + 1 }; } function sum(point: Point): i32 { return point.x + point.y; } function main(): i32 { return sum(makePoint(3)); }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "type :"));
+  Test::assert(qbeContains(&emission.source, "function :"));
+  Test::assert(!qbeContains(&emission.source, "l %ret"));
+  qbeRunExpected(source, 7);
+}
+
+@test
+function qbePreservesGlobalAlignment(): void {
+  let source: str = "record Slots { static mut PRIOR: u8 = 1; @aligned(32) static mut VALUE: i32 = 0; } function main(): i32 { let pointer: *i32 = &Slots::VALUE as *i32; return (@integerFromPointer(pointer) % 32) as i32; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "align 32"));
+  qbeRunExpected(source, 0);
+}
+
+@test
+function qbeEmitsStringLiteralsAndGlobals(): void {
+  qbeRunExpected("extern LibC { function strcmp(left: str, right: str): i32; } record Counter { static mut TOTAL: i32 = 3; } const GREETING: str = \"hey\"; function main(): i32 { let s: str = GREETING; Counter::TOTAL = Counter::TOTAL + 1; return Counter::TOTAL + strcmp(s, \"hey\"); }", 4);
+}
+
+@test
+function qbeFailsClosedOnVolatileMemory(): void {
+  let read: QbeEmission = qbeEmit("function main(): i32 { let value: i32 = 1; let pointer: *i32 = &value as *i32; return @readVolatile<i32>(pointer); }");
+  Test::assert(read.error.isSome());
+  Test::assert(read.source.length() == 0);
+  let write: QbeEmission = qbeEmit("function main(): i32 { let mut value: i32 = 1; let pointer: *mut i32 = &mut value as *mut i32; @writeVolatile<i32>(pointer, 42); return 0; }");
+  Test::assert(write.error.isSome());
+  Test::assert(write.source.length() == 0);
+}
+
+@test
+function qbeEmitsPointerOperations(): void {
+  qbeRunExpected("function main(): i32 { let mut slot: i32 = 1; let pointer: *mut i32 = &mut slot as *mut i32; *pointer = 41; return *pointer; }", 41);
+}
+
+@test
+function qbeEmitsFieldlessEnumsAsTags(): void {
+  qbeRunExpected("enum Color { RED, GREEN } function pick(c: Color): i32 { if (c == Color::GREEN) { return 1; } return 0; } function main(): i32 { return pick(Color::RED); }", 0);
+}
+
+@test
+function qbeEmitsMainWrapper(): void {
+  qbeRunExpected("function main(): i32 { return 42; }", 42);
+}
+
+/// The failure names the function by its written name. A definition id in
+/// the message would churn the pinned lane skip reasons whenever an upstream
+/// module or the corpus shifts the ids.
+@test
+function qbeNamesTheFailingFunctionWithoutADefinitionId(): void {
+  let emission: QbeEmission = qbeEmit(
+    "function apply(value: i32, f: (i32) -> i32): i32 { return f(value); } function main(): i32 { return apply(1, (x: i32): i32 -> x); }",
+  );
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: Function (apply)");
+  Test::assertEq<u64>(emission.source.length(), 0);
+  Test::assertEq<u64>(emission.functions, 0);
+}
+
+@test
+function qbeFailsClosedOnClosures(): void {
+  let emission: QbeEmission = qbeEmit("function main(): i32 { let base: i32 = 2; let addBase: (i32) -> i32 = (value: i32): i32 -> value + base; return addBase(3); }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
+  Test::assertEq<u64>(emission.source.length(), 0);
+  Test::assertEq<u64>(emission.functions, 0);
+}
+
+@test
+function qbeFailsClosedOnPayloadEnums(): void {
+  let emission: QbeEmission = qbeEmit("enum Shape { CIRCLE(i32), EMPTY } function main(): i32 { let shape: Shape = Shape::CIRCLE(5); return 0; }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: InitEnumVariant");
+  Test::assertEq<u64>(emission.source.length(), 0);
+}
+
+@test
+function qbeFailsClosedOnFloats(): void {
+  let emission: QbeEmission = qbeEmit("function main(): i32 { let x: f64 = 1.5; return x as i32; }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
+  Test::assertEq<u64>(emission.source.length(), 0);
+}
+
+@test
+function qbeReviewF18CopiesAggregatePointee(): void {
+  qbeRunExpected("record Point { public x: i32; public y: i32; } function main(): i32 { let mut point: Point = Point { x: 1, y: 2 }; let pointer: *Point = &point as *Point; let value: Point = *pointer; point.y = 9; return value.y; }", 2);
+}
+
+@test
+function qbeReviewF28CopiesAggregateLocal(): void {
+  qbeRunExpected("record Point { public x: i32; public y: i32; } function main(): i32 { let mut point: Point = Point { x: 1, y: 2 }; let value: Point = point; point.x = 9; return value.x; }", 1);
+}
+
+@test
+function qbeReviewF19PreservesEscapedBytes(): void {
+  qbeRunExpected("function main(): i32 { let text: str = \"\\u{1}\\u{80}\"; let bytes: *u8 = text as *u8; if (@read<u8>(bytes) != 1) { return 1; } if (@read<u8>(bytes + 1) != 194) { return 2; } if (@read<u8>(bytes + 2) != 128) { return 3; } return 0; }", 0);
+}
+
+@test
+function qbeReviewF20NormalizesNativeBoolean(): void {
+  qbeRunExpectedLinked("extern Native { function dirtyBool(): boolean; } function main(): i32 { return Native::dirtyBool() == true ? 0 : 1; }", 0, "#include <stdbool.h>\n__attribute__((naked)) bool dirtyBool(void) { __asm__(\"movl $0x7f000001, %eax\\n\\tret\"); }\n", "", "");
+}
+
+@test
+function qbeReviewF21EmitsRecordGlobals(): void {
+  qbeRunExpected("record Point { public x: i32; public y: i32; } @packed record Packed { public x: u8; public y: i32; } const ORIGIN: Point = Point { x: 7, y: 8 }; const COMPACT: Packed = Packed { x: 1, y: 9 }; function main(): i32 { let point: *Point = &ORIGIN as *Point; let packed: *Packed = &COMPACT as *Packed; return (*point).y + (*packed).y; }", 17);
+}
+
+@test
+function qbeReviewF24RejectsFloatGlobal(): void {
+  let emission: QbeEmission = qbeEmit("extern Native { function readScale(pointer: *f64): i32; } const SCALE: f64 = 2.5; function main(): i32 { return Native::readScale(&SCALE as *f64); }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
+  Test::assertEq<u64>(emission.source.length(), 0);
+}
+
+@test
+function qbeReviewF22EmitsArrayValueAbi(): void {
+  qbeRunExpected("function identity(values: i32[4]): i32[4] { return values; } function main(): i32 { let values: i32[4] = @splat<i32[4]>(7); let returned: i32[4] = identity(values); return returned[0] + returned[3]; }", 14);
+}
+
+@test
+function qbeReviewF23RejectsFunctionSplat(): void {
+  let emission: QbeEmission = qbeEmit("type Callback = (i32) -> i32; function callback(value: i32): i32 { return value + 1; } function main(): i32 { let callbacks: Callback[2] = @splat<Callback[2]>(callback); return 0; }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
+  Test::assertEq<u64>(emission.source.length(), 0);
+}
+
+@test
+function qbeReviewF21PadsNestedRecordGlobals(): void {
+  qbeRunExpected("record Inner { public word: i32; public byte: u8; } record Outer { public inner: Inner; public tail: u8; } const NESTED: Outer = Outer { inner: Inner { word: 7, byte: 2 }, tail: 9 }; function main(): i32 { let pointer: *Outer = &NESTED as *Outer; return (*pointer).tail as i32; }", 9);
+}

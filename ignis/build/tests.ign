@@ -1,0 +1,320 @@
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import DiagnosticBag from "@compiler::diagnostics";
+
+import
+  BuildArtifacts,
+  artifactsAssemblyPath,
+  projectArtifacts,
+  singleFileArtifacts,
+from "./artifacts";
+import BuildFingerprint, fingerprintEquals, fingerprintSerialize from "./fingerprint";
+import BuildOverrides, DiscoveryResult, Resolver from "./resolver";
+import stampProgramFingerprint from "./stamp";
+import QbeTool from "./qbe";
+
+/// Unique scratch root for one test process, so parallel runs never share a
+/// fixture project.
+function driverTestRoot(tag: str): Path::PathBuf {
+  let name: String = `ignis_driver_tests_${tag}_${Process::id()}`;
+  return Path::PathBuf::create("/tmp").join(name.toStr());
+}
+
+function driverContains(text: str, needle: str): boolean {
+  let haystack: String = String::create(text);
+  let marker: String = String::create(needle);
+  return haystack.contains(&marker);
+}
+
+function driverWriteText(path: &Path::PathBuf, text: str): void {
+  let value: String = String::create(text);
+  match (Fs::writeString(path, &value)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+function driverEnsureDir(path: &Path::PathBuf): void {
+  match (Fs::createDirAll(path)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+/// A minimal project on disk whose `[build] target` line the caller picks.
+///
+/// `std = false` keeps discovery self-contained: no std root or manifest is
+/// read, which is all a target-selection test needs.
+function driverWriteTargetProject(root: &Path::PathBuf, targetLine: str): void {
+  let srcDir: Path::PathBuf = root.join("src");
+  driverEnsureDir(&srcDir);
+
+  let mut tomlText: String = String::create("[package]\nname = \"qbe-target-test\"\nversion = \"0.1.0\"\n\n[ignis]\nstd = false\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n");
+  tomlText.pushStr(targetLine);
+  let configPath: Path::PathBuf = root.join("ignis.toml");
+  let entryPath: Path::PathBuf = srcDir.join("main.ign");
+  driverWriteText(&configPath, tomlText.toStr());
+  driverWriteText(&entryPath, "function main(): i32 {\n\treturn 0;\n}\n");
+}
+
+function driverOverridesWithTarget(target: str): BuildOverrides {
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.target = Option::SOME(String::create(target));
+  return overrides;
+}
+
+/// Without a declared target or a command-line override, a build targets the
+/// C backend.
+@test
+function driverDefaultsTargetToC(): void {
+  let root: Path::PathBuf = driverTestRoot("target_default");
+  driverWriteTargetProject(&root, "");
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(discovery.target.toStr(), "c");
+}
+
+/// `target = "qbe"` in `ignis.toml` selects the QBE backend.
+@test
+function driverReadsQbeTargetFromProjectFile(): void {
+  let root: Path::PathBuf = driverTestRoot("target_toml");
+  driverWriteTargetProject(&root, "target = \"qbe\"\n");
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(discovery.target.toStr(), "qbe");
+}
+
+/// `--target qbe` on the command line wins over the project file's own value.
+@test
+function driverCommandLineTargetOverridesProjectFile(): void {
+  let root: Path::PathBuf = driverTestRoot("target_override");
+  driverWriteTargetProject(&root, "target = \"c\"\n");
+
+  let overrides: BuildOverrides = driverOverridesWithTarget("qbe");
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(discovery.target.toStr(), "qbe");
+}
+
+/// Scratch root for one target-selection test, kept inside the repository's
+/// `build/qbe-f25/` directory instead of the system temp directory.
+function driverF25TestRoot(tag: str): Path::PathBuf {
+  let name: String = `f25_target_${tag}_${Process::id()}`;
+  let root: Path::PathBuf = Path::PathBuf::create("build/qbe-f25").join(name.toStr());
+  driverEnsureDir(&root);
+
+  return root;
+}
+
+/// A legacy `target = "iir"` stored in `ignis.toml` still builds with the C
+/// backend: pre-qbe compilers accepted every stored value and built it with
+/// C, and `ignis init` still emits this value.
+@test
+function driverReadsLegacyIirTargetAsC(): void {
+  let root: Path::PathBuf = driverF25TestRoot("iir");
+  driverWriteTargetProject(&root, "target = \"iir\"\n");
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(discovery.target.toStr(), "c");
+}
+
+/// A legacy `target = "none"` stored in `ignis.toml` still builds with the C
+/// backend, the same way the pre-qbe compilers treated it.
+@test
+function driverReadsLegacyNoneTargetAsC(): void {
+  let root: Path::PathBuf = driverF25TestRoot("none");
+  driverWriteTargetProject(&root, "target = \"none\"\n");
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(discovery.target.toStr(), "c");
+}
+
+/// Any stored target other than `qbe` falls back to the C backend, matching
+/// the pre-qbe behavior that accepted every stored value and built it with C.
+@test
+function driverStoredNonQbeTargetFallsBackToC(): void {
+  let root: Path::PathBuf = driverF25TestRoot("wasm");
+  driverWriteTargetProject(&root, "target = \"wasm\"\n");
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(discovery.target.toStr(), "c");
+}
+
+/// An unknown `--target` value from the command line is rejected the same way.
+@test
+function driverRejectsUnknownCommandLineTarget(): void {
+  let root: Path::PathBuf = driverTestRoot("target_cli_bad");
+  driverWriteTargetProject(&root, "");
+
+  let overrides: BuildOverrides = driverOverridesWithTarget("wasm");
+  let bag: DiagnosticBag = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(_) -> {
+      Test::fail();
+      return;
+    },
+    Result::ERROR(value) -> value,
+  };
+
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, "B2004");
+  Test::assertEq<boolean>(driverContains(diagnostic.messageText(), "unknown build target"), true);
+}
+
+/// A qbe project build emits its translation unit as QBE IL (`.ssa`) with the
+/// intermediate assembly beside it, and keeps the object and binary layout.
+@test
+function driverQbeProjectArtifactsWriteSsaUnit(): void {
+  let name: String = String::create("myapp");
+  let outDir: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_driver_tests_artifacts/build");
+  let outputPath: Option<String> = Option::NONE;
+
+  let artifacts: BuildArtifacts = projectArtifacts("qbe", &name, &outDir, &outputPath);
+
+  Test::assertEq<str>(artifacts.source.toString().toStr(), "/tmp/ignis_driver_tests_artifacts/build/user/src/myapp.ssa");
+  Test::assertEq<str>(artifacts.object.toString().toStr(), "/tmp/ignis_driver_tests_artifacts/build/user/obj/myapp.o");
+  Test::assertEq<str>(artifacts.executable.toString().toStr(), "/tmp/ignis_driver_tests_artifacts/build/bin/myapp");
+
+  let assembly: Path::PathBuf = artifactsAssemblyPath(&artifacts.object);
+  Test::assertEq<str>(assembly.toString().toStr(), "/tmp/ignis_driver_tests_artifacts/build/user/obj/myapp.s");
+}
+
+/// A qbe single-file build writes `selfhost_emit.ssa` instead of the C
+/// translation unit the bootstrap ladder expects; the C layout is unchanged.
+@test
+function driverQbeSingleFileArtifactsWriteSsaUnit(): void {
+  let none: Option<String> = Option::NONE;
+  let qbeArtifacts: BuildArtifacts = singleFileArtifacts("qbe", &none);
+
+  Test::assertEq<str>(qbeArtifacts.source.toString().toStr(), "selfhost_emit.ssa");
+  Test::assertEq<str>(qbeArtifacts.object.toString().toStr(), "selfhost_emit.o");
+
+  let cArtifacts: BuildArtifacts = singleFileArtifacts("c", &none);
+  Test::assertEq<str>(cArtifacts.source.toString().toStr(), "selfhost_emit.c");
+  Test::assertEq<str>(cArtifacts.object.toString().toStr(), "selfhost_emit.o");
+}
+
+/// Two builds that differ only in backend must not share a cache stamp.
+@test
+function driverFingerprintSeparatesBackends(): void {
+  let features: Vector<String> = Vector::new<String>();
+  let sources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+
+  let cFingerprint: BuildFingerprint = stampProgramFingerprint(
+    "0.1.0",
+    "x86_64-linux",
+    "c",
+    "gcc",
+    "profile-hash",
+    "manifest-hash",
+    &features,
+    &sources,
+  );
+  let qbeFingerprint: BuildFingerprint = stampProgramFingerprint(
+    "0.1.0",
+    "x86_64-linux",
+    "qbe",
+    "gcc",
+    "profile-hash",
+    "manifest-hash",
+    &features,
+    &sources,
+  );
+
+  Test::assertEq<boolean>(fingerprintEquals(&cFingerprint, &qbeFingerprint), false);
+
+  let serialized: String = fingerprintSerialize(&qbeFingerprint);
+  Test::assert(driverContains(serialized.toStr(), "backend=qbe"));
+}
+
+/// The qbe backend is admitted only for hosted builds: freestanding stays a
+/// C-only mode for now and is rejected with a clear driver diagnostic.
+@test
+function driverQbeTargetRejectsFreestandingBuilds(): void {
+  match (QbeTool::checkTargetAllowed("c", true)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (QbeTool::checkTargetAllowed("qbe", false)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let bag: DiagnosticBag = match (QbeTool::checkTargetAllowed("qbe", true)) {
+    Result::OK(_) -> {
+      Test::fail();
+      return;
+    },
+    Result::ERROR(value) -> value,
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, "B4004");
+  Test::assert(driverContains(diagnostic.messageText(), "freestanding"));
+  Test::assert(driverContains(diagnostic.messageText(), "qbe"));
+}

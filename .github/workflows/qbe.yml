@@ -1,0 +1,214 @@
+name: QBE
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# Same convention as CI: a newer push to a branch supersedes the in-flight
+# run; on main the merged commit must always finish and publish its verdict.
+concurrency:
+  group: qbe-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds everything the shards need exactly once: a seed-built stage1 (no
+  # local bootstrap, no Rust host), the standalone QBE lane runner compiled by
+  # that stage1 from scripts/qbe, and the official QBE 1.2 binary. The QBE
+  # tarball's SHA256 is checked before it is extracted or built, so nothing
+  # unverified is ever compiled or executed. Shards only download and run.
+  prepare:
+    name: Prepare stage1, runner and QBE 1.2
+    runs-on: ubuntu-latest
+    # Conservative: the local full-corpus inventory reached 173 passing pairs
+    # inside 30 minutes, but no CI run of this workflow has been measured yet,
+    # so no measured claim is made here.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # stage0 comes from the committed C seed with gcc alone; stage1 is the
+      # selfhost binary the shards run every fixture through.
+      - name: Build stage1 from the C seed
+        run: scripts/bootstrap.sh stage1-from-seed
+
+      # The runner is a standalone Ignis program (scripts/qbe project), built
+      # by the stage1 binary itself, so CI never needs a Rust toolchain. The
+      # absolute stage1 command plus IGNIS_STD_PATH pinned to this checkout's
+      # std/ keep the build independent of any installed ignis.
+      - name: Build the QBE lane runner with stage1
+        run: |
+          mkdir -p build/qbe-ci-tools
+          (
+            cd scripts/qbe && \
+            IGNIS_STD_PATH="$GITHUB_WORKSPACE/std" \
+              "$GITHUB_WORKSPACE/build/bootstrap/stage1/ignis" build \
+              -o "$GITHUB_WORKSPACE/build/qbe-ci-tools/runner"
+          )
+
+      # sha256sum --check runs BEFORE tar and make: a tampered or corrupted
+      # archive is rejected before any of its bytes are extracted, let alone
+      # compiled. Same pin as ci.yml's QBE install step.
+      - name: Download and verify QBE 1.2
+        run: |
+          curl -fsSL https://c9x.me/compile/release/qbe-1.2.tar.xz -o "$RUNNER_TEMP/qbe-1.2.tar.xz"
+          echo "a6d50eb952525a234bf76ba151861f73b7a382ac952d985f2b9af1df5368225d  $RUNNER_TEMP/qbe-1.2.tar.xz" | sha256sum --check
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/qbe-1.2.tar.xz"
+          make -C "$RUNNER_TEMP/qbe-1.2"
+          cp "$RUNNER_TEMP/qbe-1.2/qbe" build/qbe-ci-tools/qbe
+
+      - name: Upload the stage1 compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: qbe-stage1-compiler
+          path: build/bootstrap/stage1/ignis
+          if-no-files-found: error
+
+      - name: Upload the runner and QBE binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: qbe-ci-tools
+          path: build/qbe-ci-tools/
+          if-no-files-found: error
+
+  # Four independent shards, zero-based, assigned by deterministic case index
+  # modulo the shard count. Each shard runs the inventory pass and the normal
+  # differential pass over its slice and uploads both report directories;
+  # interrupted or failed shards must not end up with a valid COMPLETE, and
+  # the aggregate rejects any such report. Reports live under build/ only —
+  # no tracked manifest is ever written.
+  matrix:
+    name: Shards (${{ matrix.shard }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    # Conservative: one shard covers a quarter of the corpus in both modes,
+    # but no CI run of this workflow has been measured yet.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download the stage1 compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: qbe-stage1-compiler
+          path: build/qbe-ci-downloads/qbe-stage1-compiler
+
+      - name: Download the runner and QBE binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: qbe-ci-tools
+          path: build/qbe-ci-downloads/qbe-ci-tools
+
+      - name: Make the binaries executable
+        run: |
+          chmod +x build/qbe-ci-downloads/qbe-stage1-compiler/ignis
+          chmod +x build/qbe-ci-downloads/qbe-ci-tools/runner
+          chmod +x build/qbe-ci-downloads/qbe-ci-tools/qbe
+
+      # The compiler the runner drives emits QBE through the `qbe` binary, so
+      # it has to be on PATH for every fixture build.
+      - name: Add QBE to PATH
+        run: echo "$(pwd)/build/qbe-ci-downloads/qbe-ci-tools" >> "$GITHUB_PATH"
+
+      - name: Run the inventory shard
+        run: |
+          set -euo pipefail
+          mkdir -p build/qbe-results/logs
+          build/qbe-ci-downloads/qbe-ci-tools/runner \
+            build/qbe-ci-downloads/qbe-stage1-compiler/ignis \
+            --inventory \
+            --shard ${{ matrix.shard }} 4 \
+            --report-dir build/qbe-results/inventory/${{ matrix.shard }} \
+            2>&1 | tee build/qbe-results/logs/${{ matrix.shard }}-inventory.log
+
+      - name: Run the differential shard
+        run: |
+          set -euo pipefail
+          build/qbe-ci-downloads/qbe-ci-tools/runner \
+            build/qbe-ci-downloads/qbe-stage1-compiler/ignis \
+            --shard ${{ matrix.shard }} 4 \
+            --report-dir build/qbe-results/lane/${{ matrix.shard }} \
+            2>&1 | tee build/qbe-results/logs/${{ matrix.shard }}-lane.log
+
+      # Uploaded even when the shard fails or times out: the logs and the
+      # partial reports (a missing COMPLETE among them) are what diagnose the
+      # failure, and the aggregate needs them to say why it refused.
+      - name: Upload the shard reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qbe-results-${{ matrix.shard }}
+          path: build/qbe-results
+          if-no-files-found: error
+
+  # Runs whenever prepare succeeded, even if the matrix failed or was
+  # cancelled — a red matrix must not look green, and it must not hide the
+  # reason either. The job refuses unless every shard job succeeded AND the
+  # four report sets each validate as complete, disjoint, and identical to
+  # the committed inventories (scripts/qbe_ci_results.py).
+  aggregate:
+    name: Aggregate and verify shard reports
+    needs: [prepare, matrix]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Downloads all four shard artifacts into one directory; the upload
+      # path's common ancestor is build/qbe-results, so merging the artifacts
+      # reconstructs build/qbe-results/{inventory,lane}/<shard>/ exactly the
+      # layout the checker expects.
+      - name: Download every shard report
+        uses: actions/download-artifact@v4
+        with:
+          pattern: qbe-results-*
+          merge-multiple: true
+          path: build/qbe-results
+
+      # `needs.matrix.result` is checked explicitly instead of relying on job
+      # ordering: a cancelled or failed shard job must reach this step and be
+      # reported as the reason the run is red, never collapsed into a green
+      # no-op.
+      - name: Require every shard job to have succeeded
+        run: |
+          set -euo pipefail
+          result="${{ needs.matrix.result }}"
+          echo "matrix result: ${result}"
+          if [ "$result" != "success" ]; then
+            echo "::error::the QBE shard matrix ended '${result}', not 'success'; the aggregate refuses to validate partial reports" >&2
+            exit 1
+          fi
+
+      - name: Validate the shard reports against the corpus and the committed inventories
+        run: |
+          python3 scripts/qbe_ci_results.py \
+            --report-root build/qbe-results \
+            --corpus-dir test_cases/e2e/ok \
+            --supported-manifest test_cases/qbe_supported.txt \
+            --skip-manifest test_cases/qbe_skip.tsv \
+            --shards 4 \
+            --summary-dir build/qbe-results/summary
+
+      - name: Upload the merged reports and summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qbe-aggregate-summary
+          path: build/qbe-results/summary
+          if-no-files-found: ignore

@@ -27,10 +27,6 @@ from "./fingerprint";
 /// other reuse an object that no longer matches its runtime prelude.
 export const SELFHOST_CODEGEN_ABI_VERSION: u32 = 2;
 
-/// The backend the selfhost emits for. Recorded in the stamp so a future
-/// backend can never reuse an object emitted by this one.
-const SELFHOST_BACKEND: str = "c";
-
 /// The stamp a build writes beside its object file.
 ///
 /// The suffix is appended rather than replacing the extension, so a stamp can
@@ -237,6 +233,7 @@ export function stampProfileHash(optLevel: u64, debug: boolean, cflags: &Vector<
 export function stampProgramFingerprint(
   compilerVersion: str,
   targetTriple: str,
+  backend: str,
   cc: str,
   profileHash: str,
   manifestHash: str,
@@ -255,7 +252,7 @@ export function stampProgramFingerprint(
     compilerVersion,
     SELFHOST_CODEGEN_ABI_VERSION,
     targetTriple,
-    SELFHOST_BACKEND,
+    backend,
     toolchain.toStr(),
     profileHash,
     manifestHash,
@@ -640,7 +637,7 @@ function stampTestFingerprint(
   sources: &Vector<Path::PathBuf>,
   features: &Vector<String>
 ): BuildFingerprint {
-  return stampProgramFingerprint("0.4.0", "", "cc", "profile", "manifest", features, sources);
+  return stampProgramFingerprint("0.4.0", "", "c", "cc", "profile", "manifest", features, sources);
 }
 
 /// Record a stamp for a build that linked nothing, so its verdict rests on the

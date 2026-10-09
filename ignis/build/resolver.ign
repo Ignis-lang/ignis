@@ -20,6 +20,7 @@ import Vector from "std::vector";
 
 import BuildGraph, BuildModuleKind, ModuleGraph from "./module_graph";
 import Manifest, StdManifest, StdManifestModule from "./manifest";
+import qbeIsQbeTarget from "./qbe";
 import SourceOverrides from "./sources";
 
 const MISSING_MODULE: str = "B2001";
@@ -59,6 +60,8 @@ record ResolverProject {
   public outDir: Path::PathBuf;
   public name: String;
   public cc: String;
+  /// The backend the build lowers to: `c` or `qbe`, already validated.
+  public target: String;
   public bin: boolean;
   public emitC: boolean;
   /// False when discovery ran without an `ignis.toml`, which is what a
@@ -79,6 +82,9 @@ export record BuildOverrides {
   public features: Vector<String>;
   public stdPath: Option<String>;
   public targetTriple: Option<String>;
+  /// The backend the build lowers to (`--target c|qbe`), absent when the
+  /// project file's own `target` stands.
+  public target: Option<String>;
   public cc: Option<String>;
   public outDir: Option<String>;
   /// Module texts that replace the files on disk, which is how the language
@@ -91,6 +97,7 @@ export record BuildOverrides {
       features: Vector::new<String>(),
       stdPath: Option::NONE,
       targetTriple: Option::NONE,
+      target: Option::NONE,
       cc: Option::NONE,
       outDir: Option::NONE,
       sources: SourceOverrides::none(),
@@ -137,6 +144,8 @@ export record DiscoveryResult {
   public name: String;
   /// `[build] cc`, the C toolchain driver every toolchain step is invoked with.
   public cc: String;
+  /// The backend the build lowers to: `c` or `qbe`, already validated.
+  public target: String;
   /// `[build] bin`: whether a project build links an executable.
   public bin: boolean;
   /// True when `[build] emit` asks for the generated C to be kept.
@@ -466,6 +475,31 @@ function resolverTargetTriple(declared: &Option<String>, overrides: &BuildOverri
   };
 }
 
+/// The backend a build lowers to: the `--target` value wins over the project
+/// file's own `target`.
+///
+/// Unknown values are config errors, so a typo can never silently pick a
+/// different backend than the one the sources were written for.
+function resolverTargetBackend(
+  configPath: &Path::PathBuf,
+  declared: &String,
+  overrides: &BuildOverrides,
+): Result<String, DiagnosticBag> {
+  let selected: String = match (&overrides.target) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> declared.clone(),
+  };
+
+  if (selected.equals("c") || qbeIsQbeTarget(selected.toStr())) {
+    return Result::OK(selected);
+  }
+
+  let message: String = String::create("unknown build target '")
+    .concat(&selected)
+    .concat("' (supported: c, qbe)");
+  return Result::ERROR(resolverSimpleDiagnostic(configPath, INVALID_BUILD_PROFILE, message.toStr()));
+}
+
 /// The name a project build gives the binary it links.
 function resolverProjectName(declared: &Option<String>, root: &Path::PathBuf): String {
   if (let Option::SOME(name) = declared) {
@@ -544,6 +578,11 @@ function resolverLoadProject(
   let targetTriple: String = resolverTargetTriple(&resolved.targetTriple, overrides);
   let debug: boolean = overrides.debug.unwrapOr(resolved.debug);
 
+  // Before backend selection existed, every stored target built with C;
+  // init still emits legacy targets. CLI overrides retain strict validation.
+  let declaredBackend: String = String::create(qbeIsQbeTarget(resolved.target.toStr()) ? "qbe" : "c");
+  let target: String = resolverTargetBackend(&configPath, &declaredBackend, overrides)!;
+
   let mut outDir: Path::PathBuf = match (&resolved.outDir) {
     Option::SOME(path) -> path.clone(),
     Option::NONE -> root.join("build"),
@@ -572,6 +611,7 @@ function resolverLoadProject(
     outDir: outDir,
     name: resolverProjectName(&resolved.packageName, &root),
     cc: cc,
+    target: target,
     bin: resolved.bin,
     emitC: resolverEmitsC(&resolved.emit),
     hasProjectFile: true,
@@ -658,6 +698,9 @@ function resolverSingleFileProject(
     Option::NONE -> String::create("out"),
   };
 
+  let declaredC: String = String::create("c");
+  let target: String = resolverTargetBackend(&entry, &declaredC, overrides)!;
+
   return Result::OK(ResolverProject {
     root: sourceRoot.clone(),
     sourceRoot: sourceRoot.clone(),
@@ -671,6 +714,7 @@ function resolverSingleFileProject(
     outDir: outDir,
     name: name,
     cc: cc,
+    target: target,
     bin: true,
     emitC: false,
     hasProjectFile: false,
@@ -726,6 +770,7 @@ function resolverStdOnlyProject(
     outDir: outDir,
     name: String::create("std"),
     cc: cc,
+    target: String::create("c"),
     bin: false,
     emitC: false,
     hasProjectFile: false,
@@ -1407,6 +1452,7 @@ function resolverDiscoverProjectRoots(
     outDir: project.outDir.clone(),
     name: project.name.clone(),
     cc: project.cc.clone(),
+    target: project.target.clone(),
     bin: project.bin,
     emitC: project.emitC,
     entry: project.entry.clone(),
@@ -1498,6 +1544,7 @@ function resolverDiscoverStdRoots(
     outDir: project.outDir.clone(),
     name: String::create("std"),
     cc: project.cc.clone(),
+    target: String::create("c"),
     bin: false,
     emitC: project.emitC,
     entry: project.entry.clone(),
@@ -1777,6 +1824,7 @@ function resolverDiscoverDocRoots(
       outDir: project.outDir.clone(),
       name: project.name.clone(),
       cc: project.cc.clone(),
+      target: project.target.clone(),
       bin: project.bin,
       emitC: project.emitC,
       entry: project.entry.clone(),

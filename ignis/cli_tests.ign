@@ -1,0 +1,115 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import CliOptions, parseArguments, helpText from "./cli";
+
+function cliTestContains(text: str, needle: str): boolean {
+  let haystack: String = String::create(text);
+  let pin: String = String::create(needle);
+  return haystack.contains(&pin);
+}
+
+/// `build --target qbe` selects the QBE backend for the run.
+@test
+function cliParsesBuildTargetQbe(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("build"));
+  arguments.push(String::create("--target"));
+  arguments.push(String::create("qbe"));
+
+  let options: CliOptions = match (parseArguments(&arguments)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let Option::SOME(target) = options.target else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(target.toStr(), "qbe");
+}
+
+/// `--target c` is accepted explicitly and keeps the default backend.
+@test
+function cliParsesBuildTargetC(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("build"));
+  arguments.push(String::create("--target"));
+  arguments.push(String::create("c"));
+
+  let options: Option<CliOptions> = match (parseArguments(&arguments)) {
+    Result::OK(value) -> Option::SOME(value),
+    Result::ERROR(_) -> Option::NONE,
+  };
+
+  let Option::SOME(options) = options else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(target) = options.target else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(target.toStr(), "c");
+}
+
+/// Without `--target`, a build keeps the project file's own value.
+@test
+function cliLeavesBuildTargetUnsetByDefault(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("build"));
+
+  let options: CliOptions = match (parseArguments(&arguments)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assert(options.target.isNone());
+}
+
+/// An unknown backend value is rejected before any build work starts.
+@test
+function cliRejectsUnknownBuildTargetValue(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("build"));
+  arguments.push(String::create("--target"));
+  arguments.push(String::create("wasm"));
+
+  let Result::ERROR(message) = parseArguments(&arguments) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "error: invalid value 'wasm' for '--target': expected c or qbe");
+}
+
+/// A `--target` with no value is a missing-value error, like `--cc`.
+@test
+function cliRejectsBuildTargetWithoutValue(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("build"));
+  arguments.push(String::create("--target"));
+
+  let Result::ERROR(message) = parseArguments(&arguments) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(cliTestContains(message.toStr(), "--target"), true);
+}
+
+@test
+function cliHelpAlignsBuildTargetDescription(): void {
+  let help: String = helpText();
+  Test::assert(cliTestContains(help.toStr(), "--target <T>          Build for a backend:"));
+}

@@ -98,6 +98,9 @@
                 pkgs.python3
                 # Lints the workflows the same way CI does.
                 pkgs.actionlint
+                # The `--target qbe` backend lowers Ignis LIR to QBE IL and
+                # runs this tool to get assembly.
+                pkgs.qbe
               ];
 
             shellHook = ''

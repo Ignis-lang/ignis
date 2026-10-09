@@ -67,6 +67,8 @@ typedef void* null;
 
 A range is passed and returned by value as that struct. There is one struct per element type, emitted ahead of the record definitions, and `Range<T>` and `RangeInclusive<T>` share it: whether the end is included is part of the Ignis type and is not stored.
 
+In the selfhost C emitter, fixed-array parameters still use an element pointer and are copied into callee-local storage. A fixed-array result uses `struct __ignis_array_return_<type-id> { T data[N]; }` by value: the callee copies into that result before returning, and the caller retains its own result storage. Direct functions, closure signatures, raw function pointers and emitted extern prototypes use the same result spelling. C integrations returning fixed arrays must match this aggregate result ABI; the former pointer result could escape a callee-local array and was not lifetime-safe. This correction is selfhost-only; it does not change the Rust compiler's emitter.
+
 References and pointers both compile to C pointers. The distinction between `*T` and `*mut T`, and between `&T` and `&mut T`, is enforced at compile time only.
 
 ### Type Aliases

@@ -509,6 +509,15 @@ jobs:
             echo "superseded=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Install QBE 1.2 for executable backend tests
+        if: steps.head.outputs.superseded != 'true' && (matrix.gate == 'G3-stage1' || matrix.gate == 'G3-stage2')
+        run: |
+          curl -fsSL https://c9x.me/compile/release/qbe-1.2.tar.xz -o "$RUNNER_TEMP/qbe-1.2.tar.xz"
+          echo "a6d50eb952525a234bf76ba151861f73b7a382ac952d985f2b9af1df5368225d  $RUNNER_TEMP/qbe-1.2.tar.xz" | sha256sum --check
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/qbe-1.2.tar.xz"
+          make -C "$RUNNER_TEMP/qbe-1.2"
+          echo "$RUNNER_TEMP/qbe-1.2" >> "$GITHUB_PATH"
+
       # The gate file is the product: a non-zero exit is a recorded failure the
       # report reads, not a reason to lose the result.
       - name: Run ${{ matrix.gate }}
