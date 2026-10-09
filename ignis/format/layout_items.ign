@@ -1328,6 +1328,40 @@ export namespace Format {
     return result;
   }
 
+  /// The span a field or variant owns in its body: its own span, widened back
+  /// to its first attribute. The parser keeps attributes apart from the span,
+  /// and a comment above an attributed member has to stay that member's
+  /// rather than end up in a gap the attribute line cuts off.
+  function bodyMemberPatternSpan(node: &Ast::Pattern::Node): SourceSpan {
+    let span: SourceSpan = Format::patternSpanOf(node);
+
+    let Ast::Pattern::Node::Binding(binding) = node else {
+      return span;
+    };
+
+    let mut start: u64 = span.start;
+    let mut index: u64 = 0;
+
+    while (index < binding.metadata.attributes.length()) {
+      if (let Option::SOME(attribute) = binding.metadata.attributes.get(index)) {
+        if (attribute.span.start < start) {
+          start = attribute.span.start;
+        }
+      }
+
+      index += 1;
+    }
+
+    return SourceSpan::new(span.filePath, start, span.end);
+  }
+
+  /// The span a method owns in its body, widened back to its first attribute
+  /// like `bodyMemberPatternSpan`.
+  function bodyMemberMethodSpan(module: &Ast::Module, methodId: Ast::ItemId): SourceSpan {
+    let span: SourceSpan = Format::itemSpan(module, methodId);
+    return SourceSpan::new(span.filePath, Format::itemEffectiveStart(module, methodId), span.end);
+  }
+
   /// Merges a body's patterns and methods back into the order they were
   /// written. Each vector is already in source order, so one merge pass on the
   /// span start is enough.
@@ -1347,7 +1381,7 @@ export namespace Format {
       if (patternIndex < patterns.length()) {
         if (let Option::SOME(patternId) = patterns.get(patternIndex)) {
           if (let Option::SOME(patternNode) = module.patterns.get(*patternId)) {
-            patternStart = Format::patternSpanOf(patternNode).start;
+            patternStart = Format::bodyMemberPatternSpan(patternNode).start;
             hasPattern = true;
           }
         }
@@ -1358,7 +1392,7 @@ export namespace Format {
 
       if (methodIndex < methods.length()) {
         if (let Option::SOME(methodId) = methods.get(methodIndex)) {
-          methodStart = Format::itemSpan(module, *methodId).start;
+          methodStart = Format::bodyMemberMethodSpan(module, *methodId).start;
           hasMethod = true;
         }
       }
@@ -1385,7 +1419,7 @@ export namespace Format {
         members.push(Format::BodyMember {
           isMethod: false,
           index: patternIndex,
-          span: Format::patternSpanOf(patternNode),
+          span: Format::bodyMemberPatternSpan(patternNode),
         });
 
         patternIndex += 1;
@@ -1399,7 +1433,7 @@ export namespace Format {
       members.push(Format::BodyMember {
         isMethod: true,
         index: methodIndex,
-        span: Format::itemSpan(module, *methodId),
+        span: Format::bodyMemberMethodSpan(module, *methodId),
       });
 
       methodIndex += 1;

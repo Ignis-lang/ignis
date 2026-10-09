@@ -1309,3 +1309,24 @@ function formatterR15KeepsInlineAlwaysKeywordAsWritten(): void {
   let secondPass: String = formatOrFail(formatted.toStr());
   Test::assertEq<str>(secondPass.toStr(), formatted.toStr());
 }
+
+/// A comment written above an attributed record field stays above the field's
+/// attribute: the field's comment region ends at its first attribute, not at
+/// its name, so the attribute line no longer cuts the comment off from it.
+@test
+function formatterKeepsACommentAboveAnAttributedRecordField(): void {
+  let source: str = "record Areas {\n  /// The save areas.\n  @aligned(16)\n  static mut areas: u8[512];\n\n  // The plain one.\n  @aligned(8)\n  count: u64;\n}\n";
+  let formatted: String = formatOrFail(source);
+
+  Test::assertEq<str>(formatted.toStr(), source);
+}
+
+/// The same holds for an attributed method in a record or an enum body.
+@test
+function formatterKeepsACommentAboveAnAttributedMethod(): void {
+  let recordSource: str = "record Areas {\n  x: u8;\n\n  // Reads x.\n  @deprecated\n  public get(&self): u8 {\n    return self.x;\n  }\n}\n";
+  let enumSource: str = "enum Kind {\n  A,\n\n  // Always one.\n  @deprecated\n  public one(&self): u8 {\n    return 1;\n  }\n}\n";
+
+  Test::assertEq<str>(formatOrFail(recordSource).toStr(), recordSource);
+  Test::assertEq<str>(formatOrFail(enumSource).toStr(), enumSource);
+}
