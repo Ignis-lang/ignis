@@ -372,6 +372,23 @@ function qbeEmitsMainWrapper(): void {
   qbeRunExpected("function main(): i32 { return 42; }", 42);
 }
 
+/// The failure names the function by its written name. A definition id in
+/// the message would churn the pinned lane skip reasons whenever an upstream
+/// module or the corpus shifts the ids.
+@test
+function qbeNamesTheFailingFunctionWithoutADefinitionId(): void {
+  let emission: QbeEmission = qbeEmit(
+    "function apply(value: i32, f: (i32) -> i32): i32 { return f(value); } function main(): i32 { return apply(1, (x: i32): i32 -> x); }",
+  );
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: Function (apply)");
+  Test::assertEq<u64>(emission.source.length(), 0);
+  Test::assertEq<u64>(emission.functions, 0);
+}
+
 @test
 function qbeFailsClosedOnClosures(): void {
   let emission: QbeEmission = qbeEmit("function main(): i32 { let base: i32 = 2; let addBase: (i32) -> i32 = (value: i32): i32 -> value + base; return addBase(3); }");
