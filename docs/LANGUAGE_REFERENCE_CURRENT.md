@@ -1549,10 +1549,25 @@ Supported pattern forms:
 - Wildcard: `_`
 - Literal: `1`, `true`, `"x"`, `:ok`, `null`
 - Binding: `name`
+- Constant: `LIMIT` or `Config::LIMIT`, a name that resolves to a `const`
 - Variant path: `Option::SOME(x)`
 - Tuple pattern: `(x, y)`
 - Or pattern: `A | B`
 - Guard in match arm: `pattern if condition`
+
+In a `match` arm, an `if let` or a `while let`, a bare name that resolves to a constant is a
+constant pattern: it matches when the value equals the constant's, exactly like the qualified
+form, and binds nothing. A local variable of the same name in scope keeps the name a binding.
+In `let`, `let else`, `for` and parameters a bare name always binds.
+
+```ignis
+const READY: u64 = 1;
+
+match (state) {
+    READY -> 10,   // state == READY
+    other -> other, // binds `other`
+}
+```
 
 Tuple patterns and tuple expressions parse, but a tuple type cannot be spelled — see
 [Section 4.5](#45-type-aliases). A tuple pattern matches a tuple expression by destructuring

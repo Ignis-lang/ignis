@@ -1036,6 +1036,15 @@ export namespace Lowering {
         return Option::SOME(Hir::HirPattern::Wildcard);
       },
       Ast::Pattern::Node::Binding(binding) -> {
+        // A bare name the resolver read as a constant compares against it,
+        // the same pattern a qualified `Config::READY` lowers to.
+        if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(constantId)) = Analyzer::ResolverBodies::findPatternRef(
+          &output.resolvedBodies.bodyResolution,
+          patternId.raw(),
+        )) {
+          return Option::SOME(Hir::HirPattern::Constant(constantId));
+        }
+
         let defId: Analyzer::DefinitionId = Lowering::declarePatternBinding(
           defStore,
           symbols,

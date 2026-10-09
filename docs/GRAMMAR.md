@@ -555,6 +555,9 @@ spelled (see the reserved list).
 
 <literal-pattern> ::= <integer> | <float> | <hex> | <binary> | <string> | <char> | <boolean> | <null> | <atom>
 <binding-pattern> ::= <identifier>
+// In a match arm, `if let` or `while let`, an identifier that resolves to a
+// `const` (and is not shadowed by a local) is a constant pattern: it compares
+// against the constant's value instead of binding.
 <qualified-variant-pattern> ::= <qualified-identifier> ("(" <pattern-list>? ")")?
 <tuple-pattern> ::= "(" <pattern-list> ")"
 <pattern-list> ::= <pattern> ("," <pattern>)* ","?

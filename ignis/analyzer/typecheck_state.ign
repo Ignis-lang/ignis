@@ -3689,19 +3689,35 @@ export namespace Analyzer {
       return true;
     }
 
+    /// Whether the resolver read the bare name at `patternId` as a constant to
+    /// compare against rather than as a new binding (`patternConstantLookup`).
+    function bindingPatternNamesConstant(
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      patternId: Ast::PatternId,
+    ): boolean {
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(_)) = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId)) {
+        return true;
+      }
+
+      return false;
+    }
+
     /// Reports whether `patternId` introduces any binding. Mirrors the
-    /// reference analyzer's `pattern_has_bindings`; the selfhost AST spells a
-    /// binding as its own `Pattern::Node::Binding`, so unlike the reference
-    /// analyzer no name resolution is needed to tell a binding apart from a
-    /// payload-less enum-variant path.
-    function patternHasBindings(module: &Ast::Module, patternId: Ast::PatternId): boolean {
+    /// reference analyzer's `pattern_has_bindings`. The selfhost AST spells a
+    /// bare name as its own `Pattern::Node::Binding`, which binds unless the
+    /// resolver read it as a constant.
+    function patternHasBindings(
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      patternId: Ast::PatternId,
+    ): boolean {
       let Option::SOME(pattern) = module.patterns.get(patternId) else {
         return false;
       };
 
       match (pattern) {
         Ast::Pattern::Node::Binding(_) -> {
-          return true;
+          return !Analyzer::Typecheck::bindingPatternNamesConstant(resolvedBodies, patternId);
         },
         Ast::Pattern::Node::Wildcard(_) -> {
           return false;
@@ -3710,13 +3726,13 @@ export namespace Analyzer {
           return false;
         },
         Ast::Pattern::Node::Path(path) -> {
-          return Analyzer::Typecheck::anyPatternHasBindings(module, &path.arguments);
+          return Analyzer::Typecheck::anyPatternHasBindings(module, resolvedBodies, &path.arguments);
         },
         Ast::Pattern::Node::Tuple(tuple) -> {
-          return Analyzer::Typecheck::anyPatternHasBindings(module, &tuple.elements);
+          return Analyzer::Typecheck::anyPatternHasBindings(module, resolvedBodies, &tuple.elements);
         },
         Ast::Pattern::Node::Or(orPattern) -> {
-          return Analyzer::Typecheck::anyPatternHasBindings(module, &orPattern.alternatives);
+          return Analyzer::Typecheck::anyPatternHasBindings(module, resolvedBodies, &orPattern.alternatives);
         },
       };
 
@@ -3725,6 +3741,7 @@ export namespace Analyzer {
 
     function anyPatternHasBindings(
       module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       patterns: &Vector<Ast::PatternId>,
     ): boolean {
       let mut index: u64 = 0;
@@ -3734,7 +3751,7 @@ export namespace Analyzer {
           continue;
         };
 
-        if (Analyzer::Typecheck::patternHasBindings(module, *patternId)) {
+        if (Analyzer::Typecheck::patternHasBindings(module, resolvedBodies, *patternId)) {
           return true;
         }
 
@@ -3893,7 +3910,7 @@ export namespace Analyzer {
     ): boolean {
       let mut accepted: boolean = true;
 
-      if (Analyzer::Typecheck::anyPatternHasBindings(module, &pattern.alternatives)) {
+      if (Analyzer::Typecheck::anyPatternHasBindings(module, resolvedBodies, &pattern.alternatives)) {
         Analyzer::Typecheck::emitOrPatternBindingsDisallowed(state, pattern.span);
         accepted = false;
       }
@@ -4045,6 +4062,11 @@ export namespace Analyzer {
 
       match (pattern) {
         Ast::Pattern::Node::Binding(binding) -> {
+          // A constant binds nothing, as in the `Path` arm below.
+          if (Analyzer::Typecheck::bindingPatternNamesConstant(resolvedBodies, patternId)) {
+            return true;
+          }
+
           Analyzer::Typecheck::checkBindingShadowsVariant(state, defStore, typeStore, symbols, binding.name.toStr(), binding.span, typeId);
           return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, placeMutable, span);
         },

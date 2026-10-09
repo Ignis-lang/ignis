@@ -215,6 +215,11 @@ export namespace Analyzer {
       public orMergeDepth: u64;
       public orMergeMark: u64;
 
+      /// Set while the walk is inside a refutable pattern: a `match` arm's or a
+      /// `let` condition's. There a bare name that names a constant compares
+      /// against it instead of binding (see `patternConstantLookup`).
+      public refutablePattern: boolean;
+
       /// Lambdas currently being walked, outermost first. Parallel vectors: the expression
       /// that opened the frame, the local count at that moment, and where the frame's
       /// captures start in `pendingCaptures`.
@@ -2513,6 +2518,60 @@ export namespace Analyzer {
     // Pattern walker
     // =========================================================================
 
+    /// Walk a `match` arm's or a `let` condition's pattern, where a bare name
+    /// that names a constant compares against it.
+    function walkRefutablePattern(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      patId: Ast::PatternId,
+    ): void {
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      let enclosing: boolean = stateRef.refutablePattern;
+
+      stateRef.refutablePattern = true;
+      Analyzer::ResolverBodies::walkPattern(stateRef, defStore, symbols, module, patId);
+      stateRef.refutablePattern = enclosing;
+    }
+
+    /// The constant a bare name in a refutable pattern names, if any.
+    ///
+    /// A local in scope keeps the name a binding, the same precedence the name
+    /// has in expression position. Otherwise a name that resolves, globally or
+    /// through an import, to a constant is that constant: `READY -> ...` matches
+    /// the value of `const READY`, as `Config::READY -> ...` already did, rather
+    /// than binding a new catch-all variable called `READY`.
+    function patternConstantLookup(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      if (Analyzer::ResolverBodies::lookupLocal(&state.localStack, sym).isSome()) {
+        return Option::NONE;
+      }
+
+      let mut found: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
+
+      if (found.isNone()) {
+        found = Analyzer::ResolverBodies::bodyImportLookup(state, sym);
+      }
+
+      let Option::SOME(defId) = found else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(definition) = defStore.get(defId) else {
+        return Option::NONE;
+      };
+
+      if (let Analyzer::Definition::Variable(_) = definition) {
+        return Option::SOME(defId);
+      }
+
+      return Option::NONE;
+    }
+
     /// Resolve a single pattern node, introducing bindings into the current scope.
     ///
     /// - `Binding`: interns the name, allocates a LocalId, records in side-table. Inside
@@ -2539,6 +2598,14 @@ export namespace Analyzer {
         Ast::Pattern::Node::Binding(b) -> {
           let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
           let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
+
+          if (state.refutablePattern) {
+            if (let Option::SOME(constantId) = Analyzer::ResolverBodies::patternConstantLookup(state, defStore, sym)) {
+              Analyzer::ResolverBodies::recordPatternRef(state, patId, Analyzer::ResolverBodies::ResolvedRef::Definition(constantId));
+              return;
+            }
+          }
+
           let lid: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::bindPatternLocal(state, sym);
           Analyzer::ResolverBodies::recordPatternRef(
             state,
@@ -3120,7 +3187,7 @@ export namespace Analyzer {
         Ast::Expression::Node::LetCondition(lc) -> {
           // Walk value first (in current scope), then bind pattern.
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, lc.value);
-          Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, lc.pattern);
+          Analyzer::ResolverBodies::walkRefutablePattern(state, defStore, symbols, module, lc.pattern);
         },
         Ast::Expression::Node::Reference(r) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, r.target);
@@ -3160,7 +3227,7 @@ export namespace Analyzer {
             };
 
             Analyzer::ResolverBodies::pushScope(&mut state.localStack);
-            Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, arm.pattern);
+            Analyzer::ResolverBodies::walkRefutablePattern(state, defStore, symbols, module, arm.pattern);
 
             if (let Option::SOME(guardId) = arm.guard) {
               Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, guardId);
@@ -3996,6 +4063,7 @@ export namespace Analyzer {
         },
         orMergeDepth: 0,
         orMergeMark: 0,
+        refutablePattern: false,
         lambdaExprs: Vector::new<u32>(),
         lambdaBoundaries: Vector::new<u32>(),
         lambdaCaptureStarts: Vector::new<u64>(),
