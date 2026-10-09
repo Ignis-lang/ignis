@@ -90,6 +90,33 @@ export function projectArtifacts(
   };
 }
 
+/// With `--emit-object` the build stops at the object file, so `-o` names that
+/// object instead of the binary nothing links. Without the flag the artifacts
+/// stay exactly as the layout described them.
+export function artifactsEmitObject(
+  artifacts: &BuildArtifacts,
+  outputPath: &Option<String>,
+  emitObject: boolean,
+): BuildArtifacts {
+  let mut result: BuildArtifacts = BuildArtifacts {
+    source: artifacts.source.clone(),
+    object: artifacts.object.clone(),
+    executable: artifacts.executable.clone(),
+  };
+
+  if (!emitObject) {
+    return result;
+  }
+
+  if (let Option::SOME(value) = outputPath) {
+    let object: Path::PathBuf = Path::PathBuf::fromString(&value);
+    result.object = object.clone();
+    result.executable = object;
+  }
+
+  return result;
+}
+
 /// The directory a standard-library build lays its artifacts out under.
 ///
 /// The host `build-std` takes that directory as `-o`, so both spellings name it
