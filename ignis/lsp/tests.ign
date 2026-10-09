@@ -625,6 +625,30 @@ function analysisPlacesTheParseErrorsOfTheReachableBrokenBuffer(): void {
   Test::assertEq<boolean>(diagnostic.start.line >= 1, true);
 }
 
+/// A parse error in a module that also imports is reported where it is,
+/// rather than replaced by an import-mapping failure: the parse keeps the
+/// module's valid imports, and discovery has to have followed them too.
+@test
+function analysisPlacesTheParseErrorOfAnImportingModule(): void {
+  let source: Path::PathBuf = lspTestProject("importing");
+  lspTestWrite(&source, "other.ign", "export function other(): i32 {\n  return 1;\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &source,
+    "main.ign",
+    "import other from \"./other\";\n\nfunction main(): i32 {\n  let x: i32 = (;\n  return 0;\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+
+  let files: Vector<FileDiagnostics> = analyzeForDiagnostics(&path, &key, &stdPath, &sources);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+
+  Test::assertEq<str>(diagnostic.code.toStr(), "I0004");
+  Test::assertEq<u64>(diagnostic.start.line, 3);
+  Test::assertEq<u64>(diagnostic.start.character, 16);
+}
+
 @test
 function analysisReportsAModuleThatVanishedAfterDiscovery(): void {
   let directory: Path::PathBuf = lspTestDirectory("vanished");

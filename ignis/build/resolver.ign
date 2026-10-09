@@ -1203,10 +1203,13 @@ function resolverExtractImports(
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
 
+  // Parse diagnostics do not stop discovery, which does not report them: their
+  // spans borrow this function's `sourceFile`, and the driver would render
+  // them against the entry instead of this module. The parse phase parses the
+  // module again, recovers the same imports this parse does, which are the
+  // ones followed below, and reports the diagnostics against the module's own
+  // file before anything is analyzed.
   Parser::parseIntoWithFlags(&sourceFile, &mut module, &mut diagnostics, flags);
-  if (!diagnostics.isEmpty()) {
-    return Result::ERROR(diagnostics);
-  }
 
   let mut imports: Vector<ParsedImport> = Vector::new<ParsedImport>();
   let mut rootIndex: u64 = 0;
