@@ -109,7 +109,7 @@ if (p == null) {              // pointer comparison
 
 Using `null` where a non-pointer type is expected is a compile-time error. Dereferencing `null` and arithmetic on `null` are also rejected at compile time. `null` can appear as a match pattern on pointer-typed scrutinees.
 
-### 3.5 `never`
+### 3.6 `never`
 
 `never` is the bottom type. It is the type of expressions that never produce a value: `@panic(...)`, `@trap()`, `@unreachable()`. It is compatible with any other type, so a function that always panics satisfies any return type.
 
@@ -120,7 +120,7 @@ function fail(): i32 {
 }
 ```
 
-### 3.6 References and Pointers
+### 3.7 References and Pointers
 
 ```ignis
 function main(): i32 {
@@ -137,7 +137,7 @@ function main(): i32 {
 }
 ```
 
-### 3.7 Arrays and Function Types
+### 3.8 Arrays, Slices and Function Types
 
 ```ignis
 type Mapper = (i32) -> i32;
@@ -148,15 +148,18 @@ function main(): i32 {
 }
 ```
 
-An array can also be built from a range of integer literals: `[0..4]` is `[0, 1, 2, 3]` (see [Section 9.13](#913-ranges)).
+An array can also be built from a range of integer literals: `[0..4]` is `[0, 1, 2, 3]` (see [Section 9.14](#914-ranges)).
 
-Note: fixed-size arrays (`T[N]`) are supported. Dynamic array type syntax (`T[]`) is parsed but currently rejected by semantic analysis.
+A fixed array also coerces to a slice of the same element type: `T[]` is the slice type, a
+pointer-and-length view, and `let view: i32[] = [1, 2, 3];` binds the array as a slice.
+Slices are non-owning views; callers must keep their backing storage valid. The current
+selfhost borrow checker does not track slice-view lifetimes.
 
 For practical guidance on when to use fixed-size arrays versus `std::vector::Vector<T>`, and how they relate to `String`, `HashMap`, and `HashSet`, see `docs/STDLIB_DATA_STRUCTURES.md`.
 
-### 3.8 Range Types
+### 3.9 Range Types
 
-`Range<T>` and `RangeInclusive<T>` are builtin types, the types of `a..b` and `a..=b`. `T` is an integer type. A range is a pair of bounds of that type and nothing else: it is Copy, it is never dropped, and its C representation is a struct of two `T` values, one struct per element type, so it needs no standard library. See [Section 9.13](#913-ranges).
+`Range<T>` and `RangeInclusive<T>` are builtin types, the types of `a..b` and `a..=b`. `T` is an integer type. A range is a pair of bounds of that type and nothing else: it is Copy, it is never dropped, and its C representation is a struct of two `T` values, one struct per element type, so it needs no standard library. See [Section 9.14](#914-ranges).
 
 ```ignis
 function width(span: Range<i32>): i32 {
@@ -170,7 +173,7 @@ record Window {
 
 A record, enum or alias named `Range` or `RangeInclusive` takes precedence over the builtin type of that name.
 
-### 3.9 Generic Type Use
+### 3.10 Generic Type Use
 
 ```ignis
 record Box<T> {
@@ -275,8 +278,15 @@ Mixed-sign conversions (`u8` → `i32`, `i8` → `u32`) still require an explici
 
 ```ignis
 type Id = i32;
-type Pair<T> = (T, T);
+type IntBox = Box<i32>;
+type Identity<T> = T;
+type Callback = (i32) -> i32;
 ```
+
+Tuple patterns and tuple expressions parse, but a tuple type cannot be spelled: `(...)` in
+type position always requires `->`, so an alias like `type Pair<T> = (T, T);` is rejected
+by the parser (`ignis/parser/types.ign`, `test_cases/e2e/err/ownership/tuple_pattern_needs_a_tuple_type.ign`).
+Use a record for a named pair of values.
 
 ### 4.6 Records
 
@@ -1155,7 +1165,7 @@ null
 [1, 2, 3]
 ```
 
-Template literals are covered in [Section 9.12](#912-template-literals).
+Template literals are covered in [Section 9.13](#913-template-literals).
 
 Character literal notes:
 
@@ -1207,9 +1217,9 @@ Bitwise: `& | ^ ~ << >>`
 
 Assignment: `= += -= *= /= %= &= |= ^= <<= >>=`
 
-Range: `..` `..=` (see [Section 9.13](#913-ranges))
+Range: `..` `..=` (see [Section 9.14](#914-ranges))
 
-Pipe: `|>` (left-associative, see [Section 9.11](#911-pipe-operator))
+Pipe: `|>` (left-associative, see [Section 9.12](#912-pipe-operator))
 
 Other: cast `expr as Type`, postfix `x++`, `x--`, prefix `++x`, `--x`.
 
@@ -1295,14 +1305,14 @@ let x: i32 = isReady ? 1 : 0;
 let y: i32 = x > 10 ? x : 10;
 ```
 
-### 9.7 Cast operator
+### 9.8 Cast operator
 
 ```ignis
 let a: i64 = 42 as i64;
 let p: *i32 = &value as *i32;
 ```
 
-### 9.8 Match expressions
+### 9.9 Match expressions
 
 ```ignis
 let result: i32 = match (value) {
@@ -1314,21 +1324,21 @@ let result: i32 = match (value) {
 
 Arms accept expression bodies or block bodies.
 
-### 9.9 Closure expressions
+### 9.10 Closure expressions
 
 See [Section 5. Closures](#5-closures).
 
-### 9.10 Builtin call expressions
+### 9.11 Builtin call expressions
 
 Builtins with `@` are regular expressions and accept type args where applicable.
 
 ```ignis
 let size: u64 = @sizeOf<i32>();
 let ptr: *mut u8 = @pointerFromInteger<*mut u8>(addr);
-let ok: boolean = @configFlag("os.linux");
+let ok: boolean = @configFlag(@platform("linux"));
 ```
 
-### 9.11 Pipe Operator
+### 9.12 Pipe Operator
 
 The pipe operator `|>` passes a value as the first argument to a function on the right-hand side. `lhs |> rhs` desugars to a call where `lhs` is prepended to the argument list.
 
@@ -1408,7 +1418,7 @@ trace(0) |> f(trace(1)) |> g(trace(2))
 // Order: trace(0), trace(1), f(...), trace(2), g(...)
 ```
 
-### 9.12 Template literals
+### 9.13 Template literals
 
 A template literal is delimited by backticks and evaluates to an owned `String`.
 `${ }` interpolates an expression into the surrounding text.
@@ -1486,7 +1496,7 @@ function render(label: &String): String {
 ```
 
 
-### 9.13 Ranges
+### 9.14 Ranges
 
 `a..b` is the range from `a` up to, and not including, `b`. `a..=b` includes `b`. Both bounds are required and are integers of one type.
 
@@ -1544,6 +1554,11 @@ Supported pattern forms:
 - Or pattern: `A | B`
 - Guard in match arm: `pattern if condition`
 
+Tuple patterns and tuple expressions parse, but a tuple type cannot be spelled — see
+[Section 4.5](#45-type-aliases). A tuple pattern matches a tuple expression by destructuring
+it element by element (`let (a, (b, c)) = (x, (y, z)) else { ... };`); no pattern name can
+stand for a whole tuple, because no tuple type exists to hold one.
+
 Example:
 
 ```ignis
@@ -1575,9 +1590,11 @@ Common directive builtins:
 - `@compileError`
 - `@sizeOf`, `@alignOf`, `@typeName`
 - `@bitCast`, `@pointerCast`, `@integerFromPointer`, `@pointerFromInteger`
-- `@read`, `@write`
+- `@read`, `@write`, `@readVolatile`, `@writeVolatile`
+- `@zeroed`, `@splat`
+- `@sliceFromParts`
 - `@dropInPlace`, `@dropGlue`
-- `@eq`
+- `@hash`, `@eq`
 - `@panic`, `@trap`, `@unreachable`
 - `@maxOf`, `@minOf`
 
@@ -1600,7 +1617,7 @@ Common directive builtins:
 - The try operator `expr!` unwraps a try-capable enum (marked with `@lang(try)`) or performs early return with the error variant. The function return type must be compatible.
 - User-defined trait checks currently target records.
 - `a..b` and `a..=b` are values of `Range<T>` and `RangeInclusive<T>`; `for (i of a..b)` is a counted loop and `[a..b]` over literal bounds is an array of the values.
-- `T[]` is parsed but rejected semantically (dynamic vectors are not enabled).
+- `T[]` is the slice type: a pointer-and-length view over elements of `T`. A fixed array coerces to a slice of the same element type. Callers must keep the backing storage valid; the current selfhost borrow checker does not track slice-view lifetimes. Dynamic vectors come from `std::vector::Vector<T>`, not from type syntax.
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.
 
 ## 13. Minimal Complete Example

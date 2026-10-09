@@ -213,7 +213,7 @@ module exposes semantic APIs such as `Terminal::Style::new()`,
 
 ## `ignis fmt`
 
-Rewrite Ignis source files in place to the canonical v0.5 layout defined in [`docs/FORMATTING.md`](./FORMATTING.md).
+Rewrite Ignis source files in place to the canonical layout defined in [`docs/FORMATTING.md`](./FORMATTING.md). That document's "v0.5" is the formatter policy's own revision number; it is independent of the compiler release (the compiler on `main` is 0.4.x).
 
 Supported modes:
 

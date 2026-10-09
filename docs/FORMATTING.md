@@ -2,6 +2,10 @@
 
 This document defines the first canonical formatter policy shipped by `ignis fmt`.
 
+The **v0.5** here is the revision number of this formatter policy, not a compiler release:
+the compiler on `main` is 0.4.x. The label is kept because the policy text and its tests
+refer to it.
+
 ## Scope
 
 - The formatter rewrites trivia and layout only.
