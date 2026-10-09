@@ -219,6 +219,8 @@ struct Option__i32 {
 #define Option__i32_NONE 1
 ```
 
+A fixed array payload is stored inside the variant, the way a record stores a fixed array field (`i32 field_0[4];`), and is copied in when the variant is built. The normative layout of every type is in `docs/ABI.md`.
+
 ### Tag Type
 
 The tag type is always `u32`, regardless of the number of variants.
