@@ -1215,7 +1215,9 @@ Logical: `&& || !`
 
 Bitwise: `& | ^ ~ << >>`
 
-Assignment: `= += -= *= /= %= &= |= ^= <<= >>=`
+Assignment: `= += -= *= /= %= &= |= ^= <<= >>= ~=`
+
+A compound assignment `a op= b` assigns `a op b`. `a ~= b` assigns `a & ~b`: it clears in `a` the bits set in `b` (`flags ~= MASK`).
 
 Range: `..` `..=` (see [Section 9.14](#914-ranges))
 

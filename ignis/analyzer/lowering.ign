@@ -1395,11 +1395,26 @@ export namespace Lowering {
           }
         }
 
-        let value: Hir::HirId = match (rawTargetType) {
+        let mut value: Hir::HirId = match (rawTargetType) {
           Option::SOME(rawType) -> Lowering::lowerCFacingValue(defStore, typeStore, symbols, module, output, locals, hir, assignment.value, rawType),
           Option::NONE -> Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value),
         };
         let assignType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        // `target ~= value` assigns `target & ~value`: the value is inverted
+        // here and the `&` is the compound operation below.
+        if (assignment.operator == Ast::Expression::AssignmentOperator::NotAssign) {
+          let valueType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, assignment.value);
+          let mut invertRef: &mut Hir::HirStore = hir;
+          value = invertRef.alloc(Hir::HirNode {
+            kind: Hir::HirKind::Unary(Hir::HirUnary {
+              operation: Hir::UnaryOperation::BitNot,
+              operand: value,
+            }),
+            span: assignment.span,
+            typeId: valueType,
+          });
+        }
 
         let mut hirRef: &mut Hir::HirStore = hir;
         return hirRef.alloc(Hir::HirNode {

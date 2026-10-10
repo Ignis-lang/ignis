@@ -231,7 +231,7 @@ spelled (see the reserved list).
 
 <assignment-operators> ::=
     "=" | "+=" | "-=" | "*=" | "/=" | "%="
-  | "&=" | "|=" | "^=" | "<<=" | ">>="
+  | "&=" | "|=" | "^=" | "<<=" | ">>=" | "~="
 ```
 
 
@@ -775,7 +775,8 @@ spelled (see the reserved list).
 <hex-numbers> ::= "0x" [0-9a-fA-F]+
 <binary-numbers> ::= "0b" [01]+
 
-<assignment-operators> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+<assignment-operators> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "~="
+// `a op= b` assigns `a op b`; `a ~= b` assigns `a & ~b`, clearing in `a` the bits set in `b`.
 <variable-modifiers> ::= ("mut" | "&" | "*")+
 ```
 
