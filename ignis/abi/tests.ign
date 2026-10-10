@@ -1,0 +1,265 @@
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Id from "@compiler::ids";
+import ParseOutput, Parser from "@compiler::parser";
+import SourceFile, DiagnosticBag, Severity from "@compiler::diagnostics";
+import Abi from "./mod";
+
+// Every expected number below is what GCC reports for the canonical C
+// representation of the same declaration (`sizeof`, `_Alignof`, `offsetof`).
+
+/// The stores of one analyzed source text.
+record AbiProgram {
+  public defStore: Analyzer::DefinitionStore;
+  public typeStore: Analyzer::TypeStore;
+  public symbols: Analyzer::SymbolTable;
+}
+
+function abiCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      if (diagnostic.severity == Severity::ERROR) {
+        count += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function abiAnalyze(source: str): AbiProgram {
+  let file: SourceFile = SourceFile::create("abi_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(abiCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(abiCountErrors(&output.diagnostics), 0);
+
+  return AbiProgram { defStore: defStore, typeStore: typeStore, symbols: symbols };
+}
+
+/// The record or enum declared as `name`.
+function abiNominal(program: &mut AbiProgram, name: str): Analyzer::DefinitionId {
+  let symbol: Analyzer::SymbolId = program.symbols.intern(name);
+  let candidates: Vector<Analyzer::DefinitionId> = program.defStore.definitionsNamed(symbol);
+  let mut index: u64 = 0;
+
+  while (index < candidates.length()) {
+    if (let Option::SOME(candidate) = candidates.get(index)) {
+      match (program.defStore.get(*candidate)) {
+        Option::SOME(Analyzer::Definition::Record(_)) -> {
+          return *candidate;
+        },
+        Option::SOME(Analyzer::Definition::Enum(_)) -> {
+          return *candidate;
+        },
+        _ -> {},
+      };
+    }
+
+    index += 1;
+  }
+
+  Test::fail();
+  return Id::fromRaw<Analyzer::DefinitionTag>(0);
+}
+
+function abiRecord(program: &mut AbiProgram, name: str): Abi::RecordLayout {
+  let recordDef: Analyzer::DefinitionId = abiNominal(program, name);
+
+  return match (Abi::recordLayout(&mut program.defStore, &mut program.typeStore, recordDef)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Abi::RecordLayout {
+        layout: Abi::Layout { size: 0, alignment: 0 },
+        fieldOffsets: Vector::new<u64>(),
+        dropStateOffset: Option::NONE,
+      };
+    },
+  };
+}
+
+function abiAssertLayout(layout: &Abi::Layout, size: u64, alignment: u64): void {
+  Test::assertEq<u64>(layout.size, size);
+  Test::assertEq<u64>(layout.alignment, alignment);
+}
+
+function abiAssertOffset(offsets: &Vector<u64>, index: u64, expected: u64): void {
+  let Option::SOME(offset) = offsets.get(index) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(*offset, expected);
+}
+
+/// Natural alignment pads between fields and after the last one.
+@test
+function abiPadsRecordFieldsToTheirNaturalAlignment(): void {
+  let mut program: AbiProgram = abiAnalyze("record Mixed { a: u8; b: i64; c: u16; }");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "Mixed");
+
+  abiAssertLayout(&layout.layout, 24, 8);
+  abiAssertOffset(&layout.fieldOffsets, 0, 0);
+  abiAssertOffset(&layout.fieldOffsets, 1, 8);
+  abiAssertOffset(&layout.fieldOffsets, 2, 16);
+  Test::assertEq<boolean>(layout.dropStateOffset.isNone(), true);
+}
+
+/// `@packed` removes every padding byte and lowers the alignment to one.
+@test
+function abiPackedRecordHasNoPadding(): void {
+  let mut program: AbiProgram = abiAnalyze("@packed\nrecord Packed { a: u8; b: i32; }");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "Packed");
+
+  abiAssertLayout(&layout.layout, 5, 1);
+  abiAssertOffset(&layout.fieldOffsets, 1, 1);
+}
+
+/// `@aligned(N)` on a record raises its alignment and rounds its size up.
+@test
+function abiAlignedRecordRoundsItsSize(): void {
+  let mut program: AbiProgram = abiAnalyze("@aligned(16)\nrecord Raised { a: u8; }");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "Raised");
+
+  abiAssertLayout(&layout.layout, 16, 16);
+}
+
+/// `@aligned(N)` on a field raises that field and the record, not its neighbours.
+@test
+function abiAlignedFieldRaisesTheRecordAlignment(): void {
+  let mut program: AbiProgram = abiAnalyze("record FieldRaised {\n  @aligned(8)\n  a: u8;\n  b: u8;\n}");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "FieldRaised");
+
+  abiAssertLayout(&layout.layout, 8, 8);
+  abiAssertOffset(&layout.fieldOffsets, 1, 1);
+}
+
+/// A record that implements `Drop` carries one drop-state byte after its fields.
+@test
+function abiDropRecordCarriesTheDropStateByte(): void {
+  let mut program: AbiProgram = abiAnalyze("@implements(Drop)\nrecord Tracked {\n  public id: i32;\n\n  drop(&mut self): void {}\n}");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "Tracked");
+
+  abiAssertLayout(&layout.layout, 8, 4);
+
+  let Option::SOME(dropState) = layout.dropStateOffset else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(dropState, 4);
+}
+
+/// A fixed array is stored inline, aligned as its element.
+@test
+function abiStoresFixedArrayFieldsInline(): void {
+  let mut program: AbiProgram = abiAnalyze("record WithArray { tag: u8; values: i32[3]; }");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "WithArray");
+
+  abiAssertLayout(&layout.layout, 16, 4);
+  abiAssertOffset(&layout.fieldOffsets, 1, 4);
+}
+
+/// A nested record keeps its own tail padding, so the next field starts after it.
+@test
+function abiNestedRecordKeepsItsTailPadding(): void {
+  let mut program: AbiProgram = abiAnalyze("record Inner { a: i32; b: u8; }\nrecord Outer { x: Inner; y: u8; }");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "Outer");
+
+  abiAssertLayout(&layout.layout, 12, 4);
+  abiAssertOffset(&layout.fieldOffsets, 1, 8);
+}
+
+/// A record without fields is sized zero, the GNU C empty struct.
+@test
+function abiEmptyRecordIsSizedZero(): void {
+  let mut program: AbiProgram = abiAnalyze("record Empty {}");
+  let layout: Abi::RecordLayout = abiRecord(&mut program, "Empty");
+
+  abiAssertLayout(&layout.layout, 0, 1);
+}
+
+/// Slices are `{ data, len }`, ranges a pair of bounds and closures three
+/// pointers; each field lands where that representation puts it.
+@test
+function abiPlacesSlicesRangesAndClosures(): void {
+  let mut program: AbiProgram = abiAnalyze(
+    "record Views { flag: u8; items: i32[]; }\nrecord Spans { flag: u8; span: Range<i32>; }\nrecord Callback { flag: u8; run: (i32) -> i32; }",
+  );
+
+  let views: Abi::RecordLayout = abiRecord(&mut program, "Views");
+  abiAssertLayout(&views.layout, 24, 8);
+  abiAssertOffset(&views.fieldOffsets, 1, 8);
+
+  let spans: Abi::RecordLayout = abiRecord(&mut program, "Spans");
+  abiAssertLayout(&spans.layout, 12, 4);
+  abiAssertOffset(&spans.fieldOffsets, 1, 4);
+
+  let callback: Abi::RecordLayout = abiRecord(&mut program, "Callback");
+  abiAssertLayout(&callback.layout, 32, 8);
+  abiAssertOffset(&callback.fieldOffsets, 1, 8);
+}
+
+/// An enum is its `u32` tag, then a union of one struct per payload variant.
+@test
+function abiLaysEnumPayloadsOutAfterTheTag(): void {
+  let mut program: AbiProgram = abiAnalyze("enum Shape {\n  CIRCLE(i32),\n  RECT(i64, u8),\n  EMPTY,\n}");
+  let enumDef: Analyzer::DefinitionId = abiNominal(&mut program, "Shape");
+
+  let layout: Abi::EnumLayout = match (Abi::enumLayout(&mut program.defStore, &mut program.typeStore, enumDef)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  abiAssertLayout(&layout.layout, 24, 8);
+  Test::assertEq<u64>(layout.payloadOffset, 8);
+  Test::assertEq<u64>(layout.variants.length(), 3);
+
+  let Option::SOME(rect) = layout.variants.get(1) else {
+    Test::fail();
+    return;
+  };
+
+  abiAssertOffset(&rect.fieldOffsets, 0, 8);
+  abiAssertOffset(&rect.fieldOffsets, 1, 16);
+
+  let Option::SOME(empty) = layout.variants.get(2) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(empty.fieldOffsets.length(), 0);
+}
+
+/// An enum without payloads is only its tag.
+@test
+function abiFieldlessEnumIsItsTag(): void {
+  let mut program: AbiProgram = abiAnalyze("enum Color {\n  RED,\n  GREEN,\n}");
+  let enumDef: Analyzer::DefinitionId = abiNominal(&mut program, "Color");
+
+  match (Abi::enumLayout(&mut program.defStore, &mut program.typeStore, enumDef)) {
+    Result::OK(layout) -> {
+      abiAssertLayout(&layout.layout, 4, 4);
+      Test::assertEq<u64>(layout.payloadOffset, 4);
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
