@@ -42,6 +42,13 @@ record ParsedImport {
   public span: SourceSpan;
 }
 
+/// The imports a module's parse recovered, and whether that parse reported
+/// anything.
+record ExtractedImports {
+  public imports: Vector<ParsedImport>;
+  public hasParseDiagnostics: boolean;
+}
+
 record ResolverAlias {
   public name: String;
   public path: Path::PathBuf;
@@ -1186,7 +1193,7 @@ function resolverExtractImports(
   path: &Path::PathBuf,
   flags: &CompileFlags,
   sources: &SourceOverrides,
-): Result<Vector<ParsedImport>, DiagnosticBag> {
+): Result<ExtractedImports, DiagnosticBag> {
   let Result::OK(sourceText) = sources.read(path) else {
     return Result::ERROR(resolverSingleDiagnostic(Diagnostic::new(
       Severity::ERROR,
@@ -1252,7 +1259,10 @@ function resolverExtractImports(
     rootIndex += 1;
   }
 
-  return Result::OK(imports);
+  return Result::OK(ExtractedImports {
+    imports: imports,
+    hasParseDiagnostics: !diagnostics.isEmpty(),
+  });
 }
 
 function resolverDiscoverModule(
@@ -1280,15 +1290,25 @@ function resolverDiscoverModule(
   let mut stackRef: &mut Vector<Path::PathBuf> = stack;
   stackRef.push(currentPath.clone());
 
-  let imports: Vector<ParsedImport> = resolverExtractImports(currentPath, &project.flags, &project.sources)!;
+  let extracted: ExtractedImports = resolverExtractImports(currentPath, &project.flags, &project.sources)!;
   let mut importIndex: u64 = 0;
 
-  while (importIndex < imports.length()) {
-    let Option::SOME(importItem) = imports.get(importIndex) else {
+  while (importIndex < extracted.imports.length()) {
+    let Option::SOME(importItem) = extracted.imports.get(importIndex) else {
       break;
     };
 
-    let target: ResolvedImportTarget = resolverResolveImport(project, manifest, currentPath, &importItem.source, importItem.span)!;
+    let resolution: Result<ResolvedImportTarget, DiagnosticBag> = resolverResolveImport(project, manifest, currentPath, &importItem.source, importItem.span);
+
+    // A module that does not parse stops the build at the parse phase, which
+    // reports why. An import it cannot resolve is left for the build after
+    // it parses, rather than failing discovery and hiding its parse errors.
+    if (extracted.hasParseDiagnostics && resolution.isError()) {
+      importIndex += 1;
+      continue;
+    }
+
+    let target: ResolvedImportTarget = resolution!;
     if (resolverPathInStack(stack, &target.path)) {
       let mut cycle: Vector<Path::PathBuf> = resolverClonePathStack(stack);
       cycle.push(target.path.clone());

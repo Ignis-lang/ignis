@@ -595,6 +595,36 @@ function parseErrorInAnImportingModuleReportsOnlyItsParseErrors(): void {
   let _removed = Fs::removeDirAll(&root);
 }
 
+/// A module that does not parse and imports a module that does not exist
+/// reports its parse errors. The missing module is reported once the module
+/// parses, since nothing past the parse phase runs before that.
+@test
+function parseErrorBesideAMissingImportStaysVisible(): void {
+  let root: Path::PathBuf = parseErrorProject(
+    "parse-error-missing-import",
+    "import Helper from \"./helper\";\n\nfunction main(): i32 {\n  return Helper::value() as i32;\n}\n",
+    "import absent from \"./absent\";\n\nexport namespace Helper {\n  function value(): u64 {\n    let from: u64 = absent();\n\n    return from;\n  }\n}\n",
+  );
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let file: SourceFile = SourceFile::create("", "");
+  let options: CompileOptions = CompileOptions::build(false);
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &options);
+  let report: String = stripAnsiEscapes(&compiled.report);
+
+  Test::assertEq<u64>(compiled.errors, 2);
+  Test::assert(reportContains(&report, "src/helper.ign:5:9"));
+  Test::assert(reportContains(&report, "src/helper.ign:7:12"));
+
+  let _removed = Fs::removeDirAll(&root);
+}
+
 /// A parse error in the entry module names the entry file, line and column.
 @test
 function parseErrorInTheEntryModuleNamesItsFileLineAndColumn(): void {
