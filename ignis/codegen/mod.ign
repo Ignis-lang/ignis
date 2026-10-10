@@ -825,6 +825,79 @@ export namespace CodegenC {
   /// Whether `ty` is `i64` or `u64`. A C integer constant of either type has to
   /// carry a 64-bit suffix: a bare `137U` is 32 bits wide, so `137U << 40U`
   /// shifts past its width and is undefined behavior.
+  /// `value` as a C hexadecimal floating literal that denotes exactly the
+  /// same `f64`, such as `0x1.921fb54442d18p1` for pi. A decimal spelling
+  /// would need seventeen significant digits to round-trip; the hexadecimal
+  /// one names the significand bits themselves.
+  ///
+  /// The digits come from arithmetic that is exact in binary floating point:
+  /// scaling by two and peeling four bits at a time by sixteen. Infinities and
+  /// NaN have no literal, so they use the GCC builtins.
+  function exactFloatLiteral(value: f64): String {
+    if (value != value) {
+      return String::create("__builtin_nan(\"\")");
+    }
+
+    if (value - value != 0.0) {
+      return value > 0.0 ? String::create("__builtin_inf()") : String::create("(-__builtin_inf())");
+    }
+
+    if (value == 0.0) {
+      // Zero compares equal to negative zero, so the decimal spelling is what
+      // tells the two apart.
+      let decimal: String = `${value}`;
+
+      return decimal.startsWith("-") ? String::create("-0.0") : String::create("0.0");
+    }
+
+    let mut magnitude: f64 = value;
+    let mut sign: str = "";
+
+    if (magnitude < 0.0) {
+      magnitude = -magnitude;
+      sign = "-";
+    }
+
+    // Normalize to [1, 2), stopping at the smallest normal exponent so a
+    // subnormal keeps its leading zero.
+    let mut exponent: i64 = 0;
+
+    while (magnitude >= 2.0) {
+      magnitude = magnitude / 2.0;
+      exponent += 1;
+    }
+
+    while (magnitude < 1.0 && exponent > -1022) {
+      magnitude = magnitude * 2.0;
+      exponent -= 1;
+    }
+
+    let mut leading: str = "0";
+    let mut fraction: f64 = magnitude;
+
+    if (magnitude >= 1.0) {
+      leading = "1";
+      fraction = magnitude - 1.0;
+    }
+
+    let hexDigits: str = "0123456789abcdef";
+    let mut digits: String = String::new();
+    let mut digitIndex: u64 = 0;
+
+    // 52 fraction bits are 13 hexadecimal digits.
+    while (digitIndex < 13) {
+      fraction = fraction * 16.0;
+      let digit: u64 = fraction as u64;
+      fraction = fraction - (digit as f64);
+
+      let digitText: String = String::create(hexDigits).substringBytes(digit, digit + 1);
+      digits.pushStr(digitText.toStr());
+      digitIndex += 1;
+    }
+
+    return `${sign}0x${leading}.${digits.toStr()}p${exponent}`;
+  }
+
   function isSixtyFourBitType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     let Option::SOME(typeNode) = typeStore.get(ty) else {
       return false;
@@ -865,7 +938,7 @@ export namespace CodegenC {
         return `${number}U`;
       },
       Lir::ConstValue::Float(number, _) -> {
-        return `${number}`;
+        return CodegenC::exactFloatLiteral(number);
       },
       Lir::ConstValue::Bool(flag, _) -> {
         if (flag) {
