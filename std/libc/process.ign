@@ -50,11 +50,9 @@
 //! ```
 
 import CType from "./primitives";
+import Platform from "./platform";
 
 extern __process {
-  const EXIT_SUCCESS: CType::CInt;
-  const EXIT_FAILURE: CType::CInt;
-
   /// C `exit`; terminates the process after normal cleanup.
   function exit(status: CType::CInt): void;
   /// C `abort`; terminates abnormally.
@@ -99,19 +97,12 @@ extern __unistd_proc {
   /// success this call does not return; on failure it returns -1 and sets errno.
   function execvp(file: CType::CConstStr, argv: *mut str): CType::CInt;
 
-  /// Selector for the number of processors currently online.
-  const _SC_NPROCESSORS_ONLN: CType::CInt;
   /// POSIX `sysconf`; queries a runtime configurable system value.
   function sysconf(name: CType::CInt): CType::CLong;
 }
 
 @configFlag(@platform("linux") || @platform("macos"))
 extern __signal {
-  const SIGINT: CType::CInt;
-  const SIGKILL: CType::CInt;
-  const SIGSEGV: CType::CInt;
-  const SIGTERM: CType::CInt;
-
   /// C `raise`; sends a signal to the current process.
   function raise(sig: CType::CInt): CType::CInt;
   /// POSIX `kill`; sends a signal to a process id.
@@ -120,8 +111,6 @@ extern __signal {
 
 @configFlag(@platform("linux") || @platform("macos"))
 extern __wait {
-  /// `waitpid` option: return at once when no child has changed state.
-  const WNOHANG: CType::CInt;
   /// POSIX `wait`; waits for any child process.
   function wait(wstatus: *mut CType::CInt): CType::PidT;
   /// POSIX `waitpid`; waits for a selected child process.
@@ -131,10 +120,10 @@ extern __wait {
 /// Process control (stdlib.h, unistd.h)
 namespace LibC::Process {
   /// Successful exit status.
-  const EXIT_SUCCESS: CType::CInt = __process::EXIT_SUCCESS;
+  const EXIT_SUCCESS: CType::CInt = Platform::EXIT_SUCCESS;
 
   /// Failure exit status.
-  const EXIT_FAILURE: CType::CInt = __process::EXIT_FAILURE;
+  const EXIT_FAILURE: CType::CInt = Platform::EXIT_FAILURE;
 
   /// Terminates the process with `status`. Does not return.
   function exit(status: CType::CInt): void { __process::exit(status); }
@@ -192,7 +181,7 @@ namespace LibC::Process {
   /// result themselves.
   @configFlag(@platform("linux") || @platform("macos"))
   function onlineProcessorCount(): i64 {
-    return __unistd_proc::sysconf(__unistd_proc::_SC_NPROCESSORS_ONLN) as i64;
+    return __unistd_proc::sysconf(Platform::_SC_NPROCESSORS_ONLN) as i64;
   }
 
   /// Creates a new process by duplicating the calling process.
@@ -220,16 +209,16 @@ namespace LibC::Process {
 @configFlag(@platform("linux") || @platform("macos"))
 namespace LibC::Signals {
   /// Interrupt from keyboard (Ctrl-C).
-  const SIGINT: CType::CInt = __signal::SIGINT;
+  const SIGINT: CType::CInt = Platform::SIGINT;
 
   /// Kill signal (cannot be caught).
-  const SIGKILL: CType::CInt = __signal::SIGKILL;
+  const SIGKILL: CType::CInt = Platform::SIGKILL;
 
   /// Segmentation fault.
-  const SIGSEGV: CType::CInt = __signal::SIGSEGV;
+  const SIGSEGV: CType::CInt = Platform::SIGSEGV;
 
   /// Termination signal.
-  const SIGTERM: CType::CInt = __signal::SIGTERM;
+  const SIGTERM: CType::CInt = Platform::SIGTERM;
 
   /// Sends signal `sig` to the calling process.
   function raise(sig: CType::CInt): CType::CInt {
@@ -246,7 +235,7 @@ namespace LibC::Signals {
 @configFlag(@platform("linux") || @platform("macos"))
 namespace LibC::Wait {
   /// `waitpid` option: return 0 at once when the child has not changed state.
-  const WNOHANG: CType::CInt = __wait::WNOHANG;
+  const WNOHANG: CType::CInt = Platform::WNOHANG;
 
   /// Waits for any child process to change state.
   ///

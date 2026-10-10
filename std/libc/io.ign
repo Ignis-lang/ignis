@@ -67,16 +67,10 @@
 //! ```
 
 import CType from "./primitives";
+import Platform from "./platform";
 
 @configFlag(@platform("linux") || @platform("macos"))
 extern __unistd_io {
-  const SEEK_SET: CType::CInt;
-  const SEEK_CUR: CType::CInt;
-  const SEEK_END: CType::CInt;
-  const STDIN_FILENO: CType::CInt;
-  const STDOUT_FILENO: CType::CInt;
-  const STDERR_FILENO: CType::CInt;
-
   /// POSIX `read`; returns bytes read, 0 on EOF, or -1 on error.
   function read(fd: CType::CInt, buf: CType::CVoidPtr, count: CType::SizeT): CType::SSizeT;
   /// POSIX `write`; returns bytes written or -1 on error.
@@ -105,19 +99,6 @@ extern __unistd_io {
 
 @configFlag(@platform("linux") || @platform("macos"))
 extern __fcntl {
-  const O_RDONLY: CType::CInt;
-  const O_WRONLY: CType::CInt;
-  const O_RDWR: CType::CInt;
-  const O_CREAT: CType::CInt;
-  const O_TRUNC: CType::CInt;
-  const O_APPEND: CType::CInt;
-  /// `fcntl` command that reads descriptor flags.
-  const F_GETFD: CType::CInt;
-  /// `fcntl` command that writes descriptor flags.
-  const F_SETFD: CType::CInt;
-  /// Descriptor flag that closes the fd during successful `exec`.
-  const FD_CLOEXEC: CType::CInt;
-
   /// POSIX `fcntl(fd, cmd)` for commands without a third argument.
   @externName("fcntl")
   function fcntl(fd: CType::CInt, cmd: CType::CInt): CType::CInt;
@@ -129,9 +110,6 @@ extern __fcntl {
 
 @configFlag(@platform("linux") || @platform("macos"))
 extern __ioctl {
-  /// `ioctl` request that reads a terminal's window size.
-  const TIOCGWINSZ: CType::CULong;
-
   /// POSIX `ioctl(fd, TIOCGWINSZ, size)`. `ioctl` is variadic; this binding
   /// fixes the one argument shape the window-size request takes.
   @externName("ioctl")
@@ -148,53 +126,53 @@ namespace LibC::File {
   // ---- lseek whence values ----
 
   /// Seek from beginning of file.
-  const SEEK_SET: CType::CInt = __unistd_io::SEEK_SET;
+  const SEEK_SET: CType::CInt = Platform::SEEK_SET;
 
   /// Seek from current position.
-  const SEEK_CUR: CType::CInt = __unistd_io::SEEK_CUR;
+  const SEEK_CUR: CType::CInt = Platform::SEEK_CUR;
 
   /// Seek from end of file.
-  const SEEK_END: CType::CInt = __unistd_io::SEEK_END;
+  const SEEK_END: CType::CInt = Platform::SEEK_END;
 
   // ---- standard file descriptors ----
 
   /// Standard input file descriptor.
-  const STDIN_FILENO: CType::CInt = __unistd_io::STDIN_FILENO;
+  const STDIN_FILENO: CType::CInt = Platform::STDIN_FILENO;
 
   /// Standard output file descriptor.
-  const STDOUT_FILENO: CType::CInt = __unistd_io::STDOUT_FILENO;
+  const STDOUT_FILENO: CType::CInt = Platform::STDOUT_FILENO;
 
   /// Standard error file descriptor.
-  const STDERR_FILENO: CType::CInt = __unistd_io::STDERR_FILENO;
+  const STDERR_FILENO: CType::CInt = Platform::STDERR_FILENO;
 
   // ---- open() flags ----
 
   /// Open for reading only.
-  const O_RDONLY: CType::CInt = __fcntl::O_RDONLY;
+  const O_RDONLY: CType::CInt = Platform::O_RDONLY;
 
   /// Open for writing only.
-  const O_WRONLY: CType::CInt = __fcntl::O_WRONLY;
+  const O_WRONLY: CType::CInt = Platform::O_WRONLY;
 
   /// Open for reading and writing.
-  const O_RDWR: CType::CInt = __fcntl::O_RDWR;
+  const O_RDWR: CType::CInt = Platform::O_RDWR;
 
   /// Create file if it does not exist.
-  const O_CREAT: CType::CInt = __fcntl::O_CREAT;
+  const O_CREAT: CType::CInt = Platform::O_CREAT;
 
   /// Truncate file to zero length.
-  const O_TRUNC: CType::CInt = __fcntl::O_TRUNC;
+  const O_TRUNC: CType::CInt = Platform::O_TRUNC;
 
   /// Append on each write.
-  const O_APPEND: CType::CInt = __fcntl::O_APPEND;
+  const O_APPEND: CType::CInt = Platform::O_APPEND;
 
   /// `fcntl` request: get descriptor flags.
-  const F_GETFD: CType::CInt = __fcntl::F_GETFD;
+  const F_GETFD: CType::CInt = Platform::F_GETFD;
 
   /// `fcntl` request: set descriptor flags.
-  const F_SETFD: CType::CInt = __fcntl::F_SETFD;
+  const F_SETFD: CType::CInt = Platform::F_SETFD;
 
   /// Close the descriptor automatically on successful `exec`.
-  const FD_CLOEXEC: CType::CInt = __fcntl::FD_CLOEXEC;
+  const FD_CLOEXEC: CType::CInt = Platform::FD_CLOEXEC;
 
   // ---- functions ----
 
@@ -279,6 +257,6 @@ namespace LibC::File {
   /// Fills `size` with the window size of the terminal `fd` refers to.
   /// Returns 0 on success and -1 when `fd` is not a terminal.
   function windowSize(fd: CType::CInt, size: *mut CType::WinSize): CType::CInt {
-    return __ioctl::ioctlWindowSize(fd, __ioctl::TIOCGWINSZ, size);
+    return __ioctl::ioctlWindowSize(fd, Platform::TIOCGWINSZ, size);
   }
 }
