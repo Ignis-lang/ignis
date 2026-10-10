@@ -14,7 +14,7 @@ So two backends agree on a value exactly when they agree on its canonical repres
 | Part | State |
 | --- | --- |
 | Data layout | Specified here, computed by `ignis/abi/`, enforced on every C build |
-| Platform constants (`O_RDONLY`, `errno`, `struct stat`, ...) | Not yet: std still reads them from C headers |
+| Platform constants (`O_RDONLY`, `ENOENT`, `TIOCGWINSZ`, ...) | Specified for `x86_64` Linux in `std/libc/platform.ign`, checked against the C headers in CI; other targets still read the headers |
 | Symbol names | Not yet: Ignis symbols carry per-build definition ids |
 | Calling convention for Ignis-internal calls | Not yet: fixed arrays, closures and drop glue differ between backends |
 | Runtime ownership across objects | Not yet: every object carries its own std and runtime |
@@ -56,3 +56,18 @@ _Static_assert(__builtin_offsetof(struct Shape_12, payload.variant_1.field_1) ==
 ```
 
 Because the compiler itself and the standard library are built by the C backend, every build of them checks the layout of every type they use.
+
+## Platform constants
+
+The C constants the standard library uses (open flags, file modes, error numbers, signals, memory-mapping flags, clocks, terminal requests) live in one module, `std/libc/platform.ign`, as the `Platform` namespace. Every other part of std reads them from there.
+
+| Target | Where the values come from |
+| --- | --- |
+| `x86_64` Linux | Written in Ignis. Any backend can use them; no C header is involved. |
+| every other target | Read from the C header macro of the same name, which only the C backend can do. |
+
+`scripts/check_platform_constants.py` keeps the written values honest. It compiles one C program against the headers `std/manifest.toml` lists, prints every constant, and fails on any value that differs. It also fails when the written table, the header-reading table and the extern block that declares the macros do not list the same constants in the same order, so a constant cannot be added to one target only. CI runs it on every pull request.
+
+Values that are Ignis's own, not the platform's, are plain Ignis constants: the runtime type ids in `std::types` and `PI`, `E` and `TAU` in `std::math`.
+
+`errno` itself is read through the platform's accessor function (`__errno_location` on Linux, `__error` on macOS), a symbol every backend can call. The layout of `struct stat` is described in Ignis by `RawStat` in `std/fs/sys/unix.ign`, for `x86_64` Linux only.
