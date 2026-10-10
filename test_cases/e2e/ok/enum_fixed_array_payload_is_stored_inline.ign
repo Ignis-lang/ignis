@@ -1,0 +1,27 @@
+// A fixed array payload is stored inside the enum value. The value outlives
+// the frame that built it, and a later call reuses that frame, so a payload
+// that only pointed at the builder's array would read the other call's data.
+enum Holder {
+  FULL(i32[4]),
+  EMPTY,
+}
+
+function make(): Holder {
+  let values: i32[4] = [1, 2, 3, 4];
+  return Holder::FULL(values);
+}
+
+function clobber(seed: i32): i32 {
+  let noise: i32[16] = @splat<i32[16]>(seed);
+  return noise[3];
+}
+
+function main(): i32 {
+  let holder: Holder = make();
+  let unused: i32 = clobber(1000);
+
+  return match (holder) {
+    Holder::FULL(values) -> values[0] + values[1] + values[2] + values[3] + 32 + unused - 1000,
+    Holder::EMPTY -> 1,
+  };
+}

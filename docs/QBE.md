@@ -20,7 +20,7 @@ Project configuration selects the same backend with `[build] target = "qbe"`. Ot
 | Narrow integers | Load/store and extension operations preserve width and signedness. |
 | Pointers | QBE `l` values on supported 64-bit targets. |
 | Calls | QBE ABI types describe scalar and aggregate arguments and results. Aggregate IL values are addresses, not language-level pointer parameters. |
-| Records | Field classes and padding preserve layout; unaligned packed members use QBE opaque types for the SysV memory class. Zero-sized and over-aligned (>16 byte) aggregate values fail explicitly. |
+| Records | Sizes, alignments and field offsets come from the shared layout in `ignis/abi/` (see `docs/ABI.md`), the same one the C backend asserts in every unit. Unaligned packed members use QBE opaque types for the SysV memory class. Zero-sized and over-aligned (>16 byte) aggregate values fail explicitly, and so does a fieldless enum that implements `Drop`, which needs storage beyond its `w` tag. |
 | Extern calls | This integer-only slice uses QBE's variadic convention for typed C wrappers; it also matches fixed integer prototypes and initializes the SysV vector-register count. |
 | Hosted roots | Keep the entry point, user exports, test harness roots and runtime initialization, then walk dependencies. Unused C-only std entrypoints do not constrain integer programs. |
 | Divergence | Panic and `never` calls end the block with `hlt`; dead tail instructions must not enter QBE's SSA conversion. |

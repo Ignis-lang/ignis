@@ -70,6 +70,7 @@ jobs:
           python3 scripts/tests/test_bootstrap_report.py
           python3 scripts/tests/test_selfhost_syntax_parity.py
           python3 scripts/tests/test_selfhost_doc_parity.py
+          python3 scripts/tests/test_check_platform_constants.py
 
       # `git diff` alone would miss a fixture the generator newly *creates*,
       # since an untracked file is not a diff. `git status --porcelain` with
@@ -98,6 +99,12 @@ jobs:
       # Checks the manifest's shape and both checksums; compiles nothing.
       - name: Check the C seed matches its manifest
         run: scripts/build_from_seed.sh --verify-only
+
+      # std/libc/platform.ign writes the x86_64 Linux value of every C platform
+      # constant std uses, so backends other than C never need a header. This
+      # compiles each name against the real headers and fails on any mismatch.
+      - name: Check the platform constants against the C headers
+        run: python3 scripts/check_platform_constants.py
 
       - name: Check every e2e fixture has a drop-schedule baseline
         run: python3 scripts/selfhost_drop_schedule_parity.py --check-coverage

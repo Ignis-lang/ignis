@@ -818,6 +818,23 @@ function codegenEmitsSignedMinimumsAsSingleConstants(): void {
   Test::assert(!codegenContains(&emission.source, "-0U"));
 }
 
+/// A floating-point constant reaches C as an exact hexadecimal literal, so no
+/// digit of the value is lost on the way: the decimal spelling kept six
+/// significant digits and turned `3.141592653589793` into `3.14159`.
+@test
+function codegenSpellsFloatConstantsExactly(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "function main(): i32 {\n  let pi: f64 = 3.141592653589793;\n  let half: f64 = 0.5;\n  let negative: f64 = -1234567.875;\n  let tiny: f64 = 0.1;\n  let zero: f64 = 0.0;\n\n  return (pi + half + negative + tiny + zero) as i32;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "0x1.921fb54442d18p1"));
+  Test::assert(codegenContains(&emission.source, "0x1.0000000000000p-1"));
+  Test::assert(codegenContains(&emission.source, "0x1.2d687e0000000p20"));
+  Test::assert(codegenContains(&emission.source, "0x1.999999999999ap-4"));
+  Test::assert(codegenContains(&emission.source, "= 0.0;"));
+  Test::assert(!codegenContains(&emission.source, "3.14159;"));
+}
+
 /// A hex or binary literal with nothing expected of it keeps its narrow
 /// default type but reaches C with its full value, as the reference emits it,
 /// so a cast to a wider type keeps the high bits.

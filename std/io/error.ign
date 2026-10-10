@@ -50,6 +50,8 @@
 //! }
 //! ```
 
+import Platform from "std::libc::platform";
+
 @configFlag(@platform("linux"))
 extern __io_errno_fn {
   @externName("__errno_location")
@@ -67,14 +69,6 @@ extern __io_errno_fn {
 extern __io_error {
   /// Returns the platform error message for an errno value.
   function strerror(errnum: i32): *u8;
-
-  const ENOENT: i32;
-  const EACCES: i32;
-  const EEXIST: i32;
-  const EINVAL: i32;
-  const EINTR: i32;
-  const EAGAIN: i32;
-  const ETIMEDOUT: i32;
 }
 
 /// I/O error types and errno conversion helpers.
@@ -179,13 +173,13 @@ export namespace Io {
       let msg: str = __io_error::strerror(rawErrno) as str;
 
       let kind: ErrorKind = match (rawErrno) {
-        k if k == __io_error::ENOENT -> ErrorKind::NOT_FOUND,
-        k if k == __io_error::EACCES -> ErrorKind::PERMISSION_DENIED,
-        k if k == __io_error::EEXIST -> ErrorKind::ALREADY_EXISTS,
-        k if k == __io_error::EINVAL -> ErrorKind::INVALID_INPUT,
-        k if k == __io_error::EINTR  -> ErrorKind::INTERRUPTED,
-        k if k == __io_error::EAGAIN -> ErrorKind::WOULD_BLOCK,
-        k if k == __io_error::ETIMEDOUT -> ErrorKind::TIMED_OUT,
+        k if k == Platform::ENOENT -> ErrorKind::NOT_FOUND,
+        k if k == Platform::EACCES -> ErrorKind::PERMISSION_DENIED,
+        k if k == Platform::EEXIST -> ErrorKind::ALREADY_EXISTS,
+        k if k == Platform::EINVAL -> ErrorKind::INVALID_INPUT,
+        k if k == Platform::EINTR  -> ErrorKind::INTERRUPTED,
+        k if k == Platform::EAGAIN -> ErrorKind::WOULD_BLOCK,
+        k if k == Platform::ETIMEDOUT -> ErrorKind::TIMED_OUT,
         _ -> ErrorKind::OTHER,
       };
 

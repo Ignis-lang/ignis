@@ -6,6 +6,7 @@ import Hir from "@compiler::hir";
 import Lir from "@compiler::lir";
 
 import CodegenC from "../mod";
+import Abi from "@compiler::abi";
 import Id from "@compiler::ids";
 
 /// LIR -> QBE IL emission for the Ignis selfhost compiler.
@@ -306,39 +307,6 @@ export namespace CodegenQbe {
     return Option::NONE;
   }
 
-  /// One `@aligned(N)` request folded with the natural alignment it applies
-  /// to, the way the C emitter's `aligned` attribute does.
-  function raisedAlignment(natural: u64, requested: Option<u64>): u64 {
-    let mut alignment: u64 = natural;
-
-    if (alignment < 1) {
-      alignment = 1;
-    }
-
-    if (let Option::SOME(request) = requested) {
-      if (request > alignment) {
-        alignment = request;
-      }
-    }
-
-    return alignment;
-  }
-
-  /// `value` rounded up to the next multiple of `alignment`.
-  function alignUp(value: u64, alignment: u64): u64 {
-    if (alignment <= 1) {
-      return value;
-    }
-
-    let remainder: u64 = value % alignment;
-
-    if (remainder == 0) {
-      return value;
-    }
-
-    return value + (alignment - remainder);
-  }
-
   /// The size in bytes of a value of `ty`, computed by the emitter's own
   /// layout. Unsupported types fail the unit closed through `emitter.error`.
   function typeSize(
@@ -360,9 +328,9 @@ export namespace CodegenQbe {
     return CodegenQbe::typeLayout(emitter, defStore, typeStore, ty).alignment;
   }
 
-  /// The `(size, alignment)` of `ty`. Scalars are their width; a record is
-  /// laid out field by field like the C ABI lays out structs; an enum is its
-  /// 4-byte tag; a slice is the `{ data, len }` pair.
+  /// The `(size, alignment)` `Abi` gives `ty`, for the types this emitter
+  /// lowers. Any other type fails the unit closed through `emitter.error`,
+  /// named after the construct that would need it, before a layout is read.
   function typeLayout(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
@@ -376,144 +344,126 @@ export namespace CodegenQbe {
     };
 
     match (typeNode) {
-      Analyzer::Type::I8 -> {
-        return CodegenQbe::TypeLayout { size: 1, alignment: 1 };
-      },
-      Analyzer::Type::U8 -> {
-        return CodegenQbe::TypeLayout { size: 1, alignment: 1 };
-      },
-      Analyzer::Type::BOOLEAN -> {
-        return CodegenQbe::TypeLayout { size: 1, alignment: 1 };
-      },
-      Analyzer::Type::I16 -> {
-        return CodegenQbe::TypeLayout { size: 2, alignment: 2 };
-      },
-      Analyzer::Type::U16 -> {
-        return CodegenQbe::TypeLayout { size: 2, alignment: 2 };
-      },
-      Analyzer::Type::I32 -> {
-        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
-      },
-      Analyzer::Type::U32 -> {
-        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
-      },
-      Analyzer::Type::CHAR -> {
-        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
-      },
-      Analyzer::Type::ATOM -> {
-        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
-      },
-      Analyzer::Type::I64 -> {
-        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
-      },
-      Analyzer::Type::U64 -> {
-        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
-      },
-      Analyzer::Type::STR -> {
-        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
-      },
-      Analyzer::Type::Pointer(_) -> {
-        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
-      },
-      Analyzer::Type::Reference(_) -> {
-        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
-      },
-      Analyzer::Type::RawFunction(_) -> {
-        return CodegenQbe::TypeLayout { size: 8, alignment: 8 };
-      },
+      Analyzer::Type::I8 -> {},
+      Analyzer::Type::U8 -> {},
+      Analyzer::Type::BOOLEAN -> {},
+      Analyzer::Type::I16 -> {},
+      Analyzer::Type::U16 -> {},
+      Analyzer::Type::I32 -> {},
+      Analyzer::Type::U32 -> {},
+      Analyzer::Type::CHAR -> {},
+      Analyzer::Type::ATOM -> {},
+      Analyzer::Type::I64 -> {},
+      Analyzer::Type::U64 -> {},
+      Analyzer::Type::STR -> {},
+      Analyzer::Type::Pointer(_) -> {},
+      Analyzer::Type::Reference(_) -> {},
+      Analyzer::Type::RawFunction(_) -> {},
+      Analyzer::Type::Slice(_) -> {},
       Analyzer::Type::Enum(enumDef) -> {
         if (!CodegenQbe::enumIsFieldless(defStore, enumDef)) {
           CodegenQbe::failNamed(emitter, "InitEnumVariant");
           return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
         }
-
-        return CodegenQbe::TypeLayout { size: 4, alignment: 4 };
       },
-      Analyzer::Type::Slice(_) -> {
-        return CodegenQbe::TypeLayout { size: 16, alignment: 8 };
-      },
-      Analyzer::Type::FixedArray(element, count) -> {
-        let elementSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, element);
-        let elementAlign: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, element);
-
-        if (emitter.error.isSome()) {
-          return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
-        }
-
-        return CodegenQbe::TypeLayout { size: elementSize * count, alignment: elementAlign };
+      Analyzer::Type::FixedArray(element, _) -> {
+        CodegenQbe::typeLayout(emitter, defStore, typeStore, element);
       },
       Analyzer::Type::Record(recordDef) -> {
         return CodegenQbe::recordLayout(emitter, defStore, typeStore, recordDef);
       },
       _ -> {
         CodegenQbe::failNamed(emitter, "SizeOf");
+      },
+    };
+
+    if (emitter.error.isSome()) {
+      return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+    }
+
+    let layout: CodegenQbe::TypeLayout = CodegenQbe::abiLayout(emitter, defStore, typeStore, resolved);
+
+    // A fieldless enum is lowered as its bare `w` tag, which only holds while
+    // the enum is nothing but that tag: a drop-state byte would need storage
+    // this lowering does not have.
+    if (let Analyzer::Type::Enum(_) = typeNode) {
+      if (layout.size != 4) {
+        CodegenQbe::failNamed(emitter, "Drop");
+        return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+      }
+    }
+
+    return layout;
+  }
+
+  /// `Abi::typeLayout` for a type the caller already checked this emitter
+  /// lowers.
+  function abiLayout(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): CodegenQbe::TypeLayout {
+    return match (Abi::typeLayout(defStore, typeStore, ty)) {
+      Result::OK(layout) -> CodegenQbe::TypeLayout { size: layout.size, alignment: layout.alignment },
+      Result::ERROR(_) -> {
+        CodegenQbe::failNamed(emitter, "SizeOf");
         return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
       },
     };
   }
 
-  /// The `(size, alignment)` of the record behind `defId`, with every field
-  /// placed at its declared-order offset. `@packed` drops the inter-field
-  /// padding and the trailing one, `@aligned(N)` and a field's own
-  /// `@aligned(N)` raise alignments, and a record with no fields stays sized
-  /// zero like the reference lays it out.
+  /// The `(size, alignment)` `Abi` gives the record behind `recordDef`, once
+  /// every field type is one this emitter lowers.
   function recordLayout(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     recordDef: Analyzer::DefinitionId,
   ): CodegenQbe::TypeLayout {
-    let Option::SOME(definition) = defStore.get(recordDef) else {
-      return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
-    };
+    let mut fieldTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
 
-    if (let Analyzer::Definition::Record(recData) = definition) {
-      let mut offset: u64 = 0;
-      let mut alignment: u64 = 1;
-
-      alignment = CodegenQbe::raisedAlignment(1, recData.alignment);
-
+    if (let Option::SOME(Analyzer::Definition::Record(recData)) = defStore.get(recordDef)) {
       let mut index: u64 = 0;
 
       while (index < recData.fields.length()) {
-        let Option::SOME(fieldId) = recData.fields.get(index) else {
-          index += 1;
-          continue;
-        };
-
-        let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
-          index += 1;
-          continue;
-        };
-
-        let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, recordDef, fieldDef.fieldType);
-        let fieldSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, storageType);
-        let fieldNatural: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, storageType);
-        let fieldAlignment: u64 = CodegenQbe::raisedAlignment(recData.packed ? 1 : fieldNatural, fieldDef.alignment);
-
-        if (emitter.error.isSome()) {
-          return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+        if (let Option::SOME(fieldId) = recData.fields.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+            fieldTypes.push(fieldDef.fieldType);
+          }
         }
 
-        offset = CodegenQbe::alignUp(offset, fieldAlignment);
-
-        if (fieldAlignment > alignment) {
-          alignment = fieldAlignment;
-        }
-
-        offset = offset + fieldSize;
         index += 1;
       }
-
-      offset = CodegenQbe::alignUp(offset, alignment);
-
-      return CodegenQbe::TypeLayout { size: offset, alignment: alignment };
+    } else {
+      return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
     }
 
-    return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+    let mut typeIndex: u64 = 0;
+
+    while (typeIndex < fieldTypes.length()) {
+      if (let Option::SOME(fieldType) = fieldTypes.get(typeIndex)) {
+        let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, recordDef, *fieldType);
+        CodegenQbe::typeLayout(emitter, defStore, typeStore, storageType);
+      }
+
+      if (emitter.error.isSome()) {
+        return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+      }
+
+      typeIndex += 1;
+    }
+
+    return match (Abi::recordLayout(defStore, typeStore, recordDef)) {
+      Result::OK(layout) -> CodegenQbe::TypeLayout { size: layout.layout.size, alignment: layout.layout.alignment },
+      Result::ERROR(_) -> {
+        CodegenQbe::failNamed(emitter, "SizeOf");
+        return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+      },
+    };
   }
 
-  /// The byte offset of field `fieldIndex` inside its record.
+  /// The byte offset `Abi` gives field `fieldIndex` inside its record.
   function fieldOffset(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
@@ -521,46 +471,19 @@ export namespace CodegenQbe {
     recordDef: Analyzer::DefinitionId,
     fieldIndex: u64,
   ): u64 {
-    let Option::SOME(definition) = defStore.get(recordDef) else {
+    CodegenQbe::recordLayout(emitter, defStore, typeStore, recordDef);
+
+    if (emitter.error.isSome()) {
       return 0;
-    };
-
-    if (let Analyzer::Definition::Record(recData) = definition) {
-      let mut offset: u64 = 0;
-      let mut currentIndex: u64 = 0;
-
-      while (currentIndex < recData.fields.length()) {
-        let Option::SOME(fieldId) = recData.fields.get(currentIndex) else {
-          currentIndex += 1;
-          continue;
-        };
-
-        let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
-          currentIndex += 1;
-          continue;
-        };
-
-        let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, recordDef, fieldDef.fieldType);
-        let fieldSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, storageType);
-        let fieldNatural: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, storageType);
-        let fieldAlignment: u64 = CodegenQbe::raisedAlignment(recData.packed ? 1 : fieldNatural, fieldDef.alignment);
-
-        if (emitter.error.isSome()) {
-          return 0;
-        }
-
-        offset = CodegenQbe::alignUp(offset, fieldAlignment);
-
-        if (fieldDef.index as u64 == fieldIndex) {
-          return offset;
-        }
-
-        offset = offset + fieldSize;
-        currentIndex += 1;
-      }
     }
 
-    return 0;
+    return match (Abi::recordFieldOffset(defStore, typeStore, recordDef, fieldIndex)) {
+      Result::OK(offset) -> offset,
+      Result::ERROR(_) -> {
+        CodegenQbe::failNamed(emitter, "SizeOf");
+        return 0;
+      },
+    };
   }
 
   /// Interns a string literal and answers its data symbol. Literals are
@@ -1258,9 +1181,7 @@ export namespace CodegenQbe {
       };
 
       let storageType: Analyzer::TypeId = Hir::recordFieldStorageType(defStore, typeStore, defId, fieldDef.fieldType);
-      let fieldNatural: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, storageType);
-      let fieldAlignment: u64 = CodegenQbe::raisedAlignment(recordDef.packed ? 1 : fieldNatural, fieldDef.alignment);
-      let target: u64 = CodegenQbe::alignUp(cursor, fieldAlignment);
+      let target: u64 = CodegenQbe::fieldOffset(emitter, defStore, typeStore, defId, fieldDef.index as u64);
 
       if (emitter.error.isSome()) {
         return;
@@ -1393,7 +1314,7 @@ export namespace CodegenQbe {
 
     if (let Analyzer::Definition::Variable(variableDef) = definition) {
       variableTypeOpt = Option::SOME(variableDef.declaredType);
-      declaredAlignment = CodegenQbe::raisedAlignment(1, variableDef.alignment);
+      declaredAlignment = Abi::raisedAlignment(1, variableDef.alignment);
     }
 
     let Option::SOME(variableType) = variableTypeOpt else {

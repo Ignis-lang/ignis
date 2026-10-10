@@ -99,12 +99,14 @@ import Io from "std::io";
 import LibC from "std::libc";
 import CType from "std::libc::primitives";
 import String from "std::string";
+import Platform from "std::libc::platform";
 
 // Extern blocks — direct C symbols.
 // Local declarations are used as a workaround for cross-module symbol mangling
 // in codegen (`LibC_File_read` instead of `read`).
 
-// POSIX file I/O primitives and related constants (fcntl.h, unistd.h, sys/stat.h).
+// POSIX file I/O primitives (fcntl.h, unistd.h, sys/stat.h). Their constants
+// come from `std::libc::platform`.
 extern __fs_io {
   /// POSIX `open`; bound at the three-argument shape so `mode` is always passed.
   ///
@@ -129,38 +131,6 @@ extern __fs_io {
   function rename(oldpath: *u8, newpath: *u8): i32;
   /// POSIX `mkdir`; creates one directory with `mode`.
   function mkdir(pathname: *u8, mode: u32): i32;
-
-  const SEEK_SET: i32;
-  const SEEK_CUR: i32;
-  const SEEK_END: i32;
-
-  const O_RDONLY: i32;
-  const O_WRONLY: i32;
-  const O_RDWR: i32;
-  const O_CREAT: i32;
-  const O_TRUNC: i32;
-  const O_APPEND: i32;
-  const O_EXCL: i32;
-
-  // S_IS* mode test macros are not available as extern consts.
-  // We expose the raw bit masks instead.
-  const S_IFMT: u32;
-  const S_IFREG: u32;
-  const S_IFDIR: u32;
-  const S_IFLNK: u32;
-
-  const S_IRWXU: u32;
-  const S_IRUSR: u32;
-  const S_IWUSR: u32;
-  const S_IXUSR: u32;
-  const S_IRWXG: u32;
-  const S_IRGRP: u32;
-  const S_IWGRP: u32;
-  const S_IXGRP: u32;
-  const S_IRWXO: u32;
-  const S_IROTH: u32;
-  const S_IWOTH: u32;
-  const S_IXOTH: u32;
 }
 
 /// Host `struct stat`, laid out field for field.
@@ -242,18 +212,10 @@ extern __fs_errno_fn {
   function errno_location(): *mut i32;
 }
 
-// strerror and errno constants (POSIX-standard).
+// strerror (POSIX-standard).
 extern __fs_errno {
   /// Returns a host-owned message for an errno value.
   function strerror(errnum: i32): *u8;
-
-  const ENOENT: i32;
-  const EACCES: i32;
-  const EEXIST: i32;
-  const EINVAL: i32;
-  const EINTR: i32;
-  const EAGAIN: i32;
-  const ETIMEDOUT: i32;
 }
 
 // =============================================================================
@@ -307,39 +269,39 @@ export namespace Fs::Sys {
     public fileType: u8;
   }
 
-  // ---- Open flags (re-exported from extern consts) ----
+  // ---- Open flags (re-exported from `std::libc::platform`) ----
 
-  const SEEK_SET: i32 = __fs_io::SEEK_SET;
-  const SEEK_CUR: i32 = __fs_io::SEEK_CUR;
-  const SEEK_END: i32 = __fs_io::SEEK_END;
+  const SEEK_SET: i32 = Platform::SEEK_SET;
+  const SEEK_CUR: i32 = Platform::SEEK_CUR;
+  const SEEK_END: i32 = Platform::SEEK_END;
 
-  const O_RDONLY: i32 = __fs_io::O_RDONLY;
-  const O_WRONLY: i32 = __fs_io::O_WRONLY;
-  const O_RDWR: i32 = __fs_io::O_RDWR;
-  const O_CREAT: i32 = __fs_io::O_CREAT;
-  const O_TRUNC: i32 = __fs_io::O_TRUNC;
-  const O_APPEND: i32 = __fs_io::O_APPEND;
-  const O_EXCL: i32 = __fs_io::O_EXCL;
+  const O_RDONLY: i32 = Platform::O_RDONLY;
+  const O_WRONLY: i32 = Platform::O_WRONLY;
+  const O_RDWR: i32 = Platform::O_RDWR;
+  const O_CREAT: i32 = Platform::O_CREAT;
+  const O_TRUNC: i32 = Platform::O_TRUNC;
+  const O_APPEND: i32 = Platform::O_APPEND;
+  const O_EXCL: i32 = Platform::O_EXCL;
 
   // ---- Mode bits ----
 
-  const S_IFMT: u32 = __fs_io::S_IFMT;
-  const S_IFREG: u32 = __fs_io::S_IFREG;
-  const S_IFDIR: u32 = __fs_io::S_IFDIR;
-  const S_IFLNK: u32 = __fs_io::S_IFLNK;
+  const S_IFMT: u32 = Platform::S_IFMT;
+  const S_IFREG: u32 = Platform::S_IFREG;
+  const S_IFDIR: u32 = Platform::S_IFDIR;
+  const S_IFLNK: u32 = Platform::S_IFLNK;
 
-  const S_IRWXU: u32 = __fs_io::S_IRWXU;
-  const S_IRUSR: u32 = __fs_io::S_IRUSR;
-  const S_IWUSR: u32 = __fs_io::S_IWUSR;
-  const S_IXUSR: u32 = __fs_io::S_IXUSR;
-  const S_IRWXG: u32 = __fs_io::S_IRWXG;
-  const S_IRGRP: u32 = __fs_io::S_IRGRP;
-  const S_IWGRP: u32 = __fs_io::S_IWGRP;
-  const S_IXGRP: u32 = __fs_io::S_IXGRP;
-  const S_IRWXO: u32 = __fs_io::S_IRWXO;
-  const S_IROTH: u32 = __fs_io::S_IROTH;
-  const S_IWOTH: u32 = __fs_io::S_IWOTH;
-  const S_IXOTH: u32 = __fs_io::S_IXOTH;
+  const S_IRWXU: u32 = Platform::S_IRWXU;
+  const S_IRUSR: u32 = Platform::S_IRUSR;
+  const S_IWUSR: u32 = Platform::S_IWUSR;
+  const S_IXUSR: u32 = Platform::S_IXUSR;
+  const S_IRWXG: u32 = Platform::S_IRWXG;
+  const S_IRGRP: u32 = Platform::S_IRGRP;
+  const S_IWGRP: u32 = Platform::S_IWGRP;
+  const S_IXGRP: u32 = Platform::S_IXGRP;
+  const S_IRWXO: u32 = Platform::S_IRWXO;
+  const S_IROTH: u32 = Platform::S_IROTH;
+  const S_IWOTH: u32 = Platform::S_IWOTH;
+  const S_IXOTH: u32 = Platform::S_IXOTH;
 
   // ---- dirent type constants ----
 
@@ -421,13 +383,13 @@ export namespace Fs::Sys {
     let msg: str = __fs_errno::strerror(rawErrno) as str;
 
     let kind: Io::ErrorKind = match (rawErrno) {
-      __fs_errno::ENOENT -> Io::ErrorKind::NOT_FOUND,
-      __fs_errno::EACCES -> Io::ErrorKind::PERMISSION_DENIED,
-      __fs_errno::EEXIST -> Io::ErrorKind::ALREADY_EXISTS,
-      __fs_errno::EINVAL -> Io::ErrorKind::INVALID_INPUT,
-      __fs_errno::EINTR -> Io::ErrorKind::INTERRUPTED,
-      __fs_errno::EAGAIN -> Io::ErrorKind::WOULD_BLOCK,
-      __fs_errno::ETIMEDOUT -> Io::ErrorKind::TIMED_OUT,
+      Platform::ENOENT -> Io::ErrorKind::NOT_FOUND,
+      Platform::EACCES -> Io::ErrorKind::PERMISSION_DENIED,
+      Platform::EEXIST -> Io::ErrorKind::ALREADY_EXISTS,
+      Platform::EINVAL -> Io::ErrorKind::INVALID_INPUT,
+      Platform::EINTR -> Io::ErrorKind::INTERRUPTED,
+      Platform::EAGAIN -> Io::ErrorKind::WOULD_BLOCK,
+      Platform::ETIMEDOUT -> Io::ErrorKind::TIMED_OUT,
       _ -> Io::ErrorKind::OTHER,
     };
 
@@ -774,7 +736,7 @@ export namespace Fs::Sys {
     outType: &mut u8
   ): Result<boolean, Io::IoError> {
     if (dirp == null) {
-      return Result::ERROR(Io::IoError::fromErrno(__fs_errno::EINVAL));
+      return Result::ERROR(Io::IoError::fromErrno(Platform::EINVAL));
     }
 
     @write<i32>(__fs_errno_fn::errno_location(), 0);
@@ -803,7 +765,7 @@ export namespace Fs::Sys {
   /// dirent buffer — valid only until the next `readdir` or `closedir`.
   function readdir(dirp: CType::DirPtr): Result<Option<SysDirEntry>, Io::IoError> {
     if (dirp == null) {
-      return Result::ERROR(Io::IoError::fromErrno(__fs_errno::EINVAL));
+      return Result::ERROR(Io::IoError::fromErrno(Platform::EINVAL));
     }
 
     @write<i32>(__fs_errno_fn::errno_location(), 0);

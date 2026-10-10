@@ -10,6 +10,7 @@ import Hir from "@compiler::hir";
 import Lir from "@compiler::lir";
 import SourceFile, SourceSpan from "@compiler::diagnostics";
 import CodegenReserved from "./reserved";
+import Abi from "@compiler::abi";
 
 /// LIR -> C emission for the Ignis selfhost compiler.
 ///
@@ -839,6 +840,79 @@ export namespace CodegenC {
   /// Whether `ty` is `i64` or `u64`. A C integer constant of either type has to
   /// carry a 64-bit suffix: a bare `137U` is 32 bits wide, so `137U << 40U`
   /// shifts past its width and is undefined behavior.
+  /// `value` as a C hexadecimal floating literal that denotes exactly the
+  /// same `f64`, such as `0x1.921fb54442d18p1` for pi. A decimal spelling
+  /// would need seventeen significant digits to round-trip; the hexadecimal
+  /// one names the significand bits themselves.
+  ///
+  /// The digits come from arithmetic that is exact in binary floating point:
+  /// scaling by two and peeling four bits at a time by sixteen. Infinities and
+  /// NaN have no literal, so they use the GCC builtins.
+  function exactFloatLiteral(value: f64): String {
+    if (value != value) {
+      return String::create("__builtin_nan(\"\")");
+    }
+
+    if (value - value != 0.0) {
+      return value > 0.0 ? String::create("__builtin_inf()") : String::create("(-__builtin_inf())");
+    }
+
+    if (value == 0.0) {
+      // Zero compares equal to negative zero, so the decimal spelling is what
+      // tells the two apart.
+      let decimal: String = `${value}`;
+
+      return decimal.startsWith("-") ? String::create("-0.0") : String::create("0.0");
+    }
+
+    let mut magnitude: f64 = value;
+    let mut sign: str = "";
+
+    if (magnitude < 0.0) {
+      magnitude = -magnitude;
+      sign = "-";
+    }
+
+    // Normalize to [1, 2), stopping at the smallest normal exponent so a
+    // subnormal keeps its leading zero.
+    let mut exponent: i64 = 0;
+
+    while (magnitude >= 2.0) {
+      magnitude = magnitude / 2.0;
+      exponent += 1;
+    }
+
+    while (magnitude < 1.0 && exponent > -1022) {
+      magnitude = magnitude * 2.0;
+      exponent -= 1;
+    }
+
+    let mut leading: str = "0";
+    let mut fraction: f64 = magnitude;
+
+    if (magnitude >= 1.0) {
+      leading = "1";
+      fraction = magnitude - 1.0;
+    }
+
+    let hexDigits: str = "0123456789abcdef";
+    let mut digits: String = String::new();
+    let mut digitIndex: u64 = 0;
+
+    // 52 fraction bits are 13 hexadecimal digits.
+    while (digitIndex < 13) {
+      fraction = fraction * 16.0;
+      let digit: u64 = fraction as u64;
+      fraction = fraction - (digit as f64);
+
+      let digitText: String = String::create(hexDigits).substringBytes(digit, digit + 1);
+      digits.pushStr(digitText.toStr());
+      digitIndex += 1;
+    }
+
+    return `${sign}0x${leading}.${digits.toStr()}p${exponent}`;
+  }
+
   function isSixtyFourBitType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     let Option::SOME(typeNode) = typeStore.get(ty) else {
       return false;
@@ -879,7 +953,7 @@ export namespace CodegenC {
         return `${number}U`;
       },
       Lir::ConstValue::Float(number, _) -> {
-        return `${number}`;
+        return CodegenC::exactFloatLiteral(number);
       },
       Lir::ConstValue::Bool(flag, _) -> {
         if (flag) {
@@ -3071,7 +3145,15 @@ export namespace CodegenC {
           if (let Option::SOME(payloadOperand) = node.payload.get(payloadIndex)) {
             if (!CodegenC::operandIsVoid(typeStore, function_, payloadOperand)) {
               let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, payloadOperand);
-              let line: String = `    (${destination.toStr()})->payload.variant_${node.variantTag}.field_${fieldIndex} = ${value.toStr()};\n`;
+              let mut line: String = `    (${destination.toStr()})->payload.variant_${node.variantTag}.field_${fieldIndex} = ${value.toStr()};\n`;
+
+              if (let Option::SOME(valueType) = CodegenC::operandType(function_, payloadOperand)) {
+                if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, valueType)) {
+                  let target: String = `(${destination.toStr()})->payload.variant_${node.variantTag}.field_${fieldIndex}`;
+                  line = CodegenC::arrayCopyLine(defStore, typeStore, symbols, closures, &target, &value, &array);
+                }
+              }
+
               let mut payloadRef: &mut String = output;
               payloadRef.pushStr(line.toStr());
               fieldIndex += 1;
@@ -3966,8 +4048,18 @@ export namespace CodegenC {
 
         while (fieldIndex < payloadTypes.length()) {
           if (let Option::SOME(payloadType) = payloadTypes.get(fieldIndex)) {
-            let payloadText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *payloadType);
-            let line: String = `            ${payloadText.toStr()} field_${fieldIndex};\n`;
+            let mut payloadText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *payloadType);
+            let mut member: String = `field_${fieldIndex}`;
+
+            // A fixed array payload is stored in the variant, as a record
+            // stores a fixed array field: the decayed pointer would point
+            // into the frame that built the value.
+            if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, *payloadType)) {
+              payloadText = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+              member = `${member.toStr()}[${array.size}]`;
+            }
+
+            let line: String = `            ${payloadText.toStr()} ${member.toStr()};\n`;
 
             let mut lineRef: &mut String = output;
             lineRef.pushStr(line.toStr());
@@ -3994,6 +4086,252 @@ export namespace CodegenC {
     }
 
     enumTailRef.pushStr("};\n");
+  }
+
+  /// One `_Static_assert` line: `expression` has to equal `expected`.
+  function layoutAssertion(
+    output: &mut String,
+    expression: &String,
+    expected: u64,
+    subject: &String
+  ): void {
+    let line: String = `_Static_assert(${expression.toStr()} == ${expected}, "ignis abi layout: ${subject.toStr()}");\n`;
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(line.toStr());
+  }
+
+  /// `sizeof` and `_Alignof` of `struct name` against `layout`.
+  function layoutSizeAssertions(output: &mut String, name: &String, layout: &Abi::Layout): void {
+    let sizeText: String = `sizeof(struct ${name.toStr()})`;
+    let alignText: String = `_Alignof(struct ${name.toStr()})`;
+
+    CodegenC::layoutAssertion(output, &sizeText, layout.size, name);
+    CodegenC::layoutAssertion(output, &alignText, layout.alignment, name);
+  }
+
+  /// `__builtin_offsetof(struct name, member)` against `offset`.
+  function layoutOffsetAssertion(
+    output: &mut String,
+    name: &String,
+    member: &String,
+    offset: u64
+  ): void {
+    let offsetText: String = `__builtin_offsetof(struct ${name.toStr()}, ${member.toStr()})`;
+    let subject: String = `${name.toStr()}.${member.toStr()}`;
+
+    CodegenC::layoutAssertion(output, &offsetText, offset, &subject);
+  }
+
+  /// The layout `Abi` computes for every struct this unit defined, asserted
+  /// against the C compiler's own: size, alignment and the offset of every
+  /// member. A divergence between the shared layout and the C representation
+  /// then stops the build at C compile time instead of corrupting a value
+  /// another backend lays out. `__builtin_offsetof` keeps the check free of
+  /// `stddef.h`, so freestanding units carry it too.
+  ///
+  /// A record declared inside an `extern` block is laid out by the C side that
+  /// owns it, so it is not asserted. A type `Abi` cannot lay out leaves a
+  /// comment naming why instead of an assertion.
+  function emitLayoutAssertions(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    typeDefs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut headerRef: &mut String = output;
+    headerRef.pushStr("\n// Layout assertions\n");
+
+    let mut definitionIndex: u64 = 0;
+
+    while (definitionIndex < typeDefs.length()) {
+      let Option::SOME(defId) = typeDefs.get(definitionIndex) else {
+        definitionIndex += 1;
+        continue;
+      };
+
+      let name: String = CodegenC::structName(defStore, symbols, *defId);
+      let mut isRecord: boolean = false;
+      let mut isEnum: boolean = false;
+      let mut isExtern: boolean = false;
+      let mut fieldIndices: Vector<u64> = Vector::new<u64>();
+
+      match (defStore.get(*defId)) {
+        Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+          isRecord = true;
+          isExtern = recordDef.isExtern;
+
+          let mut fieldPosition: u64 = 0;
+
+          while (fieldPosition < recordDef.fields.length()) {
+            if (let Option::SOME(fieldId) = recordDef.fields.get(fieldPosition)) {
+              if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+                fieldIndices.push(fieldDef.index as u64);
+              }
+            }
+
+            fieldPosition += 1;
+          }
+        },
+        Option::SOME(Analyzer::Definition::Enum(_)) -> {
+          isEnum = true;
+        },
+        _ -> {},
+      };
+
+      if (isRecord && !isExtern) {
+        match (Abi::recordLayout(defStore, typeStore, *defId)) {
+          Result::OK(layout) -> {
+            CodegenC::layoutSizeAssertions(output, &name, &layout.layout);
+
+            let mut position: u64 = 0;
+
+            while (position < layout.fieldOffsets.length() && position < fieldIndices.length()) {
+              if (let Option::SOME(offset) = layout.fieldOffsets.get(position)) {
+                if (let Option::SOME(fieldIndex) = fieldIndices.get(position)) {
+                  let member: String = CodegenC::recordFieldMember(defStore, symbols, *defId, *fieldIndex);
+                  CodegenC::layoutOffsetAssertion(output, &name, &member, *offset);
+                }
+              }
+
+              position += 1;
+            }
+
+            if (let Option::SOME(dropState) = layout.dropStateOffset) {
+              let member: String = String::create("__ignis_drop_state");
+              CodegenC::layoutOffsetAssertion(output, &name, &member, dropState);
+            }
+          },
+          Result::ERROR(reason) -> {
+            CodegenC::layoutUnavailable(output, &name, &reason);
+          },
+        };
+      }
+
+      if (isEnum) {
+        match (Abi::enumLayout(defStore, typeStore, *defId)) {
+          Result::OK(layout) -> {
+            CodegenC::layoutSizeAssertions(output, &name, &layout.layout);
+
+            let mut variantIndex: u64 = 0;
+
+            while (variantIndex < layout.variants.length()) {
+              if (let Option::SOME(variant) = layout.variants.get(variantIndex)) {
+                let mut fieldIndex: u64 = 0;
+
+                while (fieldIndex < variant.fieldOffsets.length()) {
+                  if (let Option::SOME(offset) = variant.fieldOffsets.get(fieldIndex)) {
+                    let member: String = `payload.variant_${variant.tagValue}.field_${fieldIndex}`;
+                    CodegenC::layoutOffsetAssertion(output, &name, &member, *offset);
+                  }
+
+                  fieldIndex += 1;
+                }
+              }
+
+              variantIndex += 1;
+            }
+
+            if (let Option::SOME(dropState) = layout.dropStateOffset) {
+              let member: String = String::create("__ignis_drop_state");
+              CodegenC::layoutOffsetAssertion(output, &name, &member, dropState);
+            }
+          },
+          Result::ERROR(reason) -> {
+            CodegenC::layoutUnavailable(output, &name, &reason);
+          },
+        };
+      }
+
+      definitionIndex += 1;
+    }
+
+    CodegenC::emitBuiltinLayoutAssertions(defStore, typeStore, output, closures);
+  }
+
+  /// The comment a struct `Abi` cannot lay out gets instead of assertions.
+  function layoutUnavailable(output: &mut String, name: &String, reason: &String): void {
+    let line: String = `// layout of ${name.toStr()} not asserted: ${reason.toStr()}\n`;
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(line.toStr());
+  }
+
+  /// Assertions for the compiler-known structs: one per concrete slice and
+  /// range type in the store, and one per closure signature.
+  function emitBuiltinLayoutAssertions(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    let mut rawId: u32 = 0;
+    let typeCount: u64 = typeStore.length();
+
+    while ((rawId as u64) < typeCount) {
+      let typeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(rawId);
+      let mut sliceElement: Option<Analyzer::TypeId> = Option::NONE;
+      let mut rangeElement: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+        match (typeNode) {
+          Analyzer::Type::Slice(element) -> {
+            sliceElement = Option::SOME(element);
+          },
+          Analyzer::Type::Range(range) -> {
+            rangeElement = Option::SOME(range.element);
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(element) = sliceElement) {
+        if (!typeStore.containsTypeParam(element)) {
+          if (let Result::OK(layout) = Abi::typeLayout(defStore, typeStore, typeId)) {
+            let name: String = CodegenC::sliceStructName(typeId);
+            let lengthMember: String = String::create("len");
+
+            CodegenC::layoutSizeAssertions(output, &name, &layout);
+            CodegenC::layoutOffsetAssertion(output, &name, &lengthMember, layout.size / 2);
+          }
+        }
+      }
+
+      if (let Option::SOME(element) = rangeElement) {
+        if (!typeStore.containsTypeParam(element)) {
+          if (let Result::OK(layout) = Abi::typeLayout(defStore, typeStore, typeId)) {
+            // Both bounds share the layout's alignment, so the upper one
+            // starts at half the padded pair.
+            let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, element);
+            let name: String = CodegenC::rangeStructName(defStore, typeStore, resolved.typeId);
+            let upperMember: String = String::create("field_1");
+
+            CodegenC::layoutSizeAssertions(output, &name, &layout);
+            CodegenC::layoutOffsetAssertion(output, &name, &upperMember, layout.size / 2);
+          }
+        }
+      }
+
+      rawId += 1;
+    }
+
+    let mut signatureIndex: u64 = 0;
+
+    while (signatureIndex < closures.signatures.length()) {
+      if (let Option::SOME(raw) = closures.signatures.get(signatureIndex)) {
+        let signatureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+
+        if (let Result::OK(layout) = Abi::typeLayout(defStore, typeStore, signatureType)) {
+          let name: String = CodegenC::closureStructName(signatureType);
+          let environmentMember: String = String::create("env");
+
+          CodegenC::layoutSizeAssertions(output, &name, &layout);
+          CodegenC::layoutOffsetAssertion(output, &name, &environmentMember, layout.size - layout.alignment);
+        }
+      }
+
+      signatureIndex += 1;
+    }
   }
 
   /// The `__attribute__` suffix a record's `@packed` / `@aligned(N)` ask the C
@@ -6010,6 +6348,8 @@ export namespace CodegenC {
 
     CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures);
     CodegenC::emitArrayReturnTypes(defStore, typeStore, symbols, &mut source, closures, false);
+
+    CodegenC::emitLayoutAssertions(defStore, typeStore, symbols, &mut source, closures, &typeDefs);
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
 

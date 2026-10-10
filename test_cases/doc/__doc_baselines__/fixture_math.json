@@ -17,11 +17,11 @@
     },
     {
       "name": "std::libc",
-      "doc": "  \n# LibC  \n  \nRaw bindings to a POSIX-oriented subset of the C standard library.  \n  \nAll types use the `CType` namespace (re-exported from `std::libc/primitives`).  \nNo safety guarantees are added -- the caller is responsible for pointer  \nvalidity, buffer sizes, and lifetime management.  \n  \n## Sub-namespaces  \n  \n| Namespace              | Source file  | C Headers                | Description                                    |  \n|------------------------|--------------|--------------------------|------------------------------------------------|  \n| `LibC::Allocator`      | memory.ign   | `stdlib.h`               | `malloc`, `calloc`, `realloc`, `free`          |  \n| `LibC::MemoryOperations` | memory.ign | `string.h`               | `memcpy`, `memmove`, `memset`, `memcmp`        |  \n| `LibC::Memory`         | memory.ign   | `sys/mman.h`, `unistd.h` | `mmap`, `munmap`, `mprotect`, `sbrk`, `brk`    |  \n| `LibC::String`         | string.ign   | `string.h`               | `strlen`, `strcmp`, `strcpy`, `strcat`, ...     |  \n| `LibC::File`           | io.ign       | `unistd.h`, `fcntl.h`    | `open`, `close`, `read`, `write`, `lseek`, ... |  \n| `LibC::Stdio`          | stdio.ign    | `stdio.h`                | `fopen`, `fclose`, `fread`, `fwrite`, ...      |  \n| `LibC::Errno`          | errno.ign    | `errno.h`                | `get`, `set` + 26 POSIX error constants        |  \n| `LibC::Process`        | process.ign  | `stdlib.h`, `unistd.h`   | `exit`, `fork`, `getpid`, `sleep`, ...         |  \n| `LibC::Signals`        | process.ign  | `signal.h`               | `raise`, `kill`                                |  \n| `LibC::Wait`           | process.ign  | `sys/wait.h`             | `wait`, `waitpid`                              |  \n| `LibC::Conversion`     | misc.ign     | `stdlib.h`               | `atoi`, `atol`, `atof`                         |  \n| `LibC::Math`           | misc.ign     | `stdlib.h`               | `abs`, `labs`                                  |  \n| `LibC::Character`      | misc.ign     | `ctype.h`                | `isalnum`, `isdigit`, `toupper`, `tolower`, ...|  \n| `LibC::Time`           | misc.ign     | `time.h`                 | `time`, `clock`, `clock_gettime`, clock IDs    |  \n  \n## Constants  \n  \nEach sub-namespace exposes relevant C constants as `extern const`  \ndeclarations. Values come from the C headers at compile time, not  \nhardcoded in Ignis source.  \n  \n| Namespace          | Constants                                                        |  \n|--------------------|------------------------------------------------------------------|  \n| `LibC::File`       | `SEEK_SET`, `SEEK_CUR`, `SEEK_END`, `STDIN_FILENO`, `STDOUT_FILENO`, `STDERR_FILENO`, `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND` |  \n| `LibC::Stdio`      | `SEEK_SET`, `SEEK_CUR`, `SEEK_END`, `EOF`                        |  \n| `LibC::Errno`      | `EPERM`, `ENOENT`, `EACCES`, `EINVAL`, `ENOMEM`, `EAGAIN`, ...  |  \n| `LibC::Process`    | `EXIT_SUCCESS`, `EXIT_FAILURE`                                   |  \n| `LibC::Signals`    | `SIGINT`, `SIGKILL`, `SIGSEGV`, `SIGTERM`                        |  \n| `LibC::Memory`     | `PROT_NONE`, `PROT_READ`, `PROT_WRITE`, `PROT_EXEC`, `MAP_SHARED`, `MAP_PRIVATE`, `MAP_ANONYMOUS` |  \n| `LibC::Time`       | `CLOCKS_PER_SEC`, `CLOCK_REALTIME`, `CLOCK_MONOTONIC`            |  \n  \n## Platform  \n  \nType sizes assume LP64 (Linux/macOS 64-bit). See `CType` for the  \nfull type mapping.  \n  \n## Example  \n  \n```ignis  \nimport LibC, CType from \"std::libc\";  \n  \nfunction main(): i32 {  \n  // Write to stdout via file descriptor  \n  let msg: *u8 = \"hello from libc\\n\";  \n  LibC::File::write(LibC::File::STDOUT_FILENO, msg as CType::CConstVoidPtr, 16);  \n  \n  // Open a file, write to it, close it  \n  let fd: CType::CInt = LibC::File::open(\"out.txt\", LibC::File::O_WRONLY | LibC::File::O_CREAT | LibC::File::O_TRUNC);  \n  if fd != -1 {  \n    let data: *u8 = \"written via libc\\n\";  \n    LibC::File::write(fd, data as CType::CConstVoidPtr, 17);  \n    LibC::File::close(fd);  \n  }  \n  \n  // Check errno after a failed operation  \n  let bad: CType::CInt = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if bad == -1 {  \n    let err: CType::CInt = LibC::Errno::get();  \n    if err == LibC::Errno::ENOENT {  \n      LibC::Process::exit(LibC::Process::EXIT_SUCCESS);  \n    }  \n  }  \n  \n  return 0;  \n}  \n```"
+      "doc": "  \n# LibC  \n  \nRaw bindings to a POSIX-oriented subset of the C standard library.  \n  \nAll types use the `CType` namespace (re-exported from `std::libc/primitives`).  \nNo safety guarantees are added -- the caller is responsible for pointer  \nvalidity, buffer sizes, and lifetime management.  \n  \n## Sub-namespaces  \n  \n| Namespace              | Source file  | C Headers                | Description                                    |  \n|------------------------|--------------|--------------------------|------------------------------------------------|  \n| `LibC::Allocator`      | memory.ign   | `stdlib.h`               | `malloc`, `calloc`, `realloc`, `free`          |  \n| `LibC::MemoryOperations` | memory.ign | `string.h`               | `memcpy`, `memmove`, `memset`, `memcmp`        |  \n| `LibC::Memory`         | memory.ign   | `sys/mman.h`, `unistd.h` | `mmap`, `munmap`, `mprotect`, `sbrk`, `brk`    |  \n| `LibC::String`         | string.ign   | `string.h`               | `strlen`, `strcmp`, `strcpy`, `strcat`, ...     |  \n| `LibC::File`           | io.ign       | `unistd.h`, `fcntl.h`    | `open`, `close`, `read`, `write`, `lseek`, ... |  \n| `LibC::Stdio`          | stdio.ign    | `stdio.h`                | `fopen`, `fclose`, `fread`, `fwrite`, ...      |  \n| `LibC::Errno`          | errno.ign    | `errno.h`                | `get`, `set` + 26 POSIX error constants        |  \n| `LibC::Process`        | process.ign  | `stdlib.h`, `unistd.h`   | `exit`, `fork`, `getpid`, `sleep`, ...         |  \n| `LibC::Signals`        | process.ign  | `signal.h`               | `raise`, `kill`                                |  \n| `LibC::Wait`           | process.ign  | `sys/wait.h`             | `wait`, `waitpid`                              |  \n| `LibC::Conversion`     | misc.ign     | `stdlib.h`               | `atoi`, `atol`, `atof`                         |  \n| `LibC::Math`           | misc.ign     | `stdlib.h`               | `abs`, `labs`                                  |  \n| `LibC::Character`      | misc.ign     | `ctype.h`                | `isalnum`, `isdigit`, `toupper`, `tolower`, ...|  \n| `LibC::Time`           | misc.ign     | `time.h`                 | `time`, `clock`, `clock_gettime`, clock IDs    |  \n  \n## Constants  \n  \nEach sub-namespace re-exports the C constants it needs from  \n`std::libc::platform`. On `x86_64` Linux their values are written in Ignis  \nand checked against the C headers by `scripts/check_platform_constants.py`;  \nother targets read the header macro of the same name.  \n  \n| Namespace          | Constants                                                        |  \n|--------------------|------------------------------------------------------------------|  \n| `LibC::File`       | `SEEK_SET`, `SEEK_CUR`, `SEEK_END`, `STDIN_FILENO`, `STDOUT_FILENO`, `STDERR_FILENO`, `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND` |  \n| `LibC::Stdio`      | `SEEK_SET`, `SEEK_CUR`, `SEEK_END`, `EOF`                        |  \n| `LibC::Errno`      | `EPERM`, `ENOENT`, `EACCES`, `EINVAL`, `ENOMEM`, `EAGAIN`, ...  |  \n| `LibC::Process`    | `EXIT_SUCCESS`, `EXIT_FAILURE`                                   |  \n| `LibC::Signals`    | `SIGINT`, `SIGKILL`, `SIGSEGV`, `SIGTERM`                        |  \n| `LibC::Memory`     | `PROT_NONE`, `PROT_READ`, `PROT_WRITE`, `PROT_EXEC`, `MAP_SHARED`, `MAP_PRIVATE`, `MAP_ANONYMOUS` |  \n| `LibC::Time`       | `CLOCKS_PER_SEC`, `CLOCK_REALTIME`, `CLOCK_MONOTONIC`            |  \n  \n## Platform  \n  \nType sizes assume LP64 (Linux/macOS 64-bit). See `CType` for the  \nfull type mapping.  \n  \n## Example  \n  \n```ignis  \nimport LibC, CType from \"std::libc\";  \n  \nfunction main(): i32 {  \n  // Write to stdout via file descriptor  \n  let msg: *u8 = \"hello from libc\\n\";  \n  LibC::File::write(LibC::File::STDOUT_FILENO, msg as CType::CConstVoidPtr, 16);  \n  \n  // Open a file, write to it, close it  \n  let fd: CType::CInt = LibC::File::open(\"out.txt\", LibC::File::O_WRONLY | LibC::File::O_CREAT | LibC::File::O_TRUNC);  \n  if fd != -1 {  \n    let data: *u8 = \"written via libc\\n\";  \n    LibC::File::write(fd, data as CType::CConstVoidPtr, 17);  \n    LibC::File::close(fd);  \n  }  \n  \n  // Check errno after a failed operation  \n  let bad: CType::CInt = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if bad == -1 {  \n    let err: CType::CInt = LibC::Errno::get();  \n    if err == LibC::Errno::ENOENT {  \n      LibC::Process::exit(LibC::Process::EXIT_SUCCESS);  \n    }  \n  }  \n  \n  return 0;  \n}  \n```"
     },
     {
       "name": "std::libc::errno",
-      "doc": "  \n# LibC Errno  \n  \nThread-local `errno` access and POSIX error constants, exposed as  \n`LibC::Errno`.  \n  \n## Functions  \n  \n| Function | Description                                         |  \n|----------|-----------------------------------------------------|  \n| `get`    | Read the current thread-local `errno` value         |  \n| `set`    | Write a new value into thread-local `errno`         |  \n  \n## Error Constants  \n  \nAll error constants are `extern const` declarations resolved from  \n`<errno.h>` at compile time.  \n  \n| Constant       | Description                        |  \n|----------------|------------------------------------|  \n| `EPERM`        | Operation not permitted            |  \n| `ENOENT`       | No such file or directory          |  \n| `ESRCH`        | No such process                    |  \n| `EINTR`        | Interrupted system call            |  \n| `EIO`          | I/O error                          |  \n| `ENXIO`        | No such device or address          |  \n| `E2BIG`        | Argument list too long             |  \n| `EACCES`       | Permission denied                  |  \n| `EBADF`        | Bad file descriptor                |  \n| `EAGAIN`       | Resource temporarily unavailable   |  \n| `ENOMEM`       | Cannot allocate memory             |  \n| `EBUSY`        | Resource busy                      |  \n| `EEXIST`       | File exists                        |  \n| `ENOTDIR`      | Not a directory                    |  \n| `EISDIR`       | Is a directory                     |  \n| `EINVAL`       | Invalid argument                   |  \n| `ENFILE`       | Too many open files in system      |  \n| `EMFILE`       | Too many open files (per process)  |  \n| `ENOSPC`       | No space left on device            |  \n| `EROFS`        | Read-only file system              |  \n| `EPIPE`        | Broken pipe                        |  \n| `ERANGE`       | Result too large (math)            |  \n| `ENOTEMPTY`    | Directory not empty                |  \n| `ECONNREFUSED` | Connection refused                 |  \n| `ECONNRESET`   | Connection reset by peer           |  \n| `ETIMEDOUT`    | Connection timed out               |  \n| `EWOULDBLOCK`  | Alias for `EAGAIN`                 |  \n  \n## Platform Notes  \n  \nOn Linux/glibc, `errno` is a macro expanding to `(*__errno_location())`.  \nThe `get` and `set` functions call `__errno_location` to read/write the  \nthread-local value.  \n  \n## Example  \n  \n```ignis  \nimport LibC, CType from \"std::libc\";  \n  \nfunction main(): i32 {  \n  let fd: CType::CInt = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if fd == -1 {  \n    let err: CType::CInt = LibC::Errno::get();  \n    if err == LibC::Errno::ENOENT {  \n      // file not found -- expected  \n      return 0;  \n    }  \n  }  \n  return 1;  \n}  \n```"
+      "doc": "  \n# LibC Errno  \n  \nThread-local `errno` access and POSIX error constants, exposed as  \n`LibC::Errno`.  \n  \n## Functions  \n  \n| Function | Description                                         |  \n|----------|-----------------------------------------------------|  \n| `get`    | Read the current thread-local `errno` value         |  \n| `set`    | Write a new value into thread-local `errno`         |  \n  \n## Error Constants  \n  \nEvery error constant comes from `std::libc::platform`: written out on  \n`x86_64` Linux, read from `<errno.h>` on other targets.  \n  \n| Constant       | Description                        |  \n|----------------|------------------------------------|  \n| `EPERM`        | Operation not permitted            |  \n| `ENOENT`       | No such file or directory          |  \n| `ESRCH`        | No such process                    |  \n| `EINTR`        | Interrupted system call            |  \n| `EIO`          | I/O error                          |  \n| `ENXIO`        | No such device or address          |  \n| `E2BIG`        | Argument list too long             |  \n| `EACCES`       | Permission denied                  |  \n| `EBADF`        | Bad file descriptor                |  \n| `EAGAIN`       | Resource temporarily unavailable   |  \n| `ENOMEM`       | Cannot allocate memory             |  \n| `EBUSY`        | Resource busy                      |  \n| `EEXIST`       | File exists                        |  \n| `ENOTDIR`      | Not a directory                    |  \n| `EISDIR`       | Is a directory                     |  \n| `EINVAL`       | Invalid argument                   |  \n| `ENFILE`       | Too many open files in system      |  \n| `EMFILE`       | Too many open files (per process)  |  \n| `ENOSPC`       | No space left on device            |  \n| `EROFS`        | Read-only file system              |  \n| `EPIPE`        | Broken pipe                        |  \n| `ERANGE`       | Result too large (math)            |  \n| `ENOTEMPTY`    | Directory not empty                |  \n| `ECONNREFUSED` | Connection refused                 |  \n| `ECONNRESET`   | Connection reset by peer           |  \n| `ETIMEDOUT`    | Connection timed out               |  \n| `EWOULDBLOCK`  | Alias for `EAGAIN`                 |  \n  \n## Platform Notes  \n  \nOn Linux/glibc, `errno` is a macro expanding to `(*__errno_location())`.  \nThe `get` and `set` functions call `__errno_location` to read/write the  \nthread-local value.  \n  \n## Example  \n  \n```ignis  \nimport LibC, CType from \"std::libc\";  \n  \nfunction main(): i32 {  \n  let fd: CType::CInt = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if fd == -1 {  \n    let err: CType::CInt = LibC::Errno::get();  \n    if err == LibC::Errno::ENOENT {  \n      // file not found -- expected  \n      return 0;  \n    }  \n  }  \n  return 1;  \n}  \n```"
     },
     {
       "name": "std::libc::io",
@@ -34,6 +34,10 @@
     {
       "name": "std::libc::misc",
       "doc": "  \n# LibC Miscellaneous  \n  \nConversion, integer math, character classification, and time.  \n  \n## Sub-namespaces  \n  \n| Namespace            | C Header    | Description                            |  \n|----------------------|-------------|----------------------------------------|  \n| `LibC::Conversion`   | `stdlib.h`  | `atoi`, `atol`, `atof`                 |  \n| `LibC::Math`         | `stdlib.h`  | `abs`, `labs`                          |  \n| `LibC::Character`    | `ctype.h`   | `isalnum`, `isdigit`, `toupper`, ...   |  \n| `LibC::Time`         | `time.h`    | `time`, `clock`, `CLOCKS_PER_SEC`      |  \n  \n## Example  \n  \n```ignis  \nimport LibC, CType from \"std::libc\";  \n  \nfunction main(): i32 {  \n  // String-to-number conversion  \n  let n: CType::CInt = LibC::Conversion::atoi(\"42\");  \n  \n  // Character classification  \n  let ch: CType::CInt = 65; // 'A'  \n  let lower: CType::CInt = LibC::Character::tolower(ch);  \n  \n  // CPU time measurement  \n  let start: CType::ClockT = LibC::Time::clock();  \n  // ... work ...  \n  let elapsed: CType::ClockT = LibC::Time::clock() - start;  \n  \n  return 0;  \n}  \n```"
+    },
+    {
+      "name": "std::libc::platform",
+      "doc": "The C platform constants the standard library uses, in one place.  \n  \nOn `x86_64` Linux every value is written here, so no backend needs a C  \nheader to know it. `scripts/check_platform_constants.py` compiles each  \nname against the real headers and fails when a value here disagrees.  \nEvery other target still reads the header macro of the same name, which  \nonly the C backend can do."
     },
     {
       "name": "std::libc::primitives",
@@ -757,223 +761,6 @@
       "doc": "Returns the thread-local `errno` pointer on Linux."
     },
     {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants",
-      "name": "__errno_constants",
-      "kind": "namespace",
-      "visibility": "public",
-      "signature": "namespace __errno_constants",
-      "doc": "Returns the thread-local `errno` pointer on macOS."
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::E2BIG",
-      "name": "E2BIG",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const E2BIG: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EACCES",
-      "name": "EACCES",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EACCES: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EAGAIN",
-      "name": "EAGAIN",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EAGAIN: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EBADF",
-      "name": "EBADF",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EBADF: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EBUSY",
-      "name": "EBUSY",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EBUSY: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ECONNREFUSED",
-      "name": "ECONNREFUSED",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ECONNREFUSED: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ECONNRESET",
-      "name": "ECONNRESET",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ECONNRESET: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EEXIST",
-      "name": "EEXIST",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EEXIST: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EINTR",
-      "name": "EINTR",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EINTR: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EINVAL",
-      "name": "EINVAL",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EINVAL: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EIO",
-      "name": "EIO",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EIO: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EISDIR",
-      "name": "EISDIR",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EISDIR: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EMFILE",
-      "name": "EMFILE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EMFILE: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ENFILE",
-      "name": "ENFILE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ENFILE: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ENOENT",
-      "name": "ENOENT",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ENOENT: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ENOMEM",
-      "name": "ENOMEM",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ENOMEM: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ENOSPC",
-      "name": "ENOSPC",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ENOSPC: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ENOTDIR",
-      "name": "ENOTDIR",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ENOTDIR: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ENOTEMPTY",
-      "name": "ENOTEMPTY",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ENOTEMPTY: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ENXIO",
-      "name": "ENXIO",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ENXIO: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EPERM",
-      "name": "EPERM",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EPERM: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EPIPE",
-      "name": "EPIPE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EPIPE: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ERANGE",
-      "name": "ERANGE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ERANGE: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::EROFS",
-      "name": "EROFS",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EROFS: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ESRCH",
-      "name": "ESRCH",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ESRCH: i32"
-    },
-    {
-      "module": "std::libc::errno",
-      "path": "std::libc::errno::__errno_constants::ETIMEDOUT",
-      "name": "ETIMEDOUT",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const ETIMEDOUT: i32"
-    },
-    {
       "module": "std::libc::io",
       "path": "std::libc::io::File",
       "name": "File",
@@ -1247,78 +1034,6 @@
     },
     {
       "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::FD_CLOEXEC",
-      "name": "FD_CLOEXEC",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const FD_CLOEXEC: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::F_GETFD",
-      "name": "F_GETFD",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const F_GETFD: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::F_SETFD",
-      "name": "F_SETFD",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const F_SETFD: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::O_APPEND",
-      "name": "O_APPEND",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const O_APPEND: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::O_CREAT",
-      "name": "O_CREAT",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const O_CREAT: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::O_RDONLY",
-      "name": "O_RDONLY",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const O_RDONLY: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::O_RDWR",
-      "name": "O_RDWR",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const O_RDWR: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::O_TRUNC",
-      "name": "O_TRUNC",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const O_TRUNC: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__fcntl::O_WRONLY",
-      "name": "O_WRONLY",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const O_WRONLY: i32"
-    },
-    {
-      "module": "std::libc::io",
       "path": "std::libc::io::__fcntl::fcntl",
       "name": "fcntl",
       "kind": "function",
@@ -1345,14 +1060,6 @@
     },
     {
       "module": "std::libc::io",
-      "path": "std::libc::io::__ioctl::TIOCGWINSZ",
-      "name": "TIOCGWINSZ",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TIOCGWINSZ: u64"
-    },
-    {
-      "module": "std::libc::io",
       "path": "std::libc::io::__ioctl::ioctlWindowSize",
       "name": "ioctlWindowSize",
       "kind": "function",
@@ -1367,54 +1074,6 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace __unistd_io"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__unistd_io::SEEK_CUR",
-      "name": "SEEK_CUR",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SEEK_CUR: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__unistd_io::SEEK_END",
-      "name": "SEEK_END",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SEEK_END: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__unistd_io::SEEK_SET",
-      "name": "SEEK_SET",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SEEK_SET: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__unistd_io::STDERR_FILENO",
-      "name": "STDERR_FILENO",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const STDERR_FILENO: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__unistd_io::STDIN_FILENO",
-      "name": "STDIN_FILENO",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const STDIN_FILENO: i32"
-    },
-    {
-      "module": "std::libc::io",
-      "path": "std::libc::io::__unistd_io::STDOUT_FILENO",
-      "name": "STDOUT_FILENO",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const STDOUT_FILENO: i32"
     },
     {
       "module": "std::libc::io",
@@ -1731,62 +1390,6 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace __mman"
-    },
-    {
-      "module": "std::libc::memory",
-      "path": "std::libc::memory::__mman::MAP_ANONYMOUS",
-      "name": "MAP_ANONYMOUS",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const MAP_ANONYMOUS: i32"
-    },
-    {
-      "module": "std::libc::memory",
-      "path": "std::libc::memory::__mman::MAP_PRIVATE",
-      "name": "MAP_PRIVATE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const MAP_PRIVATE: i32"
-    },
-    {
-      "module": "std::libc::memory",
-      "path": "std::libc::memory::__mman::MAP_SHARED",
-      "name": "MAP_SHARED",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const MAP_SHARED: i32"
-    },
-    {
-      "module": "std::libc::memory",
-      "path": "std::libc::memory::__mman::PROT_EXEC",
-      "name": "PROT_EXEC",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const PROT_EXEC: i32"
-    },
-    {
-      "module": "std::libc::memory",
-      "path": "std::libc::memory::__mman::PROT_NONE",
-      "name": "PROT_NONE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const PROT_NONE: i32"
-    },
-    {
-      "module": "std::libc::memory",
-      "path": "std::libc::memory::__mman::PROT_READ",
-      "name": "PROT_READ",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const PROT_READ: i32"
-    },
-    {
-      "module": "std::libc::memory",
-      "path": "std::libc::memory::__mman::PROT_WRITE",
-      "name": "PROT_WRITE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const PROT_WRITE: i32"
     },
     {
       "module": "std::libc::memory",
@@ -2374,30 +1977,6 @@
     },
     {
       "module": "std::libc::misc",
-      "path": "std::libc::misc::__time_h::CLOCKS_PER_SEC",
-      "name": "CLOCKS_PER_SEC",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const CLOCKS_PER_SEC: i64"
-    },
-    {
-      "module": "std::libc::misc",
-      "path": "std::libc::misc::__time_h::CLOCK_MONOTONIC",
-      "name": "CLOCK_MONOTONIC",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const CLOCK_MONOTONIC: i32"
-    },
-    {
-      "module": "std::libc::misc",
-      "path": "std::libc::misc::__time_h::CLOCK_REALTIME",
-      "name": "CLOCK_REALTIME",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const CLOCK_REALTIME: i32"
-    },
-    {
-      "module": "std::libc::misc",
       "path": "std::libc::misc::__time_h::clock",
       "name": "clock",
       "kind": "function",
@@ -2422,6 +2001,639 @@
       "visibility": "private",
       "signature": "function time(tloc: *mut i64): i64",
       "doc": "C `time`; returns seconds since the epoch and optionally stores them."
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform",
+      "name": "Platform",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Platform",
+      "doc": "The platform constants, with the values `x86_64` Linux (glibc) defines."
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::CLOCKS_PER_SEC",
+      "name": "CLOCKS_PER_SEC",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const CLOCKS_PER_SEC: i64"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::CLOCK_MONOTONIC",
+      "name": "CLOCK_MONOTONIC",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const CLOCK_MONOTONIC: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::CLOCK_REALTIME",
+      "name": "CLOCK_REALTIME",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const CLOCK_REALTIME: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::E2BIG",
+      "name": "E2BIG",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const E2BIG: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EACCES",
+      "name": "EACCES",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EACCES: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EAGAIN",
+      "name": "EAGAIN",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EAGAIN: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EBADF",
+      "name": "EBADF",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EBADF: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EBUSY",
+      "name": "EBUSY",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EBUSY: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ECONNREFUSED",
+      "name": "ECONNREFUSED",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ECONNREFUSED: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ECONNRESET",
+      "name": "ECONNRESET",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ECONNRESET: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EEXIST",
+      "name": "EEXIST",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EEXIST: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EINTR",
+      "name": "EINTR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EINTR: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EINVAL",
+      "name": "EINVAL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EINVAL: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EIO",
+      "name": "EIO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EIO: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EISDIR",
+      "name": "EISDIR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EISDIR: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EMFILE",
+      "name": "EMFILE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EMFILE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENFILE",
+      "name": "ENFILE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENFILE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENOENT",
+      "name": "ENOENT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENOENT: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENOMEM",
+      "name": "ENOMEM",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENOMEM: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENOSPC",
+      "name": "ENOSPC",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENOSPC: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENOTDIR",
+      "name": "ENOTDIR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENOTDIR: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENOTEMPTY",
+      "name": "ENOTEMPTY",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENOTEMPTY: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENXIO",
+      "name": "ENXIO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENXIO: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EOF",
+      "name": "EOF",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EOF: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EPERM",
+      "name": "EPERM",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EPERM: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EPIPE",
+      "name": "EPIPE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EPIPE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ERANGE",
+      "name": "ERANGE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ERANGE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EROFS",
+      "name": "EROFS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EROFS: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ESRCH",
+      "name": "ESRCH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ESRCH: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ETIMEDOUT",
+      "name": "ETIMEDOUT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ETIMEDOUT: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EXIT_FAILURE",
+      "name": "EXIT_FAILURE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EXIT_FAILURE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EXIT_SUCCESS",
+      "name": "EXIT_SUCCESS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EXIT_SUCCESS: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::FD_CLOEXEC",
+      "name": "FD_CLOEXEC",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const FD_CLOEXEC: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::F_GETFD",
+      "name": "F_GETFD",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const F_GETFD: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::F_SETFD",
+      "name": "F_SETFD",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const F_SETFD: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::MAP_ANONYMOUS",
+      "name": "MAP_ANONYMOUS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const MAP_ANONYMOUS: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::MAP_PRIVATE",
+      "name": "MAP_PRIVATE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const MAP_PRIVATE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::MAP_SHARED",
+      "name": "MAP_SHARED",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const MAP_SHARED: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::O_APPEND",
+      "name": "O_APPEND",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_APPEND: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::O_CREAT",
+      "name": "O_CREAT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_CREAT: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::O_EXCL",
+      "name": "O_EXCL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_EXCL: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::O_RDONLY",
+      "name": "O_RDONLY",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_RDONLY: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::O_RDWR",
+      "name": "O_RDWR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_RDWR: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::O_TRUNC",
+      "name": "O_TRUNC",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_TRUNC: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::O_WRONLY",
+      "name": "O_WRONLY",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_WRONLY: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::PROT_EXEC",
+      "name": "PROT_EXEC",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const PROT_EXEC: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::PROT_NONE",
+      "name": "PROT_NONE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const PROT_NONE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::PROT_READ",
+      "name": "PROT_READ",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const PROT_READ: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::PROT_WRITE",
+      "name": "PROT_WRITE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const PROT_WRITE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::SEEK_CUR",
+      "name": "SEEK_CUR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SEEK_CUR: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::SEEK_END",
+      "name": "SEEK_END",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SEEK_END: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::SEEK_SET",
+      "name": "SEEK_SET",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SEEK_SET: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::SIGINT",
+      "name": "SIGINT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SIGINT: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::SIGKILL",
+      "name": "SIGKILL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SIGKILL: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::SIGSEGV",
+      "name": "SIGSEGV",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SIGSEGV: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::SIGTERM",
+      "name": "SIGTERM",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SIGTERM: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::STDERR_FILENO",
+      "name": "STDERR_FILENO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STDERR_FILENO: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::STDIN_FILENO",
+      "name": "STDIN_FILENO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STDIN_FILENO: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::STDOUT_FILENO",
+      "name": "STDOUT_FILENO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STDOUT_FILENO: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IFDIR",
+      "name": "S_IFDIR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IFDIR: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IFLNK",
+      "name": "S_IFLNK",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IFLNK: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IFMT",
+      "name": "S_IFMT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IFMT: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IFREG",
+      "name": "S_IFREG",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IFREG: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IRGRP",
+      "name": "S_IRGRP",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IRGRP: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IROTH",
+      "name": "S_IROTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IROTH: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IRUSR",
+      "name": "S_IRUSR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IRUSR: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IRWXG",
+      "name": "S_IRWXG",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IRWXG: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IRWXO",
+      "name": "S_IRWXO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IRWXO: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IRWXU",
+      "name": "S_IRWXU",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IRWXU: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IWGRP",
+      "name": "S_IWGRP",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IWGRP: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IWOTH",
+      "name": "S_IWOTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IWOTH: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IWUSR",
+      "name": "S_IWUSR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IWUSR: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IXGRP",
+      "name": "S_IXGRP",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IXGRP: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IXOTH",
+      "name": "S_IXOTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IXOTH: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::S_IXUSR",
+      "name": "S_IXUSR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const S_IXUSR: u32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::TIOCGWINSZ",
+      "name": "TIOCGWINSZ",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const TIOCGWINSZ: u64"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::WNOHANG",
+      "name": "WNOHANG",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const WNOHANG: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::_SC_NPROCESSORS_ONLN",
+      "name": "_SC_NPROCESSORS_ONLN",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const _SC_NPROCESSORS_ONLN: i32"
     },
     {
       "module": "std::libc::primitives",
@@ -3106,22 +3318,6 @@
     },
     {
       "module": "std::libc::process",
-      "path": "std::libc::process::__process::EXIT_FAILURE",
-      "name": "EXIT_FAILURE",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EXIT_FAILURE: i32"
-    },
-    {
-      "module": "std::libc::process",
-      "path": "std::libc::process::__process::EXIT_SUCCESS",
-      "name": "EXIT_SUCCESS",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EXIT_SUCCESS: i32"
-    },
-    {
-      "module": "std::libc::process",
       "path": "std::libc::process::__process::_exit",
       "name": "_exit",
       "kind": "function",
@@ -3193,38 +3389,6 @@
     },
     {
       "module": "std::libc::process",
-      "path": "std::libc::process::__signal::SIGINT",
-      "name": "SIGINT",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SIGINT: i32"
-    },
-    {
-      "module": "std::libc::process",
-      "path": "std::libc::process::__signal::SIGKILL",
-      "name": "SIGKILL",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SIGKILL: i32"
-    },
-    {
-      "module": "std::libc::process",
-      "path": "std::libc::process::__signal::SIGSEGV",
-      "name": "SIGSEGV",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SIGSEGV: i32"
-    },
-    {
-      "module": "std::libc::process",
-      "path": "std::libc::process::__signal::SIGTERM",
-      "name": "SIGTERM",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SIGTERM: i32"
-    },
-    {
-      "module": "std::libc::process",
       "path": "std::libc::process::__signal::kill",
       "name": "kill",
       "kind": "function",
@@ -3248,14 +3412,6 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace __unistd_proc"
-    },
-    {
-      "module": "std::libc::process",
-      "path": "std::libc::process::__unistd_proc::_SC_NPROCESSORS_ONLN",
-      "name": "_SC_NPROCESSORS_ONLN",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const _SC_NPROCESSORS_ONLN: i32"
     },
     {
       "module": "std::libc::process",
@@ -3354,14 +3510,6 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace __wait"
-    },
-    {
-      "module": "std::libc::process",
-      "path": "std::libc::process::__wait::WNOHANG",
-      "name": "WNOHANG",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const WNOHANG: i32"
     },
     {
       "module": "std::libc::process",
@@ -3582,38 +3730,6 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace __stdio"
-    },
-    {
-      "module": "std::libc::stdio",
-      "path": "std::libc::stdio::__stdio::EOF",
-      "name": "EOF",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const EOF: i32"
-    },
-    {
-      "module": "std::libc::stdio",
-      "path": "std::libc::stdio::__stdio::SEEK_CUR",
-      "name": "SEEK_CUR",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SEEK_CUR: i32"
-    },
-    {
-      "module": "std::libc::stdio",
-      "path": "std::libc::stdio::__stdio::SEEK_END",
-      "name": "SEEK_END",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SEEK_END: i32"
-    },
-    {
-      "module": "std::libc::stdio",
-      "path": "std::libc::stdio::__stdio::SEEK_SET",
-      "name": "SEEK_SET",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const SEEK_SET: i32"
     },
     {
       "module": "std::libc::stdio",
@@ -4194,30 +4310,6 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace __math"
-    },
-    {
-      "module": "std::math",
-      "path": "std::math::__math::E",
-      "name": "E",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const E: f64"
-    },
-    {
-      "module": "std::math",
-      "path": "std::math::__math::PI",
-      "name": "PI",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const PI: f64"
-    },
-    {
-      "module": "std::math",
-      "path": "std::math::__math::TAU",
-      "name": "TAU",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TAU: f64"
     },
     {
       "module": "std::math",
@@ -6527,126 +6619,6 @@
       "kind": "constant",
       "visibility": "private",
       "signature": "const U8: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types",
-      "name": "__types",
-      "kind": "namespace",
-      "visibility": "public",
-      "signature": "namespace __types"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_BOOL_ID",
-      "name": "TYPE_BOOL_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_BOOL_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_CHAR_ID",
-      "name": "TYPE_CHAR_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_CHAR_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_F32_ID",
-      "name": "TYPE_F32_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_F32_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_F64_ID",
-      "name": "TYPE_F64_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_F64_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_I16_ID",
-      "name": "TYPE_I16_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_I16_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_I32_ID",
-      "name": "TYPE_I32_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_I32_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_I64_ID",
-      "name": "TYPE_I64_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_I64_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_I8_ID",
-      "name": "TYPE_I8_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_I8_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_POINTER_ID",
-      "name": "TYPE_POINTER_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_POINTER_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_STRING_ID",
-      "name": "TYPE_STRING_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_STRING_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_U16_ID",
-      "name": "TYPE_U16_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_U16_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_U32_ID",
-      "name": "TYPE_U32_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_U32_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_U64_ID",
-      "name": "TYPE_U64_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_U64_ID: u32"
-    },
-    {
-      "module": "std::types",
-      "path": "std::types::__types::TYPE_U8_ID",
-      "name": "TYPE_U8_ID",
-      "kind": "constant",
-      "visibility": "private",
-      "signature": "const TYPE_U8_ID: u32"
     },
     {
       "module": "std::vector",
