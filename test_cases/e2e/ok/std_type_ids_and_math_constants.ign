@@ -1,16 +1,30 @@
 // e2e: std
 // The runtime type ids and the math constants are Ignis values. They used to
 // be declared as C constants no header defines, so any use failed to compile.
+// Each math constant also has to reach the program with every digit: scaled
+// by a million, its seventh significant digit decides the comparison.
 import Math from "std::math";
 import Type from "std::types";
 
 function main(): i32 {
-  let ids: u32 = Type::TypeId::I8 + Type::TypeId::F64 + Type::TypeId::STRING + Type::TypeId::POINTER;
-  let constants: f64 = Math::PI + Math::E + Math::TAU;
+  let piDigits: f64 = Math::PI * 1000000.0 - 3141592.0;
+  let eDigits: f64 = Math::E * 1000000.0 - 2718281.0;
+  let tauDigits: f64 = Math::TAU * 1000000.0 - 6283185.0;
 
-  if (constants < 12.14 || constants > 12.15) {
+  if (piDigits < 0.65 || piDigits > 0.66) {
     return 1;
   }
+
+  if (eDigits < 0.82 || eDigits > 0.83) {
+    return 2;
+  }
+
+  if (tauDigits < 0.30 || tauDigits > 0.31) {
+    return 3;
+  }
+
+  // I8 (0) + F64 (9) + STRING (12) + POINTER (200) = 221.
+  let ids: u32 = Type::TypeId::I8 + Type::TypeId::F64 + Type::TypeId::STRING + Type::TypeId::POINTER;
 
   return (ids as i32) - 179;
 }
