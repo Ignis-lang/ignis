@@ -2243,6 +2243,25 @@ export namespace Analyzer {
       return Analyzer::Typecheck::isFloatTypeNode(typeNode);
     }
 
+    /// Whether `typeId` resolves to an integer type, without reporting an
+    /// alias cycle (the numeric check before it already looked).
+    function isIntegerTypeQuiet(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (resolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      return Analyzer::Typecheck::isIntegerTypeNode(typeNode);
+    }
+
     /// Whether a signed literal value fits the integer type node. Mirrors the
     /// Rust `signed_fits_in_type`.
     function signedLiteralFits(typeNode: &Analyzer::Type, value: i64): boolean {

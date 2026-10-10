@@ -1217,7 +1217,7 @@ Bitwise: `& | ^ ~ << >>`
 
 Assignment: `= += -= *= /= %= &= |= ^= <<= >>= ~=`
 
-A compound assignment `a op= b` assigns `a op b`. `a ~= b` assigns `a & ~b`: it clears in `a` the bits set in `b` (`flags ~= MASK`).
+A compound assignment `a op= b` assigns `a op b`. `a ~= b` assigns `a & ~b`: it clears in `a` the bits set in `b` (`flags ~= MASK`). The bitwise forms (`&= |= ^= <<= >>= ~=`) take integers only, like the binary operators they stand for.
 
 Range: `..` `..=` (see [Section 9.14](#914-ranges))
 
