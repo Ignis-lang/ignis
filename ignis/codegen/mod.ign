@@ -691,6 +691,21 @@ export namespace CodegenC {
 
     if (let Option::SOME(destination) = function_.temps.get(node.dest.raw() as u64)) {
       shape = CodegenC::integerShape(defStore, typeStore, destination.ty);
+
+      // C has no `%` on floating types. The remainder is the truncated one,
+      // `fmod`, which constant evaluation folds too; the builtin needs no
+      // header, and a hosted link already pulls in libm.
+      if (node.op == Hir::BinaryOperation::Mod) {
+        match (typeStore.get(destination.ty)) {
+          Option::SOME(Analyzer::Type::F32) -> {
+            return `    t${node.dest.raw()} = __builtin_fmodf(${left.toStr()}, ${right.toStr()});\n`;
+          },
+          Option::SOME(Analyzer::Type::F64) -> {
+            return `    t${node.dest.raw()} = __builtin_fmod(${left.toStr()}, ${right.toStr()});\n`;
+          },
+          _ -> {},
+        };
+      }
     }
 
     if (let Option::SOME(value) = CodegenC::wrappingBinOpValue(node, left, right, &shape)) {

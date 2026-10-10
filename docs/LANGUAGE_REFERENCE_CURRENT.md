@@ -1219,6 +1219,8 @@ Assignment: `= += -= *= /= %= &= |= ^= <<= >>= ~=`
 
 A compound assignment `a op= b` assigns `a op b`. `a ~= b` assigns `a & ~b`: it clears in `a` the bits set in `b` (`flags ~= MASK`). The bitwise forms (`&= |= ^= <<= >>= ~=`) take integers only, like the binary operators they stand for.
 
+`%` on `f32` and `f64` is the truncated remainder, C's `fmod`: the result has the sign of the left operand (`-7.5 % 2.0` is `-1.5`). A hosted build links `libm` for it; a freestanding build that uses it has to provide `fmod` (and `fmodf` for `f32`).
+
 Range: `..` `..=` (see [Section 9.14](#914-ranges))
 
 Pipe: `|>` (left-associative, see [Section 9.12](#912-pipe-operator))
