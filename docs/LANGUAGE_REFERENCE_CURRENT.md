@@ -1561,7 +1561,9 @@ Supported pattern forms:
 
 In a `match` arm, an `if let` or a `while let`, a bare name that resolves to a constant is a
 constant pattern: it matches when the value equals the constant's, exactly like the qualified
-form, and binds nothing. A local variable of the same name in scope keeps the name a binding.
+form, and binds nothing. The constant has to be a value of the matched type: the same type, or
+one that widens to it implicitly ([Section 4.4](#44-implicit-integer-widening)), so a `u8`
+constant matches a `u64` but a negative `i32` or a `str` does not. A local variable of the same name in scope keeps the name a binding.
 In `let`, `let else`, `for` and parameters a bare name always binds.
 
 ```ignis

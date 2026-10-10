@@ -3708,6 +3708,40 @@ export namespace Analyzer {
       return true;
     }
 
+    /// Checks a constant pattern against the matched type. The pattern compares
+    /// the matched value with the constant's, so the constant has to be a value
+    /// of the matched type: the same type, or one that widens to it implicitly
+    /// (`u8` into `u64`). A negative `i32` against a `u64` or a `str` against an
+    /// integer is a type mismatch rather than a comparison C would coerce.
+    function checkConstantPatternType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      constantId: Analyzer::DefinitionId,
+      matchedType: Analyzer::TypeId,
+      span: SourceSpan,
+    ): boolean {
+      let mut declared: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(definition) = defStore.get(constantId)) {
+        if (let Analyzer::Definition::Variable(constant) = definition) {
+          declared = Option::SOME(constant.declaredType);
+        }
+      }
+
+      let Option::SOME(constantType) = declared else {
+        return true;
+      };
+
+      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, matchedType, constantType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, span, matchedType, constantType);
+        return false;
+      }
+
+      return true;
+    }
+
     /// Whether the resolver read the bare name at `patternId` as a constant to
     /// compare against rather than as a new binding (`patternConstantLookup`).
     function bindingPatternNamesConstant(
@@ -4082,8 +4116,8 @@ export namespace Analyzer {
       match (pattern) {
         Ast::Pattern::Node::Binding(binding) -> {
           // A constant binds nothing, as in the `Path` arm below.
-          if (Analyzer::Typecheck::bindingPatternNamesConstant(resolvedBodies, patternId)) {
-            return true;
+          if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(constantId)) = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId)) {
+            return Analyzer::Typecheck::checkConstantPatternType(state, defStore, typeStore, symbols, constantId, typeId, binding.span);
           }
 
           Analyzer::Typecheck::checkBindingShadowsVariant(state, defStore, typeStore, symbols, binding.name.toStr(), binding.span, typeId);
@@ -4122,10 +4156,10 @@ export namespace Analyzer {
 
           if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = patternRefOpt) {
             if (let Option::SOME(def) = defStore.get(defId)) {
-              // A constant pattern binds nothing; its only obligation — value
-              // comparability with the scrutinee — is checked at lowering.
+              // A constant pattern binds nothing; its only obligation is that
+              // its value fits the matched type.
               if (let Analyzer::Definition::Variable(_) = def) {
-                return true;
+                return Analyzer::Typecheck::checkConstantPatternType(state, defStore, typeStore, symbols, defId, typeId, path.span);
               }
 
               if (let Analyzer::Definition::Variant(_) = def) {
