@@ -46,6 +46,7 @@ function emptyProject(): ResolvedProject {
     target: String::create("c"),
     targetTriple: Option::NONE,
     cc: String::create("gcc"),
+    linker: Option::NONE,
     cflags: Vector::new<String>(),
     emit: Vector::new<String>(),
     defaultFeatures: Vector::new<String>(),
@@ -314,7 +315,7 @@ function unknownTopLevelTableWarns(): void {
 @test
 function everyKnownProjectKeyStaysSilent(): void {
   let source: String = String::create(
-    "[package]\nname = \"t\"\nversion = \"0.1.0\"\nauthors = [\"me\"]\ndescription = \"d\"\nkeywords = [\"k\"]\nlicense = \"MIT\"\nrepository = \"https://example.com\"\n\n[ignis]\nstd = true\nstd_path = \"../std\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 2\ndebug = true\ntarget = \"c\"\ntarget_triple = \"x86_64-unknown-linux-gnu\"\nknown_features = [\"a\"]\ndefault_features = [\"a\"]\ncc = \"gcc\"\ncflags = [\"-Wall\"]\nemit = [\"c\"]\n\n[test]\nfixtures = [\"fixtures\"]\n\n[aliases]\nmylib = \"libs/mylib\"\n"
+    "[package]\nname = \"t\"\nversion = \"0.1.0\"\nauthors = [\"me\"]\ndescription = \"d\"\nkeywords = [\"k\"]\nlicense = \"MIT\"\nrepository = \"https://example.com\"\n\n[ignis]\nstd = true\nstd_path = \"../std\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 2\ndebug = true\ntarget = \"c\"\ntarget_triple = \"x86_64-unknown-linux-gnu\"\nknown_features = [\"a\"]\ndefault_features = [\"a\"]\ncc = \"gcc\"\nlinker = \"mold\"\ncflags = [\"-Wall\"]\nemit = [\"c\"]\n\n[test]\nfixtures = [\"fixtures\"]\n\n[aliases]\nmylib = \"libs/mylib\"\n"
   );
   let document: TomlDocument = match (Toml::parse(&source)) {
     Result::OK(value) -> value,
@@ -407,4 +408,43 @@ function projectLoaderLeavesTheFreestandingStdRootUnsetWithoutAStdPath(): void {
     },
     Result::ERROR(_) -> Test::fail(),
   };
+}
+
+/// `[build] linker` is read as written; a project that omits it leaves the
+/// selection to the default rule.
+@test
+function projectLoaderReadsBuildLinker(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/linker_project");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> assertSomeString(project.linkerText(), "bfd"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let withoutLinker: Path::PathBuf = fixturePath("test_cases/selfhost/build/build_profile");
+
+  match (Config::loadProject(&withoutLinker)) {
+    Result::OK(project) -> Test::assert(project.linkerText().isNone()),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+/// `linker` is a known `[build]` key: it raises no unknown-key warning.
+@test
+function buildLinkerIsAKnownProjectKey(): void {
+  let source: String = String::create(
+    "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nlinker = \"lld\"\n"
+  );
+  let document: TomlDocument = match (Toml::parse(&source)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+
+  Test::assertEq<u64>(warnings.length(), 0);
 }

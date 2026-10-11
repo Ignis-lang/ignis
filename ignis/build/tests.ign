@@ -264,6 +264,7 @@ function driverFingerprintSeparatesBackends(): void {
     "x86_64-linux",
     "c",
     "gcc",
+    "",
     "profile-hash",
     "manifest-hash",
     &features,
@@ -274,6 +275,7 @@ function driverFingerprintSeparatesBackends(): void {
     "x86_64-linux",
     "qbe",
     "gcc",
+    "",
     "profile-hash",
     "manifest-hash",
     &features,
@@ -339,4 +341,51 @@ function driverEmitObjectTakesTheOutputPath(): void {
   let noOutput: BuildArtifacts = singleFileArtifacts("c", &none);
   let defaulted: BuildArtifacts = artifactsEmitObject(&noOutput, &none, true);
   Test::assertEq<str>(defaulted.object.toString().toStr(), "selfhost_emit.o");
+}
+
+/// Two builds that differ only in the resolved linker must not share a cache
+/// stamp, and a build with no linker flag keeps the toolchain text it always had.
+@test
+function driverFingerprintSeparatesLinkers(): void {
+  let features: Vector<String> = Vector::new<String>();
+  let sources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+
+  let systemFingerprint: BuildFingerprint = stampProgramFingerprint(
+    "0.1.0",
+    "x86_64-linux",
+    "c",
+    "gcc",
+    "",
+    "profile-hash",
+    "manifest-hash",
+    &features,
+    &sources,
+  );
+  let moldFingerprint: BuildFingerprint = stampProgramFingerprint(
+    "0.1.0",
+    "x86_64-linux",
+    "c",
+    "gcc",
+    "-fuse-ld=mold",
+    "profile-hash",
+    "manifest-hash",
+    &features,
+    &sources,
+  );
+  let bfdFingerprint: BuildFingerprint = stampProgramFingerprint(
+    "0.1.0",
+    "x86_64-linux",
+    "c",
+    "gcc",
+    "-fuse-ld=bfd",
+    "profile-hash",
+    "manifest-hash",
+    &features,
+    &sources,
+  );
+
+  Test::assertEq<boolean>(fingerprintEquals(&systemFingerprint, &moldFingerprint), false);
+  Test::assertEq<boolean>(fingerprintEquals(&moldFingerprint, &bfdFingerprint), false);
+  Test::assert(!driverContains(systemFingerprint.cc.toStr(), "fuse-ld"));
+  Test::assert(driverContains(moldFingerprint.cc.toStr(), "-fuse-ld=mold"));
 }

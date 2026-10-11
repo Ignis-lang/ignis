@@ -49,6 +49,8 @@ export record ResolvedProject {
   public target: String;
   public targetTriple: Option<String>;
   public cc: String;
+  /// `[build] linker`, absent when the project leaves the choice to the default rule.
+  public linker: Option<String>;
   public cflags: Vector<String>;
   public emit: Vector<String>;
   public defaultFeatures: Vector<String>;
@@ -132,6 +134,10 @@ export record ResolvedProject {
 
   public ccText(&self): Option<String> {
     return Option::SOME(self.cc.clone());
+  }
+
+  public linkerText(&self): Option<String> {
+    return cloneOptionString(&self.linker);
   }
 
   public cflagCount(&self): u64 {
@@ -1004,6 +1010,7 @@ function knownBuildKeys(): Vector<String> {
   keys.push(String::create("known_features"));
   keys.push(String::create("default_features"));
   keys.push(String::create("cc"));
+  keys.push(String::create("linker"));
   keys.push(String::create("cflags"));
   keys.push(String::create("emit"));
   return keys;
@@ -1266,6 +1273,11 @@ export namespace Config {
       Option::NONE -> Option::NONE,
     };
     let cc: String = stringOrDefault(&document, configPath, "build.cc", "cc")!;
+    let linkerValue: Option<ConfigStringValue> = optionalString(&document, configPath, "build.linker")!;
+    let linker: Option<String> = match (linkerValue) {
+      Option::SOME(value) -> Option::SOME(value.value),
+      Option::NONE -> Option::NONE,
+    };
     let emptyCflags: Vector<String> = Vector::new<String>();
     let cflags: Vector<String> = stringArrayOrDefault(&document, configPath, "build.cflags", &emptyCflags)!;
     let emptyEmit: Vector<String> = Vector::new<String>();
@@ -1360,6 +1372,7 @@ export namespace Config {
       target: target.clone(),
       targetTriple: cloneOptionString(&targetTriple),
       cc: cc.clone(),
+      linker: cloneOptionString(&linker),
       cflags: cloneStringVector(&cflags),
       emit: cloneStringVector(&emit),
       defaultFeatures: cloneStringVector(&defaultFeatures),
@@ -1456,6 +1469,7 @@ function emptyProject(): ResolvedProject {
     target: String::create("c"),
     targetTriple: Option::NONE,
     cc: String::create("cc"),
+    linker: Option::NONE,
     cflags: Vector::new<String>(),
     emit: Vector::new<String>(),
     defaultFeatures: Vector::new<String>(),

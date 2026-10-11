@@ -49,6 +49,8 @@ export record CliOptions {
   public outDir: Option<String>;
   public stdPath: Option<String>;
   public cc: Option<String>;
+  /// `--linker`, absent when the project file's own `linker` stands.
+  public linker: Option<String>;
   public targetTriple: Option<String>;
   /// The backend the build lowers to (`--target c|qbe`); absent leaves the
   /// project file's own `target` in charge.
@@ -115,6 +117,7 @@ export record CliOptions {
       outDir: Option::NONE,
       stdPath: Option::NONE,
       cc: Option::NONE,
+      linker: Option::NONE,
       targetTriple: Option::NONE,
       target: Option::NONE,
       optLevel: Option::NONE,
@@ -1749,6 +1752,20 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (argument.equals("--linker")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--linker", "a linker name"));
+      };
+
+      if (value.length() == 0) {
+        return Result::ERROR(cliMissingValue("--linker", "a linker name"));
+      }
+
+      options.linker = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
     // The build target selects the backend a run lowers to; `init --target`
     // keeps its own template meanings (c, iir, none) upstream in the init
     // parser, so this branch only sees build commands.
@@ -2062,6 +2079,7 @@ export function helpText(): String {
   text.pushStr("      --out-dir <DIR>       Override [build] out_dir\n");
   text.pushStr("      --std-path <DIR>      Override the standard library root\n");
   text.pushStr("      --cc <CC>             Override [build] cc\n");
+  text.pushStr("      --linker <L>          Override [build] linker: any name passed as -fuse-ld=<L>; default or ld for the system linker\n");
   text.pushStr("      --target-triple <T>   Override the target triple directives are answered with\n");
   text.pushStr("      --target <T>          Build for a backend: c (default) or qbe\n");
   text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
@@ -3745,4 +3763,45 @@ function cliParsesTheTestStdJobCount(): void {
   let attachedOptions: CliOptions = cliParse(&attached);
 
   Test::assertEq<u64>(cliJobCount(&attachedOptions), 4);
+}
+
+@test
+function cliParsesLinkerOverride(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--linker");
+  cliPush(&mut arguments, "lld");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliOptionText(&options.linker).toStr(), "lld");
+
+  let mut withoutFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut withoutFlag, "build");
+  let defaults: CliOptions = cliParse(&withoutFlag);
+  Test::assert(defaults.linker.isNone());
+}
+
+@test
+function cliRequiresALinkerValue(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--linker");
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: --linker requires a linker name");
+}
+
+@test
+function cliRejectsAnEmptyLinkerName(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--linker");
+  cliPush(&mut arguments, "");
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: --linker requires a linker name");
+}
+
+@test
+function cliHelpListsTheLinkerOverride(): void {
+  let help: String = helpText();
+  let expected: String = String::create("      --linker <L>          Override [build] linker: any name passed as -fuse-ld=<L>; default or ld for the system linker\n");
+  Test::assert(help.contains(&expected));
 }
