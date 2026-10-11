@@ -227,6 +227,9 @@ export function stampProfileHash(optLevel: u64, debug: boolean, cflags: &Vector<
 
 /// The fingerprint a whole-program build is cached under.
 ///
+/// `linkerFlags` is the linker selection the link passes, empty for the system
+/// default.
+///
 /// `sources` must carry every module the build parses, std included: the
 /// selfhost emits user and standard-library code into one translation unit, so
 /// a std source edit changes the same artifact a user source edit does.
@@ -235,6 +238,7 @@ export function stampProgramFingerprint(
   targetTriple: str,
   backend: str,
   cc: str,
+  linkerFlags: str,
   profileHash: str,
   manifestHash: str,
   features: &Vector<String>,
@@ -247,6 +251,15 @@ export function stampProgramFingerprint(
   toolchain.pushChar('|');
   let identity: String = stampCCompilerIdentity(cc);
   toolchain.push(&identity);
+
+  // The linker selection rides on the toolchain text, so changing it relinks.
+  // The system default adds nothing, which keeps older stamps valid.
+  let linkerText: String = String::create(linkerFlags);
+
+  if (linkerText.length() > 0) {
+    toolchain.pushStr("|linker=");
+    toolchain.push(&linkerText);
+  }
 
   return BuildFingerprint::withSources(
     compilerVersion,
@@ -637,7 +650,7 @@ function stampTestFingerprint(
   sources: &Vector<Path::PathBuf>,
   features: &Vector<String>
 ): BuildFingerprint {
-  return stampProgramFingerprint("0.4.0", "", "c", "cc", "profile", "manifest", features, sources);
+  return stampProgramFingerprint("0.4.0", "", "c", "cc", "", "profile", "manifest", features, sources);
 }
 
 /// Record a stamp for a build that linked nothing, so its verdict rests on the

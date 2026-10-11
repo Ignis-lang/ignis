@@ -150,6 +150,24 @@ droppable locals. A freestanding program provides both symbols at link time.
   link step. A failing `qbe` run reports the exit status and the tool's
   stdout and stderr, and the link never runs.
 - `cc` - C compiler executable.
+- `linker` - Linker the executable link uses. Any non-empty name is accepted
+  and passed to `cc` as `-fuse-ld=<value>` (`"mold"`, `"lld"`, `"gold"`,
+  `"bfd"`, ...); `"default"` and `"ld"` select the system linker. An empty
+  value is a `C1004` config error. An explicitly requested linker that the
+  driver cannot use fails the link with `B4003` instead of falling back.
+
+  Unset (the default), a Linux host links with mold when `cc` can use it and
+  with the system linker otherwise; other hosts always use the system linker.
+  Whether `cc` can use mold is checked by running `<cc> -fuse-ld=mold
+  -Wl,--version` (output discarded): it fails when mold is not installed, when
+  the driver has no `-fuse-ld=mold` (gcc before 12.1), or when a cross driver
+  cannot run it. The check runs once per command that links an executable
+  (`build` of a binary, `test`, `test-std`), never for `check`, `doc`, the
+  language server or object-only builds.
+
+  The command line override `--linker <L>` wins over the project file. The
+  resolved selection is part of the build cache, so changing it (or the
+  default switching between mold and the system linker) relinks.
 - `cflags` - Extra C compiler/linker flags.
 - `emit` - Extra artifacts (`"c"`, `"obj"`).
 

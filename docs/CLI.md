@@ -110,6 +110,20 @@ ignis build
 ignis build ./my-app
 ```
 
+`--linker <L>` overrides `[build] linker` and chooses the linker the link step
+uses. Any non-empty name is accepted and passed to the C driver as
+`-fuse-ld=<L>` (`mold`, `lld`, `gold`, `bfd`, ...); `default` and `ld` keep the
+system linker. An empty name is rejected like a missing one. Without it, and
+without `[build] linker`, a Linux host links with mold when the C driver can use
+it, which is checked once per linking command by running
+`<cc> -fuse-ld=mold -Wl,--version`; otherwise it uses the system linker (see
+`docs/PROJECT.md`).
+
+```bash
+# Link with GNU ld (bfd) instead of the default selection
+ignis build --linker bfd
+```
+
 A project with `[ignis] std = false` builds in freestanding mode (see
 `docs/PROJECT.md`): the emitted C has no runtime header, no hosted libc or
 POSIX headers and no C `main` wrapper, every unit is compiled with
