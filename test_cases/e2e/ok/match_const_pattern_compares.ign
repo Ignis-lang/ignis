@@ -1,0 +1,88 @@
+// A bare name in a refutable pattern that names a constant compares against
+// the constant's value instead of binding a new catch-all variable.
+const READY: u64 = 1;
+
+const RUNNING: u64 = 2;
+
+const STOPPED: u64 = 3;
+
+const SMALL: u8 = 4;
+
+namespace Limits {
+  const LOW: i32 = 10;
+
+  function band(value: i32): i32 {
+    return match (value) {
+      LOW -> 1,
+      _ -> 2,
+    };
+  }
+}
+
+function classify(state: u64): u64 {
+  return match (state) {
+    READY -> 10,
+    RUNNING -> 20,
+    _ -> 30,
+  };
+}
+
+function settled(state: u64): boolean {
+  return match (state) {
+    READY | STOPPED -> true,
+    _ -> false,
+  };
+}
+
+function unwrapRunning(state: Option<u64>): u64 {
+  return match (state) {
+    Option::SOME(RUNNING) -> 1,
+    Option::SOME(other) -> other,
+    Option::NONE -> 0,
+  };
+}
+
+// A constant of a narrower type of the same sign widens to the matched type,
+// as it does in a comparison.
+function isSmall(state: u64): boolean {
+  return match (state) {
+    SMALL -> true,
+    _ -> false,
+  };
+}
+
+function isReady(state: u64): boolean {
+  if (let READY = state) {
+    return true;
+  }
+
+  return false;
+}
+
+function main(): i32 {
+  if (classify(1) != 10 || classify(2) != 20 || classify(3) != 30) {
+    return 1;
+  }
+
+  if (!settled(1) || settled(2) || !settled(3)) {
+    return 2;
+  }
+
+  if (unwrapRunning(Option::SOME(2)) != 1 || unwrapRunning(Option::SOME(7)) != 7 || unwrapRunning(Option::NONE) != 0) {
+    return 3;
+  }
+
+  if (!isReady(1) || isReady(2)) {
+    return 4;
+  }
+
+  if (Limits::band(10) != 1 || Limits::band(11) != 2) {
+    return 5;
+  }
+
+  if (!isSmall(4) || isSmall(5)) {
+    return 6;
+  }
+
+  return 0;
+}

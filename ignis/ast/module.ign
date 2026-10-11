@@ -3,6 +3,7 @@ import Vector from "std::vector";
 
 import _ from "./expressions";
 import _ from "./items";
+import _ from "./metadata";
 import _ from "./patterns";
 import _ from "./statements";
 import _ from "./types";
@@ -23,6 +24,10 @@ export namespace Ast {
     /// `///` text of each documented record field and enum member, keyed by
     /// raw pattern id.
     public patternDocs: HashMap<u32, String>;
+    /// Attributes written on an enum variant, keyed by raw pattern id. A
+    /// variant is a path pattern, which has no metadata of its own; a field
+    /// keeps its attributes on its binding.
+    public variantAttributeLists: HashMap<u32, Vector<Ast::Attribute>>;
     /// `//!` text right after a namespace's opening brace, keyed by the
     /// namespace's raw item id.
     public namespaceInnerDocs: HashMap<u32, String>;
@@ -38,6 +43,7 @@ export namespace Ast {
         doc: Option::NONE,
         itemDocs: HashMap::new<u32, String>(),
         patternDocs: HashMap::new<u32, String>(),
+        variantAttributeLists: HashMap::new<u32, Vector<Ast::Attribute>>(),
         namespaceInnerDocs: HashMap::new<u32, String>(),
       };
     }
@@ -56,6 +62,34 @@ export namespace Ast {
       if (let Option::SOME(text) = doc) {
         self.patternDocs.insert(id.raw(), text.clone());
       }
+    }
+
+    public setVariantAttributes(
+      &mut self,
+      id: Ast::PatternId,
+      attributes: &Vector<Ast::Attribute>
+    ): void {
+      if (attributes.length() == 0) {
+        return;
+      }
+
+      let mut copied: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+      let mut index: u64 = 0;
+
+      while (index < attributes.length()) {
+        if (let Option::SOME(attribute) = attributes.get(index)) {
+          copied.push(Ast::copyAttribute(attribute));
+        }
+
+        index += 1;
+      }
+
+      self.variantAttributeLists.insert(id.raw(), copied);
+    }
+
+    public variantAttributes(&self, id: Ast::PatternId): Option<&Vector<Ast::Attribute>> {
+      let raw: u32 = id.raw();
+      return self.variantAttributeLists.get(&raw);
     }
 
     public setNamespaceInnerDoc(&mut self, id: Ast::ItemId, doc: &Option<String>): void {

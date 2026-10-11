@@ -231,7 +231,7 @@ spelled (see the reserved list).
 
 <assignment-operators> ::=
     "=" | "+=" | "-=" | "*=" | "/=" | "%="
-  | "&=" | "|=" | "^=" | "<<=" | ">>="
+  | "&=" | "|=" | "^=" | "<<=" | ">>=" | "~="
 ```
 
 
@@ -555,6 +555,9 @@ spelled (see the reserved list).
 
 <literal-pattern> ::= <integer> | <float> | <hex> | <binary> | <string> | <char> | <boolean> | <null> | <atom>
 <binding-pattern> ::= <identifier>
+// In a match arm, `if let` or `while let`, an identifier that resolves to a
+// `const` (and is not shadowed by a local) is a constant pattern: it compares
+// against the constant's value instead of binding.
 <qualified-variant-pattern> ::= <qualified-identifier> ("(" <pattern-list>? ")")?
 <tuple-pattern> ::= "(" <pattern-list> ")"
 <pattern-list> ::= <pattern> ("," <pattern>)* ","?
@@ -772,7 +775,8 @@ spelled (see the reserved list).
 <hex-numbers> ::= "0x" [0-9a-fA-F]+
 <binary-numbers> ::= "0b" [01]+
 
-<assignment-operators> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+<assignment-operators> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "~="
+// `a op= b` assigns `a op b`; `a ~= b` assigns `a & ~b`, clearing in `a` the bits set in `b`.
 <variable-modifiers> ::= ("mut" | "&" | "*")+
 ```
 

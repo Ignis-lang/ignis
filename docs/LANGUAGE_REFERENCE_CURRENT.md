@@ -1215,7 +1215,11 @@ Logical: `&& || !`
 
 Bitwise: `& | ^ ~ << >>`
 
-Assignment: `= += -= *= /= %= &= |= ^= <<= >>=`
+Assignment: `= += -= *= /= %= &= |= ^= <<= >>= ~=`
+
+A compound assignment `a op= b` assigns `a op b`. `a ~= b` assigns `a & ~b`: it clears in `a` the bits set in `b` (`flags ~= MASK`). The bitwise forms (`&= |= ^= <<= >>= ~=`) take integers only, like the binary operators they stand for.
+
+`%` on `f32` and `f64` is the truncated remainder, C's `fmod`: the result has the sign of the left operand (`-7.5 % 2.0` is `-1.5`). A hosted build links `libm` for it; a freestanding build that uses it has to provide `fmod` (and `fmodf` for `f32`).
 
 Range: `..` `..=` (see [Section 9.14](#914-ranges))
 
@@ -1549,10 +1553,27 @@ Supported pattern forms:
 - Wildcard: `_`
 - Literal: `1`, `true`, `"x"`, `:ok`, `null`
 - Binding: `name`
+- Constant: `LIMIT` or `Config::LIMIT`, a name that resolves to a `const`
 - Variant path: `Option::SOME(x)`
 - Tuple pattern: `(x, y)`
 - Or pattern: `A | B`
 - Guard in match arm: `pattern if condition`
+
+In a `match` arm, an `if let` or a `while let`, a bare name that resolves to a constant is a
+constant pattern: it matches when the value equals the constant's, exactly like the qualified
+form, and binds nothing. The constant has to be a value of the matched type: the same type, or
+one that widens to it implicitly ([Section 4.4](#44-implicit-integer-widening)), so a `u8`
+constant matches a `u64` but a negative `i32` or a `str` does not. A local variable of the same name in scope keeps the name a binding.
+In `let`, `let else`, `for` and parameters a bare name always binds.
+
+```ignis
+const READY: u64 = 1;
+
+match (state) {
+    READY -> 10,   // state == READY
+    other -> other, // binds `other`
+}
+```
 
 Tuple patterns and tuple expressions parse, but a tuple type cannot be spelled — see
 [Section 4.5](#45-type-aliases). A tuple pattern matches a tuple expression by destructuring

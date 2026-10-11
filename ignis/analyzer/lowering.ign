@@ -795,6 +795,7 @@ export namespace Lowering {
       Ast::Expression::AssignmentOperator::BitAndAssign -> Option::SOME(Hir::BinaryOperation::BitAnd),
       Ast::Expression::AssignmentOperator::BitOrAssign -> Option::SOME(Hir::BinaryOperation::BitOr),
       Ast::Expression::AssignmentOperator::BitXorAssign -> Option::SOME(Hir::BinaryOperation::BitXor),
+      Ast::Expression::AssignmentOperator::NotAssign -> Option::SOME(Hir::BinaryOperation::BitAnd),
       Ast::Expression::AssignmentOperator::AndAssign -> Option::SOME(Hir::BinaryOperation::And),
       Ast::Expression::AssignmentOperator::OrAssign -> Option::SOME(Hir::BinaryOperation::Or),
     };
@@ -1035,6 +1036,15 @@ export namespace Lowering {
         return Option::SOME(Hir::HirPattern::Wildcard);
       },
       Ast::Pattern::Node::Binding(binding) -> {
+        // A bare name the resolver read as a constant compares against it,
+        // the same pattern a qualified `Config::READY` lowers to.
+        if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(constantId)) = Analyzer::ResolverBodies::findPatternRef(
+          &output.resolvedBodies.bodyResolution,
+          patternId.raw(),
+        )) {
+          return Option::SOME(Hir::HirPattern::Constant(constantId));
+        }
+
         let defId: Analyzer::DefinitionId = Lowering::declarePatternBinding(
           defStore,
           symbols,
@@ -1385,11 +1395,26 @@ export namespace Lowering {
           }
         }
 
-        let value: Hir::HirId = match (rawTargetType) {
+        let mut value: Hir::HirId = match (rawTargetType) {
           Option::SOME(rawType) -> Lowering::lowerCFacingValue(defStore, typeStore, symbols, module, output, locals, hir, assignment.value, rawType),
           Option::NONE -> Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value),
         };
         let assignType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        // `target ~= value` assigns `target & ~value`: the value is inverted
+        // here and the `&` is the compound operation below.
+        if (assignment.operator == Ast::Expression::AssignmentOperator::NotAssign) {
+          let valueType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, assignment.value);
+          let mut invertRef: &mut Hir::HirStore = hir;
+          value = invertRef.alloc(Hir::HirNode {
+            kind: Hir::HirKind::Unary(Hir::HirUnary {
+              operation: Hir::UnaryOperation::BitNot,
+              operand: value,
+            }),
+            span: assignment.span,
+            typeId: valueType,
+          });
+        }
 
         let mut hirRef: &mut Hir::HirStore = hir;
         return hirRef.alloc(Hir::HirNode {

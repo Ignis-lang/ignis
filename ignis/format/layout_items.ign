@@ -1248,10 +1248,18 @@ export namespace Format {
       return Result::OK(fallback);
     };
 
-    let prefix: String = Format::formatDeclarationPrefix(&binding.metadata, config, indentLevel);
+    let mut result: String = Format::formatDeclarationPrefix(&binding.metadata, config, indentLevel);
+    Format::renderCommentGapAfterAttributes(
+      &mut result,
+      source,
+      &binding.metadata.attributes,
+      binding.span.start,
+      config,
+      indentLevel,
+    )!;
+
     let modifierKeywords: String = Format::formatModifierKeywords(&binding.metadata.modifiers);
 
-    let mut result: String = prefix;
     let indentText: String = config.indentString(indentLevel);
     result.push(&indentText);
     result.push(&modifierKeywords);
@@ -1277,12 +1285,22 @@ export namespace Format {
   /// comma that separates it from the next one.
   function formatEnumVariant(
     module: &Ast::Module,
+    patternId: Ast::PatternId,
     path: &Ast::Pattern::Path,
     source: &String,
     config: &FormatterConfig,
     indentLevel: u64
-  ): String {
-    let mut result: String = config.indentString(indentLevel);
+  ): Result<String, FormatError> {
+    let mut result: String = String::new();
+
+    if (let Option::SOME(attributes) = module.variantAttributes(patternId)) {
+      let prefix: String = Format::formatAttributes(attributes, config, indentLevel);
+      result.push(&prefix);
+      Format::renderCommentGapAfterAttributes(&mut result, source, attributes, path.span.start, config, indentLevel)!;
+    }
+
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
     let nameText: String = Format::joinSegments(&path.segments, "::");
     result.push(&nameText);
 
@@ -1325,7 +1343,53 @@ export namespace Format {
     }
 
     result.pushStr(",");
-    return result;
+    return Result::OK(result);
+  }
+
+  /// The span a field or variant owns in its body: its own span, widened back
+  /// to its first attribute. The parser keeps attributes apart from the span,
+  /// and a comment above an attributed member has to stay that member's
+  /// rather than end up in a gap the attribute line cuts off.
+  function bodyMemberPatternSpan(
+    module: &Ast::Module,
+    patternId: Ast::PatternId,
+    node: &Ast::Pattern::Node
+  ): SourceSpan {
+    let span: SourceSpan = Format::patternSpanOf(node);
+    let mut start: u64 = span.start;
+
+    if (let Ast::Pattern::Node::Binding(binding) = node) {
+      start = Format::firstAttributeStart(&binding.metadata.attributes, start);
+    } else if (let Option::SOME(attributes) = module.variantAttributes(patternId)) {
+      start = Format::firstAttributeStart(attributes, start);
+    }
+
+    return SourceSpan::new(span.filePath, start, span.end);
+  }
+
+  /// The earlier of `start` and the start of the first of `attributes`.
+  function firstAttributeStart(attributes: &Vector<Ast::Attribute>, start: u64): u64 {
+    let mut earliest: u64 = start;
+    let mut index: u64 = 0;
+
+    while (index < attributes.length()) {
+      if (let Option::SOME(attribute) = attributes.get(index)) {
+        if (attribute.span.start < earliest) {
+          earliest = attribute.span.start;
+        }
+      }
+
+      index += 1;
+    }
+
+    return earliest;
+  }
+
+  /// The span a method owns in its body, widened back to its first attribute
+  /// like `bodyMemberPatternSpan`.
+  function bodyMemberMethodSpan(module: &Ast::Module, methodId: Ast::ItemId): SourceSpan {
+    let span: SourceSpan = Format::itemSpan(module, methodId);
+    return SourceSpan::new(span.filePath, Format::itemEffectiveStart(module, methodId), span.end);
   }
 
   /// Merges a body's patterns and methods back into the order they were
@@ -1347,7 +1411,7 @@ export namespace Format {
       if (patternIndex < patterns.length()) {
         if (let Option::SOME(patternId) = patterns.get(patternIndex)) {
           if (let Option::SOME(patternNode) = module.patterns.get(*patternId)) {
-            patternStart = Format::patternSpanOf(patternNode).start;
+            patternStart = Format::bodyMemberPatternSpan(module, *patternId, patternNode).start;
             hasPattern = true;
           }
         }
@@ -1358,7 +1422,7 @@ export namespace Format {
 
       if (methodIndex < methods.length()) {
         if (let Option::SOME(methodId) = methods.get(methodIndex)) {
-          methodStart = Format::itemSpan(module, *methodId).start;
+          methodStart = Format::bodyMemberMethodSpan(module, *methodId).start;
           hasMethod = true;
         }
       }
@@ -1385,7 +1449,7 @@ export namespace Format {
         members.push(Format::BodyMember {
           isMethod: false,
           index: patternIndex,
-          span: Format::patternSpanOf(patternNode),
+          span: Format::bodyMemberPatternSpan(module, *patternId, patternNode),
         });
 
         patternIndex += 1;
@@ -1399,7 +1463,7 @@ export namespace Format {
       members.push(Format::BodyMember {
         isMethod: true,
         index: methodIndex,
-        span: Format::itemSpan(module, *methodId),
+        span: Format::bodyMemberMethodSpan(module, *methodId),
       });
 
       methodIndex += 1;
@@ -1461,7 +1525,7 @@ export namespace Format {
       };
 
       if (let Ast::Pattern::Node::Path(path) = patternNode) {
-        return Result::OK(Format::formatEnumVariant(module, &path, source, config, indentLevel));
+        return Format::formatEnumVariant(module, *patternId, &path, source, config, indentLevel);
       }
     }
 

@@ -686,12 +686,49 @@ export namespace Analyzer {
         return false;
       }
 
+      // The bitwise forms take integers only, like the binary operators they
+      // stand for.
+      let bitwiseSymbol: Option<str> = Analyzer::Typecheck::bitwiseCompoundAssignmentSymbol(operator);
+
+      if (let Option::SOME(symbol) = bitwiseSymbol) {
+        let targetInteger: boolean = Analyzer::Typecheck::isIntegerTypeQuiet(defStore, typeStore, targetType);
+        let valueInteger: boolean = Analyzer::Typecheck::isIntegerTypeQuiet(defStore, typeStore, actualType);
+
+        if (!targetInteger || !valueInteger) {
+          let mut offendingType: Analyzer::TypeId = targetType;
+
+          if (targetInteger) {
+            offendingType = actualType;
+          }
+
+          let message: String = `Compound assignment operator '${symbol}' cannot be applied to type '${typeStore.nameOfResolved(offendingType, &*defStore, &*symbols).toStr()}'`;
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE, message.toStr());
+          return false;
+        }
+      }
+
       if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, targetType, actualType)) {
         Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, span, targetType, actualType);
         return false;
       }
 
       return true;
+    }
+
+    /// The written symbol of a compound assignment whose operation is bitwise
+    /// (`&=`, `|=`, `^=`, `<<=`, `>>=`, `~=`), or NONE for the arithmetic ones.
+    function bitwiseCompoundAssignmentSymbol(
+      operator: Ast::Expression::AssignmentOperator
+    ): Option<str> {
+      return match (operator) {
+        Ast::Expression::AssignmentOperator::BitAndAssign -> Option::SOME("&="),
+        Ast::Expression::AssignmentOperator::BitOrAssign -> Option::SOME("|="),
+        Ast::Expression::AssignmentOperator::BitXorAssign -> Option::SOME("^="),
+        Ast::Expression::AssignmentOperator::ShiftLeftAssign -> Option::SOME("<<="),
+        Ast::Expression::AssignmentOperator::ShiftRightAssign -> Option::SOME(">>="),
+        Ast::Expression::AssignmentOperator::NotAssign -> Option::SOME("~="),
+        _ -> Option::NONE,
+      };
     }
 
     /// The referent of `typeId` when it is a `&mut T`, NONE otherwise.

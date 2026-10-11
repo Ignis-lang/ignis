@@ -300,15 +300,15 @@ export namespace ParserExpressions {
     }
 
     if (punctuation == Punctuation::AND_ASSIGN) {
-      return Option::SOME(Ast::Expression::AssignmentOperator::AndAssign);
+      return Option::SOME(Ast::Expression::AssignmentOperator::BitAndAssign);
     }
 
     if (punctuation == Punctuation::OR_ASSIGN) {
-      return Option::SOME(Ast::Expression::AssignmentOperator::OrAssign);
+      return Option::SOME(Ast::Expression::AssignmentOperator::BitOrAssign);
     }
 
     if (punctuation == Punctuation::NOT_ASSIGN) {
-      return Option::SOME(Ast::Expression::AssignmentOperator::BitAndAssign);
+      return Option::SOME(Ast::Expression::AssignmentOperator::NotAssign);
     }
 
     if (punctuation == Punctuation::XOR_ASSIGN) {
@@ -966,14 +966,124 @@ export namespace ParserExpressions {
         offset += 1;
 
         if (depth == 0) {
-          let next: Token = ParserExpressions::nextSignificantToken(parserRef, offset);
-          return next.kindValue() == TokenKind::PUNCTUATION && next.punctuationValue() == Punctuation::COLON;
+          return ParserExpressions::lambdaReturnTypeFollows(parserRef, offset);
         }
 
         continue;
       }
 
       offset += 1;
+    }
+
+    return false;
+  }
+
+  /// Whether the tokens from `startOffset` read `: <type> ->`, the tail of a
+  /// lambda header after its parameter list. A `:` alone is not enough: in
+  /// `flag ? (value) : other` the `:` after a parenthesized branch belongs to
+  /// the conditional expression.
+  ///
+  /// The type is scanned by its tokens rather than parsed: names, primitive
+  /// keywords, `mut`, `::`, `*`, `&`, array brackets with their sizes, type
+  /// arguments and the parentheses of a function type. The `->` has to come at
+  /// nesting depth zero, so a function type's own arrow inside parentheses does
+  /// not count.
+  function lambdaReturnTypeFollows(parser: &mut ParserShared::State, startOffset: u64): boolean {
+    let parserRef: &mut ParserShared::State = parser;
+    let mut offset: u64 = startOffset;
+    let colon: Token = ParserExpressions::nextSignificantToken(parserRef, offset);
+
+    if (colon.kindValue() != TokenKind::PUNCTUATION || colon.punctuationValue() != Punctuation::COLON) {
+      return false;
+    }
+
+    while (ParserExpressions::isTrivia(parserRef.tokens.peekNth(offset).clone())) {
+      offset += 1;
+    }
+
+    offset += 1;
+
+    let mut nesting: i64 = 0;
+    let mut sawType: boolean = false;
+
+    while (offset < startOffset + 128) {
+      let token: Token = parserRef.tokens.peekNth(offset);
+      offset += 1;
+
+      if (ParserExpressions::isTrivia(token.clone())) {
+        continue;
+      }
+
+      let kind: TokenKind = token.kindValue();
+
+      if (kind == TokenKind::IDENTIFIER || kind == TokenKind::LITERAL) {
+        sawType = true;
+        continue;
+      }
+
+      if (kind == TokenKind::KEYWORD) {
+        if (ParserTypes::isPrimitiveTypeKeyword(&token) || token.keywordValue() == Keyword::MUT) {
+          sawType = true;
+          continue;
+        }
+
+        return false;
+      }
+
+      if (kind != TokenKind::PUNCTUATION) {
+        return false;
+      }
+
+      let punctuation: Punctuation = token.punctuationValue();
+
+      if (punctuation == Punctuation::ARROW) {
+        if (nesting == 0) {
+          return sawType;
+        }
+
+        continue;
+      }
+
+      if (punctuation == Punctuation::LEFT_PAREN || punctuation == Punctuation::LEFT_BRACKET || punctuation == Punctuation::LESS) {
+        nesting += 1;
+        continue;
+      }
+
+      if (punctuation == Punctuation::RIGHT_PAREN || punctuation == Punctuation::RIGHT_BRACKET || punctuation == Punctuation::GREATER) {
+        nesting -= 1;
+        sawType = true;
+
+        if (nesting < 0) {
+          return false;
+        }
+
+        continue;
+      }
+
+      if (punctuation == Punctuation::RIGHT_SHIFT) {
+        nesting -= 2;
+        sawType = true;
+
+        if (nesting < 0) {
+          return false;
+        }
+
+        continue;
+      }
+
+      if (punctuation == Punctuation::COMMA) {
+        if (nesting == 0) {
+          return false;
+        }
+
+        continue;
+      }
+
+      if (punctuation == Punctuation::DOUBLE_COLON || punctuation == Punctuation::ASTERISK || punctuation == Punctuation::AMPERSAND) {
+        continue;
+      }
+
+      return false;
     }
 
     return false;
