@@ -43,6 +43,17 @@ function describe(values: &Vector<i32>): String {
 
   return text;
 }
+
+// A closure inside a generic function is copied once per instantiation, so
+// the copy's name has to come from the closure and the type arguments.
+function holder<T>(value: T, weight: i32): () -> i32 {
+  let held = (): i32 -> {
+    let _ = @move value;
+    return weight;
+  };
+
+  return held;
+}
 """
 
 FIRST = """import Vector from "std::vector";
@@ -52,7 +63,9 @@ function main(): i32 {
   values.push(4);
   values.push(2);
 
-  return describe(&values).length() as i32;
+  let owned: () -> i32 = holder<String>(String::create("owned"), 1);
+
+  return describe(&values).length() as i32 + owned();
 }
 """
 
@@ -80,10 +93,12 @@ function main(): i32 {
   let mut wide: Vector<u64> = Vector::new<u64>();
   wide.push(7);
 
+  let earlier: () -> i32 = holder<Vector<u64>>(Vector::new<u64>(), 2);
+  let owned: () -> i32 = holder<String>(String::create("owned"), 1);
   let extra: Padding = padding(1);
   let maybe: Option<i32> = Option::SOME(3);
 
-  return describe(&values).length() as i32 + (extra.second as i32) + (morePadding(&wide) as i32) + (maybe.isSome() ? 1 : 0);
+  return describe(&values).length() as i32 + earlier() + owned() + (extra.second as i32) + (morePadding(&wide) as i32) + (maybe.isSome() ? 1 : 0);
 }
 """
 

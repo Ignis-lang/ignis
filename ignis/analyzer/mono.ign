@@ -1290,6 +1290,16 @@ export namespace Mono {
     outputHir.functionBodies.set(clonedDef, bodyId);
     outputHir.items.push(clonedDef);
 
+    // The copy is the closure function instantiated with the enclosing
+    // body's type arguments, which is also how its symbol is named.
+    let mut originRef: &mut Analyzer::DefinitionStore = defStore;
+    originRef.setSymbolOrigin(clonedDef, Analyzer::SymbolOrigin::Instance(Analyzer::InstanceOrigin {
+      generic: originalDef,
+      owner: Option::NONE,
+      ownerArgs: Vector::new<Analyzer::TypeId>(),
+      methodArgs: Mono::copyTypeIds(&subst.args),
+    }));
+
     return clonedDef;
   }
 
