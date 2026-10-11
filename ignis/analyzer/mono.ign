@@ -566,25 +566,10 @@ export namespace Mono {
     state: &mut MonoState,
     key: &Mono::InstanceKey,
   ): String {
-    let mut ownerId: Option<Analyzer::DefinitionId> = key.ownerDef;
-    let mut ownerArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.ownerArgs);
-    let mut methodArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.methodArgs);
-
-    // `keyForCallee` leaves the method form behind whenever the method
-    // declares type parameters of its own, and packs the owner's arguments
-    // in front of the method's in one list. The owner still qualifies the
-    // name, so split that list back apart the way the key would have.
-    if (ownerId.isNone()) {
-      if (let Option::SOME(ownerCandidate) = Mono::methodOwnerOf(defStore, key.primaryDef)) {
-        let ownerParams: u64 = Mono::typeParamCountOf(defStore, ownerCandidate);
-
-        if (ownerParams > 0 && methodArgs.length() >= ownerParams) {
-          ownerId = Option::SOME(ownerCandidate);
-          ownerArgs = Mono::takeTypeIds(&methodArgs, 0, ownerParams);
-          methodArgs = Mono::takeTypeIds(&methodArgs, ownerParams, methodArgs.length());
-        }
-      }
-    }
+    let origin: Analyzer::InstanceOrigin = Mono::instanceOrigin(defStore, key);
+    let ownerId: Option<Analyzer::DefinitionId> = origin.owner;
+    let ownerArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&origin.ownerArgs);
+    let methodArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&origin.methodArgs);
 
     if (let Option::SOME(owner) = ownerId) {
       let mut mangled: String = Mono::mangleDefName(defStore, symbols, owner)
@@ -605,6 +590,41 @@ export namespace Mono {
     return Mono::mangleDefName(defStore, symbols, key.primaryDef)
       .concat("__")
       .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &methodArgs, "__").toStr());
+  }
+
+  /// What instantiation `key` names, with the owner's arguments apart from the
+  /// definition's own.
+  ///
+  /// `keyForCallee` leaves the method form behind whenever the method declares
+  /// type parameters of its own, and packs the owner's arguments in front of
+  /// the method's in one list. The owner still qualifies the instance, so that
+  /// list is split back apart the way the key would have.
+  function instanceOrigin(
+    defStore: &mut Analyzer::DefinitionStore,
+    key: &Mono::InstanceKey,
+  ): Analyzer::InstanceOrigin {
+    let mut ownerId: Option<Analyzer::DefinitionId> = key.ownerDef;
+    let mut ownerArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.ownerArgs);
+    let mut methodArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.methodArgs);
+
+    if (ownerId.isNone()) {
+      if (let Option::SOME(ownerCandidate) = Mono::methodOwnerOf(defStore, key.primaryDef)) {
+        let ownerParams: u64 = Mono::typeParamCountOf(defStore, ownerCandidate);
+
+        if (ownerParams > 0 && methodArgs.length() >= ownerParams) {
+          ownerId = Option::SOME(ownerCandidate);
+          ownerArgs = Mono::takeTypeIds(&methodArgs, 0, ownerParams);
+          methodArgs = Mono::takeTypeIds(&methodArgs, ownerParams, methodArgs.length());
+        }
+      }
+    }
+
+    return Analyzer::InstanceOrigin {
+      generic: key.primaryDef,
+      owner: ownerId,
+      ownerArgs: ownerArgs,
+      methodArgs: methodArgs,
+    };
   }
 
   /// The record, enum or trait `defId` is declared on, for a method.
@@ -1270,6 +1290,16 @@ export namespace Mono {
     outputHir.functionBodies.set(clonedDef, bodyId);
     outputHir.items.push(clonedDef);
 
+    // The copy is the closure function instantiated with the enclosing
+    // body's type arguments, which is also how its symbol is named.
+    let mut originRef: &mut Analyzer::DefinitionStore = defStore;
+    originRef.setSymbolOrigin(clonedDef, Analyzer::SymbolOrigin::Instance(Analyzer::InstanceOrigin {
+      generic: originalDef,
+      owner: Option::NONE,
+      ownerArgs: Vector::new<Analyzer::TypeId>(),
+      methodArgs: Mono::copyTypeIds(&subst.args),
+    }));
+
     return clonedDef;
   }
 
@@ -1527,6 +1557,11 @@ export namespace Mono {
       let genericDefId: Analyzer::DefinitionId = key.primaryDef;
       let instanceArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.methodArgs);
 
+      // The shell's symbol is named after what it instantiates.
+      let shellOrigin: Analyzer::InstanceOrigin = Mono::instanceOrigin(defStore, &key);
+      let mut originRef: &mut Analyzer::DefinitionStore = defStore;
+      originRef.setSymbolOrigin(shellId, Analyzer::SymbolOrigin::Instance(shellOrigin));
+
       state.cacheKeys.push(key);
       state.cacheConcreteDefs.push(shellId);
 
@@ -1555,6 +1590,10 @@ export namespace Mono {
     }
 
     let concreteId: Analyzer::DefinitionId = Mono::createConcreteDefShell(defStore, typeStore, symbols, state, &key);
+
+    let concreteOrigin: Analyzer::InstanceOrigin = Mono::instanceOrigin(defStore, &key);
+    let mut originRef: &mut Analyzer::DefinitionStore = defStore;
+    originRef.setSymbolOrigin(concreteId, Analyzer::SymbolOrigin::Instance(concreteOrigin));
 
     state.cacheKeys.push(key);
     state.cacheConcreteDefs.push(concreteId);

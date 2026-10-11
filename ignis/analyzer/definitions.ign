@@ -401,6 +401,41 @@ export namespace Analyzer {
     }
   }
 
+  /// The generic definition and the type arguments a monomorphized definition
+  /// was created from. `owner` is the generic record, enum or trait a method
+  /// instance belongs to; `ownerArgs` instantiate the owner and `methodArgs`
+  /// the definition itself.
+  record InstanceOrigin {
+    public generic: Analyzer::DefinitionId;
+    public owner: Option<Analyzer::DefinitionId>;
+    public ownerArgs: Vector<Analyzer::TypeId>;
+    public methodArgs: Vector<Analyzer::TypeId>;
+  }
+
+  /// Which function a closure literal gives rise to.
+  enum ClosureRole {
+    THUNK,
+    DROP,
+  }
+
+  /// The function a closure literal is written in, and the position of the
+  /// literal among the closures of that function's body.
+  record ClosureOrigin {
+    public enclosing: Analyzer::DefinitionId;
+    public ordinal: u64;
+    public role: Analyzer::ClosureRole;
+  }
+
+  /// Where a definition the compiler created, rather than one the source
+  /// declares, comes from. Its symbol name is derived from this instead of
+  /// from a written path.
+  enum SymbolOrigin {
+    Instance(Analyzer::InstanceOrigin),
+    Closure(Analyzer::ClosureOrigin),
+    /// A static field, named after the record or enum that declares it.
+    StaticMember(Analyzer::DefinitionId),
+  }
+
   /// Flat, insertion-ordered store of all definitions visible in a module.
   /// Mirrors the slice-1 `TypeStore` shape: no interning, no caches, `init()`
   /// returns empty and `push` is the sole allocator.
@@ -442,6 +477,17 @@ export namespace Analyzer {
     /// definition id: the host's `Definition::doc`, held aside so the many
     /// undocumented definitions carry no field for it.
     docs: HashMap<u32, String>;
+    /// The encoded symbol segments of each module's logical name, keyed by
+    /// module index (`3std4libc2io` for `std::libc::io`). Set by the driver,
+    /// which knows where each module lives.
+    moduleSymbolPaths: HashMap<u64, String>;
+    /// The origin of each definition the compiler created, keyed by raw
+    /// definition id.
+    symbolOrigins: HashMap<u32, Analyzer::SymbolOrigin>;
+    /// The stable symbol computed for each definition that has one, keyed by
+    /// raw definition id. Filled once after monomorphization; every backend
+    /// reads it.
+    symbolNames: HashMap<u32, String>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -455,7 +501,54 @@ export namespace Analyzer {
         byPathSuffix: HashMap::new<u64, Vector<Analyzer::DefinitionId>>(),
         byMethodOwner: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
         docs: HashMap::new<u32, String>(),
+        moduleSymbolPaths: HashMap::new<u64, String>(),
+        symbolOrigins: HashMap::new<u32, Analyzer::SymbolOrigin>(),
+        symbolNames: HashMap::new<u32, String>(),
       };
+    }
+
+    /// Record the encoded symbol segments of module `moduleIndex`'s logical
+    /// name.
+    public setModuleSymbolPath(&mut self, moduleIndex: u64, encoded: String): void {
+      self.moduleSymbolPaths.insert(moduleIndex, encoded);
+    }
+
+    /// The encoded symbol segments recorded for module `moduleIndex`.
+    public moduleSymbolPathOf(&self, moduleIndex: u64): Option<&String> {
+      return self.moduleSymbolPaths.get(&moduleIndex);
+    }
+
+    /// Record where the compiler-created definition `id` comes from. First
+    /// write wins.
+    public setSymbolOrigin(
+      &mut self,
+      id: Analyzer::DefinitionId,
+      origin: Analyzer::SymbolOrigin
+    ): void {
+      let raw: u32 = id.raw();
+
+      if (self.symbolOrigins.get(&raw).isSome()) {
+        return;
+      }
+
+      self.symbolOrigins.insert(raw, origin);
+    }
+
+    /// Record the stable symbol of `id`.
+    public setSymbolName(&mut self, id: Analyzer::DefinitionId, name: String): void {
+      self.symbolNames.insert(id.raw(), name);
+    }
+
+    /// The stable symbol recorded for `id`, if it has one.
+    public symbolNameOf(&self, id: Analyzer::DefinitionId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.symbolNames.get(&raw);
+    }
+
+    /// Where the compiler-created definition `id` comes from, if recorded.
+    public symbolOriginOf(&self, id: Analyzer::DefinitionId): Option<&Analyzer::SymbolOrigin> {
+      let raw: u32 = id.raw();
+      return self.symbolOrigins.get(&raw);
     }
 
     /// Record the documentation of `id`, replacing any recorded before.

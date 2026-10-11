@@ -549,13 +549,13 @@ export namespace CodegenQbe {
           hasChunk = false;
         }
 
-        let item: str = CodegenQbe::escapedByteItem(byte);
+        let item: String = CodegenQbe::escapedByteItem(byte);
 
         if (items.length() > 0) {
           items.pushStr(", ");
         }
 
-        items.pushStr(item);
+        items.push(&item);
       }
 
       index += 1;
@@ -581,26 +581,27 @@ export namespace CodegenQbe {
   }
 
   /// One escaped byte as a data item: named escapes for the common controls,
-  /// a hex escape for everything else.
-  function escapedByteItem(byte: u8): str {
+  /// a hex escape for everything else. The item is returned as an owned
+  /// `String`: a `str` view of a local would point at a buffer freed on return.
+  function escapedByteItem(byte: u8): String {
     if (byte == 10) {
-      return "b \"\\n\"";
+      return String::create("b \"\\n\"");
     }
 
     if (byte == 13) {
-      return "b \"\\r\"";
+      return String::create("b \"\\r\"");
     }
 
     if (byte == 9) {
-      return "b \"\\t\"";
+      return String::create("b \"\\t\"");
     }
 
     let digits: String = String::create("0123456789abcdef");
     let Option::SOME(high) = digits.byteAt((byte / 16) as u64) else {
-      return "b 0";
+      return String::create("b 0");
     };
     let Option::SOME(low) = digits.byteAt((byte % 16) as u64) else {
-      return "b 0";
+      return String::create("b 0");
     };
     let mut item: String = String::create("b \"\\x");
 
@@ -608,7 +609,7 @@ export namespace CodegenQbe {
     item.pushByte(low);
     item.pushStr("\"");
 
-    return item.toStr();
+    return item;
   }
 
   /// The QBE immediate for a scalar constant. A str constant is the data

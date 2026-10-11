@@ -71,6 +71,7 @@ jobs:
           python3 scripts/tests/test_selfhost_syntax_parity.py
           python3 scripts/tests/test_selfhost_doc_parity.py
           python3 scripts/tests/test_check_platform_constants.py
+          python3 scripts/tests/test_check_symbol_stability.py
 
       # `git diff` alone would miss a fixture the generator newly *creates*,
       # since an untracked file is not a diff. `git status --porcelain` with
@@ -168,6 +169,13 @@ jobs:
       # target and the former doc_command.rs programs.
       - name: Compare stage1's ignis doc output with the committed baselines
         run: python3 scripts/selfhost_doc_parity.py --compiler build/bootstrap/stage1/ignis
+
+      # One object can only call into another when both name a definition the
+      # same way. This compiles two programs that share functions, with every
+      # definition id shifted in the second, and fails if any shared symbol
+      # is named differently.
+      - name: Check that definitions keep their symbols across programs
+        run: python3 scripts/check_symbol_stability.py --compiler build/bootstrap/stage1/ignis
 
       # The standard library owns the string runtime the C smoke test used to
       # cover, so its own suite is the gate for it.

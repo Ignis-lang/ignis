@@ -57,6 +57,35 @@ export namespace Capture {
     public closureSpan: SourceSpan;
   }
 
+  /// Where a closure literal is written: the function, variable or constant
+  /// whose body or initializer holds it, and its position among that root's
+  /// closures. The functions the closure gives rise to are named after it.
+  record ClosureSite {
+    public enclosing: Analyzer::DefinitionId;
+    public ordinal: u64;
+  }
+
+  /// Records the origin of a function created for the closure at
+  /// `closureIndex`, so its symbol is named after where the closure is written.
+  function recordClosureOrigin(
+    defStore: &mut Analyzer::DefinitionStore,
+    sites: &Vector<Capture::ClosureSite>,
+    closureIndex: u64,
+    created: Analyzer::DefinitionId,
+    role: Analyzer::ClosureRole,
+  ): void {
+    let Option::SOME(site) = sites.get(closureIndex) else {
+      return;
+    };
+
+    let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    defStoreRef.setSymbolOrigin(created, Analyzer::SymbolOrigin::Closure(Analyzer::ClosureOrigin {
+      enclosing: site.enclosing,
+      ordinal: site.ordinal,
+      role: role,
+    }));
+  }
+
   /// A definition is capturable when it names a runtime value. Functions,
   /// types and constants are reached by name at any depth and never enter an
   /// environment.
@@ -648,7 +677,10 @@ export namespace Capture {
   /// Every closure node, innermost first. An inner closure must have its
   /// captures filled before the enclosing one scans for free variables, so
   /// transitive captures propagate outward.
-  function collectClosuresBottomUp(hir: &mut Hir::HirStore): Vector<Hir::HirId> {
+  function collectClosuresBottomUp(
+    hir: &mut Hir::HirStore,
+    origins: &mut Vector<Capture::ClosureSite>
+  ): Vector<Hir::HirId> {
     let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     let mut visited: HashSet<u32> = HashSet::new<u32>();
 
@@ -656,7 +688,12 @@ export namespace Capture {
 
     while (bodyIndex < hir.functionBodies.length()) {
       if (let Option::SOME(bodyId) = hir.functionBodies.valueAt(bodyIndex)) {
+        let before: u64 = result.length();
         Capture::collectClosuresPostorder(hir, bodyId, &mut result, &mut visited);
+
+        if (let Option::SOME(rootDef) = hir.functionBodies.keyAt(bodyIndex)) {
+          Capture::recordClosureSites(origins, rootDef, before, result.length());
+        }
       }
 
       bodyIndex += 1;
@@ -666,7 +703,12 @@ export namespace Capture {
 
     while (initIndex < hir.variablesInits.length()) {
       if (let Option::SOME(initId) = hir.variablesInits.valueAt(initIndex)) {
+        let before: u64 = result.length();
         Capture::collectClosuresPostorder(hir, initId, &mut result, &mut visited);
+
+        if (let Option::SOME(rootDef) = hir.variablesInits.keyAt(initIndex)) {
+          Capture::recordClosureSites(origins, rootDef, before, result.length());
+        }
       }
 
       initIndex += 1;
@@ -678,13 +720,36 @@ export namespace Capture {
 
     while (constIndex < hir.constantInits.length()) {
       if (let Option::SOME(initId) = hir.constantInits.valueAt(constIndex)) {
+        let before: u64 = result.length();
         Capture::collectClosuresPostorder(hir, initId, &mut result, &mut visited);
+
+        if (let Option::SOME(rootDef) = hir.constantInits.keyAt(constIndex)) {
+          Capture::recordClosureSites(origins, rootDef, before, result.length());
+        }
       }
 
       constIndex += 1;
     }
 
     return result;
+  }
+
+  /// Names the closures `start..end` of the collected list after the root
+  /// whose body or initializer holds them, numbered in collection order
+  /// within that root. The postorder walk of one body depends only on that
+  /// body, so the numbering is the same in every program that compiles it.
+  function recordClosureSites(
+    origins: &mut Vector<Capture::ClosureSite>,
+    rootDef: Analyzer::DefinitionId,
+    start: u64,
+    end: u64,
+  ): void {
+    let mut index: u64 = start;
+
+    while (index < end) {
+      origins.push(Capture::ClosureSite { enclosing: rootDef, ordinal: index - start });
+      index += 1;
+    }
   }
 
   function collectClosuresPostorderList(
@@ -1587,7 +1652,8 @@ export namespace Capture {
   ): DiagnosticBag {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
 
-    let closureIds: Vector<Hir::HirId> = Capture::collectClosuresBottomUp(hir);
+    let mut closureSites: Vector<Capture::ClosureSite> = Vector::new<Capture::ClosureSite>();
+    let closureIds: Vector<Hir::HirId> = Capture::collectClosuresBottomUp(hir, &mut closureSites);
     let mut dropSites: Vector<Capture::DropSite> = Vector::new<Capture::DropSite>();
     let mut closureIndex: u64 = 0;
 
@@ -1686,6 +1752,8 @@ export namespace Capture {
         returnType,
         bodyId,
       );
+
+      Capture::recordClosureOrigin(defStore, &closureSites, closureIndex, thunkDef, Analyzer::ClosureRole::THUNK);
 
       dropSites.push(Capture::DropSite {
         closureId: *closureId,
@@ -1848,6 +1916,8 @@ export namespace Capture {
         dropSite.closureIndex,
         siteSpan,
       );
+
+      Capture::recordClosureOrigin(defStore, &closureSites, dropSite.closureIndex, siteDropDef, Analyzer::ClosureRole::DROP);
 
       let mut dropRef: &mut Hir::HirStore = hir;
       let _ = dropRef.nodes.set(dropSite.closureId.raw() as u64, Hir::HirNode {

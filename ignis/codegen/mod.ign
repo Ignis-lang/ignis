@@ -161,8 +161,9 @@ export namespace CodegenC {
   }
 
   /// The C symbol for a definition. Extern functions and constants keep the
-  /// name the C side already defines; everything else is suffixed with its
-  /// definition id.
+  /// name the C side already defines; a definition with a stable symbol uses
+  /// it; anything else is suffixed with its definition id, which only names it
+  /// within one program.
   function mangledName(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -195,6 +196,12 @@ export namespace CodegenC {
 
     if (isExtern) {
       return base;
+    }
+
+    // A definition with an identity has the symbol `SymbolNames` fixed for it,
+    // the same in every program that compiles it.
+    if (let Option::SOME(stable) = defStore.symbolNameOf(defId)) {
+      return stable.clone();
     }
 
     // The reserved-name guard runs on the final name, after the id suffix, so it
