@@ -269,3 +269,20 @@ function qbeLaneReadsSkipReasonFromCommittedManifest(): void {
   let missing: String = s("mul.ign");
   Test::assertEq<boolean>(QbeLane::manifestSkipReason(&manifest, &missing).length() == 0, true);
 }
+
+/// An inventory run records a fixture that needs the diagnostic or
+/// expected-failure harness in the skip manifest it writes, not only in the
+/// shard report: a full `--inventory` used to drop it from
+/// `test_cases/qbe_skip.tsv`, and the lane then rejected the corpus.
+@test
+function qbeLaneRecordsAHarnessSkipInTheManifestAndTheReport(): void {
+  let name: String = String::create("closure_cross_module/helper.ign");
+  let mut manifest: String = String::new();
+  let mut report: String = String::new();
+
+  QbeLane::recordHarnessSkip(&mut manifest, &mut report, &name);
+
+  let expected: str = "closure_cross_module/helper.ign\tfixture requires diagnostic or expected-failure harness\n";
+  Test::assertEq<str>(manifest.toStr(), expected);
+  Test::assertEq<str>(report.toStr(), expected);
+}

@@ -136,6 +136,17 @@ export namespace QbeLane {
     return command.output();
   }
 
+  /// Records a fixture the lane cannot compare, because it needs the
+  /// diagnostic or expected-failure harness, in both the skip manifest an
+  /// inventory run writes and the shard report.
+  export function recordHarnessSkip(manifest: &mut String, report: &mut String, name: &String): void {
+    let reason: String = String::create("fixture requires diagnostic or expected-failure harness");
+    let line: String = QbeLane::skipLine(name, &reason);
+    let mut manifestRef: &mut String = manifest;
+    let mut reportRef: &mut String = report;
+    manifestRef.pushStr(line.toStr());
+    reportRef.pushStr(line.toStr());
+  }
   /// Only the backend's explicit unsupported diagnostic qualifies as a skip.
   function missingFeature(stderr: &String): Option<String> {
     let diagnostic: String = String::create("Error[B4004]: ");
@@ -430,8 +441,7 @@ function main(): i32 {
       }
     }
     if (options.inventory && (fixture.mode.kind != FixtureKind::PROGRAM || fixture.skipReason.length() > 0)) {
-      let harnessReason: String = String::create("fixture requires diagnostic or expected-failure harness");
-      skippedReport.pushStr(QbeLane::skipLine(&name, &harnessReason).toStr());
+      QbeLane::recordHarnessSkip(&mut skipped, &mut skippedReport, &name);
       skippedCount += 1;
       continue;
     }
