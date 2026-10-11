@@ -11,9 +11,6 @@ import CCompiler from "./c_compiler";
 export namespace QbeDiagnosticCode {
   /// `qbe` failed to lower the IL, or could not be started at all.
   const LOWER_FAILED: str = "B4005";
-  /// The selected backend cannot build the requested mode (unknown target,
-  /// qbe freestanding).
-  const UNSUPPORTED_BACKEND: str = "B4004";
 }
 
 function qbeSingleDiagnostic(code: str, message: str): DiagnosticBag {
@@ -24,40 +21,7 @@ function qbeSingleDiagnostic(code: str, message: str): DiagnosticBag {
   return bag;
 }
 
-/// True when the named build target selects the QBE backend.
-export function qbeIsQbeTarget(target: str): boolean {
-  return String::create(target).equals("qbe");
-}
-
 export namespace QbeTool {
-  /// The driver-level admission check for a selected backend.
-  ///
-  /// `c` builds anything. `qbe` builds hosted executables only for now:
-  /// freestanding mode relies on C runtime semantics the QBE path does not
-  /// implement yet, so the build is rejected with a clear diagnostic instead
-  /// of emitting wrong code.
-  function checkTargetAllowed(target: str, freestanding: boolean): Result<boolean, DiagnosticBag> {
-    if (qbeIsQbeTarget(target)) {
-      if (freestanding) {
-        return Result::ERROR(qbeSingleDiagnostic(
-          QbeDiagnosticCode::UNSUPPORTED_BACKEND,
-          "the qbe target does not support freestanding builds yet; use the c target or set std = true",
-        ));
-      }
-
-      return Result::OK(true);
-    }
-
-    if (String::create(target).equals("c")) {
-      return Result::OK(true);
-    }
-
-    let message: String = String::create("unknown build target '")
-      .concat(target)
-      .concat("' (supported: c, qbe)");
-    return Result::ERROR(qbeSingleDiagnostic(QbeDiagnosticCode::UNSUPPORTED_BACKEND, message.toStr()));
-  }
-
   /// Lower one QBE IL file to assembly with the installed `qbe`.
   ///
   /// A failing `qbe` run keeps everything the process reported — the exit

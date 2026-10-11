@@ -20,7 +20,7 @@ import Vector from "std::vector";
 
 import BuildGraph, BuildModuleKind, ModuleGraph from "./module_graph";
 import Manifest, StdManifest, StdManifestModule from "./manifest";
-import qbeIsQbeTarget from "./qbe";
+import Backends from "./backend";
 import SourceOverrides from "./sources";
 
 const MISSING_MODULE: str = "B2001";
@@ -510,13 +510,12 @@ function resolverTargetBackend(
     Option::NONE -> declared.clone(),
   };
 
-  if (selected.equals("c") || qbeIsQbeTarget(selected.toStr())) {
+  if (Backends::fromName(selected.toStr()).isSome()) {
     return Result::OK(selected);
   }
 
-  let message: String = String::create("unknown build target '")
-    .concat(&selected)
-    .concat("' (supported: c, qbe)");
+  let supported: String = Backends::supportedNames();
+  let message: String = `unknown build target '${selected.toStr()}' (supported: ${supported.toStr()})`;
   return Result::ERROR(resolverSimpleDiagnostic(configPath, INVALID_BUILD_PROFILE, message.toStr()));
 }
 
@@ -600,7 +599,7 @@ function resolverLoadProject(
 
   // Before backend selection existed, every stored target built with C;
   // init still emits legacy targets. CLI overrides retain strict validation.
-  let declaredBackend: String = String::create(qbeIsQbeTarget(resolved.target.toStr()) ? "qbe" : "c");
+  let declaredBackend: String = String::create(Backends::fromName(resolved.target.toStr()).isSome() ? resolved.target.toStr() : "c");
   let target: String = resolverTargetBackend(&configPath, &declaredBackend, overrides)!;
 
   let mut outDir: Path::PathBuf = match (&resolved.outDir) {

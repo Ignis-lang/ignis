@@ -334,6 +334,9 @@ Snapshot assertions (`std::test::Test::assertSnapshot`) write to the `__snapshot
 | `ignis/build/fixture_tests.ign` | E2E fixture headers and baselines |
 | `ignis/build/c_compiler.ign` | C compilation |
 | `ignis/build/linker.ign` | Linking |
+| `ignis/build/backend.ign` | The `Backend` enum: target names, unit extension, capabilities, unit-to-object step |
+| `ignis/abi/mod.ign` | Data layout shared by every backend |
+| `ignis/abi/symbols.ign` | Symbol names derived from what a definition is |
 | `ignis/config/project.ign` | `ignis.toml` loading |
 | `ignis/lexer/mod.ign` | Lexer |
 | `ignis/parser/declarations.ign` | Top-level parsing (functions, records, enums, traits, imports) |
