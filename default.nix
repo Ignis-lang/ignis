@@ -8,7 +8,10 @@ let
     gcc
     binutils
     gnumake
-  ];
+  ]
+  # On Linux a build links with mold whenever the C driver can use it
+  # (`[build] linker`, docs/PROJECT.md); elsewhere Ignis never selects it.
+  ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
 
   runtimeToolsPath = pkgs.lib.makeBinPath runtimeTools;
 
