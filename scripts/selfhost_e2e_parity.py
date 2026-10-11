@@ -352,12 +352,22 @@ def first_problem_line(output: str) -> str:
 
 
 def materialise_case(case: Case, std_path: Path, work_dir: Path, leak_check: bool = False) -> Path:
-  """Write the case as a single-file Ignis project and return its directory."""
+  """Write the case as an Ignis project and return its directory.
+
+  A fixture whose helper modules live in a directory named after it
+  (`closure_cross_module.ign` beside `closure_cross_module/helper.ign`) imports
+  them as `./closure_cross_module/helper`, so that directory is copied next to
+  `src/main.ign` where the import resolves the same way.
+  """
   case_dir = work_dir / case.name
   shutil.rmtree(case_dir, ignore_errors=True)
   (case_dir / "src").mkdir(parents=True, exist_ok=True)
   (case_dir / "ignis.toml").write_text(project_manifest(std_path, leak_check), encoding="utf-8")
   (case_dir / "src" / "main.ign").write_text(case.source or "", encoding="utf-8")
+
+  helpers = case.path.with_suffix("")
+  if helpers.is_dir():
+    shutil.copytree(helpers, case_dir / "src" / helpers.name)
 
   return case_dir
 
