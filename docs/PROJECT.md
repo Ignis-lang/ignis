@@ -174,7 +174,9 @@ droppable locals. A freestanding program provides both symbols at link time.
   then holds its own definitions and the generic instances it uses; every
   other std function and every std static stays in the archive, so the runtime
   state has one copy. `--std-archive` turns it on from the command line. Not
-  available with `std = false`. The setting is part of the build cache.
+  available with `std = false`. Only a build that links an executable uses it;
+  `check`, `test` and `build -c` ignore it. The setting is part of the build
+  cache.
 - `cflags` - Extra C compiler/linker flags.
 - `emit` - Extra artifacts (`"c"`, `"obj"`).
 
