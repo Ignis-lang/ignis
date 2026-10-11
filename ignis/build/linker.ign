@@ -19,6 +19,69 @@ import ToolchainDiagnosticCode, ToolchainError from "./c_compiler";
 /// Mirrors the Rust oracle `link_executable` / `link_executable_multi` in
 /// `crates/ignis_driver/src/link.rs`.
 export namespace Linker {
+  /// The driver flags that select the linker a build links with.
+  ///
+  /// - `configured`: `[build] linker` or `--linker`, absent when neither is set.
+  /// - `linuxHost`: whether the compiler runs on Linux.
+  /// - `moldUsable`: whether the C driver can link with mold (see `moldUsable`).
+  ///
+  /// With nothing configured a Linux host links with mold when the driver can
+  /// use it, and every other case keeps the system default (no flag).
+  /// `default` and `ld` name the system default. Any other name becomes
+  /// `-fuse-ld=<name>` as asked: an explicit choice never falls back, so a
+  /// missing linker fails the link instead of silently changing it.
+  function selectFlags(
+    configured: &Option<String>,
+    linuxHost: boolean,
+    moldUsable: boolean
+  ): Vector<String> {
+    let mut flags: Vector<String> = Vector::new<String>();
+
+    match (configured) {
+      Option::SOME(name) -> {
+        if (!name.equals("default") && !name.equals("ld")) {
+          flags.push(String::create("-fuse-ld=").concat(name.toStr()));
+        }
+      },
+      Option::NONE -> {
+        if (linuxHost && moldUsable) {
+          flags.push(String::create("-fuse-ld=mold"));
+        }
+      },
+    };
+
+    return flags;
+  }
+
+  /// Whether the C driver `cc` can link with mold: `<cc> -fuse-ld=mold
+  /// -Wl,--version` exits 0. With no inputs the driver only runs the linker it
+  /// selected, which prints its version and exits, so a driver without
+  /// `-fuse-ld=mold` support (gcc before 12.1, a cross driver) or without
+  /// `ld.mold` to find reports mold as unusable. Its output is discarded.
+  function moldUsable(cc: str): boolean {
+    let mut cmd: Process::Command = Process::Command::new(linkerResolve(cc));
+    cmd.arg("-fuse-ld=mold");
+    cmd.arg("-Wl,--version");
+
+    return match (cmd.output()) {
+      Result::OK(out) -> out.status().success,
+      Result::ERROR(_) -> false,
+    };
+  }
+
+  /// The linker flags for `configured` on this host. The mold probe of `cc`
+  /// runs only when the default rule needs it: nothing configured, Linux host.
+  function hostFlags(cc: str, configured: &Option<String>): Vector<String> {
+    let linuxHost: boolean = @configFlag(@platform("linux"));
+    let mut moldUsable: boolean = false;
+
+    if (linuxHost && configured.isNone()) {
+      moldUsable = Linker::moldUsable(cc);
+    }
+
+    return Linker::selectFlags(configured, linuxHost, moldUsable);
+  }
+
   /// Link object and archive files into an executable.
   ///
   /// - `cc`: linker executable (defaults to `"gcc"` when empty).
@@ -299,4 +362,237 @@ function linkerErrorDiagHasCode(): void {
   let error: ToolchainError = ToolchainError::new("gcc", "linking", "undefined reference to 'main'");
   let bag: DiagnosticBag = linkerErrorDiag(&error);
   Test::assert(bag.length() > 0);
+}
+
+/// Link the shared test object with `flags`, reporting whether the link succeeded.
+function linkerLinkTestObjectWith(testName: str, flags: &Vector<String>): boolean {
+  let objPath: Path::PathBuf = linkerCompileTestObject(testName);
+  let outPath: Path::PathBuf = linkerTestPath(testName, "_out");
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(objPath.toString());
+
+  let archives: Vector<String> = Vector::new<String>();
+  let libs: Vector<String> = Vector::new<String>();
+
+  return match (Linker::link("gcc", &outPath, &objects, &archives, &libs, flags)) {
+    Result::OK(_) -> true,
+    Result::ERROR(_) -> false,
+  };
+}
+
+function linkerFlagsText(flags: &Vector<String>): String {
+  let mut text: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < flags.length()) {
+    let Option::SOME(flag) = flags.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      text.pushChar(' ');
+    }
+
+    text.push(flag);
+    index += 1;
+  }
+
+  return text;
+}
+
+function linkerSelectionText(
+  configured: Option<String>,
+  linuxHost: boolean,
+  moldUsable: boolean
+): String {
+  let flags: Vector<String> = Linker::selectFlags(&configured, linuxHost, moldUsable);
+  return linkerFlagsText(&flags);
+}
+
+@test
+function linkerSelectionDefaultsToMoldOnLinuxWhenAvailable(): void {
+  Test::assertEq<str>(linkerSelectionText(Option::NONE, true, true).toStr(), "-fuse-ld=mold");
+}
+
+@test
+function linkerSelectionDefaultsToSystemLinkerWithoutMold(): void {
+  Test::assertEq<str>(linkerSelectionText(Option::NONE, true, false).toStr(), "");
+}
+
+@test
+function linkerSelectionDefaultsToSystemLinkerOffLinux(): void {
+  Test::assertEq<str>(linkerSelectionText(Option::NONE, false, true).toStr(), "");
+  Test::assertEq<str>(linkerSelectionText(Option::NONE, false, false).toStr(), "");
+}
+
+@test
+function linkerSelectionDefaultAndLdMeanTheSystemLinker(): void {
+  Test::assertEq<str>(linkerSelectionText(Option::SOME(String::create("default")), true, true).toStr(), "");
+  Test::assertEq<str>(linkerSelectionText(Option::SOME(String::create("ld")), true, true).toStr(), "");
+  Test::assertEq<str>(linkerSelectionText(Option::SOME(String::create("ld")), false, false).toStr(), "");
+}
+
+/// An explicit choice is passed as asked even when mold is missing or the host
+/// is not Linux: it never falls back to the system linker.
+@test
+function linkerSelectionPassesAnExplicitLinkerVerbatim(): void {
+  Test::assertEq<str>(linkerSelectionText(Option::SOME(String::create("mold")), true, false).toStr(), "-fuse-ld=mold");
+  Test::assertEq<str>(linkerSelectionText(Option::SOME(String::create("lld")), true, true).toStr(), "-fuse-ld=lld");
+  Test::assertEq<str>(linkerSelectionText(Option::SOME(String::create("bfd")), false, false).toStr(), "-fuse-ld=bfd");
+  Test::assertEq<str>(linkerSelectionText(Option::SOME(String::create("gold")), true, true).toStr(), "-fuse-ld=gold");
+}
+
+/// Without mold, the default selection links with exactly today's command.
+@test
+function linkerDefaultSelectionWithoutMoldLinksLikeBefore(): void {
+  let configured: Option<String> = Option::NONE;
+  let flags: Vector<String> = Linker::selectFlags(&configured, true, false);
+  Test::assertEq<u64>(flags.length(), 0);
+  Test::assert(linkerLinkTestObjectWith("default_selection", &flags));
+}
+
+@test
+function linkerExplicitBfdSelectionLinks(): void {
+  let configured: Option<String> = Option::SOME(String::create("bfd"));
+  let flags: Vector<String> = Linker::selectFlags(&configured, true, false);
+  Test::assert(linkerLinkTestObjectWith("explicit_bfd", &flags));
+}
+
+/// An explicitly requested linker the driver cannot use fails the link with
+/// B4003 rather than falling back.
+@test
+function linkerUnavailableExplicitLinkerFailsTheLink(): void {
+  let configured: Option<String> = Option::SOME(String::create("ignis-no-such-linker"));
+  let flags: Vector<String> = Linker::selectFlags(&configured, true, true);
+  Test::assert(!linkerLinkTestObjectWith("unavailable_linker", &flags));
+}
+
+/// Writes an executable stand-in C driver that records its arguments in
+/// `<script>.args` and exits with `exitCode`.
+function linkerWriteProbeDriver(testName: str, exitCode: u64): Path::PathBuf {
+  let scriptPath: Path::PathBuf = linkerTestPath(testName, "_cc");
+  let script: String = `#!/bin/sh\necho "$@" >> ${scriptPath.asStr()}.args\nexit ${exitCode}\n`;
+
+  match (Fs::writeString(&scriptPath, &script)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return scriptPath;
+    },
+  };
+
+  let mut chmod: Process::Command = Process::Command::new("chmod");
+  chmod.arg("+x");
+  chmod.arg(scriptPath.asStr());
+
+  match (chmod.output()) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  return scriptPath;
+}
+
+function linkerProbeDriverArgs(scriptPath: &Path::PathBuf): String {
+  let argsPath: String = `${scriptPath.asStr()}.args`;
+
+  return match (Fs::readToString(&argsPath)) {
+    Result::OK(text) -> text.trimAsciiWhitespace(),
+    Result::ERROR(_) -> String::new(),
+  };
+}
+
+/// A driver that accepts the probe makes mold usable, and the probe asks for
+/// nothing but the linker's version.
+@test
+function linkerMoldProbeAcceptsADriverThatLinksWithMold(): void {
+  let driver: Path::PathBuf = linkerWriteProbeDriver("probe_accepts", 0);
+  Test::assert(Linker::moldUsable(driver.asStr()));
+  Test::assertEq<str>(linkerProbeDriverArgs(&driver).toStr(), "-fuse-ld=mold -Wl,--version");
+}
+
+/// A driver that rejects `-fuse-ld=mold` (gcc before 12.1, a cross driver)
+/// leaves mold unusable even when `ld.mold` is installed.
+@test
+function linkerMoldProbeRejectsADriverWithoutMoldSupport(): void {
+  let driver: Path::PathBuf = linkerWriteProbeDriver("probe_rejects", 1);
+  Test::assert(!Linker::moldUsable(driver.asStr()));
+}
+
+@test
+function linkerMoldProbeRejectsAMissingDriver(): void {
+  Test::assert(!Linker::moldUsable("/nonexistent/ignis-no-such-cc"));
+}
+
+/// With no linker configured the host selection follows the probe, and an
+/// explicit choice never runs it.
+@test
+function linkerHostSelectionProbesOnlyTheDefault(): void {
+  let accepting: Path::PathBuf = linkerWriteProbeDriver("host_default", 0);
+  let unset: Option<String> = Option::NONE;
+  let defaultFlags: Vector<String> = Linker::hostFlags(accepting.asStr(), &unset);
+  let expected: str = @configFlag(@platform("linux")) ? "-fuse-ld=mold" : "";
+  Test::assertEq<str>(linkerFlagsText(&defaultFlags).toStr(), expected);
+
+  let explicitDriver: Path::PathBuf = linkerWriteProbeDriver("host_explicit", 0);
+  let bfd: Option<String> = Option::SOME(String::create("bfd"));
+  let explicitFlags: Vector<String> = Linker::hostFlags(explicitDriver.asStr(), &bfd);
+  Test::assertEq<str>(linkerFlagsText(&explicitFlags).toStr(), "-fuse-ld=bfd");
+  Test::assertEq<str>(linkerProbeDriverArgs(&explicitDriver).toStr(), "");
+}
+
+/// With the real gcc the default selection links whether or not mold is
+/// installed on the machine running the test: it adds `-fuse-ld=mold` exactly
+/// when the probe says gcc can use it, and nothing otherwise.
+@test
+function linkerHostDefaultWithGccLinks(): void {
+  let unset: Option<String> = Option::NONE;
+  let flags: Vector<String> = Linker::hostFlags("gcc", &unset);
+  let expected: u64 = @configFlag(@platform("linux")) && Linker::moldUsable("gcc") ? 1 : 0;
+
+  Test::assertEq<u64>(flags.length(), expected);
+  Test::assert(linkerLinkTestObjectWith("host_default_gcc", &flags));
+}
+
+/// The mold default reaches the driver as `-fuse-ld=mold`, which gcc resolves to
+/// an `ld.mold` program. A stand-in `ld.mold` that runs the system `ld`, found
+/// through `-B`, proves the flag links; mold itself need not be installed.
+@test
+function linkerMoldSelectionLinksThroughLdMold(): void {
+  let fakeDir: Path::PathBuf = linkerTestPath("fake_mold", "_bin");
+  match (Fs::createDirAll(&fakeDir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let scriptPath: Path::PathBuf = fakeDir.join("ld.mold");
+  let script: String = String::create("#!/bin/sh\nexec ld \"$@\"\n");
+  match (Fs::writeString(&scriptPath, &script)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let mut chmod: Process::Command = Process::Command::new("chmod");
+  chmod.arg("+x");
+  chmod.arg(scriptPath.asStr());
+  match (chmod.output()) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configured: Option<String> = Option::NONE;
+  let mut flags: Vector<String> = Linker::selectFlags(&configured, true, true);
+  Test::assertEq<str>(linkerFlagsText(&flags).toStr(), "-fuse-ld=mold");
+  flags.push(`-B${fakeDir.asStr()}/`);
+  Test::assert(linkerLinkTestObjectWith("mold_selection", &flags));
 }

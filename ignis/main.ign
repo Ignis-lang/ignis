@@ -246,6 +246,12 @@ record BuildProfile {
   public cflags: Vector<String>;
   /// The project's `[build] cc`, the driver every toolchain step is invoked with.
   public cc: String;
+  /// `[build] linker` or `--linker`, absent when the default rule chooses.
+  public linker: Option<String>;
+  /// The driver flags that select the linker. Empty until
+  /// `resolveLinkerSelection` runs, which only a command that links an
+  /// executable does, because the default rule probes the C driver.
+  public linkerFlags: Vector<String>;
   /// The backend the build lowers to: `c` (default) or `qbe`.
   public backend: String;
   /// A `std = false` build: every unit is compiled with `-ffreestanding` and
@@ -280,6 +286,11 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
     debug: discovery.flags.debug,
     cflags: buildProfileCloneStrings(&discovery.cflags),
     cc: discovery.cc.clone(),
+    linker: match (&discovery.linker) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    },
+    linkerFlags: Vector::new<String>(),
     backend: discovery.target.clone(),
     freestanding: false,
   };
@@ -340,6 +351,7 @@ function programBuildFingerprint(
 ): BuildFingerprint {
   let sources: Vector<Path::PathBuf> = discoveredSourcePaths(discovery);
   let profileHash: String = stampProfileHash(profile.optLevel, profile.debug, &profile.cflags);
+  let linkerFlagsText: String = toolchainLinkerFlagsText(profile);
   let mut manifestHash: String = String::new();
 
   if (!discovery.stdRoot.isEmpty()) {
@@ -352,6 +364,7 @@ function programBuildFingerprint(
     discovery.flags.targetTriple.toStr(),
     profile.backend.toStr(),
     profile.cc.toStr(),
+    linkerFlagsText.toStr(),
     profileHash.toStr(),
     manifestHash.toStr(),
     &discovery.flags.features,
@@ -657,6 +670,55 @@ function inlineAsmUnitFlags(flags: &Vector<String>, usesInlineAsm: boolean): Vec
   return unitFlags;
 }
 
+/// Resolve the linker selection for a command that links an executable.
+///
+/// The default rule runs the C driver once to probe for mold, so this is called
+/// once per command and only where an executable is linked, never by `check`,
+/// `doc`, the language server or an object-only build.
+function resolveLinkerSelection(profile: &mut BuildProfile): void {
+  profile.linkerFlags = Linker::hostFlags(profile.cc.toStr(), &profile.linker);
+}
+
+/// The flags an executable link passes: the profile flags, then the linker
+/// selection.
+function toolchainLinkFlags(profile: &BuildProfile): Vector<String> {
+  let mut flags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let mut index: u64 = 0;
+
+  while (index < profile.linkerFlags.length()) {
+    let Option::SOME(flag) = profile.linkerFlags.get(index) else {
+      break;
+    };
+
+    flags.push(flag.clone());
+    index += 1;
+  }
+
+  return flags;
+}
+
+/// The linker selection as the build cache records it: empty for the system
+/// default, so a stamp written before the selection existed still matches.
+function toolchainLinkerFlagsText(profile: &BuildProfile): String {
+  let mut text: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < profile.linkerFlags.length()) {
+    let Option::SOME(flag) = profile.linkerFlags.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      text.pushChar(' ');
+    }
+
+    text.push(flag);
+    index += 1;
+  }
+
+  return text;
+}
+
 /// The libraries a build links: `libm` for a hosted build, none for a
 /// freestanding one.
 function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
@@ -765,7 +827,7 @@ function compileAndLinkQuietly(
   let archives: Vector<String> = Vector::new<String>();
   let libs: Vector<String> = toolchainLinkLibraries(profile);
 
-  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let linkFlags: Vector<String> = toolchainLinkFlags(profile);
 
   if (let Result::ERROR(_) = Linker::link(cc, outputPath, &objects, &archives, &libs, &linkFlags)) {
     return 1;
@@ -844,7 +906,7 @@ function assembleUnits(
   let archives: Vector<String> = Vector::new<String>();
   let libs: Vector<String> = toolchainLinkLibraries(profile);
 
-  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let linkFlags: Vector<String> = toolchainLinkFlags(profile);
 
   if (let Result::ERROR(linkBag) = Linker::link(profile.cc.toStr(), outputPath, &objects, &archives, &libs, &linkFlags)) {
     if (!quiet) {
@@ -961,7 +1023,7 @@ function compileAndLinkUnits(
   let archives: Vector<String> = Vector::new<String>();
   let libs: Vector<String> = toolchainLinkLibraries(profile);
 
-  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+  let linkFlags: Vector<String> = toolchainLinkFlags(profile);
 
   Output::beginPhase("link", 0);
 
@@ -2196,6 +2258,7 @@ function buildOverridesFrom(options: &CliOptions): BuildOverrides {
   overrides.targetTriple = cloneOptionalText(&options.targetTriple);
   overrides.target = cloneOptionalText(&options.target);
   overrides.cc = cloneOptionalText(&options.cc);
+  overrides.linker = cloneOptionalText(&options.linker);
   overrides.outDir = cloneOptionalText(&options.outDir);
   return overrides;
 }
@@ -2414,6 +2477,10 @@ function runCompile(
   }
 
   let objectOnly: boolean = (profile.freestanding && !discovery.bin) || options.emitObject;
+
+  if (!checkOnly && !objectOnly && discovery.bin) {
+    resolveLinkerSelection(&mut profile);
+  }
   let layoutArtifacts: BuildArtifacts = projectMode ? projectArtifacts(profile.backend.toStr(), &discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(profile.backend.toStr(), &options.outputPath);
   let artifacts: BuildArtifacts = artifactsEmitObject(&layoutArtifacts, &options.outputPath, options.emitObject);
   let stampPath: Path::PathBuf = stampPathForObject(&artifacts.object);
@@ -2732,6 +2799,7 @@ function runProgramFixture(
   options: &CliOptions,
   timeoutSeconds: u64,
   compareBaseline: boolean,
+  linkerFlags: &Vector<String>,
 ): String {
   if (fixture.mode.forceStd && !discovery.stdEnabled) {
     return String::create("fixture requires the standard library but the project has std disabled");
@@ -2783,6 +2851,10 @@ function runProgramFixture(
   // Every fixture but one that leaks on purpose is linked leak-checkable, so a
   // program that forgets to free reports it instead of passing.
   let mut profile: BuildProfile = resolveBuildProfile(&fixtureDiscovery, options.optLevel);
+
+  // The test command resolved the selection once; a fixture links with it
+  // instead of probing the driver again.
+  profile.linkerFlags = buildProfileCloneStrings(linkerFlags);
 
   if (!fixture.mode.allowLeak) {
     profile.cflags.push(String::create("-fsanitize=leak"));
@@ -2965,6 +3037,7 @@ function runFixture(
   discovery: &DiscoveryResult,
   options: &CliOptions,
   timeoutSeconds: u64,
+  linkerFlags: &Vector<String>,
 ): TestOutcome {
   if (fixture.modeError.length() > 0) {
     return fixtureOutcome(fixture, false, fixture.modeError.clone(), String::new());
@@ -2975,7 +3048,7 @@ function runFixture(
   let failure: String = match (fixture.mode.kind) {
     FixtureKind::DIAGNOSTICS -> runDiagnosticsFixture(fixture, projectStart, options, compareBaseline),
     FixtureKind::WARNINGS -> runWarningsFixture(fixture, projectStart, options, compareBaseline),
-    FixtureKind::PROGRAM -> runProgramFixture(fixture, projectStart, discovery, options, timeoutSeconds, compareBaseline),
+    FixtureKind::PROGRAM -> runProgramFixture(fixture, projectStart, discovery, options, timeoutSeconds, compareBaseline, linkerFlags),
   };
 
   if (!compareBaseline) {
@@ -3190,7 +3263,8 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   };
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
-  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  resolveLinkerSelection(&mut profile);
   let mut compileOptions: CompileOptions = testCompileOptions();
   compileOptions.verbose = options.verbose;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
@@ -3265,7 +3339,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
       break;
     };
 
-    outcomes.push(runFixture(fixture, startPath, &discovery, options, timeoutSeconds));
+    outcomes.push(runFixture(fixture, startPath, &discovery, options, timeoutSeconds, &profile.linkerFlags));
     Output::advanceOuter(&fixture.name);
     fixtureIndex += 1;
   }
@@ -3306,7 +3380,8 @@ function runStdTests(options: &CliOptions): i32 {
   Output::message(`Testing std ${discovery.stdRoot.asStr()}\n`);
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
-  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  resolveLinkerSelection(&mut profile);
   let mut compileOptions: CompileOptions = stdTestCompileOptions(&discovery.stdRoot);
   compileOptions.verbose = options.verbose;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
