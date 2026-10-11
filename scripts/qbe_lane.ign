@@ -1,3 +1,5 @@
+import Env from "std::env";
+import CType from "std::libc";
 import Fs from "std::fs";
 import Io from "std::io";
 import Path from "std::path";
@@ -5,6 +7,11 @@ import Process from "std::process";
 import Vector from "std::vector";
 
 import FixtureCase, FixtureKind, FixtureTests from "../ignis/build/fixture_tests";
+
+extern __qbe_lane_unistd {
+  /// POSIX `symlink`; creates `linkpath` naming `target`. Returns 0 or -1.
+  function symlink(target: CType::CConstStr, linkpath: CType::CConstStr): CType::CInt;
+}
 
 /// Differential fixture runner. Inventory changes require an explicit invocation.
 export namespace QbeLane {
@@ -118,22 +125,105 @@ export namespace QbeLane {
     return count;
   }
 
-  function compile(
-    compiler: &String,
+  /// The working directory of one build: a case's index and backend under the
+  /// run's work directory. A single-file build writes its emitted unit and
+  /// object (`selfhost_emit.*`) to the directory it runs in, so builds sharing
+  /// one directory, such as two lane processes started from the repository
+  /// root, overwrite each other's files.
+  export function caseBuildDirectory(work: &String, position: u64, target: str): String {
+    return `${work.toStr()}/build-${position}-${target}`;
+  }
+
+  /// `path` as an absolute path under `root` when it is relative. A bare
+  /// program name with no `/` is left for `PATH` to resolve.
+  export function rooted(root: &Path::PathBuf, path: str, bareIsProgram: boolean): String {
+    let value: Path::PathBuf = Path::PathBuf::create(path);
+    let text: String = String::create(path);
+    let separator: String = String::create("/");
+
+    if (value.isAbsolute() || (bareIsProgram && !text.contains(&separator))) {
+      return text;
+    }
+
+    return root.join(path).toString();
+  }
+
+  /// The compiler arguments of one fixture build, which runs in its own
+  /// directory: the standard library and the executable are named by absolute
+  /// path. The source keeps its corpus-relative path, which the build directory
+  /// resolves through its `test_cases` link (see `compile`).
+  export function compileArguments(
+    root: &Path::PathBuf,
     source: &Path::PathBuf,
     target: str,
     executable: &String
+  ): Vector<String> {
+    let mut arguments: Vector<String> = Vector::new<String>();
+    arguments.push(String::create("build"));
+    arguments.push(String::create(source.asStr()));
+    arguments.push(String::create("--std-path"));
+    arguments.push(QbeLane::rooted(root, "std", false));
+    arguments.push(String::create("--target"));
+    arguments.push(String::create(target));
+    arguments.push(String::create("-o"));
+    arguments.push(QbeLane::rooted(root, executable.toStr(), false));
+    return arguments;
+  }
+
+  /// Builds one fixture in `buildDirectory`, which is created first with a
+  /// `test_cases` link to the repository's corpus.
+  ///
+  /// The source path stays relative on purpose. The compiler looks for an
+  /// `ignis.toml` in every lexical parent of the source path, so an absolute or
+  /// `..` path would reach the repository's own project file and build the
+  /// compiler instead of the fixture. `test_cases/e2e/ok/<name>.ign` has no
+  /// such parent, from the repository root or from a build directory.
+  function compile(
+    root: &Path::PathBuf,
+    compiler: &String,
+    source: &Path::PathBuf,
+    target: str,
+    executable: &String,
+    buildDirectory: &String
   ): Result<Process::Output, Io::IoError> {
-    let mut command: Process::Command = Process::command(compiler.toStr());
-    command.arg("build");
-    command.arg(source.asStr());
-    command.arg("--std-path");
-    command.arg("std");
-    command.arg("--target");
-    command.arg(target);
-    command.arg("-o");
-    command.arg(executable.toStr());
+    let directory: Path::PathBuf = root.join(buildDirectory.toStr());
+    if (let Result::ERROR(error) = Fs::createDirAll(&directory)) {
+      return Result::ERROR(error);
+    }
+
+    let corpusLink: Path::PathBuf = directory.join("test_cases");
+    if (!Fs::exists(corpusLink.asStr())) {
+      let corpus: String = root.join("test_cases").toString();
+      let linkText: String = corpusLink.toString();
+      if (__qbe_lane_unistd::symlink(corpus.toStr() as *u8, linkText.toStr() as *u8) != 0) {
+        return Result::ERROR(Io::IoError::lastError());
+      }
+    }
+
+    let program: String = QbeLane::rooted(root, compiler.toStr(), true);
+    let mut command: Process::Command = Process::command(program.toStr());
+    command.cwd(&directory);
+    let arguments: Vector<String> = QbeLane::compileArguments(root, source, target, executable);
+    let mut index: u64 = 0;
+    while (index < arguments.length()) {
+      if (let Option::SOME(argument) = arguments.get(index)) {
+        command.arg(argument.toStr());
+      }
+      index += 1;
+    }
     return command.output();
+  }
+
+  /// Records a fixture the lane cannot compare, because it needs the
+  /// diagnostic or expected-failure harness, in both the skip manifest an
+  /// inventory run writes and the shard report.
+  export function recordHarnessSkip(manifest: &mut String, report: &mut String, name: &String): void {
+    let reason: String = String::create("fixture requires diagnostic or expected-failure harness");
+    let line: String = QbeLane::skipLine(name, &reason);
+    let mut manifestRef: &mut String = manifest;
+    let mut reportRef: &mut String = report;
+    manifestRef.pushStr(line.toStr());
+    reportRef.pushStr(line.toStr());
   }
 
   /// Only the backend's explicit unsupported diagnostic qualifies as a skip.
@@ -391,6 +481,10 @@ function main(): i32 {
     Io::eprintln("QBE inventory does not cover the current corpus; rerun --inventory");
     return 1;
   }
+  let Result::OK(root) = Env::currentDir() else {
+    Io::eprintln("cannot read the current directory");
+    return 1;
+  };
   let work: String = `build/qbe-lane/run-${Process::id()}`;
   if (Fs::createDirAll(&work).isError()) {
     return 1;
@@ -430,14 +524,15 @@ function main(): i32 {
       }
     }
     if (options.inventory && (fixture.mode.kind != FixtureKind::PROGRAM || fixture.skipReason.length() > 0)) {
-      let harnessReason: String = String::create("fixture requires diagnostic or expected-failure harness");
-      skippedReport.pushStr(QbeLane::skipLine(&name, &harnessReason).toStr());
+      QbeLane::recordHarnessSkip(&mut skipped, &mut skippedReport, &name);
       skippedCount += 1;
       continue;
     }
     let qbeBinary: String = `${work.toStr()}/qbe-${position}`;
     let cBinary: String = `${work.toStr()}/c-${position}`;
-    let Result::OK(qbeBuild) = QbeLane::compile(&options.compiler, &fixture.path, "qbe", &qbeBinary) else {
+    let qbeBuildDirectory: String = QbeLane::caseBuildDirectory(&work, position, "qbe");
+    let cBuildDirectory: String = QbeLane::caseBuildDirectory(&work, position, "c");
+    let Result::OK(qbeBuild) = QbeLane::compile(&root, &options.compiler, &fixture.path, "qbe", &qbeBinary, &qbeBuildDirectory) else {
       Io::eprintln(`cannot start compiler: ${name.toStr()}`);
       return 1;
     };
@@ -454,7 +549,7 @@ function main(): i32 {
       Io::eprintln(`QBE build failed: ${name.toStr()}\n${stderr.toStr()}`);
       return 1;
     }
-    let Result::OK(cBuild) = QbeLane::compile(&options.compiler, &fixture.path, "c", &cBinary) else {
+    let Result::OK(cBuild) = QbeLane::compile(&root, &options.compiler, &fixture.path, "c", &cBinary, &cBuildDirectory) else {
       return 1;
     };
     if (!cBuild.status().success) {

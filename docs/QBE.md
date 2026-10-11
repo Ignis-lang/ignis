@@ -69,7 +69,7 @@ build/qbe-lane/runner build/selfhost/ignis --inventory --shard 0 4 --report-dir 
 build/qbe-lane/runner build/selfhost/ignis --shard 0 4 --report-dir build/qbe-results/lane/0
 ```
 
-Repeat with indexes 1, 2 and 3 for complete coverage. A successful individual shard is not a complete lane result: all shard reports must pass aggregation. The completion marker is written only after that shard finishes its checks.
+Repeat with indexes 1, 2 and 3 for complete coverage. Shards may run at the same time in one checkout: every build runs in its own directory under `build/qbe-lane/run-<pid>/`, which links `test_cases` back to the corpus, so no two builds share their emitted C. A successful individual shard is not a complete lane result: all shard reports must pass aggregation. The completion marker is written only after that shard finishes its checks.
 
 ## Initial slice verification
 
