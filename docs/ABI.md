@@ -15,7 +15,7 @@ So two backends agree on a value exactly when they agree on its canonical repres
 | --- | --- |
 | Data layout | Specified here, computed by `ignis/abi/`, enforced on every C build |
 | Platform constants (`O_RDONLY`, `ENOENT`, `TIOCGWINSZ`, ...) | Specified for `x86_64` Linux in `std/libc/platform.ign`, checked against the C headers in CI; other targets still read the headers |
-| Symbol names | Not yet: Ignis symbols carry per-build definition ids |
+| Symbol names | Specified below, computed by `ignis/abi/symbols.ign`; checked across programs in CI |
 | Calling convention for Ignis-internal calls | Not yet: fixed arrays, closures and drop glue differ between backends |
 | Runtime ownership across objects | Not yet: every object carries its own std and runtime |
 
@@ -71,3 +71,36 @@ The C constants the standard library uses (open flags, file modes, error numbers
 Values that are Ignis's own, not the platform's, are plain Ignis constants: the runtime type ids in `std::types` and `PI`, `E` and `TAU` in `std::math`.
 
 `errno` itself is read through the platform's accessor function (`__errno_location` on Linux, `__error` on macOS), a symbol every backend can call. The layout of `struct stat` is described in Ignis by `RawStat` in `std/fs/sys/unix.ign`, for `x86_64` Linux only.
+
+## Symbol names
+
+A definition's symbol is derived from what it is, so the same function has the same symbol in every program that compiles it. That is what lets one object call into another. Every backend takes its symbols from `ignis/abi/symbols.ign`.
+
+A symbol is `_I` followed by a nested name, `N` parts `E`. Each part is one segment, its byte length followed by the identifier:
+
+| Definition | Symbol |
+| --- | --- |
+| `close` in `std/libc/io.ign` | `_IN3std4libc2io5closeE` |
+| `File::open` in the same module | `_IN3std4libc2io4File4openE` |
+| method `raw` of record `Handle` there | `_IN3std4libc2io6Handle3rawE` |
+| static field `ARGC` of `ProcessSlots` in `std/process/runtime/mod.ign` | `_IN3std7process7runtime12ProcessSlots4ARGCE` |
+| `Vector<u8>::push` | `_IN3std6vector6VectorI2u8E4pushE` |
+| the first closure in `PathBuf::extension` | `_INN3std4path4Path7PathBuf9extensionECt0_E` |
+
+The parts, in order:
+
+- **Module.** A std module is `std` followed by its path below the std root; a project module is the package name followed by its path below the directory of the entry module. The `.ign` extension and a final `mod` are dropped.
+- **Written path.** The declaration's path inside its module, `Outer::Inner::Name`. A method or a static field is its owner's name followed by its own name.
+- **Generic arguments.** `I` types `E` after the segment they instantiate.
+- **Overload signature.** `F` parameter types `V` return type `E`, only for a function that shares its name with another one in the same scope.
+- **Closure functions.** A closure's thunk and drop function are named after the function, variable or constant whose body holds the closure, then `Ct` or `Cd` and the closure's position in that body.
+
+Types inside a symbol are encoded as follows: a primitive is its name as a segment (`3i32`); `P`/`Q` a pointer or mutable pointer, `R`/`M` a reference or mutable reference, `S` a slice, `A<count>_` a fixed array, `T...E` a tuple, `F...V...E` a closure type, `W...V...E` a raw function, `Z`/`Y` a range or inclusive range, a record or enum its nested name, and `K` a generic parameter. Every production starts with a digit or with a letter that no other production in the same position uses, so a symbol reads back one way only and two definitions never share one. A segment holding a byte that cannot appear in a C identifier is written `X`, the length of its escaped text, `_`, then that text: each invalid byte becomes `_` and two hex digits and a literal `_` is doubled (`a-b` is `X5_a_2db`).
+
+**Length.** QBE accepts identifiers of at most 79 characters, and every backend uses the same symbols, so a longer symbol keeps its first 62 characters followed by `_` and the 64-bit FNV-1a hash of the whole symbol in sixteen lowercase hex digits (offset basis `14695981039346656037`, prime `1099511628211`). A full symbol always ends in `E` and a shortened one in a hex digit, so the two forms never collide; two shortened symbols are told apart by their hashes, and a collision would surface as a duplicate definition when the object is compiled.
+
+Some names stay as they are: `extern` declarations and `@externName` keep the C name the other side defines, and the generated C `main` stays `main`. A definition with no module or written path to derive a name from keeps a per-program name, `name_<id>`; none of the compiler's own emitted symbols does.
+
+`scripts/check_symbol_stability.py` is the check. It compiles two programs that share functions, with every definition id shifted in the second, and fails when a symbol of the first program is missing from the second.
+
+Symbols are still local to their object: every function is `static`. Exporting them, so another object can link against them, is the next step.

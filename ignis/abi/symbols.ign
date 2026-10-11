@@ -1,0 +1,905 @@
+//! Symbol names derived from what a definition is, never from the order a
+//! program happened to analyze it in.
+//!
+//! The same std function gets the same symbol in every program that compiles
+//! it, which is what lets one object call into another. Every backend takes
+//! its symbols from here.
+//!
+//! A symbol is `_I` followed by one nested name:
+//!
+//! | Production | Form |
+//! | --- | --- |
+//! | nested name | `N` parts `E` |
+//! | identifier segment | byte length, then the identifier: `4libc` |
+//! | escaped segment | `X`, length of the escaped text, `_`, then the text with each invalid byte as `_` and two hex digits and `_` doubled: `X5_a_2db` |
+//! | generic arguments | `I` types `E` |
+//! | overload signature | `F` parameter types `V` return type `E` |
+//! | closure function | `N` enclosing name `E`, then `Ct` or `Cd`, ordinal, `_` |
+//!
+//! A name's parts are the logical module (`std`, `libc`, `io`), then the
+//! written path of the declaration; a method or a static field is its owner's
+//! name followed by its own segment. Generic arguments follow the segment they instantiate. A
+//! signature is only added for a function that shares its name with another
+//! function of the same scope, because only then is the path not enough.
+//!
+//! | Type | Form |
+//! | --- | --- |
+//! | primitive | its name as a segment: `3i32`, `7boolean` |
+//! | pointer, mutable pointer | `P`, `Q` then the pointee |
+//! | reference, mutable reference | `R`, `M` then the referent |
+//! | slice | `S` then the element |
+//! | fixed array | `A`, count, `_`, then the element |
+//! | tuple | `T` elements `E` |
+//! | closure type, raw function | `F` or `W`, parameters, `V`, return, `E` |
+//! | range, inclusive range | `Z` or `Y` then the bound |
+//! | record, enum | its nested name, with generic arguments |
+//! | generic parameter | `K` then its name as a segment |
+//!
+//! Each production starts with a digit or a letter no other production in the
+//! same position starts with, so a symbol reads back one way only: two
+//! different definitions cannot share a symbol.
+//!
+//! A symbol longer than 79 characters, the longest identifier QBE accepts,
+//! keeps its first 62 characters followed by `_` and a 64-bit hash of the
+//! whole symbol. That keeps it stable across programs and valid for every
+//! backend; distinctness of such symbols rests on the hash.
+
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Id from "@compiler::ids";
+
+export namespace SymbolNames {
+  /// The prefix every Ignis-defined symbol starts with.
+  const PREFIX: str = "_I";
+
+  /// The longest identifier QBE accepts. Every backend gets the same symbol,
+  /// so the limit of the strictest one applies to all of them.
+  const MAX_SYMBOL_LENGTH: u64 = 79;
+
+  /// How much of a capped symbol is kept before the hash: the limit minus
+  /// `_` and sixteen hex digits.
+  const CAPPED_PREFIX_LENGTH: u64 = 62;
+
+  /// The 64-bit FNV-1a parameters. They are part of the symbol contract, so
+  /// they are spelled here rather than borrowed from `std::hash`, whose hasher
+  /// may change for reasons that have nothing to do with symbols.
+  const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+  const FNV_PRIME: u64 = 1099511628211;
+
+  /// Whether `byte` may appear in a C identifier.
+  function isIdentifierByte(byte: u8): boolean {
+    return (byte >= 'a' as u8 && byte <= 'z' as u8) || (byte >= 'A' as u8 && byte <= 'Z' as u8) || (byte >= '0' as u8 && byte <= '9' as u8) || byte == '_' as u8;
+  }
+
+  /// `text` as one segment: its byte length then the text, or the escaped
+  /// form when a byte would not be valid in a C identifier.
+  function segment(text: &String): String {
+    let mut plain: boolean = text.length() > 0;
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      if (let Option::SOME(byte) = text.byteAt(index)) {
+        if (!SymbolNames::isIdentifierByte(byte)) {
+          plain = false;
+        }
+      }
+
+      index += 1;
+    }
+
+    if (plain) {
+      return `${text.length()}${text.toStr()}`;
+    }
+
+    // Only the bytes a C identifier cannot hold are escaped, as `_` and two
+    // hex digits; a literal `_` doubles, so `_` followed by `_` or by hex
+    // digits reads back one way.
+    let hexDigits: String = String::create("0123456789abcdef");
+    let mut encoded: String = String::new();
+    let mut byteIndex: u64 = 0;
+
+    while (byteIndex < text.length()) {
+      if (let Option::SOME(byte) = text.byteAt(byteIndex)) {
+        if (byte == '_' as u8) {
+          encoded.pushStr("__");
+        } else if (SymbolNames::isIdentifierByte(byte)) {
+          encoded.pushByte(byte);
+        } else {
+          let high: u64 = (byte >> 4) as u64;
+          let low: u64 = (byte & 15) as u64;
+          let highText: String = hexDigits.substringBytes(high, high + 1);
+          let lowText: String = hexDigits.substringBytes(low, low + 1);
+
+          encoded.pushStr("_");
+          encoded.push(&highText);
+          encoded.push(&lowText);
+        }
+      }
+
+      byteIndex += 1;
+    }
+
+    return `X${encoded.length()}_${encoded.toStr()}`;
+  }
+
+  /// The segments of `text` split on `separator`, empty pieces skipped.
+  function splitSegments(text: &String, separator: str): String {
+    let separatorText: String = String::create(separator);
+    let mut encoded: String = String::new();
+    let mut start: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index <= text.length()) {
+      let mut atSeparator: boolean = index == text.length();
+
+      if (!atSeparator && index + separatorText.length() <= text.length()) {
+        let candidate: String = text.substringBytes(index, index + separatorText.length());
+        atSeparator = candidate.equals(separator);
+      }
+
+      if (atSeparator) {
+        if (index > start) {
+          let piece: String = text.substringBytes(start, index);
+          let pieceSegment: String = SymbolNames::segment(&piece);
+          encoded.push(&pieceSegment);
+        }
+
+        if (index == text.length()) {
+          break;
+        }
+
+        index += separatorText.length();
+        start = index;
+        continue;
+      }
+
+      index += 1;
+    }
+
+    return encoded;
+  }
+
+  /// The segments of a written path such as `Outer::Inner::Name`.
+  function pathSegments(path: &String): String {
+    return SymbolNames::splitSegments(path, "::");
+  }
+
+  /// The segments of a module's logical name.
+  ///
+  /// `relativePath` is the module file's path below the std root for a std
+  /// module, or below the project root otherwise, with `/` separators. The
+  /// `.ign` extension and a final `mod` are dropped: `libc/io.ign` is
+  /// `std::libc::io` and `libc/mod.ign` is `std::libc`. A project module is
+  /// named under its package.
+  function moduleSegments(isStd: boolean, relativePath: &String, packageName: &String): String {
+    let mut path: String = relativePath.clone();
+
+    if (path.endsWith(".ign")) {
+      path = path.substringBytes(0, path.length() - 4);
+    }
+
+    if (path.equals("mod")) {
+      path = String::new();
+    } else if (path.endsWith("/mod")) {
+      path = path.substringBytes(0, path.length() - 4);
+    }
+
+    let root: String = isStd ? String::create("std") : packageName.clone();
+    let mut encoded: String = SymbolNames::segment(&root);
+    let pathPart: String = SymbolNames::splitSegments(&path, "/");
+
+    encoded.push(&pathPart);
+    return encoded;
+  }
+
+  /// How many symbol-bearing definitions got a stable name, and how many kept
+  /// their per-program one.
+  record Assignment {
+    public stable: u64;
+    public perProgram: u64;
+  }
+
+  /// Computes and records the symbol of every function, method and
+  /// module-level variable that has one. Runs once, after monomorphization has
+  /// created the last definition that needs one.
+  function assignSymbols(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+  ): SymbolNames::Assignment {
+    let mut assignment: SymbolNames::Assignment = SymbolNames::Assignment { stable: 0, perProgram: 0 };
+    let count: u64 = defStore.length();
+
+    SymbolNames::recordStaticMembers(defStore, count);
+
+    let mut raw: u64 = 0;
+
+    while (raw < count) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(raw as u32);
+      let mut bearsSymbol: boolean = false;
+      let mut isVariable: boolean = false;
+
+      if (let Option::SOME(definition) = defStore.get(defId)) {
+        match (definition) {
+          Analyzer::Definition::Function(functionDef) -> {
+            bearsSymbol = !functionDef.isExtern && functionDef.externName.isNone() && functionDef.typeParams.length() == 0;
+          },
+          Analyzer::Definition::Method(methodDef) -> {
+            bearsSymbol = methodDef.typeParams.length() == 0;
+          },
+          // A module-level variable is published under a written path; locals
+          // and parameters are not, and never become symbols.
+          Analyzer::Definition::Variable(variableDef) -> {
+            isVariable = !variableDef.isExtern;
+          },
+          _ -> {},
+        };
+      }
+
+      if (isVariable) {
+        bearsSymbol = defStore.qualifiedNameOf(defId).isSome() || defStore.symbolOriginOf(defId).isSome();
+      }
+
+      if (bearsSymbol) {
+        match (SymbolNames::symbolFor(defStore, typeStore, symbols, defId)) {
+          Option::SOME(name) -> {
+            let mut storeRef: &mut Analyzer::DefinitionStore = defStore;
+            storeRef.setSymbolName(defId, name);
+            assignment.stable += 1;
+          },
+          Option::NONE -> {
+            assignment.perProgram += 1;
+          },
+        };
+      }
+
+      raw += 1;
+    }
+
+    return assignment;
+  }
+
+  /// Records each static field's owner as its origin. The binder keeps static
+  /// fields in their record's or enum's `staticFields`, not under a written
+  /// path of their own.
+  function recordStaticMembers(defStore: &mut Analyzer::DefinitionStore, count: u64): void {
+    let mut raw: u64 = 0;
+
+    while (raw < count) {
+      let owner: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(raw as u32);
+      let mut members: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(definition) = defStore.get(owner)) {
+        match (definition) {
+          Analyzer::Definition::Record(recordDef) -> {
+            members = SymbolNames::copyDefs(&recordDef.staticFields);
+          },
+          Analyzer::Definition::Enum(enumDef) -> {
+            members = SymbolNames::copyDefs(&enumDef.staticFields);
+          },
+          _ -> {},
+        };
+      }
+
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < members.length()) {
+        if (let Option::SOME(member) = members.get(memberIndex)) {
+          let mut storeRef: &mut Analyzer::DefinitionStore = defStore;
+          storeRef.setSymbolOrigin(*member, Analyzer::SymbolOrigin::StaticMember(owner));
+        }
+
+        memberIndex += 1;
+      }
+
+      raw += 1;
+    }
+  }
+
+  /// The symbol of `defId`, or `NONE` when the definition has no identity to
+  /// derive one from: no module, no written path, or a type this encoding
+  /// does not name. The caller then keeps the old per-program name.
+  function symbolFor(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): Option<String> {
+    let Option::SOME(body) = SymbolNames::fullBody(defStore, typeStore, symbols, defId) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(SymbolNames::capped(`${SymbolNames::PREFIX}N${body.toStr()}E`));
+  }
+
+  /// `symbol` if it fits in `MAX_SYMBOL_LENGTH` characters; otherwise its first
+  /// `CAPPED_PREFIX_LENGTH` characters, `_`, and the 64-bit FNV-1a hash of the
+  /// whole symbol in sixteen lowercase hex digits.
+  ///
+  /// A full symbol always ends in `E` and a capped one in a lowercase hex
+  /// digit, so the two forms never name each other. Two capped symbols could
+  /// only coincide if both their prefixes and their hashes did; the C
+  /// compiler would then report the duplicate definition.
+  function capped(symbol: String): String {
+    if (symbol.length() <= SymbolNames::MAX_SYMBOL_LENGTH) {
+      return symbol;
+    }
+
+    let mut hash: u64 = SymbolNames::FNV_OFFSET_BASIS;
+    let mut index: u64 = 0;
+
+    while (index < symbol.length()) {
+      if (let Option::SOME(byte) = symbol.byteAt(index)) {
+        hash = hash ^ (byte as u64);
+        hash = hash * SymbolNames::FNV_PRIME;
+      }
+
+      index += 1;
+    }
+
+    let hexDigits: String = String::create("0123456789abcdef");
+    let mut result: String = symbol.substringBytes(0, SymbolNames::CAPPED_PREFIX_LENGTH);
+    result.pushStr("_");
+
+    let mut shift: u64 = 64;
+
+    while (shift > 0) {
+      shift -= 4;
+      let digit: u64 = (hash >> shift) & 15;
+      let digitText: String = hexDigits.substringBytes(digit, digit + 1);
+      result.push(&digitText);
+    }
+
+    return result;
+  }
+
+  /// The parts of `defId`'s nested name, taking its origin into account.
+  function fullBody(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): Option<String> {
+    let mut isInstance: boolean = false;
+    let mut generic: Analyzer::DefinitionId = defId;
+    let mut hasOwner: boolean = false;
+    let mut ownerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut methodArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    // Two steps on purpose: a nested `SOME(Variant(x))` pattern over an
+    // `Option` of a reference dereferences the payload before it checks the
+    // tag, and crashes on `NONE`.
+    if (let Option::SOME(recorded) = defStore.symbolOriginOf(defId)) {
+      if (let Analyzer::SymbolOrigin::Instance(origin) = recorded) {
+        isInstance = true;
+        generic = origin.generic;
+        hasOwner = origin.owner.isSome();
+        ownerArgs = SymbolNames::copyTypes(&origin.ownerArgs);
+        methodArgs = SymbolNames::copyTypes(&origin.methodArgs);
+      }
+    }
+
+    if (!isInstance) {
+      return SymbolNames::declaredBody(defStore, typeStore, symbols, defId, Option::NONE, methodArgs);
+    }
+
+    if (hasOwner) {
+      return SymbolNames::declaredBody(defStore, typeStore, symbols, generic, Option::SOME(ownerArgs), methodArgs);
+    }
+
+    return SymbolNames::declaredBody(defStore, typeStore, symbols, generic, Option::NONE, methodArgs);
+  }
+
+  /// The parts of the nested name of `defId` as written, with `ownerArgs`
+  /// instantiating a method's owner and `ownArgs` instantiating `defId`
+  /// (empty when it is not generic).
+  function declaredBody(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+    ownerArgs: Option<Vector<Analyzer::TypeId>>,
+    ownArgs: Vector<Analyzer::TypeId>,
+  ): Option<String> {
+    // Consumed here, once, so every path below sees the same value.
+    let hasOwnerArgs: boolean = ownerArgs.isSome();
+    let ownerList: Vector<Analyzer::TypeId> = match (ownerArgs) {
+      Option::SOME(list) -> list,
+      Option::NONE -> Vector::new<Analyzer::TypeId>(),
+    };
+
+    let arguments: String = match (SymbolNames::argumentList(defStore, typeStore, symbols, &ownArgs)) {
+      Option::SOME(text) -> text,
+      Option::NONE -> {
+        return Option::NONE;
+      },
+    };
+
+    let mut closure: Option<Analyzer::ClosureOrigin> = Option::NONE;
+    let mut staticOwner: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(recorded) = defStore.symbolOriginOf(defId)) {
+      match (recorded) {
+        Analyzer::SymbolOrigin::Closure(origin) -> {
+          closure = Option::SOME(Analyzer::ClosureOrigin { enclosing: origin.enclosing, ordinal: origin.ordinal, role: origin.role });
+        },
+        Analyzer::SymbolOrigin::StaticMember(owner) -> {
+          staticOwner = Option::SOME(owner);
+        },
+        _ -> {},
+      };
+    }
+
+    if (let Option::SOME(origin) = closure) {
+      let Option::SOME(enclosing) = SymbolNames::fullBody(defStore, typeStore, symbols, origin.enclosing) else {
+        return Option::NONE;
+      };
+
+      let role: str = match (origin.role) {
+        Analyzer::ClosureRole::THUNK -> "Ct",
+        Analyzer::ClosureRole::DROP -> "Cd",
+      };
+
+      return Option::SOME(`N${enclosing.toStr()}E${role}${origin.ordinal}_${arguments.toStr()}`);
+    }
+
+    let Option::SOME(nameText) = SymbolNames::writtenName(defStore, symbols, defId) else {
+      return Option::NONE;
+    };
+
+    let mut methodOwner: Option<Analyzer::DefinitionId> = staticOwner;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Method(methodDef) = definition) {
+        methodOwner = Option::SOME(methodDef.owner);
+      }
+    }
+
+    let mut scope: String = String::new();
+    let mut ownSegments: String = String::new();
+
+    if (let Option::SOME(owner) = methodOwner) {
+      // An owner without arguments here may itself be an instance, which
+      // its own origin names.
+      let mut ownerBody: Option<String> = Option::NONE;
+
+      if (hasOwnerArgs) {
+        ownerBody = SymbolNames::declaredBody(defStore, typeStore, symbols, owner, Option::NONE, SymbolNames::copyTypes(&ownerList));
+      } else {
+        ownerBody = SymbolNames::fullBody(defStore, typeStore, symbols, owner);
+      }
+
+      let Option::SOME(ownerBody) = ownerBody else {
+        return Option::NONE;
+      };
+
+      scope = ownerBody;
+      ownSegments = SymbolNames::segment(&nameText);
+    } else {
+      let Option::SOME(moduleIndex) = defStore.defModuleOf(defId) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(modulePath) = defStore.moduleSymbolPathOf(moduleIndex) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(qualified) = defStore.qualifiedNameOf(defId) else {
+        return Option::NONE;
+      };
+
+      scope = modulePath.clone();
+      ownSegments = SymbolNames::pathSegments(qualified);
+    }
+
+    let mut body: String = scope;
+    body.push(&ownSegments);
+    body.push(&arguments);
+
+    if (SymbolNames::isOverloaded(defStore, defId)) {
+      let Option::SOME(signature) = SymbolNames::signature(defStore, typeStore, symbols, defId) else {
+        return Option::NONE;
+      };
+
+      body.push(&signature);
+    }
+
+    return Option::SOME(body);
+  }
+
+  /// `I` types `E` for a non-empty argument list; empty otherwise.
+  function argumentList(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    list: &Vector<Analyzer::TypeId>,
+  ): Option<String> {
+    if (list.length() == 0) {
+      return Option::SOME(String::new());
+    }
+
+    let mut encoded: String = String::create("I");
+    let mut index: u64 = 0;
+
+    while (index < list.length()) {
+      if (let Option::SOME(argument) = list.get(index)) {
+        let Option::SOME(code) = SymbolNames::typeCode(defStore, typeStore, symbols, *argument) else {
+          return Option::NONE;
+        };
+
+        encoded.push(&code);
+      }
+
+      index += 1;
+    }
+
+    encoded.pushStr("E");
+    return Option::SOME(encoded);
+  }
+
+  /// The name `defId` declares, as written.
+  function writtenName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): Option<String> {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(text) = symbols.resolve(definition.name()) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(String::create(text));
+  }
+
+  /// Whether another function or method of the same scope declares the same
+  /// name, so the path alone would not tell them apart. Compiler-created
+  /// definitions are not counted: their names come from elsewhere.
+  function isOverloaded(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let mut name: Option<Analyzer::SymbolId> = Option::NONE;
+    let mut methodOwner: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isFunction: boolean = false;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          isFunction = true;
+          name = Option::SOME(functionDef.name);
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          methodOwner = Option::SOME(methodDef.owner);
+          name = Option::SOME(methodDef.name);
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(name) = name else {
+      return false;
+    };
+
+    let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(name);
+    let ownModule: Option<u64> = defStore.defModuleOf(defId);
+    let ownParent: String = SymbolNames::qualifiedParent(defStore, defId);
+    let mut siblings: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < candidates.length()) {
+      if (let Option::SOME(candidate) = candidates.get(index)) {
+        let mut sameScope: boolean = false;
+        let mut candidateIsFunction: boolean = false;
+        let mut candidateOwner: Option<Analyzer::DefinitionId> = Option::NONE;
+
+        if (let Option::SOME(candidateDefinition) = defStore.get(*candidate)) {
+          match (candidateDefinition) {
+            Analyzer::Definition::Function(_) -> {
+              candidateIsFunction = true;
+            },
+            Analyzer::Definition::Method(candidateMethod) -> {
+              candidateOwner = Option::SOME(candidateMethod.owner);
+            },
+            _ -> {},
+          };
+        }
+
+        let created: boolean = defStore.symbolOriginOf(*candidate).isSome();
+
+        if (!created && isFunction && candidateIsFunction) {
+          let candidateParent: String = SymbolNames::qualifiedParent(defStore, *candidate);
+          sameScope = SymbolNames::sameModule(defStore.defModuleOf(*candidate), ownModule) && candidateParent.equals(&ownParent);
+        }
+
+        if (!created) {
+          if (let Option::SOME(owner) = methodOwner) {
+            if (let Option::SOME(otherOwner) = candidateOwner) {
+              sameScope = otherOwner.equals(&owner);
+            }
+          }
+        }
+
+        if (sameScope) {
+          siblings += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return siblings > 1;
+  }
+
+  /// Whether two optional module indices name the same module.
+  function sameModule(left: Option<u64>, right: Option<u64>): boolean {
+    if (let Option::SOME(leftIndex) = left) {
+      if (let Option::SOME(rightIndex) = right) {
+        return leftIndex == rightIndex;
+      }
+
+      return false;
+    }
+
+    return right.isNone();
+  }
+
+  /// The written path of `defId` without its last segment, or empty.
+  function qualifiedParent(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): String {
+    let Option::SOME(qualified) = defStore.qualifiedNameOf(defId) else {
+      return String::new();
+    };
+
+    let mut cut: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index + 1 < qualified.length()) {
+      let pair: String = qualified.substringBytes(index, index + 2);
+
+      if (pair.equals("::")) {
+        cut = index;
+      }
+
+      index += 1;
+    }
+
+    return qualified.substringBytes(0, cut);
+  }
+
+  /// `F` parameter types `V` return type `E` for a function or method. The
+  /// return marker is a letter no type starts with, so a reference parameter
+  /// (`R`) never reads as the start of the return type.
+  function signature(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): Option<String> {
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          params = SymbolNames::copyDefs(&functionDef.params);
+          returnType = Option::SOME(functionDef.returnType);
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          params = SymbolNames::copyDefs(&methodDef.params);
+          returnType = Option::SOME(methodDef.returnType);
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(result) = returnType else {
+      return Option::NONE;
+    };
+
+    let mut encoded: String = String::create("F");
+    let mut index: u64 = 0;
+
+    while (index < params.length()) {
+      if (let Option::SOME(paramId) = params.get(index)) {
+        let mut paramType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(paramDefinition) = defStore.get(*paramId)) {
+          if (let Analyzer::Definition::Variable(variableDef) = paramDefinition) {
+            paramType = Option::SOME(variableDef.declaredType);
+          }
+        }
+
+        let Option::SOME(declared) = paramType else {
+          return Option::NONE;
+        };
+
+        let Option::SOME(code) = SymbolNames::typeCode(defStore, typeStore, symbols, declared) else {
+          return Option::NONE;
+        };
+
+        encoded.push(&code);
+      }
+
+      index += 1;
+    }
+
+    let Option::SOME(resultCode) = SymbolNames::typeCode(defStore, typeStore, symbols, result) else {
+      return Option::NONE;
+    };
+
+    encoded.pushStr("V");
+    encoded.push(&resultCode);
+    encoded.pushStr("E");
+    return Option::SOME(encoded);
+  }
+
+  /// The encoding of `ty`, or `NONE` for a form that has no stable name.
+  function typeCode(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+  ): Option<String> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, ty);
+
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> Option::SOME(String::create("2i8")),
+      Analyzer::Type::I16 -> Option::SOME(String::create("3i16")),
+      Analyzer::Type::I32 -> Option::SOME(String::create("3i32")),
+      Analyzer::Type::I64 -> Option::SOME(String::create("3i64")),
+      Analyzer::Type::U8 -> Option::SOME(String::create("2u8")),
+      Analyzer::Type::U16 -> Option::SOME(String::create("3u16")),
+      Analyzer::Type::U32 -> Option::SOME(String::create("3u32")),
+      Analyzer::Type::U64 -> Option::SOME(String::create("3u64")),
+      Analyzer::Type::F32 -> Option::SOME(String::create("3f32")),
+      Analyzer::Type::F64 -> Option::SOME(String::create("3f64")),
+      Analyzer::Type::BOOLEAN -> Option::SOME(String::create("7boolean")),
+      Analyzer::Type::CHAR -> Option::SOME(String::create("4char")),
+      Analyzer::Type::STR -> Option::SOME(String::create("3str")),
+      Analyzer::Type::VOID -> Option::SOME(String::create("4void")),
+      Analyzer::Type::NEVER -> Option::SOME(String::create("5never")),
+      Analyzer::Type::ATOM -> Option::SOME(String::create("4atom")),
+      Analyzer::Type::Pointer(pointer) -> SymbolNames::prefixed(defStore, typeStore, symbols, pointer.mutable ? "Q" : "P", pointer.pointee),
+      Analyzer::Type::Reference(reference) -> SymbolNames::prefixed(defStore, typeStore, symbols, reference.mutable ? "M" : "R", reference.referent),
+      Analyzer::Type::Slice(element) -> SymbolNames::prefixed(defStore, typeStore, symbols, "S", element),
+      Analyzer::Type::FixedArray(element, count) -> {
+        let prefix: String = `A${count}_`;
+        return SymbolNames::prefixed(defStore, typeStore, symbols, prefix.toStr(), element);
+      },
+      Analyzer::Type::Range(range) -> SymbolNames::prefixed(defStore, typeStore, symbols, range.inclusive ? "Y" : "Z", range.element),
+      Analyzer::Type::Tuple(tuple) -> SymbolNames::typeList(defStore, typeStore, symbols, "T", &tuple.elements, Option::NONE),
+      Analyzer::Type::Function(function_) -> SymbolNames::typeList(defStore, typeStore, symbols, "F", &function_.params, Option::SOME(function_.returnType)),
+      Analyzer::Type::RawFunction(function_) -> SymbolNames::typeList(defStore, typeStore, symbols, "W", &function_.params, Option::SOME(function_.returnType)),
+      Analyzer::Type::Record(recordDef) -> SymbolNames::nominal(defStore, typeStore, symbols, recordDef),
+      Analyzer::Type::Enum(enumDef) -> SymbolNames::nominal(defStore, typeStore, symbols, enumDef),
+      Analyzer::Type::Instance(instance) -> {
+        let arguments: Vector<Analyzer::TypeId> = SymbolNames::copyTypes(&instance.typeArguments);
+        let Option::SOME(body) = SymbolNames::declaredBody(defStore, typeStore, symbols, instance.definition, Option::NONE, arguments) else {
+          return Option::NONE;
+        };
+
+        return Option::SOME(`N${body.toStr()}E`);
+      },
+      Analyzer::Type::Param(name) -> {
+        let Option::SOME(text) = symbols.resolve(name) else {
+          return Option::NONE;
+        };
+
+        let nameText: String = String::create(text);
+        let nameSegment: String = SymbolNames::segment(&nameText);
+        return Option::SOME(`K${nameSegment.toStr()}`);
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  /// `prefix` followed by the encoding of `inner`.
+  function prefixed(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    prefix: str,
+    inner: Analyzer::TypeId,
+  ): Option<String> {
+    let Option::SOME(code) = SymbolNames::typeCode(defStore, typeStore, symbols, inner) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(String::create(prefix).concat(code.toStr()));
+  }
+
+  /// `opener`, each element, then `V` and the result when there is one, then `E`.
+  function typeList(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    opener: str,
+    elements: &Vector<Analyzer::TypeId>,
+    result: Option<Analyzer::TypeId>,
+  ): Option<String> {
+    let mut encoded: String = String::create(opener);
+    let mut index: u64 = 0;
+
+    while (index < elements.length()) {
+      if (let Option::SOME(element) = elements.get(index)) {
+        let Option::SOME(code) = SymbolNames::typeCode(defStore, typeStore, symbols, *element) else {
+          return Option::NONE;
+        };
+
+        encoded.push(&code);
+      }
+
+      index += 1;
+    }
+
+    if (let Option::SOME(resultType) = result) {
+      let Option::SOME(resultCode) = SymbolNames::typeCode(defStore, typeStore, symbols, resultType) else {
+        return Option::NONE;
+      };
+
+      encoded.pushStr("V");
+      encoded.push(&resultCode);
+    }
+
+    encoded.pushStr("E");
+    return Option::SOME(encoded);
+  }
+
+  /// A record or enum as a nested name.
+  function nominal(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): Option<String> {
+    let Option::SOME(body) = SymbolNames::fullBody(defStore, typeStore, symbols, defId) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(`N${body.toStr()}E`);
+  }
+
+  function copyTypes(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+    let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(value) = source.get(index)) {
+        copied.push(*value);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyDefs(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+    let mut copied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(value) = source.get(index)) {
+        copied.push(*value);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+}

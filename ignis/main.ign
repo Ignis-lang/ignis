@@ -63,6 +63,7 @@ import CCompiler from "./build/c_compiler";
 import QbeTool, qbeIsQbeTarget from "./build/qbe";
 import Linker from "./build/linker";
 import BuildOverrides, DiscoveryResult, DocDiscovery, Resolver from "./build/resolver";
+import SymbolNames from "./abi/symbols";
 import
   FixtureCase,
   FixtureKind,
@@ -981,6 +982,70 @@ function compileAndLinkUnits(
   return 0;
 }
 
+/// `path` below `root`, or `NONE` when it lies elsewhere.
+function pathBelowRoot(path: &String, root: &String): Option<String> {
+  if (root.length() == 0 || path.length() <= root.length() + 1 || !path.startsWith(root.toStr())) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(separator) = path.byteAt(root.length()) else {
+    return Option::NONE;
+  };
+
+  if (separator != '/' as u8) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(path.substringBytes(root.length() + 1, path.length()));
+}
+
+/// Records each module's logical name for symbol naming: a std module by its
+/// path below the std root, a project module by its package and its path
+/// below the directory of the entry module. Both are independent of where the
+/// checkout lives, and a std module's name is the same in every program. A
+/// module outside both roots gets no name, and its definitions keep their
+/// per-program symbols. Names are keyed by position in `infos`, which is the
+/// module index the analyzer records for each definition.
+function recordModuleSymbolPaths(
+  defStore: &mut Analyzer::DefinitionStore,
+  infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  discovery: &DiscoveryResult,
+): void {
+  let stdRoot: String = discovery.stdRoot.normalize().toString();
+  let mut projectRoot: String = String::new();
+
+  if (let Option::SOME(rootIndex) = discovery.graph.rootIndex) {
+    if (let Option::SOME(rootNode) = discovery.graph.nodes.get(rootIndex)) {
+      if (let Option::SOME(parent) = rootNode.path.normalize().parent()) {
+        projectRoot = parent.toString();
+      }
+    }
+  }
+
+  let packageName: String = discovery.name.length() > 0 ? discovery.name.clone() : String::create("main");
+  let mut infoIndex: u64 = 0;
+
+  while (infoIndex < infos.length()) {
+    if (let Option::SOME(info) = infos.get(infoIndex)) {
+      let mut isStd: boolean = false;
+
+      if (let Analyzer::Imports::ModuleKind::STD = info.kind) {
+        isStd = true;
+      }
+
+      let normalized: String = Path::PathBuf::fromString(&info.pathText).normalize().toString();
+      let root: &String = isStd ? &stdRoot : &projectRoot;
+
+      if (let Option::SOME(relative) = pathBelowRoot(&normalized, root)) {
+        let mut storeRef: &mut Analyzer::DefinitionStore = defStore;
+        storeRef.setModuleSymbolPath(infoIndex, SymbolNames::moduleSegments(isStd, &relative, &packageName));
+      }
+    }
+
+    infoIndex += 1;
+  }
+}
+
 /// How one run of the compile pipeline behaves.
 record CompileOptions {
   /// Gather the project's `@test` functions and leave the entry wrapper out of
@@ -1485,6 +1550,8 @@ function compileDiscovered(
     &preludePaths,
   );
 
+  recordModuleSymbolPaths(&mut defStore, &infos, discovery);
+
   let mut analyzeErrors: u64 = 0;
   let mut analyzeWarnings: u64 = 0;
   let mut recordIndex: u64 = 0;
@@ -1788,6 +1855,28 @@ function compileDiscovered(
 
   if (!quiet) {
     printStatus(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`, verbose);
+  }
+
+  // Monomorphization created the last definition that needs a symbol, so the
+  // names every backend uses are fixed here, once.
+  let assignment: SymbolNames::Assignment = SymbolNames::assignSymbols(&mut defStore, &mut typeStore, &mut symbols);
+
+  if (!quiet) {
+    printStatus(`  symbols: ${assignment.stable} stable, ${assignment.perProgram} per-program`, verbose);
+  }
+
+  // Test cases were collected during analysis, before the symbols above
+  // existed, so the harness would call each test by a name the program unit
+  // no longer defines.
+  let mut testIndex: u64 = 0;
+
+  while (testIndex < tests.length()) {
+    if (let Option::SOME(testCase) = tests.getMut(testIndex)) {
+      let testDef: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(testCase.defIdRaw);
+      testCase.symbolName = CodegenC::mangledName(&mut defStore, &mut symbols, testDef);
+    }
+
+    testIndex += 1;
   }
 
   // Ownership and borrow checking runs over the monomorphized HIR, the same
@@ -5272,7 +5361,12 @@ function buildKeepsAVolatileReadOfAnUnwrittenPointerSlotAtO2(): void {
     return;
   };
 
-  let slot: String = String::create("handoffTarget_");
+  // The static is `Handoff::handoffTarget` in the package's `lib` module. Its
+  // symbol is built the way `SymbolNames` builds it, including the escaped
+  // package segment and the cap on long symbols.
+  let libPath: String = String::create("lib.ign");
+  let modulePart: String = SymbolNames::moduleSegments(false, &libPath, &name);
+  let slot: String = SymbolNames::capped(`_IN${modulePart.toStr()}7Handoff13handoffTargetE`);
   Test::assert(assembly.contains(&slot));
 
   let _removed = Fs::removeDirAll(&scratch);

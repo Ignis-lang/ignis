@@ -1,0 +1,305 @@
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
+import ParseOutput, Parser from "@compiler::parser";
+import SourceFile, DiagnosticBag, Severity from "@compiler::diagnostics";
+import SymbolNames from "./symbols";
+
+/// The stores of one analyzed program.
+record SymbolProgram {
+  public defStore: Analyzer::DefinitionStore;
+  public typeStore: Analyzer::TypeStore;
+  public symbols: Analyzer::SymbolTable;
+}
+
+function symbolsCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      if (diagnostic.severity == Severity::ERROR) {
+        count += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function symbolsParse(fileName: str, source: str): Ast::Module {
+  let file: SourceFile = SourceFile::create(fileName, source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(symbolsCountErrors(&parsed.parseDiagnostics), 0);
+
+  return parsed.module;
+}
+
+/// Analyzes `sources` as one program, module `i` named by `moduleNames[i]`
+/// (its path below the std root).
+function symbolsAnalyze(sources: &Vector<String>, moduleNames: &Vector<String>): SymbolProgram {
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  let mut index: u64 = 0;
+
+  while (index < sources.length()) {
+    if (let Option::SOME(source) = sources.get(index)) {
+      if (let Option::SOME(name) = moduleNames.get(index)) {
+        modules.push(symbolsParse(name.toStr(), source.toStr()));
+        infos.push(Analyzer::Imports::ModuleInfo {
+          index: index,
+          pathText: name.clone(),
+          kind: Analyzer::Imports::ModuleKind::STD,
+        });
+      }
+    }
+
+    index += 1;
+  }
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let noPrelude: Vector<String> = Vector::new<String>();
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(&mut defStore, &mut typeStore, &mut symbols, &modules, &infos, &noPrelude);
+  let mut recordIndex: u64 = 0;
+
+  while (recordIndex < records.length()) {
+    if (let Option::SOME(analysis) = records.get(recordIndex)) {
+      Test::assertEq<u64>(symbolsCountErrors(&analysis.output.diagnostics), 0);
+    }
+
+    recordIndex += 1;
+  }
+
+  let mut nameIndex: u64 = 0;
+  let packageName: String = String::create("unused");
+
+  while (nameIndex < moduleNames.length()) {
+    if (let Option::SOME(name) = moduleNames.get(nameIndex)) {
+      defStore.setModuleSymbolPath(nameIndex, SymbolNames::moduleSegments(true, name, &packageName));
+    }
+
+    nameIndex += 1;
+  }
+
+  return SymbolProgram { defStore: defStore, typeStore: typeStore, symbols: symbols };
+}
+
+function symbolsOne(name: str, source: str): SymbolProgram {
+  let mut sources: Vector<String> = Vector::new<String>();
+  let mut names: Vector<String> = Vector::new<String>();
+  sources.push(String::create(source));
+  names.push(String::create(name));
+
+  return symbolsAnalyze(&sources, &names);
+}
+
+/// The symbol of the `ordinal`-th function, method or variable declared as
+/// `name`, in definition order.
+function symbolsOf(program: &mut SymbolProgram, name: str, ordinal: u64): String {
+  let symbol: Analyzer::SymbolId = program.symbols.intern(name);
+  let candidates: Vector<Analyzer::DefinitionId> = program.defStore.definitionsNamed(symbol);
+  let mut seen: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < candidates.length()) {
+    if (let Option::SOME(candidate) = candidates.get(index)) {
+      let mut eligible: boolean = false;
+
+      if (let Option::SOME(definition) = program.defStore.get(*candidate)) {
+        match (definition) {
+          Analyzer::Definition::Function(_) -> {
+            eligible = true;
+          },
+          Analyzer::Definition::Method(_) -> {
+            eligible = true;
+          },
+          _ -> {},
+        };
+      }
+
+      if (eligible) {
+        if (seen == ordinal) {
+          return match (SymbolNames::symbolFor(&mut program.defStore, &mut program.typeStore, &mut program.symbols, *candidate)) {
+            Option::SOME(text) -> text,
+            Option::NONE -> String::create("<none>"),
+          };
+        }
+
+        seen += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return String::create("<missing>");
+}
+
+@test
+function symbolsSegmentIsLengthPrefixed(): void {
+  let name: String = String::create("open");
+  Test::assertEq<str>(SymbolNames::segment(&name).toStr(), "4open");
+}
+
+/// A byte no C identifier may hold is escaped, so the symbol stays a valid
+/// identifier and still reads back one way.
+@test
+function symbolsSegmentEscapesNonIdentifierBytes(): void {
+  let name: String = String::create("a-b");
+  Test::assertEq<str>(SymbolNames::segment(&name).toStr(), "X5_a_2db");
+}
+
+@test
+function symbolsModuleSegmentsDropTheExtensionAndAFinalMod(): void {
+  let package: String = String::create("app");
+  let io: String = String::create("libc/io.ign");
+  let libc: String = String::create("libc/mod.ign");
+  let root: String = String::create("mod.ign");
+  let project: String = String::create("codegen/qbe/mod.ign");
+
+  Test::assertEq<str>(SymbolNames::moduleSegments(true, &io, &package).toStr(), "3std4libc2io");
+  Test::assertEq<str>(SymbolNames::moduleSegments(true, &libc, &package).toStr(), "3std4libc");
+  Test::assertEq<str>(SymbolNames::moduleSegments(true, &root, &package).toStr(), "3std");
+  Test::assertEq<str>(SymbolNames::moduleSegments(false, &project, &package).toStr(), "3app7codegen3qbe");
+}
+
+/// `a_b::c` and `a::b_c` flatten to the same text with `_` joining, and to
+/// different symbols with length prefixes.
+@test
+function symbolsPathsThatFlattenAlikeStayApart(): void {
+  let first: String = String::create("a_b::c");
+  let second: String = String::create("a::b_c");
+
+  Test::assertEq<str>(SymbolNames::pathSegments(&first).toStr(), "3a_b1c");
+  Test::assertEq<str>(SymbolNames::pathSegments(&second).toStr(), "1a3b_c");
+}
+
+/// A top-level function is named by its module and its name, a namespaced
+/// one by the full written path, a method by its owner and its name.
+@test
+function symbolsNameFunctionsByModuleAndPath(): void {
+  let mut program: SymbolProgram = symbolsOne(
+    "libc/io.ign",
+    "export function close(fd: i32): i32 {\n  return fd;\n}\n\nexport namespace File {\n  function open(flags: i32): i32 {\n    return flags;\n  }\n}\n\nexport record Handle {\n  public fd: i32;\n\n  public raw(&self): i32 {\n    return self.fd;\n  }\n}\n",
+  );
+
+  Test::assertEq<str>(symbolsOf(&mut program, "close", 0).toStr(), "_IN3std4libc2io5closeE");
+  Test::assertEq<str>(symbolsOf(&mut program, "open", 0).toStr(), "_IN3std4libc2io4File4openE");
+  Test::assertEq<str>(symbolsOf(&mut program, "raw", 0).toStr(), "_IN3std4libc2io6Handle3rawE");
+}
+
+/// Functions that share a name in one scope carry their signature; a name
+/// that is unique in its scope does not.
+@test
+function symbolsAddTheSignatureOnlyToOverloads(): void {
+  let mut program: SymbolProgram = symbolsOne(
+    "math.ign",
+    "export function scale(value: i32): i32 {\n  return value;\n}\n\nexport function scale(value: f64): f64 {\n  return value;\n}\n\nexport function single(value: i32): i32 {\n  return value;\n}\n",
+  );
+
+  Test::assertEq<str>(symbolsOf(&mut program, "scale", 0).toStr(), "_IN3std4math5scaleF3i32V3i32EE");
+  Test::assertEq<str>(symbolsOf(&mut program, "scale", 1).toStr(), "_IN3std4math5scaleF3f64V3f64EE");
+  Test::assertEq<str>(symbolsOf(&mut program, "single", 0).toStr(), "_IN3std4math6singleE");
+}
+
+/// The same module, analyzed inside two different programs, gets different
+/// definition ids and the same symbols: the name depends on what the
+/// function is, not on what else the program contains.
+@test
+function symbolsAreTheSameInEveryProgram(): void {
+  let library: str = "export function answer(): i32 {\n  return 42;\n}\n";
+
+  let mut alone: SymbolProgram = symbolsOne("answer.ign", library);
+
+  let mut sources: Vector<String> = Vector::new<String>();
+  let mut names: Vector<String> = Vector::new<String>();
+  sources.push(String::create("export function first(): i32 {\n  return 1;\n}\n\nexport function second(): i32 {\n  return 2;\n}\n"));
+  names.push(String::create("other.ign"));
+  sources.push(String::create(library));
+  names.push(String::create("answer.ign"));
+  let mut together: SymbolProgram = symbolsAnalyze(&sources, &names);
+
+  let aloneSymbol: String = symbolsOf(&mut alone, "answer", 0);
+  let togetherSymbol: String = symbolsOf(&mut together, "answer", 0);
+
+  Test::assertEq<str>(aloneSymbol.toStr(), "_IN3std6answer6answerE");
+  Test::assertEq<str>(togetherSymbol.toStr(), aloneSymbol.toStr());
+}
+
+/// Without a module name there is no identity to derive a symbol from, and
+/// the caller keeps its own name.
+@test
+function symbolsNeedAModuleName(): void {
+  let file: SourceFile = SourceFile::create("loose.ign", "function loose(): i32 {\n  return 1;\n}\n");
+  let parsed: ParseOutput = Parser::parseFile(&file);
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let _ = Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  let symbol: Analyzer::SymbolId = symbols.intern("loose");
+  let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(symbol);
+
+  let Option::SOME(defId) = candidates.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(SymbolNames::symbolFor(&mut defStore, &mut typeStore, &mut symbols, *defId).isNone());
+}
+
+/// A static field has no written path of its own: it is named after the
+/// record that declares it, like a method.
+@test
+function symbolsNameStaticFieldsAfterTheirRecord(): void {
+  let mut program: SymbolProgram = symbolsOne(
+    "process/runtime/mod.ign",
+    "export record ProcessSlots {\n  static mut ARGC: i32 = 0;\n}\n",
+  );
+
+  let assignment: SymbolNames::Assignment = SymbolNames::assignSymbols(&mut program.defStore, &mut program.typeStore, &mut program.symbols);
+  Test::assertEq<u64>(assignment.perProgram, 0);
+
+  let symbol: Analyzer::SymbolId = program.symbols.intern("ARGC");
+  let candidates: Vector<Analyzer::DefinitionId> = program.defStore.definitionsNamed(symbol);
+
+  let Option::SOME(defId) = candidates.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(name) = program.defStore.symbolNameOf(*defId) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(name.toStr(), "_IN3std7process7runtime12ProcessSlots4ARGCE");
+}
+
+/// A symbol longer than the 79 characters QBE accepts keeps its first 62
+/// characters and ends in `_` and the 64-bit FNV-1a hash of the whole symbol,
+/// so it stays the same in every program and fits every backend.
+@test
+function symbolsCapLongNamesWithAHashOfTheFullName(): void {
+  let long: String = String::create("_IN3std2fs2Fs10removeFileFRN3std4path4Path7PathBufEVN3std6result6ResultI4voidN3std2io5error2Io7IoErrorEEEEE");
+  let capped: String = SymbolNames::capped(long);
+
+  Test::assertEq<str>(capped.toStr(), "_IN3std2fs2Fs10removeFileFRN3std4path4Path7PathBufEVN3std6resu_c0d0f9edff990fca");
+  Test::assertEq<u64>(capped.length(), 79);
+}
+
+/// A symbol of 79 characters or fewer is left as it is.
+@test
+function symbolsKeepNamesThatFit(): void {
+  let fits: String = String::create("_IN1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a");
+  Test::assertEq<u64>(fits.length(), 79);
+  Test::assertEq<str>(SymbolNames::capped(fits.clone()).toStr(), fits.toStr());
+}
