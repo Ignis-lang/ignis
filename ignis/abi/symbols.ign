@@ -10,14 +10,15 @@
 //! | Production | Form |
 //! | --- | --- |
 //! | nested name | `N` parts `E` |
+//! | module | `L` segments `E` |
 //! | identifier segment | byte length, then the identifier: `4libc` |
-//! | escaped segment | `X`, length of the escaped text, `_`, then the text with each invalid byte as `_` and two hex digits and `_` doubled: `X5_a_2db` |
+//! | escaped segment, for text with a byte invalid in a C identifier or a leading digit | `X`, length of the escaped text, `_`, then the text with each invalid byte as `_` and two hex digits and `_` doubled: `X5_a_2db` |
 //! | generic arguments | `I` types `E` |
 //! | overload signature | `F` parameter types `V` return type `E` |
 //! | closure function | `N` enclosing name `E`, then `Ct` or `Cd`, ordinal, `_` |
 //!
-//! A name's parts are the logical module (`std`, `libc`, `io`), then the
-//! written path of the declaration; a method or a static field is its owner's
+//! A name's parts are the logical module as one closed part (`L3std4libc2ioE`),
+//! then the written path of the declaration; a method or a static field is its owner's
 //! name followed by its own segment. Generic arguments follow the segment they instantiate. A
 //! signature is only added for a function that shares its name with another
 //! function of the same scope, because only then is the path not enough.
@@ -73,9 +74,17 @@ export namespace SymbolNames {
   }
 
   /// `text` as one segment: its byte length then the text, or the escaped
-  /// form when a byte would not be valid in a C identifier.
+  /// form when a byte would not be valid in a C identifier or the text starts
+  /// with a digit.
   function segment(text: &String): String {
     let mut plain: boolean = text.length() > 0;
+
+    // A leading digit would read as part of the length in front of it.
+    if (let Option::SOME(first) = text.byteAt(0)) {
+      if (first >= '0' as u8 && first <= '9' as u8) {
+        plain = false;
+      }
+    }
     let mut index: u64 = 0;
 
     while (index < text.length()) {
@@ -165,13 +174,16 @@ export namespace SymbolNames {
     return SymbolNames::splitSegments(path, "::");
   }
 
-  /// The segments of a module's logical name.
+  /// A module's logical name as a closed part: `L`, its segments, `E`.
   ///
   /// `relativePath` is the module file's path below the std root for a std
-  /// module, or below the project root otherwise, with `/` separators. The
-  /// `.ign` extension and a final `mod` are dropped: `libc/io.ign` is
-  /// `std::libc::io` and `libc/mod.ign` is `std::libc`. A project module is
-  /// named under its package.
+  /// module, or below the project root otherwise, with `/` separators. Only
+  /// the `.ign` extension is dropped, so `libc/io.ign` is `L3std4libc2ioE`
+  /// and `libc/mod.ign` is `L3std4libc3modE`: keeping `mod` keeps `a.ign`
+  /// and `a/mod.ign` apart. A project module is named under its package.
+  /// The closing `E` keeps the module apart from the written path that
+  /// follows it, so `util.ign` declaring `text::width` and `util/text.ign`
+  /// declaring `width` get different symbols.
   function moduleSegments(isStd: boolean, relativePath: &String, packageName: &String): String {
     let mut path: String = relativePath.clone();
 
@@ -179,18 +191,11 @@ export namespace SymbolNames {
       path = path.substringBytes(0, path.length() - 4);
     }
 
-    if (path.equals("mod")) {
-      path = String::new();
-    } else if (path.endsWith("/mod")) {
-      path = path.substringBytes(0, path.length() - 4);
-    }
-
     let root: String = isStd ? String::create("std") : packageName.clone();
-    let mut encoded: String = SymbolNames::segment(&root);
+    let rootSegment: String = SymbolNames::segment(&root);
     let pathPart: String = SymbolNames::splitSegments(&path, "/");
 
-    encoded.push(&pathPart);
-    return encoded;
+    return `L${rootSegment.toStr()}${pathPart.toStr()}E`;
   }
 
   /// How many symbol-bearing definitions got a stable name, and how many kept

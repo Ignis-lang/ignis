@@ -157,18 +157,21 @@ function symbolsSegmentEscapesNonIdentifierBytes(): void {
   Test::assertEq<str>(SymbolNames::segment(&name).toStr(), "X5_a_2db");
 }
 
+/// The module part drops only the `.ign` extension and is closed by its own
+/// `E`, so `a.ign` and `a/mod.ign` stay apart, and so do a module path and a
+/// namespace path that spell the same words.
 @test
-function symbolsModuleSegmentsDropTheExtensionAndAFinalMod(): void {
+function symbolsModuleSegmentsAreClosedAndKeepMod(): void {
   let package: String = String::create("app");
   let io: String = String::create("libc/io.ign");
   let libc: String = String::create("libc/mod.ign");
   let root: String = String::create("mod.ign");
   let project: String = String::create("codegen/qbe/mod.ign");
 
-  Test::assertEq<str>(SymbolNames::moduleSegments(true, &io, &package).toStr(), "3std4libc2io");
-  Test::assertEq<str>(SymbolNames::moduleSegments(true, &libc, &package).toStr(), "3std4libc");
-  Test::assertEq<str>(SymbolNames::moduleSegments(true, &root, &package).toStr(), "3std");
-  Test::assertEq<str>(SymbolNames::moduleSegments(false, &project, &package).toStr(), "3app7codegen3qbe");
+  Test::assertEq<str>(SymbolNames::moduleSegments(true, &io, &package).toStr(), "L3std4libc2ioE");
+  Test::assertEq<str>(SymbolNames::moduleSegments(true, &libc, &package).toStr(), "L3std4libc3modE");
+  Test::assertEq<str>(SymbolNames::moduleSegments(true, &root, &package).toStr(), "L3std3modE");
+  Test::assertEq<str>(SymbolNames::moduleSegments(false, &project, &package).toStr(), "L3app7codegen3qbe3modE");
 }
 
 /// `a_b::c` and `a::b_c` flatten to the same text with `_` joining, and to
@@ -191,9 +194,9 @@ function symbolsNameFunctionsByModuleAndPath(): void {
     "export function close(fd: i32): i32 {\n  return fd;\n}\n\nexport namespace File {\n  function open(flags: i32): i32 {\n    return flags;\n  }\n}\n\nexport record Handle {\n  public fd: i32;\n\n  public raw(&self): i32 {\n    return self.fd;\n  }\n}\n",
   );
 
-  Test::assertEq<str>(symbolsOf(&mut program, "close", 0).toStr(), "_IN3std4libc2io5closeE");
-  Test::assertEq<str>(symbolsOf(&mut program, "open", 0).toStr(), "_IN3std4libc2io4File4openE");
-  Test::assertEq<str>(symbolsOf(&mut program, "raw", 0).toStr(), "_IN3std4libc2io6Handle3rawE");
+  Test::assertEq<str>(symbolsOf(&mut program, "close", 0).toStr(), "_INL3std4libc2ioE5closeE");
+  Test::assertEq<str>(symbolsOf(&mut program, "open", 0).toStr(), "_INL3std4libc2ioE4File4openE");
+  Test::assertEq<str>(symbolsOf(&mut program, "raw", 0).toStr(), "_INL3std4libc2ioE6Handle3rawE");
 }
 
 /// Functions that share a name in one scope carry their signature; a name
@@ -205,9 +208,9 @@ function symbolsAddTheSignatureOnlyToOverloads(): void {
     "export function scale(value: i32): i32 {\n  return value;\n}\n\nexport function scale(value: f64): f64 {\n  return value;\n}\n\nexport function single(value: i32): i32 {\n  return value;\n}\n",
   );
 
-  Test::assertEq<str>(symbolsOf(&mut program, "scale", 0).toStr(), "_IN3std4math5scaleF3i32V3i32EE");
-  Test::assertEq<str>(symbolsOf(&mut program, "scale", 1).toStr(), "_IN3std4math5scaleF3f64V3f64EE");
-  Test::assertEq<str>(symbolsOf(&mut program, "single", 0).toStr(), "_IN3std4math6singleE");
+  Test::assertEq<str>(symbolsOf(&mut program, "scale", 0).toStr(), "_INL3std4mathE5scaleF3i32V3i32EE");
+  Test::assertEq<str>(symbolsOf(&mut program, "scale", 1).toStr(), "_INL3std4mathE5scaleF3f64V3f64EE");
+  Test::assertEq<str>(symbolsOf(&mut program, "single", 0).toStr(), "_INL3std4mathE6singleE");
 }
 
 /// The same module, analyzed inside two different programs, gets different
@@ -230,7 +233,7 @@ function symbolsAreTheSameInEveryProgram(): void {
   let aloneSymbol: String = symbolsOf(&mut alone, "answer", 0);
   let togetherSymbol: String = symbolsOf(&mut together, "answer", 0);
 
-  Test::assertEq<str>(aloneSymbol.toStr(), "_IN3std6answer6answerE");
+  Test::assertEq<str>(aloneSymbol.toStr(), "_INL3std6answerE6answerE");
   Test::assertEq<str>(togetherSymbol.toStr(), aloneSymbol.toStr());
 }
 
@@ -281,7 +284,7 @@ function symbolsNameStaticFieldsAfterTheirRecord(): void {
     return;
   };
 
-  Test::assertEq<str>(name.toStr(), "_IN3std7process7runtime12ProcessSlots4ARGCE");
+  Test::assertEq<str>(name.toStr(), "_INL3std7process7runtime3modE12ProcessSlots4ARGCE");
 }
 
 /// A symbol longer than the 79 characters QBE accepts keeps its first 62
@@ -302,4 +305,41 @@ function symbolsKeepNamesThatFit(): void {
   let fits: String = String::create("_IN1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a");
   Test::assertEq<u64>(fits.length(), 79);
   Test::assertEq<str>(SymbolNames::capped(fits.clone()).toStr(), fits.toStr());
+}
+
+/// A segment whose text starts with a digit is escaped: a plain `<length><text>`
+/// would read its leading digits as part of the length.
+@test
+function symbolsEscapeSegmentsThatStartWithADigit(): void {
+  let digitLeading: String = String::create("1a");
+  Test::assertEq<str>(SymbolNames::segment(&digitLeading).toStr(), "X2_1a");
+
+  let package: String = String::create("main");
+  let first: String = String::create("1a/abcdefghijklmnopqr.ign");
+  let second: String = String::create("a18abcdefghijklmnopqr.ign");
+  let firstModule: String = SymbolNames::moduleSegments(false, &first, &package);
+  let secondModule: String = SymbolNames::moduleSegments(false, &second, &package);
+
+  Test::assertEq<str>(firstModule.toStr(), "L4mainX2_1a18abcdefghijklmnopqrE");
+  Test::assertEq<str>(secondModule.toStr(), "L4main21a18abcdefghijklmnopqrE");
+}
+
+/// `text::width` declared in `util.ign` and `width` declared in
+/// `util/text.ign` spell the same words; the closed module part tells them
+/// apart.
+@test
+function symbolsSeparateTheModuleFromTheWrittenPath(): void {
+  let mut sources: Vector<String> = Vector::new<String>();
+  let mut names: Vector<String> = Vector::new<String>();
+  sources.push(String::create("export namespace text {\n  export function width(): i32 {\n    return 1;\n  }\n}\n"));
+  names.push(String::create("util.ign"));
+  sources.push(String::create("export function width(): i32 {\n  return 2;\n}\n"));
+  names.push(String::create("util/text.ign"));
+  let mut program: SymbolProgram = symbolsAnalyze(&sources, &names);
+
+  let namespaced: String = symbolsOf(&mut program, "width", 0);
+  let moduleLevel: String = symbolsOf(&mut program, "width", 1);
+
+  Test::assertEq<str>(namespaced.toStr(), "_INL3std4utilE4text5widthE");
+  Test::assertEq<str>(moduleLevel.toStr(), "_INL3std4util4textE5widthE");
 }
