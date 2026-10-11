@@ -52,7 +52,6 @@ import Doc from "./doc/mod";
 import BuildLayout from "./build/layout";
 import
   BuildArtifacts,
-  artifactsAssemblyPath,
   artifactsEmitObject,
   projectArtifacts,
   singleFileArtifacts,
@@ -60,7 +59,7 @@ import
 from "./build/artifacts";
 import ArchiveTool from "./build/archive";
 import CCompiler from "./build/c_compiler";
-import QbeTool, qbeIsQbeTarget from "./build/qbe";
+import Backend, Backends from "./build/backend";
 import Linker from "./build/linker";
 import BuildOverrides, DiscoveryResult, DocDiscovery, Resolver from "./build/resolver";
 import SymbolNames from "./abi/symbols";
@@ -573,7 +572,10 @@ function relinkCachedBuild(
 
   let noInlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
 
-  let linkErrors: u64 = compileAndLinkUnits(
+  // A relink reuses the object the cache reported current, so no unit is
+  // built: whichever backend produced the object, linking it is the same.
+  let linkErrors: u64 = buildAndLinkUnits(
+    Backend::C,
     &noSources,
     &noObjects,
     &prebuiltObjects,
@@ -582,6 +584,7 @@ function relinkCachedBuild(
     profile,
     file,
     verbose,
+    false,
     TestRunner::jobLimit(Option::NONE),
     &noInlineAsmUnits,
   );
@@ -669,245 +672,40 @@ function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
   return libs;
 }
 
-/// Compile every emitted translation unit into an object and link nothing,
-/// which is what a freestanding library build produces. `usesInlineAsm`
-/// says whether the units contain inline asm.
-///
-/// Returns 0 when every unit compiles and 1 when any one fails.
-function compileObjectUnits(
-  sourcePaths: &Vector<Path::PathBuf>,
-  objectPaths: &Vector<Path::PathBuf>,
-  stdRoot: &Path::PathBuf,
-  profile: &BuildProfile,
-  file: &SourceFile,
-  verbose: boolean,
-  usesInlineAsm: boolean,
-): u64 {
-  let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
-  let profileFlags: Vector<String> = toolchainCompileFlags(profile);
-  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, usesInlineAsm);
-
-  if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
-    profile.cc.toStr(),
-    sourcePaths,
-    objectPaths,
-    &includeDirs,
-    &extraFlags,
-    TestRunner::jobLimit(Option::NONE),
-  )) {
-    renderBagToStderr(&compileBag, file);
-    printStatus(String::create("  object: failed"), verbose);
-    return 1;
-  }
-
-  let mut objectIndex: u64 = 0;
-
-  while (objectIndex < objectPaths.length()) {
-    let Option::SOME(objectPath) = objectPaths.get(objectIndex) else {
-      break;
-    };
-
-    printStatus(`  object: ${objectPath.asStr()}`, verbose);
-    objectIndex += 1;
-  }
-
-  return 0;
+/// The backend a validated target names. The resolver has already rejected
+/// any other name, so an unknown one cannot reach here; C stands in for it.
+function driverBackend(name: &String): Backend {
+  return match (Backends::fromName(name.toStr())) {
+    Option::SOME(backend) -> backend,
+    Option::NONE -> Backend::C,
+  };
 }
 
-/// Compile and link one fixture's translation unit without reporting anything.
+/// Turns every emitted translation unit into an object with `backend`.
 ///
-/// A fixture's toolchain failure belongs to that fixture's own report block,
-/// not to the run's output, so nothing is printed and nothing is rendered.
-/// `usesInlineAsm` says whether the units contain inline asm.
+/// `inlineAsmUnits` says, for each unit of `sourcePaths`, whether it contains
+/// inline asm: a C unit that does is compiled on its own with `-masm=intel`.
+/// `quiet` prints and renders nothing, which is what a fixture compiled inside
+/// a test run needs.
 ///
-/// Returns 0 when every toolchain step succeeds and 1 when any one fails.
-function compileAndLinkQuietly(
+/// Returns 0 when every unit builds and 1 when any one fails.
+function buildUnitObjects(
+  backend: Backend,
   sourcePaths: &Vector<Path::PathBuf>,
   objectPaths: &Vector<Path::PathBuf>,
-  outputPath: &Path::PathBuf,
-  stdRoot: &Path::PathBuf,
-  profile: &BuildProfile,
-  usesInlineAsm: boolean,
-): u64 {
-  let cc: str = profile.cc.toStr();
-  let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
-  let profileFlags: Vector<String> = toolchainCompileFlags(profile);
-  let extraFlags: Vector<String> = inlineAsmUnitFlags(&profileFlags, usesInlineAsm);
-
-  let mut objects: Vector<String> = Vector::new<String>();
-  let mut unitIndex: u64 = 0;
-
-  while (unitIndex < objectPaths.length()) {
-    let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
-      break;
-    };
-
-    objects.push(objectPath.toString());
-    unitIndex += 1;
-  }
-
-  if (qbeIsQbeTarget(profile.backend.toStr())) {
-    let file: SourceFile = SourceFile::create("", "");
-    return assembleUnits(sourcePaths, objectPaths, outputPath, stdRoot, profile, &file, false, true, true);
-  }
-
-  if (let Result::ERROR(_) = CCompiler::compileObjects(
-    cc,
-    sourcePaths,
-    objectPaths,
-    &includeDirs,
-    &extraFlags,
-    1,
-  )) {
-    return 1;
-  }
-
-  let archives: Vector<String> = Vector::new<String>();
-  let libs: Vector<String> = toolchainLinkLibraries(profile);
-
-  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
-
-  if (let Result::ERROR(_) = Linker::link(cc, outputPath, &objects, &archives, &libs, &linkFlags)) {
-    return 1;
-  }
-
-  return 0;
-}
-
-/// Lower every emitted QBE IL unit to assembly, assemble it into an object
-/// with the build's C driver and, when `linkExecutable` asks for it, link the
-/// executable.
-///
-/// `qbe` never touches the existing linker inputs: its `.s` output becomes an
-/// ordinary object, so the link step and the libraries it pulls in are exactly
-/// the ones a C build uses.
-///
-/// Returns 0 when every toolchain step succeeds and 1 when any one fails; a
-/// failing step avoids the link entirely.
-function assembleUnits(
-  sourcePaths: &Vector<Path::PathBuf>,
-  objectPaths: &Vector<Path::PathBuf>,
-  outputPath: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
   file: &SourceFile,
   verbose: boolean,
   quiet: boolean,
-  linkExecutable: boolean,
-): u64 {
-  let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
-  let extraFlags: Vector<String> = toolchainCompileFlags(profile);
-
-  let mut objects: Vector<String> = Vector::new<String>();
-  let mut unitIndex: u64 = 0;
-
-  while (unitIndex < sourcePaths.length() && unitIndex < objectPaths.length()) {
-    let Option::SOME(sourcePath) = sourcePaths.get(unitIndex) else {
-      break;
-    };
-    let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
-      break;
-    };
-
-    // The assembly path mirrors the object path, so two units never collide.
-    let assemblyPath: Path::PathBuf = artifactsAssemblyPath(objectPath);
-
-    match (QbeTool::lowerToAssembly("qbe", sourcePath, &assemblyPath)) {
-      Result::OK(_) -> {},
-      Result::ERROR(lowerBag) -> {
-        if (!quiet) { renderBagToStderr(&lowerBag, file); }
-        printStatus(String::create("  qbe: failed"), verbose && !quiet);
-        return 1;
-      },
-    };
-
-    printStatus(`  qbe: ${assemblyPath.asStr()}`, verbose && !quiet);
-
-    match (QbeTool::assembleObject(profile.cc.toStr(), &assemblyPath, objectPath, &includeDirs, &extraFlags)) {
-      Result::OK(_) -> {},
-      Result::ERROR(compileBag) -> {
-        if (!quiet) { renderBagToStderr(&compileBag, file); }
-        printStatus(String::create("  object: failed"), verbose && !quiet);
-        return 1;
-      },
-    };
-
-    printStatus(`  object: ${objectPath.asStr()}`, verbose && !quiet);
-    objects.push(objectPath.toString());
-    unitIndex += 1;
-  }
-
-  if (!linkExecutable) {
-    return 0;
-  }
-
-  let archives: Vector<String> = Vector::new<String>();
-  let libs: Vector<String> = toolchainLinkLibraries(profile);
-
-  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
-
-  if (let Result::ERROR(linkBag) = Linker::link(profile.cc.toStr(), outputPath, &objects, &archives, &libs, &linkFlags)) {
-    if (!quiet) {
-      renderBagToStderr(&linkBag, file);
-    }
-    printStatus(String::create("  link: failed"), verbose && !quiet);
-    return 1;
-  }
-
-  printStatus(`  link: ${outputPath.asStr()}`, verbose && !quiet);
-  return 0;
-}
-
-/// Compile every emitted translation unit and link them into an executable.
-///
-/// `prebuiltObjects` are linked without being compiled, which is how a run
-/// reuses an object the build cache reported current. `inlineAsmUnits` says,
-/// for each unit of `sourcePaths`, whether it contains inline asm; the units
-/// that do are compiled on their own with `-masm=intel`.
-///
-/// Returns 0 when every toolchain step succeeds and 1 when any one fails.
-function compileAndLinkUnits(
-  sourcePaths: &Vector<Path::PathBuf>,
-  objectPaths: &Vector<Path::PathBuf>,
-  prebuiltObjects: &Vector<Path::PathBuf>,
-  outputPath: &Path::PathBuf,
-  stdRoot: &Path::PathBuf,
-  profile: &BuildProfile,
-  file: &SourceFile,
-  verbose: boolean,
   jobs: u64,
   inlineAsmUnits: &Vector<boolean>,
 ): u64 {
-  let cc: str = profile.cc.toStr();
   let includeDirs: Vector<String> = toolchainIncludeDirs(stdRoot, profile);
   let extraFlags: Vector<String> = toolchainCompileFlags(profile);
 
-  let mut objects: Vector<String> = Vector::new<String>();
-  let mut unitIndex: u64 = 0;
-
-  while (unitIndex < objectPaths.length()) {
-    let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
-      break;
-    };
-
-    objects.push(objectPath.toString());
-    unitIndex += 1;
-  }
-
-  let mut prebuiltIndex: u64 = 0;
-
-  while (prebuiltIndex < prebuiltObjects.length()) {
-    let Option::SOME(objectPath) = prebuiltObjects.get(prebuiltIndex) else {
-      break;
-    };
-
-    objects.push(objectPath.toString());
-    prebuiltIndex += 1;
-  }
-
-  // A relink reuses every object it links, so there is no unit to compile and
-  // the toolchain is never invoked for one. The units with inline asm and the
-  // units without take different flags, so each group is compiled on its own.
+  // The units with inline asm and the units without take different flags, so
+  // each group is built on its own.
   let mut groupIndex: u64 = 0;
 
   while (groupIndex < 2) {
@@ -944,42 +742,127 @@ function compileAndLinkUnits(
 
     let groupFlags: Vector<String> = inlineAsmUnitFlags(&extraFlags, groupUsesInlineAsm);
 
-    if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
-      cc,
+    if (let Result::ERROR(compileBag) = Backends::compileUnits(
+      backend,
+      profile.cc.toStr(),
       &groupSources,
       &groupObjects,
       &includeDirs,
       &groupFlags,
       jobs,
     )) {
-      renderBagToStderr(&compileBag, file);
-      printStatus(String::create("  link: failed"), verbose);
+      if (!quiet) {
+        renderBagToStderr(&compileBag, file);
+      }
+
+      printStatus(String::create("  object: failed"), verbose && !quiet);
       return 1;
     }
+
+    let mut objectIndex: u64 = 0;
+
+    while (objectIndex < groupObjects.length()) {
+      if (let Option::SOME(objectPath) = groupObjects.get(objectIndex)) {
+        printStatus(`  object: ${objectPath.asStr()}`, verbose && !quiet);
+      }
+
+      objectIndex += 1;
+    }
+  }
+
+  return 0;
+}
+
+/// Links `objects` into the executable at `outputPath`. The step is the same
+/// for every backend: the objects are ordinary objects, and the libraries a
+/// build pulls in depend only on its profile.
+///
+/// Returns 0 when the link succeeds and 1 when it fails.
+function linkObjects(
+  objects: &Vector<Path::PathBuf>,
+  outputPath: &Path::PathBuf,
+  profile: &BuildProfile,
+  file: &SourceFile,
+  verbose: boolean,
+  quiet: boolean,
+): u64 {
+  let mut objectTexts: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < objects.length()) {
+    if (let Option::SOME(objectPath) = objects.get(index)) {
+      objectTexts.push(objectPath.toString());
+    }
+
+    index += 1;
   }
 
   let archives: Vector<String> = Vector::new<String>();
   let libs: Vector<String> = toolchainLinkLibraries(profile);
-
   let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
-  Output::beginPhase("link", 0);
+  if (!quiet) {
+    Output::beginPhase("link", 0);
+  }
 
-  if (let Result::ERROR(linkBag) = Linker::link(
-    cc,
-    outputPath,
-    &objects,
-    &archives,
-    &libs,
-    &linkFlags,
-  )) {
-    renderBagToStderr(&linkBag, file);
-    printStatus(String::create("  link: failed"), verbose);
+  if (let Result::ERROR(linkBag) = Linker::link(profile.cc.toStr(), outputPath, &objectTexts, &archives, &libs, &linkFlags)) {
+    if (!quiet) {
+      renderBagToStderr(&linkBag, file);
+    }
+
+    printStatus(String::create("  link: failed"), verbose && !quiet);
     return 1;
   }
 
-  printStatus(`  link: ${outputPath.asStr()}`, verbose);
+  printStatus(`  link: ${outputPath.asStr()}`, verbose && !quiet);
   return 0;
+}
+
+/// Builds the objects of `sourcePaths` with `backend`, then links them,
+/// together with the already built `prebuiltObjects`, into `outputPath`.
+///
+/// Returns 0 when every step succeeds and 1 when any one fails; a failing
+/// build avoids the link entirely.
+function buildAndLinkUnits(
+  backend: Backend,
+  sourcePaths: &Vector<Path::PathBuf>,
+  objectPaths: &Vector<Path::PathBuf>,
+  prebuiltObjects: &Vector<Path::PathBuf>,
+  outputPath: &Path::PathBuf,
+  stdRoot: &Path::PathBuf,
+  profile: &BuildProfile,
+  file: &SourceFile,
+  verbose: boolean,
+  quiet: boolean,
+  jobs: u64,
+  inlineAsmUnits: &Vector<boolean>,
+): u64 {
+  if (buildUnitObjects(backend, sourcePaths, objectPaths, stdRoot, profile, file, verbose, quiet, jobs, inlineAsmUnits) > 0) {
+    return 1;
+  }
+
+  let mut objects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut index: u64 = 0;
+
+  while (index < objectPaths.length()) {
+    if (let Option::SOME(objectPath) = objectPaths.get(index)) {
+      objects.push(objectPath.clone());
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < prebuiltObjects.length()) {
+    if (let Option::SOME(objectPath) = prebuiltObjects.get(index)) {
+      objects.push(objectPath.clone());
+    }
+
+    index += 1;
+  }
+
+  return linkObjects(&objects, outputPath, profile, file, verbose, quiet);
 }
 
 /// `path` below `root`, or `NONE` when it lies elsewhere.
@@ -2079,38 +1962,43 @@ export function compileDiscovered(
     usesInlineAsm: false,
   };
 
-  if (qbeIsQbeTarget(discovery.target.toStr())) {
-    let qbeRoots: Vector<u32> = qbeExportRoots(&mut defStore, &lirResult.program, &infos, &externalSymbols);
-    let qbe: CodegenQbe::EmitOutput = CodegenQbe::emitProgram(
-      &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &qbeRoots,
-    );
-    if (let Option::SOME(message) = &qbe.error) {
-      let diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "B4004", message.toStr(), SourceSpan::new("", 0, 0));
-      let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
-      diagnostics.push(diagnostic);
-      if (quiet) {
-        collectDiagnosticMessages(&diagnostics, Severity::ERROR, false, &mut errorMessages);
-      } else {
-        renderBagCollecting(&diagnostics, file, &mut report);
-      }
-      return CompiledProgram {
-        source: String::new(),
-        tests: tests,
-        errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors + 1,
-        warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
-        errorMessages: errorMessages,
-        warningMessages: warningMessages,
-        report: report,
-        usesInlineAsm: false,
-      };
-    }
-    emitResult.source = qbe.source;
-    emitResult.functions = qbe.functions;
-  } else {
-    emitResult = CodegenC::emitProgram(
-      &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &externalSymbols, &infos, &mut hooks,
-    );
-  }
+  // Every backend is a variant of `Backend`, and this match has no catch-all:
+  // a new backend does not compile until it says how it emits.
+  match (driverBackend(&discovery.target)) {
+    Backend::C -> {
+      emitResult = CodegenC::emitProgram(
+        &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &externalSymbols, &infos, &mut hooks,
+      );
+    },
+    Backend::QBE -> {
+        let qbeRoots: Vector<u32> = qbeExportRoots(&mut defStore, &lirResult.program, &infos, &externalSymbols);
+        let qbe: CodegenQbe::EmitOutput = CodegenQbe::emitProgram(
+          &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &qbeRoots,
+        );
+        if (let Option::SOME(message) = &qbe.error) {
+          let diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "B4004", message.toStr(), SourceSpan::new("", 0, 0));
+          let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+          diagnostics.push(diagnostic);
+          if (quiet) {
+            collectDiagnosticMessages(&diagnostics, Severity::ERROR, false, &mut errorMessages);
+          } else {
+            renderBagCollecting(&diagnostics, file, &mut report);
+          }
+          return CompiledProgram {
+            source: String::new(),
+            tests: tests,
+            errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors + 1,
+            warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
+            errorMessages: errorMessages,
+            warningMessages: warningMessages,
+            report: report,
+            usesInlineAsm: false,
+          };
+        }
+        emitResult.source = qbe.source;
+        emitResult.functions = qbe.functions;
+    },
+  };
 
   if (!quiet) {
     printStatus(
@@ -2403,15 +2291,17 @@ function runCompile(
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   profile.freestanding = !discovery.stdEnabled;
 
-  // The qbe backend builds hosted executables only for now; anything else it
-  // cannot build is rejected before a single toolchain step runs.
+  // A mode the selected backend cannot build (qbe has no freestanding
+  // support yet) is rejected before a single toolchain step runs.
   if (!checkOnly) {
-    if (let Result::ERROR(backendBag) = QbeTool::checkTargetAllowed(profile.backend.toStr(), profile.freestanding)) {
+    if (let Result::ERROR(backendBag) = Backends::checkAllowed(profile.backend.toStr(), profile.freestanding)) {
       renderBagToStderr(&backendBag, &file);
       printFailure("Build", 1, 0);
       return 1;
     }
   }
+
+  let backend: Backend = driverBackend(&profile.backend);
 
   let objectOnly: boolean = (profile.freestanding && !discovery.bin) || options.emitObject;
   let layoutArtifacts: BuildArtifacts = projectMode ? projectArtifacts(profile.backend.toStr(), &discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(profile.backend.toStr(), &options.outputPath);
@@ -2498,34 +2388,13 @@ function runCompile(
       let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
       inlineAsmUnits.push(compiled.usesInlineAsm);
 
-      if (objectOnly && qbeIsQbeTarget(profile.backend.toStr())) {
-        linkErrors += assembleUnits(
-          &sourcePaths,
-          &objectPaths,
-          &artifacts.object,
-          &discovery.stdRoot,
-          &profile,
-          &file,
-          verbose,
-          false,
-          false,
-        );
-      } else if (objectOnly) {
-        linkErrors += compileObjectUnits(&sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, verbose, compiled.usesInlineAsm);
-      } else if (qbeIsQbeTarget(profile.backend.toStr()) && discovery.bin) {
-        linkErrors += assembleUnits(
-          &sourcePaths,
-          &objectPaths,
-          &artifacts.executable,
-          &discovery.stdRoot,
-          &profile,
-          &file,
-          verbose,
-          false,
-          true,
-        );
+      let jobs: u64 = TestRunner::jobLimit(Option::NONE);
+
+      if (objectOnly) {
+        linkErrors += buildUnitObjects(backend, &sourcePaths, &objectPaths, &discovery.stdRoot, &profile, &file, verbose, false, jobs, &inlineAsmUnits);
       } else if (discovery.bin) {
-        linkErrors += compileAndLinkUnits(
+        linkErrors += buildAndLinkUnits(
+          backend,
           &sourcePaths,
           &objectPaths,
           &noPrebuiltObjects,
@@ -2534,7 +2403,8 @@ function runCompile(
           &profile,
           &file,
           verbose,
-          TestRunner::jobLimit(Option::NONE),
+          false,
+          jobs,
           &inlineAsmUnits,
         );
       }
@@ -2796,7 +2666,27 @@ function runProgramFixture(
   let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   objectPaths.push(objectPath.clone());
 
-  if (compileAndLinkQuietly(&sourcePaths, &objectPaths, &binaryPath, &fixtureDiscovery.stdRoot, &profile, compiled.usesInlineAsm) > 0) {
+  let noPrebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
+  inlineAsmUnits.push(compiled.usesInlineAsm);
+  let quietFile: SourceFile = SourceFile::create("", "");
+
+  // A fixture's toolchain failure belongs to its own report block, so the
+  // steps run quietly.
+  if (buildAndLinkUnits(
+    driverBackend(&profile.backend),
+    &sourcePaths,
+    &objectPaths,
+    &noPrebuiltObjects,
+    &binaryPath,
+    &fixtureDiscovery.stdRoot,
+    &profile,
+    &quietFile,
+    false,
+    true,
+    1,
+    &inlineAsmUnits,
+  ) > 0) {
     return String::create("compilation failed");
   }
 
@@ -3125,7 +3015,8 @@ function linkTestBinary(
 
   let jobs: u64 = TestRunner::jobLimit(options.jobs);
 
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, options.verbose, jobs, &inlineAsmUnits) > 0) {
+  // The harness is always C, and so is the program unit of a test build.
+  if (buildAndLinkUnits(Backend::C, &sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, options.verbose, false, jobs, &inlineAsmUnits) > 0) {
     return Option::NONE;
   }
 

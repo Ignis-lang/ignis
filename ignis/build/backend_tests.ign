@@ -1,0 +1,98 @@
+import String from "std::string";
+import Test from "std::test";
+
+import DiagnosticBag from "@compiler::diagnostics";
+import Backend, Backends from "./backend";
+
+function backendContains(text: str, needle: str): boolean {
+  let haystack: String = String::create(text);
+  let pin: String = String::create(needle);
+  return haystack.contains(&pin);
+}
+
+/// Every backend reads back from its own name, and nothing else is a backend.
+@test
+function backendNamesRoundTrip(): void {
+  let Option::SOME(c) = Backends::fromName("c") else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(Backends::name(c), "c");
+
+  let Option::SOME(qbe) = Backends::fromName("qbe") else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(Backends::name(qbe), "qbe");
+
+  Test::assert(Backends::fromName("wasm").isNone());
+  Test::assert(Backends::fromName("").isNone());
+  Test::assert(Backends::fromName("QBE").isNone());
+}
+
+/// The translation unit a backend emits is C for `c` and QBE IL for `qbe`.
+@test
+function backendUnitExtensions(): void {
+  Test::assertEq<str>(Backends::unitExtension(Backend::C), "c");
+  Test::assertEq<str>(Backends::unitExtension(Backend::QBE), "ssa");
+}
+
+/// Only the C backend builds freestanding programs today.
+@test
+function backendFreestandingCapability(): void {
+  Test::assertEq<boolean>(Backends::supportsFreestanding(Backend::C), true);
+  Test::assertEq<boolean>(Backends::supportsFreestanding(Backend::QBE), false);
+}
+
+/// The supported names, as diagnostics list them.
+@test
+function backendSupportedNames(): void {
+  Test::assertEq<str>(Backends::supportedNames().toStr(), "c, qbe");
+}
+
+/// Admission: `c` builds anything, `qbe` only hosted programs, and an unknown
+/// name is rejected with the list of supported ones.
+@test
+function backendAdmission(): void {
+  match (Backends::checkAllowed("c", true)) {
+    Result::OK(backend) -> Test::assertEq<str>(Backends::name(backend), "c"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (Backends::checkAllowed("qbe", false)) {
+    Result::OK(backend) -> Test::assertEq<str>(Backends::name(backend), "qbe"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let freestanding: DiagnosticBag = match (Backends::checkAllowed("qbe", true)) {
+    Result::OK(_) -> {
+      Test::fail();
+      return;
+    },
+    Result::ERROR(bag) -> bag,
+  };
+
+  let Option::SOME(freestandingDiagnostic) = freestanding.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(freestandingDiagnostic.code, "B4004");
+  Test::assertEq<str>(freestandingDiagnostic.messageText(), "the qbe target does not support freestanding builds yet; use the c target or set std = true");
+
+  let unknown: DiagnosticBag = match (Backends::checkAllowed("wasm", false)) {
+    Result::OK(_) -> {
+      Test::fail();
+      return;
+    },
+    Result::ERROR(bag) -> bag,
+  };
+
+  let Option::SOME(unknownDiagnostic) = unknown.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(unknownDiagnostic.code, "B4004");
+  Test::assert(backendContains(unknownDiagnostic.messageText(), "unknown build target 'wasm' (supported: c, qbe)"));
+}

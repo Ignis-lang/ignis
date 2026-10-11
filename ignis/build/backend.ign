@@ -1,0 +1,167 @@
+//! The code generation backends, and everything the driver asks of one.
+//!
+//! A backend turns the program into one translation unit and that unit into an
+//! object; linking the objects is the same for every backend. The driver
+//! dispatches on `Backend` with exhaustive matches, so a new backend is one
+//! more variant here and the compiler points at every place that has to handle
+//! it.
+
+import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+
+import Path from "std::path";
+import String from "std::string";
+import Vector from "std::vector";
+
+import CCompiler from "./c_compiler";
+import QbeTool from "./qbe";
+
+/// The backends a build can select with `target` or `--target`.
+export enum Backend {
+  /// C, compiled and linked by the configured C compiler.
+  C,
+  /// QBE IL, lowered to assembly by `qbe` and assembled by the C driver.
+  QBE,
+}
+
+export namespace Backends {
+  /// The diagnostic code for a backend that cannot build the requested mode:
+  /// an unknown target, or a mode the backend does not support.
+  const UNSUPPORTED_BACKEND: str = "B4004";
+
+  /// The backend `name` selects, or `NONE` when it names none.
+  function fromName(name: str): Option<Backend> {
+    let text: String = String::create(name);
+
+    if (text.equals("c")) {
+      return Option::SOME(Backend::C);
+    }
+
+    if (text.equals("qbe")) {
+      return Option::SOME(Backend::QBE);
+    }
+
+    return Option::NONE;
+  }
+
+  /// The name `target` and `--target` spell `backend` with.
+  function name(backend: Backend): str {
+    return match (backend) {
+      Backend::C -> "c",
+      Backend::QBE -> "qbe",
+    };
+  }
+
+  /// Every backend name, in the order diagnostics list them.
+  function supportedNames(): String {
+    let mut names: String = String::create(Backends::name(Backend::C));
+    names.pushStr(", ");
+    names.pushStr(Backends::name(Backend::QBE));
+    return names;
+  }
+
+  /// The file extension of the translation unit `backend` emits.
+  function unitExtension(backend: Backend): str {
+    return match (backend) {
+      Backend::C -> "c",
+      Backend::QBE -> "ssa",
+    };
+  }
+
+  /// Whether `backend` builds freestanding programs. The QBE path relies on
+  /// the hosted runtime and has no freestanding handlers yet.
+  function supportsFreestanding(backend: Backend): boolean {
+    return match (backend) {
+      Backend::C -> true,
+      Backend::QBE -> false,
+    };
+  }
+
+  /// The backend `name` selects, when it can build the requested mode; a
+  /// single `B4004` diagnostic otherwise.
+  function checkAllowed(name: str, freestanding: boolean): Result<Backend, DiagnosticBag> {
+    let Option::SOME(backend) = Backends::fromName(name) else {
+      let supported: String = Backends::supportedNames();
+      let message: String = `unknown build target '${name}' (supported: ${supported.toStr()})`;
+      return Result::ERROR(Backends::singleDiagnostic(message.toStr()));
+    };
+
+    if (freestanding && !Backends::supportsFreestanding(backend)) {
+      let message: String = `the ${Backends::name(backend)} target does not support freestanding builds yet; use the c target or set std = true`;
+      return Result::ERROR(Backends::singleDiagnostic(message.toStr()));
+    }
+
+    return Result::OK(backend);
+  }
+
+  /// Turns each translation unit of `sourcePaths` into the object at the same
+  /// index of `objectPaths`. C units go through the C compiler, up to `jobs`
+  /// at a time; QBE units are lowered to assembly beside their object and
+  /// assembled by the same compiler driver. Nothing is printed: the caller
+  /// reports.
+  function compileUnits(
+    backend: Backend,
+    cc: str,
+    sourcePaths: &Vector<Path::PathBuf>,
+    objectPaths: &Vector<Path::PathBuf>,
+    includeDirs: &Vector<String>,
+    flags: &Vector<String>,
+    jobs: u64,
+  ): Result<boolean, DiagnosticBag> {
+    match (backend) {
+      Backend::C -> {
+        return CCompiler::compileObjects(cc, sourcePaths, objectPaths, includeDirs, flags, jobs);
+      },
+      Backend::QBE -> {
+        let mut index: u64 = 0;
+
+        while (index < sourcePaths.length() && index < objectPaths.length()) {
+          let Option::SOME(sourcePath) = sourcePaths.get(index) else {
+            break;
+          };
+          let Option::SOME(objectPath) = objectPaths.get(index) else {
+            break;
+          };
+
+          // The assembly path mirrors the object path, so two units never
+          // collide.
+          let assemblyPath: Path::PathBuf = Backends::assemblyPath(objectPath);
+
+          QbeTool::lowerToAssembly("qbe", sourcePath, &assemblyPath)!;
+          QbeTool::assembleObject(cc, &assemblyPath, objectPath, includeDirs, flags)!;
+
+          index += 1;
+        }
+
+        return Result::OK(true);
+      },
+    };
+  }
+
+  /// The assembly file the qbe backend writes for one unit: the object's own
+  /// path with a `.s` extension, so parallel units never collide.
+  function assemblyPath(objectPath: &Path::PathBuf): Path::PathBuf {
+    let objectText: String = objectPath.toString();
+    let lastDotOpt: Option<u64> = objectText.findLastByte((byte: u8): boolean -> {
+      return byte == 46;
+    });
+
+    let mut dotIndex: u64 = objectText.length();
+
+    if (let Option::SOME(dotPos) = lastDotOpt) {
+      if (dotPos > 0) {
+        dotIndex = dotPos;
+      }
+    }
+
+    let stem: String = objectText.substringBytes(0, dotIndex);
+    return Path::PathBuf::create(stem.concat(".s").toStr());
+  }
+
+  function singleDiagnostic(message: str): DiagnosticBag {
+    let span: SourceSpan = SourceSpan::new("", 0, 0);
+    let diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, Backends::UNSUPPORTED_BACKEND, message, span);
+    let mut bag: DiagnosticBag = DiagnosticBag::init();
+    bag.push(diagnostic);
+    return bag;
+  }
+}

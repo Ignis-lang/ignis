@@ -2,7 +2,7 @@ import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
 
-import qbeIsQbeTarget from "./qbe";
+import Backend, Backends from "./backend";
 import BuildLayout from "./layout";
 
 /// Where a build writes the translation unit, the object and the executable.
@@ -12,34 +12,18 @@ export record BuildArtifacts {
   public executable: Path::PathBuf;
 }
 
-/// The translation-unit extension a backend emits: QBE IL for `qbe`, C for
-/// everything else.
-function artifactsSourceExtension(backend: str): str {
-  if (qbeIsQbeTarget(backend)) {
-    return "ssa";
-  }
-
-  return "c";
+/// The extension of the unit the backend named `backend` emits. A name no
+/// backend has gets C's: the driver rejects it before anything is written.
+function artifactsUnitExtension(backend: str): str {
+  return match (Backends::fromName(backend)) {
+    Option::SOME(selected) -> Backends::unitExtension(selected),
+    Option::NONE -> Backends::unitExtension(Backend::C),
+  };
 }
 
-/// The assembly file the qbe backend writes for one unit: the object's own
-/// path with a `.s` extension, so parallel units never collide.
+/// The assembly file the qbe backend writes for one unit, beside its object.
 export function artifactsAssemblyPath(objectPath: &Path::PathBuf): Path::PathBuf {
-  let objectText: String = objectPath.toString();
-  let lastDotOpt: Option<u64> = objectText.findLastByte((byte: u8): boolean -> {
-    return byte == 46;
-  });
-
-  let mut dotIndex: u64 = objectText.length();
-
-  if (let Option::SOME(dotPos) = lastDotOpt) {
-    if (dotPos > 0) {
-      dotIndex = dotPos;
-    }
-  }
-
-  let stem: String = objectText.substringBytes(0, dotIndex);
-  return Path::PathBuf::create(stem.concat(".s").toStr());
+  return Backends::assemblyPath(objectPath);
 }
 
 /// The paths a single-file build writes.
@@ -53,7 +37,7 @@ export function singleFileArtifacts(backend: str, outputPath: &Option<String>): 
     Option::NONE -> String::create("selfhost_out"),
   };
 
-  let sourceName: String = String::create("selfhost_emit.").concat(artifactsSourceExtension(backend));
+  let sourceName: String = String::create("selfhost_emit.").concat(artifactsUnitExtension(backend));
 
   return BuildArtifacts {
     source: Path::PathBuf::create(sourceName.toStr()),
@@ -74,7 +58,7 @@ export function projectArtifacts(
   outputPath: &Option<String>,
 ): BuildArtifacts {
   let layout: BuildLayout = BuildLayout::new(name.toStr(), outDir);
-  let sourceName: String = name.concat(".").concat(artifactsSourceExtension(backend));
+  let sourceName: String = name.concat(".").concat(artifactsUnitExtension(backend));
   let objectName: String = name.concat(".o");
 
   let mut executable: Path::PathBuf = layout.binPath();
