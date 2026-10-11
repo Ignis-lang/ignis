@@ -48,6 +48,7 @@ function emptyProject(): ResolvedProject {
     cc: String::create("gcc"),
     linker: Option::NONE,
     cflags: Vector::new<String>(),
+    stdArchive: false,
     emit: Vector::new<String>(),
     defaultFeatures: Vector::new<String>(),
     knownFeatures: Vector::new<String>(),
@@ -434,6 +435,45 @@ function projectLoaderReadsBuildLinker(): void {
 function buildLinkerIsAKnownProjectKey(): void {
   let source: String = String::create(
     "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nlinker = \"lld\"\n"
+  );
+  let document: TomlDocument = match (Toml::parse(&source)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+
+  Test::assertEq<u64>(warnings.length(), 0);
+}
+
+/// `[build] std_archive` is read as written; a project that omits it keeps
+/// std in its own unit.
+@test
+function projectLoaderReadsBuildStdArchive(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/std_archive");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> Test::assert(project.stdArchive),
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let without: Path::PathBuf = fixturePath("test_cases/selfhost/build/build_profile");
+
+  match (Config::loadProject(&without)) {
+    Result::OK(project) -> Test::assert(!project.stdArchive),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+/// `std_archive` is a known `[build]` key: it raises no unknown-key warning.
+@test
+function buildStdArchiveIsAKnownProjectKey(): void {
+  let source: String = String::create(
+    "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nstd_archive = true\n"
   );
   let document: TomlDocument = match (Toml::parse(&source)) {
     Result::OK(value) -> value,

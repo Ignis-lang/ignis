@@ -64,6 +64,9 @@ export record CliOptions {
   /// Stop after the object file instead of linking, and let `-o` name that
   /// object rather than the binary (`-c` / `--emit-object`).
   public emitObject: boolean;
+  /// Link std from `libignis_std.a` instead of compiling it into the
+  /// program's unit (`--std-archive`); `[build] std_archive` asks for the same.
+  public stdArchive: boolean;
   /// Print every compiler phase line on stderr in addition to the default
   /// summary (`-v` / `--verbose`).
   public verbose: boolean;
@@ -125,6 +128,7 @@ export record CliOptions {
       features: Vector::new<String>(),
       force: false,
       emitObject: false,
+      stdArchive: false,
       verbose: false,
       progress: Output::ProgressMode::AUTO,
       filter: String::new(),
@@ -1840,6 +1844,17 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    // Only a build links, so only a build has an archive to link std from.
+    if (argument.equals("--std-archive")) {
+      if (options.command != CliCommand::BUILD) {
+        return Result::ERROR(String::create("error: --std-archive is a build option: only build links the standard library"));
+      }
+
+      options.stdArchive = true;
+      index += 1;
+      continue;
+    }
+
     if (argument.equals("--dump-drop-schedule")) {
       options.dumpDropSchedule = true;
       index += 1;
@@ -2087,6 +2102,7 @@ export function helpText(): String {
   text.pushStr("      --no-debug            Build without debug information\n");
   text.pushStr("  -f, --force               Rebuild even when the build cache is current\n");
   text.pushStr("  -c, --emit-object         Compile to an object file and do not link; -o names it\n");
+  text.pushStr("      --std-archive         Link std from libignis_std.a instead of compiling it into the unit\n");
   text.pushStr("  -v, --verbose             Also print every compiler phase line on stderr (build, check,\n");
   text.pushStr("                            build-std, check-std, test, test-std)\n");
   text.pushStr("      --progress <MODE>     Live progress line on stderr for the same commands: auto\n");

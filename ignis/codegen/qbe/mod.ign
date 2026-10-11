@@ -1285,6 +1285,7 @@ export namespace CodegenQbe {
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     program: &Lir::LirProgram,
+    foreignDefinitions: &Vector<u32>,
   ): void {
     let mut index: u64 = 0;
 
@@ -1293,6 +1294,11 @@ export namespace CodegenQbe {
         index += 1;
         continue;
       };
+
+      if (CodegenC::hasRaw(foreignDefinitions, init.defId.raw())) {
+        index += 1;
+        continue;
+      }
 
       CodegenQbe::qbeEmitOneGlobal(emitter, defStore, typeStore, symbols, init);
       index += 1;
@@ -3648,6 +3654,7 @@ export namespace CodegenQbe {
     defStore: &mut Analyzer::DefinitionStore,
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
+    foreignDefinitions: &Vector<u32>,
   ): Vector<u32> {
     let mut reachable: Vector<u32> = Vector::new<u32>();
     if (let Option::SOME(entry) = program.entryPoint) {
@@ -3677,6 +3684,13 @@ export namespace CodegenQbe {
         break;
       };
       let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*raw);
+
+      // A foreign function's body lives in another unit, so what it calls is
+      // that unit's to emit.
+      if (CodegenC::hasRaw(foreignDefinitions, *raw)) {
+        cursor += 1;
+        continue;
+      }
       if (let Option::SOME(function_) = program.functions.get(defId)) {
         let mut blockIndex: u64 = 0;
         while (blockIndex < function_.blocks.length()) {
@@ -3704,15 +3718,21 @@ export namespace CodegenQbe {
   /// A run that meets anything unsupported fails closed: `source` stays empty
   /// and `error` carries the exact instruction name, so the driver reports a
   /// build failure instead of emitting wrong code.
+  ///
+  /// `foreignDefinitions` holds the raw ids of the functions and statics
+  /// another unit defines (the std archive's, in a unit linked against
+  /// `libignis_std.a`): they get no body and no data here, and their uses
+  /// stay `$symbol` references the linker resolves.
   function emitProgram(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
+    foreignDefinitions: &Vector<u32>,
   ): CodegenQbe::EmitOutput {
     let mut emitter: CodegenQbe::Emitter = CodegenQbe::Emitter::init();
-    let reachable: Vector<u32> = CodegenQbe::reachableFunctions(defStore, program, externalSymbols);
+    let reachable: Vector<u32> = CodegenQbe::reachableFunctions(defStore, program, externalSymbols, foreignDefinitions);
 
     // Type declarations first: aggregate signatures and aggregate call
     // results reference them by name.
@@ -3722,7 +3742,7 @@ export namespace CodegenQbe {
       let Option::SOME(function_) = program.functions.functionAt(typeIndex) else {
         break;
       };
-      if (CodegenC::isExternFunction(defStore, function_.defId) || !CodegenC::hasRaw(&reachable, function_.defId.raw())) {
+      if (CodegenC::isExternFunction(defStore, function_.defId) || !CodegenC::hasRaw(&reachable, function_.defId.raw()) || CodegenC::hasRaw(foreignDefinitions, function_.defId.raw())) {
         typeIndex += 1;
         continue;
       }
@@ -3753,7 +3773,7 @@ export namespace CodegenQbe {
       globalIndex += 1;
     }
 
-    CodegenQbe::qbeEmitGlobals(&mut emitter, defStore, typeStore, symbols, program);
+    CodegenQbe::qbeEmitGlobals(&mut emitter, defStore, typeStore, symbols, program, foreignDefinitions);
 
     if (emitter.error.isSome()) {
       return CodegenQbe::EmitOutput {
@@ -3772,7 +3792,7 @@ export namespace CodegenQbe {
         continue;
       };
 
-      if (CodegenC::hasRaw(&reachable, function_.defId.raw()) && CodegenQbe::qbeEmitFunction(&mut emitter, defStore, typeStore, symbols, function_, externalSymbols)) {
+      if (CodegenC::hasRaw(&reachable, function_.defId.raw()) && !CodegenC::hasRaw(foreignDefinitions, function_.defId.raw()) && CodegenQbe::qbeEmitFunction(&mut emitter, defStore, typeStore, symbols, function_, externalSymbols)) {
         functions += 1;
       }
 

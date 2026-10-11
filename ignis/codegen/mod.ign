@@ -59,6 +59,13 @@ export namespace CodegenC {
     /// when the build has no std.
     public stdRoot: String;
     public unhandledPanics: Vector<SourceSpan>;
+    /// Raw ids of the functions and statics another unit defines, which this
+    /// unit declares `extern` and does not define: the std archive's
+    /// definitions in a unit linked against `libignis_std.a`.
+    public foreignDefinitions: Vector<u32>;
+    /// Give mutable statics external linkage, which the std archive needs so
+    /// that the units linked against it share its one copy of each.
+    public exportStatics: boolean;
 
     public static hosted(): RuntimeHooks {
       return RuntimeHooks {
@@ -70,6 +77,8 @@ export namespace CodegenC {
         projectRoot: String::new(),
         stdRoot: String::new(),
         unhandledPanics: Vector::new<SourceSpan>(),
+        foreignDefinitions: Vector::new<u32>(),
+        exportStatics: false,
       };
     }
   }
@@ -6100,6 +6109,7 @@ export namespace CodegenC {
     output: &mut String,
     closures: &CodegenC::ClosureTables,
     program: &Lir::LirProgram,
+    hooks: &mut CodegenC::RuntimeHooks,
   ): void {
     if (program.globalInits.length() == 0) {
       return;
@@ -6118,14 +6128,14 @@ export namespace CodegenC {
 
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut alignment: Option<u64> = Option::NONE;
-      let mut storage: str = "static";
+      let mut storage: str = hooks.exportStatics ? "" : "static ";
 
       if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(global.defId)) {
         declaredType = variable.declaredType;
         alignment = variable.alignment;
 
         if (!variable.mutable) {
-          storage = "static const";
+          storage = "static const ";
         }
       }
 
@@ -6144,10 +6154,20 @@ export namespace CodegenC {
 
       declarator.pushStr(CodegenC::staticLayoutAttributes(alignment, &valueTypeText).toStr());
 
+      // A static another unit defines is only declared here, so every unit
+      // reaches that unit's one copy.
+      if (CodegenC::hasRaw(&hooks.foreignDefinitions, global.defId.raw())) {
+        let externLine: String = `extern ${declarator.toStr()};\n`;
+
+        outputRef.pushStr(externLine.toStr());
+        index += 1;
+        continue;
+      }
+
       // A global that is all zero bytes carries no initializer: C places it in
       // zero-initialized storage, so it occupies no space in the object file.
       if (CodegenC::isZeroGlobal(&global.parts)) {
-        let zeroLine: String = `${storage} ${declarator.toStr()};\n`;
+        let zeroLine: String = `${storage}${declarator.toStr()};\n`;
 
         outputRef.pushStr(zeroLine.toStr());
         index += 1;
@@ -6155,7 +6175,7 @@ export namespace CodegenC {
       }
 
       let value: String = CodegenC::formatGlobalInitializer(defStore, typeStore, symbols, closures, &global.parts);
-      let line: String = `${storage} ${declarator.toStr()} = ${value.toStr()};\n`;
+      let line: String = `${storage}${declarator.toStr()} = ${value.toStr()};\n`;
 
       outputRef.pushStr(line.toStr());
       index += 1;
@@ -6360,7 +6380,7 @@ export namespace CodegenC {
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
 
-    CodegenC::emitStaticGlobals(defStore, typeStore, symbols, &mut source, closures, program);
+    CodegenC::emitStaticGlobals(defStore, typeStore, symbols, &mut source, closures, program, hooks);
 
     if (hooks.freestanding) {
       CodegenC::emitExternConstDeclarations(defStore, typeStore, symbols, &mut source, closures);
@@ -6380,7 +6400,7 @@ export namespace CodegenC {
         // side owns the definition. A declaration and its definition have to
         // agree on the storage class, so the prototype repeats the `static`
         // the body carries.
-        if (CodegenC::isExternFunction(defStore, function_.defId)) {
+        if (CodegenC::isExternFunction(defStore, function_.defId) || CodegenC::hasRaw(&hooks.foreignDefinitions, function_.defId.raw())) {
           source.pushStr("extern ");
         } else if (CodegenC::hasInternalLinkage(defStore, function_.defId, externalSymbols)) {
           source.pushStr("static ");
@@ -6407,8 +6427,9 @@ export namespace CodegenC {
         continue;
       };
 
-      // An extern function is defined on the C side; a prototype is all it gets.
-      if (CodegenC::isExternFunction(defStore, function_.defId)) {
+      // An extern function is defined on the C side, and a foreign one by the
+      // unit that owns it; a prototype is all either gets.
+      if (CodegenC::isExternFunction(defStore, function_.defId) || CodegenC::hasRaw(&hooks.foreignDefinitions, function_.defId.raw())) {
         bodyIndex += 1;
         continue;
       }

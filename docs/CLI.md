@@ -124,6 +124,24 @@ it, which is checked once per linking command by running
 ignis build --linker bfd
 ```
 
+`--std-archive` overrides `[build] std_archive` and links the standard library
+from `libignis_std.a` instead of compiling it into the program's unit. The build
+first makes sure the archive under its output directory (`<out_dir>/std/lib`) is
+current, rebuilding it with the C backend when its stamp says it is stale, then
+compiles the program's unit with only the project's own definitions and the
+generic instances it uses, and links the archive. It works with `--target c` and
+`--target qbe`; the archive itself is always built with C. Without the flag the
+whole program is one unit, as before. The flag is accepted only by `build`; any
+other command rejects it with
+`error: --std-archive is a build option: only build links the standard library`,
+and a `std = false` build rejects the mode, since it has no standard library to
+link.
+
+```bash
+# Link std from the archive and compile the program with QBE
+ignis build --std-archive --target qbe
+```
+
 A project with `[ignis] std = false` builds in freestanding mode (see
 `docs/PROJECT.md`): the emitted C has no runtime header, no hosted libc or
 POSIX headers and no C `main` wrapper, every unit is compiled with

@@ -168,6 +168,13 @@ droppable locals. A freestanding program provides both symbols at link time.
   The command line override `--linker <L>` wins over the project file. The
   resolved selection is part of the build cache, so changing it (or the
   default switching between mold and the system linker) relinks.
+- `std_archive` - `true` links the standard library from `libignis_std.a`,
+  built with the C backend under `<out_dir>/std/lib` when stale, instead of
+  compiling it into the program's unit (default `false`). The program's unit
+  then holds its own definitions and the generic instances it uses; every
+  other std function and every std static stays in the archive, so the runtime
+  state has one copy. `--std-archive` turns it on from the command line. Not
+  available with `std = false`. The setting is part of the build cache.
 - `cflags` - Extra C compiler/linker flags.
 - `emit` - Extra artifacts (`"c"`, `"obj"`).
 
