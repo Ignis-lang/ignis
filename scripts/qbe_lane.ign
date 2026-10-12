@@ -152,11 +152,16 @@ export namespace QbeLane {
   /// directory: the standard library and the executable are named by absolute
   /// path. The source keeps its corpus-relative path, which the build directory
   /// resolves through its `test_cases` link (see `compile`).
+  ///
+  /// `archiveOutDir` links std from its archive, built under that directory.
+  /// Every archive build of a run names the same directory, so the archive is
+  /// built once and reused.
   export function compileArguments(
     root: &Path::PathBuf,
     source: &Path::PathBuf,
     target: str,
-    executable: &String
+    executable: &String,
+    archiveOutDir: &Option<String>
   ): Vector<String> {
     let mut arguments: Vector<String> = Vector::new<String>();
     arguments.push(String::create("build"));
@@ -167,6 +172,13 @@ export namespace QbeLane {
     arguments.push(String::create(target));
     arguments.push(String::create("-o"));
     arguments.push(QbeLane::rooted(root, executable.toStr(), false));
+
+    if (let Option::SOME(outDir) = archiveOutDir) {
+      arguments.push(String::create("--std-archive"));
+      arguments.push(String::create("--out-dir"));
+      arguments.push(QbeLane::rooted(root, outDir.toStr(), false));
+    }
+
     return arguments;
   }
 
@@ -184,7 +196,8 @@ export namespace QbeLane {
     source: &Path::PathBuf,
     target: str,
     executable: &String,
-    buildDirectory: &String
+    buildDirectory: &String,
+    archiveOutDir: &Option<String>
   ): Result<Process::Output, Io::IoError> {
     let directory: Path::PathBuf = root.join(buildDirectory.toStr());
     if (let Result::ERROR(error) = Fs::createDirAll(&directory)) {
@@ -203,7 +216,7 @@ export namespace QbeLane {
     let program: String = QbeLane::rooted(root, compiler.toStr(), true);
     let mut command: Process::Command = Process::command(program.toStr());
     command.cwd(&directory);
-    let arguments: Vector<String> = QbeLane::compileArguments(root, source, target, executable);
+    let arguments: Vector<String> = QbeLane::compileArguments(root, source, target, executable, archiveOutDir);
     let mut index: u64 = 0;
     while (index < arguments.length()) {
       if (let Option::SOME(argument) = arguments.get(index)) {
@@ -259,6 +272,9 @@ export namespace QbeLane {
     public shardIndex: u64;
     public shardCount: u64;
     public reportDir: String;
+    /// Also build every supported fixture against the std archive, with C and
+    /// with QBE, and require the same result as the whole-program C build.
+    public stdArchive: boolean;
   }
 
   export function parseUnsigned(text: &String): Option<u64> {
@@ -288,11 +304,11 @@ export namespace QbeLane {
     return Option::SOME(value);
   }
 
-  /// Parses `<compiler> [--inventory] [--shard INDEX COUNT --report-dir DIR]`.
+  /// Parses `<compiler> [--inventory | --std-archive] [--shard INDEX COUNT --report-dir DIR]`.
   /// Flags may appear in any order, but never twice, and shard/report-dir flags
   /// are only valid together.
   export function parseLaneOptions(args: &Vector<String>): Result<LaneOptions, String> {
-    let usage: String = String::create("usage: qbe-lane <compiler> [--inventory] [--shard INDEX COUNT --report-dir DIR]");
+    let usage: String = String::create("usage: qbe-lane <compiler> [--inventory | --std-archive] [--shard INDEX COUNT --report-dir DIR]");
     if (args.length() < 2) {
       return Result::ERROR(usage);
     }
@@ -308,8 +324,10 @@ export namespace QbeLane {
       shardIndex: 0,
       shardCount: 0,
       reportDir: String::new(),
+      stdArchive: false,
     };
     let mut seenInventory: boolean = false;
+    let mut seenStdArchive: boolean = false;
     let mut seenShard: boolean = false;
     let mut seenReportDir: boolean = false;
     let mut index: u64 = 2;
@@ -324,6 +342,14 @@ export namespace QbeLane {
         }
         seenInventory = true;
         options.inventory = true;
+        continue;
+      }
+      if (argument.equals("--std-archive")) {
+        if (seenStdArchive) {
+          return Result::ERROR(String::create("duplicate --std-archive"));
+        }
+        seenStdArchive = true;
+        options.stdArchive = true;
         continue;
       }
       if (argument.equals("--shard")) {
@@ -368,6 +394,9 @@ export namespace QbeLane {
         continue;
       }
       return Result::ERROR(`unknown argument: ${argument.toStr()}`);
+    }
+    if (seenInventory && seenStdArchive) {
+      return Result::ERROR(String::create("--std-archive cannot be combined with --inventory"));
     }
     if (seenShard != seenReportDir) {
       return Result::ERROR(String::create("--shard and --report-dir must be used together"));
@@ -489,6 +518,13 @@ function main(): i32 {
   if (Fs::createDirAll(&work).isError()) {
     return 1;
   }
+
+  // The archive lane shares one output directory, so std is archived once.
+  let wholeProgram: Option<String> = Option::NONE;
+  let mut archiveOutDir: Option<String> = Option::NONE;
+  if (options.stdArchive) {
+    archiveOutDir = Option::SOME(`${work.toStr()}/std-archive`);
+  }
   let mut passed: u64 = 0;
   let mut skippedCount: u64 = 0;
   let mut selectedCount: u64 = 0;
@@ -532,7 +568,7 @@ function main(): i32 {
     let cBinary: String = `${work.toStr()}/c-${position}`;
     let qbeBuildDirectory: String = QbeLane::caseBuildDirectory(&work, position, "qbe");
     let cBuildDirectory: String = QbeLane::caseBuildDirectory(&work, position, "c");
-    let Result::OK(qbeBuild) = QbeLane::compile(&root, &options.compiler, &fixture.path, "qbe", &qbeBinary, &qbeBuildDirectory) else {
+    let Result::OK(qbeBuild) = QbeLane::compile(&root, &options.compiler, &fixture.path, "qbe", &qbeBinary, &qbeBuildDirectory, &wholeProgram) else {
       Io::eprintln(`cannot start compiler: ${name.toStr()}`);
       return 1;
     };
@@ -549,7 +585,7 @@ function main(): i32 {
       Io::eprintln(`QBE build failed: ${name.toStr()}\n${stderr.toStr()}`);
       return 1;
     }
-    let Result::OK(cBuild) = QbeLane::compile(&root, &options.compiler, &fixture.path, "c", &cBinary, &cBuildDirectory) else {
+    let Result::OK(cBuild) = QbeLane::compile(&root, &options.compiler, &fixture.path, "c", &cBinary, &cBuildDirectory, &wholeProgram) else {
       return 1;
     };
     if (!cBuild.status().success) {
@@ -571,6 +607,39 @@ function main(): i32 {
     if (!QbeLane::outputsMatch(cRun.status().code, &cOut, &cErr, qbeRun.status().code, &qbeOut, &qbeErr)) {
       Io::eprintln(`C/QBE runtime mismatch: ${name.toStr()} (C ${cRun.status().code}, QBE ${qbeRun.status().code})`);
       return 1;
+    }
+
+    // The link matrix: the program built with C and with QBE, each linked
+    // against the C-built std archive, has to behave as the whole-program C
+    // build does.
+    if (options.stdArchive) {
+      let mut targetIndex: u64 = 0;
+      while (targetIndex < 2) {
+        let target: str = targetIndex == 0 ? "c" : "qbe";
+        targetIndex += 1;
+        let archiveBinary: String = `${work.toStr()}/${target}-archive-${position}`;
+        let archiveTarget: String = `${target}-archive`;
+        let archiveBuildDirectory: String = QbeLane::caseBuildDirectory(&work, position, archiveTarget.toStr());
+        let Result::OK(archiveBuild) = QbeLane::compile(&root, &options.compiler, &fixture.path, target, &archiveBinary, &archiveBuildDirectory, &archiveOutDir) else {
+          Io::eprintln(`cannot start compiler for the std archive build (${target}): ${name.toStr()}`);
+          return 1;
+        };
+        if (!archiveBuild.status().success) {
+          Io::eprintln(`std archive build failed (${target}): ${name.toStr()}\n${archiveBuild.stderr().toStr()}`);
+          return 1;
+        }
+        let archiveCommand: Process::Command = Process::command(archiveBinary.toStr());
+        let Result::OK(archiveRun) = archiveCommand.output() else {
+          Io::eprintln(`cannot run the std archive binary (${target}): ${name.toStr()}`);
+          return 1;
+        };
+        let archiveOut: String = archiveRun.stdout();
+        let archiveErr: String = archiveRun.stderr();
+        if (!QbeLane::outputsMatch(cRun.status().code, &cOut, &cErr, archiveRun.status().code, &archiveOut, &archiveErr)) {
+          Io::eprintln(`std archive runtime mismatch (${target}): ${name.toStr()} (whole-program C ${cRun.status().code}, archive ${archiveRun.status().code})`);
+          return 1;
+        }
+      }
     }
     if (options.inventory) {
       supported.pushStr(`${name.toStr()}\n`.toStr());

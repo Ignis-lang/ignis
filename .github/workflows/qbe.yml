@@ -143,6 +143,20 @@ jobs:
             --report-dir build/qbe-results/lane/${{ matrix.shard }} \
             2>&1 | tee build/qbe-results/logs/${{ matrix.shard }}-lane.log
 
+      # The link matrix: every supported fixture is also built with C and with
+      # QBE against the C-built std archive (`--std-archive`), and both have to
+      # behave as the whole-program C build. The aggregate requires these
+      # reports like the other two modes.
+      - name: Run the std archive link matrix shard
+        run: |
+          set -euo pipefail
+          build/qbe-ci-downloads/qbe-ci-tools/runner \
+            build/qbe-ci-downloads/qbe-stage1-compiler/ignis \
+            --std-archive \
+            --shard ${{ matrix.shard }} 4 \
+            --report-dir build/qbe-results/archive/${{ matrix.shard }} \
+            2>&1 | tee build/qbe-results/logs/${{ matrix.shard }}-archive.log
+
       # Uploaded even when the shard fails or times out: the logs and the
       # partial reports (a missing COMPLETE among them) are what diagnose the
       # failure, and the aggregate needs them to say why it refused.
