@@ -3550,6 +3550,36 @@ export namespace Borrowck {
     return state.isBorrowedBinding(defId.raw());
   }
 
+  /// Rejects an `@eq<T>` whose comparison strategy monomorphization could not
+  /// pick: `T` is neither an integer primitive, `boolean`, `char` nor `str`,
+  /// and does not declare `@implements(Eq)` with an `equals` method. Code
+  /// generation has no comparison to emit for it and would leave the result
+  /// unset. The check lives here because this walk is the first analysis that
+  /// sees every `T` substituted; the driver only runs it over monomorphized HIR.
+  function rejectUnsupportedEquality(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    diagnostics: &mut DiagnosticBag,
+    eqNode: &Hir::HirBuiltinEq,
+    span: SourceSpan,
+  ): void {
+    let unresolved: boolean = match (&eqNode.kind) {
+      Hir::BuiltinEqKind::Pending -> true,
+      _ -> false,
+    };
+
+    if (!unresolved) {
+      return;
+    }
+
+    let typeName: String = typeStore.nameOfResolved(eqNode.ty, &*defStore, &*symbols);
+    let message: String = `type '${typeName.toStr()}' does not support \`@eq\``;
+    let label: String = `declare \`@implements(Eq)\` with \`equals(&self, other: &${typeName.toStr()}): boolean\`, or compare its fields`;
+
+    Borrowck::emitError(diagnostics, span, DiagnosticCode::UNSUPPORTED_EQUALITY, message.toStr(), label.toStr());
+  }
+
   /// Whether the node dereferences a reference by value: `*reference` copies
   /// the referent's bytes out of storage the reference does not own. A raw
   /// pointer is not a borrow, so dereferencing one is the caller's contract.
@@ -4319,6 +4349,7 @@ export namespace Borrowck {
       Hir::HirKind::BuiltinEq(eqNode) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, eqNode.left);
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, eqNode.right);
+        Borrowck::rejectUnsupportedEquality(defStore, typeStore, symbols, diagnostics, &eqNode, span);
       },
       // Also the shape a discard takes: `let _ = value;` lowers to the
       // expression statement `value;`, so it declares no owned binding, owes no
