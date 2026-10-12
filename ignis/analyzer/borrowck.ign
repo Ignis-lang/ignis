@@ -4900,7 +4900,7 @@ export namespace Borrowck {
   /// Whether every value `value` can evaluate to is a closure literal, a
   /// move-only closure owner or a closure field, with at least one owner or
   /// field among them. Each owner is moved into the result on its own path
-  /// (see `consumeBranchClosureOwner`) and each field is moved out of its
+  /// (see `consumeBranchResultOwner`) and each field is moved out of its
   /// record, so the binding that receives the result owns whichever
   /// environment arrives.
   function valueTakesClosureOwners(
@@ -5699,7 +5699,7 @@ export namespace Borrowck {
     let mut thenOwner: Option<u32> = Option::NONE;
 
     if (ifValueIsUsed) {
-      thenOwner = Borrowck::consumeBranchClosureOwner(hir, state, schedules, ifNode.thenBranch, span);
+      thenOwner = Borrowck::consumeBranchResultOwner(defStore, typeStore, hir, state, schedules, ifNode.thenBranch, span);
     }
 
     let mut thenMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
@@ -5741,7 +5741,7 @@ export namespace Borrowck {
     let mut elseOwner: Option<u32> = Option::NONE;
 
     if (ifValueIsUsed) {
-      elseOwner = Borrowck::consumeBranchClosureOwner(hir, state, schedules, elseBranch, span);
+      elseOwner = Borrowck::consumeBranchResultOwner(defStore, typeStore, hir, state, schedules, elseBranch, span);
     }
 
     let mut elseMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
@@ -5751,7 +5751,7 @@ export namespace Borrowck {
     borrowRef.mergeBorrowsWith(&thenBorrows);
     borrowRef.setReachable(thenReachable || elseReachable);
 
-    // A closure owner one branch hands to the result is still owned on the
+    // An owner one branch hands to the result is still owned on the
     // other branch, which is the last point where it is live: it is dropped
     // at the end of that branch, and moved on every path afterwards.
     if (let Option::SOME(owner) = thenOwner) {
@@ -5785,9 +5785,16 @@ export namespace Borrowck {
     Borrowck::conservativeMergeMoves(state, &thenMoves);
   }
 
-  /// Moves the move-only closure owner a branch of a used `if` produces as its
-  /// value into that value, returning the owner it moved.
-  function consumeBranchClosureOwner(
+  /// Moves the owned binding a branch of a used `if` (a conditional
+  /// expression included) produces as its value into that value, returning
+  /// the owner it moved. The binding is either a value whose type needs a
+  /// drop or a move-only closure owner; without the move, the binding would
+  /// still be dropped at its scope end after the result took its bytes. A
+  /// borrowed binding names storage the `if` never owned, so it is left alone,
+  /// exactly as a match arm leaves it.
+  function consumeBranchResultOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     schedules: &mut Hir::DropSchedules,
@@ -5802,7 +5809,9 @@ export namespace Borrowck {
       return Option::NONE;
     };
 
-    if (!state.isMoveOnlyClosureOwner(result.raw()) || !state.isMoveValid(result.raw())) {
+    let ownsValue: boolean = Borrowck::definitionNeedsDrop(defStore, typeStore, result) || state.isMoveOnlyClosureOwner(result.raw());
+
+    if (!ownsValue || state.isBorrowedBinding(result.raw()) || !state.isMoveValid(result.raw())) {
       return Option::NONE;
     }
 

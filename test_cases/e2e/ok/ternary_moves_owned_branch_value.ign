@@ -1,0 +1,74 @@
+// e2e: std
+// A conditional expression whose branch names an owned binding hands that
+// binding to its result. A binding only the other branch names is still owned
+// on the path that did not take it, so it is dropped where that branch ends.
+// Every value is dropped exactly once.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function make(id: i32): Tracked {
+  return Tracked { id: id };
+}
+
+function pick(flag: boolean, fallback: Tracked): Tracked {
+  let raw: Tracked = Tracked { id: 1 };
+
+  return flag ? raw : fallback;
+}
+
+function pickIntoLocal(flag: boolean, fallback: Tracked): Tracked {
+  let raw: Tracked = Tracked { id: 3 };
+  let chosen: Tracked = flag ? raw : fallback;
+
+  Io::println(`chosen ${chosen.id}`.toStr());
+
+  return chosen;
+}
+
+function pickOrMake(flag: boolean): Tracked {
+  let raw: Tracked = Tracked { id: 5 };
+
+  return flag ? raw : make(6);
+}
+
+function main(): i32 {
+  {
+    let value: Tracked = pick(true, Tracked { id: 2 });
+    Io::println(`got ${value.id}`.toStr());
+  }
+
+  {
+    let value: Tracked = pick(false, Tracked { id: 2 });
+    Io::println(`got ${value.id}`.toStr());
+  }
+
+  {
+    let value: Tracked = pickIntoLocal(true, Tracked { id: 4 });
+    Io::println(`got ${value.id}`.toStr());
+  }
+
+  {
+    let value: Tracked = pickIntoLocal(false, Tracked { id: 4 });
+    Io::println(`got ${value.id}`.toStr());
+  }
+
+  {
+    let value: Tracked = pickOrMake(true);
+    Io::println(`got ${value.id}`.toStr());
+  }
+
+  {
+    let value: Tracked = pickOrMake(false);
+    Io::println(`got ${value.id}`.toStr());
+  }
+
+  return 0;
+}
