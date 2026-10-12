@@ -1,0 +1,132 @@
+// e2e: std
+//
+// Payload enums across the QBE backend: user enums and the std `Option` and
+// `Result` instances, matched, passed and returned by value. The program
+// returns 0 only when every shape read back exactly the value it stored.
+import Option from "std::option";
+import Result from "std::result";
+
+enum Shape {
+  CIRCLE(i32),
+  SQUARE(i32),
+}
+
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+enum Geometry {
+  POINT(Point),
+  EMPTY,
+}
+
+/// Two payload fields of different widths: the `u8` starts the union and the
+/// `i64` sits at its 8-byte-aligned offset.
+enum Mixed {
+  PAIR(u8, i64),
+  ALONE(i32),
+}
+
+enum Bucket {
+  ITEMS(i32[4]),
+  EMPTY,
+}
+
+function area(shape: Shape): i32 {
+  return match (shape) {
+    Shape::CIRCLE(radius) -> radius * 2,
+    Shape::SQUARE(side) -> side + 1,
+  };
+}
+
+function wrap(value: i32): Shape {
+  return Shape::SQUARE(value);
+}
+
+function unwrap(shape: Shape): i32 {
+  return area(shape);
+}
+
+function maybe(flag: boolean): Option<i32> {
+  if (flag) {
+    return Option::SOME(4);
+  }
+  return Option::NONE;
+}
+
+function compute(flag: boolean): Result<i64, i32> {
+  if (flag) {
+    return Result::OK(2);
+  }
+  return Result::ERROR(7);
+}
+
+function geometrySum(shape: Geometry): i32 {
+  return match (shape) {
+    Geometry::POINT(point) -> point.x + point.y,
+    Geometry::EMPTY -> 0,
+  };
+}
+
+function mixedSum(value: Mixed): i32 {
+  return match (value) {
+    Mixed::PAIR(byte, word) -> (byte as i32) + (word as i32),
+    Mixed::ALONE(single) -> single,
+  };
+}
+
+function edgeSum(bucket: Bucket): i32 {
+  return match (bucket) {
+    Bucket::ITEMS(values) -> values[0] + values[3],
+    Bucket::EMPTY -> 0,
+  };
+}
+
+function nested(flag: boolean): Option<Shape> {
+  if (flag) {
+    return Option::SOME(Shape::CIRCLE(3));
+  }
+  return Option::NONE;
+}
+
+function main(): i32 {
+  let mut total: i32 = 0;
+
+  total += area(Shape::CIRCLE(10));
+  total += geometrySum(Geometry::POINT(Point { x: 1, y: 1 }));
+  total += mixedSum(Mixed::PAIR(2, 9));
+
+  if (let Option::SOME(value) = maybe(true)) {
+    total += value;
+  }
+
+  if (let Result::OK(value) = compute(true)) {
+    total += value as i32;
+  }
+
+  let values: i32[4] = @splat<i32[4]>(1);
+  total += edgeSum(Bucket::ITEMS(values));
+
+  let optionShape: Option<Shape> = nested(true);
+  if (let Option::SOME(shape) = optionShape) {
+    total += area(shape);
+  }
+
+  total += unwrap(wrap(0));
+
+  if (total != 48) {
+    return 1;
+  }
+
+  let mut sawError: i32 = 0;
+  if (let Result::ERROR(code) = compute(false)) {
+    sawError = code;
+  }
+
+  if (sawError != 7) {
+    return 2;
+  }
+
+  return 0;
+}
