@@ -3550,10 +3550,42 @@ export namespace Borrowck {
     return state.isBorrowedBinding(defId.raw());
   }
 
+  /// Whether the node dereferences a reference by value: `*reference` copies
+  /// the referent's bytes out of storage the reference does not own. A raw
+  /// pointer is not a borrow, so dereferencing one is the caller's contract.
+  function dereferencesReference(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    let mut innerOpt: Option<Hir::HirId> = Option::NONE;
+
+    match (&node.kind) {
+      Hir::HirKind::Dereference(inner) -> {
+        innerOpt = Option::SOME(inner);
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(innerId) = innerOpt else {
+      return false;
+    };
+
+    let Option::SOME(innerNode) = hir.get(innerId) else {
+      return false;
+    };
+
+    return Borrowck::isReferenceType(typeStore, innerNode.typeId);
+  }
+
   /// Reports a move whose source is borrowed storage: a field read through a
-  /// reference, or a pattern binding that carries a borrow forward. Only owning
-  /// values matter, because reading a `Copy` value leaves the borrow intact.
-  /// Mirrors `reject_move_out_of_borrow`.
+  /// reference, a reference dereferenced by value, or a pattern binding that
+  /// carries a borrow forward. Only owning values matter, because reading a
+  /// `Copy` value leaves the borrow intact. Mirrors `reject_move_out_of_borrow`.
   function rejectMoveOutOfBorrow(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3569,7 +3601,7 @@ export namespace Borrowck {
     let span: SourceSpan = node.span;
     let typeId: Analyzer::TypeId = node.typeId;
 
-    let throughReference: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, nodeId);
+    let throughReference: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, nodeId) || Borrowck::dereferencesReference(typeStore, hir, nodeId);
     let borrowedBinding: boolean = Borrowck::isBorrowedBindingNode(hir, state, nodeId);
 
     if (!throughReference && !borrowedBinding) {
@@ -5699,6 +5731,7 @@ export namespace Borrowck {
     let mut thenOwner: Option<u32> = Option::NONE;
 
     if (ifValueIsUsed) {
+      Borrowck::rejectBranchMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, ifNode.thenBranch, span);
       thenOwner = Borrowck::consumeBranchResultOwner(defStore, typeStore, hir, state, schedules, ifNode.thenBranch, span);
     }
 
@@ -5741,6 +5774,7 @@ export namespace Borrowck {
     let mut elseOwner: Option<u32> = Option::NONE;
 
     if (ifValueIsUsed) {
+      Borrowck::rejectBranchMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, elseBranch, span);
       elseOwner = Borrowck::consumeBranchResultOwner(defStore, typeStore, hir, state, schedules, elseBranch, span);
     }
 
@@ -5783,6 +5817,37 @@ export namespace Borrowck {
     // Neither branch reaches the join, so nothing downstream observes the
     // state; the oracle still keeps the most restrictive of the two.
     Borrowck::conservativeMergeMoves(state, &thenMoves);
+  }
+
+  /// The value a branch of a used `if` produces flows out of it, so producing
+  /// it from borrowed storage moves out of a borrow just as a `let` or a
+  /// `return` would. A block-bodied branch hides a borrowed binding behind its
+  /// block node, so its tail binding is checked too, as match arms do.
+  function rejectBranchMoveOutOfBorrow(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    branch: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    if (!state.reachable) {
+      return;
+    }
+
+    Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, branch);
+
+    let Option::SOME(result) = Borrowck::armResultBinding(hir, branch) else {
+      return;
+    };
+
+    let handedOnDirectly: boolean = Borrowck::isBorrowedBindingNode(hir, state, branch);
+    let resultOwnsValue: boolean = Borrowck::definitionNeedsDrop(defStore, typeStore, result) || state.isMoveOnlyClosureOwner(result.raw());
+
+    if (!handedOnDirectly && state.isBorrowedBinding(result.raw()) && resultOwnsValue) {
+      Borrowck::emitCannotMoveOutOfBorrow(state, diagnostics, Option::SOME(result), span);
+    }
   }
 
   /// Moves the owned binding a branch of a used `if` (a conditional
@@ -6135,8 +6200,12 @@ export namespace Borrowck {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, arm.body);
 
         // The arm's value flows out of the match, so producing it from borrowed
-        // storage moves out of a borrow just as a `let` or a `return` would.
-        Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, arm.body);
+        // storage moves out of a borrow just as a `let` or a `return` would. A
+        // match in statement position discards a dereferenced reference without
+        // taking it: the referent's owner still frees it, so nothing moved.
+        if (matchValueIsUsed || !Borrowck::dereferencesReference(typeStore, hir, arm.body)) {
+          Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, arm.body);
+        }
 
         if (let Option::SOME(result) = Borrowck::armResultBinding(hir, arm.body)) {
           // A block-bodied arm hides the binding behind its block node, so the

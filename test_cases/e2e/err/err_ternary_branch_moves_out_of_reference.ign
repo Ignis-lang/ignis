@@ -1,0 +1,24 @@
+// e2e: err
+// The branch a conditional expression produces flows out of it, so producing
+// it from a field reached through a reference moves out of a borrow just as a
+// `let` or a `return` of that field would.
+import Vector from "std::vector";
+
+record Shape {
+  params: Vector<u32>;
+}
+
+record Holder {
+  shape: Shape;
+}
+
+function choose(flag: boolean, holder: &Holder, other: Shape): Shape {
+  return flag ? holder.shape : other;
+}
+
+function main(): i32 {
+  let holder: Holder = Holder { shape: Shape { params: Vector::new<u32>() } };
+  let chosen: Shape = choose(true, &holder, Shape { params: Vector::new<u32>() });
+
+  return chosen.params.length() as i32;
+}

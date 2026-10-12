@@ -281,6 +281,16 @@ function main(): void {
 
 Borrows are released at the end of their enclosing block scope.
 
+### Moving Out of a Borrow
+
+A reference does not own its referent, so a value whose type needs a drop cannot be taken out of one by value: the referent's owner would drop it a second time. These moves are rejected with A0186:
+
+- reading a field by value through a reference (`return holder.shape;` where `holder: &Holder`)
+- dereferencing a reference by value (`let copy: Shape = *reference;`, or `return *shape;` where `shape: &Shape` came from an `Option<&Shape>`)
+- producing such a value from a match arm or from a branch of a conditional expression whose value is used (`flag ? holder.shape : other`)
+
+Copy values are not affected. A match in statement position discards a dereferenced arm value without taking it, so that is allowed. Raw pointers are not borrows, so dereferencing one is never rejected.
+
 ## Raw Pointers
 
 Raw pointers (`*T`, `*mut T`) bypass borrow checking entirely. They are always Copy and carry no ownership semantics.
