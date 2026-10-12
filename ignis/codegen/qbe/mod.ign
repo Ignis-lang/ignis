@@ -1489,6 +1489,28 @@ export namespace CodegenQbe {
     return CodegenQbe::typeSize(emitter, defStore, typeStore, resolved);
   }
 
+  /// Whether a parameter of type `ty` is passed as the address of its storage
+  /// rather than by value. A fixed array is, as the C backend passes it (the
+  /// array decays to a pointer to its first element), so the two backends
+  /// call each other with one convention. An aggregate value is already the
+  /// address of its storage here, so the address is the value itself.
+  function passesByAddress(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::FixedArray(_, _) -> true,
+      _ -> false,
+    };
+  }
+
   /// The `:name` reference for `ty` when it is an aggregate, NONE otherwise.
   function qbeTypeRefIfAggregate(
     emitter: &mut CodegenQbe::Emitter,
@@ -1714,7 +1736,11 @@ export namespace CodegenQbe {
 
       let tempName: String = `%t${index}`;
 
-      if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, foundType)) {
+      if (CodegenQbe::passesByAddress(defStore, typeStore, foundType)) {
+        let text: String = `l ${tempName.toStr()}`;
+
+        header.pushStr(text.toStr());
+      } else if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, foundType)) {
         let text: String = `${cls.toStr()} ${tempName.toStr()}`;
 
         header.pushStr(text.toStr());
@@ -2534,6 +2560,10 @@ export namespace CodegenQbe {
     let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, argument) else {
       return String::create("");
     };
+
+    if (CodegenQbe::passesByAddress(defStore, typeStore, argumentType)) {
+      return `l ${value.toStr()}`;
+    }
 
     if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, argumentType)) {
       return `${cls.toStr()} ${value.toStr()}`;

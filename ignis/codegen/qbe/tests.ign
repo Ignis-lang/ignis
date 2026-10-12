@@ -466,6 +466,19 @@ function qbeReviewF22EmitsArrayValueAbi(): void {
   qbeRunExpected("function identity(values: i32[4]): i32[4] { return values; } function main(): i32 { let values: i32[4] = @splat<i32[4]>(7); let returned: i32[4] = identity(values); return returned[0] + returned[3]; }", 14);
 }
 
+/// A fixed-array parameter is passed as the address of its first element,
+/// the convention the C backend uses, so a QBE caller and a C callee (or the
+/// reverse) agree. Parameters are immutable, so the callee never needs a
+/// copy of its own.
+@test
+function qbePassesFixedArrayParametersByAddress(): void {
+  let emission: QbeEmission = qbeEmit("function first(values: i32[4]): i32 { return values[0] + values[3]; } function main(): i32 { let values: i32[4] = @splat<i32[4]>(7); return first(values); }");
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "(l %t0)"));
+  Test::assert(!qbeContains(&emission.source, "(:ignis_array_"));
+  qbeRunExpected("function first(values: i32[4]): i32 { return values[0] + values[3]; } function main(): i32 { let values: i32[4] = @splat<i32[4]>(7); return first(values); }", 14);
+}
+
 @test
 function qbeReviewF23RejectsFunctionSplat(): void {
   let emission: QbeEmission = qbeEmit("type Callback = (i32) -> i32; function callback(value: i32): i32 { return value + 1; } function main(): i32 { let callbacks: Callback[2] = @splat<Callback[2]>(callback); return 0; }");
