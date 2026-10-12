@@ -58,7 +58,6 @@ Runner regression tests:
 (cd scripts/qbe && ignis test --filter '::qbeLane')
 ```
 
-
 ### Std archive link matrix
 
 `--std-archive` adds the link matrix to a lane run: every supported fixture is also built twice against the C-built std archive (`ignis build --std-archive`), once with `--target c` and once with `--target qbe`, and both binaries have to match the whole-program C build in exit code, stdout and stderr. All archive builds of one run share an output directory, so the archive is built once. The mode cannot be combined with `--inventory`; it checks the committed inventory and writes the same classification reports, which the CI aggregate requires for every shard like the inventory and lane reports.
@@ -71,7 +70,7 @@ The std side of the matrix is C only: QBE cannot build the std archive until it 
 
 ## Parallel CI verification
 
-The QBE differential workflow prepares one compiler, lane runner and checksum-verified QBE 1.2 toolchain, then runs four independent shard jobs. Each shard regenerates its observed inventory and compares the supported programs against C. A final aggregation job rejects missing, failed or cancelled shards, inconsistent catalogs, overlapping or missing cases, and classifications that differ from the committed inventories.
+The QBE differential workflow prepares one compiler, lane runner and checksum-verified QBE 1.2 toolchain, then runs four independent shard jobs. Each shard regenerates its observed inventory, compares the supported programs against C, and runs the std archive link matrix over the same programs. A final aggregation job rejects missing, failed or cancelled shards, inconsistent catalogs, overlapping or missing cases, and classifications that differ from the committed inventories.
 
 Shard membership uses the zero-based index in the deterministic fixture catalog modulo four. Sharded runs write reports only; they never regenerate the tracked inventories:
 
