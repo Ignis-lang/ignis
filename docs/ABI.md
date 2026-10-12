@@ -113,7 +113,7 @@ Two shapes have a rule of their own, the same in every backend:
 
 | Shape | Convention |
 | --- | --- |
-| `T[N]` parameter | the address of the first element, as a C array parameter decays. Parameters are immutable, so the callee never needs its own copy. |
+| `T[N]` parameter | the address of the first element, as a C array parameter decays. A callee that needs the value copies it into its own storage. |
 | `T[N]` result | by value, as `struct { T data[N]; }` |
 
-`scripts/check_cross_backend_abi.py` checks the convention where two backends meet: it adds a probe module to a copy of std, builds the std archive with C, and calls every probe function from a program built with C and with QBE (records of 8, 16 and 24 bytes, mixed field widths, a fixed array in both directions, narrow scalars). The QBE workflow runs it on every pull request.
+`scripts/check_cross_backend_abi.py` checks the convention where two backends meet: it adds a probe module to a copy of std, builds the std archive with C, and calls every probe function from a program built with C and with QBE (records of 3 to 32 bytes, mixed field widths, records holding arrays, fixed arrays and slices in both directions, narrow scalar results, an enum, and arguments passed on the stack). It covers calls from a QBE program into the C archive; ranges are not probed yet. The QBE workflow runs it on every pull request.

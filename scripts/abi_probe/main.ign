@@ -2,7 +2,22 @@
 // this unit to the C-built std archive. A shape that disagrees prints its name
 // and the exit code counts the failures.
 import Io from "std::io";
-import AbiProbe, Pair, Wide, Large, Mixed from "std::abiprobe";
+import
+  AbiProbe,
+  AbiProbeExtra,
+  Pair,
+  Wide,
+  Large,
+  Mixed,
+  Three,
+  Bytes3,
+  WithArray,
+  LongArray,
+  ByteThenLong,
+  Nested,
+  Color,
+  Wide2,
+from "std::abiprobe";
 
 function check(label: str, got: i64, expected: i64): i32 {
   if (got == expected) {
@@ -39,6 +54,59 @@ function main(): i32 {
   failures += check("negativeByte", AbiProbe::negativeByte(-5) as i64, -6);
   failures += check("highShort", AbiProbe::highShort(65000) as i64, 65001);
   failures += check("isLarge", (AbiProbe::isLarge(5000) ? 1 : 0) as i64, 1);
+
+  failures += check("sumThree", AbiProbeExtra::sumThree(Three { a: 1, b: 2, c: 3 }) as i64, 123);
+  let three: Three = AbiProbeExtra::makeThree(4, 5, 6);
+  failures += check("makeThree", (three.a * 100 + three.b * 10 + three.c) as i64, 456);
+
+  failures += check("sumBytes3", AbiProbeExtra::sumBytes3(Bytes3 { a: 1, b: 2, c: 3 }) as i64, 123);
+  let bytes: Bytes3 = AbiProbeExtra::makeBytes3(7, 8, 9);
+  failures += check("makeBytes3", ((bytes.a as i32) * 100 + (bytes.b as i32) * 10 + (bytes.c as i32)) as i64, 789);
+
+  let mut values: i32[3] = @splat<i32[3]>(2);
+  values[2] = 3;
+  failures += check("sumWithArray", AbiProbeExtra::sumWithArray(WithArray { a: 1, values: values }) as i64, 1223);
+  let withArray: WithArray = AbiProbeExtra::makeWithArray(4, 5);
+  failures += check("makeWithArray", (withArray.a * 1000 + withArray.values[0] * 100 + withArray.values[1] * 10 + withArray.values[2]) as i64, 4556);
+
+  let mut longs: i64[3] = @splat<i64[3]>(3);
+  longs[0] = 2;
+  failures += check("sumLongArray", AbiProbeExtra::sumLongArray(LongArray { tag: 1, values: longs }), 1233);
+  let longArray: LongArray = AbiProbeExtra::makeLongArray(9, 5);
+  failures += check("makeLongArray", longArray.tag * 1000 + longArray.values[0] * 100 + longArray.values[1] * 10 + longArray.values[2], 9455);
+
+  failures += check("sumByteThenLong", AbiProbeExtra::sumByteThenLong(ByteThenLong { a: 7, b: 42 }), 7042);
+  let byteThenLong: ByteThenLong = AbiProbeExtra::makeByteThenLong(3, 99);
+  failures += check("makeByteThenLong", (byteThenLong.a as i64) * 1000 + byteThenLong.b, 3099);
+
+  failures += check("sumNested", AbiProbeExtra::sumNested(Nested { inner: Three { a: 1, b: 2, c: 3 }, d: 4 }) as i64, 1234);
+  let nested: Nested = AbiProbeExtra::makeNested(5, 9);
+  failures += check("makeNested", ((nested.inner.a * 100 + nested.inner.b * 10 + nested.inner.c) * 10 + (nested.d as i32)) as i64, 5679);
+
+  let mut items: i32[4] = @splat<i32[4]>(1);
+  items[1] = 2;
+  items[2] = 3;
+  items[3] = 4;
+  failures += check("sumSlice", AbiProbeExtra::sumSlice(items), 1234);
+  let view: i32[] = AbiProbeExtra::identitySlice(items);
+  failures += check("identitySlice", (view[0] as i64) * 100 + (view[3] as i64), 104);
+  failures += check("sumSliceView", AbiProbeExtra::sumSlice(view), 1234);
+
+  failures += check("boolNot", (AbiProbeExtra::boolNot(false) ? 1 : 0) as i64, 1);
+  failures += check("boolNot2", (AbiProbeExtra::boolNot(true) ? 1 : 0) as i64, 0);
+  failures += check("nextChar", (AbiProbeExtra::nextChar('a') as u32) as i64, 98);
+  failures += check("byteMax", AbiProbeExtra::byteMax(55) as i64, 255);
+  failures += check("signedByte", AbiProbeExtra::signedByte(-128) as i64, -128);
+  failures += check("signedShort", AbiProbeExtra::signedShort(-32767) as i64, -32768);
+  failures += check("wideUnsigned", AbiProbeExtra::wideUnsigned(4294967294) as i64, 4294967295);
+  failures += check("nextColor", (AbiProbeExtra::nextColor(Color::GREEN) == Color::BLUE ? 1 : 0) as i64, 1);
+  failures += check("eightArgs", AbiProbeExtra::eightArgs(1, 2, 3, 4, 5, 6, 7, 8), 12345678);
+  failures += check("stackRecords", AbiProbeExtra::stackRecords(Wide2 { a: 1, b: 0 }, Wide2 { a: 0, b: 2 }, Wide2 { a: 3, b: 0 }, Three { a: 0, b: 0, c: 4 }, 5, Wide2 { a: 0, b: 6 }), 654321);
+  let mut pair: i32[2] = @splat<i32[2]>(7);
+  pair[1] = 8;
+  failures += check("arrayAfterSix", AbiProbeExtra::arrayAfterSix(1, 1, 1, 1, 1, 1, pair), 8706);
+  failures += check("readRef", AbiProbeExtra::readRef(&three) as i64, 5);
+  failures += check("strLength", AbiProbeExtra::strLength("hello") as i64, 5);
 
   if (failures == 0) {
     Io::println("all shapes agree");

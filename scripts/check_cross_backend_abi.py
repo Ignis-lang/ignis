@@ -5,7 +5,9 @@ Ignis-to-Ignis calls cross objects built by different backends when a program
 links the std archive (`ignis build --std-archive`): the archive is always
 built with C, the program with whichever backend `--target` names. This check
 copies std, adds `scripts/abi_probe/abiprobe.ign` as `std::abiprobe` (functions
-with every argument and result shape the platform ABI classifies differently),
+with argument and result shapes the platform ABI classifies differently: odd
+record sizes, mixed widths, records holding arrays, fixed arrays, slices,
+narrow scalars, enums, and arguments passed on the stack),
 and builds `scripts/abi_probe/main.ign`, which calls each of them, three ways:
 
 - whole program with C, the reference;

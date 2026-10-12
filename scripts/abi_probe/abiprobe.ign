@@ -3,9 +3,10 @@
 //! The check copies std, adds this file as `std::abiprobe`, builds the std
 //! archive with the C backend, and calls every function here from a program
 //! built with each backend. Each function covers one argument or result shape
-//! the platform ABI classifies differently: records of 8, 16 and 24 bytes,
-//! mixed field widths, a fixed array in both directions, and narrow scalars
-//! whose upper bits the callee may leave unset.
+//! the platform ABI classifies differently: records of several sizes and
+//! field widths, records holding arrays, fixed arrays and slices, narrow
+//! scalars whose upper bits the callee may leave unset, an enum, and
+//! arguments passed on the stack.
 
 export record Pair {
   public a: i32;
@@ -81,4 +82,171 @@ export namespace AbiProbe {
   function isLarge(value: i64): boolean {
     return value > 1000;
   }
+}
+
+export record Three {
+  public a: i32;
+  public b: i32;
+  public c: i32;
+}
+
+export record Bytes3 {
+  public a: u8;
+  public b: u8;
+  public c: u8;
+}
+
+export record WithArray {
+  public a: i32;
+  public values: i32[3];
+}
+
+export record LongArray {
+  public tag: i64;
+  public values: i64[3];
+}
+
+export record ByteThenLong {
+  public a: u8;
+  public b: i64;
+}
+
+export record Nested {
+  public inner: Three;
+  public d: i16;
+}
+
+export enum Color {
+  RED,
+  GREEN,
+  BLUE,
+}
+
+/// Shapes beyond the first set: odd record sizes, records holding arrays,
+/// slices, narrow results, enums, and arguments passed on the stack.
+export namespace AbiProbeExtra {
+  function sumThree(value: Three): i32 {
+    return value.a * 100 + value.b * 10 + value.c;
+  }
+
+  function makeThree(a: i32, b: i32, c: i32): Three {
+    return Three { a: a, b: b, c: c };
+  }
+
+  function sumBytes3(value: Bytes3): i32 {
+    return (value.a as i32) * 100 + (value.b as i32) * 10 + (value.c as i32);
+  }
+
+  function makeBytes3(a: u8, b: u8, c: u8): Bytes3 {
+    return Bytes3 { a: a, b: b, c: c };
+  }
+
+  function sumWithArray(value: WithArray): i32 {
+    return value.a * 1000 + value.values[0] * 100 + value.values[1] * 10 + value.values[2];
+  }
+
+  function makeWithArray(a: i32, b: i32): WithArray {
+    let mut values: i32[3] = @splat<i32[3]>(b);
+    values[2] = b + 1;
+    return WithArray { a: a, values: values };
+  }
+
+  function sumLongArray(value: LongArray): i64 {
+    return value.tag * 1000 + value.values[0] * 100 + value.values[1] * 10 + value.values[2];
+  }
+
+  function makeLongArray(tag: i64, b: i64): LongArray {
+    let mut values: i64[3] = @splat<i64[3]>(b);
+    values[0] = b - 1;
+    return LongArray { tag: tag, values: values };
+  }
+
+  function sumByteThenLong(value: ByteThenLong): i64 {
+    return (value.a as i64) * 1000 + value.b;
+  }
+
+  function makeByteThenLong(a: u8, b: i64): ByteThenLong {
+    return ByteThenLong { a: a, b: b };
+  }
+
+  function sumNested(value: Nested): i32 {
+    return (value.inner.a * 100 + value.inner.b * 10 + value.inner.c) * 10 + (value.d as i32);
+  }
+
+  function makeNested(a: i32, d: i16): Nested {
+    return Nested { inner: Three { a: a, b: a + 1, c: a + 2 }, d: d };
+  }
+
+  function sumSlice(values: i32[]): i64 {
+    return (values[0] as i64) * 1000 + (values[1] as i64) * 100 + (values[2] as i64) * 10 + (values[3] as i64);
+  }
+
+  function identitySlice(values: i32[]): i32[] {
+    return values;
+  }
+
+  function boolNot(value: boolean): boolean {
+    return !value;
+  }
+
+  function nextChar(value: char): char {
+    return ((value as u32) + 1) as char;
+  }
+
+  function byteMax(value: u8): u8 {
+    return value + 200;
+  }
+
+  function signedByte(value: i8): i8 {
+    return value;
+  }
+
+  function signedShort(value: i16): i16 {
+    return value - 1;
+  }
+
+  function wideUnsigned(value: u32): u32 {
+    return value + 1;
+  }
+
+  function nextColor(value: Color): Color {
+    return match (value) {
+      Color::RED -> Color::GREEN,
+      Color::GREEN -> Color::BLUE,
+      Color::BLUE -> Color::RED,
+    };
+  }
+
+  function eightArgs(a: i64, b: i32, c: u8, d: i64, e: i16, f: i64, g: i32, h: i64): i64 {
+    return a * 10000000 + (b as i64) * 1000000 + (c as i64) * 100000 + d * 10000 + (e as i64) * 1000 + f * 100 + (g as i64) * 10 + h;
+  }
+
+  function stackRecords(a: Wide2, b: Wide2, c: Wide2, d: Three, e: i64, f: Wide2): i64 {
+    return a.a + b.b * 10 + c.a * 100 + (d.c as i64) * 1000 + e * 10000 + f.b * 100000;
+  }
+
+  function arrayAfterSix(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, values: i32[2]): i64 {
+    return a + b + c + d + e + f + (values[0] as i64) * 100 + (values[1] as i64) * 1000;
+  }
+
+  function readRef(value: &Three): i32 {
+    return value.b;
+  }
+
+  function strLength(value: str): u64 {
+    let mut count: u64 = 0;
+    while (true) {
+      let byte: u8 = @read<u8>((value as *u8) + count);
+      if (byte == 0) {
+        break;
+      }
+      count += 1;
+    }
+    return count;
+  }
+}
+
+export record Wide2 {
+  public a: i64;
+  public b: i64;
 }
