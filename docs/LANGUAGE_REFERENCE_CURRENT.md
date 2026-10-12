@@ -1619,6 +1619,8 @@ Common directive builtins:
 - `@panic`, `@trap`, `@unreachable`
 - `@maxOf`, `@minOf`
 
+`@eq<T>(a, b)` supports integer primitives, `boolean`, `char`, `str`, and records or enums that declare `@implements(Eq)` with an `equals(&self, other: &T): boolean` method. Any other `T` is an error (A0246). A generic `@eq<T>` is judged for each concrete `T` it is instantiated with.
+
 ## 12. Semantics Summary
 
 - `if` and `while` conditions must be parenthesized.

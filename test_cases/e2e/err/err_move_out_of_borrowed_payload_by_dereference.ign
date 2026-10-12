@@ -1,0 +1,36 @@
+// e2e: err
+// A `let else` over an `Option<&T>` binds a reference into storage the store
+// still owns. Returning the dereferenced binding by value would hand the caller
+// buffers the store frees again, so the move is rejected.
+import Vector from "std::vector";
+
+record Shape {
+  params: Vector<u32>;
+}
+
+record Store {
+  items: Vector<Shape>;
+
+  get(&self, index: u64): Option<&Shape> {
+    return self.items.get(index);
+  }
+}
+
+function takeShape(store: &Store): Shape {
+  let Option::SOME(shape) = store.get(0) else {
+    return Shape { params: Vector::new<u32>() };
+  };
+
+  return *shape;
+}
+
+function main(): i32 {
+  let mut items: Vector<Shape> = Vector::new<Shape>();
+  let mut params: Vector<u32> = Vector::new<u32>();
+  params.push(7);
+  items.push(Shape { params: params });
+  let store: Store = Store { items: items };
+  let copy: Shape = takeShape(&store);
+
+  return copy.params.length() as i32;
+}

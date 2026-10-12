@@ -1,0 +1,29 @@
+// e2e: err
+// `@eq<T>` compares through a type's `equals` method only when the type
+// declares `@implements(Eq)`. A record without it, or with an `equals` method
+// but no `Eq`, has no equality the compiler can emit, so the comparison is
+// rejected instead of compiling to an unset result.
+record Plain {
+  x: i32;
+}
+
+record Loose {
+  x: i32;
+
+  public equals(&self, other: &Loose): boolean {
+    return self.x == other.x;
+  }
+}
+
+function main(): i32 {
+  let a: Plain = Plain { x: 1 };
+  let b: Plain = Plain { x: 1 };
+  let c: Loose = Loose { x: 2 };
+  let d: Loose = Loose { x: 2 };
+
+  if (@eq<Plain>(&a, &b) && @eq<Loose>(&c, &d)) {
+    return 1;
+  }
+
+  return 0;
+}
