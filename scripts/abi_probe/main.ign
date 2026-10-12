@@ -2,6 +2,7 @@
 // this unit to the C-built std archive. A shape that disagrees prints its name
 // and the exit code counts the failures.
 import Io from "std::io";
+import Option from "std::option";
 import
   AbiProbe,
   AbiProbeExtra,
@@ -17,6 +18,9 @@ import
   Nested,
   Color,
   Wide2,
+  SmallPayload,
+  BytePayload,
+  LargePayload,
 from "std::abiprobe";
 
 function check(label: str, got: i64, expected: i64): i32 {
@@ -26,6 +30,34 @@ function check(label: str, got: i64, expected: i64): i32 {
 
   Io::println(label);
   return 1;
+}
+
+function readSmallLocal(value: SmallPayload): i64 {
+  return match (value) {
+    SmallPayload::NUMBER(number) -> number as i64,
+    SmallPayload::NOTHING -> -1,
+  };
+}
+
+function readByteLocal(value: BytePayload): i64 {
+  return match (value) {
+    BytePayload::PAIR(small, large) -> (small as i64) * 1000 + large,
+    BytePayload::SINGLE(single) -> single as i64,
+  };
+}
+
+function readLargeLocal(value: LargePayload): i64 {
+  return match (value) {
+    LargePayload::TRIPLE(a, b, c) -> a * 100 + b * 10 + c,
+    LargePayload::EMPTY -> -1,
+  };
+}
+
+function readOptionLocal(value: Option<i64>): i64 {
+  return match (value) {
+    Option::SOME(number) -> number,
+    Option::NONE -> -1,
+  };
 }
 
 function main(): i32 {
@@ -100,6 +132,16 @@ function main(): i32 {
   failures += check("signedShort", AbiProbeExtra::signedShort(-32767) as i64, -32768);
   failures += check("wideUnsigned", AbiProbeExtra::wideUnsigned(4294967294) as i64, 4294967295);
   failures += check("nextColor", (AbiProbeExtra::nextColor(Color::GREEN) == Color::BLUE ? 1 : 0) as i64, 1);
+  failures += check("readSmall", AbiProbeExtra::readSmall(SmallPayload::NUMBER(42)) as i64, 42);
+  failures += check("readSmallEmpty", AbiProbeExtra::readSmall(SmallPayload::NOTHING) as i64, -1);
+  failures += check("makeSmall", readSmallLocal(AbiProbeExtra::makeSmall(77)), 77);
+  failures += check("readByte", AbiProbeExtra::readByte(BytePayload::PAIR(7, 42)), 7042);
+  failures += check("makeByte", readByteLocal(AbiProbeExtra::makeByte(3, 99)), 3099);
+  failures += check("readLarge", AbiProbeExtra::readLarge(LargePayload::TRIPLE(1, 2, 3)), 123);
+  failures += check("makeLarge", readLargeLocal(AbiProbeExtra::makeLarge(4, 5, 6)), 456);
+  failures += check("readOption", AbiProbeExtra::readOption(Option::SOME(1234)), 1234);
+  failures += check("readOptionNone", AbiProbeExtra::readOption(Option::NONE), -1);
+  failures += check("makeOption", readOptionLocal(AbiProbeExtra::makeOption(5678)), 5678);
   failures += check("eightArgs", AbiProbeExtra::eightArgs(1, 2, 3, 4, 5, 6, 7, 8), 12345678);
   failures += check("stackRecords", AbiProbeExtra::stackRecords(Wide2 { a: 1, b: 0 }, Wide2 { a: 0, b: 2 }, Wide2 { a: 3, b: 0 }, Three { a: 0, b: 0, c: 4 }, 5, Wide2 { a: 0, b: 6 }), 654321);
   let mut pair: i32[2] = @splat<i32[2]>(7);
