@@ -1,0 +1,48 @@
+// The program side of the cross-backend ABI check: every call crosses from
+// this unit to the C-built std archive. A shape that disagrees prints its name
+// and the exit code counts the failures.
+import Io from "std::io";
+import AbiProbe, Pair, Wide, Large, Mixed from "std::abiprobe";
+
+function check(label: str, got: i64, expected: i64): i32 {
+  if (got == expected) {
+    return 0;
+  }
+
+  Io::println(label);
+  return 1;
+}
+
+function main(): i32 {
+  let mut failures: i32 = 0;
+
+  failures += check("sumPair", AbiProbe::sumPair(Pair { a: 3, b: 4 }) as i64, 34);
+  let pair: Pair = AbiProbe::makePair(5, 6);
+  failures += check("makePair", (pair.a * 10 + pair.b) as i64, 56);
+
+  failures += check("sumWide", AbiProbe::sumWide(Wide { a: 7, b: 8 }), 78);
+  let wide: Wide = AbiProbe::makeWide(9, 1);
+  failures += check("makeWide", wide.a * 10 + wide.b, 91);
+
+  failures += check("sumLarge", AbiProbe::sumLarge(Large { a: 1, b: 2, c: 3 }), 123);
+  let large: Large = AbiProbe::makeLarge(4, 5, 6);
+  failures += check("makeLarge", large.a * 100 + large.b * 10 + large.c, 456);
+
+  failures += check("sumMixed", AbiProbe::sumMixed(Mixed { a: 7, b: 8, c: 9 }) as i64, 789);
+  let mixed: Mixed = AbiProbe::makeMixed(1, 2, 3);
+  failures += check("makeMixed", ((mixed.a as i32) * 100 + mixed.b * 10 + (mixed.c as i32)) as i64, 123);
+
+  let made: i32[4] = AbiProbe::makeArray(5);
+  failures += check("makeArray", (made[0] * 1000 + made[1] * 100 + made[2] * 10 + made[3]) as i64, 5678);
+  failures += check("sumArray", AbiProbe::sumArray(made) as i64, 5678);
+
+  failures += check("negativeByte", AbiProbe::negativeByte(-5) as i64, -6);
+  failures += check("highShort", AbiProbe::highShort(65000) as i64, 65001);
+  failures += check("isLarge", (AbiProbe::isLarge(5000) ? 1 : 0) as i64, 1);
+
+  if (failures == 0) {
+    Io::println("all shapes agree");
+  }
+
+  return failures;
+}

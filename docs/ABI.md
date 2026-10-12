@@ -16,7 +16,7 @@ So two backends agree on a value exactly when they agree on its canonical repres
 | Data layout | Specified here, computed by `ignis/abi/`, enforced on every C build |
 | Platform constants (`O_RDONLY`, `ENOENT`, `TIOCGWINSZ`, ...) | Specified for `x86_64` Linux in `std/libc/platform.ign`, checked against the C headers in CI; other targets still read the headers |
 | Symbol names | Specified below, computed by `ignis/abi/symbols.ign`; checked across programs in CI |
-| Calling convention for Ignis-internal calls | Not yet: fixed arrays, closures and drop glue differ between backends |
+| Calling convention for Ignis-internal calls | Specified below for the shapes both backends build, checked across C and QBE in CI; closures and drop glue still exist only in the C backend |
 | Runtime ownership across objects | Not yet: every object carries its own std and runtime |
 
 ## Data layout
@@ -104,3 +104,16 @@ Some names stay as they are: `extern` declarations and `@externName` keep the C 
 `scripts/check_symbol_stability.py` is the check. It compiles two programs that share functions, with every definition id shifted in the second, and fails when a symbol of the first program is missing from the second.
 
 Symbols are still local to their object in a whole-program build: every function is `static`. `ignis build-std` exports every non-generic function and every mutable static of the std archive under these names. A build with `[build] std_archive` (or `--std-archive`) links against that archive: its unit declares the std functions and statics it uses as external references and defines only the project's own definitions plus the generic instances it uses, which stay `static` in every unit, so no instance is ever defined twice. Exporting a program's own symbols, so another object can link against them, is the next step.
+
+## Calling convention
+
+An Ignis-internal call follows the platform C calling convention for the canonical C representation of each argument and result (System V on the hosted 64-bit targets). Records, enums, slices and ranges are passed and returned by value as the structs the data layout describes, so the platform ABI decides registers or memory from their size and fields.
+
+Two shapes have a rule of their own, the same in every backend:
+
+| Shape | Convention |
+| --- | --- |
+| `T[N]` parameter | the address of the first element, as a C array parameter decays. Parameters are immutable, so the callee never needs its own copy. |
+| `T[N]` result | by value, as `struct { T data[N]; }` |
+
+`scripts/check_cross_backend_abi.py` checks the convention where two backends meet: it adds a probe module to a copy of std, builds the std archive with C, and calls every probe function from a program built with C and with QBE (records of 8, 16 and 24 bytes, mixed field widths, a fixed array in both directions, narrow scalars). The QBE workflow runs it on every pull request.

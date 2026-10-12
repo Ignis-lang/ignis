@@ -64,6 +64,14 @@ jobs:
           make -C "$RUNNER_TEMP/qbe-1.2"
           cp "$RUNNER_TEMP/qbe-1.2/qbe" build/qbe-ci-tools/qbe
 
+      # A program built with QBE calls the C-built std archive for every
+      # argument and result shape the platform ABI classifies differently;
+      # the program has to agree with its whole-program C build.
+      - name: Check the cross-backend ABI against the std archive
+        run: |
+          PATH="$GITHUB_WORKSPACE/build/qbe-ci-tools:$PATH" \
+            python3 scripts/check_cross_backend_abi.py --compiler build/bootstrap/stage1/ignis
+
       - name: Upload the stage1 compiler
         uses: actions/upload-artifact@v4
         with:

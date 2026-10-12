@@ -1,0 +1,84 @@
+//! The std side of the cross-backend ABI check (`scripts/check_cross_backend_abi.py`).
+//!
+//! The check copies std, adds this file as `std::abiprobe`, builds the std
+//! archive with the C backend, and calls every function here from a program
+//! built with each backend. Each function covers one argument or result shape
+//! the platform ABI classifies differently: records of 8, 16 and 24 bytes,
+//! mixed field widths, a fixed array in both directions, and narrow scalars
+//! whose upper bits the callee may leave unset.
+
+export record Pair {
+  public a: i32;
+  public b: i32;
+}
+
+export record Wide {
+  public a: i64;
+  public b: i64;
+}
+
+export record Large {
+  public a: i64;
+  public b: i64;
+  public c: i64;
+}
+
+export record Mixed {
+  public a: u8;
+  public b: i32;
+  public c: u16;
+}
+
+export namespace AbiProbe {
+  function sumPair(value: Pair): i32 {
+    return value.a * 10 + value.b;
+  }
+
+  function makePair(a: i32, b: i32): Pair {
+    return Pair { a: a, b: b };
+  }
+
+  function sumWide(value: Wide): i64 {
+    return value.a * 10 + value.b;
+  }
+
+  function makeWide(a: i64, b: i64): Wide {
+    return Wide { a: a, b: b };
+  }
+
+  function sumLarge(value: Large): i64 {
+    return value.a * 100 + value.b * 10 + value.c;
+  }
+
+  function makeLarge(a: i64, b: i64, c: i64): Large {
+    return Large { a: a, b: b, c: c };
+  }
+
+  function sumMixed(value: Mixed): i32 {
+    return (value.a as i32) * 100 + value.b * 10 + (value.c as i32);
+  }
+
+  function makeMixed(a: u8, b: i32, c: u16): Mixed {
+    return Mixed { a: a, b: b, c: c };
+  }
+
+  function sumArray(values: i32[4]): i32 {
+    return values[0] * 1000 + values[1] * 100 + values[2] * 10 + values[3];
+  }
+
+  function makeArray(base: i32): i32[4] {
+    return [base, base + 1, base + 2, base + 3];
+  }
+
+  function negativeByte(value: i8): i8 {
+    return value - 1;
+  }
+
+  function highShort(value: u16): u16 {
+    return value + 1;
+  }
+
+  function isLarge(value: i64): boolean {
+    return value > 1000;
+  }
+}
