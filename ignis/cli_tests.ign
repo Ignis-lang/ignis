@@ -188,3 +188,64 @@ function cliHelpAlignsEmitObjectDescription(): void {
   let help: String = helpText();
   Test::assert(cliTestContains(help.toStr(), "-c, --emit-object         Compile to an object file and do not link"));
 }
+
+/// `--std-archive` selects linking std from its archive on `build`.
+@test
+function cliParsesStdArchiveOnBuild(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+  arguments.push(String::create("build"));
+  arguments.push(String::create("--std-archive"));
+
+  let options: CliOptions = match (parseArguments(&arguments)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(options.stdArchive, true);
+  Test::assertEq<boolean>(options.emitObject, false);
+}
+
+/// Without the flag a build keeps std in its own unit.
+@test
+function cliLeavesStdArchiveOffByDefault(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+  arguments.push(String::create("build"));
+
+  let options: CliOptions = match (parseArguments(&arguments)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(options.stdArchive, false);
+}
+
+/// `check` links nothing, so asking for the std archive is an error.
+@test
+function cliRejectsStdArchiveWithCheck(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+  arguments.push(String::create("check"));
+  arguments.push(String::create("--std-archive"));
+
+  let Result::ERROR(message) = parseArguments(&arguments) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "error: --std-archive is a build option: only build links the standard library");
+}
+
+/// The help text documents `--std-archive` on the build flag column.
+@test
+function cliHelpDescribesStdArchive(): void {
+  let help: String = helpText();
+  Test::assert(cliTestContains(help.toStr(), "      --std-archive         Link std from libignis_std.a instead of compiling it into the unit"));
+}

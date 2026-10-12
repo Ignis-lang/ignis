@@ -52,6 +52,9 @@ export record ResolvedProject {
   /// `[build] linker`, absent when the project leaves the choice to the default rule.
   public linker: Option<String>;
   public cflags: Vector<String>;
+  /// `[build] std_archive`: link std from `libignis_std.a` instead of
+  /// compiling it into the program's unit.
+  public stdArchive: boolean;
   public emit: Vector<String>;
   public defaultFeatures: Vector<String>;
   public knownFeatures: Vector<String>;
@@ -1012,6 +1015,7 @@ function knownBuildKeys(): Vector<String> {
   keys.push(String::create("cc"));
   keys.push(String::create("linker"));
   keys.push(String::create("cflags"));
+  keys.push(String::create("std_archive"));
   keys.push(String::create("emit"));
   return keys;
 }
@@ -1280,6 +1284,7 @@ export namespace Config {
     };
     let emptyCflags: Vector<String> = Vector::new<String>();
     let cflags: Vector<String> = stringArrayOrDefault(&document, configPath, "build.cflags", &emptyCflags)!;
+    let stdArchive: boolean = booleanOrDefault(&document, configPath, "build.std_archive", false)!;
     let emptyEmit: Vector<String> = Vector::new<String>();
     let emit: Vector<String> = stringArrayOrDefault(&document, configPath, "build.emit", &emptyEmit)!;
     let emptyDefaultFeatures: Vector<String> = Vector::new<String>();
@@ -1374,6 +1379,7 @@ export namespace Config {
       cc: cc.clone(),
       linker: cloneOptionString(&linker),
       cflags: cloneStringVector(&cflags),
+      stdArchive: stdArchive,
       emit: cloneStringVector(&emit),
       defaultFeatures: cloneStringVector(&defaultFeatures),
       knownFeatures: cloneStringVector(&knownFeatures),
@@ -1471,6 +1477,7 @@ function emptyProject(): ResolvedProject {
     cc: String::create("cc"),
     linker: Option::NONE,
     cflags: Vector::new<String>(),
+    stdArchive: false,
     emit: Vector::new<String>(),
     defaultFeatures: Vector::new<String>(),
     knownFeatures: Vector::new<String>(),

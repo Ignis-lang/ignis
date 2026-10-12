@@ -72,6 +72,8 @@ record ResolverProject {
   public target: String;
   public bin: boolean;
   public emitC: boolean;
+  /// `[build] std_archive`.
+  public stdArchive: boolean;
   /// False when discovery ran without an `ignis.toml`, which is what a
   /// single-file build does.
   public hasProjectFile: boolean;
@@ -163,6 +165,9 @@ export record DiscoveryResult {
   public bin: boolean;
   /// True when `[build] emit` asks for the generated C to be kept.
   public emitC: boolean;
+  /// `[build] std_archive`: link std from `libignis_std.a` instead of
+  /// compiling it into the program's unit. `--std-archive` turns it on too.
+  public stdArchive: boolean;
   /// The entry module the build starts from.
   public entry: Path::PathBuf;
   /// False when discovery ran without an `ignis.toml`.
@@ -640,6 +645,7 @@ function resolverLoadProject(
     target: target,
     bin: resolved.bin,
     emitC: resolverEmitsC(&resolved.emit),
+    stdArchive: resolved.stdArchive,
     hasProjectFile: true,
     stdEnabled: resolved.stdEnabled,
     testFixtures: resolverClonePaths(&resolved.testFixtures),
@@ -744,6 +750,7 @@ function resolverSingleFileProject(
     target: target,
     bin: true,
     emitC: false,
+    stdArchive: false,
     hasProjectFile: false,
     stdEnabled: true,
     testFixtures: Vector::new<Path::PathBuf>(),
@@ -801,6 +808,7 @@ function resolverStdOnlyProject(
     target: String::create("c"),
     bin: false,
     emitC: false,
+    stdArchive: false,
     hasProjectFile: false,
     stdEnabled: true,
     testFixtures: Vector::new<Path::PathBuf>(),
@@ -1500,6 +1508,7 @@ function resolverDiscoverProjectRoots(
     target: project.target.clone(),
     bin: project.bin,
     emitC: project.emitC,
+    stdArchive: project.stdArchive,
     entry: project.entry.clone(),
     hasProjectFile: project.hasProjectFile,
     root: project.root.clone(),
@@ -1593,6 +1602,8 @@ function resolverDiscoverStdRoots(
     target: String::create("c"),
     bin: false,
     emitC: project.emitC,
+    // The archive is what `std_archive` links, never a unit linked against one.
+    stdArchive: false,
     entry: project.entry.clone(),
     hasProjectFile: project.hasProjectFile,
     root: project.root.clone(),
@@ -1874,6 +1885,7 @@ function resolverDiscoverDocRoots(
       target: project.target.clone(),
       bin: project.bin,
       emitC: project.emitC,
+      stdArchive: project.stdArchive,
       entry: project.entry.clone(),
       hasProjectFile: project.hasProjectFile,
       root: project.root.clone(),

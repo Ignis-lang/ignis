@@ -256,6 +256,12 @@ record BuildProfile {
   /// A `std = false` build: every unit is compiled with `-ffreestanding` and
   /// without the std runtime headers, and nothing links `libm`.
   public freestanding: boolean;
+  /// `--std-archive` or `[build] std_archive`: the program's unit defines only
+  /// the project's definitions and the generic instances it uses, and std
+  /// comes from `libignis_std.a`.
+  public stdArchive: boolean;
+  /// The std archive the link adds, set once the build made sure it is current.
+  public stdArchivePath: Option<Path::PathBuf>;
 }
 
 function buildProfileCloneStrings(source: &Vector<String>): Vector<String> {
@@ -292,6 +298,8 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
     linkerFlags: Vector::new<String>(),
     backend: discovery.target.clone(),
     freestanding: false,
+    stdArchive: discovery.stdArchive,
+    stdArchivePath: Option::NONE,
   };
 
   if (let Option::SOME(level) = optLevel) {
@@ -349,8 +357,14 @@ function programBuildFingerprint(
   profile: &BuildProfile
 ): BuildFingerprint {
   let sources: Vector<Path::PathBuf> = discoveredSourcePaths(discovery);
-  let profileHash: String = stampProfileHash(profile.optLevel, profile.debug, &profile.cflags);
+  let mut profileHash: String = stampProfileHash(profile.optLevel, profile.debug, &profile.cflags);
   let linkerFlagsText: String = toolchainLinkerFlagsText(profile);
+
+  // A unit linked against the std archive holds different code than a
+  // whole-program one. The default adds nothing, which keeps older stamps valid.
+  if (profile.stdArchive) {
+    profileHash.pushStr("|std-archive");
+  }
   let mut manifestHash: String = String::new();
 
   if (!discovery.stdRoot.isEmpty()) {
@@ -859,7 +873,12 @@ function linkObjects(
     index += 1;
   }
 
-  let archives: Vector<String> = Vector::new<String>();
+  let mut archives: Vector<String> = Vector::new<String>();
+
+  if (let Option::SOME(archivePath) = &profile.stdArchivePath) {
+    archives.push(archivePath.toString());
+  }
+
   let libs: Vector<String> = toolchainLinkLibraries(profile);
 
   let linkFlags: Vector<String> = toolchainLinkFlags(profile);
@@ -1024,6 +1043,10 @@ export record CompileOptions {
   /// Emit a freestanding unit, which a `std = false` build compiles: no
   /// runtime or hosted headers and no C `main` wrapper.
   public freestanding: boolean;
+  /// Emit a unit linked against the std archive: std functions and mutable
+  /// statics are declared, not defined, except the generic instances the
+  /// program uses, which the unit always defines for itself.
+  public stdArchive: boolean;
 
   public static build(emitCode: boolean): CompileOptions {
     return CompileOptions {
@@ -1038,6 +1061,7 @@ export record CompileOptions {
       verbose: false,
       stdTestRoot: Option::NONE,
       freestanding: false,
+      stdArchive: false,
     };
   }
 }
@@ -1351,6 +1375,137 @@ function qbeExportRoots(
     index += 1;
   }
   return roots;
+}
+
+/// Whether `defId` is a monomorphized instance, or a closure copy made for one.
+function isInstanceDefinition(
+  defStore: &mut Analyzer::DefinitionStore,
+  defId: Analyzer::DefinitionId,
+): boolean {
+  // Two steps: a nested `SOME(Variant(..))` over an `Option` of a reference
+  // reads the payload before it checks the tag and crashes on `NONE`.
+  let Option::SOME(origin) = defStore.symbolOriginOf(defId) else {
+    return false;
+  };
+
+  return match (origin) {
+    Analyzer::SymbolOrigin::Instance(_) -> true,
+    _ -> false,
+  };
+}
+
+/// Whether `defId` belongs to a std module. A method and a static field have
+/// no module of their own, so the record, enum or trait that declares them
+/// answers for them.
+function isStdOwned(
+  defStore: &mut Analyzer::DefinitionStore,
+  defId: Analyzer::DefinitionId,
+  infos: &Vector<Analyzer::Imports::ModuleInfo>,
+): boolean {
+  let mut owner: Analyzer::DefinitionId = defId;
+
+  if (let Option::SOME(definition) = defStore.get(defId)) {
+    if (let Analyzer::Definition::Method(methodDef) = definition) {
+      owner = methodDef.owner;
+    }
+  }
+
+  if (let Option::SOME(origin) = defStore.symbolOriginOf(defId)) {
+    if (let Analyzer::SymbolOrigin::StaticMember(declaringType) = origin) {
+      owner = declaringType;
+    }
+  }
+
+  return CodegenC::isStdDefinition(defStore, infos, owner);
+}
+
+/// Whether the std archive defines `defId`: a std function that is not a
+/// generic instance, or a closure written in one. An instance is never in
+/// it, since each unit defines the instances it uses.
+function isStdArchiveFunction(
+  defStore: &mut Analyzer::DefinitionStore,
+  defId: Analyzer::DefinitionId,
+  infos: &Vector<Analyzer::Imports::ModuleInfo>,
+): boolean {
+  let mut current: Analyzer::DefinitionId = defId;
+  let mut depth: u64 = 0;
+
+  // A closure is named after the function it is written in, and is defined
+  // wherever that function is; nested closures walk up to the outermost one.
+  while (depth < 64) {
+    let mut enclosing: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(origin) = defStore.symbolOriginOf(current)) {
+      match (origin) {
+        Analyzer::SymbolOrigin::Instance(_) -> {
+          return false;
+        },
+        Analyzer::SymbolOrigin::Closure(closure) -> {
+          enclosing = Option::SOME(closure.enclosing);
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(next) = enclosing else {
+      break;
+    };
+
+    current = next;
+    depth += 1;
+  }
+
+  if (CodegenC::isExternFunction(defStore, current)) {
+    return false;
+  }
+
+  return isStdOwned(defStore, current, infos);
+}
+
+/// The raw ids of the definitions in `program` that the std archive defines,
+/// which a unit linked against it declares instead of defining: the std
+/// functions `isStdArchiveFunction` accepts and every mutable std static, so
+/// the runtime state has the archive's one copy. An immutable static is only
+/// ever read, so each unit keeps its own.
+function stdArchiveDefinitions(
+  defStore: &mut Analyzer::DefinitionStore,
+  program: &Lir::LirProgram,
+  infos: &Vector<Analyzer::Imports::ModuleInfo>,
+): Vector<u32> {
+  let mut foreign: Vector<u32> = Vector::new<u32>();
+  let mut functionIndex: u64 = 0;
+
+  while (functionIndex < program.functions.length()) {
+    if (let Option::SOME(defId) = program.functions.defAt(functionIndex)) {
+      if (isStdArchiveFunction(defStore, *defId, infos)) {
+        foreign.push(defId.raw());
+      }
+    }
+
+    functionIndex += 1;
+  }
+
+  let mut globalIndex: u64 = 0;
+
+  while (globalIndex < program.globalInits.length()) {
+    if (let Option::SOME(global) = program.globalInits.get(globalIndex)) {
+      let mut mutable: boolean = false;
+
+      if (let Option::SOME(definition) = defStore.get(global.defId)) {
+        if (let Analyzer::Definition::Variable(variable) = definition) {
+          mutable = variable.mutable;
+        }
+      }
+
+      if (mutable && !isInstanceDefinition(defStore, global.defId) && isStdOwned(defStore, global.defId, infos)) {
+        foreign.push(global.defId.raw());
+      }
+    }
+
+    globalIndex += 1;
+  }
+
+  return foreign;
 }
 
 /// Parse, analyze, lower and emit every module `discovery` reached.
@@ -1985,7 +2140,13 @@ export function compileDiscovered(
         break;
       };
 
-      externalSymbols.push(defId.raw());
+      // A generic instance stays private to the archive: every unit that uses
+      // one defines its own copy, so the archive never offers a symbol a
+      // linked unit also defines.
+      if (!isInstanceDefinition(&mut defStore, *defId)) {
+        externalSymbols.push(defId.raw());
+      }
+
       functionIndex += 1;
     }
   }
@@ -2015,6 +2176,11 @@ export function compileDiscovered(
   hooks.sources = files;
   hooks.projectRoot = discovery.root.toString();
   hooks.stdRoot = discovery.stdRoot.toString();
+  hooks.exportStatics = exportAll;
+
+  if (options.stdArchive) {
+    hooks.foreignDefinitions = stdArchiveDefinitions(&mut defStore, &lirResult.program, &infos);
+  }
 
   Output::beginPhase("codegen", 0);
 
@@ -2036,7 +2202,7 @@ export function compileDiscovered(
     Backend::QBE -> {
         let qbeRoots: Vector<u32> = qbeExportRoots(&mut defStore, &lirResult.program, &infos, &externalSymbols);
         let qbe: CodegenQbe::EmitOutput = CodegenQbe::emitProgram(
-          &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &qbeRoots,
+          &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &qbeRoots, &hooks.foreignDefinitions,
         );
         if (let Option::SOME(message) = &qbe.error) {
           let diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "B4004", message.toStr(), SourceSpan::new("", 0, 0));
@@ -2365,6 +2531,16 @@ function runCompile(
     }
   }
 
+  profile.stdArchive = profile.stdArchive || options.stdArchive;
+
+  if (!checkOnly) {
+    if (let Option::SOME(message) = stdArchiveModeError(profile.stdArchive, profile.freestanding)) {
+      Output::message(message);
+      printFailure("Build", 1, 0);
+      return 1;
+    }
+  }
+
   let backend: Backend = driverBackend(&profile.backend);
 
   let objectOnly: boolean = (profile.freestanding && !discovery.bin) || options.emitObject;
@@ -2378,6 +2554,17 @@ function runCompile(
   let reportPath: Path::PathBuf = stampReportPathForObject(&artifacts.object);
   let fingerprint: BuildFingerprint = programBuildFingerprint(&discovery, &profile);
   let mut cacheIsWritable: boolean = false;
+
+  // The archive has to be current before the cache can relink against it,
+  // and it is the C backend's whichever backend the program's unit uses.
+  if (!checkOnly && profile.stdArchive && !objectOnly && discovery.bin) {
+    let Option::SOME(archivePath) = ensureStdArchive(startPath, options, &discovery.outDir) else {
+      printFailure("Build", 1, 0);
+      return 1;
+    };
+
+    profile.stdArchivePath = Option::SOME(archivePath);
+  }
 
   // `--emit-object` writes one object and nothing else, so the binary cache has
   // nothing to reuse or relink and the object is always rebuilt.
@@ -2425,6 +2612,7 @@ function runCompile(
   compileOptions.ownershipReportFunction = options.ownershipReportFunction.clone();
   compileOptions.verbose = options.verbose;
   compileOptions.freestanding = profile.freestanding;
+  compileOptions.stdArchive = profile.stdArchive;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
   let mut emitted: boolean = false;
@@ -4439,15 +4627,48 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-
   let base: Path::PathBuf = stdArtifactBase(&discovery.outDir, &options.outDir, &options.outputPath);
-  let layout: BuildLayout = BuildLayout::new("std", &base);
+  let outcome: StdArchiveOutcome = produceStdArchive(&discovery, &file, &profile, &base, options);
+
+  if (outcome.errors > 0) {
+    printFailure("Build", outcome.errors, outcome.warnings);
+    return 1;
+  }
+
+  let timing: String = outcome.cached ? String::create("cached") : buildClockText(&started);
+  printStandardLibraryBuilt(outcome.warnings, &timing, &outcome.libraryPath);
+  return 0;
+}
+
+/// What `produceStdArchive` did: the errors it reported, the warnings the
+/// std build has, whether the cached archive was current, and where it is.
+record StdArchiveOutcome {
+  public errors: u64;
+  public warnings: u64;
+  public cached: boolean;
+  public libraryPath: Path::PathBuf;
+}
+
+/// Makes sure `libignis_std.a` under `base` is current, compiling std with
+/// the C backend only when its stamp says the archive is stale. Every
+/// function and mutable static gets external linkage, because the archive is
+/// linked by units this build never sees. Prints the phase lines and any
+/// diagnostics, but no closing line: the caller owns that.
+function produceStdArchive(
+  discovery: &DiscoveryResult,
+  file: &SourceFile,
+  profile: &BuildProfile,
+  base: &Path::PathBuf,
+  options: &CliOptions,
+): StdArchiveOutcome {
+  let verbose: boolean = options.verbose;
+  let layout: BuildLayout = BuildLayout::new("std", base);
   let sourcePath: Path::PathBuf = layout.stdSrcDir().join("ignis_std.c");
   let objectPath: Path::PathBuf = layout.stdObjDir().join("ignis_std.o");
   let libraryPath: Path::PathBuf = layout.stdLibPath();
   let stampPath: Path::PathBuf = layout.stdStampPath();
   let reportPath: Path::PathBuf = stampReportPathForObject(&objectPath);
-  let fingerprint: BuildFingerprint = programBuildFingerprint(&discovery, &profile);
+  let fingerprint: BuildFingerprint = programBuildFingerprint(discovery, profile);
 
   let mut guarded: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   guarded.push(sourcePath.clone());
@@ -4478,31 +4699,47 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     replayBuildReport(&reportPath);
     printStatus(`  archive: ${libraryPath.asStr()}`, verbose);
     printStatus(`  summary: 0 errors, ${recordedWarnings} warnings`, verbose);
-    let cachedTiming: String = String::create("cached");
-    printStandardLibraryBuilt(recordedWarnings, &cachedTiming, &libraryPath);
-    return 0;
+    return StdArchiveOutcome {
+      errors: 0,
+      warnings: recordedWarnings,
+      cached: true,
+      libraryPath: libraryPath,
+    };
   }
 
   stampInvalidate(&stampPath);
 
   let mut compileOptions: CompileOptions = stdCompileOptions();
   compileOptions.verbose = verbose;
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(discovery, file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     printStatus(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`, verbose);
-    printFailure("Build", compiled.errors > 0 ? compiled.errors : 1, compiled.warnings);
-    return 1;
+    let errors: u64 = compiled.errors > 0 ? compiled.errors : 1;
+    return StdArchiveOutcome {
+      errors: errors,
+      warnings: compiled.warnings,
+      cached: false,
+      libraryPath: libraryPath,
+    };
   }
 
   if (!ensureParentDirectory(&sourcePath) || !ensureParentDirectory(&objectPath) || !ensureParentDirectory(&libraryPath) || !ensureParentDirectory(&stampPath)) {
-    printFailure("Build", 1, compiled.warnings);
-    return 1;
+    return StdArchiveOutcome {
+      errors: 1,
+      warnings: compiled.warnings,
+      cached: false,
+      libraryPath: libraryPath,
+    };
   }
 
   if (!writeArtifact(&sourcePath, &compiled.source)) {
-    printFailure("Build", 1, compiled.warnings);
-    return 1;
+    return StdArchiveOutcome {
+      errors: 1,
+      warnings: compiled.warnings,
+      cached: false,
+      libraryPath: libraryPath,
+    };
   }
 
   printStatus(`  emit: ${sourcePath.asStr()}`, verbose);
@@ -4521,20 +4758,28 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     &includeDirs,
     &extraFlags,
   )) {
-    renderBagToStderr(&compileBag, &file);
+    renderBagToStderr(&compileBag, file);
     printStatus(String::create("  archive: failed"), verbose);
-    printFailure("Build", 1, compiled.warnings);
-    return 1;
+    return StdArchiveOutcome {
+      errors: 1,
+      warnings: compiled.warnings,
+      cached: false,
+      libraryPath: libraryPath,
+    };
   }
 
   let mut objects: Vector<String> = Vector::new<String>();
   objects.push(objectPath.toString());
 
   if (let Result::ERROR(archiveBag) = ArchiveTool::archive("ar", &libraryPath, &objects)) {
-    renderBagToStderr(&archiveBag, &file);
+    renderBagToStderr(&archiveBag, file);
     printStatus(String::create("  archive: failed"), verbose);
-    printFailure("Build", 1, compiled.warnings);
-    return 1;
+    return StdArchiveOutcome {
+      errors: 1,
+      warnings: compiled.warnings,
+      cached: false,
+      libraryPath: libraryPath,
+    };
   }
 
   if (cacheIsWritable) {
@@ -4545,9 +4790,56 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
 
   printStatus(`  archive: ${libraryPath.asStr()}`, verbose);
   printStatus(`  summary: 0 errors, ${compiled.warnings} warnings`, verbose);
-  let timing: String = buildClockText(&started);
-  printStandardLibraryBuilt(compiled.warnings, &timing, &libraryPath);
-  return 0;
+  return StdArchiveOutcome {
+    errors: 0,
+    warnings: compiled.warnings,
+    cached: false,
+    libraryPath: libraryPath,
+  };
+}
+
+/// Makes sure the std archive a `--std-archive` build links is current: std
+/// is discovered from the same start path and overrides as the program, so
+/// both see the same std root and feature set, and is always built with the
+/// C backend under the program's output directory. Returns the archive path,
+/// or `NONE` once the failure has been reported.
+function ensureStdArchive(
+  startPath: &Path::PathBuf,
+  options: &CliOptions,
+  outDir: &Path::PathBuf,
+): Option<Path::PathBuf> {
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+  let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      let startFile: SourceFile = entrySourceFile(startPath);
+      let _tally: BuildTally = reportDiscoveryFailure(&diagnostics, &startFile, options.verbose);
+      return Option::NONE;
+    },
+  };
+
+  printStatus(`  std archive: ${discovery.stdRoot.asStr()}`, options.verbose);
+
+  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let outcome: StdArchiveOutcome = produceStdArchive(&discovery, &file, &profile, outDir, options);
+
+  if (outcome.errors > 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(outcome.libraryPath);
+}
+
+/// The error a `--std-archive` build is rejected with before anything runs,
+/// or `NONE` when the mode can build: a `std = false` build has no std to
+/// link from an archive.
+export function stdArchiveModeError(stdArchive: boolean, freestanding: boolean): Option<String> {
+  if (stdArchive && freestanding) {
+    return Option::SOME(String::create("error: --std-archive needs the standard library, but this build sets std = false: there is no std to link"));
+  }
+
+  return Option::NONE;
 }
 
 /// Print the last lines of a successful `ignis build-std`.
@@ -5340,6 +5632,239 @@ function buildKeepsAVolatileReadOfAnUnwrittenPointerSlotAtO2(): void {
   let modulePart: String = SymbolNames::moduleSegments(false, &libPath, &name);
   let slot: String = SymbolNames::capped(`_IN${modulePart.toStr()}7Handoff13handoffTargetE`);
   Test::assert(assembly.contains(&slot));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// The symbol table `nm` prints for the object or archive at `path`, empty
+/// when `nm` cannot run.
+function stdArchiveSymbolTable(path: &Path::PathBuf): String {
+  let mut command: Process::Command = Process::Command::new("nm");
+  command.arg(path.asStr());
+
+  let Result::OK(output) = command.output() else {
+    return String::new();
+  };
+
+  return output.stdout();
+}
+
+/// Whether a line of the `nm` output `table` lists a symbol whose name
+/// contains `needle` with one of the type letters in `kinds`.
+function stdArchiveHasSymbol(table: &String, kinds: str, needle: str): boolean {
+  let kindText: String = String::create(kinds);
+  let needleText: String = String::create(needle);
+  let mut lineStart: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= table.length()) {
+    let atEnd: boolean = index == table.length();
+    let mut isBreak: boolean = atEnd;
+
+    if (!atEnd) {
+      if (let Option::SOME(byte) = table.byteAt(index)) {
+        isBreak = byte == 10;
+      }
+    }
+
+    if (isBreak) {
+      let line: String = table.substringBytes(lineStart, index);
+      let mut space: u64 = line.length();
+
+      while (space > 0) {
+        let Option::SOME(byte) = line.byteAt(space - 1) else {
+          break;
+        };
+
+        if (byte == 32) {
+          break;
+        }
+
+        space -= 1;
+      }
+
+      if (space >= 2) {
+        let name: String = line.substringBytes(space, line.length());
+        let kind: String = line.substringBytes(space - 2, space - 1);
+
+        if (kindText.contains(&kind) && name.contains(&needleText)) {
+          return true;
+        }
+      }
+
+      lineStart = index + 1;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// Runs the binary at `executable` and answers whether it exited with
+/// `expectedCode` after printing exactly `expectedStdout`.
+function stdArchiveBinaryRuns(
+  executable: &Path::PathBuf,
+  expectedCode: i32,
+  expectedStdout: str
+): boolean {
+  let command: Process::Command = Process::Command::new(executable.asStr());
+
+  let Result::OK(output) = command.output() else {
+    return false;
+  };
+
+  let stdout: String = output.stdout();
+  return output.status().code == expectedCode && stdout.equals(expectedStdout);
+}
+
+/// A build with `[build] std_archive = true` links std from the archive it
+/// builds under the output directory: the program's object only references a
+/// non-generic std function, the archive defines it, and the binary runs.
+@test
+function stdArchiveBuildLinksStdFromTheArchive(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/selfhost/build/std_archive");
+  let scratch: Path::PathBuf = checkStdScratchDir("std-archive-c");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.stdPath = Option::SOME(checkStdRepositoryStd().toString());
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("std-archive");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
+  let archivePath: Path::PathBuf = BuildLayout::new("std", &scratch).stdLibPath();
+
+  Test::assert(stdArchiveBinaryRuns(&artifacts.executable, 42, "linked from the std archive\n"));
+
+  let objectSymbols: String = stdArchiveSymbolTable(&artifacts.object);
+  let archiveSymbols: String = stdArchiveSymbolTable(&archivePath);
+
+  Test::assert(stdArchiveHasSymbol(&objectSymbols, "U", "6String6create"));
+  Test::assert(!stdArchiveHasSymbol(&objectSymbols, "Tt", "6String6create"));
+  Test::assert(stdArchiveHasSymbol(&archiveSymbols, "T", "6String6create"));
+  Test::assert(stdArchiveHasSymbol(&objectSymbols, "U", "7println"));
+
+  // The runtime's state has one copy, the archive's: the program never
+  // defines a std static, even one declared on a record.
+  Test::assert(!stdArchiveHasSymbol(&objectSymbols, "bBdD", "12ProcessSlots4ARGCE"));
+  Test::assert(!stdArchiveHasSymbol(&objectSymbols, "bBdD", "10AllocStats11ALLOCS_LIVEE"));
+  Test::assert(stdArchiveHasSymbol(&archiveSymbols, "B", "12ProcessSlots4ARGCE"));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// `--std-archive` links a qbe unit against the std archive, which is
+/// still built with the C backend.
+@test
+function stdArchiveFlagLinksAQbeUnitAgainstTheCArchive(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/selfhost/build/std_archive_qbe");
+  let scratch: Path::PathBuf = checkStdScratchDir("std-archive-qbe");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.stdPath = Option::SOME(checkStdRepositoryStd().toString());
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+  options.stdArchive = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("std-archive-qbe");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts("qbe", &name, &scratch, &noOutput);
+  let archivePath: Path::PathBuf = BuildLayout::new("std", &scratch).stdLibPath();
+
+  Test::assert(stdArchiveBinaryRuns(&artifacts.executable, 42, "linked from the std archive\n"));
+
+  let objectSymbols: String = stdArchiveSymbolTable(&artifacts.object);
+  let archiveSymbols: String = stdArchiveSymbolTable(&archivePath);
+
+  Test::assert(stdArchiveHasSymbol(&objectSymbols, "U", "7println"));
+  Test::assert(!stdArchiveHasSymbol(&objectSymbols, "Tt", "7println"));
+  Test::assert(stdArchiveHasSymbol(&archiveSymbols, "T", "7println"));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// Without the mode a build still compiles the std functions it reaches into
+/// its own unit and builds no archive.
+@test
+function buildWithoutStdArchiveEmbedsStd(): void {
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/selfhost/build/std_archive_qbe");
+  let scratch: Path::PathBuf = checkStdScratchDir("std-archive-off");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.stdPath = Option::SOME(checkStdRepositoryStd().toString());
+  options.outDir = Option::SOME(scratch.toString());
+  options.target = Option::SOME(String::create("c"));
+  options.force = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+
+  let name: String = String::create("std-archive-qbe");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
+  let archivePath: Path::PathBuf = BuildLayout::new("std", &scratch).stdLibPath();
+
+  Test::assert(stdArchiveBinaryRuns(&artifacts.executable, 42, "linked from the std archive\n"));
+
+  let objectSymbols: String = stdArchiveSymbolTable(&artifacts.object);
+
+  Test::assert(stdArchiveHasSymbol(&objectSymbols, "Tt", "7println"));
+  Test::assert(!stdArchiveHasSymbol(&objectSymbols, "U", "7println"));
+  Test::assert(!Fs::exists(archivePath.asStr()));
+
+  let _removed = Fs::removeDirAll(&scratch);
+}
+
+/// A `std = false` build has no std to link, so the mode is rejected with
+/// the message the driver prints, and nothing is built.
+@test
+function stdArchiveIsRejectedForAFreestandingBuild(): void {
+  let Option::SOME(message) = stdArchiveModeError(true, true) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "error: --std-archive needs the standard library, but this build sets std = false: there is no std to link");
+  Test::assert(stdArchiveModeError(false, true).isNone());
+  Test::assert(stdArchiveModeError(true, false).isNone());
+
+  let Result::OK(workingDirectory) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let projectRoot: Path::PathBuf = workingDirectory.join("test_cases/freestanding/no_std");
+  let scratch: Path::PathBuf = checkStdScratchDir("std-archive-freestanding");
+  let mut options: CliOptions = CliOptions::create(CliCommand::BUILD);
+  options.outDir = Option::SOME(scratch.toString());
+  options.force = true;
+  options.stdArchive = true;
+
+  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 1);
+
+  let name: String = String::create("freestanding-no-std");
+  let noOutput: Option<String> = Option::NONE;
+  let artifacts: BuildArtifacts = projectArtifacts("c", &name, &scratch, &noOutput);
+
+  Test::assert(!Fs::exists(artifacts.object.asStr()));
+  Test::assert(!Fs::exists(artifacts.source.asStr()));
 
   let _removed = Fs::removeDirAll(&scratch);
 }
