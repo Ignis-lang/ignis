@@ -308,7 +308,8 @@ function qbeLaneBuildsEveryCaseInItsOwnDirectory(): void {
   let root: Path::PathBuf = Path::PathBuf::create("/repo");
   let source: Path::PathBuf = Path::PathBuf::create("test_cases/e2e/ok/add.ign");
   let executable: String = String::create("build/qbe-lane/run-7/qbe-0");
-  let arguments: Vector<String> = QbeLane::compileArguments(&root, &source, "qbe", &executable);
+  let noArchive: Option<String> = Option::NONE;
+  let arguments: Vector<String> = QbeLane::compileArguments(&root, &source, "qbe", &executable, &noArchive);
   let mut joined: String = String::new();
   let mut index: u64 = 0;
 
@@ -336,4 +337,91 @@ function qbeLaneRootsTheCompilerPath(): void {
   Test::assertEq<str>(QbeLane::rooted(&root, "ignis", true).toStr(), "ignis");
   Test::assertEq<str>(QbeLane::rooted(&root, "/opt/ignis", true).toStr(), "/opt/ignis");
   Test::assertEq<str>(QbeLane::rooted(&root, "build/selfhost/ignis", true).toStr(), "/repo/build/selfhost/ignis");
+}
+
+function qbeLaneJoined(arguments: &Vector<String>): String {
+  let mut joined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < arguments.length()) {
+    if (let Option::SOME(argument) = arguments.get(index)) {
+      joined.pushStr(argument.toStr());
+      joined.pushStr(" ");
+    }
+
+    index += 1;
+  }
+
+  return joined;
+}
+
+/// In the std archive lane a build links std from the archive under one shared
+/// output directory, so the archive is built once for the whole run.
+@test
+function qbeLaneArchiveBuildsShareOneOutputDirectory(): void {
+  let root: Path::PathBuf = Path::PathBuf::create("/repo");
+  let source: Path::PathBuf = Path::PathBuf::create("test_cases/e2e/ok/add.ign");
+  let executable: String = String::create("build/qbe-lane/run-7/qbe-archive-0");
+  let shared: Option<String> = Option::SOME(String::create("build/qbe-lane/run-7/std-archive"));
+  let arguments: Vector<String> = QbeLane::compileArguments(&root, &source, "qbe", &executable, &shared);
+
+  Test::assertEq<str>(
+    qbeLaneJoined(&arguments).toStr(),
+    "build test_cases/e2e/ok/add.ign --std-path /repo/std --target qbe -o /repo/build/qbe-lane/run-7/qbe-archive-0 --std-archive --out-dir /repo/build/qbe-lane/run-7/std-archive ",
+  );
+}
+
+@test
+function qbeLaneParsesStdArchiveFlag(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(s("./target/ignis"));
+  values.push(s("--std-archive"));
+  values.push(s("--shard"));
+  values.push(s("1"));
+  values.push(s("4"));
+  values.push(s("--report-dir"));
+  values.push(s("out"));
+  let args: Vector<String> = laneArgs(&values);
+  let Result::OK(options) = QbeLane::parseLaneOptions(&args) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<boolean>(options.stdArchive, true);
+  Test::assertEq<boolean>(options.inventory, false);
+
+  let mut plain: Vector<String> = Vector::new<String>();
+  plain.push(s("./target/ignis"));
+  let plainArgs: Vector<String> = laneArgs(&plain);
+  let Result::OK(plainOptions) = QbeLane::parseLaneOptions(&plainArgs) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<boolean>(plainOptions.stdArchive, false);
+}
+
+/// The inventory records what QBE supports in a whole-program build; the
+/// archive lane only checks that inventory, so the two do not combine.
+@test
+function qbeLaneRejectsStdArchiveWithInventoryOrTwice(): void {
+  let mut both: Vector<String> = Vector::new<String>();
+  both.push(s("./target/ignis"));
+  both.push(s("--std-archive"));
+  both.push(s("--inventory"));
+  let bothArgs: Vector<String> = laneArgs(&both);
+  let Result::ERROR(message) = QbeLane::parseLaneOptions(&bothArgs) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(message.toStr(), "--std-archive cannot be combined with --inventory");
+
+  let mut twice: Vector<String> = Vector::new<String>();
+  twice.push(s("./target/ignis"));
+  twice.push(s("--std-archive"));
+  twice.push(s("--std-archive"));
+  let twiceArgs: Vector<String> = laneArgs(&twice);
+  let Result::ERROR(duplicate) = QbeLane::parseLaneOptions(&twiceArgs) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(duplicate.toStr(), "duplicate --std-archive");
 }

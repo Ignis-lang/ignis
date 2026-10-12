@@ -125,7 +125,7 @@ class QbeCiResultsTest(unittest.TestCase):
             handle.write("".join(value + "\n" for value in complete))
 
     def write_valid_reports(self, report_root):
-        for mode in ("inventory", "lane"):
+        for mode in ("inventory", "lane", "archive"):
             for shard in range(SHARDS):
                 self.write_valid_shard(report_root, mode, shard)
 
@@ -211,6 +211,13 @@ class QbeCiResultsTest(unittest.TestCase):
         shutil.rmtree(os.path.join(report_root, "lane", "2"))
         result = self.run_checker(report_root)
         self.assert_fails_with(result, "lane/2")
+
+    def test_missing_std_archive_shard_fails(self):
+        report_root = os.path.join(self.base, "build", "qbe-results", "merged")
+        self.write_valid_reports(report_root)
+        shutil.rmtree(os.path.join(report_root, "archive", "3"))
+        result = self.run_checker(report_root)
+        self.assert_fails_with(result, "archive/3")
 
     def test_missing_complete_fails(self):
         report_root = os.path.join(self.base, "build", "qbe-results", "merged")

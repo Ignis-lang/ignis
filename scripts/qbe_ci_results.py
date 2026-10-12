@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Aggregate and validate the QBE CI shard reports.
 
-Every matrix shard writes, per mode (inventory / lane), a report directory
+Every matrix shard writes, per mode (inventory / lane / archive), a report directory
 holding `all.txt`, `supported.txt`, `skip.tsv` and a `COMPLETE` marker written
 last. This script is the aggregate job's gate: it accepts the merged report
 root, the fixture corpus and the committed inventory manifests, and fails
@@ -19,7 +19,7 @@ import os
 import re
 import sys
 
-MODES = ("inventory", "lane")
+MODES = ("inventory", "lane", "archive")
 REPORT_FILES = ("all.txt", "supported.txt", "skip.tsv", "COMPLETE")
 SNAPSHOT_DIR_NAME = "__snapshots__"
 
