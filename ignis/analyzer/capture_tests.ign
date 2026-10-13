@@ -233,3 +233,196 @@ function captureBindingDoesNotOwnClosureMixedWithAnExistingBinding(): void {
     "chosen",
   ));
 }
+
+/// Run `source` through parse, analysis, HIR lowering and capture analysis,
+/// and count the closure literals whose environment escapes to the heap.
+function captureEscapingClosureCount(source: str): u64 {
+  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(captureCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let captureBag: DiagnosticBag = Capture::populateClosureCaptures(&mut defStore, &mut typeStore, &mut symbols, &mut hir);
+  Test::assertEq<u64>(captureCountErrors(&captureBag), 0);
+
+  let mut count: u64 = 0;
+  let mut nodeIndex: u64 = 0;
+
+  while (nodeIndex < hir.nodes.length()) {
+    if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+      if (let Hir::HirKind::Closure(closure) = &node.kind) {
+        if (closure.escapes) {
+          count += 1;
+        }
+      }
+    }
+
+    nodeIndex += 1;
+  }
+
+  return count;
+}
+
+/// Scenario: a closure built in a loop body and assigned to a binding declared
+/// before the loop. The next iteration builds the closure again while the
+/// binding still holds the previous one, so one stack environment per site
+/// would be overwritten under a live closure.
+@test
+function captureClosureAssignedOutsideItsLoopEscapes(): void {
+  Test::assertEq<u64>(
+    captureEscapingClosureCount(
+      "function main(): i32 {\n  let mut current = (): i32 -> 0;\n  let mut index: i32 = 0;\n  while (index < 3) {\n    let value: i32 = index;\n    current = (): i32 -> value;\n    index = index + 1;\n  }\n  return current();\n}\n",
+    ),
+    1,
+  );
+}
+
+/// Scenario: a closure built inside another closure's body and assigned to a
+/// binding the outer closure captured. The inner environment would live in
+/// the thunk's frame, which ends before the binding is called.
+@test
+function captureClosureAssignedOutsideItsClosureBodyEscapes(): void {
+  Test::assertEq<u64>(
+    captureEscapingClosureCount(
+      "function main(): i32 {\n  let mut current = (): i32 -> 0;\n  let mut install = (id: i32): void -> {\n    current = (): i32 -> id;\n  };\n  install(5);\n  return current();\n}\n",
+    ),
+    1,
+  );
+}
+
+/// Scenario: a closure bound and called inside the loop body. The binding ends
+/// with the iteration, so its stack environment is never overwritten while live.
+@test
+function captureClosureBoundInsideItsLoopStaysOnTheStack(): void {
+  Test::assertEq<u64>(
+    captureEscapingClosureCount(
+      "function main(): i32 {\n  let mut total: i32 = 0;\n  let mut index: i32 = 0;\n  while (index < 3) {\n    let value: i32 = index;\n    let read = (): i32 -> value;\n    total = total + read();\n    index = index + 1;\n  }\n  return total;\n}\n",
+    ),
+    0,
+  );
+}
+
+/// Scenario: a closure assigned to a binding outside its loop that mutates a
+/// counter declared before the loop. Its environment moves to the heap, but the
+/// closure stays inside the frame, and so does the counter it refers to.
+@test
+function captureAcceptsRefCaptureOfABindingDeclaredBeforeTheLoop(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function main(): i32 {\n  let mut count: i32 = 0;\n  let mut bump = (): void -> {};\n  let mut index: i32 = 0;\n  while (index < 3) {\n    bump = (): void -> {\n      count = count + 1;\n    };\n    bump();\n    index = index + 1;\n  }\n  return count;\n}\n",
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&bag), 0);
+}
+
+/// Scenario: the same closure referring to a counter declared inside the loop.
+/// The counter ends with the iteration while the binding still holds the
+/// closure.
+@test
+function captureRejectsRefCaptureOfABindingDeclaredInTheLoop(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function main(): i32 {\n  let mut bump = (): void -> {};\n  let mut index: i32 = 0;\n  while (index < 3) {\n    let mut hits: i32 = 0;\n    bump = (): void -> {\n      hits = hits + 1;\n    };\n    bump();\n    index = index + 1;\n  }\n  return 0;\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `hits` by reference",
+  );
+}
+
+/// Scenario: a closure built in another closure's body, assigned outside it,
+/// that refers to a local of that body. The local ends with the call.
+@test
+function captureRejectsRefCaptureOfALocalOfTheBuildingClosure(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function main(): i32 {\n  let mut current = (): void -> {};\n  let mut install = (): void -> {\n    let mut local: i32 = 0;\n    current = (): void -> {\n      local = local + 1;\n    };\n  };\n  install();\n  return 0;\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `local` by reference",
+  );
+}
+
+/// Scenario: the same inner closure referring to a counter declared outside
+/// the building closure. Inside the thunk that reference can name a copy the
+/// outer closure captured, which ends with the call, so it is rejected too.
+@test
+function captureRejectsRefCaptureFromAClosureBuiltInAClosureBody(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function main(): i32 {\n  let mut count: i32 = 0;\n  let mut bump = (): void -> {};\n  let mut install = (): void -> {\n    bump = (): void -> {\n      count = count + 10;\n    };\n  };\n  install();\n  return count;\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `count` by reference",
+  );
+}
+
+/// Scenario: a closure that escapes an inner loop and mutates a counter of the
+/// outer loop, captured by a closure that escapes the outer loop. Its lifetime
+/// now follows the capturing closure, past the counter's iteration.
+@test
+function captureRejectsRefCaptureInAClosureHeldByAnEscapingClosure(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function main(): i32 {\n  let mut g = (): i32 -> 0;\n  let mut i: i32 = 0;\n  while (i < 2) {\n    let mut x: i32 = 0;\n    let mut f = (): i32 -> 0;\n    let mut j: i32 = 0;\n    while (j < 2) {\n      f = (): i32 -> {\n        x = x + 1;\n        return x;\n      };\n      j = j + 1;\n    }\n    g = (): i32 -> f();\n    i = i + 1;\n  }\n  return g();\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `x` by reference",
+  );
+}
+
+/// Scenario: a closure bound in the loop, captured by a closure that escapes
+/// the loop, mutating a counter declared before the loop. It lives as long as
+/// the capturing closure, inside the frame, and so does the counter.
+@test
+function captureAcceptsOuterRefCaptureInAClosureHeldByALoopEscapingClosure(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function main(): i32 {\n  let mut x: i32 = 0;\n  let mut g = (): void -> {};\n  let mut i: i32 = 0;\n  while (i < 2) {\n    let f = (): void -> {\n      x = x + 1;\n    };\n    g = (): void -> {\n      f();\n    };\n    i = i + 1;\n  }\n  g();\n  return x;\n}\n",
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&bag), 0);
+}
+
+/// Scenario: a closure that escapes a loop inside a closure body, captured by
+/// a closure that escapes that body. It outlives the call, and the local it
+/// refers to with it.
+@test
+function captureRejectsRefCaptureInAClosureHeldByAClosureBodyEscapingClosure(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function main(): i32 {\n  let mut g = (): void -> {};\n  let h = (): void -> {\n    let mut y: i32 = 0;\n    let mut f = (): void -> {};\n    let mut i: i32 = 0;\n    while (i < 2) {\n      f = (): void -> {\n        y = y + 1;\n      };\n      i = i + 1;\n    }\n    g = (): void -> {\n      f();\n    };\n  };\n  h();\n  g();\n  return 0;\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `y` by reference",
+  );
+}

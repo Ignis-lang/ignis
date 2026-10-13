@@ -1,0 +1,59 @@
+// e2e: std
+// A closure local reassigned in a loop: every iteration builds the closure at
+// the same site while the binding still holds the previous one, so each
+// closure needs an environment of its own. The old closure drops exactly its
+// own capture, and a closure holding only copies frees its environment too.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function lastIndex(): i32 {
+  let mut read = (): i32 -> 0;
+  let mut previous = (): i32 -> 0;
+  let mut index: i32 = 0;
+
+  while (index < 3) {
+    let value: i32 = index * 10;
+    previous = read;
+    read = (): i32 -> value;
+    index = index + 1;
+  }
+
+  return previous() + read();
+}
+
+function main(): i32 {
+  let first: Tracked = Tracked { id: 0 };
+  let mut current = (): i32 -> {
+    let seen: &Tracked = &first;
+    let _ = @move first;
+
+    return seen.id;
+  };
+  let mut index: i32 = 1;
+  let mut total: i32 = 0;
+
+  while (index < 4) {
+    let held: Tracked = Tracked { id: index };
+    current = (): i32 -> {
+      let seen: &Tracked = &held;
+      let _ = @move held;
+
+      return seen.id;
+    };
+    total = total + current();
+    index = index + 1;
+  }
+
+  Io::println(`total ${total}`.toStr());
+  Io::println(`last ${lastIndex()}`.toStr());
+
+  return 0;
+}
