@@ -346,6 +346,26 @@ export namespace AbiProbeExtra {
     };
   }
 
+  /// Calls a closure the program built and passed across the boundary. The
+  /// closure value is a `{ call, drop_fn, env }` struct in both directions.
+  function applyClosure(f: (i32) -> i32, value: i32): i32 {
+    return f(value);
+  }
+
+  /// Builds an escaping closure in std, capturing a droppable value by move,
+  /// and hands it to the program. The program calls it and drops it, and the
+  /// captured value's destructor runs exactly once through the closure's drop
+  /// function.
+  function makeDroppableClosure(value: i32): () -> i32 {
+    let held: Droppable = Droppable { value: value };
+
+    return (): i32 -> {
+      let seen: &Droppable = &held;
+      let _ = @move held;
+      return seen.value;
+    };
+  }
+
   function eightArgs(a: i64, b: i32, c: u8, d: i64, e: i16, f: i64, g: i32, h: i64): i64 {
     return a * 10000000 + (b as i64) * 1000000 + (c as i64) * 100000 + d * 10000 + (e as i64) * 1000 + f * 100 + (g as i64) * 10 + h;
   }

@@ -254,11 +254,6 @@ export namespace CodegenQbe {
           while (payloadIndex < variantDef.payload.length()) {
             if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
               if (!Abi::isVoid(defStore, typeStore, *payloadType)) {
-                if (Hir::typeIsFunction(typeStore, *payloadType)) {
-                  CodegenQbe::failNamed(emitter, "MakeClosure");
-                  return false;
-                }
-
                 CodegenQbe::typeLayout(emitter, defStore, typeStore, *payloadType);
 
                 if (emitter.error.isSome()) {
@@ -319,6 +314,7 @@ export namespace CodegenQbe {
       Analyzer::Type::Enum(enumDef) -> !CodegenQbe::enumIsScalar(defStore, enumDef),
       Analyzer::Type::FixedArray(_, _) -> true,
       Analyzer::Type::Slice(_) -> true,
+      Analyzer::Type::Function(_) -> true,
       _ -> false,
     };
   }
@@ -427,6 +423,7 @@ export namespace CodegenQbe {
       Analyzer::Type::Pointer(_) -> {},
       Analyzer::Type::Reference(_) -> {},
       Analyzer::Type::RawFunction(_) -> {},
+      Analyzer::Type::Function(_) -> {},
       Analyzer::Type::Slice(_) -> {},
       Analyzer::Type::Enum(enumDef) -> {
         if (!CodegenQbe::enumIsScalar(defStore, enumDef)) {
@@ -762,6 +759,108 @@ export namespace CodegenQbe {
     return CodegenC::operandType(function_, operand);
   }
 
+  /// The QBE type reference of the closure struct of one signature. It holds
+  /// the same three pointers the C backend's `__ignis_closure_t<id>` does, in
+  /// the same order, so a closure value crosses between the backends.
+  function closureTypeRef(typeId: Analyzer::TypeId): String {
+    return `:ignis_closure_${typeId.raw()}`;
+  }
+
+  /// The environment struct of the closure whose thunk, or whose environment
+  /// drop function, is `defId`, when the program builds one. A drop function
+  /// reads the thunk's environment, so it is found through the thunk.
+  function qbeEnvFor(
+    envs: &Vector<CodegenC::ClosureEnv>,
+    defId: Analyzer::DefinitionId,
+  ): Option<&CodegenC::ClosureEnv> {
+    let mut index: u64 = 0;
+
+    while (index < envs.length()) {
+      if (let Option::SOME(env) = envs.get(index)) {
+        if (env.thunk == defId.raw()) {
+          return Option::SOME(env);
+        }
+
+        if (let Option::SOME(dropFnRaw) = env.dropFn) {
+          if (dropFnRaw == defId.raw()) {
+            return Option::SOME(env);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The byte offset of capture `fieldIndex` inside the environment struct,
+  /// laid out as the C emitter's `struct { T0 field_0; ... }` is: every field
+  /// aligned to its own alignment. Only the capturing backend reads the
+  /// environment, so the offset has to be consistent, not ABI-mandated.
+  function qbeEnvFieldOffset(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    env: &CodegenC::ClosureEnv,
+    fieldIndex: u64,
+  ): u64 {
+    let mut cursor: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < fieldIndex) {
+      if (let Option::SOME(raw) = env.captureTypes.get(index)) {
+        let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+        let alignment: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, ty);
+
+        cursor = Abi::alignUp(cursor, alignment);
+        cursor += CodegenQbe::typeSize(emitter, defStore, typeStore, ty);
+      }
+
+      index += 1;
+    }
+
+    if (let Option::SOME(raw) = env.captureTypes.get(fieldIndex)) {
+      let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+      let alignment: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, ty);
+
+      cursor = Abi::alignUp(cursor, alignment);
+    }
+
+    return cursor;
+  }
+
+  /// The size in bytes of the environment struct, padded to its alignment,
+  /// or zero when the closure captures nothing.
+  function qbeEnvSize(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    env: &CodegenC::ClosureEnv,
+  ): u64 {
+    let mut cursor: u64 = 0;
+    let mut maxAlignment: u64 = 1;
+    let mut index: u64 = 0;
+
+    while (index < env.captureTypes.length()) {
+      if (let Option::SOME(raw) = env.captureTypes.get(index)) {
+        let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+        let alignment: u64 = CodegenQbe::typeAlign(emitter, defStore, typeStore, ty);
+
+        if (alignment > maxAlignment) {
+          maxAlignment = alignment;
+        }
+
+        cursor = Abi::alignUp(cursor, alignment);
+        cursor += CodegenQbe::typeSize(emitter, defStore, typeStore, ty);
+      }
+
+      index += 1;
+    }
+
+    return Abi::alignUp(cursor, maxAlignment);
+  }
+
   /// Renders `operand` for a value position of class `cls`.
   ///
   /// A temp is its QBE temporary. A scalar local is loaded into a fresh
@@ -949,6 +1048,9 @@ export namespace CodegenQbe {
       },
       Analyzer::Type::Slice(_) -> {
         return `:ignis_slice_${resolved.raw()}`;
+      },
+      Analyzer::Type::Function(_) -> {
+        return CodegenQbe::closureTypeRef(resolved);
       },
       Analyzer::Type::FixedArray(_, _) -> {
         return `:ignis_array_${resolved.raw()}`;
@@ -1165,6 +1267,13 @@ export namespace CodegenQbe {
         emitted.push(raw);
 
         let line: String = `type :ignis_slice_${raw} = { l, l }\n`;
+
+        emitter.data.pushStr(line.toStr());
+      },
+      Analyzer::Type::Function(_) -> {
+        emitted.push(raw);
+
+        let line: String = `type ${CodegenQbe::closureTypeRef(resolved).toStr()} = { l, l, l }\n`;
 
         emitter.data.pushStr(line.toStr());
       },
@@ -1715,17 +1824,26 @@ export namespace CodegenQbe {
   record QbeFuncCtx {
     public slotTemps: Vector<u32>;
     public slotNames: Vector<String>;
+    public envTemps: Vector<u32>;
+    public envNames: Vector<String>;
 
     public static init(): CodegenQbe::QbeFuncCtx {
       return CodegenQbe::QbeFuncCtx {
         slotTemps: Vector::new<u32>(),
         slotNames: Vector::new<String>(),
+        envTemps: Vector::new<u32>(),
+        envNames: Vector::new<String>(),
       };
     }
 
     public reserve(&mut self, tempRaw: u32, slot: String): void {
       self.slotTemps.push(tempRaw);
       self.slotNames.push(slot);
+    }
+
+    public reserveEnv(&mut self, tempRaw: u32, slot: String): void {
+      self.envTemps.push(tempRaw);
+      self.envNames.push(slot);
     }
 
     public slotFor(&self, tempRaw: u32): Option<String> {
@@ -1751,6 +1869,30 @@ export namespace CodegenQbe {
 
       return Option::NONE;
     }
+
+    public envSlotFor(&self, tempRaw: u32): Option<String> {
+      let mut index: u64 = 0;
+
+      while (index < self.envTemps.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(existing) = self.envTemps.get(index)) {
+          if (*existing == tempRaw) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          if (let Option::SOME(name) = self.envNames.get(index)) {
+            return Option::SOME(name.clone());
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
   }
 
   /// Reserves one stack slot per aggregate temp the function's instructions
@@ -1765,6 +1907,7 @@ export namespace CodegenQbe {
     symbols: &mut Analyzer::SymbolTable,
     function_: &Lir::FunctionLir,
     context: &mut CodegenQbe::QbeFuncCtx,
+    closures: &CodegenC::ClosureTables,
   ): void {
     let mut blockIndex: u64 = 0;
 
@@ -1821,6 +1964,32 @@ export namespace CodegenQbe {
           context.reserve(node.dest.raw(), slot);
         }
 
+        if (let Lir::Instr::MakeClosure(node) = instruction) {
+          let closureSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.closureType);
+          let closureSlot: String = CodegenQbe::freshTemp(emitter);
+
+          emitter.out.pushStr(`    ${closureSlot.toStr()} =l alloc16 ${closureSize}\n`.toStr());
+          context.reserve(node.dest.raw(), closureSlot);
+
+          // A non-escaping closure keeps its environment in this frame, so
+          // one slot per site is reserved for the whole function, never one
+          // per loop iteration. An escaping closure allocates it instead.
+          if (!node.heapAllocate) {
+            if (let Option::SOME(env) = CodegenQbe::qbeEnvFor(&closures.envs, node.thunk)) {
+              let mut envSize: u64 = CodegenQbe::qbeEnvSize(emitter, defStore, typeStore, env);
+
+              if (envSize == 0) {
+                envSize = 1;
+              }
+
+              let envSlot: String = CodegenQbe::freshTemp(emitter);
+
+              emitter.out.pushStr(`    ${envSlot.toStr()} =l alloc16 ${envSize}\n`.toStr());
+              context.reserveEnv(node.dest.raw(), envSlot);
+            }
+          }
+        }
+
         instrIndex += 1;
       }
 
@@ -1861,6 +2030,23 @@ export namespace CodegenQbe {
     let text: String = `${reference.toStr()} `;
 
     return text;
+  }
+
+  /// The class or type prefix of one parameter, with the `l ` spelling a
+  /// by-address parameter (a fixed array) uses. The same rule
+  /// `qbeFunctionHeader` and `qbeCallArg` apply.
+  function qbeParameterPrefix(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+  ): String {
+    if (CodegenQbe::passesByAddress(defStore, typeStore, ty)) {
+      return String::create("l ");
+    }
+
+    return CodegenQbe::qbeTypeText(emitter, defStore, typeStore, symbols, ty);
   }
 
   /// The signature line of one function: linkage, return class or type, the
@@ -1991,17 +2177,32 @@ export namespace CodegenQbe {
 
       // A droppable local starts zeroed and marked dropped, so a drop that
       // reaches a slot no store initialized is a no-op instead of a free of
-      // stack garbage. Mirrors the C emitter's prologue.
+      // stack garbage. Mirrors the C emitter's prologue. A closure local has
+      // no drop-state byte: zeroing it clears `drop_fn` and `call`.
       if (!local.borrowedAlias && !CodegenC::isVoidType(typeStore, local.ty) && CodegenC::fixedArrayShape(typeStore, local.ty).isNone()) {
-        let scheduled: Vector<u32> = CodegenC::dropScheduledLocals(function_);
-
-        if (CodegenC::containsLocalRaw(&scheduled, index as u32) || Borrowck::needsDropType(defStore, typeStore, local.ty)) {
-          let name: String = CodegenQbe::qbeMarkMovedName(defStore, typeStore, local.ty);
+        if (Hir::typeIsFunction(typeStore, local.ty)) {
           let clear: String = `    call $memset(l %l${index}, w 0, l ${size})\n`;
-          let mark: String = `    call $${name.toStr()}(l %l${index})\n`;
 
           emitter.out.pushStr(clear.toStr());
-          emitter.out.pushStr(mark.toStr());
+        } else {
+          let scheduled: Vector<u32> = CodegenC::dropScheduledLocals(function_);
+
+          if (CodegenC::containsLocalRaw(&scheduled, index as u32) || Borrowck::needsDropType(defStore, typeStore, local.ty)) {
+            let clear: String = `    call $memset(l %l${index}, w 0, l ${size})\n`;
+
+            emitter.out.pushStr(clear.toStr());
+
+            // The helper exists only for a type `qbeAddMarkType` collected,
+            // which is exactly the types that need dropping. Zeroing the slot
+            // is the whole mark for a type whose only owner is a closure
+            // field: clearing the closure's `drop_fn` cancels its drop.
+            if (Borrowck::needsDropType(defStore, typeStore, local.ty)) {
+              let name: String = CodegenQbe::qbeMarkMovedName(defStore, typeStore, local.ty);
+              let mark: String = `    call $${name.toStr()}(l %l${index})\n`;
+
+              emitter.out.pushStr(mark.toStr());
+            }
+          }
         }
       }
 
@@ -2103,6 +2304,7 @@ export namespace CodegenQbe {
     function_: &Lir::FunctionLir,
     context: &mut CodegenQbe::QbeFuncCtx,
     instruction: &Lir::Instr,
+    closures: &CodegenC::ClosureTables,
   ): void {
     match (instruction) {
       Lir::Instr::Nop -> {},
@@ -2214,7 +2416,7 @@ export namespace CodegenQbe {
         CodegenQbe::qbeEmitMarkMoved(emitter, defStore, typeStore, symbols, function_, &node);
       },
       Lir::Instr::GetFieldPtr(node) -> {
-        CodegenQbe::qbeEmitGetFieldPtr(emitter, defStore, typeStore, symbols, function_, &node);
+        CodegenQbe::qbeEmitGetFieldPtr(emitter, defStore, typeStore, symbols, function_, &node, closures);
       },
       Lir::Instr::InitRecord(node) -> {
         CodegenQbe::qbeEmitInitRecord(emitter, defStore, typeStore, symbols, function_, &node);
@@ -2233,6 +2435,24 @@ export namespace CodegenQbe {
       },
       Lir::Instr::BuiltinEq(node) -> {
         CodegenQbe::qbeEmitBuiltinEq(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::MakeClosure(node) -> {
+        CodegenQbe::qbeEmitMakeClosure(emitter, defStore, typeStore, symbols, function_, context, &node, closures);
+      },
+      Lir::Instr::CallClosure(node) -> {
+        CodegenQbe::qbeEmitCallClosure(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::DropClosure(node) -> {
+        CodegenQbe::qbeEmitDropClosure(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::FreeEnv(node) -> {
+        CodegenQbe::qbeEmitFreeEnv(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::MakeRawFunction(node) -> {
+        CodegenQbe::qbeEmitMakeRawFunction(emitter, defStore, symbols, function_, &node);
+      },
+      Lir::Instr::RawToClosure(node) -> {
+        CodegenQbe::qbeEmitRawToClosure(emitter, defStore, typeStore, symbols, function_, context, &node);
       },
       _ -> {
         CodegenQbe::failFor(emitter, instruction);
@@ -3505,6 +3725,34 @@ export namespace CodegenQbe {
       return;
     };
 
+    // A closure owns its environment, and its drop function knows how to
+    // release it; the field glue reads the same two pointers. Mirrors the C
+    // emitter's `emitFieldDrops` closure arm.
+    if (let Analyzer::Type::Function(_) = typeNode) {
+      let dropField: String = CodegenQbe::qbeBodyOffset(body, address, 8, tempCounter);
+      let dropPointer: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+
+      body.pushStr(`    ${dropPointer.toStr()} =l loadl ${dropField.toStr()}\n`.toStr());
+
+      let envField: String = CodegenQbe::qbeBodyOffset(body, address, 16, tempCounter);
+      let environment: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+
+      body.pushStr(`    ${environment.toStr()} =l loadl ${envField.toStr()}\n`.toStr());
+
+      let condition: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+      let salt: u64 = CodegenQbe::qbeNextIndex(labelCounter);
+      let liveLabel: String = `@dcl${salt}`;
+      let endLabel: String = `@dce${salt}`;
+
+      body.pushStr(`    ${condition.toStr()} =w cnel ${dropPointer.toStr()}, 0\n`.toStr());
+      body.pushStr(`    jnz ${condition.toStr()}, ${liveLabel.toStr()}, ${endLabel.toStr()}\n`.toStr());
+      body.pushStr(`${liveLabel.toStr()}\n`.toStr());
+      body.pushStr(`    call ${dropPointer.toStr()}(l ${environment.toStr()})\n`.toStr());
+      body.pushStr(`    jmp ${endLabel.toStr()}\n`.toStr());
+      body.pushStr(`${endLabel.toStr()}\n`.toStr());
+      return;
+    }
+
     let mut nominalOpt: Option<Analyzer::DefinitionId> = Option::NONE;
     let mut isEnum: boolean = false;
 
@@ -4129,11 +4377,6 @@ export namespace CodegenQbe {
       let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
       let name: String = CodegenQbe::qbeDropGlueName(defStore, typeStore, ty);
 
-      if (Hir::typeIsFunction(typeStore, ty)) {
-        CodegenQbe::failNamed(emitter, "MakeClosure");
-        return;
-      }
-
       emitter.out.pushStr(`function $${name.toStr()}(l %payload) {\n`.toStr());
       emitter.out.pushStr("@start\n");
 
@@ -4555,7 +4798,15 @@ export namespace CodegenQbe {
     node: &Lir::InstrMarkMoved,
   ): void {
     if (Hir::typeIsFunction(typeStore, node.ty)) {
-      CodegenQbe::failNamed(emitter, "MakeClosure");
+      // A closure moved out of its place leaves a zeroed struct behind: its
+      // `drop_fn` is null, so the owner's drop is a no-op and a later call
+      // faults on the null `call` instead of reading a freed environment.
+      let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.ptr) else {
+        return;
+      };
+      let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.ty);
+
+      emitter.out.pushStr(`    call $memset(l ${address.toStr()}, w 0, l ${size})\n`.toStr());
       return;
     }
 
@@ -4580,11 +4831,32 @@ export namespace CodegenQbe {
     symbols: &mut Analyzer::SymbolTable,
     function_: &Lir::FunctionLir,
     node: &Lir::InstrGetFieldPtr,
+    closures: &CodegenC::ClosureTables,
   ): void {
     let Option::SOME(baseType) = CodegenQbe::operandType(defStore, function_, &node.base) else {
       CodegenQbe::failNamed(emitter, "GetFieldPtr");
       return;
     };
+
+    // A capture read out of a thunk's environment: the base is the `*u8` the
+    // thunk receives, and the field offset comes from the environment layout
+    // `MakeClosure` wrote.
+    if (CodegenC::operandIsEnvironmentPointer(typeStore, function_, &node.base)) {
+      let Option::SOME(env) = CodegenQbe::qbeEnvFor(&closures.envs, function_.defId) else {
+        CodegenQbe::failNamed(emitter, "GetFieldPtr");
+        return;
+      };
+
+      let Option::SOME(baseAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.base) else {
+        return;
+      };
+
+      let offset: u64 = CodegenQbe::qbeEnvFieldOffset(emitter, defStore, typeStore, env, node.fieldIndex as u64);
+      let address: String = CodegenQbe::qbeAddressOffset(emitter, &baseAddress, offset);
+
+      emitter.out.pushStr(`    %t${node.dest.raw()} =l copy ${address.toStr()}\n`.toStr());
+      return;
+    }
 
     let Option::SOME(recordDef) = CodegenQbe::nominalBehind(defStore, typeStore, baseType) else {
       CodegenQbe::failNamed(emitter, "GetFieldPtr");
@@ -5016,6 +5288,537 @@ export namespace CodegenQbe {
     };
   }
 
+  /// A fresh `@v<N>` label, kept apart from the `%v<N>` temporaries by the
+  /// sigil.
+  function freshLabel(emitter: &mut CodegenQbe::Emitter): String {
+    let name: String = `@v${emitter.fresh}`;
+
+    emitter.fresh += 1;
+
+    return name;
+  }
+
+  /// One `call %fn(args)` line, with the destination prefix the return type
+  /// asks for. The indirect counterpart of `qbeCallLine`.
+  function qbeIndirectCallLine(
+    emitter: &mut CodegenQbe::Emitter,
+    functionPointer: &String,
+    args: &Vector<String>,
+    destPrefix: &String,
+  ): void {
+    let mut call: String = String::create("    ");
+
+    call.pushStr(destPrefix.toStr());
+    call.pushStr(`call ${functionPointer.toStr()}(`.toStr());
+
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        if (index > 0) {
+          call.pushStr(", ");
+        }
+
+        call.pushStr(argument.toStr());
+      }
+
+      index += 1;
+    }
+
+    call.pushStr(")\n");
+
+    emitter.out.pushStr(call.toStr());
+  }
+
+  /// The destination prefix of a call whose result is `ty`: empty for void,
+  /// `<dest> =<cls> ` for a scalar, `<dest> =<typeref> ` for an aggregate.
+  function qbeCallDestinationPrefix(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+    destName: &String,
+  ): String {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    if (CodegenC::isVoidType(typeStore, resolved)) {
+      return String::create("");
+    }
+
+    if (let Option::SOME(Analyzer::Type::NEVER) = typeStore.get(resolved)) {
+      return String::create("");
+    }
+
+    if (let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, ty)) {
+      return `${destName.toStr()} =${cls.toStr()} `;
+    }
+
+    let reference: String = CodegenQbe::qbeTypeRef(defStore, typeStore, symbols, ty);
+
+    return `${destName.toStr()} =${reference.toStr()} `;
+  }
+
+  /// `MakeClosure`: build the environment (heap for an escaping closure, the
+  /// reserved frame slot otherwise), write every capture at its offset, and
+  /// assemble the `{ call, drop_fn, env }` value the C backend builds.
+  function qbeEmitMakeClosure(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    context: &mut CodegenQbe::QbeFuncCtx,
+    node: &Lir::InstrMakeClosure,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    let Option::SOME(closureSlot) = context.slotFor(node.dest.raw()) else {
+      CodegenQbe::failNamed(emitter, "MakeClosure");
+      return;
+    };
+
+    let Option::SOME(env) = CodegenQbe::qbeEnvFor(&closures.envs, node.thunk) else {
+      CodegenQbe::failNamed(emitter, "MakeClosure");
+      return;
+    };
+
+    let mut environment: String = String::create("0");
+
+    if (node.heapAllocate) {
+      let mut envSize: u64 = CodegenQbe::qbeEnvSize(emitter, defStore, typeStore, env);
+
+      if (envSize == 0) {
+        envSize = 1;
+      }
+
+      environment = CodegenQbe::freshTemp(emitter);
+
+      emitter.out.pushStr(`    ${environment.toStr()} =l call $malloc(l ${envSize})\n`.toStr());
+    } else {
+      if (let Option::SOME(slot) = context.envSlotFor(node.dest.raw())) {
+        environment = slot;
+      }
+    }
+
+    let mut captureIndex: u64 = 0;
+
+    while (captureIndex < node.captures.length()) {
+      if (let Option::SOME(capture) = node.captures.get(captureIndex)) {
+        let offset: u64 = CodegenQbe::qbeEnvFieldOffset(emitter, defStore, typeStore, env, captureIndex);
+        let address: String = CodegenQbe::qbeAddressOffset(emitter, &environment, offset);
+
+        let Option::SOME(captureType) = CodegenQbe::operandType(defStore, function_, capture) else {
+          CodegenQbe::failNamed(emitter, "MakeClosure");
+          return;
+        };
+
+        if (CodegenQbe::isAggregateType(defStore, typeStore, captureType)) {
+          let Option::SOME(valueAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, capture) else {
+            return;
+          };
+          let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, captureType);
+
+          CodegenQbe::qbeMemcpy(emitter, &address, &valueAddress, size);
+        } else {
+          let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, capture) else {
+            return;
+          };
+
+          CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, captureType, &value, &address);
+        }
+      }
+
+      captureIndex += 1;
+    }
+
+    let thunkName: String = CodegenC::mangledName(defStore, symbols, node.thunk);
+    let callField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 0);
+
+    emitter.out.pushStr(`    storel $${thunkName.toStr()}, ${callField.toStr()}\n`.toStr());
+
+    let dropField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 8);
+
+    if (let Option::SOME(dropId) = node.dropFn) {
+      let dropName: String = CodegenC::mangledName(defStore, symbols, dropId);
+
+      emitter.out.pushStr(`    storel $${dropName.toStr()}, ${dropField.toStr()}\n`.toStr());
+    } else {
+      emitter.out.pushStr(`    storel 0, ${dropField.toStr()}\n`.toStr());
+    }
+
+    let envField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 16);
+
+    emitter.out.pushStr(`    storel ${environment.toStr()}, ${envField.toStr()}\n`.toStr());
+    emitter.out.pushStr(`    %t${node.dest.raw()} =l copy ${closureSlot.toStr()}\n`.toStr());
+  }
+
+  /// `CallClosure`: an indirect call through the thunk stored at offset 0 of
+  /// the closure value, with the environment at offset 16 as the first
+  /// argument. The argument and result conventions match a direct call.
+  function qbeEmitCallClosure(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrCallClosure,
+  ): void {
+    let Option::SOME(closureAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.closure) else {
+      return;
+    };
+
+    let callField: String = CodegenQbe::qbeAddressOffset(emitter, &closureAddress, 0);
+    let functionPointer: String = CodegenQbe::freshTemp(emitter);
+
+    emitter.out.pushStr(`    ${functionPointer.toStr()} =l loadl ${callField.toStr()}\n`.toStr());
+
+    let envField: String = CodegenQbe::qbeAddressOffset(emitter, &closureAddress, 16);
+    let environment: String = CodegenQbe::freshTemp(emitter);
+
+    emitter.out.pushStr(`    ${environment.toStr()} =l loadl ${envField.toStr()}\n`.toStr());
+
+    let mut args: Vector<String> = Vector::new<String>();
+
+    args.push(`l ${environment.toStr()}`);
+
+    let mut index: u64 = 0;
+
+    while (index < node.args.length()) {
+      if (let Option::SOME(argument) = node.args.get(index)) {
+        let text: String = CodegenQbe::qbeCallArg(emitter, defStore, typeStore, symbols, function_, argument);
+
+        if (emitter.error.isSome()) {
+          return;
+        }
+
+        args.push(text);
+      }
+
+      index += 1;
+    }
+
+    let Option::SOME(dest) = node.dest else {
+      let noPrefix: String = String::create("");
+
+      CodegenQbe::qbeIndirectCallLine(emitter, &functionPointer, &args, &noPrefix);
+      return;
+    };
+
+    let destOperand: Lir::Operand = Lir::Operand::Temp(dest);
+    let Option::SOME(returnType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "CallClosure");
+      return;
+    };
+
+    let destName: String = `%t${dest.raw()}`;
+    let prefix: String = CodegenQbe::qbeCallDestinationPrefix(emitter, defStore, typeStore, symbols, returnType, &destName);
+
+    CodegenQbe::qbeIndirectCallLine(emitter, &functionPointer, &args, &prefix);
+
+    if (prefix.length() > 0) {
+      if (CodegenQbe::qbeClass(defStore, typeStore, returnType).isSome()) {
+        CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, returnType, &destName);
+      }
+    }
+  }
+
+  /// `DropClosure`: call the environment drop function at offset 8 when it is
+  /// non-null, with the environment at offset 16.
+  function qbeEmitDropClosure(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrDropClosure,
+  ): void {
+    let Option::SOME(closureAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.closure) else {
+      return;
+    };
+
+    let dropField: String = CodegenQbe::qbeAddressOffset(emitter, &closureAddress, 8);
+    let dropPointer: String = CodegenQbe::freshTemp(emitter);
+
+    emitter.out.pushStr(`    ${dropPointer.toStr()} =l loadl ${dropField.toStr()}\n`.toStr());
+
+    let envField: String = CodegenQbe::qbeAddressOffset(emitter, &closureAddress, 16);
+    let environment: String = CodegenQbe::freshTemp(emitter);
+
+    emitter.out.pushStr(`    ${environment.toStr()} =l loadl ${envField.toStr()}\n`.toStr());
+
+    let condition: String = CodegenQbe::freshTemp(emitter);
+    let liveLabel: String = CodegenQbe::freshLabel(emitter);
+    let endLabel: String = CodegenQbe::freshLabel(emitter);
+
+    emitter.out.pushStr(`    ${condition.toStr()} =w cnel ${dropPointer.toStr()}, 0\n`.toStr());
+    emitter.out.pushStr(`    jnz ${condition.toStr()}, ${liveLabel.toStr()}, ${endLabel.toStr()}\n`.toStr());
+    emitter.out.pushStr(`${liveLabel.toStr()}\n`.toStr());
+    emitter.out.pushStr(`    call ${dropPointer.toStr()}(l ${environment.toStr()})\n`.toStr());
+    emitter.out.pushStr(`    jmp ${endLabel.toStr()}\n`.toStr());
+    emitter.out.pushStr(`${endLabel.toStr()}\n`.toStr());
+  }
+
+  /// `FreeEnv`: release the heap environment of an escaping closure.
+  function qbeEmitFreeEnv(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrFreeEnv,
+  ): void {
+    let Option::SOME(environment) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.env) else {
+      return;
+    };
+
+    let condition: String = CodegenQbe::freshTemp(emitter);
+    let liveLabel: String = CodegenQbe::freshLabel(emitter);
+    let endLabel: String = CodegenQbe::freshLabel(emitter);
+
+    emitter.out.pushStr(`    ${condition.toStr()} =w cnel ${environment.toStr()}, 0\n`.toStr());
+    emitter.out.pushStr(`    jnz ${condition.toStr()}, ${liveLabel.toStr()}, ${endLabel.toStr()}\n`.toStr());
+    emitter.out.pushStr(`${liveLabel.toStr()}\n`.toStr());
+    emitter.out.pushStr(`    call $free(l ${environment.toStr()})\n`.toStr());
+    emitter.out.pushStr(`${endLabel.toStr()}\n`.toStr());
+  }
+
+  /// `MakeRawFunction`: the C function pointer of a named function, or of the
+  /// null-environment wrapper around a capture-free thunk.
+  function qbeEmitMakeRawFunction(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrMakeRawFunction,
+  ): void {
+    let mut target: String = CodegenC::mangledName(defStore, symbols, node.callee);
+
+    if (node.viaThunk) {
+      target = CodegenC::rawThunkWrapperName(defStore, symbols, node.callee);
+    }
+
+    emitter.out.pushStr(`    %t${node.dest.raw()} =l copy $${target.toStr()}\n`.toStr());
+  }
+
+  /// `RawToClosure`: wrap a C function pointer the way the C backend's
+  /// trampoline does, as the closure's environment and its `call` target.
+  function qbeEmitRawToClosure(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    context: &mut CodegenQbe::QbeFuncCtx,
+    node: &Lir::InstrRawToClosure,
+  ): void {
+    let Option::SOME(closureSlot) = context.slotFor(node.dest.raw()) else {
+      CodegenQbe::failNamed(emitter, "RawToClosure");
+      return;
+    };
+
+    let Option::SOME(raw) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.raw) else {
+      return;
+    };
+
+    let trampoline: String = CodegenC::rawTrampolineName(node.rawType);
+    let callField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 0);
+    let dropField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 8);
+    let envField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 16);
+
+    emitter.out.pushStr(`    storel $${trampoline.toStr()}, ${callField.toStr()}\n`.toStr());
+    emitter.out.pushStr(`    storel 0, ${dropField.toStr()}\n`.toStr());
+    emitter.out.pushStr(`    storel ${raw.toStr()}, ${envField.toStr()}\n`.toStr());
+    emitter.out.pushStr(`    %t${node.dest.raw()} =l copy ${closureSlot.toStr()}\n`.toStr());
+  }
+
+  /// The `_raw` wrappers and raw trampolines the program needs: one per thunk
+  /// passed to C, one per C function pointer read back as a closure.
+  function qbeEmitRawAdapters(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    program: &Lir::LirProgram,
+  ): void {
+    let mut thunks: Vector<u32> = Vector::new<u32>();
+    let mut rawTypes: Vector<u32> = Vector::new<u32>();
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < function_.blocks.length()) {
+        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        let mut instructionIndex: u64 = 0;
+
+        while (instructionIndex < block.instructions.length()) {
+          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+            if (let Lir::Instr::MakeRawFunction(node) = instruction) {
+              if (node.viaThunk && !CodegenC::containsRaw(&mut thunks, node.callee.raw())) {
+                thunks.push(node.callee.raw());
+              }
+            }
+
+            if (let Lir::Instr::RawToClosure(node) = instruction) {
+              if (!CodegenC::containsRaw(&mut rawTypes, node.rawType.raw())) {
+                rawTypes.push(node.rawType.raw());
+              }
+            }
+          }
+
+          instructionIndex += 1;
+        }
+
+        blockIndex += 1;
+      }
+
+      functionIndex += 1;
+    }
+
+    if (thunks.isEmpty() && rawTypes.isEmpty()) {
+      return;
+    }
+
+    emitter.out.pushStr("\n# C function pointer adapters\n");
+
+    let mut thunkIndex: u64 = 0;
+
+    while (thunkIndex < thunks.length()) {
+      let Option::SOME(raw) = thunks.get(thunkIndex) else {
+        thunkIndex += 1;
+        continue;
+      };
+
+      let thunk: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*raw);
+      let Option::SOME(thunkFunction) = program.functions.get(thunk) else {
+        thunkIndex += 1;
+        continue;
+      };
+
+      let wrapper: String = CodegenC::rawThunkWrapperName(defStore, symbols, thunk);
+      let thunkName: String = CodegenC::mangledName(defStore, symbols, thunk);
+      let returnText: String = CodegenQbe::qbeTypeText(emitter, defStore, typeStore, symbols, thunkFunction.returnType);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      let mut header: String = `function ${returnText.toStr()}$${wrapper.toStr()}(`;
+      let mut args: Vector<String> = Vector::new<String>();
+
+      args.push(String::create("l 0"));
+
+      let mut paramIndex: u64 = 1;
+
+      while (paramIndex < thunkFunction.params.length()) {
+        let mut paramType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(paramDef) = thunkFunction.params.get(paramIndex)) {
+          if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(*paramDef)) {
+            paramType = Option::SOME(variableDef.declaredType);
+          }
+        }
+
+        let Option::SOME(foundType) = paramType else {
+          CodegenQbe::failNamed(emitter, "MakeRawFunction");
+          return;
+        };
+
+        if (paramIndex > 1) {
+          header.pushStr(", ");
+        }
+
+        let text: String = CodegenQbe::qbeParameterPrefix(emitter, defStore, typeStore, symbols, foundType);
+        let tempName: String = `%t${paramIndex}`;
+
+        header.pushStr(`${text.toStr()}${tempName.toStr()}`.toStr());
+        args.push(`${text.toStr()}${tempName.toStr()}`);
+        paramIndex += 1;
+      }
+
+      header.pushStr(") {\n@start\n");
+      emitter.out.pushStr(header.toStr());
+
+      let destinationName: String = String::create("%r");
+      let prefix: String = CodegenQbe::qbeCallDestinationPrefix(emitter, defStore, typeStore, symbols, thunkFunction.returnType, &destinationName);
+
+      CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &thunkName, &args, &prefix);
+
+      if (CodegenC::isVoidType(typeStore, thunkFunction.returnType)) {
+        emitter.out.pushStr("    ret\n}\n\n");
+      } else {
+        emitter.out.pushStr("    ret %r\n}\n\n");
+      }
+
+      thunkIndex += 1;
+    }
+
+    let mut rawIndex: u64 = 0;
+
+    while (rawIndex < rawTypes.length()) {
+      let Option::SOME(raw) = rawTypes.get(rawIndex) else {
+        rawIndex += 1;
+        continue;
+      };
+
+      let rawType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+      let Option::SOME(Analyzer::Type::RawFunction(signature)) = typeStore.get(rawType) else {
+        rawIndex += 1;
+        continue;
+      };
+
+      let trampoline: String = CodegenC::rawTrampolineName(rawType);
+      let returnText: String = CodegenQbe::qbeTypeText(emitter, defStore, typeStore, symbols, signature.returnType);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      let mut header: String = `function ${returnText.toStr()}$${trampoline.toStr()}(l %t0`;
+      let mut args: Vector<String> = Vector::new<String>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < signature.params.length()) {
+        if (let Option::SOME(paramType) = signature.params.get(paramIndex)) {
+          let text: String = CodegenQbe::qbeParameterPrefix(emitter, defStore, typeStore, symbols, *paramType);
+          let tempName: String = `%t${paramIndex + 1}`;
+
+          header.pushStr(`, ${text.toStr()}${tempName.toStr()}`.toStr());
+          args.push(`${text.toStr()}${tempName.toStr()}`);
+        }
+
+        paramIndex += 1;
+      }
+
+      header.pushStr(") {\n@start\n");
+      emitter.out.pushStr(header.toStr());
+      emitter.out.pushStr("    %r0 =l copy %t0\n");
+
+      let destinationName: String = String::create("%r");
+      let prefix: String = CodegenQbe::qbeCallDestinationPrefix(emitter, defStore, typeStore, symbols, signature.returnType, &destinationName);
+      let functionPointerName: String = String::create("%r0");
+
+      CodegenQbe::qbeIndirectCallLine(emitter, &functionPointerName, &args, &prefix);
+
+      if (CodegenC::isVoidType(typeStore, signature.returnType)) {
+        emitter.out.pushStr("    ret\n}\n\n");
+      } else {
+        emitter.out.pushStr("    ret %r\n}\n\n");
+      }
+
+      rawIndex += 1;
+    }
+  }
+
   /// Emits one block terminator: `jmp`, a `jnz` over an evaluated condition,
   /// a `ret` of the normalized return value, or `hlt` for unreachable.
   function qbeEmitTerminator(
@@ -5144,6 +5947,7 @@ export namespace CodegenQbe {
     symbols: &mut Analyzer::SymbolTable,
     function_: &Lir::FunctionLir,
     externalSymbols: &Vector<u32>,
+    closures: &CodegenC::ClosureTables,
   ): boolean {
     if (CodegenC::isExternFunction(defStore, function_.defId)) {
       return false;
@@ -5170,7 +5974,7 @@ export namespace CodegenQbe {
     let mut context: CodegenQbe::QbeFuncCtx = CodegenQbe::QbeFuncCtx::init();
 
     CodegenQbe::qbeEmitLocalSlots(emitter, defStore, typeStore, function_);
-    CodegenQbe::qbeReserveSlots(emitter, defStore, typeStore, symbols, function_, &mut context);
+    CodegenQbe::qbeReserveSlots(emitter, defStore, typeStore, symbols, function_, &mut context, closures);
 
     if (emitter.error.isSome()) {
       return false;
@@ -5200,7 +6004,7 @@ export namespace CodegenQbe {
           continue;
         };
 
-        CodegenQbe::qbeEmitInstruction(emitter, defStore, typeStore, symbols, function_, &mut context, instruction);
+        CodegenQbe::qbeEmitInstruction(emitter, defStore, typeStore, symbols, function_, &mut context, instruction, closures);
         if (CodegenQbe::instructionDiverges(defStore, typeStore, instruction)) {
           diverged = true;
           break;
@@ -5348,6 +6152,22 @@ export namespace CodegenQbe {
       Lir::Instr::BuiltinEq(node) -> { CodegenQbe::addOperandFunction(reachable, &node.left); CodegenQbe::addOperandFunction(reachable, &node.right); },
       Lir::Instr::GetElementPtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.base); CodegenQbe::addOperandFunction(reachable, &node.index); },
       Lir::Instr::GetFieldPtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.base); },
+      Lir::Instr::MakeClosure(node) -> {
+        CodegenQbe::addReachable(reachable, node.thunk);
+
+        if (let Option::SOME(dropFn) = node.dropFn) {
+          CodegenQbe::addReachable(reachable, dropFn);
+        }
+      },
+      Lir::Instr::CallClosure(node) -> {
+        CodegenQbe::addOperandFunctions(reachable, &node.args);
+      },
+      Lir::Instr::MakeRawFunction(node) -> {
+        CodegenQbe::addReachable(reachable, node.callee);
+      },
+      Lir::Instr::RawToClosure(node) -> {
+        CodegenQbe::addOperandFunction(reachable, &node.raw);
+      },
       Lir::Instr::InitRecord(node) -> {
         let mut index: u64 = 0;
         while (index < node.fields.length()) {
@@ -5457,6 +6277,10 @@ export namespace CodegenQbe {
   ): CodegenQbe::EmitOutput {
     let mut emitter: CodegenQbe::Emitter = CodegenQbe::Emitter::init();
 
+    // The closure environments are collected before emission: a `MakeClosure`
+    // writes the layout its thunk reads back.
+    let closureTables: CodegenC::ClosureTables = CodegenC::collectClosureTables(defStore, typeStore, program);
+
     // The drop and mark-moved helpers are type-keyed, so they are collected
     // from the LIR before reachability, and the drop methods they call join
     // the reachable set as extra roots.
@@ -5512,6 +6336,7 @@ export namespace CodegenQbe {
     CodegenQbe::qbeEmitDropGlueHelpers(&mut emitter, defStore, typeStore, symbols, &glueTypes);
     CodegenQbe::qbeEmitMarkHelpers(&mut emitter, defStore, typeStore, &markTypes);
     CodegenQbe::qbeEmitDropGuardHelpers(&mut emitter, defStore, typeStore, &guardTypes);
+    CodegenQbe::qbeEmitRawAdapters(&mut emitter, defStore, typeStore, symbols, program);
 
     if (emitter.error.isSome()) {
       return CodegenQbe::EmitOutput {
@@ -5530,7 +6355,7 @@ export namespace CodegenQbe {
         continue;
       };
 
-      if (CodegenC::hasRaw(&reachable, function_.defId.raw()) && !CodegenC::hasRaw(foreignDefinitions, function_.defId.raw()) && CodegenQbe::qbeEmitFunction(&mut emitter, defStore, typeStore, symbols, function_, externalSymbols)) {
+      if (CodegenC::hasRaw(&reachable, function_.defId.raw()) && !CodegenC::hasRaw(foreignDefinitions, function_.defId.raw()) && CodegenQbe::qbeEmitFunction(&mut emitter, defStore, typeStore, symbols, function_, externalSymbols, &closureTables)) {
         functions += 1;
       }
 

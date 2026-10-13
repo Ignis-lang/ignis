@@ -379,28 +379,26 @@ function qbeEmitsMainWrapper(): void {
 /// module or the corpus shifts the ids.
 @test
 function qbeNamesTheFailingFunctionWithoutADefinitionId(): void {
-  let emission: QbeEmission = qbeEmit(
-    "function apply(value: i32, f: (i32) -> i32): i32 { return f(value); } function main(): i32 { return apply(1, (x: i32): i32 -> x); }",
-  );
+  let emission: QbeEmission = qbeEmit("function scale(value: f64): f64 { return value; } function main(): i32 { return scale(1.5) as i32; }");
   let Option::SOME(error) = &emission.error else {
     Test::fail();
     return;
   };
-  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: Function (apply)");
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: Function (scale)");
   Test::assertEq<u64>(emission.source.length(), 0);
   Test::assertEq<u64>(emission.functions, 0);
 }
 
+/// Closures no longer fail closed: the emitted unit declares the closure
+/// struct and the thunk, and the program runs.
 @test
-function qbeFailsClosedOnClosures(): void {
-  let emission: QbeEmission = qbeEmit("function main(): i32 { let base: i32 = 2; let addBase: (i32) -> i32 = (value: i32): i32 -> value + base; return addBase(3); }");
-  let Option::SOME(error) = &emission.error else {
-    Test::fail();
-    return;
-  };
-  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
-  Test::assertEq<u64>(emission.source.length(), 0);
-  Test::assertEq<u64>(emission.functions, 0);
+function qbeEmitsClosureValues(): void {
+  let source: str = "function makeAdder(base: i32): (i32) -> i32 { return (x: i32): i32 -> x + base; } function main(): i32 { let addBase = makeAdder(2); return addBase(40); }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "type :ignis_closure_"));
+  Test::assert(qbeContains(&emission.source, "$malloc"));
+  qbeRunExpected(source, 42);
 }
 
 @test
@@ -596,4 +594,80 @@ function qbeDropInPlaceBuiltin(): void {
 @test
 function qbeWidensIntegerLiteralCastToItsFullValue(): void {
   qbeRunExpected("function main(): i32 { let high: u64 = 0x100000000 as u64; let binaryValue: u64 = 0b100000000000000000000000000000000 as u64; let maximum: i64 = 0x7FFFFFFFFFFFFFFF as i64; if ((high >> 32) != 1) { return 1; } if ((binaryValue >> 32) != 1) { return 2; } if ((maximum >> 62) != 1) { return 3; } return 42; }", 42);
+}
+
+/// A closure that captures nothing is a closure value like any other: built
+/// with `MakeClosure`, called through its thunk, and dropped.
+@test
+function qbeEmitsNonCapturingClosure(): void {
+  qbeRunExpected("function main(): i32 { let double = (x: i32): i32 -> x * 2; return double(21); }", 42);
+}
+
+/// A read-only capture reaches the environment the thunk reads back. `@ref`
+/// keeps a pointer to the captured place, so a later write is visible.
+@test
+function qbeCapturesByReference(): void {
+  qbeRunExpected("function main(): i32 { let mut x: i32 = 10; let getX = (): i32 -> @ref x; x = 42; return getX(); }", 42);
+}
+
+/// A mutable capture writes through the environment pointer, so the mutation
+/// is visible after the call.
+@test
+function qbeCapturesByMutableReference(): void {
+  qbeRunExpected("function main(): i32 { let mut counter: i32 = 0; let inc = (): void -> { counter = counter + 1; }; inc(); inc(); return counter + 40; }", 42);
+}
+
+/// A by-value capture of a droppable value owns it in the environment; the
+/// closure's environment drop function releases it exactly once.
+@test
+function qbeCapturesDroppableValueByMoveOnce(): void {
+  qbeRunExpected("record Drops { static mut COUNT: i32 = 0; } @implements(Drop) record Tracked { public id: i32; drop(&mut self): void { Drops::COUNT += 1; return; } } function idOf(value: &Tracked): i32 { return value.id; } function main(): i32 { let mut observed: i32 = 0; { let held: Tracked = Tracked { id: 42 }; let read = (): i32 -> { let seen: &Tracked = &held; let _ = @move held; return idOf(seen); }; observed = read(); } if (observed != 42) { return 1; } if (Drops::COUNT != 1) { return 2; } return 0; }", 0);
+}
+
+/// An escaping closure gets a heap environment; the binding that receives it
+/// calls it and releases it.
+@test
+function qbeEmitsEscapingClosureReturnedAndCalled(): void {
+  qbeRunExpected("function makeAdder(base: i32): (i32) -> i32 { return (x: i32): i32 -> x + base; } function main(): i32 { let add = makeAdder(40); return add(2); }", 42);
+}
+
+/// A closure parameter is a closure value passed by value; the callee calls it
+/// through the thunk.
+@test
+function qbePassesClosureAsParameter(): void {
+  qbeRunExpected("function apply(f: (i32) -> i32, x: i32): i32 { return f(x); } function main(): i32 { let offset: i32 = 30; let add = (n: i32): i32 -> n + offset; return apply(add, 12); }", 42);
+}
+
+/// A closure stored in a record field is dropped with the record, running its
+/// environment drop function.
+@test
+function qbeDropsClosureInRecordField(): void {
+  qbeRunExpected("record Drops { static mut COUNT: i32 = 0; } @implements(Drop) record Tracked { public id: i32; drop(&mut self): void { Drops::COUNT += 1; return; } } record Holder { public callback: () -> i32; } function idOf(value: &Tracked): i32 { return value.id; } function main(): i32 { { let held: Tracked = Tracked { id: 42 }; let callback = (): i32 -> { let seen: &Tracked = &held; let _ = @move held; return idOf(seen); }; let holder: Holder = Holder { callback: callback }; let stored: () -> i32 = holder.callback; if (stored() != 42) { return 1; } } if (Drops::COUNT != 1) { return 2; } return 0; }", 0);
+}
+
+/// A closure stored in an enum payload is moved out by the `match` and its
+/// environment is released exactly once.
+@test
+function qbeDropsClosureInEnumPayload(): void {
+  qbeRunExpected("record Drops { static mut COUNT: i32 = 0; } @implements(Drop) record Tracked { public id: i32; drop(&mut self): void { Drops::COUNT += 1; return; } } enum Slot { FULL(() -> i32), EMPTY } function idOf(value: &Tracked): i32 { return value.id; } function main(): i32 { let mut got: i32 = 0; { let held: Tracked = Tracked { id: 42 }; let callback = (): i32 -> { let seen: &Tracked = &held; let _ = @move held; return idOf(seen); }; let slot: Slot = Slot::FULL(callback); got = match (slot) { Slot::FULL(call) -> call(), Slot::EMPTY -> 0, }; } if (got != 42) { return 1; } if (Drops::COUNT != 1) { return 2; } return 0; }", 0);
+}
+
+/// A closure takes and returns a record by value.
+@test
+function qbeClosureTakesAndReturnsRecord(): void {
+  qbeRunExpected("record Point { public x: i32; public y: i32; } function main(): i32 { let shift = (p: Point): Point -> Point { x: p.x + 1, y: p.y + 1 }; let p: Point = shift(Point { x: 19, y: 21 }); return p.x + p.y; }", 42);
+}
+
+/// A closure takes a fixed array by address, the convention the C backend
+/// uses, so both backends agree on the argument.
+@test
+function qbeClosureTakesFixedArray(): void {
+  qbeRunExpected("function main(): i32 { let sum = (values: i32[4]): i32 -> values[0] + values[3]; let values: i32[4] = @splat<i32[4]>(21); return sum(values); }", 42);
+}
+
+/// `@noescape` keeps the environment in the caller's frame; the callee's
+/// promise is what lets a by-reference capture stay on the stack.
+@test
+function qbeNoescapeClosureKeepsStackEnvironment(): void {
+  qbeRunExpected("function applyTwice(@noescape f: (i32) -> i32, x: i32): i32 { return f(f(x)); } function main(): i32 { let base: i32 = 20; let add = (x: i32): i32 -> x + base; return applyTwice(add, 2); }", 42);
 }
