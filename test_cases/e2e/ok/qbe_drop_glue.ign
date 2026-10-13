@@ -1,0 +1,178 @@
+// e2e: std
+//
+// Drop glue across the QBE backend: a record that implements `Drop`, a record
+// with a droppable field, a payload enum dropped per variant, a fieldless enum
+// that implements `Drop`, a moved-out value, the early-exit paths and
+// `@dropInPlace`. Every destructor bumps a global counter, and the program
+// returns 0 only when each ran exactly once.
+record Counter {
+  static mut DROPS: i32 = 0;
+}
+
+@implements(Drop)
+record Resource {
+  public value: i32;
+
+  drop(&mut self): void {
+    Counter::DROPS += 1;
+    return;
+  }
+}
+
+record Holder {
+  public resource: Resource;
+  public tag: i32;
+}
+
+enum Maybe {
+  ITEM(Resource),
+  EMPTY,
+}
+
+@implements(Drop)
+enum Flag {
+  OFF,
+  ON,
+
+  drop(&mut self): void {
+    Counter::DROPS += 1;
+    return;
+  }
+}
+
+function take(resource: Resource): i32 {
+  return resource.value;
+}
+
+function early(flag: boolean): i32 {
+  {
+    let resource: Resource = Resource { value: 1 };
+    if (resource.value < 0) {
+      return 1;
+    }
+    if (flag) {
+      return 10;
+    }
+  }
+  return 0;
+}
+
+function loopBreak(): i32 {
+  let mut i: i32 = 0;
+  while (i < 3) {
+    {
+      let resource: Resource = Resource { value: i };
+      if (resource.value < 0) {
+        return 13;
+      }
+      if (i == 1) {
+        break;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function main(): i32 {
+  {
+    let resource: Resource = Resource { value: 7 };
+    if (resource.value != 7) {
+      return 2;
+    }
+  }
+  if (Counter::DROPS != 1) {
+    return 3;
+  }
+
+  {
+    let holder: Holder = Holder { resource: Resource { value: 3 }, tag: 9 };
+    if (holder.tag != 9) {
+      return 4;
+    }
+  }
+  if (Counter::DROPS != 2) {
+    return 5;
+  }
+
+  {
+    let item: Maybe = Maybe::ITEM(Resource { value: 1 });
+    match (item) {
+      Maybe::ITEM(payload) -> {
+        if (payload.value != 1) {
+          return 6;
+        }
+      },
+      Maybe::EMPTY -> {},
+    };
+  }
+  if (Counter::DROPS != 3) {
+    return 7;
+  }
+
+  {
+    let empties: Maybe = Maybe::EMPTY;
+    match (empties) {
+      Maybe::ITEM(_) -> {
+        return 8;
+      },
+      Maybe::EMPTY -> {},
+    };
+  }
+  if (Counter::DROPS != 3) {
+    return 9;
+  }
+
+  {
+    let flag: Flag = Flag::ON;
+    if (flag == Flag::OFF) {
+      return 10;
+    }
+  }
+  if (Counter::DROPS != 4) {
+    return 11;
+  }
+
+  {
+    let resource: Resource = Resource { value: 4 };
+    let taken: i32 = take(resource);
+    if (taken != 4) {
+      return 12;
+    }
+  }
+  if (Counter::DROPS != 5) {
+    return 14;
+  }
+
+  let first: i32 = early(true);
+  if (first != 10) {
+    return 15;
+  }
+  if (Counter::DROPS != 6) {
+    return 16;
+  }
+  let second: i32 = early(false);
+  if (second != 0) {
+    return 17;
+  }
+  if (Counter::DROPS != 7) {
+    return 18;
+  }
+  let cycles: i32 = loopBreak();
+  if (cycles != 1) {
+    return 19;
+  }
+  if (Counter::DROPS != 9) {
+    return 20;
+  }
+
+  {
+    let mut resource: Resource = Resource { value: 5 };
+    @dropInPlace<Resource>((&mut resource) as *mut Resource);
+  }
+  if (Counter::DROPS != 10) {
+    return 21;
+  }
+
+  return 0;
+}

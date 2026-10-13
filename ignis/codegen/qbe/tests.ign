@@ -542,3 +542,58 @@ function qbeReviewF23RejectsFunctionSplat(): void {
 function qbeReviewF21PadsNestedRecordGlobals(): void {
   qbeRunExpected("record Inner { public word: i32; public byte: u8; } record Outer { public inner: Inner; public tail: u8; } const NESTED: Outer = Outer { inner: Inner { word: 7, byte: 2 }, tail: 9 }; function main(): i32 { let pointer: *Outer = &NESTED as *Outer; return (*pointer).tail as i32; }", 9);
 }
+
+/// A record implementing `Drop` runs its destructor once when its scope ends,
+/// at the point the C backend drops it.
+@test
+function qbeDropsRecordAtScopeEnd(): void {
+  qbeRunExpected("record Counter { static mut DROPS: i32 = 0; } @implements(Drop) record Resource { public value: i32; drop(&mut self): void { Counter::DROPS += 1; return; } } function main(): i32 { { let r: Resource = Resource { value: 7 }; if (r.value != 7) { return 1; } } return Counter::DROPS - 1; }", 0);
+}
+
+/// A record without the Drop trait drops its droppable fields, and only those.
+@test
+function qbeDropsRecordFields(): void {
+  qbeRunExpected("record Counter { static mut DROPS: i32 = 0; } @implements(Drop) record Resource { public value: i32; drop(&mut self): void { Counter::DROPS += 1; return; } } record Holder { public resource: Resource; public tag: i32; } function main(): i32 { { let h: Holder = Holder { resource: Resource { value: 3 }, tag: 9 }; if (h.tag != 9) { return 1; } } return Counter::DROPS - 1; }", 0);
+}
+
+/// A payload enum drops the live variant's payload, dispatching on the tag.
+@test
+function qbeDropsPayloadEnumVariant(): void {
+  qbeRunExpected("record Counter { static mut DROPS: i32 = 0; } @implements(Drop) record Resource { public value: i32; drop(&mut self): void { Counter::DROPS += 1; return; } } enum Maybe { ITEM(Resource), EMPTY } function main(): i32 { { let a: Maybe = Maybe::ITEM(Resource { value: 1 }); match (a) { Maybe::ITEM(payload) -> { if (payload.value != 1) { return 1; } }, Maybe::EMPTY -> {}, }; } if (Counter::DROPS != 1) { return 2; } { let b: Maybe = Maybe::EMPTY; } if (Counter::DROPS != 1) { return 3; } return 0; }", 0);
+}
+
+/// A fieldless enum with the Drop trait is an aggregate with a drop-state byte
+/// and runs its destructor.
+@test
+function qbeDropsFieldlessEnum(): void {
+  qbeRunExpected("record Counter { static mut DROPS: i32 = 0; } @implements(Drop) enum Flag { OFF, ON, drop(&mut self): void { Counter::DROPS += 1; return; } } function main(): i32 { { let f: Flag = Flag::ON; if (f == Flag::OFF) { return 1; } } return Counter::DROPS - 1; }", 0);
+}
+
+/// Moving a value out of a local must not drop it twice: the moved-from place
+/// is marked and its later drop becomes a no-op.
+@test
+function qbeMoveOutDoesNotDoubleDrop(): void {
+  qbeRunExpected("record Counter { static mut DROPS: i32 = 0; } @implements(Drop) record Resource { public value: i32; drop(&mut self): void { Counter::DROPS += 1; return; } } function take(resource: Resource): i32 { return resource.value; } function main(): i32 { { let r: Resource = Resource { value: 4 }; let taken: i32 = take(r); if (taken != 4) { return 1; } } return Counter::DROPS - 1; }", 0);
+}
+
+/// A `return` and a `break` leave their scope through the same drop point, so a
+/// resource is freed exactly once on each path.
+@test
+function qbeEarlyExitDropsOnce(): void {
+  qbeRunExpected("record Counter { static mut DROPS: i32 = 0; } @implements(Drop) record Resource { public value: i32; drop(&mut self): void { Counter::DROPS += 1; return; } } function early(flag: boolean): i32 { { let r: Resource = Resource { value: 1 }; if (flag) { return 10; } } return 0; } function loopBreak(): i32 { let mut i: i32 = 0; while (i < 3) { { let r: Resource = Resource { value: i }; if (i == 1) { break; } } i += 1; } return i; } function main(): i32 { let a: i32 = early(true); if (a != 10) { return 1; } if (Counter::DROPS != 1) { return 2; } let b: i32 = early(false); if (b != 0) { return 3; } if (Counter::DROPS != 2) { return 4; } let c: i32 = loopBreak(); if (c != 1) { return 5; } if (Counter::DROPS != 4) { return 6; } return 0; }", 0);
+}
+
+/// `@dropInPlace` reaches the same helper as an automatic drop, and the later
+/// scope-end drop stays a no-op through the drop-state byte.
+@test
+function qbeDropInPlaceBuiltin(): void {
+  qbeRunExpected("record Counter { static mut DROPS: i32 = 0; } @implements(Drop) record Resource { public value: i32; drop(&mut self): void { Counter::DROPS += 1; return; } } function main(): i32 { { let mut r: Resource = Resource { value: 5 }; @dropInPlace<Resource>((&mut r) as *mut Resource); } return Counter::DROPS - 1; }", 0);
+}
+
+/// A hex or binary integer literal over 32 bits keeps its full value through a
+/// widening cast; the constant is copied into the `l` class, never
+/// zero-extended from the 32-bit source class (which would truncate it).
+@test
+function qbeWidensIntegerLiteralCastToItsFullValue(): void {
+  qbeRunExpected("function main(): i32 { let high: u64 = 0x100000000 as u64; let binaryValue: u64 = 0b100000000000000000000000000000000 as u64; let maximum: i64 = 0x7FFFFFFFFFFFFFFF as i64; if ((high >> 32) != 1) { return 1; } if ((binaryValue >> 32) != 1) { return 2; } if ((maximum >> 62) != 1) { return 3; } return 42; }", 42);
+}
