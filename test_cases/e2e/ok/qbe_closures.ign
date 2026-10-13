@@ -1,0 +1,178 @@
+// e2e: std
+//
+// Closures across the QBE backend: a non-capturing closure, a by-reference and
+// a by-mutable-reference capture, a by-value capture of a droppable value, an
+// escaping closure built in one frame and called in another, a closure passed
+// as a parameter, a closure stored in a record field and in an enum payload,
+// a closure taking and returning a record, a closure taking a fixed array, and
+// a `@noescape` parameter. Every destructor bumps a global counter, and the
+// program returns 0 only when each ran exactly once.
+record Counter {
+  static mut DROPS: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counter::DROPS += 1;
+    return;
+  }
+}
+
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+record Holder {
+  public callback: () -> i32;
+}
+
+enum Slot {
+  FULL(() -> i32),
+  EMPTY,
+}
+
+function idOf(value: &Tracked): i32 {
+  return value.id;
+}
+
+function apply(f: (i32) -> i32, value: i32): i32 {
+  return f(value);
+}
+
+function applyTwice(@noescape f: (i32) -> i32, value: i32): i32 {
+  return f(f(value));
+}
+
+function makeAdder(base: i32): (i32) -> i32 {
+  return (x: i32): i32 -> x + base;
+}
+
+function makeReader(): () -> i32 {
+  let held: Tracked = Tracked { id: 42 };
+  let read = (): i32 -> {
+    let seen: &Tracked = &held;
+    let _ = @move held;
+    return idOf(seen);
+  };
+
+  return read;
+}
+
+function main(): i32 {
+  let double = (x: i32): i32 -> x * 2;
+  if (double(21) != 42) {
+    return 1;
+  }
+
+  let mut reference: i32 = 10;
+  let readReference = (): i32 -> @ref reference;
+  reference = 42;
+  if (readReference() != 42) {
+    return 2;
+  }
+
+  let mut counter: i32 = 0;
+  let increment = (): void -> { counter = counter + 1; };
+  increment();
+  increment();
+  if (counter + 40 != 42) {
+    return 3;
+  }
+
+  {
+    let held: Tracked = Tracked { id: 42 };
+    let read = (): i32 -> {
+      let seen: &Tracked = &held;
+      let _ = @move held;
+      return idOf(seen);
+    };
+    if (read() != 42) {
+      return 4;
+    }
+  }
+  if (Counter::DROPS != 1) {
+    return 5;
+  }
+
+  let add = makeAdder(40);
+  if (add(2) != 42) {
+    return 6;
+  }
+
+  let base: i32 = 30;
+  let addBase = (x: i32): i32 -> x + base;
+  if (apply(addBase, 12) != 42) {
+    return 7;
+  }
+
+  {
+    let held: Tracked = Tracked { id: 42 };
+    let callback = (): i32 -> {
+      let seen: &Tracked = &held;
+      let _ = @move held;
+      return idOf(seen);
+    };
+    let holder: Holder = Holder { callback: callback };
+    let stored: () -> i32 = holder.callback;
+    if (stored() != 42) {
+      return 8;
+    }
+  }
+  if (Counter::DROPS != 2) {
+    return 9;
+  }
+
+  {
+    let held: Tracked = Tracked { id: 42 };
+    let callback = (): i32 -> {
+      let seen: &Tracked = &held;
+      let _ = @move held;
+      return idOf(seen);
+    };
+    let slot: Slot = Slot::FULL(callback);
+    let got: i32 = match (slot) {
+      Slot::FULL(call) -> call(),
+      Slot::EMPTY -> 0,
+    };
+    if (got != 42) {
+      return 10;
+    }
+  }
+  if (Counter::DROPS != 3) {
+    return 11;
+  }
+
+  let shift = (value: Point): Point -> Point { x: value.x + 1, y: value.y + 1 };
+  let shifted: Point = shift(Point { x: 19, y: 21 });
+  if (shifted.x + shifted.y != 42) {
+    return 12;
+  }
+
+  let sum = (values: i32[4]): i32 -> values[0] + values[3];
+  let values: i32[4] = @splat<i32[4]>(21);
+  if (sum(values) != 42) {
+    return 13;
+  }
+
+  let twiceBase: i32 = 20;
+  let addTwice = (value: i32): i32 -> value + twiceBase;
+  if (applyTwice(addTwice, 2) != 42) {
+    return 14;
+  }
+
+  {
+    let reader = makeReader();
+    if (reader() != 42) {
+      return 15;
+    }
+  }
+  if (Counter::DROPS != 4) {
+    return 16;
+  }
+
+  return 0;
+}
