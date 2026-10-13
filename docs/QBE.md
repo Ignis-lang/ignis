@@ -20,8 +20,9 @@ Project configuration selects the same backend with `[build] target = "qbe"`. Ot
 | Narrow integers | Load/store and extension operations preserve width and signedness. |
 | Pointers | QBE `l` values on supported 64-bit targets. |
 | Calls | QBE ABI types describe scalar and aggregate arguments and results. Aggregate IL values are addresses, not language-level pointer parameters. |
-| Records | Sizes, alignments and field offsets come from the shared layout in `ignis/abi/` (see `docs/ABI.md`), the same one the C backend asserts in every unit. Unaligned packed members use QBE opaque types for the SysV memory class. Zero-sized and over-aligned (>16 byte) aggregate values fail explicitly, and so does a fieldless enum that implements `Drop`, which needs storage beyond its `w` tag. |
-| Payload enums | The `u32` tag and the payload union come from `Abi::enumLayout`. A payload enum is one aggregate declared `type :name = align A { w, b <pad>, b <union> }`; the union is an integer blob, not a bare `{ N }`, which QBE would classify as memory and misalign with the C struct. `InitEnumVariant` zeroes the storage, stores the tag and copies each non-void payload into its ABI offset; `EnumGetTag`, `EnumGetPayloadField` and `EnumGetPayloadFieldPtr` read the tag and payloads. Enums or payloads that need drop glue (`Drop`) and closure payloads (`MakeClosure`) still fail closed. |
+| Records | Sizes, alignments and field offsets come from the shared layout in `ignis/abi/` (see `docs/ABI.md`), the same one the C backend asserts in every unit. A record that implements `Drop` carries its trailing drop-state byte, so the QBE aggregate is byte-identical to the C struct. Unaligned packed members use QBE opaque types for the SysV memory class. Zero-sized and over-aligned (>16 byte) aggregate values fail explicitly. |
+| Payload enums | The `u32` tag and the payload union come from `Abi::enumLayout`. A payload enum is one aggregate declared `type :name = align A { w, b <pad>, b <union> }`; the union is an integer blob, not a bare `{ N }`, which QBE would classify as memory and misalign with the C struct. `InitEnumVariant` zeroes the storage, stores the tag and copies each non-void payload into its ABI offset; `EnumGetTag`, `EnumGetPayloadField` and `EnumGetPayloadFieldPtr` read the tag and payloads. A fieldless enum that implements `Drop` is an aggregate too, because its drop-state byte needs storage the bare `w` tag does not have. Closure payloads (`MakeClosure`) still fail closed. |
+| Drop glue | `Drop`, `DropInPlace` and the `@dropInPlace`/`@dropGlue` builtins lower to per-type helpers named exactly as the C backend names them (`ignis_drop_glue_t<id>`). A nominal with a user `drop` method runs it once, guarded by the drop-state byte; a record without one drops its droppable fields; an enum without one dispatches on the tag. `MarkMoved` writes the flags through an internal mark helper, `InitRecord`/`InitEnumVariant` reset them, and every droppable local is zeroed and marked at the prologue. Closure values keep failing closed as `MakeClosure`. |
 | Extern calls | This integer-only slice uses QBE's variadic convention for typed C wrappers; it also matches fixed integer prototypes and initializes the SysV vector-register count. |
 | Hosted roots | Keep the entry point, user exports, test harness roots and runtime initialization, then walk dependencies. Unused C-only std entrypoints do not constrain integer programs. |
 | Divergence | Panic and `never` calls end the block with `hlt`; dead tail instructions must not enter QBE's SSA conversion. |
@@ -108,8 +109,7 @@ Independent bounded public-CLI probes passed for default/config/override selecti
 
 ## Follow-ups
 
-- Closures and their allocation/runtime conventions.
-- Drop glue and ownership cleanup.
+- Closures and their allocation/runtime conventions (closure drop glue included).
 - Inline assembly.
 - Freestanding runtime handlers and assembler/linker-only toolchains.
 - Generic edge cases and expansion of the supported fixture inventory.

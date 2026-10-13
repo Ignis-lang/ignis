@@ -16,7 +16,7 @@ So two backends agree on a value exactly when they agree on its canonical repres
 | Data layout | Specified here, computed by `ignis/abi/`, enforced on every C build |
 | Platform constants (`O_RDONLY`, `ENOENT`, `TIOCGWINSZ`, ...) | Specified for `x86_64` Linux in `std/libc/platform.ign`, checked against the C headers in CI; other targets still read the headers |
 | Symbol names | Specified below, computed by `ignis/abi/symbols.ign`; checked across programs in CI |
-| Calling convention for Ignis-internal calls | Specified below for the shapes both backends build, checked across C and QBE in CI; closures and drop glue still exist only in the C backend |
+| Calling convention for Ignis-internal calls | Specified below for the shapes both backends build, checked across C and QBE in CI; closures still exist only in the C backend |
 | Runtime ownership across objects | Not yet: every object carries its own std and runtime |
 
 ## Data layout
@@ -39,7 +39,7 @@ Sizes and alignments are in bytes. A pointer is 8 bytes, aligned to 8.
 
 The rules that complete the table:
 
-- **Drop state.** A record or enum that implements `Drop` ends with one `uint8_t` drop-state byte, placed after its last member and before the trailing padding.
+- **Drop state.** A record or enum that implements `Drop` ends with one `uint8_t` drop-state byte, placed after its last member and before the trailing padding. Both backends read this offset from `Abi`, so a QBE aggregate carrying a drop-state byte is byte-identical to the C struct, and the drop helper that reads or writes the byte is the same `ignis_drop_glue_t<id>` in either backend.
 - **Enum payloads.** The tag is always a `u32` at offset 0. A variant without payload, and a `void` payload field, take no storage. An enum with no payload at all is only its tag.
 - **`@packed`** removes every padding byte between and after fields; the record's alignment becomes 1 unless `@aligned(N)` raises it.
 - **`@aligned(N)`** on a record or a field raises its alignment to `N` and never lowers it. The record's size rounds up to its final alignment.

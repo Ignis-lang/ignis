@@ -168,7 +168,7 @@ export namespace CodegenQbe {
       Analyzer::Type::Reference(_) -> Option::SOME("l"),
       Analyzer::Type::RawFunction(_) -> Option::SOME("l"),
       Analyzer::Type::Enum(enumDef) -> {
-        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+        if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
           return Option::SOME("w");
         }
 
@@ -176,6 +176,20 @@ export namespace CodegenQbe {
       },
       _ -> Option::NONE,
     };
+  }
+
+  /// Whether the enum behind `defId` is lowered as its bare `w` tag. A
+  /// fieldless enum that implements `Drop` is not: its drop-state byte makes
+  /// it an aggregate, the same shape the C struct has.
+  function enumIsScalar(
+    defStore: &mut Analyzer::DefinitionStore,
+    enumDef: Analyzer::DefinitionId,
+  ): boolean {
+    if (!CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+      return false;
+    }
+
+    return !CodegenC::hasDropTrait(defStore, enumDef);
   }
 
   /// Whether every variant of the enum behind `defId` carries no payload.
@@ -210,12 +224,10 @@ export namespace CodegenQbe {
     return false;
   }
 
-  /// Whether this emitter can store every payload of `enumDef`. An enum that
-  /// implements `Drop`, or one of whose payloads needs drop glue, is F5b's
-  /// work and fails closed as `Drop`; a closure payload is F5c's and fails
-  /// closed as `MakeClosure`. Any other unsupported payload type fails
-  /// through `typeLayout`. `emitter.error` is set whenever the answer is
-  /// false.
+  /// Whether this emitter can store every payload of `enumDef`. A closure
+  /// payload is F5c's and fails closed as `MakeClosure`; any other
+  /// unsupported payload type fails through `typeLayout`. `emitter.error` is
+  /// set whenever the answer is false.
   function enumPayloadsSupported(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
@@ -232,11 +244,6 @@ export namespace CodegenQbe {
       return false;
     };
 
-    if (enumDefNode.implementsDrop) {
-      CodegenQbe::failNamed(emitter, "Drop");
-      return false;
-    }
-
     let mut variantIndex: u64 = 0;
 
     while (variantIndex < enumDefNode.variants.length()) {
@@ -249,11 +256,6 @@ export namespace CodegenQbe {
               if (!Abi::isVoid(defStore, typeStore, *payloadType)) {
                 if (Hir::typeIsFunction(typeStore, *payloadType)) {
                   CodegenQbe::failNamed(emitter, "MakeClosure");
-                  return false;
-                }
-
-                if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
-                  CodegenQbe::failNamed(emitter, "Drop");
                   return false;
                 }
 
@@ -314,7 +316,7 @@ export namespace CodegenQbe {
 
     return match (typeNode) {
       Analyzer::Type::Record(_) -> true,
-      Analyzer::Type::Enum(enumDef) -> !CodegenQbe::enumIsFieldless(defStore, enumDef),
+      Analyzer::Type::Enum(enumDef) -> !CodegenQbe::enumIsScalar(defStore, enumDef),
       Analyzer::Type::FixedArray(_, _) -> true,
       Analyzer::Type::Slice(_) -> true,
       _ -> false,
@@ -427,7 +429,7 @@ export namespace CodegenQbe {
       Analyzer::Type::RawFunction(_) -> {},
       Analyzer::Type::Slice(_) -> {},
       Analyzer::Type::Enum(enumDef) -> {
-        if (!CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+        if (!CodegenQbe::enumIsScalar(defStore, enumDef)) {
           if (!CodegenQbe::enumPayloadsSupported(emitter, defStore, typeStore, enumDef)) {
             return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
           }
@@ -450,12 +452,10 @@ export namespace CodegenQbe {
 
     let layout: CodegenQbe::TypeLayout = CodegenQbe::abiLayout(emitter, defStore, typeStore, resolved);
 
-    // A fieldless enum is lowered as its bare `w` tag, which only holds while
-    // the enum is nothing but that tag: a drop-state byte would need storage
-    // this lowering does not have. A payload enum already validated its own
-    // drop state in `enumPayloadsSupported`.
+    // A fieldless enum that implements `Drop` is an aggregate with a
+    // drop-state byte; only the bare `w` scalar is exactly four bytes.
     if (let Analyzer::Type::Enum(enumDef) = typeNode) {
-      if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+      if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
         if (layout.size != 4) {
           CodegenQbe::failNamed(emitter, "Drop");
           return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
@@ -868,7 +868,7 @@ export namespace CodegenQbe {
       Analyzer::Type::Reference(_) -> Option::SOME(String::create("loadl")),
       Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("loadl")),
       Analyzer::Type::Enum(enumDef) -> {
-        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+        if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
           return Option::SOME(String::create("loaduw"));
         }
 
@@ -907,7 +907,7 @@ export namespace CodegenQbe {
       Analyzer::Type::Reference(_) -> Option::SOME(String::create("storel")),
       Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("storel")),
       Analyzer::Type::Enum(enumDef) -> {
-        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+        if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
           return Option::SOME(String::create("storew"));
         }
 
@@ -939,7 +939,7 @@ export namespace CodegenQbe {
         return `:${name.toStr()}_${defId.raw()}`;
       },
       Analyzer::Type::Enum(defId) -> {
-        if (CodegenQbe::enumIsFieldless(defStore, defId)) {
+        if (CodegenQbe::enumIsScalar(defStore, defId)) {
           return String::create("");
         }
 
@@ -991,7 +991,7 @@ export namespace CodegenQbe {
       Analyzer::Type::Reference(_) -> Option::SOME(String::create("l")),
       Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("l")),
       Analyzer::Type::Enum(enumDef) -> {
-        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+        if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
           return Option::SOME(String::create("w"));
         }
 
@@ -1031,7 +1031,7 @@ export namespace CodegenQbe {
       Analyzer::Type::Reference(_) -> Option::SOME(String::create("l")),
       Analyzer::Type::RawFunction(_) -> Option::SOME(String::create("l")),
       Analyzer::Type::Enum(enumDef) -> {
-        if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+        if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
           return Option::SOME(String::create("w"));
         }
 
@@ -1187,7 +1187,7 @@ export namespace CodegenQbe {
         emitter.data.pushStr(`type :ignis_array_${raw} = align ${layout.alignment} { ${item.toStr()} ${count} }\n`.toStr());
       },
       Analyzer::Type::Enum(defId) -> {
-        if (CodegenQbe::enumIsFieldless(defStore, defId)) {
+        if (CodegenQbe::enumIsScalar(defStore, defId)) {
           return;
         }
 
@@ -1988,6 +1988,23 @@ export namespace CodegenQbe {
       let line: String = `    %l${index} =l ${slotOp} ${size}\n`;
 
       emitter.out.pushStr(line.toStr());
+
+      // A droppable local starts zeroed and marked dropped, so a drop that
+      // reaches a slot no store initialized is a no-op instead of a free of
+      // stack garbage. Mirrors the C emitter's prologue.
+      if (!local.borrowedAlias && !CodegenC::isVoidType(typeStore, local.ty) && CodegenC::fixedArrayShape(typeStore, local.ty).isNone()) {
+        let scheduled: Vector<u32> = CodegenC::dropScheduledLocals(function_);
+
+        if (CodegenC::containsLocalRaw(&scheduled, index as u32) || Borrowck::needsDropType(defStore, typeStore, local.ty)) {
+          let name: String = CodegenQbe::qbeMarkMovedName(local.ty);
+          let clear: String = `    call $memset(l %l${index}, w 0, l ${size})\n`;
+          let mark: String = `    call $${name.toStr()}(l %l${index})\n`;
+
+          emitter.out.pushStr(clear.toStr());
+          emitter.out.pushStr(mark.toStr());
+        }
+      }
+
       index += 1;
     }
   }
@@ -2185,9 +2202,17 @@ export namespace CodegenQbe {
         CodegenQbe::qbeEmitDrop(emitter, defStore, typeStore, function_, node.local);
       },
       Lir::Instr::DropInPlace(node) -> {
-        CodegenQbe::qbeEmitDropInPlace(emitter, defStore, typeStore, node.ty);
+        CodegenQbe::qbeEmitDropInPlace(emitter, defStore, typeStore, symbols, function_, &node);
       },
-      Lir::Instr::MarkMoved(_) -> {},
+      Lir::Instr::DropGlue(node) -> {
+        let name: String = CodegenC::dropGlueName(node.ty);
+        let line: String = `    %t${node.dest.raw()} =l copy $${name.toStr()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      },
+      Lir::Instr::MarkMoved(node) -> {
+        CodegenQbe::qbeEmitMarkMoved(emitter, defStore, typeStore, symbols, function_, &node);
+      },
       Lir::Instr::GetFieldPtr(node) -> {
         CodegenQbe::qbeEmitGetFieldPtr(emitter, defStore, typeStore, symbols, function_, &node);
       },
@@ -2521,6 +2546,56 @@ export namespace CodegenQbe {
     };
   }
 
+  /// One `==`/`!=` on a fieldless enum as a comparison of the `u32` tags. A
+  /// scalar enum's value already is the tag; an aggregate one is the address
+  /// of its storage, so the tag is loaded from its first word.
+  function qbeEmitUnitEnumComparison(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrBinOp,
+    leftType: Analyzer::TypeId,
+  ): void {
+    let Option::SOME(leftValue) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
+      return;
+    };
+
+    let Option::SOME(rightValue) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.right) else {
+      return;
+    };
+
+    let mut left: String = leftValue;
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, leftType)) {
+      let tag: String = CodegenQbe::freshTemp(emitter);
+      emitter.out.pushStr(`    ${tag.toStr()} =w loaduw ${left.toStr()}\n`.toStr());
+      left = tag;
+    }
+
+    let Option::SOME(rightType) = CodegenQbe::operandType(defStore, function_, &node.right) else {
+      CodegenQbe::failNamed(emitter, "BinOp");
+      return;
+    };
+
+    let mut right: String = rightValue;
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, rightType)) {
+      let tag: String = CodegenQbe::freshTemp(emitter);
+      emitter.out.pushStr(`    ${tag.toStr()} =w loaduw ${right.toStr()}\n`.toStr());
+      right = tag;
+    }
+
+    let mut stem: String = String::create("eq");
+
+    if (let Hir::BinaryOperation::NotEqual = node.op) {
+      stem = String::create("ne");
+    }
+
+    emitter.out.pushStr(`    %t${node.dest.raw()} =w c${stem.toStr()}w ${left.toStr()}, ${right.toStr()}\n`.toStr());
+  }
+
   function qbeEmitBinOp(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
@@ -2544,6 +2619,14 @@ export namespace CodegenQbe {
       CodegenQbe::failNamed(emitter, "BinOp");
       return;
     };
+
+    // Equality on a fieldless enum compares tags: an aggregate enum (one that
+    // implements `Drop`) is the address of its storage, so its `u32` tag is the
+    // first word. The C emitter does the same with `.tag`.
+    if (CodegenC::isEqualityOperation(&node.op) && CodegenC::isUnitEnumOperand(defStore, typeStore, function_, &node.left)) {
+      CodegenQbe::qbeEmitUnitEnumComparison(emitter, defStore, typeStore, symbols, function_, &node, leftType);
+      return;
+    }
 
     let Option::SOME(left) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
       return;
@@ -2805,6 +2888,8 @@ export namespace CodegenQbe {
     function_: &Lir::FunctionLir,
     node: &Lir::InstrCall,
   ): void {
+    CodegenQbe::qbeEmitReceiverGuard(emitter, defStore, typeStore, symbols, function_, node);
+
     let name: String = CodegenC::mangledName(defStore, symbols, node.callee);
     let mut args: Vector<String> = Vector::new<String>();
     let mut index: u64 = 0;
@@ -2997,6 +3082,16 @@ export namespace CodegenQbe {
         }
 
         if (targetCls.equals("l")) {
+          // A constant already holds its full declared value, so widening it
+          // must not re-read it through the 32-bit source class: a hex
+          // literal over 32 bits would otherwise be truncated by `extuw`.
+          if (let Lir::Operand::Const(_) = node.source) {
+            let up: String = `    ${dest.toStr()} =l copy ${value.toStr()}\n`;
+
+            emitter.out.pushStr(up.toStr());
+            return;
+          }
+
           let widened: String = CodegenQbe::qbeWidenToLong(emitter, defStore, typeStore, sourceResolved, &value);
           let up: String = `    ${dest.toStr()} =l copy ${widened.toStr()}\n`;
 
@@ -3296,6 +3391,1095 @@ export namespace CodegenQbe {
     emitter.out.pushStr(exit.toStr());
   }
 
+  /// The internal symbol of the helper that marks a value moved-from, so a
+  /// later drop of it becomes a no-op.
+  function qbeMarkMovedName(ty: Analyzer::TypeId): String {
+    return `ignis_mark_moved_t${ty.raw()}`;
+  }
+
+  /// The offset of the drop-state byte of the nominal behind `nominal`, if it
+  /// carries `@implements(Drop)` and so owns one.
+  function qbeDropStateOffset(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    nominal: Analyzer::DefinitionId,
+  ): Option<u64> {
+    if (let Option::SOME(Analyzer::Definition::Record(_)) = defStore.get(nominal)) {
+      return match (Abi::recordLayout(defStore, typeStore, nominal)) {
+        Result::OK(layout) -> layout.dropStateOffset,
+        Result::ERROR(_) -> Option::NONE,
+      };
+    }
+
+    if (let Option::SOME(Analyzer::Definition::Enum(_)) = defStore.get(nominal)) {
+      return match (Abi::enumLayout(defStore, typeStore, nominal)) {
+        Result::OK(layout) -> layout.dropStateOffset,
+        Result::ERROR(_) -> Option::NONE,
+      };
+    }
+
+    return Option::NONE;
+  }
+
+  /// The byte offset `Abi` gives field `fieldIndex`, or NONE after recording
+  /// the failure.
+  function qbeFieldOffset(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordDef: Analyzer::DefinitionId,
+    fieldIndex: u64,
+  ): Option<u64> {
+    return match (Abi::recordFieldOffset(defStore, typeStore, recordDef, fieldIndex)) {
+      Result::OK(offset) -> Option::SOME(offset),
+      Result::ERROR(_) -> {
+        CodegenQbe::failNamed(emitter, "Drop");
+        Option::NONE
+      },
+    };
+  }
+
+  /// The `%d<counter>` temporaries and labels inside one generated helper
+  /// share these counters, so no name repeats.
+  function qbeNextIndex(counter: &mut u64): u64 {
+    let value: u64 = *counter;
+    *counter = *counter + 1;
+    return value;
+  }
+
+  /// `%d<N> =l add|copy <origin>, <offset>`, the address of a member.
+  function qbeBodyOffset(
+    body: &mut String,
+    origin: &String,
+    offset: u64,
+    tempCounter: &mut u64,
+  ): String {
+    let temp: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+
+    if (offset == 0) {
+      body.pushStr(`    ${temp.toStr()} =l copy ${origin.toStr()}\n`.toStr());
+    } else {
+      body.pushStr(`    ${temp.toStr()} =l add ${origin.toStr()}, ${offset}\n`.toStr());
+    }
+
+    return temp;
+  }
+
+  /// The body statements that drop the value whose storage address is
+  /// `address`, following the C emitter's `emitFieldDrops`: a nominal with a
+  /// user `drop` method runs it once, guarded by its drop-state byte when it
+  /// implements `Drop`; a record without one drops its droppable fields; an
+  /// enum without one drops the live variant's payloads.
+  function qbeDropBody(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+    address: &String,
+    body: &mut String,
+    tempCounter: &mut u64,
+    labelCounter: &mut u64,
+  ): void {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return;
+    };
+
+    let mut nominalOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isEnum: boolean = false;
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        nominalOpt = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominalOpt = Option::SOME(defId);
+        isEnum = true;
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(nominal) = nominalOpt else {
+      return;
+    };
+
+    let guarded: boolean = CodegenC::hasDropTrait(defStore, nominal);
+    let methodOpt: Option<Analyzer::DefinitionId> = CodegenC::findDropMethod(defStore, symbols, nominal);
+
+    if (let Option::SOME(methodId) = methodOpt) {
+      let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+
+      if (!guarded) {
+        body.pushStr(`    call $${name.toStr()}(l ${address.toStr()})\n`.toStr());
+        return;
+      }
+
+      let Option::SOME(offset) = CodegenQbe::qbeDropStateOffset(defStore, typeStore, nominal) else {
+        CodegenQbe::failNamed(emitter, "Drop");
+        return;
+      };
+
+      let statePtr: String = CodegenQbe::qbeBodyOffset(body, address, offset, tempCounter);
+      let state: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+      let cond: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+      let salt: u64 = CodegenQbe::qbeNextIndex(labelCounter);
+      let liveLabel: String = `@dgl${salt}`;
+      let endLabel: String = `@dge${salt}`;
+
+      body.pushStr(`    ${state.toStr()} =w loadub ${statePtr.toStr()}\n`.toStr());
+      body.pushStr(`    ${cond.toStr()} =w ceqw ${state.toStr()}, 0\n`.toStr());
+      body.pushStr(`    jnz ${cond.toStr()}, ${liveLabel.toStr()}, ${endLabel.toStr()}\n`.toStr());
+      body.pushStr(`${liveLabel.toStr()}\n`.toStr());
+      body.pushStr(`    call $${name.toStr()}(l ${address.toStr()})\n`.toStr());
+      body.pushStr(`    storeb 1, ${statePtr.toStr()}\n`.toStr());
+      body.pushStr(`    jmp ${endLabel.toStr()}\n`.toStr());
+      body.pushStr(`${endLabel.toStr()}\n`.toStr());
+      return;
+    }
+
+    if (isEnum) {
+      CodegenQbe::qbeDropEnumPayloads(emitter, defStore, typeStore, symbols, nominal, address, body, tempCounter, labelCounter);
+      return;
+    }
+
+    CodegenQbe::qbeDropRecordFields(emitter, defStore, typeStore, symbols, nominal, address, body, tempCounter, labelCounter);
+  }
+
+  function qbeDropRecordFields(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    nominal: Analyzer::DefinitionId,
+    address: &String,
+    body: &mut String,
+    tempCounter: &mut u64,
+    labelCounter: &mut u64,
+  ): void {
+    let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(nominal) else {
+      return;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < recordDef.fields.length()) {
+      let Option::SOME(fieldId) = recordDef.fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+        index += 1;
+        continue;
+      };
+
+      let fieldType: Analyzer::TypeId = fieldDef.fieldType;
+
+      // A C function pointer field owns nothing to drop.
+      if (Hir::recordFieldStorageType(defStore, typeStore, nominal, fieldType).raw() != fieldType.raw()) {
+        index += 1;
+        continue;
+      }
+
+      if (Borrowck::needsDropType(defStore, typeStore, fieldType) || Hir::typeIsFunction(typeStore, fieldType)) {
+        let Option::SOME(offset) = CodegenQbe::qbeFieldOffset(emitter, defStore, typeStore, nominal, fieldDef.index as u64) else {
+          return;
+        };
+
+        let fieldAddress: String = CodegenQbe::qbeBodyOffset(body, address, offset, tempCounter);
+
+        CodegenQbe::qbeDropBody(emitter, defStore, typeStore, symbols, fieldType, &fieldAddress, body, tempCounter, labelCounter);
+
+        if (emitter.error.isSome()) {
+          return;
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The `switch` on the tag the C emitter's `emitEnumVariantDrops` writes,
+  /// as QBE blocks. Variants with no droppable payload get no arm.
+  function qbeDropEnumPayloads(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    nominal: Analyzer::DefinitionId,
+    address: &String,
+    body: &mut String,
+    tempCounter: &mut u64,
+    labelCounter: &mut u64,
+  ): void {
+    let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(nominal) else {
+      return;
+    };
+
+    let mut hasDroppable: boolean = false;
+    let mut scan: u64 = 0;
+
+    while (scan < enumDef.variants.length()) {
+      let Option::SOME(variantId) = enumDef.variants.get(scan) else {
+        scan += 1;
+        continue;
+      };
+
+      if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantDef.payload.length()) {
+          if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+            if (Borrowck::needsDropType(defStore, typeStore, *payloadType) || Hir::typeIsFunction(typeStore, *payloadType)) {
+              hasDroppable = true;
+            }
+          }
+
+          payloadIndex += 1;
+        }
+      }
+
+      scan += 1;
+    }
+
+    if (!hasDroppable) {
+      return;
+    }
+
+    let salt: u64 = CodegenQbe::qbeNextIndex(labelCounter);
+    let tag: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+    let noMatchLabel: String = `@dve${salt}`;
+    let endLabel: String = `@dvend${salt}`;
+    let mut checks: String = String::create("");
+    let mut blocks: String = String::create("");
+
+    checks.pushStr(`    ${tag.toStr()} =w loaduw ${address.toStr()}\n`.toStr());
+
+    let mut ordinal: u64 = 0;
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < enumDef.variants.length()) {
+      let Option::SOME(variantId) = enumDef.variants.get(variantIndex) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+        let mut any: boolean = false;
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantDef.payload.length()) {
+          if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+            if (Borrowck::needsDropType(defStore, typeStore, *payloadType) || Hir::typeIsFunction(typeStore, *payloadType)) {
+              any = true;
+            }
+          }
+
+          payloadIndex += 1;
+        }
+
+        if (any) {
+          let cond: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+          let variantLabel: String = `@dvv${salt}_${ordinal}`;
+          let nextLabel: String = `@dvn${salt}_${ordinal}`;
+
+          checks.pushStr(`    ${cond.toStr()} =w ceqw ${tag.toStr()}, ${variantDef.tagValue}\n`.toStr());
+          checks.pushStr(`    jnz ${cond.toStr()}, ${variantLabel.toStr()}, ${nextLabel.toStr()}\n`.toStr());
+          checks.pushStr(`${nextLabel.toStr()}\n`.toStr());
+          blocks.pushStr(`${variantLabel.toStr()}\n`.toStr());
+
+          let mut field: u64 = 0;
+          let mut fieldNumber: u64 = 0;
+
+          while (field < variantDef.payload.length()) {
+            if (let Option::SOME(payloadType) = variantDef.payload.get(field)) {
+              if (!Abi::isVoid(defStore, typeStore, *payloadType)) {
+                if (Borrowck::needsDropType(defStore, typeStore, *payloadType) || Hir::typeIsFunction(typeStore, *payloadType)) {
+                  let Option::SOME(offset) = CodegenQbe::qbeEnumFieldOffset(emitter, defStore, typeStore, nominal, variantDef.tagValue, fieldNumber) else {
+                    return;
+                  };
+
+                  let fieldAddress: String = CodegenQbe::qbeBodyOffset(&mut blocks, address, offset, tempCounter);
+
+                  CodegenQbe::qbeDropBody(emitter, defStore, typeStore, symbols, *payloadType, &fieldAddress, &mut blocks, tempCounter, labelCounter);
+
+                  if (emitter.error.isSome()) {
+                    return;
+                  }
+                }
+
+                fieldNumber += 1;
+              }
+            }
+
+            field += 1;
+          }
+
+          blocks.pushStr(`    jmp ${endLabel.toStr()}\n`.toStr());
+          ordinal += 1;
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    body.pushStr(checks.toStr());
+    body.pushStr(`${noMatchLabel.toStr()}\n`.toStr());
+    body.pushStr(`    jmp ${endLabel.toStr()}\n`.toStr());
+    body.pushStr(blocks.toStr());
+    body.pushStr(`${endLabel.toStr()}\n`.toStr());
+  }
+
+  /// The offset `Abi` gives payload field `fieldIndex` of one variant.
+  function qbeEnumFieldOffset(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    enumDef: Analyzer::DefinitionId,
+    variantTag: u32,
+    fieldIndex: u64,
+  ): Option<u64> {
+    return match (Abi::enumPayloadFieldOffset(defStore, typeStore, enumDef, variantTag, fieldIndex)) {
+      Result::OK(offset) -> Option::SOME(offset),
+      Result::ERROR(_) -> {
+        CodegenQbe::failNamed(emitter, "Drop");
+        Option::NONE
+      },
+    };
+  }
+
+  /// The statements that mark the value at `address` moved-from, mirroring the
+  /// C emitter's `emitUninitializedDropState`: a nominal with the Drop trait
+  /// owns a flag of its own and stops the walk, a record without one recurses
+  /// into its droppable fields, and an enum without one dispatches on its tag.
+  function qbeMarkBody(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    address: &String,
+    body: &mut String,
+    tempCounter: &mut u64,
+    labelCounter: &mut u64,
+  ): void {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return;
+    };
+
+    let mut nominalOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isRecord: boolean = false;
+    let mut isEnum: boolean = false;
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        nominalOpt = Option::SOME(defId);
+        isRecord = true;
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominalOpt = Option::SOME(defId);
+        isEnum = true;
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(nominal) = nominalOpt else {
+      return;
+    };
+
+    if (CodegenC::hasDropTrait(defStore, nominal)) {
+      let Option::SOME(offset) = CodegenQbe::qbeDropStateOffset(defStore, typeStore, nominal) else {
+        CodegenQbe::failNamed(emitter, "Drop");
+        return;
+      };
+
+      let statePtr: String = CodegenQbe::qbeBodyOffset(body, address, offset, tempCounter);
+
+      body.pushStr(`    storeb 1, ${statePtr.toStr()}\n`.toStr());
+      return;
+    }
+
+    if (isEnum) {
+      CodegenQbe::qbeMarkEnumPayloads(emitter, defStore, typeStore, nominal, address, body, tempCounter, labelCounter);
+      return;
+    }
+
+    if (isRecord) {
+      CodegenQbe::qbeMarkRecordFields(emitter, defStore, typeStore, nominal, address, body, tempCounter, labelCounter);
+    }
+  }
+
+  function qbeMarkRecordFields(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    nominal: Analyzer::DefinitionId,
+    address: &String,
+    body: &mut String,
+    tempCounter: &mut u64,
+    labelCounter: &mut u64,
+  ): void {
+    let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(nominal) else {
+      return;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < recordDef.fields.length()) {
+      let Option::SOME(fieldId) = recordDef.fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId) else {
+        index += 1;
+        continue;
+      };
+
+      let fieldType: Analyzer::TypeId = fieldDef.fieldType;
+
+      if (Borrowck::needsDropType(defStore, typeStore, fieldType)) {
+        let Option::SOME(offset) = CodegenQbe::qbeFieldOffset(emitter, defStore, typeStore, nominal, fieldDef.index as u64) else {
+          return;
+        };
+
+        let fieldAddress: String = CodegenQbe::qbeBodyOffset(body, address, offset, tempCounter);
+
+        CodegenQbe::qbeMarkBody(emitter, defStore, typeStore, fieldType, &fieldAddress, body, tempCounter, labelCounter);
+
+        if (emitter.error.isSome()) {
+          return;
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  function qbeMarkEnumPayloads(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    nominal: Analyzer::DefinitionId,
+    address: &String,
+    body: &mut String,
+    tempCounter: &mut u64,
+    labelCounter: &mut u64,
+  ): void {
+    let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(nominal) else {
+      return;
+    };
+
+    let mut hasDroppable: boolean = false;
+    let mut scan: u64 = 0;
+
+    while (scan < enumDef.variants.length()) {
+      let Option::SOME(variantId) = enumDef.variants.get(scan) else {
+        scan += 1;
+        continue;
+      };
+
+      if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantDef.payload.length()) {
+          if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+            if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
+              hasDroppable = true;
+            }
+          }
+
+          payloadIndex += 1;
+        }
+      }
+
+      scan += 1;
+    }
+
+    if (!hasDroppable) {
+      return;
+    }
+
+    let salt: u64 = CodegenQbe::qbeNextIndex(labelCounter);
+    let tag: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+    let noMatchLabel: String = `@mve${salt}`;
+    let endLabel: String = `@mvend${salt}`;
+    let mut checks: String = String::create("");
+    let mut blocks: String = String::create("");
+
+    checks.pushStr(`    ${tag.toStr()} =w loaduw ${address.toStr()}\n`.toStr());
+
+    let mut ordinal: u64 = 0;
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < enumDef.variants.length()) {
+      let Option::SOME(variantId) = enumDef.variants.get(variantIndex) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+        let mut any: boolean = false;
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantDef.payload.length()) {
+          if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+            if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
+              any = true;
+            }
+          }
+
+          payloadIndex += 1;
+        }
+
+        if (any) {
+          let cond: String = `%d${CodegenQbe::qbeNextIndex(tempCounter)}`;
+          let variantLabel: String = `@mvv${salt}_${ordinal}`;
+          let nextLabel: String = `@mvn${salt}_${ordinal}`;
+
+          checks.pushStr(`    ${cond.toStr()} =w ceqw ${tag.toStr()}, ${variantDef.tagValue}\n`.toStr());
+          checks.pushStr(`    jnz ${cond.toStr()}, ${variantLabel.toStr()}, ${nextLabel.toStr()}\n`.toStr());
+          checks.pushStr(`${nextLabel.toStr()}\n`.toStr());
+          blocks.pushStr(`${variantLabel.toStr()}\n`.toStr());
+
+          let mut field: u64 = 0;
+          let mut fieldNumber: u64 = 0;
+
+          while (field < variantDef.payload.length()) {
+            if (let Option::SOME(payloadType) = variantDef.payload.get(field)) {
+              if (!Abi::isVoid(defStore, typeStore, *payloadType)) {
+                if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
+                  let Option::SOME(offset) = CodegenQbe::qbeEnumFieldOffset(emitter, defStore, typeStore, nominal, variantDef.tagValue, fieldNumber) else {
+                    return;
+                  };
+
+                  let fieldAddress: String = CodegenQbe::qbeBodyOffset(&mut blocks, address, offset, tempCounter);
+
+                  CodegenQbe::qbeMarkBody(emitter, defStore, typeStore, *payloadType, &fieldAddress, &mut blocks, tempCounter, labelCounter);
+
+                  if (emitter.error.isSome()) {
+                    return;
+                  }
+                }
+
+                fieldNumber += 1;
+              }
+            }
+
+            field += 1;
+          }
+
+          blocks.pushStr(`    jmp ${endLabel.toStr()}\n`.toStr());
+          ordinal += 1;
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    body.pushStr(checks.toStr());
+    body.pushStr(`${noMatchLabel.toStr()}\n`.toStr());
+    body.pushStr(`    jmp ${endLabel.toStr()}\n`.toStr());
+    body.pushStr(blocks.toStr());
+    body.pushStr(`${endLabel.toStr()}\n`.toStr());
+  }
+
+  /// The internal symbol of the guard that panics when a value of the nominal
+  /// behind `owner` is used after it was dropped.
+  function qbeGuardName(owner: Analyzer::DefinitionId): String {
+    return `ignis_drop_guard_t${owner.raw()}`;
+  }
+
+  /// Panic before reading a method receiver whose owner implements `Drop` and
+  /// whose drop-state byte is set. Mirrors the C emitter's
+  /// `emitMethodReceiverDropGuard`.
+  function qbeEmitReceiverGuard(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrCall,
+  ): void {
+    let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(node.callee)) {
+      if (!methodDef.isStatic) {
+        ownerOpt = Option::SOME(methodDef.owner);
+      }
+    }
+
+    let Option::SOME(owner) = ownerOpt else {
+      return;
+    };
+
+    if (!CodegenC::hasDropTrait(defStore, owner)) {
+      return;
+    }
+
+    let Option::SOME(receiver) = node.args.get(0) else {
+      return;
+    };
+
+    let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, receiver) else {
+      return;
+    };
+
+    let name: String = CodegenQbe::qbeGuardName(owner);
+
+    emitter.out.pushStr(`    call $${name.toStr()}(l ${address.toStr()})\n`.toStr());
+  }
+
+  /// One `ignis_drop_guard_t<id>` helper per nominal whose drop-state byte is
+  /// read: it prints the same panic the C emitter's guard does and exits 101.
+  function qbeEmitDropGuardHelpers(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    guardTypes: &Vector<u32>,
+  ): void {
+    if (guardTypes.length() == 0) {
+      return;
+    }
+
+    emitter.out.pushStr("\n# Drop-state guards\n");
+
+    let mut index: u64 = 0;
+
+    while (index < guardTypes.length()) {
+      let Option::SOME(raw) = guardTypes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let owner: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*raw);
+      let Option::SOME(offset) = CodegenQbe::qbeDropStateOffset(defStore, typeStore, owner) else {
+        index += 1;
+        continue;
+      };
+
+      let name: String = CodegenQbe::qbeGuardName(owner);
+      let format: String = String::create("panic: %s\n");
+      let formatSymbol: String = CodegenQbe::internString(emitter, &format);
+      let message: String = String::create("use of dropped value");
+      let messageSymbol: String = CodegenQbe::internString(emitter, &message);
+
+      emitter.out.pushStr(`function $${name.toStr()}(l %base) {\n`.toStr());
+      emitter.out.pushStr("@start\n");
+
+      let pointer: String = CodegenQbe::freshTemp(emitter);
+      emitter.out.pushStr(`    ${pointer.toStr()} =l add %base, ${offset}\n`.toStr());
+
+      let state: String = CodegenQbe::freshTemp(emitter);
+      emitter.out.pushStr(`    ${state.toStr()} =w loadub ${pointer.toStr()}\n`.toStr());
+      emitter.out.pushStr(`    jnz ${state.toStr()}, @dropped, @live\n`.toStr());
+      emitter.out.pushStr("@dropped\n");
+      emitter.out.pushStr(`    call $dprintf(w 2, l ${formatSymbol.toStr()}, ..., l ${messageSymbol.toStr()})\n`.toStr());
+      emitter.out.pushStr("    call $exit(w 101)\n");
+      emitter.out.pushStr("    hlt\n");
+      emitter.out.pushStr("@live\n");
+      emitter.out.pushStr("    ret\n}\n\n");
+      index += 1;
+    }
+  }
+
+  /// One QBE function per collected glue type, named exactly as the C
+  /// backend's `DropGlue` helper so the two agree.
+  function qbeEmitDropGlueHelpers(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    glueTypes: &Vector<u32>,
+  ): void {
+    if (glueTypes.length() == 0) {
+      return;
+    }
+
+    emitter.out.pushStr("\n# Drop glue\n");
+
+    let mut index: u64 = 0;
+
+    while (index < glueTypes.length()) {
+      let Option::SOME(raw) = glueTypes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+      let name: String = CodegenC::dropGlueName(ty);
+
+      if (Hir::typeIsFunction(typeStore, ty)) {
+        CodegenQbe::failNamed(emitter, "MakeClosure");
+        return;
+      }
+
+      emitter.out.pushStr(`function $${name.toStr()}(l %payload) {\n`.toStr());
+      emitter.out.pushStr("@start\n");
+
+      let mut body: String = String::create("");
+      let mut tempCounter: u64 = 0;
+      let mut labelCounter: u64 = 0;
+      let payloadName: String = String::create("%payload");
+
+      CodegenQbe::qbeDropBody(emitter, defStore, typeStore, symbols, ty, &payloadName, &mut body, &mut tempCounter, &mut labelCounter);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      emitter.out.pushStr(body.toStr());
+      emitter.out.pushStr("    ret\n}\n\n");
+      index += 1;
+    }
+  }
+
+  /// One internal mark-moved helper per collected type.
+  function qbeEmitMarkHelpers(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    markTypes: &Vector<u32>,
+  ): void {
+    if (markTypes.length() == 0) {
+      return;
+    }
+
+    emitter.out.pushStr("\n# Mark-moved helpers\n");
+
+    let mut index: u64 = 0;
+
+    while (index < markTypes.length()) {
+      let Option::SOME(raw) = markTypes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+      let name: String = CodegenQbe::qbeMarkMovedName(ty);
+
+      emitter.out.pushStr(`function $${name.toStr()}(l %payload) {\n`.toStr());
+      emitter.out.pushStr("@start\n");
+
+      let mut body: String = String::create("");
+      let mut tempCounter: u64 = 0;
+      let mut labelCounter: u64 = 0;
+      let payloadName: String = String::create("%payload");
+
+      CodegenQbe::qbeMarkBody(emitter, defStore, typeStore, ty, &payloadName, &mut body, &mut tempCounter, &mut labelCounter);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      emitter.out.pushStr(body.toStr());
+      emitter.out.pushStr("    ret\n}\n\n");
+      index += 1;
+    }
+  }
+
+  /// Collects the glue function of `ty` and every nested type its body
+  /// reaches, plus the `drop` methods the glue calls. A nominal with a `drop`
+  /// method stops the walk; the method's own body drops its fields.
+  function qbeAddGlueType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    glueTypes: &mut Vector<u32>,
+    glueMethods: &mut Vector<u32>,
+    ty: Analyzer::TypeId,
+  ): void {
+    if (!CodegenQbe::needsDrop(defStore, typeStore, ty)) {
+      return;
+    }
+
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    if (CodegenC::containsRaw(glueTypes, resolved.raw())) {
+      return;
+    }
+
+    glueTypes.push(resolved.raw());
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return;
+    };
+
+    let mut nominalOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        nominalOpt = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominalOpt = Option::SOME(defId);
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(nominal) = nominalOpt else {
+      return;
+    };
+
+    if (let Option::SOME(methodId) = CodegenC::findDropMethod(defStore, symbols, nominal)) {
+      if (!CodegenC::containsRaw(glueMethods, methodId.raw())) {
+        glueMethods.push(methodId.raw());
+      }
+
+      return;
+    }
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(nominal)) {
+      let mut index: u64 = 0;
+
+      while (index < recordDef.fields.length()) {
+        let Option::SOME(fieldId) = recordDef.fields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+          let fieldType: Analyzer::TypeId = fieldDef.fieldType;
+
+          if (Hir::recordFieldStorageType(defStore, typeStore, nominal, fieldType).raw() == fieldType.raw()) {
+            if (Borrowck::needsDropType(defStore, typeStore, fieldType) || Hir::typeIsFunction(typeStore, fieldType)) {
+              CodegenQbe::qbeAddGlueType(defStore, typeStore, symbols, glueTypes, glueMethods, fieldType);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return;
+    }
+
+    if (let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(nominal)) {
+      let mut variantIndex: u64 = 0;
+
+      while (variantIndex < enumDef.variants.length()) {
+        let Option::SOME(variantId) = enumDef.variants.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+          let mut payloadIndex: u64 = 0;
+
+          while (payloadIndex < variantDef.payload.length()) {
+            if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+              if (Borrowck::needsDropType(defStore, typeStore, *payloadType) || Hir::typeIsFunction(typeStore, *payloadType)) {
+                CodegenQbe::qbeAddGlueType(defStore, typeStore, symbols, glueTypes, glueMethods, *payloadType);
+              }
+            }
+
+            payloadIndex += 1;
+          }
+        }
+
+        variantIndex += 1;
+      }
+    }
+  }
+
+  /// Collects the mark-moved helper of `ty` and the nested types it reaches.
+  function qbeAddMarkType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    markTypes: &mut Vector<u32>,
+    ty: Analyzer::TypeId,
+  ): void {
+    if (!Borrowck::needsDropType(defStore, typeStore, ty)) {
+      return;
+    }
+
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    if (CodegenC::containsRaw(markTypes, resolved.raw())) {
+      return;
+    }
+
+    markTypes.push(resolved.raw());
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return;
+    };
+
+    let mut nominalOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isRecord: boolean = false;
+    let mut isEnum: boolean = false;
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        nominalOpt = Option::SOME(defId);
+        isRecord = true;
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominalOpt = Option::SOME(defId);
+        isEnum = true;
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(nominal) = nominalOpt else {
+      return;
+    };
+
+    if (CodegenC::hasDropTrait(defStore, nominal)) {
+      return;
+    }
+
+    if (isEnum) {
+      if (let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(nominal)) {
+        let mut variantIndex: u64 = 0;
+
+        while (variantIndex < enumDef.variants.length()) {
+          let Option::SOME(variantId) = enumDef.variants.get(variantIndex) else {
+            variantIndex += 1;
+            continue;
+          };
+
+          if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+            let mut payloadIndex: u64 = 0;
+
+            while (payloadIndex < variantDef.payload.length()) {
+              if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+                CodegenQbe::qbeAddMarkType(defStore, typeStore, markTypes, *payloadType);
+              }
+
+              payloadIndex += 1;
+            }
+          }
+
+          variantIndex += 1;
+        }
+      }
+
+      return;
+    }
+
+    if (isRecord) {
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(nominal)) {
+        let mut index: u64 = 0;
+
+        while (index < recordDef.fields.length()) {
+          let Option::SOME(fieldId) = recordDef.fields.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+            CodegenQbe::qbeAddMarkType(defStore, typeStore, markTypes, fieldDef.fieldType);
+          }
+
+          index += 1;
+        }
+      }
+    }
+  }
+
+  /// Scans every LIR instruction for the drop and mark helpers the unit needs,
+  /// including the prologue mark of every droppable local.
+  function qbeCollectDropHelpers(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    program: &Lir::LirProgram,
+    glueTypes: &mut Vector<u32>,
+    markTypes: &mut Vector<u32>,
+    guardTypes: &mut Vector<u32>,
+    glueMethods: &mut Vector<u32>,
+  ): void {
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      let scheduled: Vector<u32> = CodegenC::dropScheduledLocals(function_);
+      let mut localIndex: u64 = 0;
+
+      while (localIndex < function_.locals.length()) {
+        let Option::SOME(local) = function_.locals.get(localIndex) else {
+          localIndex += 1;
+          continue;
+        };
+
+        if (!local.borrowedAlias && !CodegenC::isVoidType(typeStore, local.ty) && CodegenC::fixedArrayShape(typeStore, local.ty).isNone()) {
+          if (CodegenC::containsLocalRaw(&scheduled, localIndex as u32) || Borrowck::needsDropType(defStore, typeStore, local.ty)) {
+            CodegenQbe::qbeAddMarkType(defStore, typeStore, markTypes, local.ty);
+          }
+        }
+
+        localIndex += 1;
+      }
+
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < function_.blocks.length()) {
+        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        let mut instructionIndex: u64 = 0;
+
+        while (instructionIndex < block.instructions.length()) {
+          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+            match (instruction) {
+              Lir::Instr::Drop(node) -> {
+                if (let Option::SOME(local) = function_.locals.get(node.local.raw() as u64)) {
+                  if (!local.borrowedAlias) {
+                    CodegenQbe::qbeAddGlueType(defStore, typeStore, symbols, glueTypes, glueMethods, local.ty);
+                  }
+                }
+              },
+              Lir::Instr::DropInPlace(node) -> {
+                CodegenQbe::qbeAddGlueType(defStore, typeStore, symbols, glueTypes, glueMethods, node.ty);
+              },
+              Lir::Instr::DropGlue(node) -> {
+                CodegenQbe::qbeAddGlueType(defStore, typeStore, symbols, glueTypes, glueMethods, node.ty);
+              },
+              Lir::Instr::MarkMoved(node) -> {
+                if (!Hir::typeIsFunction(typeStore, node.ty)) {
+                  CodegenQbe::qbeAddMarkType(defStore, typeStore, markTypes, node.ty);
+                }
+              },
+              Lir::Instr::GetFieldPtr(node) -> {
+                if (let Option::SOME(baseType) = CodegenQbe::operandType(defStore, function_, &node.base)) {
+                  if (let Option::SOME(owner) = CodegenC::resolveDroppableRecord(defStore, typeStore, baseType)) {
+                    if (!CodegenC::containsRaw(guardTypes, owner.raw())) {
+                      guardTypes.push(owner.raw());
+                    }
+                  }
+                }
+              },
+              Lir::Instr::Call(node) -> {
+                if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(node.callee)) {
+                  if (!methodDef.isStatic && CodegenC::hasDropTrait(defStore, methodDef.owner)) {
+                    if (!CodegenC::containsRaw(guardTypes, methodDef.owner.raw())) {
+                      guardTypes.push(methodDef.owner.raw());
+                    }
+                  }
+                }
+              },
+              _ -> {},
+            };
+          }
+
+          instructionIndex += 1;
+        }
+
+        blockIndex += 1;
+      }
+
+      functionIndex += 1;
+    }
+  }
+
   function qbeEmitDrop(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
@@ -3303,25 +4487,71 @@ export namespace CodegenQbe {
     function_: &Lir::FunctionLir,
     local: Lir::LocalId,
   ): void {
-    let localOperand: Lir::Operand = Lir::Operand::Local(local);
-    let Option::SOME(localType) = CodegenQbe::operandType(defStore, function_, &localOperand) else {
+    let Option::SOME(local_) = function_.locals.get(local.raw() as u64) else {
       return;
     };
 
-    if (CodegenQbe::needsDrop(defStore, typeStore, localType)) {
-      CodegenQbe::failNamed(emitter, "Drop");
+    if (local_.borrowedAlias) {
+      return;
     }
+
+    if (!CodegenQbe::needsDrop(defStore, typeStore, local_.ty)) {
+      return;
+    }
+
+    let name: String = CodegenC::dropGlueName(local_.ty);
+    let line: String = `    call $${name.toStr()}(l %l${local.raw()})\n`;
+
+    emitter.out.pushStr(line.toStr());
   }
 
   function qbeEmitDropInPlace(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
-    ty: Analyzer::TypeId,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrDropInPlace,
   ): void {
-    if (CodegenQbe::needsDrop(defStore, typeStore, ty)) {
-      CodegenQbe::failNamed(emitter, "DropInPlace");
+    if (!CodegenQbe::needsDrop(defStore, typeStore, node.ty)) {
+      return;
     }
+
+    let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.ptr) else {
+      return;
+    };
+
+    let name: String = CodegenC::dropGlueName(node.ty);
+    let line: String = `    call $${name.toStr()}(l ${address.toStr()})\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  function qbeEmitMarkMoved(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrMarkMoved,
+  ): void {
+    if (Hir::typeIsFunction(typeStore, node.ty)) {
+      CodegenQbe::failNamed(emitter, "MakeClosure");
+      return;
+    }
+
+    if (!Borrowck::needsDropType(defStore, typeStore, node.ty)) {
+      return;
+    }
+
+    let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.ptr) else {
+      return;
+    };
+
+    let name: String = CodegenQbe::qbeMarkMovedName(node.ty);
+    let line: String = `    call $${name.toStr()}(l ${address.toStr()})\n`;
+
+    emitter.out.pushStr(line.toStr());
   }
 
   function qbeEmitGetFieldPtr(
@@ -3345,6 +4575,14 @@ export namespace CodegenQbe {
     let Option::SOME(baseAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.base) else {
       return;
     };
+
+    // A read through a base whose nominal was already dropped panics, as the
+    // C emitter's field guard does.
+    if (let Option::SOME(owner) = CodegenC::resolveDroppableRecord(defStore, typeStore, baseType)) {
+      let guard: String = CodegenQbe::qbeGuardName(owner);
+
+      emitter.out.pushStr(`    call $${guard.toStr()}(l ${baseAddress.toStr()})\n`.toStr());
+    }
 
     let offset: u64 = CodegenQbe::fieldOffset(emitter, defStore, typeStore, recordDef, node.fieldIndex);
 
@@ -3415,6 +4653,15 @@ export namespace CodegenQbe {
 
       index += 1;
     }
+
+    // A freshly built value is live: the slot may already hold the drop-state
+    // byte of a value dropped earlier.
+    if (CodegenC::hasDropTrait(defStore, recordDef)) {
+      if (let Option::SOME(offset) = CodegenQbe::qbeDropStateOffset(defStore, typeStore, recordDef)) {
+        let stateAddress: String = CodegenQbe::qbeAddressOffset(emitter, &pointer, offset);
+        emitter.out.pushStr(`    storeb 0, ${stateAddress.toStr()}\n`.toStr());
+      }
+    }
   }
 
   function qbeEmitEnumGetTag(
@@ -3436,7 +4683,7 @@ export namespace CodegenQbe {
       return;
     }
 
-    if (!CodegenQbe::enumIsFieldless(defStore, enumDefId)) {
+    if (!CodegenQbe::enumIsScalar(defStore, enumDefId)) {
       // A payload enum is an aggregate, so the source value is the address of
       // its storage and the `u32` tag is the first word of it.
       let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
@@ -3508,7 +4755,7 @@ export namespace CodegenQbe {
       return;
     }
 
-    if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+    if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
       if (let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr)) {
         let line: String = `    storew ${node.variantTag}, ${address.toStr()}\n`;
 
@@ -4101,11 +5348,23 @@ export namespace CodegenQbe {
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
     foreignDefinitions: &Vector<u32>,
+    extraRoots: &Vector<u32>,
   ): Vector<u32> {
     let mut reachable: Vector<u32> = Vector::new<u32>();
     if (let Option::SOME(entry) = program.entryPoint) {
       CodegenQbe::addReachable(&mut reachable, entry);
     }
+
+    // The drop methods generated glue calls are roots even though no LIR
+    // instruction names them directly.
+    let mut rootIndex: u64 = 0;
+    while (rootIndex < extraRoots.length()) {
+      if (let Option::SOME(raw) = extraRoots.get(rootIndex)) {
+        CodegenQbe::addReachable(&mut reachable, Id::fromRaw<Analyzer::DefinitionTag>(*raw));
+      }
+      rootIndex += 1;
+    }
+
     let mut index: u64 = 0;
     while (index < program.functions.length()) {
       if (let Option::SOME(function_) = program.functions.functionAt(index)) {
@@ -4178,7 +5437,18 @@ export namespace CodegenQbe {
     foreignDefinitions: &Vector<u32>,
   ): CodegenQbe::EmitOutput {
     let mut emitter: CodegenQbe::Emitter = CodegenQbe::Emitter::init();
-    let reachable: Vector<u32> = CodegenQbe::reachableFunctions(defStore, program, externalSymbols, foreignDefinitions);
+
+    // The drop and mark-moved helpers are type-keyed, so they are collected
+    // from the LIR before reachability, and the drop methods they call join
+    // the reachable set as extra roots.
+    let mut glueTypes: Vector<u32> = Vector::new<u32>();
+    let mut markTypes: Vector<u32> = Vector::new<u32>();
+    let mut guardTypes: Vector<u32> = Vector::new<u32>();
+    let mut glueMethods: Vector<u32> = Vector::new<u32>();
+
+    CodegenQbe::qbeCollectDropHelpers(defStore, typeStore, symbols, program, &mut glueTypes, &mut markTypes, &mut guardTypes, &mut glueMethods);
+
+    let reachable: Vector<u32> = CodegenQbe::reachableFunctions(defStore, program, externalSymbols, foreignDefinitions, &glueMethods);
 
     // Type declarations first: aggregate signatures and aggregate call
     // results reference them by name.
@@ -4220,6 +5490,9 @@ export namespace CodegenQbe {
     }
 
     CodegenQbe::qbeEmitGlobals(&mut emitter, defStore, typeStore, symbols, program, foreignDefinitions);
+    CodegenQbe::qbeEmitDropGlueHelpers(&mut emitter, defStore, typeStore, symbols, &glueTypes);
+    CodegenQbe::qbeEmitMarkHelpers(&mut emitter, defStore, typeStore, &markTypes);
+    CodegenQbe::qbeEmitDropGuardHelpers(&mut emitter, defStore, typeStore, &guardTypes);
 
     if (emitter.error.isSome()) {
       return CodegenQbe::EmitOutput {

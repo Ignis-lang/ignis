@@ -144,6 +144,31 @@ export enum LargePayload {
   EMPTY,
 }
 
+/// The drop count the droppable shapes below bump, so a build whose layout or
+/// glue disagrees shows a different number of destructor calls.
+export record DropCounter {
+  static mut DROPS: i32 = 0;
+}
+
+/// A droppable record: its `@implements(Drop)` byte is the last member of the
+/// C struct and of the QBE aggregate, so a size disagreement moves it.
+@implements(Drop)
+export record Droppable {
+  public value: i32;
+
+  drop(&mut self): void {
+    DropCounter::DROPS += 1;
+    return;
+  }
+}
+
+/// A payload enum whose variant holds a droppable record, so dropping it
+/// dispatches through the tag and the payload's glue.
+export enum DroppableEnum {
+  ITEM(Droppable),
+  EMPTY,
+}
+
 /// Shapes beyond the first set: odd record sizes, records holding arrays,
 /// slices, narrow results, enums, and arguments passed on the stack.
 export namespace AbiProbeExtra {
@@ -273,6 +298,44 @@ export namespace AbiProbeExtra {
 
   function makeOption(number: i64): Option<i64> {
     return Option::SOME(number);
+  }
+
+  function resetDrops(): void {
+    DropCounter::DROPS = 0;
+  }
+
+  function dropCount(): i32 {
+    return DropCounter::DROPS;
+  }
+
+  /// Builds a droppable record in std and hands it to the caller by value.
+  function makeDroppable(value: i32): Droppable {
+    return Droppable { value: value };
+  }
+
+  /// Owns its droppable parameter, so the callee drops it.
+  function droppableValue(value: Droppable): i32 {
+    return value.value;
+  }
+
+  /// Builds a droppable payload enum in std and hands it back by value.
+  function makeDroppableEnum(value: i32): DroppableEnum {
+    return DroppableEnum::ITEM(Droppable { value: value });
+  }
+
+  /// Owns its droppable enum parameter, so dropping it dispatches through the
+  /// tag and the payload's glue.
+  function readDroppableEnum(value: DroppableEnum): i32 {
+    let mut result: i32 = -1;
+
+    match (value) {
+      DroppableEnum::ITEM(payload) -> {
+        result = payload.value;
+      },
+      DroppableEnum::EMPTY -> {},
+    };
+
+    return result;
   }
 
   function nextColor(value: Color): Color {
