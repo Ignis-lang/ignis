@@ -1996,7 +1996,7 @@ export namespace CodegenQbe {
         let scheduled: Vector<u32> = CodegenC::dropScheduledLocals(function_);
 
         if (CodegenC::containsLocalRaw(&scheduled, index as u32) || Borrowck::needsDropType(defStore, typeStore, local.ty)) {
-          let name: String = CodegenQbe::qbeMarkMovedName(local.ty);
+          let name: String = CodegenQbe::qbeMarkMovedName(defStore, typeStore, local.ty);
           let clear: String = `    call $memset(l %l${index}, w 0, l ${size})\n`;
           let mark: String = `    call $${name.toStr()}(l %l${index})\n`;
 
@@ -2205,7 +2205,7 @@ export namespace CodegenQbe {
         CodegenQbe::qbeEmitDropInPlace(emitter, defStore, typeStore, symbols, function_, &node);
       },
       Lir::Instr::DropGlue(node) -> {
-        let name: String = CodegenC::dropGlueName(node.ty);
+        let name: String = CodegenQbe::qbeDropGlueName(defStore, typeStore, node.ty);
         let line: String = `    %t${node.dest.raw()} =l copy $${name.toStr()}\n`;
 
         emitter.out.pushStr(line.toStr());
@@ -3392,9 +3392,28 @@ export namespace CodegenQbe {
   }
 
   /// The internal symbol of the helper that marks a value moved-from, so a
-  /// later drop of it becomes a no-op.
-  function qbeMarkMovedName(ty: Analyzer::TypeId): String {
-    return `ignis_mark_moved_t${ty.raw()}`;
+  /// later drop of it becomes a no-op. Named after the alias-resolved type, the
+  /// id its helper is defined under.
+  function qbeMarkMovedName(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): String {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    return `ignis_mark_moved_t${resolved.raw()}`;
+  }
+
+  /// The internal symbol of the drop glue helper of `ty`. Named after the
+  /// alias-resolved type, the id its helper is defined under.
+  function qbeDropGlueName(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): String {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    return CodegenC::dropGlueName(resolved);
   }
 
   /// The offset of the drop-state byte of the nominal behind `nominal`, if it
@@ -4108,7 +4127,7 @@ export namespace CodegenQbe {
       };
 
       let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
-      let name: String = CodegenC::dropGlueName(ty);
+      let name: String = CodegenQbe::qbeDropGlueName(defStore, typeStore, ty);
 
       if (Hir::typeIsFunction(typeStore, ty)) {
         CodegenQbe::failNamed(emitter, "MakeClosure");
@@ -4157,7 +4176,7 @@ export namespace CodegenQbe {
       };
 
       let ty: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
-      let name: String = CodegenQbe::qbeMarkMovedName(ty);
+      let name: String = CodegenQbe::qbeMarkMovedName(defStore, typeStore, ty);
 
       emitter.out.pushStr(`function $${name.toStr()}(l %payload) {\n`.toStr());
       emitter.out.pushStr("@start\n");
@@ -4181,7 +4200,7 @@ export namespace CodegenQbe {
 
   /// Collects the glue function of `ty` and every nested type its body
   /// reaches, plus the `drop` methods the glue calls. A nominal with a `drop`
-  /// method stops the walk; the method's own body drops its fields.
+  /// method stops the walk, as in the C emitter: its fields are not dropped by glue.
   function qbeAddGlueType(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -4499,7 +4518,7 @@ export namespace CodegenQbe {
       return;
     }
 
-    let name: String = CodegenC::dropGlueName(local_.ty);
+    let name: String = CodegenQbe::qbeDropGlueName(defStore, typeStore, local_.ty);
     let line: String = `    call $${name.toStr()}(l %l${local.raw()})\n`;
 
     emitter.out.pushStr(line.toStr());
@@ -4521,7 +4540,7 @@ export namespace CodegenQbe {
       return;
     };
 
-    let name: String = CodegenC::dropGlueName(node.ty);
+    let name: String = CodegenQbe::qbeDropGlueName(defStore, typeStore, node.ty);
     let line: String = `    call $${name.toStr()}(l ${address.toStr()})\n`;
 
     emitter.out.pushStr(line.toStr());
@@ -4548,7 +4567,7 @@ export namespace CodegenQbe {
       return;
     };
 
-    let name: String = CodegenQbe::qbeMarkMovedName(node.ty);
+    let name: String = CodegenQbe::qbeMarkMovedName(defStore, typeStore, node.ty);
     let line: String = `    call $${name.toStr()}(l ${address.toStr()})\n`;
 
     emitter.out.pushStr(line.toStr());
