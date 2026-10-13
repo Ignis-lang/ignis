@@ -1,0 +1,557 @@
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticCode,
+  LabelKind,
+  Severity,
+  SourceSpan,
+from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import HashSet from "std::collections";
+import Vector from "std::vector";
+
+/// Generic bound checking: every type argument has to satisfy the bounds of
+/// the type parameter it binds.
+///
+/// The pass reads lowered HIR rather than the typechecker's many call paths,
+/// because HIR is where every instantiation has settled: a call node carries
+/// its effective type arguments, written or inferred, and every node carries
+/// its resolved type, so a generic record or enum instantiated anywhere shows
+/// up as an `Instance` type. Type parameters are still visible here, which is
+/// what lets a generic body be judged by its own bounds instead of by each
+/// later instantiation.
+///
+/// A bound is satisfied in one of three ways:
+///   - by a type parameter that declares the same bound itself,
+///   - structurally, for the traits the compiler can judge from a type's
+///     shape: `Copy` through the Copy classification, and `Eq` and `Hash` for
+///     the integer primitives, `boolean`, `char` and `str`, which have no
+///     declaration to write `@implements` on,
+///   - nominally, by a record or enum whose `@implements` names the trait.
+///
+/// Bounds are held as the written trait name, so they are matched by name.
+export namespace Bounds {
+  /// Checks the function bodies `hir` gained from body index `firstBody` on.
+  ///
+  /// Runs on one module's bodies right after lowering and before closure
+  /// conversion, while each closure body is still part of the function that
+  /// declares it and so sees that function's type parameters.
+  function checkBodies(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    firstBody: u64,
+  ): DiagnosticBag {
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut index: u64 = firstBody;
+
+    while (index < hir.functionBodies.length()) {
+      let Option::SOME(enclosing) = hir.functionBodies.keyAt(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(bodyId) = hir.functionBodies.valueAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      Bounds::checkBody(defStore, typeStore, symbols, hir, enclosing, bodyId, &mut diagnostics);
+      index += 1;
+    }
+
+    return diagnostics;
+  }
+
+  /// Walks one body in source order. A type that fails is reported once per
+  /// body, at its first node, rather than at every expression that has it.
+  function checkBody(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    enclosing: Analyzer::DefinitionId,
+    bodyId: Hir::HirId,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let mut checkedTypes: HashSet<u32> = HashSet::new<u32>();
+    let mut pending: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    pending.push(bodyId);
+
+    while (pending.length() > 0) {
+      let Option::SOME(nodeId) = pending.pop() else {
+        break;
+      };
+      let Option::SOME(node) = hir.get(nodeId) else {
+        continue;
+      };
+
+      let span: SourceSpan = node.span;
+      let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      types.push(node.typeId);
+
+      let mut callee: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut typeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      match (&node.kind) {
+        Hir::HirKind::Call(call) -> {
+          callee = Option::SOME(call.callee);
+          typeArgs = Bounds::copyTypeIds(&call.typeArgs);
+        },
+        Hir::HirKind::MethodCall(call) -> {
+          callee = Option::SOME(call.method);
+          typeArgs = Bounds::copyTypeIds(&call.typeArgs);
+        },
+        Hir::HirKind::Let(letNode) -> {
+          if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(letNode.name)) {
+            types.push(variable.declaredType);
+          }
+        },
+        _ -> {},
+      };
+
+      let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+      let mut childIndex: u64 = children.length();
+
+      while (childIndex > 0) {
+        childIndex -= 1;
+
+        if (let Option::SOME(child) = children.get(childIndex)) {
+          pending.push(*child);
+        }
+      }
+
+      if (let Option::SOME(calleeDefId) = callee) {
+        Bounds::checkCall(defStore, typeStore, symbols, enclosing, calleeDefId, &typeArgs, span, diagnostics);
+      }
+
+      let mut typeIndex: u64 = 0;
+
+      while (typeIndex < types.length()) {
+        if (let Option::SOME(typeId) = types.get(typeIndex)) {
+          if (checkedTypes.insert(typeId.raw())) {
+            Bounds::checkType(defStore, typeStore, symbols, enclosing, *typeId, span, diagnostics);
+          }
+        }
+
+        typeIndex += 1;
+      }
+    }
+  }
+
+  /// Checks a call's type arguments against the callee's type parameters: a
+  /// method's own, or its owner's when it declares none, which is what
+  /// `Type::staticMethod<T>()` on a generic declaration binds. A count that
+  /// does not match was already reported by the typechecker.
+  function checkCall(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    enclosing: Analyzer::DefinitionId,
+    calleeDefId: Analyzer::DefinitionId,
+    typeArgs: &Vector<Analyzer::TypeId>,
+    span: SourceSpan,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    if (typeArgs.length() == 0) {
+      return;
+    }
+
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(calleeDefId)) {
+      match (definition) {
+        Analyzer::Definition::Function(function_) -> {
+          params = Bounds::copyDefinitionIds(&function_.typeParams);
+        },
+        Analyzer::Definition::Method(method) -> {
+          params = Bounds::copyDefinitionIds(&method.typeParams);
+          ownerOpt = Option::SOME(method.owner);
+        },
+        _ -> {},
+      };
+    }
+
+    if (params.length() == 0) {
+      if (let Option::SOME(ownerDefId) = ownerOpt) {
+        params = Bounds::declaredTypeParams(defStore, ownerDefId);
+      }
+    }
+
+    if (params.length() != typeArgs.length()) {
+      return;
+    }
+
+    Bounds::checkArguments(defStore, typeStore, symbols, enclosing, calleeDefId, &params, typeArgs, span, diagnostics);
+  }
+
+  /// Checks every generic record or enum instantiated anywhere inside the
+  /// type, including through references, pointers, tuples and the type
+  /// arguments of another instance.
+  function checkType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    enclosing: Analyzer::DefinitionId,
+    root: Analyzer::TypeId,
+    span: SourceSpan,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let mut pending: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    pending.push(root);
+
+    while (pending.length() > 0) {
+      let Option::SOME(typeId) = pending.pop() else {
+        break;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        continue;
+      }
+
+      let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
+        continue;
+      };
+
+      let mut instanceDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      match (type_) {
+        Analyzer::Type::Pointer(pointer) -> {
+          components.push(pointer.pointee);
+        },
+        Analyzer::Type::Reference(reference) -> {
+          components.push(reference.referent);
+        },
+        Analyzer::Type::Slice(element) -> {
+          components.push(element);
+        },
+        Analyzer::Type::FixedArray(element, _) -> {
+          components.push(element);
+        },
+        Analyzer::Type::Tuple(tuple) -> {
+          components = Bounds::copyTypeIds(&tuple.elements);
+        },
+        Analyzer::Type::Function(function_) -> {
+          components = Bounds::copyTypeIds(&function_.params);
+          components.push(function_.returnType);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          instanceDefId = Option::SOME(instance.definition);
+          components = Bounds::copyTypeIds(&instance.typeArguments);
+        },
+        _ -> {},
+      };
+
+      if (let Option::SOME(definition) = instanceDefId) {
+        let params: Vector<Analyzer::DefinitionId> = Bounds::declaredTypeParams(defStore, definition);
+
+        if (params.length() == components.length()) {
+          Bounds::checkArguments(defStore, typeStore, symbols, enclosing, definition, &params, &components, span, diagnostics);
+        }
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < components.length()) {
+        if (let Option::SOME(component) = components.get(index)) {
+          pending.push(*component);
+        }
+
+        index += 1;
+      }
+    }
+  }
+
+  /// Reports each bound of `params` that the type argument at the same
+  /// position does not satisfy.
+  function checkArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    enclosing: Analyzer::DefinitionId,
+    generic: Analyzer::DefinitionId,
+    params: &Vector<Analyzer::DefinitionId>,
+    typeArgs: &Vector<Analyzer::TypeId>,
+    span: SourceSpan,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < params.length()) {
+      let Option::SOME(paramDefId) = params.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(typeArg) = typeArgs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut paramName: Option<Analyzer::SymbolId> = Option::NONE;
+      let mut bounds: Vector<String> = Vector::new<String>();
+
+      if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+        paramName = Option::SOME(typeParam.name);
+        bounds = Bounds::copyStrings(&typeParam.bounds);
+      }
+
+      let mut boundIndex: u64 = 0;
+
+      while (boundIndex < bounds.length()) {
+        if (let Option::SOME(bound) = bounds.get(boundIndex)) {
+          if (!Bounds::satisfies(defStore, typeStore, symbols, enclosing, *typeArg, bound)) {
+            Bounds::reportUnsatisfied(defStore, typeStore, symbols, generic, paramName, bound.toStr(), *typeArg, span, diagnostics);
+          }
+        }
+
+        boundIndex += 1;
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Whether `typeArg`, seen from inside `enclosing`, satisfies the bound
+  /// named `bound`.
+  function satisfies(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    enclosing: Analyzer::DefinitionId,
+    typeArg: Analyzer::TypeId,
+    bound: &String,
+  ): boolean {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeArg);
+
+    // A cyclic alias is reported where it is declared.
+    if (resolved.cycleAlias.isSome()) {
+      return true;
+    }
+
+    if (bound.equals("Copy")) {
+      if (Analyzer::Typecheck::isCopyType(defStore, typeStore, resolved.typeId)) {
+        return true;
+      }
+    }
+
+    let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
+      return true;
+    };
+
+    let mut paramSymbol: Option<Analyzer::SymbolId> = Option::NONE;
+    let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut structural: boolean = false;
+
+    match (type_) {
+      Analyzer::Type::I8
+      | Analyzer::Type::I16
+      | Analyzer::Type::I32
+      | Analyzer::Type::I64
+      | Analyzer::Type::U8
+      | Analyzer::Type::U16
+      | Analyzer::Type::U32
+      | Analyzer::Type::U64
+      | Analyzer::Type::BOOLEAN
+      | Analyzer::Type::CHAR
+      | Analyzer::Type::STR -> {
+        structural = bound.equals("Eq") || bound.equals("Hash");
+      },
+      Analyzer::Type::Param(symbol) -> {
+        paramSymbol = Option::SOME(symbol);
+      },
+      Analyzer::Type::Record(definition) -> {
+        nominal = Option::SOME(definition);
+      },
+      Analyzer::Type::Enum(definition) -> {
+        nominal = Option::SOME(definition);
+      },
+      Analyzer::Type::Instance(instance) -> {
+        nominal = Option::SOME(instance.definition);
+      },
+      _ -> {},
+    };
+
+    if (structural) {
+      return true;
+    }
+
+    if (let Option::SOME(symbol) = paramSymbol) {
+      return Bounds::typeParamDeclares(defStore, enclosing, symbol, bound.toStr());
+    }
+
+    if (let Option::SOME(definition) = nominal) {
+      return Bounds::declaresImplements(defStore, definition, bound.toStr());
+    }
+
+    return false;
+  }
+
+  /// Whether the type parameter named `symbol` in scope at `enclosing`
+  /// declares `bound`. A parameter that is not in scope cannot be judged
+  /// here and is accepted rather than reported against the wrong declaration.
+  function typeParamDeclares(
+    defStore: &mut Analyzer::DefinitionStore,
+    enclosing: Analyzer::DefinitionId,
+    symbol: Analyzer::SymbolId,
+    bound: str,
+  ): boolean {
+    let scoped: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
+    let mut index: u64 = 0;
+
+    while (index < scoped.length()) {
+      if (let Option::SOME(paramDefId) = scoped.get(index)) {
+        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+          if (typeParam.name.raw() == symbol.raw()) {
+            return Bounds::containsName(&typeParam.bounds, bound);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// Whether the record or enum lists `bound` in its `@implements`.
+  function declaresImplements(
+    defStore: &mut Analyzer::DefinitionStore,
+    definition: Analyzer::DefinitionId,
+    bound: str,
+  ): boolean {
+    return match (defStore.get(definition)) {
+      Option::SOME(Analyzer::Definition::Record(record_)) -> Bounds::containsName(&record_.implementedTraits, bound),
+      Option::SOME(Analyzer::Definition::Enum(enum_)) -> Bounds::containsName(&enum_.implementedTraits, bound),
+      _ -> false,
+    };
+  }
+
+  /// The type parameters a record, enum or trait declares.
+  function declaredTypeParams(
+    defStore: &mut Analyzer::DefinitionStore,
+    definition: Analyzer::DefinitionId,
+  ): Vector<Analyzer::DefinitionId> {
+    return match (defStore.get(definition)) {
+      Option::SOME(Analyzer::Definition::Record(record_)) -> Bounds::copyDefinitionIds(&record_.typeParams),
+      Option::SOME(Analyzer::Definition::Enum(enum_)) -> Bounds::copyDefinitionIds(&enum_.typeParams),
+      _ -> Vector::new<Analyzer::DefinitionId>(),
+    };
+  }
+
+  function reportUnsatisfied(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    generic: Analyzer::DefinitionId,
+    paramName: Option<Analyzer::SymbolId>,
+    bound: str,
+    typeArg: Analyzer::TypeId,
+    span: SourceSpan,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let typeName: String = typeStore.nameOfResolved(typeArg, &*defStore, &*symbols);
+    let mut genericName: str = "?";
+    let mut parameter: str = "?";
+
+    if (let Option::SOME(definition) = defStore.get(generic)) {
+      if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+        genericName = name;
+      }
+    }
+
+    if (let Option::SOME(paramSymbol) = paramName) {
+      if (let Option::SOME(name) = symbols.resolve(paramSymbol)) {
+        parameter = name;
+      }
+    }
+
+    let message: String = `type '${typeName.toStr()}' does not satisfy the bound '${parameter}: ${bound}' of '${genericName}'`;
+    let mut label: String = `'${typeName.toStr()}' cannot implement '${bound}'`;
+
+    if (let Option::SOME(type_) = typeStore.get(typeArg)) {
+      match (type_) {
+        Analyzer::Type::Param(_) -> {
+          label = `add '${bound}' to the bounds of '${typeName.toStr()}'`;
+        },
+        Analyzer::Type::Record(_) | Analyzer::Type::Enum(_) | Analyzer::Type::Instance(_) -> {
+          label = `declare \`@implements(${bound})\` on '${typeName.toStr()}'`;
+        },
+        _ -> {},
+      };
+    }
+
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED, message.toStr(), span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, label.toStr());
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+  }
+
+  function containsName(names: &Vector<String>, name: str): boolean {
+    let mut index: u64 = 0;
+
+    while (index < names.length()) {
+      if (let Option::SOME(entry) = names.get(index)) {
+        if (entry.equals(name)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+    let mut copy: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copy.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copy;
+  }
+
+  function copyDefinitionIds(
+    source: &Vector<Analyzer::DefinitionId>
+  ): Vector<Analyzer::DefinitionId> {
+    let mut copy: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copy.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copy;
+  }
+
+  function copyStrings(source: &Vector<String>): Vector<String> {
+    let mut copy: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copy.push(entry.clone());
+      }
+
+      index += 1;
+    }
+
+    return copy;
+  }
+}

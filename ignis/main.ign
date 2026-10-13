@@ -35,6 +35,7 @@ import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./form
 // outside the graph is never typechecked.
 import _ from "./analyzer/lowering";
 import Borrowck from "./analyzer/borrowck";
+import Bounds from "./analyzer/bounds";
 import _ from "./analyzer/escape";
 import Capture from "./analyzer/capture";
 import RuntimeHandlers from "./analyzer/runtime_handlers";
@@ -1856,6 +1857,7 @@ export function compileDiscovered(
     }
 
     let moduleNodeStart: u64 = programHir.nodes.length();
+    let moduleBodyStart: u64 = programHir.functionBodies.length();
 
     Lowering::lowerModuleInto(
       &mut defStore,
@@ -1865,6 +1867,18 @@ export function compileDiscovered(
       &analysisRecord.output,
       &mut programHir,
     );
+
+    // Bounds are judged before closure conversion moves closure bodies into
+    // functions of their own, which no longer see the enclosing function's
+    // type parameters.
+    let moduleBoundDiagnostics: DiagnosticBag = Bounds::checkBodies(
+      &mut defStore,
+      &mut typeStore,
+      &mut symbols,
+      &programHir,
+      moduleBodyStart,
+    );
+    Analyzer::appendDiagnostics(&mut captureDiagnostics, &moduleBoundDiagnostics);
 
     // Capture analysis runs per module, as it does in the reference compiler,
     // which analyzes one module at a time: the counter behind

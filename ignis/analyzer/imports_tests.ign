@@ -1375,7 +1375,7 @@ function analyzeProgramBindsNamedReExportInTheReExportingModule(): void {
 @test
 function analyzeProgramResolvesATraitBoundMethodDeclaredInAnotherModule(): void {
   let traitSource: str = "export trait Shape {\n  area(&self): i32;\n}\n";
-  let callerSource: str = "import Shape from \"a.ign\";\n\nrecord Square {\n  side: i32;\n\n  public area(&self): i32 {\n    return self.side * self.side;\n  }\n}\n\nfunction total<T: Shape>(value: &T): i32 {\n  return value.area();\n}\n";
+  let callerSource: str = "import Shape from \"a.ign\";\n\n@implements(Shape)\nrecord Square {\n  side: i32;\n\n  public area(&self): i32 {\n    return self.side * self.side;\n  }\n}\n\nfunction total<T: Shape>(value: &T): i32 {\n  return value.area();\n}\n";
 
   let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
     "a.ign",
@@ -1396,8 +1396,8 @@ function analyzeProgramResolvesATraitBoundMethodDeclaredInAnotherModule(): void 
 /// wrote, not from whichever bounded `T` the program defined first.
 @test
 function analyzeProgramScopesATraitBoundToTheDeclarationThatWroteIt(): void {
-  let firstSource: str = "export trait Named {\n  label(&self): i32;\n}\n\nexport trait Shape {\n  area(&self): i32;\n}\n\nrecord Tag {\n  value: i32;\n\n  public label(&self): i32 {\n    return self.value;\n  }\n}\n\nfunction describe<T: Named>(value: &T): i32 {\n  return value.label();\n}\n\nfunction describeTag(): i32 {\n  let tag: Tag = Tag { value: 2 };\n\n  return describe<Tag>(&tag);\n}\n";
-  let secondSource: str = "import Shape from \"a.ign\";\n\nrecord Square {\n  side: i32;\n\n  public area(&self): i32 {\n    return self.side * self.side;\n  }\n}\n\nfunction total<T: Shape>(value: &T): i32 {\n  return value.area();\n}\n\nfunction totalSquare(): i32 {\n  let square: Square = Square { side: 7 };\n\n  return total<Square>(&square);\n}\n";
+  let firstSource: str = "export trait Named {\n  label(&self): i32;\n}\n\nexport trait Shape {\n  area(&self): i32;\n}\n\n@implements(Named)\nrecord Tag {\n  value: i32;\n\n  public label(&self): i32 {\n    return self.value;\n  }\n}\n\nfunction describe<T: Named>(value: &T): i32 {\n  return value.label();\n}\n\nfunction describeTag(): i32 {\n  let tag: Tag = Tag { value: 2 };\n\n  return describe<Tag>(&tag);\n}\n";
+  let secondSource: str = "import Shape from \"a.ign\";\n\n@implements(Shape)\nrecord Square {\n  side: i32;\n\n  public area(&self): i32 {\n    return self.side * self.side;\n  }\n}\n\nfunction total<T: Shape>(value: &T): i32 {\n  return value.area();\n}\n\nfunction totalSquare(): i32 {\n  let square: Square = Square { side: 7 };\n\n  return total<Square>(&square);\n}\n";
 
   let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
     "a.ign",

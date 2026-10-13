@@ -186,6 +186,8 @@ function main(): i32 {
 }
 ```
 
+A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`.
+
 ## 4. Declarations
 
 ### 4.1 Functions

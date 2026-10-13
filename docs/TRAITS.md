@@ -192,6 +192,20 @@ When a record method implements a trait method, the signature must match exactly
 
 If a required trait method is missing, compilation fails.
 
+### Trait Bounds
+
+A type parameter can be bounded by one or more traits, joined with `&`. Every instantiation has to
+satisfy every bound, whether the type argument is written or inferred, and whether the generic is
+a function, a method, a record or an enum:
+
+- A record or enum satisfies a bound by naming the trait in `@implements`. Having methods with the
+  right names is not enough.
+- A type parameter satisfies a bound only when it declares the same bound itself.
+- `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
+  by every Copy type, since primitives have no declaration to write `@implements` on.
+
+A type argument that misses a bound is an error (A0247).
+
 ### Current Limit
 
 General user-defined trait implementation checks still primarily target records.
@@ -484,3 +498,4 @@ Available lints: `unused_variable`, `unused_import`, `deprecated`.
 | A0146 | Static methods are not allowed in trait declarations | Error |
 | A0148 | Type declares `@implements(Copy)` but a record field is non-Copy | Error |
 | A0149 | Type declares `@implements(Copy)` but an enum payload is non-Copy | Error |
+| A0247 | Type argument does not satisfy a bound of its type parameter | Error |

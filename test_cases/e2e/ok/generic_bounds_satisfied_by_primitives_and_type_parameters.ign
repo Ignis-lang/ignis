@@ -1,0 +1,35 @@
+// e2e: std
+// Primitive keys satisfy `Hash` and `Eq` without declaring anything, a record
+// satisfies them by declaring `@implements`, and a type parameter satisfies a
+// bound it declares itself.
+import Eq, Hash, HashMap from "std::collections";
+import Hasher from "std::hash";
+
+@implements(Hash, Eq)
+record Key {
+  public id: u32;
+
+  hash(&self, hasher: &mut Hasher): void {
+    hasher.writeU32(self.id);
+  }
+
+  equals(&self, other: &Key): boolean {
+    return self.id == other.id;
+  }
+}
+
+function countKeys<K: Hash & Eq>(first: K, second: K): u64 {
+  let mut map: HashMap<K, i32> = HashMap::new<K, i32>();
+  map.insert(first, 1);
+  map.insert(second, 2);
+
+  return map.length();
+}
+
+function main(): i32 {
+  let numbers: u64 = countKeys<u32>(1, 2);
+  let names: u64 = countKeys<str>("a", "a");
+  let keys: u64 = countKeys<Key>(Key { id: 1 }, Key { id: 2 });
+
+  return (numbers + names + keys) as i32;
+}
