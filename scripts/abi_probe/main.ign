@@ -21,6 +21,8 @@ import
   SmallPayload,
   BytePayload,
   LargePayload,
+  Droppable,
+  DroppableEnum,
 from "std::abiprobe";
 
 function check(label: str, got: i64, expected: i64): i32 {
@@ -149,6 +151,34 @@ function main(): i32 {
   failures += check("arrayAfterSix", AbiProbeExtra::arrayAfterSix(1, 1, 1, 1, 1, 1, pair), 8706);
   failures += check("readRef", AbiProbeExtra::readRef(&three) as i64, 5);
   failures += check("strLength", AbiProbeExtra::strLength("hello") as i64, 5);
+
+  // Droppable shapes across the boundary, both directions, with the drop
+  // count as the observable: a size or glue disagreement changes the count.
+  AbiProbeExtra::resetDrops();
+  {
+    let madeDroppable: Droppable = AbiProbeExtra::makeDroppable(7);
+    failures += check("makeDroppable", madeDroppable.value as i64, 7);
+    failures += check("makeDroppableDrops", AbiProbeExtra::dropCount() as i64, 0);
+  }
+  failures += check("makeDroppableDropOnce", AbiProbeExtra::dropCount() as i64, 1);
+
+  AbiProbeExtra::resetDrops();
+  failures += check("droppableValue", AbiProbeExtra::droppableValue(Droppable { value: 9 }) as i64, 9);
+  failures += check("droppableValueDrops", AbiProbeExtra::dropCount() as i64, 1);
+
+  AbiProbeExtra::resetDrops();
+  {
+    let madeDroppableEnum: DroppableEnum = AbiProbeExtra::makeDroppableEnum(11);
+    failures += check("makeDroppableEnum", AbiProbeExtra::readDroppableEnum(madeDroppableEnum) as i64, 11);
+  }
+  failures += check("makeDroppableEnumDrops", AbiProbeExtra::dropCount() as i64, 1);
+
+  AbiProbeExtra::resetDrops();
+  {
+    let constructedEnum: DroppableEnum = DroppableEnum::ITEM(Droppable { value: 13 });
+    failures += check("readDroppableEnum", AbiProbeExtra::readDroppableEnum(constructedEnum) as i64, 13);
+  }
+  failures += check("readDroppableEnumDrops", AbiProbeExtra::dropCount() as i64, 1);
 
   if (failures == 0) {
     Io::println("all shapes agree");
