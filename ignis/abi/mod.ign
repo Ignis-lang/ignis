@@ -550,4 +550,40 @@ export namespace Abi {
       dropStateOffset: dropStateOffset,
     });
   }
+
+  /// The offset of payload field `fieldIndex` of the variant with tag
+  /// `variantTag`. The index counts only the non-void payloads, the same
+  /// numbering `Abi::enumLayout` stores in `VariantLayout.fieldOffsets`.
+  function enumPayloadFieldOffset(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    enumDef: Analyzer::DefinitionId,
+    variantTag: u32,
+    fieldIndex: u64,
+  ): Result<u64, String> {
+    let layout: Abi::EnumLayout = match (Abi::enumLayout(defStore, typeStore, enumDef)) {
+      Result::OK(value) -> value,
+      Result::ERROR(message) -> {
+        return Result::ERROR(message);
+      },
+    };
+
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < layout.variants.length()) {
+      if (let Option::SOME(variant) = layout.variants.get(variantIndex)) {
+        if (variant.tagValue == variantTag) {
+          if (let Option::SOME(offset) = variant.fieldOffsets.get(fieldIndex)) {
+            return Result::OK(*offset);
+          }
+
+          return Result::ERROR(String::create("enum payload field out of range"));
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    return Result::ERROR(String::create("unknown enum variant"));
+  }
 }

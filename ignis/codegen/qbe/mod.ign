@@ -210,6 +210,72 @@ export namespace CodegenQbe {
     return false;
   }
 
+  /// Whether this emitter can store every payload of `enumDef`. An enum that
+  /// implements `Drop`, or one of whose payloads needs drop glue, is F5b's
+  /// work and fails closed as `Drop`; a closure payload is F5c's and fails
+  /// closed as `MakeClosure`. Any other unsupported payload type fails
+  /// through `typeLayout`. `emitter.error` is set whenever the answer is
+  /// false.
+  function enumPayloadsSupported(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    enumDef: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(enumDef) else {
+      CodegenQbe::failNamed(emitter, "InitEnumVariant");
+      return false;
+    };
+
+    let Analyzer::Definition::Enum(enumDefNode) = definition else {
+      CodegenQbe::failNamed(emitter, "InitEnumVariant");
+      return false;
+    };
+
+    if (enumDefNode.implementsDrop) {
+      CodegenQbe::failNamed(emitter, "Drop");
+      return false;
+    }
+
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < enumDefNode.variants.length()) {
+      if (let Option::SOME(variantId) = enumDefNode.variants.get(variantIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+          let mut payloadIndex: u64 = 0;
+
+          while (payloadIndex < variantDef.payload.length()) {
+            if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+              if (!Abi::isVoid(defStore, typeStore, *payloadType)) {
+                if (Hir::typeIsFunction(typeStore, *payloadType)) {
+                  CodegenQbe::failNamed(emitter, "MakeClosure");
+                  return false;
+                }
+
+                if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
+                  CodegenQbe::failNamed(emitter, "Drop");
+                  return false;
+                }
+
+                CodegenQbe::typeLayout(emitter, defStore, typeStore, *payloadType);
+
+                if (emitter.error.isSome()) {
+                  return false;
+                }
+              }
+            }
+
+            payloadIndex += 1;
+          }
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    return true;
+  }
+
   /// Whether `ty` is a signed integer. Division, remainder, right shifts and
   /// comparisons pick their signed or unsigned form from this.
   function isSignedInteger(
@@ -362,8 +428,9 @@ export namespace CodegenQbe {
       Analyzer::Type::Slice(_) -> {},
       Analyzer::Type::Enum(enumDef) -> {
         if (!CodegenQbe::enumIsFieldless(defStore, enumDef)) {
-          CodegenQbe::failNamed(emitter, "InitEnumVariant");
-          return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+          if (!CodegenQbe::enumPayloadsSupported(emitter, defStore, typeStore, enumDef)) {
+            return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+          }
         }
       },
       Analyzer::Type::FixedArray(element, _) -> {
@@ -385,11 +452,14 @@ export namespace CodegenQbe {
 
     // A fieldless enum is lowered as its bare `w` tag, which only holds while
     // the enum is nothing but that tag: a drop-state byte would need storage
-    // this lowering does not have.
-    if (let Analyzer::Type::Enum(_) = typeNode) {
-      if (layout.size != 4) {
-        CodegenQbe::failNamed(emitter, "Drop");
-        return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+    // this lowering does not have. A payload enum already validated its own
+    // drop state in `enumPayloadsSupported`.
+    if (let Analyzer::Type::Enum(enumDef) = typeNode) {
+      if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+        if (layout.size != 4) {
+          CodegenQbe::failNamed(emitter, "Drop");
+          return CodegenQbe::TypeLayout { size: 0, alignment: 1 };
+        }
       }
     }
 
@@ -868,6 +938,15 @@ export namespace CodegenQbe {
 
         return `:${name.toStr()}_${defId.raw()}`;
       },
+      Analyzer::Type::Enum(defId) -> {
+        if (CodegenQbe::enumIsFieldless(defStore, defId)) {
+          return String::create("");
+        }
+
+        let name: String = CodegenC::structName(defStore, symbols, defId);
+
+        return `:${name.toStr()}_${defId.raw()}`;
+      },
       Analyzer::Type::Slice(_) -> {
         return `:ignis_slice_${resolved.raw()}`;
       },
@@ -1107,8 +1186,111 @@ export namespace CodegenQbe {
         emitted.push(raw);
         emitter.data.pushStr(`type :ignis_array_${raw} = align ${layout.alignment} { ${item.toStr()} ${count} }\n`.toStr());
       },
+      Analyzer::Type::Enum(defId) -> {
+        if (CodegenQbe::enumIsFieldless(defStore, defId)) {
+          return;
+        }
+
+        CodegenQbe::enumPayloadsSupported(emitter, defStore, typeStore, defId);
+
+        if (emitter.error.isSome()) {
+          return;
+        }
+
+        // A union has no QBE type of its own, so the payload enum is an
+        // opaque blob and its payload types only need declarations when they
+        // are used by value somewhere else.
+        CodegenQbe::qbeEmitEnumPayloadDeclarations(emitter, defStore, typeStore, symbols, emitted, defId);
+
+        if (emitter.error.isSome()) {
+          return;
+        }
+
+        emitted.push(raw);
+        CodegenQbe::qbeEmitEnumDeclaration(emitter, defStore, typeStore, symbols, defId);
+      },
       _ -> {},
     };
+  }
+
+  /// Declares the types every payload of `enumDef` reaches by value, so they
+  /// precede the enum that embeds them.
+  function qbeEmitEnumPayloadDeclarations(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    emitted: &mut Vector<u32>,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return;
+    };
+
+    let Analyzer::Definition::Enum(enumDefNode) = definition else {
+      return;
+    };
+
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < enumDefNode.variants.length()) {
+      if (let Option::SOME(variantId) = enumDefNode.variants.get(variantIndex)) {
+        if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+          let mut payloadIndex: u64 = 0;
+
+          while (payloadIndex < variantDef.payload.length()) {
+            if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+              CodegenQbe::qbeEmitTypeDeclarations(emitter, defStore, typeStore, symbols, emitted, *payloadType);
+
+              if (emitter.error.isSome()) {
+                return;
+              }
+            }
+
+            payloadIndex += 1;
+          }
+        }
+      }
+
+      variantIndex += 1;
+    }
+  }
+
+  /// The `type :name = align A { w, ... }` declaration of one payload enum.
+  /// The `u32` tag sits at offset 0 and the payload union follows at its
+  /// ABI-aligned offset, spelled as one opaque byte blob: QBE has no union,
+  /// and an integer blob keeps the aggregate in the register classes the C
+  /// struct's union classifies into. Size and alignment are exactly
+  /// `Abi::enumLayout`'s, so both backends agree on the storage.
+  function qbeEmitEnumDeclaration(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let layout: Abi::EnumLayout = match (Abi::enumLayout(defStore, typeStore, defId)) {
+      Result::OK(value) -> value,
+      Result::ERROR(_) -> {
+        CodegenQbe::failNamed(emitter, "SizeOf");
+        return;
+      },
+    };
+
+    let name: String = CodegenC::structName(defStore, symbols, defId);
+    let mut items: String = String::create("w");
+
+    if (layout.payloadOffset > 4) {
+      items.pushStr(`, b ${layout.payloadOffset - 4}`.toStr());
+    }
+
+    if (layout.layout.size > layout.payloadOffset) {
+      items.pushStr(`, b ${layout.layout.size - layout.payloadOffset}`.toStr());
+    }
+
+    let line: String = `type :${name.toStr()}_${defId.raw()} = align ${layout.layout.alignment} { ${items.toStr()} }\n`;
+
+    emitter.data.pushStr(line.toStr());
   }
 
   /// The `type :name = align A { items }` declaration of one record. Items
@@ -1603,6 +1785,7 @@ export namespace CodegenQbe {
         let aggregateLoad: Option<Lir::TempId> = match (instruction) {
           Lir::Instr::LoadPtr(node) -> Option::SOME(node.dest),
           Lir::Instr::BuiltinLoad(node) -> Option::SOME(node.dest),
+          Lir::Instr::EnumGetPayloadField(node) -> Option::SOME(node.dest),
           _ -> Option::NONE,
         };
         if (let Option::SOME(dest) = aggregateLoad) {
@@ -2012,18 +2195,16 @@ export namespace CodegenQbe {
         CodegenQbe::qbeEmitInitRecord(emitter, defStore, typeStore, symbols, function_, &node);
       },
       Lir::Instr::InitEnumVariant(node) -> {
-        let enumDef: Analyzer::DefinitionId = CodegenQbe::enumDefOf(emitter, defStore, typeStore, node.enumType);
-        if (node.payload.length() > 0 || !CodegenQbe::enumIsFieldless(defStore, enumDef)) {
-          CodegenQbe::failFor(emitter, instruction);
-        } else {
-          if (let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr)) {
-            let line: String = `    storew ${node.variantTag}, ${address.toStr()}\n`;
-            emitter.out.pushStr(line.toStr());
-          }
-        }
+        CodegenQbe::qbeEmitInitEnumVariant(emitter, defStore, typeStore, symbols, function_, &node);
       },
       Lir::Instr::EnumGetTag(node) -> {
         CodegenQbe::qbeEmitEnumGetTag(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::EnumGetPayloadField(node) -> {
+        CodegenQbe::qbeEmitEnumGetPayloadField(emitter, defStore, typeStore, symbols, function_, context, &node);
+      },
+      Lir::Instr::EnumGetPayloadFieldPtr(node) -> {
+        CodegenQbe::qbeEmitEnumGetPayloadFieldPtr(emitter, defStore, typeStore, symbols, function_, &node);
       },
       Lir::Instr::BuiltinEq(node) -> {
         CodegenQbe::qbeEmitBuiltinEq(emitter, defStore, typeStore, symbols, function_, &node);
@@ -3256,7 +3437,15 @@ export namespace CodegenQbe {
     }
 
     if (!CodegenQbe::enumIsFieldless(defStore, enumDefId)) {
-      CodegenQbe::failNamed(emitter, "EnumGetTag");
+      // A payload enum is an aggregate, so the source value is the address of
+      // its storage and the `u32` tag is the first word of it.
+      let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+        return;
+      };
+
+      let line: String = `    %t${node.dest.raw()} =w loaduw ${address.toStr()}\n`;
+
+      emitter.out.pushStr(line.toStr());
       return;
     }
 
@@ -3265,6 +3454,233 @@ export namespace CodegenQbe {
     };
 
     let line: String = `    %t${node.dest.raw()} =w copy ${tag.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  /// The ABI offset of payload field `fieldIndex` of the variant with tag
+  /// `variantTag`, or NONE after recording `failNamed(fallback)`.
+  function enumPayloadOffset(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    enumDef: Analyzer::DefinitionId,
+    variantTag: u32,
+    fieldIndex: u64,
+    fallback: str,
+  ): Option<u64> {
+    return match (Abi::enumPayloadFieldOffset(defStore, typeStore, enumDef, variantTag, fieldIndex)) {
+      Result::OK(offset) -> Option::SOME(offset),
+      Result::ERROR(_) -> {
+        CodegenQbe::failNamed(emitter, fallback);
+        Option::NONE
+      },
+    };
+  }
+
+  /// One `InitEnumVariant`: clear the whole value so the rest of the union
+  /// holds zeros, store the tag, then store every non-void payload field at
+  /// its ABI offset. A fieldless enum keeps its bare `w` tag store.
+  function qbeEmitInitEnumVariant(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrInitEnumVariant,
+  ): void {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, node.enumType);
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      CodegenQbe::failNamed(emitter, "InitEnumVariant");
+      return;
+    };
+
+    let mut enumDef: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+    let mut isEnum: boolean = false;
+
+    if (let Analyzer::Type::Enum(found) = typeNode) {
+      enumDef = found;
+      isEnum = true;
+    }
+
+    if (!isEnum) {
+      CodegenQbe::failNamed(emitter, "InitEnumVariant");
+      return;
+    }
+
+    if (CodegenQbe::enumIsFieldless(defStore, enumDef)) {
+      if (let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr)) {
+        let line: String = `    storew ${node.variantTag}, ${address.toStr()}\n`;
+
+        emitter.out.pushStr(line.toStr());
+      }
+
+      return;
+    }
+
+    CodegenQbe::enumPayloadsSupported(emitter, defStore, typeStore, enumDef);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr) else {
+      return;
+    };
+
+    let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.enumType);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let clear: String = `    call $memset(l ${pointer.toStr()}, w 0, l ${size})\n`;
+
+    emitter.out.pushStr(clear.toStr());
+    emitter.out.pushStr(`    storew ${node.variantTag}, ${pointer.toStr()}\n`.toStr());
+
+    let mut payloadIndex: u64 = 0;
+    let mut fieldIndex: u64 = 0;
+
+    while (payloadIndex < node.payload.length()) {
+      if (let Option::SOME(payloadOperand) = node.payload.get(payloadIndex)) {
+        if (!CodegenC::operandIsVoid(typeStore, function_, payloadOperand)) {
+          let Option::SOME(offset) = CodegenQbe::enumPayloadOffset(emitter, defStore, typeStore, enumDef, node.variantTag, fieldIndex, "InitEnumVariant") else {
+            return;
+          };
+
+          let address: String = CodegenQbe::qbeAddressOffset(emitter, &pointer, offset);
+          let Option::SOME(valueType) = CodegenQbe::operandType(defStore, function_, payloadOperand) else {
+            CodegenQbe::failNamed(emitter, "InitEnumVariant");
+            return;
+          };
+
+          if (CodegenQbe::isAggregateType(defStore, typeStore, valueType)) {
+            let Option::SOME(valueAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, payloadOperand) else {
+              return;
+            };
+
+            let fieldSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, valueType);
+
+            if (emitter.error.isSome()) {
+              return;
+            }
+
+            CodegenQbe::qbeMemcpy(emitter, &address, &valueAddress, fieldSize);
+          } else {
+            let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, payloadOperand) else {
+              return;
+            };
+
+            CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, valueType, &value, &address);
+          }
+
+          fieldIndex += 1;
+        }
+      }
+
+      payloadIndex += 1;
+    }
+  }
+
+  /// One `EnumGetPayloadField`: load (or copy, for an aggregate) the payload
+  /// field out of the enum's storage at its ABI offset.
+  function qbeEmitEnumGetPayloadField(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    context: &mut CodegenQbe::QbeFuncCtx,
+    node: &Lir::InstrEnumGetPayloadField,
+  ): void {
+    let Option::SOME(sourceType) = CodegenQbe::operandType(defStore, function_, &node.source) else {
+      CodegenQbe::failNamed(emitter, "EnumGetPayloadField");
+      return;
+    };
+
+    let Option::SOME(enumDef) = CodegenQbe::nominalBehind(defStore, typeStore, sourceType) else {
+      CodegenQbe::failNamed(emitter, "EnumGetPayloadField");
+      return;
+    };
+
+    let Option::SOME(offset) = CodegenQbe::enumPayloadOffset(emitter, defStore, typeStore, enumDef, node.variantTag, node.fieldIndex as u64, "EnumGetPayloadField") else {
+      return;
+    };
+
+    let Option::SOME(sourceAddress) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+      return;
+    };
+
+    let fieldAddress: String = CodegenQbe::qbeAddressOffset(emitter, &sourceAddress, offset);
+    let destOperand: Lir::Operand = Lir::Operand::Temp(node.dest);
+    let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
+      CodegenQbe::failNamed(emitter, "EnumGetPayloadField");
+      return;
+    };
+
+    if (CodegenQbe::isAggregateType(defStore, typeStore, destType)) {
+      let Option::SOME(slot) = context.slotFor(node.dest.raw()) else {
+        CodegenQbe::failNamed(emitter, "EnumGetPayloadField");
+        return;
+      };
+
+      let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, destType);
+
+      if (emitter.error.isSome()) {
+        return;
+      }
+
+      CodegenQbe::qbeMemcpy(emitter, &slot, &fieldAddress, size);
+      emitter.out.pushStr(`    %t${node.dest.raw()} =l copy ${slot.toStr()}\n`.toStr());
+      return;
+    }
+
+    let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, destType) else {
+      CodegenQbe::failNamed(emitter, "EnumGetPayloadField");
+      return;
+    };
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, destType) else {
+      CodegenQbe::failNamed(emitter, "EnumGetPayloadField");
+      return;
+    };
+
+    let line: String = `    %t${node.dest.raw()} =${cls.toStr()} ${load.toStr()} ${fieldAddress.toStr()}\n`;
+
+    emitter.out.pushStr(line.toStr());
+  }
+
+  /// One `EnumGetPayloadFieldPtr`: the address of a payload field, given a
+  /// pointer to the enum storage.
+  function qbeEmitEnumGetPayloadFieldPtr(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrEnumGetPayloadFieldPtr,
+  ): void {
+    let Option::SOME(sourceType) = CodegenQbe::operandType(defStore, function_, &node.source) else {
+      CodegenQbe::failNamed(emitter, "EnumGetPayloadFieldPtr");
+      return;
+    };
+
+    let Option::SOME(enumDef) = CodegenQbe::nominalBehind(defStore, typeStore, sourceType) else {
+      CodegenQbe::failNamed(emitter, "EnumGetPayloadFieldPtr");
+      return;
+    };
+
+    let Option::SOME(offset) = CodegenQbe::enumPayloadOffset(emitter, defStore, typeStore, enumDef, node.variantTag, node.fieldIndex as u64, "EnumGetPayloadFieldPtr") else {
+      return;
+    };
+
+    let Option::SOME(base) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+      return;
+    };
+
+    let address: String = CodegenQbe::qbeAddressOffset(emitter, &base, offset);
+    let line: String = `    %t${node.dest.raw()} =l copy ${address.toStr()}\n`;
 
     emitter.out.pushStr(line.toStr());
   }

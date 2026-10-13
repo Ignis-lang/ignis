@@ -5,8 +5,11 @@
 //! built with each backend. Each function covers one argument or result shape
 //! the platform ABI classifies differently: records of several sizes and
 //! field widths, records holding arrays, fixed arrays and slices, narrow
-//! scalars whose upper bits the callee may leave unset, an enum, and
+//! scalars whose upper bits the callee may leave unset, a fieldless enum,
+//! payload enums in registers and in memory, a std `Option` instance, and
 //! arguments passed on the stack.
+
+import Option from "std::option";
 
 export record Pair {
   public a: i32;
@@ -122,6 +125,25 @@ export enum Color {
   BLUE,
 }
 
+/// Eight bytes: the tag and an `i32` payload share one register.
+export enum SmallPayload {
+  NUMBER(i32),
+  NOTHING,
+}
+
+/// Sixteen bytes: a `u8` and an `i64` payload field, classified as two
+/// integer eightbytes.
+export enum BytePayload {
+  PAIR(u8, i64),
+  SINGLE(i32),
+}
+
+/// Thirty-two bytes: passed and returned in memory.
+export enum LargePayload {
+  TRIPLE(i64, i64, i64),
+  EMPTY,
+}
+
 /// Shapes beyond the first set: odd record sizes, records holding arrays,
 /// slices, narrow results, enums, and arguments passed on the stack.
 export namespace AbiProbeExtra {
@@ -207,6 +229,50 @@ export namespace AbiProbeExtra {
 
   function wideUnsigned(value: u32): u32 {
     return value + 1;
+  }
+
+  function readSmall(value: SmallPayload): i32 {
+    return match (value) {
+      SmallPayload::NUMBER(number) -> number,
+      SmallPayload::NOTHING -> -1,
+    };
+  }
+
+  function makeSmall(number: i32): SmallPayload {
+    return SmallPayload::NUMBER(number);
+  }
+
+  function readByte(value: BytePayload): i64 {
+    return match (value) {
+      BytePayload::PAIR(small, large) -> (small as i64) * 1000 + large,
+      BytePayload::SINGLE(single) -> single as i64,
+    };
+  }
+
+  function makeByte(small: u8, large: i64): BytePayload {
+    return BytePayload::PAIR(small, large);
+  }
+
+  function readLarge(value: LargePayload): i64 {
+    return match (value) {
+      LargePayload::TRIPLE(a, b, c) -> a * 100 + b * 10 + c,
+      LargePayload::EMPTY -> -1,
+    };
+  }
+
+  function makeLarge(a: i64, b: i64, c: i64): LargePayload {
+    return LargePayload::TRIPLE(a, b, c);
+  }
+
+  function readOption(value: Option<i64>): i64 {
+    return match (value) {
+      Option::SOME(number) -> number,
+      Option::NONE -> -1,
+    };
+  }
+
+  function makeOption(number: i64): Option<i64> {
+    return Option::SOME(number);
   }
 
   function nextColor(value: Color): Color {

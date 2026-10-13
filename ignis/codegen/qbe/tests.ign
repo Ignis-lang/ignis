@@ -404,14 +404,62 @@ function qbeFailsClosedOnClosures(): void {
 }
 
 @test
-function qbeFailsClosedOnPayloadEnums(): void {
-  let emission: QbeEmission = qbeEmit("enum Shape { CIRCLE(i32), EMPTY } function main(): i32 { let shape: Shape = Shape::CIRCLE(5); return 0; }");
-  let Option::SOME(error) = &emission.error else {
-    Test::fail();
-    return;
-  };
-  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: InitEnumVariant");
-  Test::assertEq<u64>(emission.source.length(), 0);
+function qbeEmitsPayloadEnums(): void {
+  let source: str = "enum Shape { CIRCLE(i32), SQUARE(i32) } function area(shape: Shape): i32 { return match (shape) { Shape::CIRCLE(radius) -> radius * 2, Shape::SQUARE(side) -> side + 1 }; } function main(): i32 { let circle: i32 = area(Shape::CIRCLE(20)); let square: i32 = area(Shape::SQUARE(1)); return circle + square; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "type :Shape_"));
+  qbeRunExpected(source, 42);
+}
+
+@test
+function qbeEmitsGenericOptionPayloadEnums(): void {
+  let source: str = "enum Option<T> { NONE, SOME(T) } function maybe(value: i32): Option<i32> { if (value > 0) { return Option::SOME(value); } return Option::NONE; } function main(): i32 { let mut total: i32 = 0; if (let Option::SOME(value) = maybe(40)) { total = value; } let fromMatch: i32 = match (maybe(2)) { Option::SOME(value) -> value, Option::NONE -> 0 }; return total + fromMatch; }";
+  qbeRunExpected(source, 42);
+}
+
+@test
+function qbeEmitsGenericResultPayloadEnums(): void {
+  let source: str = "enum Result<T, E> { OK(T), ERROR(E) } function compute(flag: boolean): Result<i64, i32> { if (flag) { return Result::OK(40); } return Result::ERROR(9); } function main(): i32 { let result: Result<i64, i32> = compute(true); let value: i32 = match (result) { Result::OK(ok) -> ok as i32, Result::ERROR(err) -> err }; return value + 2; }";
+  qbeRunExpected(source, 42);
+}
+
+@test
+function qbeEmitsRecordPayloadEnums(): void {
+  let source: str = "record Point { public x: i32; public y: i32; } enum Geometry { POINT(Point), NONE } function sum(shape: Geometry): i32 { return match (shape) { Geometry::POINT(point) -> point.x + point.y, Geometry::NONE -> 0 }; } function main(): i32 { return sum(Geometry::POINT(Point { x: 30, y: 12 })); }";
+  qbeRunExpected(source, 42);
+}
+
+/// A variant whose payload fields have different widths: the `u8` sits at the
+/// start of the union and the `i64` at its 8-byte-aligned offset, so a wrong
+/// offset reads the wrong bytes.
+@test
+function qbeEmitsWidePayloadEnumFields(): void {
+  let source: str = "enum Mixed { PAIR(u8, i64), ALONE(i32) } function measure(value: Mixed): i32 { return match (value) { Mixed::PAIR(byte, word) -> (byte as i32) + (word as i32), Mixed::ALONE(single) -> single }; } function main(): i32 { return measure(Mixed::PAIR(2, 40)); }";
+  qbeRunExpected(source, 42);
+}
+
+/// An enum travels by value through a parameter and a result, so QBE
+/// classifies the aggregate exactly as the C struct does.
+@test
+function qbePassesPayloadEnumsByValue(): void {
+  let source: str = "enum Boxed { VALUE(i32), EMPTY } function wrap(value: i32): Boxed { return Boxed::VALUE(value); } function unwrap(held: Boxed): i32 { return match (held) { Boxed::VALUE(value) -> value, Boxed::EMPTY -> 0 }; } function main(): i32 { return unwrap(wrap(42)); }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "(:Boxed_"));
+  qbeRunExpected(source, 42);
+}
+
+@test
+function qbeEmitsNestedPayloadEnums(): void {
+  let source: str = "enum Shape { CIRCLE(i32), EMPTY } enum Option<T> { NONE, SOME(T) } function maybe(flag: boolean): Option<Shape> { if (flag) { return Option::SOME(Shape::CIRCLE(40)); } return Option::NONE; } function main(): i32 { let option: Option<Shape> = maybe(true); let mut area: i32 = 0; if (let Option::SOME(shape) = option) { area = match (shape) { Shape::CIRCLE(radius) -> radius, Shape::EMPTY -> 0 }; } return area + 2; }";
+  qbeRunExpected(source, 42);
+}
+
+@test
+function qbeEmitsFixedArrayPayloadEnums(): void {
+  let source: str = "enum Bucket { ITEMS(i32[4]), EMPTY } function edgeSum(bucket: Bucket): i32 { return match (bucket) { Bucket::ITEMS(values) -> values[0] + values[3], Bucket::EMPTY -> 0 }; } function main(): i32 { let values: i32[4] = @splat<i32[4]>(21); return edgeSum(Bucket::ITEMS(values)); }";
+  qbeRunExpected(source, 42);
 }
 
 @test
