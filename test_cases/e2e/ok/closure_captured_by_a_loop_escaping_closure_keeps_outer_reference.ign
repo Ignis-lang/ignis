@@ -1,0 +1,29 @@
+// e2e: std
+// e2e: allow-leak
+// A closure bound in the loop and captured by a closure that escapes the loop
+// lives as long as that closure, inside the frame: its reference to a counter
+// declared before the loop stays valid. Its environment moves to the heap with
+// the capturing closure, and a closure drop function does not tear down
+// closure-typed captures yet, so that environment leaks (see
+// closures_captured_by_an_escaping_closure.ign).
+import Io from "std::io";
+
+function main(): i32 {
+  let mut x: i32 = 0;
+  let mut g = (): void -> {};
+  let mut i: i32 = 0;
+
+  while (i < 2) {
+    let f = (): void -> {
+      x = x + 1;
+    };
+    g = (): void -> {
+      f();
+    };
+    i = i + 1;
+  }
+
+  g();
+  Io::println(`x ${x}`.toStr());
+  return 0;
+}

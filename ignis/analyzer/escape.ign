@@ -1,5 +1,6 @@
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
+import Id from "@compiler::ids";
 import Vector from "std::vector";
 
 /// Escape analysis for closures, the port of
@@ -31,6 +32,13 @@ import Vector from "std::vector";
 ///     `@noescape` (the callee may store it), or any argument of an
 ///     indirect closure call (no static parameter information is
 ///     available);
+///   - a binding declared outside a loop or closure body that contains the
+///     literal: the site runs again (next iteration) or its frame ends (the
+///     thunk returns) while the binding still holds the closure. Such a
+///     closure escaping a loop still lives in its frame, so only its
+///     references to bindings declared inside the loop outlive their
+///     referent; one escaping a closure body outlives every reference
+///     (`referenceOutlivesReferent`);
 ///   - the capture list of another closure that escapes (transitively).
 ///
 /// # Who frees a heap environment
@@ -194,11 +202,33 @@ export namespace Escape {
     return Option::NONE;
   }
 
+  /// A closure that outlives one run of the region it was built in: the loop
+  /// node, or the closure node whose body built it.
+  record RegionEscape {
+    public closureId: Hir::HirId;
+    public regionId: Hir::HirId;
+  }
+
+  /// What escape analysis decided for the closures of a program.
+  record EscapeResult {
+    /// Every closure whose environment goes to the heap.
+    public escaping: Vector<Hir::HirId>;
+    /// The closures among them that outlive the frame that built them, either
+    /// directly or inside a closure that does. A reference capture in one of
+    /// these always outlives its referent.
+    public frameEscaping: Vector<Hir::HirId>;
+    /// Every region a closure escapes, directly or inside a closure that
+    /// escapes it. A closure that escapes only regions stays inside its frame,
+    /// so only references to bindings declared in one of those regions outlive
+    /// their referent.
+    public regions: Vector<Escape::RegionEscape>;
+  }
+
   /// The closure nodes that outlive their defining scope.
   function analyzeEscapes(
     hir: &mut Hir::HirStore,
     defStore: &mut Analyzer::DefinitionStore,
-  ): Vector<Hir::HirId> {
+  ): Escape::EscapeResult {
     let mut aliases: Escape::AliasTable = Escape::AliasTable::init();
 
     let mut nodeIndex: u64 = 0;
@@ -288,9 +318,478 @@ export namespace Escape {
       bodyIndex += 1;
     }
 
-    Escape::propagateThroughCaptures(hir, &aliases, &mut escaping);
+    let mut frameEscaping: Vector<Hir::HirId> = Escape::copyHirIds(&mut escaping);
+    Escape::propagateThroughCaptures(hir, &aliases, &mut frameEscaping);
 
-    return escaping;
+    let mut regions: Vector<Escape::RegionEscape> = Vector::new<Escape::RegionEscape>();
+    Escape::markRegionEscapes(hir, &aliases, &mut escaping, &mut regions);
+    Escape::propagateThroughCaptures(hir, &aliases, &mut escaping);
+    Escape::inheritCapturerLifetimes(hir, &aliases, &escaping, &mut frameEscaping, &mut regions);
+
+    return Escape::EscapeResult {
+      escaping: escaping,
+      frameEscaping: frameEscaping,
+      regions: regions,
+    };
+  }
+
+  /// A closure an escaping closure captures lives as long as the capturing
+  /// closure: it escapes the frame when that one does, and every region that
+  /// one escapes. Repeated until nothing changes, so a chain of captures
+  /// passes the lifetime all the way down.
+  function inheritCapturerLifetimes(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &Vector<Hir::HirId>,
+    frameEscaping: &mut Vector<Hir::HirId>,
+    regions: &mut Vector<Escape::RegionEscape>,
+  ): void {
+    let mut changed: boolean = true;
+
+    while (changed) {
+      changed = false;
+
+      let mut index: u64 = 0;
+
+      while (index < escaping.length()) {
+        let Option::SOME(closureId) = escaping.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let captured: Vector<Hir::HirId> = Escape::capturedClosures(hir, aliases, *closureId);
+        let capturerEscapesFrame: boolean = Escape::containsHirId(&*frameEscaping, *closureId);
+        let mut capturerRegions: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+        let mut regionIndex: u64 = 0;
+
+        while (regionIndex < regions.length()) {
+          if (let Option::SOME(region) = regions.get(regionIndex)) {
+            if (region.closureId.raw() == closureId.raw()) {
+              capturerRegions.push(region.regionId);
+            }
+          }
+
+          regionIndex += 1;
+        }
+
+        let mut capturedIndex: u64 = 0;
+
+        while (capturedIndex < captured.length()) {
+          if (let Option::SOME(innerId) = captured.get(capturedIndex)) {
+            if (capturerEscapesFrame && !Escape::containsHirId(&*frameEscaping, *innerId)) {
+              Escape::pushHirId(frameEscaping, *innerId);
+              changed = true;
+            }
+
+            let mut inheritIndex: u64 = 0;
+
+            while (inheritIndex < capturerRegions.length()) {
+              if (let Option::SOME(regionId) = capturerRegions.get(inheritIndex)) {
+                if (Escape::addRegionEscape(regions, *innerId, *regionId)) {
+                  changed = true;
+                }
+              }
+
+              inheritIndex += 1;
+            }
+          }
+
+          capturedIndex += 1;
+        }
+
+        index += 1;
+      }
+    }
+  }
+
+  /// The closure literals the captures of `closureId` can name.
+  function capturedClosures(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    closureId: Hir::HirId,
+  ): Vector<Hir::HirId> {
+    let mut captureDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(node) = hir.get(closureId)) {
+      if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+        let mut captureIndex: u64 = 0;
+
+        while (captureIndex < closureNode.captures.length()) {
+          if (let Option::SOME(capture) = closureNode.captures.get(captureIndex)) {
+            captureDefs.push(capture.sourceDef);
+          }
+
+          captureIndex += 1;
+        }
+      }
+    }
+
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut defIndex: u64 = 0;
+
+    while (defIndex < captureDefs.length()) {
+      if (let Option::SOME(defId) = captureDefs.get(defIndex)) {
+        let inner: Vector<Hir::HirId> = aliases.lookupAll(*defId);
+        let mut innerIndex: u64 = 0;
+
+        while (innerIndex < inner.length()) {
+          if (let Option::SOME(innerClosureId) = inner.get(innerIndex)) {
+            Escape::pushHirId(&mut result, *innerClosureId);
+          }
+
+          innerIndex += 1;
+        }
+      }
+
+      defIndex += 1;
+    }
+
+    return result;
+  }
+
+  /// Record that `closureId` escapes `regionId`, once.
+  function addRegionEscape(
+    regions: &mut Vector<Escape::RegionEscape>,
+    closureId: Hir::HirId,
+    regionId: Hir::HirId,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < regions.length()) {
+      if (let Option::SOME(region) = regions.get(index)) {
+        if (region.closureId.raw() == closureId.raw() && region.regionId.raw() == regionId.raw()) {
+          return false;
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut regionsRef: &mut Vector<Escape::RegionEscape> = regions;
+    regionsRef.push(Escape::RegionEscape { closureId: closureId, regionId: regionId });
+
+    return true;
+  }
+
+  /// A stack environment is one slot per closure site, reused every time the
+  /// site runs. A loop body runs the site again in the same frame, and a
+  /// closure body runs it in the thunk's frame, which ends with each call. A
+  /// closure bound to a binding declared outside that region outlives one run
+  /// of the site: the next iteration overwrites its environment while the
+  /// binding still holds it, or the thunk returns and the environment is gone.
+  /// Such a closure escapes the region, so its environment goes to the heap.
+  function markRegionEscapes(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    regions: &mut Vector<Escape::RegionEscape>,
+  ): void {
+    if (aliases.defs.length() == 0) {
+      return;
+    }
+
+    let mut nodeIndex: u64 = 0;
+
+    while (nodeIndex < hir.nodes.length()) {
+      let mut isRegion: boolean = false;
+
+      if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+        match (&node.kind) {
+          Hir::HirKind::Loop(_) -> {
+            isRegion = true;
+          },
+          Hir::HirKind::Closure(_) -> {
+            isRegion = true;
+          },
+          _ -> {},
+        };
+      }
+
+      if (isRegion) {
+        let regionId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(nodeIndex as u32);
+        Escape::markRegionEscapesUnder(hir, aliases, escaping, regions, regionId);
+      }
+
+      nodeIndex += 1;
+    }
+  }
+
+  /// Mark every closure literal in the region `regionId` that a binding
+  /// declared outside the region names.
+  function markRegionEscapesUnder(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    regions: &mut Vector<Escape::RegionEscape>,
+    regionId: Hir::HirId,
+  ): void {
+    let mut literals: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut pending: Vector<Hir::HirId> = Escape::regionRoots(hir, regionId);
+
+    while (let Option::SOME(hirId) = pending.pop()) {
+      if (let Option::SOME(node) = hir.get(hirId)) {
+        if (let Hir::HirKind::Closure(_) = &node.kind) {
+          literals.push(hirId);
+        }
+
+        let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+        let mut childIndex: u64 = 0;
+
+        while (childIndex < children.length()) {
+          if (let Option::SOME(childId) = children.get(childIndex)) {
+            pending.push(*childId);
+          }
+
+          childIndex += 1;
+        }
+      }
+    }
+
+    if (literals.length() == 0) {
+      return;
+    }
+
+    let declared: Vector<Analyzer::DefinitionId> = Escape::regionBindings(hir, regionId);
+    let mut aliasIndex: u64 = 0;
+
+    while (aliasIndex < aliases.defs.length()) {
+      if (let Option::SOME(defId) = aliases.defs.get(aliasIndex)) {
+        if (let Option::SOME(closureId) = aliases.closures.get(aliasIndex)) {
+          if (Escape::containsHirId(&literals, *closureId) && !Escape::containsDefId(&declared, *defId)) {
+            Escape::pushHirId(escaping, *closureId);
+
+            let _ = Escape::addRegionEscape(regions, *closureId, regionId);
+          }
+        }
+      }
+
+      aliasIndex += 1;
+    }
+  }
+
+  /// The nodes a region runs again: every child of a loop, condition and
+  /// update included, or the body of a closure.
+  function regionRoots(hir: &mut Hir::HirStore, regionId: Hir::HirId): Vector<Hir::HirId> {
+    let mut roots: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    if (let Option::SOME(node) = hir.get(regionId)) {
+      match (&node.kind) {
+        Hir::HirKind::Loop(_) -> {
+          roots = Hir::childIds(&node.kind);
+        },
+        Hir::HirKind::Closure(closureNode) -> {
+          roots.push(closureNode.body);
+        },
+        _ -> {},
+      };
+    }
+
+    return roots;
+  }
+
+  /// Every binding the region `regionId` declares: `let` names, pattern
+  /// bindings and the parameters of every closure in it, the region's own
+  /// closure included. A binding declared here does not outlive one run of the
+  /// region. Collecting too many only rejects more, so the walk descends
+  /// everywhere, nested closures included.
+  function regionBindings(
+    hir: &mut Hir::HirStore,
+    regionId: Hir::HirId
+  ): Vector<Analyzer::DefinitionId> {
+    let mut bindings: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut pending: Vector<Hir::HirId> = Escape::regionRoots(hir, regionId);
+
+    if (let Option::SOME(regionNode) = hir.get(regionId)) {
+      if (let Hir::HirKind::Closure(closureNode) = &regionNode.kind) {
+        Escape::pushDefIds(&mut bindings, &closureNode.params);
+      }
+    }
+
+    while (let Option::SOME(hirId) = pending.pop()) {
+      if (let Option::SOME(node) = hir.get(hirId)) {
+        match (&node.kind) {
+          Hir::HirKind::Let(letNode) -> {
+            bindings.push(letNode.name);
+          },
+          Hir::HirKind::LetElse(letElseNode) -> {
+            Escape::collectPatternBindings(&letElseNode.pattern, &mut bindings);
+          },
+          Hir::HirKind::Match(matchNode) -> {
+            let mut armIndex: u64 = 0;
+
+            while (armIndex < matchNode.arms.length()) {
+              if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+                Escape::collectPatternBindings(&arm.pattern, &mut bindings);
+              }
+
+              armIndex += 1;
+            }
+          },
+          Hir::HirKind::Closure(closureNode) -> {
+            Escape::pushDefIds(&mut bindings, &closureNode.params);
+          },
+          _ -> {},
+        };
+
+        let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+        let mut childIndex: u64 = 0;
+
+        while (childIndex < children.length()) {
+          if (let Option::SOME(childId) = children.get(childIndex)) {
+            pending.push(*childId);
+          }
+
+          childIndex += 1;
+        }
+      }
+    }
+
+    return bindings;
+  }
+
+  function pushDefIds(
+    target: &mut Vector<Analyzer::DefinitionId>,
+    source: &Vector<Analyzer::DefinitionId>
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(defId) = source.get(index)) {
+        let mut targetRef: &mut Vector<Analyzer::DefinitionId> = target;
+        targetRef.push(*defId);
+      }
+
+      index += 1;
+    }
+  }
+
+  function collectPatternBindings(
+    pattern: &Hir::HirPattern,
+    bindings: &mut Vector<Analyzer::DefinitionId>
+  ): void {
+    match (pattern) {
+      Hir::HirPattern::Binding(defId) -> {
+        let mut bindingsRef: &mut Vector<Analyzer::DefinitionId> = bindings;
+        bindingsRef.push(defId);
+      },
+      Hir::HirPattern::Variant(variantPattern) -> {
+        let mut index: u64 = 0;
+
+        while (index < variantPattern.args.length()) {
+          if (let Option::SOME(argPattern) = variantPattern.args.get(index)) {
+            Escape::collectPatternBindings(argPattern, bindings);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(element) = elements.get(index)) {
+            Escape::collectPatternBindings(element, bindings);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Or(alternatives) -> {
+        let mut index: u64 = 0;
+
+        while (index < alternatives.length()) {
+          if (let Option::SOME(alternative) = alternatives.get(index)) {
+            Escape::collectPatternBindings(alternative, bindings);
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  /// Whether a reference capture of `defId` in the escaping closure
+  /// `closureId` outlives its referent. A closure that escapes its frame or a
+  /// closure body outlives every reference it holds; one that escapes only
+  /// loops outlives just the bindings those loops declare.
+  function referenceOutlivesReferent(
+    hir: &mut Hir::HirStore,
+    result: &Escape::EscapeResult,
+    closureId: Hir::HirId,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    if (Escape::containsHirId(&result.frameEscaping, closureId)) {
+      return true;
+    }
+
+    let mut foundRegion: boolean = false;
+    let mut regionIndex: u64 = 0;
+
+    while (regionIndex < result.regions.length()) {
+      if (let Option::SOME(region) = result.regions.get(regionIndex)) {
+        if (region.closureId.raw() == closureId.raw()) {
+          foundRegion = true;
+
+          // A closure body region is a thunk frame that ends with each call.
+          // A reference built there can point into that frame even when it
+          // names a binding of an outer scope (an outer capture copied into
+          // the thunk), so every reference outlives its referent.
+          if (let Option::SOME(regionNode) = hir.get(region.regionId)) {
+            if (let Hir::HirKind::Closure(_) = &regionNode.kind) {
+              return true;
+            }
+          }
+
+          let declared: Vector<Analyzer::DefinitionId> = Escape::regionBindings(hir, region.regionId);
+
+          if (Escape::containsDefId(&declared, defId)) {
+            return true;
+          }
+        }
+      }
+
+      regionIndex += 1;
+    }
+
+    // Every heap closure is frame-escaping or has a region record; one with
+    // neither has no known bound, so treat it like a frame escape.
+    return !foundRegion;
+  }
+
+  function containsHirId(ids: &Vector<Hir::HirId>, value: Hir::HirId): boolean {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(existing) = ids.get(index)) {
+        if (existing.raw() == value.raw()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function containsDefId(
+    ids: &Vector<Analyzer::DefinitionId>,
+    value: Analyzer::DefinitionId
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(existing) = ids.get(index)) {
+        if (existing.raw() == value.raw()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
   }
 
   /// A closure captured by an escaping closure outlives the capturing

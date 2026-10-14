@@ -1785,7 +1785,8 @@ export namespace Capture {
       closureIndex += 1;
     }
 
-    let escaping: Vector<Hir::HirId> = Escape::analyzeEscapes(hir, defStore);
+    let escapeResult: Escape::EscapeResult = Escape::analyzeEscapes(hir, defStore);
+    let escaping: &Vector<Hir::HirId> = &escapeResult.escaping;
     let mut markEscapeIndex: u64 = 0;
 
     while (markEscapeIndex < escaping.length()) {
@@ -1946,7 +1947,7 @@ export namespace Capture {
         continue;
       };
 
-      let mut refCaptureNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut refCaptureDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut escapeSpan: SourceSpan = SourceSpan::new("", 0, 0);
 
       if (let Option::SOME(node) = hir.get(*escapingId)) {
@@ -1970,9 +1971,7 @@ export namespace Capture {
               };
 
               if (byReference) {
-                if (let Option::SOME(definition) = defStore.get(capture.sourceDef)) {
-                  refCaptureNames.push(definition.name());
-                }
+                refCaptureDefs.push(capture.sourceDef);
               }
             }
 
@@ -1981,7 +1980,22 @@ export namespace Capture {
         }
       }
 
-      // An escaping closure outlives the frame its references point into.
+      let mut refCaptureNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut defIndex: u64 = 0;
+
+      while (defIndex < refCaptureDefs.length()) {
+        if (let Option::SOME(sourceDef) = refCaptureDefs.get(defIndex)) {
+          if (Escape::referenceOutlivesReferent(hir, &escapeResult, *escapingId, *sourceDef)) {
+            if (let Option::SOME(definition) = defStore.get(*sourceDef)) {
+              refCaptureNames.push(definition.name());
+            }
+          }
+        }
+
+        defIndex += 1;
+      }
+
+      // An escaping closure outlives the referents its references point to.
       let mut nameIndex: u64 = 0;
 
       while (nameIndex < refCaptureNames.length()) {
