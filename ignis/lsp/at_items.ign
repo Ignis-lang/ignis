@@ -42,6 +42,11 @@ function pushBuiltins(items: &mut Vector<AtItem>): void {
   pushAtItem(itemsRef, "write", true, "@write<T>(ptr, value)", "Stores a value of type `T` through a pointer.", "Performs an untyped store through a raw pointer. Takes the pointer and the value to write.");
   pushAtItem(itemsRef, "readVolatile", true, "@readVolatile<T>(ptr)", "Loads a value of type `T` from a pointer with a volatile access.", "Like `@read`, but the load is never elided, merged or reordered across other volatile accesses. Emits C `*(volatile T*)ptr`.");
   pushAtItem(itemsRef, "writeVolatile", true, "@writeVolatile<T>(ptr, value)", "Stores a value of type `T` through a pointer with a volatile access.", "Like `@write`, but the store is never elided, merged or reordered across other volatile accesses. Emits C `*(volatile T*)ptr = value`.");
+  pushAtItem(itemsRef, "atomicLoad", true, "@atomicLoad<T>(ptr, ordering)", "Atomically loads a value of type `T` from a pointer.", "`T` is an integer primitive, `boolean` or a raw pointer. `ordering` is `:relaxed`, `:acquire` or `:seqCst`. Emits GCC `__atomic_load_n`. Meant for std's atomic types.");
+  pushAtItem(itemsRef, "atomicStore", true, "@atomicStore<T>(ptr, value, ordering)", "Atomically stores a value of type `T` through a pointer.", "`T` is an integer primitive, `boolean` or a raw pointer. `ordering` is `:relaxed`, `:release` or `:seqCst`. Emits GCC `__atomic_store_n`. Meant for std's atomic types.");
+  pushAtItem(itemsRef, "atomicRmw", true, "@atomicRmw<T>(ptr, operation, value, ordering)", "Atomically reads, modifies and writes the value behind a pointer, returning the previous value.", "`operation` is `:swap`, `:add`, `:sub`, `:and`, `:or` or `:xor`; all but `:swap` need an integer `T`. Any ordering. Emits GCC `__atomic_exchange_n` or `__atomic_fetch_*`. Meant for std's atomic types.");
+  pushAtItem(itemsRef, "atomicCompareExchange", true, "@atomicCompareExchange<T>(ptr, expected, desired, success, failure)", "Atomically replaces `expected` with `desired`, returning the value observed.", "Strong compare-exchange: the result equals `expected` exactly when the exchange happened. `success` is any ordering; `failure` is `:relaxed`, `:acquire` or `:seqCst`. Emits GCC `__atomic_compare_exchange_n`. Meant for std's atomic types.");
+  pushAtItem(itemsRef, "fence", true, "@fence(ordering)", "Emits a memory fence with the given ordering.", "`ordering` is `:relaxed`, `:acquire`, `:release`, `:acqRel` or `:seqCst`. Emits GCC `__atomic_thread_fence`.");
   pushAtItem(itemsRef, "zeroed", true, "@zeroed<T>()", "Returns a value of type `T` whose every byte is zero.", "`T` must have a zero value: integers, floats, `boolean`, `char`, raw pointers, and arrays, records and payload-free enums of them. In a static initializer it is part of the constant; in a function body it is filled with `__builtin_memset`.");
   pushAtItem(itemsRef, "splat", true, "@splat<T[N]>(value)", "Returns an array of `N` elements that all equal `value`.", "`T` must be Copy. In a static initializer `value` must be constant and the array holds at most 65536 elements unless `value` is zero. In a function body it is filled with `__builtin_memset` or a loop.");
   pushAtItem(itemsRef, "dropInPlace", true, "@dropInPlace<T>(ptr)", "Calls the drop glue for type `T` on the value behind `ptr`.", "Used for manual resource cleanup through raw pointers. Only valid for types that implement Drop.");
@@ -162,6 +167,26 @@ export function atItemSnippet(item: &AtItem): Option<String> {
 
   if (name.equals("zeroed")) {
     return Option::SOME(name.concat("<${1:T}>()"));
+  }
+
+  if (name.equals("atomicLoad")) {
+    return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3::seqCst})"));
+  }
+
+  if (name.equals("atomicStore")) {
+    return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3:value}, ${4::seqCst})"));
+  }
+
+  if (name.equals("atomicRmw")) {
+    return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3::add}, ${4:value}, ${5::seqCst})"));
+  }
+
+  if (name.equals("atomicCompareExchange")) {
+    return Option::SOME(name.concat("<${1:T}>(${2:ptr}, ${3:expected}, ${4:desired}, ${5::seqCst}, ${6::seqCst})"));
+  }
+
+  if (name.equals("fence")) {
+    return Option::SOME(name.concat("(${1::seqCst})"));
   }
 
   if (name.equals("splat")) {

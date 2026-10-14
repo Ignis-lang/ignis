@@ -232,6 +232,91 @@ export namespace CodegenC {
     return "";
   }
 
+  /// The GCC `__ATOMIC_*` constant for a memory ordering.
+  function atomicOrderingConstant(ordering: Hir::AtomicOrdering): str {
+    return match (ordering) {
+      Hir::AtomicOrdering::RELAXED -> "__ATOMIC_RELAXED",
+      Hir::AtomicOrdering::ACQUIRE -> "__ATOMIC_ACQUIRE",
+      Hir::AtomicOrdering::RELEASE -> "__ATOMIC_RELEASE",
+      Hir::AtomicOrdering::ACQ_REL -> "__ATOMIC_ACQ_REL",
+      Hir::AtomicOrdering::SEQ_CST -> "__ATOMIC_SEQ_CST",
+    };
+  }
+
+  /// The GCC builtin an `@atomicRmw` operation maps to.
+  function atomicRmwBuiltin(operation: Hir::AtomicOperation): str {
+    return match (operation) {
+      Hir::AtomicOperation::ADD -> "__atomic_fetch_add",
+      Hir::AtomicOperation::SUB -> "__atomic_fetch_sub",
+      Hir::AtomicOperation::AND -> "__atomic_fetch_and",
+      Hir::AtomicOperation::OR -> "__atomic_fetch_or",
+      Hir::AtomicOperation::XOR -> "__atomic_fetch_xor",
+      _ -> "__atomic_exchange_n",
+    };
+  }
+
+  /// One atomic builtin as GCC `__atomic_*` calls. The pointer is cast to
+  /// `T*` so a `*T` operand of a load drops nothing the builtin needs, and a
+  /// compare-exchange is strong (`weak` is 0) and reads back the observed
+  /// value through a block-local temporary that the builtin overwrites on
+  /// failure.
+  function emitAtomic(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    output: &mut String,
+    node: &Lir::InstrAtomic,
+  ): void {
+    let ordering: str = CodegenC::atomicOrderingConstant(node.ordering);
+    let mut outputRef: &mut String = output;
+
+    if (let Hir::AtomicOperation::FENCE = node.operation) {
+      let line: String = `    __atomic_thread_fence(${ordering});\n`;
+      outputRef.pushStr(line.toStr());
+      return;
+    }
+
+    let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
+    let mut pointer: String = String::create("0");
+    if (let Option::SOME(pointerOperand) = node.operands.get(0)) {
+      pointer = `(${target.toStr()}*)(${CodegenC::formatOperand(defStore, typeStore, symbols, closures, pointerOperand).toStr()})`;
+    }
+
+    let mut value: String = String::create("0");
+    if (let Option::SOME(valueOperand) = node.operands.get(1)) {
+      value = CodegenC::formatOperand(defStore, typeStore, symbols, closures, valueOperand);
+    }
+
+    let mut destination: String = String::create("");
+    if (let Option::SOME(dest) = node.dest) {
+      destination = `t${dest.raw()} = `;
+    }
+
+    let mut line: String = `    ${destination.toStr()}${CodegenC::atomicRmwBuiltin(node.operation)}(${pointer.toStr()}, ${value.toStr()}, ${ordering});\n`;
+
+    match (node.operation) {
+      Hir::AtomicOperation::LOAD -> {
+        line = `    ${destination.toStr()}__atomic_load_n(${pointer.toStr()}, ${ordering});\n`;
+      },
+      Hir::AtomicOperation::STORE -> {
+        line = `    __atomic_store_n(${pointer.toStr()}, ${value.toStr()}, ${ordering});\n`;
+      },
+      Hir::AtomicOperation::COMPARE_EXCHANGE -> {
+        let mut desired: String = String::create("0");
+        if (let Option::SOME(desiredOperand) = node.operands.get(2)) {
+          desired = CodegenC::formatOperand(defStore, typeStore, symbols, closures, desiredOperand);
+        }
+        let failure: str = CodegenC::atomicOrderingConstant(node.failureOrdering);
+
+        line = `    { ${target.toStr()} __ignis_atomic_expected = ${value.toStr()}; __atomic_compare_exchange_n(${pointer.toStr()}, &__ignis_atomic_expected, ${desired.toStr()}, 0, ${ordering}, ${failure}); ${destination.toStr()}__ignis_atomic_expected; }\n`;
+      },
+      _ -> {},
+    };
+
+    outputRef.pushStr(line.toStr());
+  }
+
   /// The C struct name of a record or enum. A record declared inside an
   /// extern block keeps its written name, which the C side names too; every
   /// other nominal is suffixed with its definition id.
@@ -2474,6 +2559,7 @@ export namespace CodegenC {
       Lir::Instr::StorePtr(_) -> "StorePtr",
       Lir::Instr::BuiltinLoad(_) -> "BuiltinLoad",
       Lir::Instr::BuiltinStore(_) -> "BuiltinStore",
+      Lir::Instr::Atomic(_) -> "Atomic",
       Lir::Instr::BuiltinHash(_) -> "BuiltinHash",
       Lir::Instr::BuiltinEq(_) -> "BuiltinEq",
       Lir::Instr::Copy(_) -> "Copy",
@@ -3304,6 +3390,9 @@ export namespace CodegenC {
         let line: String = `    *(${target.toStr()}${qualifier}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::Atomic(node) -> {
+        CodegenC::emitAtomic(defStore, typeStore, symbols, closures, output, &node);
       },
       Lir::Instr::BitCast(node) -> {
         // The Rust emitter also guards the copy with a `_Static_assert` on the

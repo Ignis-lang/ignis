@@ -1,0 +1,170 @@
+function checkU64(): i32 {
+  let mut cell: u64 = 10;
+  let ptr: *mut u64 = (&mut cell) as *mut u64;
+
+  @atomicStore<u64>(ptr, 20, :release);
+  if (@atomicLoad<u64>(ptr, :acquire) != 20) {
+    return 1;
+  }
+
+  if (@atomicRmw<u64>(ptr, :add, 5, :relaxed) != 20) {
+    return 2;
+  }
+  if (@atomicLoad<u64>(ptr, :seqCst) != 25) {
+    return 3;
+  }
+
+  if (@atomicRmw<u64>(ptr, :sub, 3, :acqRel) != 25) {
+    return 4;
+  }
+  if (@atomicRmw<u64>(ptr, :swap, 100, :seqCst) != 22) {
+    return 5;
+  }
+
+  if (@atomicCompareExchange<u64>(ptr, 100, 7, :seqCst, :acquire) != 100) {
+    return 6;
+  }
+  if (@atomicLoad<u64>(ptr, :relaxed) != 7) {
+    return 7;
+  }
+
+  if (@atomicCompareExchange<u64>(ptr, 100, 9, :acqRel, :relaxed) != 7) {
+    return 8;
+  }
+  if (@atomicLoad<u64>(ptr, :relaxed) != 7) {
+    return 9;
+  }
+
+  return 0;
+}
+
+function checkU32(): i32 {
+  let mut cell: u32 = 12;
+  let ptr: *mut u32 = (&mut cell) as *mut u32;
+
+  if (@atomicRmw<u32>(ptr, :and, 10, :relaxed) != 12) {
+    return 11;
+  }
+  if (@atomicRmw<u32>(ptr, :or, 5, :relaxed) != 8) {
+    return 12;
+  }
+  if (@atomicRmw<u32>(ptr, :xor, 1, :relaxed) != 13) {
+    return 13;
+  }
+  if (@atomicLoad<u32>(ptr, :relaxed) != 12) {
+    return 14;
+  }
+
+  return 0;
+}
+
+function checkU8(): i32 {
+  let mut cell: u8 = 255;
+  let ptr: *mut u8 = (&mut cell) as *mut u8;
+
+  if (@atomicRmw<u8>(ptr, :add, 1, :seqCst) != 255) {
+    return 21;
+  }
+  if (@atomicLoad<u8>(ptr, :seqCst) != 0) {
+    return 22;
+  }
+
+  return 0;
+}
+
+function checkI32(): i32 {
+  let mut cell: i32 = -5;
+  let ptr: *mut i32 = (&mut cell) as *mut i32;
+
+  if (@atomicRmw<i32>(ptr, :sub, 10, :relaxed) != -5) {
+    return 31;
+  }
+  if (@atomicCompareExchange<i32>(ptr, -15, 3, :release, :relaxed) != -15) {
+    return 32;
+  }
+  if (@atomicLoad<i32>(ptr, :acquire) != 3) {
+    return 33;
+  }
+
+  return 0;
+}
+
+function checkBoolean(): i32 {
+  let mut cell: boolean = false;
+  let ptr: *mut boolean = (&mut cell) as *mut boolean;
+
+  if (@atomicRmw<boolean>(ptr, :swap, true, :acqRel)) {
+    return 41;
+  }
+  if (!@atomicCompareExchange<boolean>(ptr, true, false, :seqCst, :seqCst)) {
+    return 42;
+  }
+
+  @atomicStore<boolean>(ptr, true, :seqCst);
+  if (!@atomicLoad<boolean>(ptr, :relaxed)) {
+    return 43;
+  }
+
+  return 0;
+}
+
+function checkPointer(): i32 {
+  let mut first: i32 = 1;
+  let mut second: i32 = 2;
+  let firstPtr: *mut i32 = (&mut first) as *mut i32;
+  let secondPtr: *mut i32 = (&mut second) as *mut i32;
+  let mut cell: *mut i32 = firstPtr;
+  let ptr: *mut *mut i32 = (&mut cell) as *mut *mut i32;
+
+  let previous: *mut i32 = @atomicRmw<*mut i32>(ptr, :swap, secondPtr, :seqCst);
+  if (@read<i32>(previous) != 1) {
+    return 51;
+  }
+
+  let observed: *mut i32 = @atomicCompareExchange<*mut i32>(ptr, secondPtr, firstPtr, :seqCst, :relaxed);
+  if (@read<i32>(observed) != 2) {
+    return 52;
+  }
+
+  let current: *mut i32 = @atomicLoad<*mut i32>(ptr, :acquire);
+  if (@read<i32>(current) != 1) {
+    return 53;
+  }
+
+  return 0;
+}
+
+function main(): i32 {
+  @fence(:relaxed);
+  @fence(:acquire);
+  @fence(:release);
+  @fence(:acqRel);
+  @fence(:seqCst);
+
+  let mut result: i32 = checkU64();
+  if (result != 0) {
+    return result;
+  }
+  result = checkU32();
+  if (result != 0) {
+    return result;
+  }
+  result = checkU8();
+  if (result != 0) {
+    return result;
+  }
+  result = checkI32();
+  if (result != 0) {
+    return result;
+  }
+  result = checkBoolean();
+  if (result != 0) {
+    return result;
+  }
+  result = checkPointer();
+  if (result != 0) {
+    return result;
+  }
+
+  return 42;
+}

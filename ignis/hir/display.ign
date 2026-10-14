@@ -51,6 +51,46 @@ export namespace Hir {
       return "";
     }
 
+    /// The builtin-facing name of an atomic operation, as in `atomic_rmw_add`.
+    function atomicOperationName(operation: Hir::AtomicOperation): str {
+      return match (operation) {
+        Hir::AtomicOperation::LOAD -> "load",
+        Hir::AtomicOperation::STORE -> "store",
+        Hir::AtomicOperation::SWAP -> "rmw_swap",
+        Hir::AtomicOperation::ADD -> "rmw_add",
+        Hir::AtomicOperation::SUB -> "rmw_sub",
+        Hir::AtomicOperation::AND -> "rmw_and",
+        Hir::AtomicOperation::OR -> "rmw_or",
+        Hir::AtomicOperation::XOR -> "rmw_xor",
+        Hir::AtomicOperation::COMPARE_EXCHANGE -> "compare_exchange",
+        Hir::AtomicOperation::FENCE -> "fence",
+      };
+    }
+
+    /// The atom an ordering is written as, without the leading colon.
+    function atomicOrderingName(ordering: Hir::AtomicOrdering): str {
+      return match (ordering) {
+        Hir::AtomicOrdering::RELAXED -> "relaxed",
+        Hir::AtomicOrdering::ACQUIRE -> "acquire",
+        Hir::AtomicOrdering::RELEASE -> "release",
+        Hir::AtomicOrdering::ACQ_REL -> "acqRel",
+        Hir::AtomicOrdering::SEQ_CST -> "seqCst",
+      };
+    }
+
+    /// `ordering`, or `success/failure` for a compare-exchange.
+    function atomicOrderingText(
+      operation: Hir::AtomicOperation,
+      ordering: Hir::AtomicOrdering,
+      failureOrdering: Hir::AtomicOrdering,
+    ): String {
+      if (let Hir::AtomicOperation::COMPARE_EXCHANGE = operation) {
+        return `${Hir::Display::atomicOrderingName(ordering)}/${Hir::Display::atomicOrderingName(failureOrdering)}`;
+      }
+
+      return String::create(Hir::Display::atomicOrderingName(ordering));
+    }
+
     function writeIndent(output: &mut String, indent: u64): void {
       let mut out: &mut String = output;
       let mut level: u64 = 0;
@@ -231,6 +271,15 @@ export namespace Hir {
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, storeNode.ptr))
           .concat(", ")
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, storeNode.value))
+          .concat(")"),
+        Hir::HirKind::BuiltinAtomic(atomicNode) -> String::create("builtin_atomic_")
+          .concat(Hir::Display::atomicOperationName(atomicNode.operation))
+          .concat("<")
+          .concat(Hir::Display::formatType(types, defs, symbols, atomicNode.ty))
+          .concat(", ")
+          .concat(Hir::Display::atomicOrderingText(atomicNode.operation, atomicNode.ordering, atomicNode.failureOrdering))
+          .concat(">(")
+          .concat(Hir::Display::formatCompactList(hir, types, defs, symbols, &atomicNode.operands))
           .concat(")"),
         Hir::HirKind::BuiltinHash(hashNode) -> String::create("builtin_hash<")
           .concat(Hir::Display::formatType(types, defs, symbols, hashNode.ty))
@@ -672,6 +721,11 @@ export namespace Hir {
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, storeNode.ptr, indent + 1, out);
           Hir::Display::printNode(hir, types, defs, symbols, storeNode.value, indent + 1, out);
+        },
+        Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+          let head: String = `BuiltinAtomic(${Hir::Display::atomicOperationName(atomicNode.operation)}, ${Hir::Display::formatType(types, defs, symbols, atomicNode.ty)}, ${Hir::Display::atomicOrderingText(atomicNode.operation, atomicNode.ordering, atomicNode.failureOrdering)})`;
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printIndexedChildren(hir, types, defs, symbols, &atomicNode.operands, indent + 1, out);
         },
         Hir::HirKind::BuiltinHash(hashNode) -> {
           let head: String = `BuiltinHash(${Hir::Display::formatType(types, defs, symbols, hashNode.ty)})`;

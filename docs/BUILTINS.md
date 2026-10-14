@@ -287,6 +287,51 @@ Same rules as `@write`. The store is emitted as C `*(T volatile*)(ptr) = value`,
 
 ---
 
+### Atomic primitives
+
+`@atomicLoad`, `@atomicStore`, `@atomicRmw`, `@atomicCompareExchange` and `@fence` are the compiler's atomic operations. They are low-level primitives meant for the standard library, which builds its public atomic types on them; ordinary code should use those types.
+
+| Builtin | Arguments | Returns |
+|---|---|---|
+| `@atomicLoad<T>(ptr, ordering)` | `*T`, ordering | `T` |
+| `@atomicStore<T>(ptr, value, ordering)` | `*mut T`, `T`, ordering | `void` |
+| `@atomicRmw<T>(ptr, operation, value, ordering)` | `*mut T`, operation, `T`, ordering | `T`, the previous value |
+| `@atomicCompareExchange<T>(ptr, expected, desired, success, failure)` | `*mut T`, `T`, `T`, ordering, ordering | `T`, the value observed |
+| `@fence(ordering)` | ordering | `void` |
+
+```ignis
+function increment(counter: *mut u64): u64 {
+    return @atomicRmw<u64>(counter, :add, 1, :relaxed);
+}
+
+function tryLock(flag: *mut boolean): boolean {
+    return !@atomicCompareExchange<boolean>(flag, false, true, :acquire, :relaxed);
+}
+```
+
+**Types.** `T` is an integer primitive (`i8` to `i64`, `u8` to `u64`), `boolean`, or a raw pointer type. Any other `T` is an error (A0251). Inside a generic function, a `T` that is a type parameter is checked again for each type it is instantiated with.
+
+**Orderings.** An ordering is one of the atom literals `:relaxed`, `:acquire`, `:release`, `:acqRel` and `:seqCst`, written at the call. A variable or any other expression is an error (A0248), and so is an atom that names no ordering (A0249). Each operation accepts:
+
+| Operation | Allowed orderings |
+|---|---|
+| `@atomicLoad` | `:relaxed`, `:acquire`, `:seqCst` |
+| `@atomicStore` | `:relaxed`, `:release`, `:seqCst` |
+| `@atomicRmw` | any |
+| `@atomicCompareExchange` success | any |
+| `@atomicCompareExchange` failure | `:relaxed`, `:acquire`, `:seqCst` |
+| `@fence` | any |
+
+Any other ordering is an error (A0250).
+
+**Read-modify-write.** The `@atomicRmw` operation is an atom literal: `:swap`, `:add`, `:sub`, `:and`, `:or` or `:xor`. Every one returns the value the memory held before the operation. `:swap` works on every supported `T`; the others need an integer `T` (A0251). An atom that names no operation is A0249, and a non-literal operation is A0248. Integer arithmetic wraps.
+
+**Compare-exchange.** `@atomicCompareExchange` is strong: it does not fail spuriously. It writes `desired` when the memory holds `expected` and returns the value it observed, so the exchange happened exactly when the result equals `expected`.
+
+**Code generation.** The C backend emits GCC builtins with `__ATOMIC_*` ordering constants: `__atomic_load_n`, `__atomic_store_n`, `__atomic_exchange_n` for `:swap`, `__atomic_fetch_add`/`sub`/`and`/`or`/`xor`, `__atomic_compare_exchange_n` with `weak` set to 0 and the observed value read back through a temporary, and `__atomic_thread_fence`. The QBE backend does not support atomics yet and rejects a program that uses one.
+
+---
+
 ### `@zeroed<T>()`
 
 A value of type `T` whose every byte is zero.
@@ -623,6 +668,11 @@ identifier as a value, and no form that puts a type where a type is expected.
 | `@write<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (store through pointer) |
 | `@readVolatile<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (volatile load through pointer) |
 | `@writeVolatile<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (volatile store through pointer) |
+| `@atomicLoad<T>(ptr, ordering)` | 1 type arg + 2 exprs | `T` | Yes (`__atomic_load_n`) |
+| `@atomicStore<T>(ptr, value, ordering)` | 1 type arg + 3 exprs | `void` | Yes (`__atomic_store_n`) |
+| `@atomicRmw<T>(ptr, operation, value, ordering)` | 1 type arg + 4 exprs | `T` | Yes (`__atomic_exchange_n`, `__atomic_fetch_*`) |
+| `@atomicCompareExchange<T>(ptr, expected, desired, success, failure)` | 1 type arg + 5 exprs | `T` | Yes (`__atomic_compare_exchange_n`) |
+| `@fence(ordering)` | 1 expr | `void` | Yes (`__atomic_thread_fence`) |
 | `@zeroed<T>()` | 1 type arg | `T` | Yes (`__builtin_memset`, or `{0}` in a static) |
 | `@splat<T[N]>(value)` | 1 array type arg + 1 expr | `T[N]` | Yes (`__builtin_memset` or a fill loop, or a constant in a static) |
 | `@sliceFromParts<T>(data, len)` | 1 type arg + 2 exprs | `T[]` | Yes (slice construction) |
@@ -756,3 +806,7 @@ The target triple used by predicates follows: **CLI** (`--target-triple`) > **ig
 | A0112 | @name expects N argument(s), got M | Error |
 | A0113 | @name expects a string literal argument | Error |
 | A0070 | Wrong number of type arguments for '@name': expected N, got M | Error |
+| A0248 | The ordering (or operation) of an atomic builtin must be an atom literal | Error |
+| A0249 | Unknown memory ordering, or unknown `@atomicRmw` operation | Error |
+| A0250 | The ordering is not allowed for this atomic operation | Error |
+| A0251 | The atomic builtin does not support this type | Error |

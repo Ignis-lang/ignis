@@ -206,7 +206,7 @@ Builtins use `@name(args)` or `@name<Type>(args)` syntax.
 3. Lower the HIR to LIR in `ignis/lir/lowering.ign`, and emit C in `ignis/codegen/mod.ign`.
 4. Register it for the language server in `ignis/lsp/at_items.ign`.
 
-Existing builtins: `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `sliceFromParts`, `read`, `write`, `readVolatile`, `writeVolatile`, `zeroed`, `splat`, `dropInPlace`, `dropGlue`, `hash`, `eq`, `maxOf`, `minOf`, `compileError`, `panic`, `trap`, `unreachable`. `typeOf` is a reserved builtin name the analyzer does not type yet: a use of `@typeOf` is rejected as an unsupported construct (`ignis/analyzer/typecheck_tests.ign`). `configFlag` is a directive, not a builtin, even though it is written like one in expression position; the parser handles it (`ignis/parser/expressions.ign`).
+Existing builtins: `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `sliceFromParts`, `read`, `write`, `readVolatile`, `writeVolatile`, `atomicLoad`, `atomicStore`, `atomicRmw`, `atomicCompareExchange`, `fence`, `zeroed`, `splat`, `dropInPlace`, `dropGlue`, `hash`, `eq`, `maxOf`, `minOf`, `compileError`, `panic`, `trap`, `unreachable`. `typeOf` is a reserved builtin name the analyzer does not type yet: a use of `@typeOf` is rejected as an unsupported construct (`ignis/analyzer/typecheck_tests.ign`). `configFlag` is a directive, not a builtin, even though it is written like one in expression position; the parser handles it (`ignis/parser/expressions.ign`).
 
 ### Adding a New Pattern Form
 

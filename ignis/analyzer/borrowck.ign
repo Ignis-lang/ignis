@@ -3580,6 +3580,41 @@ export namespace Borrowck {
     Borrowck::emitError(diagnostics, span, DiagnosticCode::UNSUPPORTED_EQUALITY, message.toStr(), label.toStr());
   }
 
+  /// Rejects an atomic builtin whose `T` was a type parameter at typecheck
+  /// and was substituted with a type the operation does not support: one that
+  /// is not an integer primitive, `boolean` or a raw pointer, or a non-integer
+  /// under an arithmetic or bitwise `@atomicRmw`. Typecheck rejects every
+  /// concrete `T` itself, so this only fires for generic code.
+  function rejectUnsupportedAtomic(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    diagnostics: &mut DiagnosticBag,
+    atomicNode: &Hir::HirBuiltinAtomic,
+    span: SourceSpan,
+  ): void {
+    if (let Hir::AtomicOperation::FENCE = atomicNode.operation) {
+      return;
+    }
+
+    let valueClass: Analyzer::Typecheck::AtomicValueClass = Analyzer::Typecheck::atomicValueClass(defStore, typeStore, atomicNode.ty);
+    let supported: boolean = match (valueClass) {
+      Analyzer::Typecheck::AtomicValueClass::INTEGER -> true,
+      Analyzer::Typecheck::AtomicValueClass::SCALAR -> !Hir::atomicOperationNeedsInteger(atomicNode.operation),
+      _ -> false,
+    };
+
+    if (supported) {
+      return;
+    }
+
+    let typeName: String = typeStore.nameOfResolved(atomicNode.ty, &*defStore, &*symbols);
+    let message: String = `\`@${Hir::atomicBuiltinName(atomicNode.operation)}\` does not support type '${typeName.toStr()}' substituted for its type parameter`;
+    let label: String = String::create("atomic builtins take an integer primitive, `boolean` or a raw pointer; arithmetic and bitwise `@atomicRmw` operations take an integer primitive");
+
+    Borrowck::emitError(diagnostics, span, DiagnosticCode::ATOMIC_UNSUPPORTED_TYPE, message.toStr(), label.toStr());
+  }
+
   /// Whether the node dereferences a reference by value: `*reference` copies
   /// the referent's bytes out of storage the reference does not own. A raw
   /// pointer is not a borrow, so dereferencing one is the caller's contract.
@@ -4337,6 +4372,19 @@ export namespace Borrowck {
       },
       Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, dropNode.ptr);
+      },
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+        let mut operandIndex: u64 = 0;
+
+        while (operandIndex < atomicNode.operands.length()) {
+          if (let Option::SOME(operand) = atomicNode.operands.get(operandIndex)) {
+            Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *operand);
+          }
+
+          operandIndex += 1;
+        }
+
+        Borrowck::rejectUnsupportedAtomic(defStore, typeStore, symbols, diagnostics, &atomicNode, span);
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, storeNode.ptr);

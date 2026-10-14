@@ -1614,6 +1614,7 @@ Common directive builtins:
 - `@sizeOf`, `@alignOf`, `@typeName`
 - `@bitCast`, `@pointerCast`, `@integerFromPointer`, `@pointerFromInteger`
 - `@read`, `@write`, `@readVolatile`, `@writeVolatile`
+- `@atomicLoad`, `@atomicStore`, `@atomicRmw`, `@atomicCompareExchange`, `@fence`
 - `@zeroed`, `@splat`
 - `@sliceFromParts`
 - `@dropInPlace`, `@dropGlue`

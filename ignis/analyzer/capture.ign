@@ -655,6 +655,17 @@ export namespace Capture {
       Hir::HirKind::BuiltinSplat(splatNode) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, splatNode.value, varDef);
       },
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+        let mut operandIndex: u64 = 0;
+
+        while (operandIndex < atomicNode.operands.length()) {
+          if (let Option::SOME(operand) = atomicNode.operands.get(operandIndex)) {
+            Capture::analyzeVarUsage(hir, defStore, typeStore, usage, *operand, varDef);
+          }
+
+          operandIndex += 1;
+        }
+      },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, storeNode.ptr, varDef);
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, storeNode.value, varDef);
@@ -967,6 +978,17 @@ export namespace Capture {
       },
       Hir::HirKind::BuiltinSplat(splatNode) -> {
         Capture::collectClosuresPostorder(hir, splatNode.value, result, visited);
+      },
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+        let mut operandIndex: u64 = 0;
+
+        while (operandIndex < atomicNode.operands.length()) {
+          if (let Option::SOME(operand) = atomicNode.operands.get(operandIndex)) {
+            Capture::collectClosuresPostorder(hir, *operand, result, visited);
+          }
+
+          operandIndex += 1;
+        }
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         Capture::collectClosuresPostorder(hir, storeNode.ptr, result, visited);
@@ -1381,6 +1403,17 @@ export namespace Capture {
       },
       Hir::HirKind::BuiltinSplat(splatNode) -> {
         Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, splatNode.value);
+      },
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+        let mut operandIndex: u64 = 0;
+
+        while (operandIndex < atomicNode.operands.length()) {
+          if (let Option::SOME(operand) = atomicNode.operands.get(operandIndex)) {
+            Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, *operand);
+          }
+
+          operandIndex += 1;
+        }
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, storeNode.ptr);

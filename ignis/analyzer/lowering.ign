@@ -3145,6 +3145,126 @@ export namespace Lowering {
     );
   }
 
+  /// The ordering an atom literal argument names. Typecheck has already
+  /// rejected anything else, so a missing one only shows up after an error.
+  function atomicOrderingArgument(
+    module: &Ast::Module,
+    builtinCall: &Ast::Expression::BuiltinCall,
+    argumentIndex: u64,
+  ): Option<Hir::AtomicOrdering> {
+    let Option::SOME(argumentId) = builtinCall.arguments.get(argumentIndex) else {
+      return Option::NONE;
+    };
+    let Option::SOME(name) = Analyzer::Typecheck::atomLiteralName(module, *argumentId) else {
+      return Option::NONE;
+    };
+
+    return Hir::atomicOrderingFromName(&name);
+  }
+
+  /// Lowers the five atomic builtins to one `HirKind::BuiltinAtomic`. The
+  /// ordering and operation atoms become fields; every other argument is an
+  /// operand, pointer first.
+  function lowerBuiltinAtomic(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    builtinCall: &Ast::Expression::BuiltinCall,
+  ): Hir::HirId {
+    let name: &String = &builtinCall.name;
+    let voidType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    let mut operation: Hir::AtomicOperation = Hir::AtomicOperation::FENCE;
+    let mut operandCount: u64 = 0;
+    let mut orderingIndex: u64 = 0;
+
+    if (name.equals("atomicLoad")) {
+      operation = Hir::AtomicOperation::LOAD;
+      operandCount = 1;
+      orderingIndex = 1;
+    } else if (name.equals("atomicStore")) {
+      operation = Hir::AtomicOperation::STORE;
+      operandCount = 2;
+      orderingIndex = 2;
+    } else if (name.equals("atomicRmw")) {
+      let Option::SOME(operationId) = builtinCall.arguments.get(1) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+      let Option::SOME(operationName) = Analyzer::Typecheck::atomLiteralName(module, *operationId) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+      let Option::SOME(rmwOperation) = Hir::atomicRmwOperationFromName(&operationName) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      operation = rmwOperation;
+      operandCount = 2;
+      orderingIndex = 3;
+    } else if (name.equals("atomicCompareExchange")) {
+      operation = Hir::AtomicOperation::COMPARE_EXCHANGE;
+      operandCount = 3;
+      orderingIndex = 3;
+    }
+
+    let mut valueType: Analyzer::TypeId = voidType;
+    if (operandCount > 0) {
+      let Option::SOME(typeArgument) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+      valueType = typeArgument;
+    }
+
+    let Option::SOME(ordering) = Lowering::atomicOrderingArgument(module, builtinCall, orderingIndex) else {
+      return Lowering::errorNode(hir, typeStore, builtinCall.span);
+    };
+
+    let mut failureOrdering: Hir::AtomicOrdering = ordering;
+    if (let Hir::AtomicOperation::COMPARE_EXCHANGE = operation) {
+      let Option::SOME(failure) = Lowering::atomicOrderingArgument(module, builtinCall, 4) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+      failureOrdering = failure;
+    }
+
+    let mut operands: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut argumentIndex: u64 = 0;
+    while (operands.length() < operandCount) {
+      // The operation atom of `@atomicRmw` sits between its pointer and value.
+      let isRmwOperation: boolean = name.equals("atomicRmw") && argumentIndex == 1;
+
+      if (!isRmwOperation) {
+        let Option::SOME(argumentId) = builtinCall.arguments.get(argumentIndex) else {
+          return Lowering::errorNode(hir, typeStore, builtinCall.span);
+        };
+        operands.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *argumentId));
+      }
+
+      argumentIndex += 1;
+    }
+
+    let mut resultType: Analyzer::TypeId = valueType;
+    if (let Hir::AtomicOperation::STORE = operation) {
+      resultType = voidType;
+    }
+
+    let mut atomicHirRef: &mut Hir::HirStore = hir;
+    return atomicHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::BuiltinAtomic(Hir::HirBuiltinAtomic {
+        operation: operation,
+        ty: valueType,
+        operands: operands,
+        ordering: ordering,
+        failureOrdering: failureOrdering,
+      }),
+      span: builtinCall.span,
+      typeId: resultType,
+    });
+  }
+
   /// Lowers a lambda to `HirKind::Closure` with empty captures, escapes
   /// false and no thunk/drop definitions, exactly like the oracle's
   /// `lower_lambda_to_hir`: captures and escape analysis belong to a later
@@ -3450,6 +3570,10 @@ export namespace Lowering {
         span: builtinCall.span,
         typeId: Lowering::voidType(typeStore),
       });
+    }
+
+    if (Analyzer::Typecheck::isAtomicBuiltinName(name)) {
+      return Lowering::lowerBuiltinAtomic(defStore, typeStore, symbols, module, output, locals, hir, builtinCall);
     }
 
     if (name.equals("dropInPlace")) {
