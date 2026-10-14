@@ -16,7 +16,7 @@ So two backends agree on a value exactly when they agree on its canonical repres
 | Data layout | Specified here, computed by `ignis/abi/`, enforced on every C build |
 | Platform constants (`O_RDONLY`, `ENOENT`, `TIOCGWINSZ`, ...) | Specified for `x86_64` Linux in `std/libc/platform.ign`, checked against the C headers in CI; other targets still read the headers |
 | Symbol names | Specified below, computed by `ignis/abi/symbols.ign`; checked across programs in CI |
-| Calling convention for Ignis-internal calls | Specified below for the shapes both backends build, checked across C and QBE in CI; closures still exist only in the C backend |
+| Calling convention for Ignis-internal calls | Specified below for the shapes both backends build, checked across C and QBE in CI, closures included |
 | Runtime ownership across objects | Not yet: every object carries its own std and runtime |
 
 ## Data layout
@@ -116,4 +116,4 @@ Two shapes have a rule of their own, the same in every backend:
 | `T[N]` parameter | the address of the first element, as a C array parameter decays. A callee that needs the value copies it into its own storage. |
 | `T[N]` result | by value, as `struct { T data[N]; }` |
 
-`scripts/check_cross_backend_abi.py` checks the convention where two backends meet: it adds a probe module to a copy of std, builds the std archive with C, and calls every probe function from a program built with C and with QBE (records of 3 to 32 bytes, mixed field widths, records holding arrays, fixed arrays and slices in both directions, narrow scalar results, a fieldless enum, payload enums of 8, 16 and 32 bytes and a std `Option` instance in both directions, and arguments passed on the stack). It covers calls from a QBE program into the C archive; ranges are not probed yet. The QBE workflow runs it on every pull request.
+`scripts/check_cross_backend_abi.py` checks the convention where two backends meet: it adds a probe module to a copy of std, builds the std archive with C, and calls every probe function from a program built with C and with QBE (records of 3 to 32 bytes, mixed field widths, records holding arrays, fixed arrays and slices in both directions, narrow scalar results, a fieldless enum, payload enums of 8, 16 and 32 bytes and a std `Option` instance in both directions, closure values in both directions, and arguments passed on the stack). It covers calls from a QBE program into the C archive; ranges are not probed yet. The QBE workflow runs it on every pull request.

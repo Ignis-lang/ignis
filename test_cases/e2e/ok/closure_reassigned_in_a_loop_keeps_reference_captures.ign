@@ -1,0 +1,50 @@
+// e2e: std
+// A closure assigned outside the loop that builds it moves its environment to
+// the heap, but it stays inside its frame: references to bindings declared
+// before the loop stay valid, and every iteration sees the same referent.
+import Io from "std::io";
+
+record Tally {
+  public label: String;
+  public total: i32;
+}
+
+function countInALoop(): i32 {
+  let mut count: i32 = 0;
+  let mut bump = (): void -> {};
+  let mut index: i32 = 0;
+
+  while (index < 3) {
+    bump = (): void -> {
+      count = count + 1;
+    };
+    bump();
+    index = index + 1;
+  }
+
+  bump();
+
+  return count;
+}
+
+function readInALoop(): i32 {
+  let tally: Tally = Tally { label: String::create("tally"), total: 7 };
+  let mut read = (): i32 -> 0;
+  let mut index: i32 = 0;
+  let mut sum: i32 = 0;
+
+  while (index < 3) {
+    read = (): i32 -> tally.total + tally.label.length() as i32;
+    sum = sum + read();
+    index = index + 1;
+  }
+
+  return sum + read();
+}
+
+function main(): i32 {
+  Io::println(`loop ${countInALoop()}`.toStr());
+  Io::println(`read ${readInALoop()}`.toStr());
+
+  return 0;
+}

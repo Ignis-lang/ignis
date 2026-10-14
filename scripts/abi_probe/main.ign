@@ -180,6 +180,25 @@ function main(): i32 {
   }
   failures += check("readDroppableEnumDrops", AbiProbeExtra::dropCount() as i64, 1);
 
+  // Closure values across the boundary: a program-built closure called by std,
+  // and an std-built capturing closure the program calls and drops.
+  failures += check("applyClosure", AbiProbeExtra::applyClosure((x: i32): i32 -> x + 2, 40) as i64, 42);
+
+  let capturedBase: i32 = 2;
+  failures += check(
+    "applyCapturingClosure",
+    AbiProbeExtra::applyClosure((x: i32): i32 -> x + capturedBase, 40) as i64,
+    42,
+  );
+
+  AbiProbeExtra::resetDrops();
+  {
+    let reader = AbiProbeExtra::makeDroppableClosure(42);
+    failures += check("makeDroppableClosure", reader() as i64, 42);
+    failures += check("makeDroppableClosureDrops", AbiProbeExtra::dropCount() as i64, 0);
+  }
+  failures += check("makeDroppableClosureDropOnce", AbiProbeExtra::dropCount() as i64, 1);
+
   if (failures == 0) {
     Io::println("all shapes agree");
   }
