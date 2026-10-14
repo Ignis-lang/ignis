@@ -509,7 +509,39 @@ export namespace Capture {
           }
         }
       },
-      Hir::HirKind::Closure(_) -> {},
+      // Closures are analyzed innermost first, so a nested closure already
+      // knows how it captures `varDef`. Whatever it does to the variable, the
+      // enclosing closure does too: a nested write needs the outer capture to
+      // reach the original, not a copy of it.
+      Hir::HirKind::Closure(closureNode) -> {
+        let mut index: u64 = 0;
+
+        while (index < closureNode.captures.length()) {
+          if (let Option::SOME(capture) = closureNode.captures.get(index)) {
+            if (capture.sourceDef.raw() == varDef.raw()) {
+              let mut usageRef: &mut Capture::VarUsage = usage;
+
+              match (capture.mode) {
+                Hir::CaptureMode::ByMutRef -> {
+                  usageRef.mutated = true;
+                },
+                Hir::CaptureMode::ByValue -> {
+                  if (Analyzer::Typecheck::isCopyType(defStore, typeStore, capture.typeInEnv)) {
+                    usageRef.read = true;
+                  } else {
+                    usageRef.moved = true;
+                  }
+                },
+                Hir::CaptureMode::ByRef -> {
+                  usageRef.read = true;
+                },
+              };
+            }
+          }
+
+          index += 1;
+        }
+      },
       Hir::HirKind::Block(blockNode) -> {
         Capture::analyzeVarUsageList(hir, defStore, typeStore, usage, &blockNode.statements, varDef);
 
@@ -530,7 +562,14 @@ export namespace Capture {
       Hir::HirKind::BitCast(castNode) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, castNode.expression, varDef);
       },
+      // `&mut x`, including the receiver lowering builds for a `&mut self`
+      // method, can write through `x`, so it captures like an assignment.
       Hir::HirKind::Reference(referenceNode) -> {
+        if (referenceNode.mutable && Capture::isRootedAt(hir, referenceNode.expression, varDef)) {
+          let mut usageRef: &mut Capture::VarUsage = usage;
+          usageRef.mutated = true;
+        }
+
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, referenceNode.expression, varDef);
       },
       Hir::HirKind::Dereference(inner) -> {

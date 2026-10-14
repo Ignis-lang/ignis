@@ -1,0 +1,44 @@
+// A closure mutates a captured variable when it takes `&mut` of it, calls a
+// `&mut self` method on it, or calls a nested closure that mutates it. All
+// three have to capture the variable by mutable reference, so the change is
+// visible to the enclosing function.
+record Counter {
+  public value: i32;
+
+  bump(&mut self): void {
+    self.value += 1;
+  }
+}
+
+function runIt(@noescape task: () -> void): void {
+  task();
+}
+
+function increment(value: &mut i32): void {
+  *value += 1;
+}
+
+function main(): i32 {
+  let mut viaReference: i32 = 0;
+  runIt((): void -> {
+    increment(&mut viaReference);
+  });
+
+  let mut counter: Counter = Counter { value: 0 };
+  runIt((): void -> {
+    counter.bump();
+  });
+  runIt((): void -> {
+    counter.bump();
+  });
+
+  let mut viaNested: i32 = 0;
+  runIt((): void -> {
+    let inner = (): void -> {
+      viaNested += 1;
+    };
+    inner();
+  });
+
+  return viaReference * 100 + counter.value * 10 + viaNested;
+}
