@@ -1,0 +1,38 @@
+// e2e: std
+// A discarded match in a generic function, nested matches included, names one
+// of its owning parameters per path. After monomorphization each instance still
+// hands nothing to the discarded result, so every parameter is dropped once.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function pick<T>(flag: i32, first: T, second: T): void {
+  match (flag) {
+    1 -> first,
+    2 -> second,
+    _ -> match (flag) {
+      3 -> first,
+      _ -> second,
+    },
+  };
+
+  Io::println("end pick");
+}
+
+function main(): i32 {
+  pick<Tracked>(1, Tracked { id: 1 }, Tracked { id: 2 });
+  pick<Tracked>(2, Tracked { id: 3 }, Tracked { id: 4 });
+  pick<Tracked>(3, Tracked { id: 5 }, Tracked { id: 6 });
+  pick<Tracked>(4, Tracked { id: 7 }, Tracked { id: 8 });
+  pick<String>(1, String::create("a"), String::create("b"));
+  pick<String>(4, String::create("c"), String::create("d"));
+
+  return 0;
+}

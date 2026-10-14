@@ -6345,12 +6345,13 @@ export namespace Borrowck {
           // drop for the referent.
           //
           // The arm's own binding is handed over only when LIR lowering stores the
-          // arm's value into the match result, which it does whenever the match
-          // produces a value: a `!` in statement position still does, and the
-          // statement drops that result. A match typed `void` stores nothing, so the
-          // binding stays owned and the arm-end schedule frees it.
+          // arm's value into the match result, which it does when the match
+          // produces a value that is used. A match typed `void` stores nothing, and
+          // neither does one whose value is discarded (`Hir::DropSchedules::
+          // discardedMatches`), so the binding stays owned and the arm-end schedule
+          // frees it.
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
-            if (matchProducesValue) {
+            if (matchProducesValue && matchValueIsUsed) {
               Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
             }
           } else if (matchValueIsUsed && !resultIsBorrowed && state.isMoveValid(result.raw()) && resultOwnsValue) {
@@ -7152,6 +7153,20 @@ export namespace Borrowck {
     let mut reportEvents: Vector<Borrowck::OwnershipEvent> = Vector::new<Borrowck::OwnershipEvent>();
     let mut schedules: Hir::DropSchedules = Hir::DropSchedules::init();
     let statementPositionNodes: Vector<u32> = Borrowck::collectStatementPositionNodes(hir);
+    let mut discardedIndex: u64 = 0;
+
+    while (discardedIndex < statementPositionNodes.length()) {
+      if (let Option::SOME(nodeRaw) = statementPositionNodes.get(discardedIndex)) {
+        if (let Option::SOME(node) = hir.nodes.get(*nodeRaw as u64)) {
+          if (let Hir::HirKind::Match(_) = &node.kind) {
+            schedules.discardedMatches.push(*nodeRaw);
+          }
+        }
+      }
+
+      discardedIndex += 1;
+    }
+
     let envsCapturedByEscapingClosures: Vector<u32> = Borrowck::collectEnvsCapturedByEscapingClosures(hir);
     let bindingsAssignedClosureEnv: Vector<u32> = Borrowck::collectBindingsAssignedClosureEnv(defStore, typeStore, hir);
     let thunkCaptures: Borrowck::ThunkCaptures = Borrowck::collectThunkCaptures(defStore, typeStore, hir);

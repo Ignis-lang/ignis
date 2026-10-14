@@ -233,6 +233,13 @@ export namespace Hir {
     /// by-value copies, exactly as before.
     public borrowedPatternBindings: Vector<Analyzer::DefinitionId>;
 
+    /// Raw `HirId`s of the matches whose value is discarded: a match in statement
+    /// position and a match in the result position of one of its arms. Ownership hands
+    /// nothing to their result, so lowering stores none and lets each arm discard its own
+    /// value. Deciding it in lowering instead would let the two disagree, and a result
+    /// stored and dropped while the arm's binding keeps its drop frees it twice.
+    public discardedMatches: Vector<u32>;
+
     public static init(): DropSchedules {
       return DropSchedules {
         onScopeEnd: Vector::new<Hir::NodeDropEntry>(),
@@ -246,7 +253,24 @@ export namespace Hir {
         onExitDefers: Vector::new<Hir::ExitDeferEntry>(),
         moves: Vector::new<Hir::MoveEntry>(),
         borrowedPatternBindings: Vector::new<Analyzer::DefinitionId>(),
+        discardedMatches: Vector::new<u32>(),
       };
+    }
+
+    public isDiscardedMatch(&self, matchRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.discardedMatches.length()) {
+        if (let Option::SOME(entry) = self.discardedMatches.get(index)) {
+          if (*entry == matchRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     /// Adds `defId` to `borrowedPatternBindings` if it is not already listed, mirroring
