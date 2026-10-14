@@ -228,6 +228,12 @@ export namespace Borrowck {
     /// `arm_result_move_frames`.
     armResultMoveFrames: Vector<Vector<u32>>;
 
+    /// Raw `HirId`s of the blocks whose tail value leaves them: a used match
+    /// arm, a body producing its function's result, and every block that is
+    /// the tail of one of those. A binding such a block declares and names as
+    /// its tail is handed to that value before the block's scope ends.
+    tailHandoverBlocks: Vector<u32>;
+
     /// Raw `HirId`s of every node sitting directly in a block's statement
     /// list, whose value is therefore discarded. Computed once for the whole
     /// module and installed before each function is walked. Mirrors
@@ -351,6 +357,7 @@ export namespace Borrowck {
         borrowedBindings: Vector::new<u32>(),
         environmentCaptures: Vector::new<u32>(),
         armResultMoveFrames: Vector::new<Vector<u32>>(),
+        tailHandoverBlocks: Vector::new<u32>(),
         statementPositionNodes: Vector::new<u32>(),
         letConditionMatches: Vector::new<u32>(),
         letConditionOwned: Vector::new<u32>(),
@@ -650,6 +657,26 @@ export namespace Borrowck {
       while (self.borrowedBindings.length() > mark) {
         self.borrowedBindings.pop();
       }
+    }
+
+    public markTailHandover(&mut self, blockRaw: u32): void {
+      Borrowck::pushUniqueRaw(&mut self.tailHandoverBlocks, blockRaw);
+    }
+
+    public handsOverTail(&self, blockRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.tailHandoverBlocks.length()) {
+        if (let Option::SOME(existing) = self.tailHandoverBlocks.get(index)) {
+          if (*existing == blockRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     /// Push a fresh frame for a match that is about to be checked.
@@ -5429,10 +5456,70 @@ export namespace Borrowck {
     if (let Option::SOME(tail) = block.expression) {
       if (state.reachable) {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, tail);
+
+        if (state.handsOverTail(blockId.raw())) {
+          Borrowck::handOverTailBinding(defStore, typeStore, hir, state, schedules, tail, Borrowck::closingSpanOf(hir, blockId));
+        }
       }
     }
 
     Borrowck::exitScope(state, schedules);
+  }
+
+  /// Marks `nodeId` and every block on its chain of tails as handing its tail
+  /// value out, when `nodeId` is a block.
+  function markTailHandoverChain(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId
+  ): void {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return;
+    };
+
+    let Hir::HirKind::Block(block) = &node.kind else {
+      return;
+    };
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.markTailHandover(nodeId.raw());
+
+    if (let Option::SOME(tail) = block.expression) {
+      Borrowck::markTailHandoverChain(hir, state, tail);
+    }
+  }
+
+  /// Moves the binding a handing-over block names as its tail into the
+  /// block's value, when the block itself declared it. Its scope ends right
+  /// after, and without the move the scope end would drop the value the tail
+  /// just handed out. A binding declared outside the block outlives it and is
+  /// left to whoever receives the block's value.
+  function handOverTailBinding(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    tail: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(result) = Borrowck::armResultBinding(hir, tail) else {
+      return;
+    };
+
+    let mut declaredHere: Vector<u32> = state.currentScopeDrops();
+
+    if (!Borrowck::containsRaw(&mut declaredHere, result.raw())) {
+      return;
+    }
+
+    let ownsValue: boolean = Borrowck::definitionNeedsDrop(defStore, typeStore, result) || state.isMoveOnlyClosureOwner(result.raw());
+
+    if (!ownsValue || state.isBorrowedBinding(result.raw()) || !state.isMoveValid(result.raw())) {
+      return;
+    }
+
+    Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
   }
 
   /// Checks the branch a `let` condition guards, handing it ownership of that
@@ -6228,6 +6315,10 @@ export namespace Borrowck {
       }
 
       if (state.reachable) {
+        if (matchValueIsUsed) {
+          Borrowck::markTailHandoverChain(hir, state, arm.body);
+        }
+
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, arm.body);
 
         // The arm's value flows out of the match, so producing it from borrowed
@@ -6965,6 +7056,10 @@ export namespace Borrowck {
       }
 
       index += 1;
+    }
+
+    if (Borrowck::nodeProducesValue(typeStore, hir, bodyId)) {
+      Borrowck::markTailHandoverChain(hir, &mut state, bodyId);
     }
 
     Borrowck::checkNode(defStore, typeStore, symbols, hir, &mut state, diagnostics, schedules, bodyId);
