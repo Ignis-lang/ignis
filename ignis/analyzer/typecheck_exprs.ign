@@ -8239,6 +8239,12 @@ export namespace Analyzer {
         orderingStart = 3;
       }
 
+      let valueIsParam: boolean = match (Analyzer::Typecheck::atomicValueClass(defStore, typeStore, valueType)) {
+        Analyzer::Typecheck::AtomicValueClass::PENDING -> true,
+        _ -> false,
+      };
+      let mut argumentsValid: boolean = true;
+
       let mut argumentIndex: u64 = 0;
       while (argumentIndex < call.arguments.length()) {
         let Option::SOME(argumentId) = call.arguments.get(argumentIndex) else {
@@ -8253,7 +8259,7 @@ export namespace Analyzer {
           expectedArgument = Option::NONE;
         }
 
-        let _argumentType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        let argumentType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
           state,
           defStore,
           typeStore,
@@ -8263,7 +8269,32 @@ export namespace Analyzer {
           *argumentId,
           expectedArgument,
         );
+
+        if (let Option::SOME(actualType) = argumentType) {
+          if (let Option::SOME(expectedType) = expectedArgument) {
+            // A type parameter's value arguments are judged after monomorphization;
+            // the pointer is always `*T`/`*mut T` and can be compared now.
+            let deferred: boolean = argumentIndex != 0 && valueIsParam;
+            let mut satisfied: boolean = deferred || Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedType, actualType);
+
+            // A load reads through either pointer kind.
+            if (!satisfied && isLoad && argumentIndex == 0) {
+              let mut mutableTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+              let mutablePointerType: Analyzer::TypeId = mutableTypeStoreRef.mutablePointer(valueType);
+              satisfied = Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, mutablePointerType, actualType);
+            }
+
+            if (!satisfied) {
+              Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, call.span, argumentIndex + 1, expectedType, actualType);
+              argumentsValid = false;
+            }
+          }
+        }
         argumentIndex += 1;
+      }
+
+      if (!argumentsValid) {
+        return Option::NONE;
       }
 
       if (let Option::SOME(pointerArgId) = call.arguments.get(0)) {
