@@ -1,0 +1,27 @@
+function fetchAdd<T>(ptr: *mut T, value: T): T {
+  return @atomicRmw<T>(ptr, :add, value, :seqCst);
+}
+
+function exchange<T>(ptr: *mut T, value: T): T {
+  return @atomicRmw<T>(ptr, :swap, value, :acqRel);
+}
+
+function main(): i32 {
+  let mut counter: u32 = 40;
+  let counterPtr: *mut u32 = (&mut counter) as *mut u32;
+  let previous: u32 = fetchAdd<u32>(counterPtr, 2);
+  if (previous != 40) {
+    return 1;
+  }
+
+  let mut flag: boolean = false;
+  let flagPtr: *mut boolean = (&mut flag) as *mut boolean;
+  if (exchange<boolean>(flagPtr, true)) {
+    return 2;
+  }
+  if (!flag) {
+    return 3;
+  }
+
+  return @atomicLoad<u32>(counterPtr, :seqCst) as i32;
+}

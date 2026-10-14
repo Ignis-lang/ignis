@@ -135,6 +135,44 @@ export namespace Hir {
     public volatile: boolean;
   }
 
+  /// What an atomic builtin does. `SWAP` through `XOR` are the `@atomicRmw`
+  /// operations; each of them returns the value the memory held before.
+  enum AtomicOperation {
+    LOAD,
+    STORE,
+    SWAP,
+    ADD,
+    SUB,
+    AND,
+    OR,
+    XOR,
+    COMPARE_EXCHANGE,
+    FENCE,
+  }
+
+  /// The memory ordering of an atomic builtin, written as an atom literal in
+  /// source (`:relaxed`, `:acquire`, `:release`, `:acqRel`, `:seqCst`).
+  enum AtomicOrdering {
+    RELAXED,
+    ACQUIRE,
+    RELEASE,
+    ACQ_REL,
+    SEQ_CST,
+  }
+
+  /// `@atomicLoad`, `@atomicStore`, `@atomicRmw`, `@atomicCompareExchange` and
+  /// `@fence`. `operands` holds the pointer first, then the stored value, the
+  /// rmw operand, or the expected and desired values; a fence has none.
+  /// `failureOrdering` is meaningful only for `COMPARE_EXCHANGE` and equals
+  /// `ordering` otherwise.
+  record HirBuiltinAtomic {
+    public operation: Hir::AtomicOperation;
+    public ty: Analyzer::TypeId;
+    public operands: Vector<Hir::HirId>;
+    public ordering: Hir::AtomicOrdering;
+    public failureOrdering: Hir::AtomicOrdering;
+  }
+
   /// `@splat<T[N]>(value)`: an array of type `ty` whose every element is a copy
   /// of `value`.
   record HirBuiltinSplat {
@@ -400,6 +438,7 @@ export namespace Hir {
     MinOf(Analyzer::TypeId),
     BuiltinLoad(Hir::HirBuiltinLoad),
     BuiltinStore(Hir::HirBuiltinStore),
+    BuiltinAtomic(Hir::HirBuiltinAtomic),
     BuiltinHash(Hir::HirBuiltinHash),
     BuiltinEq(Hir::HirBuiltinEq),
     BuiltinDropInPlace(Hir::HirBuiltinDropInPlace),
@@ -452,6 +491,75 @@ export namespace Hir {
     public kind: Hir::HirKind;
     public span: SourceSpan;
     public typeId: Analyzer::TypeId;
+  }
+
+  /// The ordering an atom names, without its leading colon.
+  function atomicOrderingFromName(name: &String): Option<Hir::AtomicOrdering> {
+    if (name.equals("relaxed")) {
+      return Option::SOME(Hir::AtomicOrdering::RELAXED);
+    }
+    if (name.equals("acquire")) {
+      return Option::SOME(Hir::AtomicOrdering::ACQUIRE);
+    }
+    if (name.equals("release")) {
+      return Option::SOME(Hir::AtomicOrdering::RELEASE);
+    }
+    if (name.equals("acqRel")) {
+      return Option::SOME(Hir::AtomicOrdering::ACQ_REL);
+    }
+    if (name.equals("seqCst")) {
+      return Option::SOME(Hir::AtomicOrdering::SEQ_CST);
+    }
+
+    return Option::NONE;
+  }
+
+  /// The `@atomicRmw` operation an atom names, without its leading colon.
+  function atomicRmwOperationFromName(name: &String): Option<Hir::AtomicOperation> {
+    if (name.equals("swap")) {
+      return Option::SOME(Hir::AtomicOperation::SWAP);
+    }
+    if (name.equals("add")) {
+      return Option::SOME(Hir::AtomicOperation::ADD);
+    }
+    if (name.equals("sub")) {
+      return Option::SOME(Hir::AtomicOperation::SUB);
+    }
+    if (name.equals("and")) {
+      return Option::SOME(Hir::AtomicOperation::AND);
+    }
+    if (name.equals("or")) {
+      return Option::SOME(Hir::AtomicOperation::OR);
+    }
+    if (name.equals("xor")) {
+      return Option::SOME(Hir::AtomicOperation::XOR);
+    }
+
+    return Option::NONE;
+  }
+
+  /// The builtin an atomic operation is written with, without its `@`.
+  function atomicBuiltinName(operation: Hir::AtomicOperation): str {
+    return match (operation) {
+      Hir::AtomicOperation::LOAD -> "atomicLoad",
+      Hir::AtomicOperation::STORE -> "atomicStore",
+      Hir::AtomicOperation::COMPARE_EXCHANGE -> "atomicCompareExchange",
+      Hir::AtomicOperation::FENCE -> "fence",
+      _ -> "atomicRmw",
+    };
+  }
+
+  /// Whether an `@atomicRmw` operation is arithmetic or bitwise, and so needs
+  /// an integer type.
+  function atomicOperationNeedsInteger(operation: Hir::AtomicOperation): boolean {
+    return match (operation) {
+      Hir::AtomicOperation::ADD
+      | Hir::AtomicOperation::SUB
+      | Hir::AtomicOperation::AND
+      | Hir::AtomicOperation::OR
+      | Hir::AtomicOperation::XOR -> true,
+      _ -> false,
+    };
   }
 
   function offsetHirIdVector(ids: Vector<Hir::HirId>, offset: u32): Vector<Hir::HirId> {
@@ -602,6 +710,13 @@ export namespace Hir {
         ptr: Hir::offsetHirId(store.ptr, offset),
         value: Hir::offsetHirId(store.value, offset),
         volatile: store.volatile,
+      }),
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> Hir::HirKind::BuiltinAtomic(Hir::HirBuiltinAtomic {
+        operation: atomicNode.operation,
+        ty: atomicNode.ty,
+        operands: Hir::offsetHirIdVector(atomicNode.operands, offset),
+        ordering: atomicNode.ordering,
+        failureOrdering: atomicNode.failureOrdering,
       }),
       Hir::HirKind::BuiltinHash(hashNode) -> Hir::HirKind::BuiltinHash(Hir::HirBuiltinHash {
         ty: hashNode.ty,
@@ -758,6 +873,17 @@ export namespace Hir {
       Hir::HirKind::BuiltinStore(storeNode) -> {
         children.push(storeNode.ptr);
         children.push(storeNode.value);
+      },
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+        let mut index: u64 = 0;
+
+        while (index < atomicNode.operands.length()) {
+          if (let Option::SOME(operand) = atomicNode.operands.get(index)) {
+            children.push(*operand);
+          }
+
+          index += 1;
+        }
       },
       Hir::HirKind::BuiltinHash(hashNode) -> {
         children.push(hashNode.value);

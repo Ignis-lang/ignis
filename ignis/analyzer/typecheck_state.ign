@@ -1575,6 +1575,325 @@ export namespace Analyzer {
       return false;
     }
 
+    /// Whether a value of `typeId` may move to another thread (`sync` false,
+    /// the `Send` trait) or be shared between threads by reference (`sync`
+    /// true, the `Sync` trait), judged from the type's structure.
+    ///
+    /// Raw pointers are neither: what they point to is not tracked. A shared
+    /// reference, or a slice, is either one only when its referent is Sync,
+    /// since every holder reads the same value. A function value is neither,
+    /// because its type does not say what it captured; callers judge closure
+    /// arguments by their captures instead. A record or enum that declares the
+    /// trait in `@implements` is taken at its word; any other is judged by its
+    /// fields or payloads, with an instance's type arguments substituted in. A
+    /// type parameter is judged by the bounds it declares among `scope`, and
+    /// one that is not in scope is accepted rather than judged against the
+    /// wrong declaration. A record or enum met again while it is being judged
+    /// adds nothing new and answers yes.
+    function isThreadSafeType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+      sync: boolean,
+      scope: &Vector<Analyzer::DefinitionId>,
+      visited: &mut Vector<u32>,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      // A cyclic alias is reported where it is declared.
+      if (resolved.cycleAlias.isSome()) {
+        return true;
+      }
+
+      let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
+        return true;
+      };
+
+      let mut directAnswer: Option<boolean> = Option::NONE;
+      let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut componentsSync: boolean = sync;
+      let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut typeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut paramSymbol: Option<Analyzer::SymbolId> = Option::NONE;
+
+      match (type_) {
+        Analyzer::Type::I8
+        | Analyzer::Type::I16
+        | Analyzer::Type::I32
+        | Analyzer::Type::I64
+        | Analyzer::Type::U8
+        | Analyzer::Type::U16
+        | Analyzer::Type::U32
+        | Analyzer::Type::U64
+        | Analyzer::Type::F32
+        | Analyzer::Type::F64
+        | Analyzer::Type::BOOLEAN
+        | Analyzer::Type::CHAR
+        | Analyzer::Type::STR
+        | Analyzer::Type::VOID
+        | Analyzer::Type::NEVER
+        | Analyzer::Type::ATOM
+        | Analyzer::Type::Range(_)
+        | Analyzer::Type::RawFunction(_)
+        | Analyzer::Type::Alias(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Pointer(_) | Analyzer::Type::Function(_) -> {
+          directAnswer = Option::SOME(false);
+        },
+        Analyzer::Type::Reference(reference) -> {
+          components.push(reference.referent);
+
+          if (!reference.mutable) {
+            componentsSync = true;
+          }
+        },
+        Analyzer::Type::Slice(element) -> {
+          components.push(element);
+          componentsSync = true;
+        },
+        Analyzer::Type::FixedArray(element, _) -> {
+          components.push(element);
+        },
+        Analyzer::Type::Tuple(tuple) -> {
+          components = Analyzer::Typecheck::copyTypeIdVector(&tuple.elements);
+        },
+        Analyzer::Type::Record(defId) -> {
+          nominal = Option::SOME(defId);
+        },
+        Analyzer::Type::Enum(defId) -> {
+          nominal = Option::SOME(defId);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          nominal = Option::SOME(instance.definition);
+          typeArguments = Analyzer::Typecheck::copyTypeIdVector(&instance.typeArguments);
+        },
+        Analyzer::Type::Param(symbol) -> {
+          paramSymbol = Option::SOME(symbol);
+        },
+      };
+
+      if (let Option::SOME(answer) = directAnswer) {
+        return answer;
+      }
+
+      if (let Option::SOME(symbol) = paramSymbol) {
+        return Analyzer::Typecheck::typeParamDeclaresThreadSafety(defStore, scope, symbol, sync);
+      }
+
+      if (let Option::SOME(defId) = nominal) {
+        if (Analyzer::Typecheck::declaresThreadSafety(defStore, defId, sync)) {
+          return true;
+        }
+
+        let typeRaw: u32 = resolved.typeId.raw();
+
+        if (Analyzer::Typecheck::copyVisitAlreadySeen(visited, typeRaw)) {
+          return true;
+        }
+
+        components = Analyzer::Typecheck::nominalMemberTypes(defStore, typeStore, defId, &typeArguments);
+
+        let mut pushRef: &mut Vector<u32> = visited;
+        pushRef.push(typeRaw);
+
+        let answer: boolean = Analyzer::Typecheck::allThreadSafe(defStore, typeStore, &components, sync, scope, visited);
+
+        let mut popRef: &mut Vector<u32> = visited;
+        popRef.pop();
+        return answer;
+      }
+
+      return Analyzer::Typecheck::allThreadSafe(defStore, typeStore, &components, componentsSync, scope, visited);
+    }
+
+    function allThreadSafe(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      types: &Vector<Analyzer::TypeId>,
+      sync: boolean,
+      scope: &Vector<Analyzer::DefinitionId>,
+      visited: &mut Vector<u32>,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < types.length()) {
+        if (let Option::SOME(member) = types.get(index)) {
+          if (!Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, *member, sync, scope, visited)) {
+            return false;
+          }
+        }
+
+        index += 1;
+      }
+
+      return true;
+    }
+
+    /// The name of the lang trait `isThreadSafeType` judges.
+    function threadSafetyTraitName(sync: boolean): str {
+      if (sync) {
+        return "Sync";
+      }
+
+      return "Send";
+    }
+
+    /// Whether the record or enum lists `Send` (or `Sync`) in its `@implements`.
+    function declaresThreadSafety(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+      sync: boolean,
+    ): boolean {
+      let traitName: str = Analyzer::Typecheck::threadSafetyTraitName(sync);
+      let mut traits: Vector<String> = Vector::new<String>();
+
+      match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Record(record_)) -> {
+          traits = Analyzer::Typecheck::copyStringVector(&record_.implementedTraits);
+        },
+        Option::SOME(Analyzer::Definition::Enum(enum_)) -> {
+          traits = Analyzer::Typecheck::copyStringVector(&enum_.implementedTraits);
+        },
+        _ -> {},
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < traits.length()) {
+        if (let Option::SOME(name) = traits.get(index)) {
+          if (name.equals(traitName)) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether the type parameter named `symbol` among `scope` declares `Send`
+    /// (or `Sync`). A parameter not in `scope` is accepted.
+    function typeParamDeclaresThreadSafety(
+      defStore: &mut Analyzer::DefinitionStore,
+      scope: &Vector<Analyzer::DefinitionId>,
+      symbol: Analyzer::SymbolId,
+      sync: boolean,
+    ): boolean {
+      let traitName: str = Analyzer::Typecheck::threadSafetyTraitName(sync);
+      let mut index: u64 = 0;
+
+      while (index < scope.length()) {
+        if (let Option::SOME(paramDefId) = scope.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+            if (typeParam.name.raw() == symbol.raw()) {
+              let mut boundIndex: u64 = 0;
+
+              while (boundIndex < typeParam.bounds.length()) {
+                if (let Option::SOME(bound) = typeParam.bounds.get(boundIndex)) {
+                  if (bound.equals(traitName)) {
+                    return true;
+                  }
+                }
+
+                boundIndex += 1;
+              }
+
+              return false;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return true;
+    }
+
+    /// The field types of a record, or the payload types of every variant of
+    /// an enum, with `typeArguments` substituted for the declaration's type
+    /// parameters when an instance supplies them.
+    function nominalMemberTypes(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      defId: Analyzer::DefinitionId,
+      typeArguments: &Vector<Analyzer::TypeId>,
+    ): Vector<Analyzer::TypeId> {
+      let mut memberDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Record(record_)) -> {
+          memberDefIds = Analyzer::Typecheck::copyDefinitionIdVector(&record_.fields);
+          typeParams = Analyzer::Typecheck::copyDefinitionIdVector(&record_.typeParams);
+        },
+        Option::SOME(Analyzer::Definition::Enum(enum_)) -> {
+          memberDefIds = Analyzer::Typecheck::copyDefinitionIdVector(&enum_.variants);
+          typeParams = Analyzer::Typecheck::copyDefinitionIdVector(&enum_.typeParams);
+        },
+        _ -> {},
+      };
+
+      let mut declared: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < memberDefIds.length()) {
+        if (let Option::SOME(memberDefId) = memberDefIds.get(memberIndex)) {
+          match (defStore.get(*memberDefId)) {
+            Option::SOME(Analyzer::Definition::Field(field)) -> {
+              declared.push(field.fieldType);
+            },
+            Option::SOME(Analyzer::Definition::Variant(variant)) -> {
+              let mut payloadIndex: u64 = 0;
+
+              while (payloadIndex < variant.payload.length()) {
+                if (let Option::SOME(payloadType) = variant.payload.get(payloadIndex)) {
+                  declared.push(*payloadType);
+                }
+
+                payloadIndex += 1;
+              }
+            },
+            _ -> {},
+          };
+        }
+
+        memberIndex += 1;
+      }
+
+      if (typeArguments.length() == 0) {
+        return declared;
+      }
+
+      let mut paramSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < typeParams.length()) {
+        if (let Option::SOME(paramDefId) = typeParams.get(paramIndex)) {
+          if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+            paramSymbols.push(typeParam.name);
+          }
+        }
+
+        paramIndex += 1;
+      }
+
+      let mut substituted: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut declaredIndex: u64 = 0;
+
+      while (declaredIndex < declared.length()) {
+        if (let Option::SOME(memberType) = declared.get(declaredIndex)) {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          substituted.push(typeStoreRef.substitute(*memberType, &paramSymbols, typeArguments));
+        }
+
+        declaredIndex += 1;
+      }
+
+      return substituted;
+    }
+
     /// Copy answer for a record type, honoring `@implements(...)` metadata.
     /// Mirrors the Rust `is_copy_with_defs_inner`: `Drop` forces non-Copy,
     /// `Copy` forces Copy, otherwise the record copies when every field type

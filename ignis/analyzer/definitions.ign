@@ -488,6 +488,9 @@ export namespace Analyzer {
     /// raw definition id. Filled once after monomorphization; every backend
     /// reads it.
     symbolNames: HashMap<u32, String>;
+    /// Raw ids of the parameters written with `@sendable`. Held aside, like
+    /// `docs`, so the many parameters without it carry no field for it.
+    sendableParams: HashMap<u32, boolean>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -504,7 +507,19 @@ export namespace Analyzer {
         moduleSymbolPaths: HashMap::new<u64, String>(),
         symbolOrigins: HashMap::new<u32, Analyzer::SymbolOrigin>(),
         symbolNames: HashMap::new<u32, String>(),
+        sendableParams: HashMap::new<u32, boolean>(),
       };
+    }
+
+    /// Record that the parameter `id` was written with `@sendable`.
+    public markSendable(&mut self, id: Analyzer::DefinitionId): void {
+      self.sendableParams.insert(id.raw(), true);
+    }
+
+    /// Whether the parameter `id` was written with `@sendable`.
+    public isSendable(&self, id: Analyzer::DefinitionId): boolean {
+      let raw: u32 = id.raw();
+      return self.sendableParams.get(&raw).isSome();
     }
 
     /// Record the encoded symbol segments of module `moduleIndex`'s logical

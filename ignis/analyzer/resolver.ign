@@ -59,6 +59,13 @@ export namespace Analyzer {
       /// name is read against this chain before the flat index answers, so
       /// two namespaces may each declare a `Point` and keep them apart.
       public namespaceChain: Vector<String>;
+      /// `@sendable` parameters waiting for their type to be judged, with the
+      /// span and name of each. They are judged once every alias in the
+      /// module is resolved, since a parameter may name an alias declared
+      /// after it.
+      public sendableParams: Vector<Analyzer::DefinitionId>;
+      public sendableSpans: Vector<SourceSpan>;
+      public sendableNames: Vector<String>;
     }
 
     /// Type-parameter scope for one item walk (Record, Enum, or Function).
@@ -612,6 +619,88 @@ export namespace Analyzer {
         Analyzer::Definition::Trait(_) -> {},
         Analyzer::Definition::Method(_) -> {},
       };
+    }
+
+    /// Queues a `@sendable` parameter for `checkSendableParameters`.
+    function checkSendableParameter(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      module: &Ast::Module,
+      paramDefId: Analyzer::DefinitionId,
+      paramPatId: Ast::PatternId,
+    ): void {
+      if (!defStore.isSendable(paramDefId)) {
+        return;
+      }
+
+      let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(paramPatId) else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      stateRef.sendableParams.push(paramDefId);
+      stateRef.sendableSpans.push(binding.span);
+      stateRef.sendableNames.push(binding.name.clone());
+    }
+
+    /// Rejects `@sendable` on a parameter whose declared type, with aliases
+    /// followed, is not a function type: the attribute judges what a closure
+    /// captures, and only a function value can carry captures. A cyclic alias
+    /// is reported where it is declared and is not judged here.
+    function checkSendableParameters(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < state.sendableParams.length()) {
+        let Option::SOME(paramDefId) = state.sendableParams.get(index) else {
+          index += 1;
+          continue;
+        };
+        let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(*paramDefId)) {
+          declaredType = Option::SOME(variable.declaredType);
+        }
+
+        let Option::SOME(typeId) = declaredType else {
+          index += 1;
+          continue;
+        };
+
+        let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+        let mut accepted: boolean = resolved.cycleAlias.isSome();
+
+        match (typeStore.get(resolved.typeId)) {
+          Option::SOME(Analyzer::Type::Function(_)) | Option::NONE -> {
+            accepted = true;
+          },
+          _ -> {},
+        };
+
+        if (!accepted) {
+          let Option::SOME(span) = state.sendableSpans.get(index) else {
+            index += 1;
+            continue;
+          };
+          let Option::SOME(name) = state.sendableNames.get(index) else {
+            index += 1;
+            continue;
+          };
+          let message: String = `\`@sendable\` on parameter '${name.toStr()}', whose type is not a function type`;
+          emitTypeDiagnosticLabeled(
+            state,
+            *span,
+            DiagnosticCode::SENDABLE_PARAMETER_NOT_FUNCTION,
+            message.toStr(),
+            "`@sendable` only applies to a parameter of function type",
+          );
+        }
+
+        index += 1;
+      }
     }
 
     /// Patch `VariableDef.declaredType` at `varDefId` via `DefinitionStore::replace`.
@@ -1825,6 +1914,7 @@ export namespace Analyzer {
               if (let Option::SOME(annotationTypeId) = annotationOpt) {
                 let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
                 patchVariableType(defStore, *paramDefId, resolved);
+                checkSendableParameter(state, defStore, module, *paramDefId, *paramPatId);
               }
               paramIndex += 1;
             }
@@ -2082,6 +2172,7 @@ export namespace Analyzer {
         if (let Option::SOME(annotationTypeId) = annotationOpt) {
           let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
           patchVariableType(defStore, *paramDefId, resolved);
+          checkSendableParameter(state, defStore, module, *paramDefId, *paramPatId);
         }
 
         paramIndex += 1;
@@ -2594,6 +2685,9 @@ export namespace Analyzer {
         programDefs: Vector::new<Analyzer::DefinitionId>(),
         programQualifiedNames: Vector::new<String>(),
         namespaceChain: Vector::new<String>(),
+        sendableParams: Vector::new<Analyzer::DefinitionId>(),
+        sendableSpans: Vector::new<SourceSpan>(),
+        sendableNames: Vector::new<String>(),
       };
 
       buildGlobalNameIndex(&mut state, defStore, pass1);
@@ -2638,6 +2732,8 @@ export namespace Analyzer {
         );
         cycleIndex += 1;
       }
+
+      checkSendableParameters(&mut state, defStore, typeStore);
 
       return Analyzer::Resolver::ResolverOutput { diagnostics: state.diagnostics };
     }

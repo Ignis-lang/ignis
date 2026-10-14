@@ -74,6 +74,7 @@ export namespace Analyzer {
       UNUSED_IMPORT,
       UNUSED_MUT,
       DEPRECATED,
+      THREAD_SAFETY,
     }
 
     /// Reporting level for one lint. `ALLOW` suppresses the lint entirely.
@@ -188,6 +189,9 @@ export namespace Analyzer {
       }
       if (argument.equals("deprecated")) {
         return Option::SOME(Analyzer::Lint::LintKind::DEPRECATED);
+      }
+      if (argument.equals("thread_safety")) {
+        return Option::SOME(Analyzer::Lint::LintKind::THREAD_SAFETY);
       }
 
       return Option::NONE;
@@ -1119,8 +1123,11 @@ export namespace Analyzer {
     /// `mut`, unused imports, deprecated calls.
     function lintModule(
       defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       overlay: &Analyzer::Imports::ImportOverlay,
@@ -1188,9 +1195,285 @@ export namespace Analyzer {
         );
       }
 
+      let threadSafetyLevel: Analyzer::Lint::LintLevel = Analyzer::Lint::effectiveLevel(
+        &overrides,
+        Analyzer::Lint::LintKind::THREAD_SAFETY,
+      );
+      Analyzer::Lint::lintThreadSafetyDeclarations(
+        &mut diagnostics,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+        &module.roots,
+        threadSafetyLevel,
+      );
+
       return Analyzer::Lint::LintOutput {
         diagnostics: diagnostics,
       };
+    }
+
+    /// Thread-safety declaration lint (A0254): a record or enum that declares
+    /// `@implements(Send)` or `@implements(Sync)` while a field or payload is
+    /// not Send or Sync. The declaration is honored either way; the lint only
+    /// says the compiler can no longer check it. A directive written on the
+    /// record or enum itself overrides the module level for that declaration.
+    function lintThreadSafetyDeclarations(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemIds: &Vector<Ast::ItemId>,
+      moduleLevel: Analyzer::Lint::LintLevel,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < itemIds.length()) {
+        let Option::SOME(itemId) = itemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(item) = module.items.get(*itemId) else {
+          index += 1;
+          continue;
+        };
+
+        match (item) {
+          Ast::Item::Node::Record(record_) -> {
+            Analyzer::Lint::lintThreadSafetyItem(
+              diagnostics,
+              defStore,
+              typeStore,
+              symbols,
+              pass1,
+              pass2,
+              *itemId,
+              &record_.metadata.attributes,
+              record_.span,
+              moduleLevel,
+            );
+          },
+          Ast::Item::Node::Enum(enum_) -> {
+            Analyzer::Lint::lintThreadSafetyItem(
+              diagnostics,
+              defStore,
+              typeStore,
+              symbols,
+              pass1,
+              pass2,
+              *itemId,
+              &enum_.metadata.attributes,
+              enum_.span,
+              moduleLevel,
+            );
+          },
+          Ast::Item::Node::Namespace(namespaceItem) -> {
+            Analyzer::Lint::lintThreadSafetyDeclarations(
+              diagnostics,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              pass1,
+              pass2,
+              &namespaceItem.items,
+              moduleLevel,
+            );
+          },
+          Ast::Item::Node::Export(exportItem) -> {
+            if (let Option::SOME(innerItemId) = exportItem.declaration) {
+              let mut inner: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+              inner.push(innerItemId);
+              Analyzer::Lint::lintThreadSafetyDeclarations(
+                diagnostics,
+                defStore,
+                typeStore,
+                symbols,
+                module,
+                pass1,
+                pass2,
+                &inner,
+                moduleLevel,
+              );
+            }
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+    }
+
+    function lintThreadSafetyItem(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      attributes: &Vector<Ast::Attribute>,
+      span: SourceSpan,
+      moduleLevel: Analyzer::Lint::LintLevel,
+    ): void {
+      let Option::SOME(defId) = Analyzer::Checks::findItemDef(pass1, pass2, itemId) else {
+        return;
+      };
+
+      let mut itemOverrides: Analyzer::Lint::LintOverrides = Analyzer::Lint::LintOverrides {
+        kinds: Vector::new<Analyzer::Lint::LintKind>(),
+        levels: Vector::new<Analyzer::Lint::LintLevel>(),
+      };
+      Analyzer::Lint::collectAttributeDirectives(diagnostics, &mut itemOverrides, attributes);
+
+      // Only a directive naming this lint replaces the module level.
+      let mut level: Analyzer::Lint::LintLevel = moduleLevel;
+
+      if (Analyzer::Lint::overridesName(&itemOverrides, Analyzer::Lint::LintKind::THREAD_SAFETY)) {
+        level = Analyzer::Lint::effectiveLevel(&itemOverrides, Analyzer::Lint::LintKind::THREAD_SAFETY);
+      }
+
+      if (level == Analyzer::Lint::LintLevel::ALLOW) {
+        return;
+      }
+
+      Analyzer::Lint::lintThreadSafetyDeclaration(diagnostics, defStore, typeStore, symbols, defId, span, false, level);
+      Analyzer::Lint::lintThreadSafetyDeclaration(diagnostics, defStore, typeStore, symbols, defId, span, true, level);
+    }
+
+    function overridesName(
+      overrides: &Analyzer::Lint::LintOverrides,
+      kind: Analyzer::Lint::LintKind,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < overrides.kinds.length()) {
+        if (let Option::SOME(candidate) = overrides.kinds.get(index)) {
+          if (*candidate == kind) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Reports the first field or payload that keeps a declaration of `Send`
+    /// (`sync` false) or `Sync` (`sync` true) from holding structurally.
+    function lintThreadSafetyDeclaration(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+      span: SourceSpan,
+      sync: boolean,
+      level: Analyzer::Lint::LintLevel,
+    ): void {
+      if (!Analyzer::Typecheck::declaresThreadSafety(defStore, defId, sync)) {
+        return;
+      }
+
+      let mut kindName: str = "record";
+      let mut ownTypeRaw: u32 = 0;
+      let mut typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut members: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Record(record_)) -> {
+          ownTypeRaw = record_.typeId.raw();
+          typeParams = Analyzer::Typecheck::copyDefinitionIdVector(&record_.typeParams);
+          members = Analyzer::Typecheck::copyDefinitionIdVector(&record_.fields);
+        },
+        Option::SOME(Analyzer::Definition::Enum(enum_)) -> {
+          kindName = "enum";
+          ownTypeRaw = enum_.typeId.raw();
+          typeParams = Analyzer::Typecheck::copyDefinitionIdVector(&enum_.typeParams);
+          members = Analyzer::Typecheck::copyDefinitionIdVector(&enum_.variants);
+        },
+        _ -> {},
+      };
+
+      let traitName: str = Analyzer::Typecheck::threadSafetyTraitName(sync);
+      let mut index: u64 = 0;
+
+      while (index < members.length()) {
+        let Option::SOME(memberDefId) = members.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut memberTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        let mut memberKind: str = "field";
+
+        match (defStore.get(*memberDefId)) {
+          Option::SOME(Analyzer::Definition::Field(field)) -> {
+            memberTypes.push(field.fieldType);
+          },
+          Option::SOME(Analyzer::Definition::Variant(variant)) -> {
+            memberKind = "variant";
+            memberTypes = Analyzer::Typecheck::copyTypeIdVector(&variant.payload);
+          },
+          _ -> {},
+        };
+
+        let mut typeIndex: u64 = 0;
+
+        while (typeIndex < memberTypes.length()) {
+          let Option::SOME(memberType) = memberTypes.get(typeIndex) else {
+            typeIndex += 1;
+            continue;
+          };
+
+          // The declaration itself is what is being questioned, so the
+          // record is not taken at its word while its own members are judged.
+          let mut visited: Vector<u32> = Vector::new<u32>();
+          visited.push(ownTypeRaw);
+
+          if (!Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, *memberType, sync, &typeParams, &mut visited)) {
+            let mut ownerName: str = "?";
+            let mut memberName: str = "?";
+
+            if (let Option::SOME(definition) = defStore.get(defId)) {
+              if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+                ownerName = name;
+              }
+            }
+
+            if (let Option::SOME(definition) = defStore.get(*memberDefId)) {
+              if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+                memberName = name;
+              }
+            }
+
+            let typeName: String = typeStore.nameOfResolved(*memberType, &*defStore, &*symbols);
+            let message: String = `${kindName} '${ownerName}' declares \`@implements(${traitName})\`, but ${memberKind} '${memberName}' has type '${typeName.toStr()}', which is not ${traitName}`;
+            let label: String = `the compiler cannot check that '${ownerName}' is ${traitName}; \`@allow(thread_safety)\` keeps the declaration without this warning`;
+
+            Analyzer::Lint::emitLint(
+              diagnostics,
+              Analyzer::Lint::levelSeverity(level),
+              span,
+              DiagnosticCode::THREAD_SAFETY_DECLARATION,
+              message.toStr(),
+              label.toStr(),
+            );
+            return;
+          }
+
+          typeIndex += 1;
+        }
+
+        index += 1;
+      }
     }
   }
 }

@@ -2,7 +2,7 @@
 
 Ignis now has two trait layers:
 
-1. **Lang traits** (`Drop`, `Clone`, `Copy`) used by ownership and codegen.
+1. **Lang traits** (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) used by ownership, codegen and thread-safety checks.
 2. **User-defined traits** (`trait Name { ... }`) used as method contracts on records and, for canonical equality, enums.
 
 It also has an extension method system (`@extension`) for adding methods to existing types.
@@ -18,6 +18,8 @@ Lang traits are built-in traits that the compiler understands and uses for code 
 | `Drop` | `drop(&mut self): void` | Custom cleanup when value goes out of scope |
 | `Clone` | `clone(&self): Self` | Explicit duplication via `.clone()` |
 | `Copy` | *(none)* | Value is copied (not moved) on assignment |
+| `Send` | *(none)* | Value may move to another thread |
+| `Sync` | *(none)* | Value may be shared between threads through `&` |
 
 Lang traits are fixed and compiler-defined. User-defined traits are a separate feature covered below.
 
@@ -191,6 +193,92 @@ When a record method implements a trait method, the signature must match exactly
 - Return type
 
 If a required trait method is missing, compilation fails.
+
+### `Send` and `Sync`
+
+`Send` and `Sync` need no declaration or import: they are accepted in `@implements` and as bounds.
+The compiler answers them from a type's structure:
+
+| Type | `Send` | `Sync` |
+|------|--------|--------|
+| Integer and float primitives, `boolean`, `char`, `str`, `void`, `never`, atoms, ranges, raw C function pointers | yes | yes |
+| `*T`, `*mut T` | no | no |
+| `&T`, slices `T[]` | when `T` is `Sync` | when `T` is `Sync` |
+| `&mut T` | when `T` is `Send` | when `T` is `Sync` |
+| Fixed arrays, tuples | when every element is | when every element is |
+| Records, enums, generic instances | declared, or every field / payload is | declared, or every field / payload is |
+| Function values | no; only a call argument is judged, at the call (below) | no; only a call argument is judged, at the call (below) |
+| Type parameters | when the parameter declares the bound | when the parameter declares the bound |
+
+A function type does not record what a closure captured, so a function-typed argument bound to a
+`Send` or `Sync` type parameter, or passed to a `@sendable` parameter, is judged where it is
+passed, once captures are known. Anywhere else, such as a field of `Holder<() -> i32>`, a function
+type is neither `Send` nor `Sync`.
+
+- a closure literal: every capture moved in by value has to be `Send` (`Sync` for a `Sync` bound),
+  and every capture read by reference has to be `Sync`. For a `Sync` bound, a capture by mutable
+  reference is rejected outright: a closure shared between threads may run on several of them at
+  once. Otherwise A0252,
+- a named function: accepted, it has no environment,
+- a `@sendable` parameter of the enclosing function, forwarded as is: accepted, its own caller was
+  checked,
+- any other function value: rejected (A0253).
+
+#### `@sendable`
+
+A type parameter `F: Send` cannot be called inside the function. `@sendable` on a parameter of
+function type gives the same check at every call while keeping the parameter an ordinary,
+callable function value. Arguments are judged with the `Send` rules above. `@sendable` on a
+parameter that is not of function type is an error (A0255). An alias is judged by the type it names: an alias to a function type is accepted, an alias to anything else is A0255, and so is a generic alias, which is not resolved to a function type. A parameter typed by an alias cannot be called today (A0024), so spell the function type out when the task is called. It combines with `@noescape`, which
+keeps deciding where by-reference captures are allowed.
+
+```ignis
+function spawn(@sendable task: () -> i32): i32 {
+  return task();
+}
+
+function later(@sendable task: () -> i32): i32 {
+  return spawn(task);   // ok: forwarded
+}
+```
+
+A record or enum can declare `@implements(Send)` or `@implements(Sync)` when its structure does not
+prove it, for example when it guards a raw pointer itself. The declaration wins, and the
+`thread_safety` lint reports it (A0254, a warning by default) naming the first field or payload that
+breaks it. `@allow(thread_safety)` on the record or enum, or on a top-level function for the whole
+module, silences it.
+
+```ignis
+@allow(thread_safety)
+@implements(Send, Sync)
+record Handle {
+  public raw: *mut i32;
+}
+
+function spawn<F: Send>(task: F): void {}
+
+function main(): void {
+  let count: i32 = 3;
+  spawn((): i32 -> count);   // ok: captures an i32
+}
+```
+
+### Trait Bounds
+
+A type parameter can be bounded by one or more traits, joined with `&`. Every instantiation has to
+satisfy every bound, whether the type argument is written or inferred, and whether the generic is
+a function, a method, a record or an enum:
+
+- A record or enum satisfies a bound by naming the trait in `@implements`. Having methods with the
+  right names is not enough.
+- A type parameter satisfies a bound only when it declares the same bound itself.
+- `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
+  by every Copy type, since primitives have no declaration to write `@implements` on.
+- `Send` and `Sync` are judged from the type's structure, or taken from an `@implements(Send)` /
+  `@implements(Sync)` declaration. A closure bound to a `Send` or `Sync` parameter is judged by
+  what it captures (A0252); any other function value is rejected (A0253).
+
+A type argument that misses a bound is an error (A0247).
 
 ### Current Limit
 
@@ -428,6 +516,8 @@ When `std = false` (standalone mode), prelude modules are not loaded and these m
 | `@implements(Drop)` | Declare custom drop behavior |
 | `@implements(Clone)` | Declare explicit clone method |
 | `@implements(Copy)` | Force copy semantics |
+| `@implements(Send)` | Declare the type may move between threads |
+| `@implements(Sync)` | Declare the type may be shared between threads |
 | `@implements(MyTrait)` | Declare a user-defined trait implementation on a record |
 
 ### Function Attributes
@@ -452,7 +542,10 @@ When `std = false` (standalone mode), prelude modules are not loaded and these m
 | `@warn(lint_name)` | Promote a lint to warning level |
 | `@deny(lint_name)` | Promote a lint to error level |
 
-Available lints: `unused_variable`, `unused_import`, `deprecated`.
+Available lints: `unused_variable`, `unused_import`, `unused_mut`, `deprecated`, `thread_safety`.
+
+Directives on top-level functions apply to the whole module. `thread_safety` can also be set on the
+record or enum it reports, which overrides the module level for that declaration.
 
 ### Field Attributes
 
@@ -484,3 +577,8 @@ Available lints: `unused_variable`, `unused_import`, `deprecated`.
 | A0146 | Static methods are not allowed in trait declarations | Error |
 | A0148 | Type declares `@implements(Copy)` but a record field is non-Copy | Error |
 | A0149 | Type declares `@implements(Copy)` but an enum payload is non-Copy | Error |
+| A0247 | Type argument does not satisfy a bound of its type parameter | Error |
+| A0252 | Closure bound to a `Send` / `Sync` parameter captures a value that is not thread-safe | Error |
+| A0253 | Function value bound to a `Send` / `Sync` parameter whose captures cannot be known | Error |
+| A0254 | `@implements(Send)` / `@implements(Sync)` on a type whose structure does not support it (`thread_safety` lint) | Warning |
+| A0255 | `@sendable` on a parameter that is not of function type | Error |

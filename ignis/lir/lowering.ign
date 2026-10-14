@@ -133,6 +133,7 @@ export namespace LirLowering {
       Hir::HirKind::MinOf(_) -> "MinOf",
       Hir::HirKind::BuiltinLoad(_) -> "BuiltinLoad",
       Hir::HirKind::BuiltinStore(_) -> "BuiltinStore",
+      Hir::HirKind::BuiltinAtomic(_) -> "BuiltinAtomic",
       Hir::HirKind::BuiltinHash(_) -> "BuiltinHash",
       Hir::HirKind::BuiltinEq(_) -> "BuiltinEq",
       Hir::HirKind::BuiltinDropInPlace(_) -> "BuiltinDropInPlace",
@@ -2111,6 +2112,43 @@ export namespace LirLowering {
           ty: storeNode.ty,
           volatile: storeNode.volatile,
         }));
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+        let mut operands: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+        let mut operandIndex: u64 = 0;
+
+        while (operandIndex < atomicNode.operands.length()) {
+          if (let Option::SOME(operand) = atomicNode.operands.get(operandIndex)) {
+            operands.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *operand));
+          }
+
+          operandIndex += 1;
+        }
+
+        let yieldsValue: boolean = match (atomicNode.operation) {
+          Hir::AtomicOperation::STORE | Hir::AtomicOperation::FENCE -> false,
+          _ -> true,
+        };
+
+        let mut dest: Option<Lir::TempId> = Option::NONE;
+        if (yieldsValue) {
+          dest = Option::SOME(LirLowering::freshTemp(function_, atomicNode.ty, nodeSpan));
+        }
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Atomic(Lir::InstrAtomic {
+          dest: dest,
+          operation: atomicNode.operation,
+          ty: atomicNode.ty,
+          operands: operands,
+          ordering: atomicNode.ordering,
+          failureOrdering: atomicNode.failureOrdering,
+        }));
+
+        if (let Option::SOME(resultTemp) = dest) {
+          return Lir::Operand::Temp(resultTemp);
+        }
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },

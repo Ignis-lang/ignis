@@ -65,6 +65,32 @@ reorders it relative to other volatile accesses — but volatile is not synchron
 accesses are not atomic, they are not memory barriers, and they order nothing except other
 volatile accesses. Use real synchronization primitives for shared state between threads.
 
+## Atomics
+
+| Builtin | What it does |
+| --- | --- |
+| `@atomicLoad<T>(ptr, ordering)` | Reads a `T` atomically |
+| `@atomicStore<T>(ptr, value, ordering)` | Writes a `T` atomically |
+| `@atomicRmw<T>(ptr, operation, value, ordering)` | Atomically swaps, adds, subtracts, ands, ors or xors, returning the previous value |
+| `@atomicCompareExchange<T>(ptr, expected, desired, success, failure)` | Atomically replaces `expected` with `desired`, returning the value it observed |
+| `@fence(ordering)` | A memory fence |
+
+These are the primitives the standard library builds its atomic types on; prefer those
+types in ordinary code. `T` is an integer primitive, `boolean` or a raw pointer. The
+ordering is an atom literal written at the call: `:relaxed`, `:acquire`, `:release`,
+`:acqRel` or `:seqCst`. A load takes `:relaxed`, `:acquire` or `:seqCst`; a store takes
+`:relaxed`, `:release` or `:seqCst`; the failure ordering of a compare-exchange takes the
+same as a load; everything else takes any ordering. The `@atomicRmw` operation is one of
+`:swap`, `:add`, `:sub`, `:and`, `:or` and `:xor`, and all but `:swap` need an integer `T`.
+The compare-exchange is strong: the exchange happened exactly when the result equals
+`expected`.
+
+```ignis
+let previous: u64 = @atomicRmw<u64>(counter, :add, 1, :relaxed);
+```
+
+The C backend emits GCC `__atomic_*` builtins. The QBE backend does not support atomics yet.
+
 ## Zero and fill
 
 `@zeroed<T>()` is a value of `T` whose every byte is zero, and `@splat<T[N]>(value)` is a

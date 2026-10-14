@@ -1364,6 +1364,17 @@ export namespace Escape {
       Hir::HirKind::BuiltinSplat(splatNode) -> {
         Escape::scanForEscapes(hir, defStore, aliases, escaping, splatNode.value);
       },
+      Hir::HirKind::BuiltinAtomic(atomicNode) -> {
+        let mut operandIndex: u64 = 0;
+
+        while (operandIndex < atomicNode.operands.length()) {
+          if (let Option::SOME(operand) = atomicNode.operands.get(operandIndex)) {
+            Escape::scanForEscapes(hir, defStore, aliases, escaping, *operand);
+          }
+
+          operandIndex += 1;
+        }
+      },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         Escape::scanForEscapes(hir, defStore, aliases, escaping, storeNode.ptr);
         Escape::scanForEscapes(hir, defStore, aliases, escaping, storeNode.value);

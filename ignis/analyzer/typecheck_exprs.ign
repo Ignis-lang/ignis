@@ -7546,6 +7546,10 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinPointerFamily(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
 
+      if (Analyzer::Typecheck::isAtomicBuiltinName(name)) {
+        return Analyzer::Typecheck::checkBuiltinAtomic(state, defStore, typeStore, symbols, module, resolvedBodies, call);
+      }
+
       if (name.equals("zeroed")) {
         return Analyzer::Typecheck::checkBuiltinZeroed(state, defStore, typeStore, symbols, module, call);
       }
@@ -7598,6 +7602,10 @@ export namespace Analyzer {
         return true;
       }
 
+      if (Analyzer::Typecheck::isAtomicBuiltinName(name)) {
+        return true;
+      }
+
       if (name.equals("hash") || name.equals("eq")) {
         return true;
       }
@@ -7607,6 +7615,15 @@ export namespace Analyzer {
       }
 
       return name.equals("dropInPlace") || name.equals("dropGlue");
+    }
+
+    /// Whether `name` is one of the five atomic builtins.
+    function isAtomicBuiltinName(name: &String): boolean {
+      if (name.equals("atomicLoad") || name.equals("atomicStore") || name.equals("atomicRmw")) {
+        return true;
+      }
+
+      return name.equals("atomicCompareExchange") || name.equals("fence");
     }
 
     /// `@zeroed<T>()`: one type argument, no value arguments, and the result
@@ -8014,6 +8031,341 @@ export namespace Analyzer {
       }
 
       return Option::SOME(voidType);
+    }
+
+    /// How an atomic builtin may use its type argument.
+    enum AtomicValueClass {
+      /// An integer primitive: every operation applies.
+      INTEGER,
+      /// `boolean` or a raw pointer: everything but arithmetic and bitwise `@atomicRmw`.
+      SCALAR,
+      /// A type parameter, checked again once monomorphization substitutes it.
+      PENDING,
+      UNSUPPORTED,
+    }
+
+    /// The class of an atomic builtin's type argument, looking through aliases.
+    function atomicValueClass(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Analyzer::Typecheck::AtomicValueClass {
+      let Option::SOME(resolvedType) = Analyzer::Typecheck::nonCyclicAliasResolvedType(defStore, typeStore, typeId) else {
+        return Analyzer::Typecheck::AtomicValueClass::UNSUPPORTED;
+      };
+      let Option::SOME(typeNode) = typeStore.get(resolvedType) else {
+        return Analyzer::Typecheck::AtomicValueClass::UNSUPPORTED;
+      };
+
+      if (Analyzer::Typecheck::isIntegerTypeNode(&typeNode)) {
+        return Analyzer::Typecheck::AtomicValueClass::INTEGER;
+      }
+
+      return match (typeNode) {
+        Analyzer::Type::BOOLEAN | Analyzer::Type::Pointer(_) -> Analyzer::Typecheck::AtomicValueClass::SCALAR,
+        Analyzer::Type::Param(_) -> Analyzer::Typecheck::AtomicValueClass::PENDING,
+        _ -> Analyzer::Typecheck::AtomicValueClass::UNSUPPORTED,
+      };
+    }
+
+    /// Whether an atom names a memory ordering.
+    function isAtomicOrderingName(name: &String): boolean {
+      if (name.equals("relaxed") || name.equals("acquire") || name.equals("release")) {
+        return true;
+      }
+
+      return name.equals("acqRel") || name.equals("seqCst");
+    }
+
+    /// Whether an atom names an `@atomicRmw` operation.
+    function isAtomicRmwOperationName(name: &String): boolean {
+      if (name.equals("swap") || name.equals("add") || name.equals("sub")) {
+        return true;
+      }
+
+      return name.equals("and") || name.equals("or") || name.equals("xor");
+    }
+
+    /// The name of an atom literal argument, looking through parentheses, or
+    /// `NONE` when the argument is any other expression.
+    function atomLiteralName(module: &Ast::Module, exprId: Ast::ExpressionId): Option<String> {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      match (expression) {
+        Ast::Expression::Node::Literal(literal) -> {
+          if (let Ast::Expression::LiteralValue::Atom(name) = &literal.value) {
+            return Option::SOME(name.clone());
+          }
+
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::atomLiteralName(module, grouped.expression);
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+    }
+
+    /// Checks the ordering argument at `argumentIndex`: an atom literal naming
+    /// an ordering, and not `:release`/`:acqRel` when `rejectsRelease` nor
+    /// `:acquire`/`:acqRel` when `rejectsAcquire`. `role` names the argument in
+    /// diagnostics. Returns whether it is valid.
+    function checkAtomicOrderingArgument(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      module: &Ast::Module,
+      call: &Ast::Expression::BuiltinCall,
+      argumentIndex: u64,
+      role: str,
+      rejectsRelease: boolean,
+      rejectsAcquire: boolean,
+    ): boolean {
+      let Option::SOME(argumentId) = call.arguments.get(argumentIndex) else {
+        return false;
+      };
+      let span: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, *argumentId, call.span);
+
+      let Option::SOME(name) = Analyzer::Typecheck::atomLiteralName(module, *argumentId) else {
+        let message: String = `the ${role} of \`@${call.name.toStr()}\` must be an atom literal such as \`:seqCst\``;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ATOMIC_ARGUMENT_NOT_ATOM_LITERAL, message.toStr());
+        return false;
+      };
+
+      if (!Analyzer::Typecheck::isAtomicOrderingName(&name)) {
+        let message: String = `unknown memory ordering \`:${name.toStr()}\`; expected \`:relaxed\`, \`:acquire\`, \`:release\`, \`:acqRel\` or \`:seqCst\``;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ATOMIC_UNKNOWN_ATOM, message.toStr());
+        return false;
+      }
+
+      let releases: boolean = name.equals("release") || name.equals("acqRel");
+      let acquires: boolean = name.equals("acquire") || name.equals("acqRel");
+      let rejected: boolean = (rejectsRelease && releases) || (rejectsAcquire && acquires);
+
+      if (rejected) {
+        let mut expected: str = "`:relaxed`, `:acquire` or `:seqCst`";
+        if (rejectsAcquire) {
+          expected = "`:relaxed`, `:release` or `:seqCst`";
+        }
+
+        let message: String = `the ${role} of \`@${call.name.toStr()}\` cannot be \`:${name.toStr()}\`; expected ${expected}`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ATOMIC_ORDERING_NOT_ALLOWED, message.toStr());
+        return false;
+      }
+
+      return true;
+    }
+
+    /// `@atomicLoad<T>(ptr, ordering)`, `@atomicStore<T>(ptr, value, ordering)`,
+    /// `@atomicRmw<T>(ptr, operation, value, ordering)`,
+    /// `@atomicCompareExchange<T>(ptr, expected, desired, success, failure)` and
+    /// `@fence(ordering)`. Orderings and the rmw operation are atom literals
+    /// checked here; `T` must be an integer primitive, `boolean` or a raw
+    /// pointer, which a type parameter defers to the post-monomorphization
+    /// check in the borrow checker.
+    function checkBuiltinAtomic(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      let isFence: boolean = call.name.equals("fence");
+      let isLoad: boolean = call.name.equals("atomicLoad");
+      let isStore: boolean = call.name.equals("atomicStore");
+      let isRmw: boolean = call.name.equals("atomicRmw");
+
+      let mut expectedTypeArguments: u64 = 1;
+      let mut expectedArguments: u64 = 5;
+      if (isFence) {
+        expectedTypeArguments = 0;
+        expectedArguments = 1;
+      } else if (isLoad) {
+        expectedArguments = 2;
+      } else if (isStore) {
+        expectedArguments = 3;
+      } else if (isRmw) {
+        expectedArguments = 4;
+      }
+
+      if (call.typeArguments.length() != expectedTypeArguments) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), expectedTypeArguments, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != expectedArguments) {
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), expectedArguments, call.arguments.length());
+        return Option::NONE;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
+
+      if (isFence) {
+        if (let Option::SOME(orderingId) = call.arguments.get(0)) {
+          let _orderingType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *orderingId);
+        }
+
+        if (!Analyzer::Typecheck::checkAtomicOrderingArgument(state, module, call, 0, "ordering", false, false)) {
+          return Option::NONE;
+        }
+
+        return Option::SOME(voidType);
+      }
+
+      let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+      let Option::SOME(valueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
+        let detail: String = `the type argument of \`@${call.name.toStr()}\``;
+        Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+        return Option::NONE;
+      };
+
+      let mut pointerTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let mut pointerType: Analyzer::TypeId = pointerTypeStoreRef.mutablePointer(valueType);
+      if (isLoad) {
+        pointerType = pointerTypeStoreRef.pointer(valueType);
+      }
+
+      // The pointer is argument 0; the rmw operation (argument 1 of
+      // `@atomicRmw`) and the trailing orderings are atoms; the rest are `T`.
+      let mut orderingStart: u64 = expectedArguments - 1;
+      if (call.name.equals("atomicCompareExchange")) {
+        orderingStart = 3;
+      }
+
+      let valueIsParam: boolean = match (Analyzer::Typecheck::atomicValueClass(defStore, typeStore, valueType)) {
+        Analyzer::Typecheck::AtomicValueClass::PENDING -> true,
+        _ -> false,
+      };
+      let mut argumentsValid: boolean = true;
+
+      let mut argumentIndex: u64 = 0;
+      while (argumentIndex < call.arguments.length()) {
+        let Option::SOME(argumentId) = call.arguments.get(argumentIndex) else {
+          argumentIndex += 1;
+          continue;
+        };
+
+        let mut expectedArgument: Option<Analyzer::TypeId> = Option::SOME(valueType);
+        if (argumentIndex == 0) {
+          expectedArgument = Option::SOME(pointerType);
+        } else if (argumentIndex >= orderingStart || (isRmw && argumentIndex == 1)) {
+          expectedArgument = Option::NONE;
+        }
+
+        let argumentType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          *argumentId,
+          expectedArgument,
+        );
+
+        if (let Option::SOME(actualType) = argumentType) {
+          if (let Option::SOME(expectedType) = expectedArgument) {
+            // A type parameter's value arguments are judged after monomorphization;
+            // the pointer is always `*T`/`*mut T` and can be compared now.
+            let deferred: boolean = argumentIndex != 0 && valueIsParam;
+            let mut satisfied: boolean = deferred || Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedType, actualType);
+
+            // A load reads through either pointer kind.
+            if (!satisfied && isLoad && argumentIndex == 0) {
+              let mut mutableTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+              let mutablePointerType: Analyzer::TypeId = mutableTypeStoreRef.mutablePointer(valueType);
+              satisfied = Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, mutablePointerType, actualType);
+            }
+
+            if (!satisfied) {
+              Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, call.span, argumentIndex + 1, expectedType, actualType);
+              argumentsValid = false;
+            }
+          }
+        }
+        argumentIndex += 1;
+      }
+
+      if (!argumentsValid) {
+        return Option::NONE;
+      }
+
+      if (let Option::SOME(pointerArgId) = call.arguments.get(0)) {
+        if (Analyzer::Typecheck::isNullLiteral(module, *pointerArgId)) {
+          let argSpan: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, *pointerArgId, call.span);
+          Analyzer::Typecheck::emitNullDereference(state, argSpan);
+          return Option::NONE;
+        }
+      }
+
+      let mut valid: boolean = true;
+      if (isLoad) {
+        valid = Analyzer::Typecheck::checkAtomicOrderingArgument(state, module, call, 1, "ordering", true, false);
+      } else if (isStore) {
+        valid = Analyzer::Typecheck::checkAtomicOrderingArgument(state, module, call, 2, "ordering", false, true);
+      } else if (isRmw) {
+        valid = Analyzer::Typecheck::checkAtomicOrderingArgument(state, module, call, 3, "ordering", false, false);
+      } else {
+        let successValid: boolean = Analyzer::Typecheck::checkAtomicOrderingArgument(state, module, call, 3, "success ordering", false, false);
+        let failureValid: boolean = Analyzer::Typecheck::checkAtomicOrderingArgument(state, module, call, 4, "failure ordering", true, false);
+        valid = successValid && failureValid;
+      }
+
+      let valueClass: Analyzer::Typecheck::AtomicValueClass = Analyzer::Typecheck::atomicValueClass(defStore, typeStore, valueType);
+      if (let Analyzer::Typecheck::AtomicValueClass::UNSUPPORTED = valueClass) {
+        let typeName: String = typeStore.nameOfResolved(valueType, &*defStore, &*symbols);
+        let message: String = `\`@${call.name.toStr()}\` does not support type '${typeName.toStr()}'; expected an integer primitive, \`boolean\` or a raw pointer`;
+        Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::ATOMIC_UNSUPPORTED_TYPE, message.toStr());
+        valid = false;
+      }
+
+      if (isRmw) {
+        let Option::SOME(operationId) = call.arguments.get(1) else {
+          return Option::NONE;
+        };
+        let operationSpan: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, *operationId, call.span);
+
+        if (let Option::SOME(operationName) = Analyzer::Typecheck::atomLiteralName(module, *operationId)) {
+          if (Analyzer::Typecheck::isAtomicRmwOperationName(&operationName)) {
+            let isScalar: boolean = match (valueClass) {
+              Analyzer::Typecheck::AtomicValueClass::SCALAR -> true,
+              _ -> false,
+            };
+
+            if (isScalar && !operationName.equals("swap")) {
+              let typeName: String = typeStore.nameOfResolved(valueType, &*defStore, &*symbols);
+              let message: String = `\`@atomicRmw\` operation \`:${operationName.toStr()}\` needs an integer type, got '${typeName.toStr()}'`;
+              Analyzer::Typecheck::emitDiagnostic(state, operationSpan, DiagnosticCode::ATOMIC_UNSUPPORTED_TYPE, message.toStr());
+              valid = false;
+            }
+          } else {
+            let message: String = `unknown \`@atomicRmw\` operation \`:${operationName.toStr()}\`; expected \`:swap\`, \`:add\`, \`:sub\`, \`:and\`, \`:or\` or \`:xor\``;
+            Analyzer::Typecheck::emitDiagnostic(state, operationSpan, DiagnosticCode::ATOMIC_UNKNOWN_ATOM, message.toStr());
+            valid = false;
+          }
+        } else {
+          let message: String = String::create("the operation of `@atomicRmw` must be an atom literal such as `:add`");
+          Analyzer::Typecheck::emitDiagnostic(state, operationSpan, DiagnosticCode::ATOMIC_ARGUMENT_NOT_ATOM_LITERAL, message.toStr());
+          valid = false;
+        }
+      }
+
+      if (!valid) {
+        return Option::NONE;
+      }
+
+      if (isStore) {
+        return Option::SOME(voidType);
+      }
+
+      return Option::SOME(valueType);
     }
 
     /// `@name<T>()`: exactly one type argument, no value arguments, fixed result type.

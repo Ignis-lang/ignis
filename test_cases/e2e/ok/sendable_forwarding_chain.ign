@@ -1,0 +1,28 @@
+// `@sendable` parameters forward through several calls; closures capturing Send values
+// and named functions are accepted at the outermost call.
+record Point {
+  public x: i32;
+  public y: i32;
+}
+function spawn(@sendable task: () -> i32): i32 {
+  return task();
+}
+function middle(@sendable task: () -> i32): i32 {
+  return spawn(task);
+}
+function outer(@sendable task: () -> i32): i32 {
+  return middle(task);
+}
+function named(): i32 {
+  return 5;
+}
+function main(): i32 {
+  let a: i32 = 1;
+  let point: Point = Point { x: 2, y: 3 };
+  let mut total: i32 = spawn((): i32 -> a);
+  total += spawn((): i32 -> point.x + point.y);
+  total += spawn(named);
+  total += outer((): i32 -> a + 10);
+  total += outer(named);
+  return total;
+}

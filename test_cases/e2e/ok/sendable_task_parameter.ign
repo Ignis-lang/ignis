@@ -1,0 +1,47 @@
+// A `@sendable` parameter is an ordinary function value inside the callee,
+// so it can be called. At each call the argument is judged like a closure
+// bound to `Send`: a closure capturing Send values, a named function and a
+// forwarded `@sendable` parameter are all accepted.
+record Pool {
+  public size: i32;
+
+  run(&self, @sendable task: () -> i32): i32 {
+    return task() + self.size;
+  }
+
+  submit(@sendable task: () -> i32): i32 {
+    return task();
+  }
+}
+
+function spawn(@sendable task: () -> i32): i32 {
+  return task();
+}
+
+function later(@sendable task: () -> i32): i32 {
+  return spawn(task);
+}
+
+function scoped(@sendable @noescape task: () -> i32): i32 {
+  return task();
+}
+
+function named(): i32 {
+  return 3;
+}
+
+function main(): i32 {
+  let base: i32 = 2;
+  let step: i32 = 1;
+  let pool: Pool = Pool { size: 10 };
+
+  let mut total: i32 = spawn((): i32 -> base + step);
+  total += spawn(named);
+  total += later((): i32 -> base);
+  total += pool.run((): i32 -> step);
+  total += Pool::submit((): i32 -> base * 2);
+  total += ((): i32 -> step) |> spawn;
+  total += scoped((): i32 -> base);
+
+  return total;
+}

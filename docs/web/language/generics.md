@@ -38,6 +38,33 @@ function main(): i32 {
 }
 ```
 
+## Bounds
+
+```ignis
+trait Weigh {
+    weigh(&self): i32;
+}
+
+function total<T: Weigh>(value: &T): i32 {
+    return value.weigh();
+}
+```
+
+A type parameter can be bounded by one or more traits, joined with `&`. Every instantiation has to
+satisfy every bound, whether the type argument is written or inferred, and whether the generic is
+a function, a method, a record or an enum:
+
+- A record or enum satisfies a bound by naming the trait in `@implements`. Having methods with the
+  right names is not enough.
+- A type parameter satisfies a bound only when it declares the same bound itself.
+- `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
+  by every Copy type, since primitives have no declaration to write `@implements` on.
+- `Send` and `Sync` are judged from the type's structure, or taken from an `@implements(Send)` /
+  `@implements(Sync)` declaration. A closure bound to a `Send` or `Sync` parameter is judged by
+  what it captures (A0252); any other function value is rejected (A0253).
+
+A type argument that misses a bound is an error (A0247).
+
 ## Instantiating a generic type
 
 ```ignis
