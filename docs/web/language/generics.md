@@ -59,6 +59,9 @@ a function, a method, a record or an enum:
 - A type parameter satisfies a bound only when it declares the same bound itself.
 - `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
   by every Copy type, since primitives have no declaration to write `@implements` on.
+- `Send` and `Sync` are judged from the type's structure, or taken from an `@implements(Send)` /
+  `@implements(Sync)` declaration. A closure bound to a `Send` or `Sync` parameter is judged by
+  what it captures (A0252); any other function value is rejected (A0253).
 
 A type argument that misses a bound is an error (A0247).
 

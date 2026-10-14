@@ -1896,6 +1896,17 @@ export function compileDiscovered(
     // shallow duplicate of a value that is about to be dropped.
     Analyzer::appendDiagnostics(&mut captureDiagnostics, &moduleCaptureDiagnostics);
 
+    // A closure bound to a `Send` or `Sync` type parameter is judged by what
+    // it captures, which is known only now.
+    let moduleClosureBoundDiagnostics: DiagnosticBag = Bounds::checkClosureCaptures(
+      &mut defStore,
+      &mut typeStore,
+      &mut symbols,
+      &programHir,
+      moduleBodyStart,
+    );
+    Analyzer::appendDiagnostics(&mut captureDiagnostics, &moduleClosureBoundDiagnostics);
+
     let mut nodeIndex: u64 = moduleNodeStart;
     while (nodeIndex < programHir.nodes.length()) {
       if (let Option::SOME(node) = programHir.nodes.get(nodeIndex)) {

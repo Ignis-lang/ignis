@@ -33,7 +33,7 @@ default. Missing one is a compile-time error, not a runtime surprise.
 
 ## Lang traits
 
-Three traits are known to the compiler and change how values behave rather than only what methods
+Five traits are known to the compiler and change how values behave rather than only what methods
 they carry.
 
 | Trait | Requires | What changes |
@@ -41,6 +41,8 @@ they carry.
 | `Drop` | `drop(&mut self): void` | The compiler inserts drop calls at every scope exit |
 | `Clone` | `clone(&self): Self` | `.clone()` produces an independent copy without moving the original |
 | `Copy` | nothing | Assignment copies instead of moving |
+| `Send` | nothing | The value may move to another thread |
+| `Sync` | nothing | The value may be shared between threads through `&` |
 
 ```ignis
 @implements(Drop, Clone)
@@ -64,6 +66,34 @@ Two rules that catch people out:
 - `Copy` is mostly automatic. A record or enum whose fields are all recursively copyable already
   behaves that way with no annotation; writing `@implements(Copy)` asks the compiler to check that
   claim and fail if it is wrong.
+
+### `Send` and `Sync`
+
+`Send` and `Sync` are judged from a type's structure, so most types never name them:
+
+- Primitives, `str`, ranges and raw C function pointers are both.
+- Raw pointers (`*T`, `*mut T`) are neither: the compiler does not track what they point to.
+- `&T` is either one only when `T` is `Sync`; `&mut T` follows `T`. Slices follow `&T`.
+- Arrays, tuples, records and enums are `Send` (or `Sync`) when every element, field or payload is,
+  with a generic instance judged after its type arguments are substituted.
+- A function value is neither. A closure written at a call to `function spawn<F: Send>(task: F)` is
+  judged by what it captures: a value it moves in has to be `Send`, one it reads by reference has
+  to be `Sync`. A named function has nothing to capture and is accepted. A function value held in a
+  variable is rejected (A0253), since its captures cannot be known there.
+
+A type whose structure says no can still declare `@implements(Send)` or `@implements(Sync)`, for
+example a record that guards a raw pointer itself. The declaration is honored, and the
+`thread_safety` lint warns that the compiler can no longer check it (A0254). Prefer leaving the
+structure to prove it; when the declaration is deliberate, `@allow(thread_safety)` on the record
+keeps it without the warning.
+
+```ignis
+@allow(thread_safety)
+@implements(Send, Sync)
+record Handle {
+    public raw: *mut i32;
+}
+```
 
 See [ownership and borrowing](/docs/language/ownership) for what moving, copying and dropping do to
 a value's lifetime.

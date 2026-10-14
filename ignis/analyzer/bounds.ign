@@ -27,8 +27,12 @@ import Vector from "std::vector";
 ///   - structurally, for the traits the compiler can judge from a type's
 ///     shape: `Copy` through the Copy classification, and `Eq` and `Hash` for
 ///     the integer primitives, `boolean`, `char` and `str`, which have no
-///     declaration to write `@implements` on,
+///     declaration to write `@implements` on, and `Send` and `Sync` for
+///     every type through `Typecheck::isThreadSafeType`,
 ///   - nominally, by a record or enum whose `@implements` names the trait.
+///
+/// A function type passed to a `Send` or `Sync` bound at a call is left to
+/// `checkClosureCaptures`, which judges the argument by what it captures.
 ///
 /// Bounds are held as the written trait name, so they are matched by name.
 export namespace Bounds {
@@ -62,6 +66,388 @@ export namespace Bounds {
     }
 
     return diagnostics;
+  }
+
+  /// Checks the closures passed where a type parameter bounded by `Send` or
+  /// `Sync` is expected, in the function bodies `hir` gained from body index
+  /// `firstBody` on.
+  ///
+  /// Runs after capture analysis, the first point where a closure knows what
+  /// it captures. A closure's thunk takes the closure's body as its own, so
+  /// a node is judged once, from the first body that reaches it: the function
+  /// that declares the closure, whose type parameters are still in scope.
+  function checkClosureCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    firstBody: u64,
+  ): DiagnosticBag {
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut visited: HashSet<u32> = HashSet::new<u32>();
+    let mut index: u64 = firstBody;
+
+    while (index < hir.functionBodies.length()) {
+      let Option::SOME(enclosing) = hir.functionBodies.keyAt(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(bodyId) = hir.functionBodies.valueAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      let scope: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
+      let mut pending: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+      pending.push(bodyId);
+
+      while (pending.length() > 0) {
+        let Option::SOME(nodeId) = pending.pop() else {
+          break;
+        };
+
+        if (!visited.insert(nodeId.raw())) {
+          continue;
+        }
+
+        let Option::SOME(node) = hir.get(nodeId) else {
+          continue;
+        };
+
+        let mut callee: Option<Analyzer::DefinitionId> = Option::NONE;
+        let mut typeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        let mut args: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+        match (&node.kind) {
+          Hir::HirKind::Call(call) -> {
+            callee = Option::SOME(call.callee);
+            typeArgs = Bounds::copyTypeIds(&call.typeArgs);
+            args = Bounds::copyHirIds(&call.args);
+          },
+          Hir::HirKind::MethodCall(call) -> {
+            callee = Option::SOME(call.method);
+            typeArgs = Bounds::copyTypeIds(&call.typeArgs);
+            args = Bounds::copyHirIds(&call.args);
+          },
+          _ -> {},
+        };
+
+        let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+        let mut childIndex: u64 = children.length();
+
+        while (childIndex > 0) {
+          childIndex -= 1;
+
+          if (let Option::SOME(child) = children.get(childIndex)) {
+            pending.push(*child);
+          }
+        }
+
+        if (let Option::SOME(calleeDefId) = callee) {
+          Bounds::checkThreadSafeArguments(defStore, typeStore, symbols, hir, &scope, calleeDefId, &typeArgs, &args, node.span, &mut diagnostics);
+        }
+      }
+
+      index += 1;
+    }
+
+    return diagnostics;
+  }
+
+  /// Judges the function-typed arguments a call binds to a type parameter
+  /// bounded by `Send` or `Sync`: a closure literal by its captures, a named
+  /// function as having nothing to capture, and any other function value as
+  /// unknowable. A bounded parameter bound to a function type with no value
+  /// parameter of exactly that type cannot be judged either.
+  function checkThreadSafeArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    scope: &Vector<Analyzer::DefinitionId>,
+    calleeDefId: Analyzer::DefinitionId,
+    typeArgs: &Vector<Analyzer::TypeId>,
+    args: &Vector<Hir::HirId>,
+    span: SourceSpan,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    if (typeArgs.length() == 0) {
+      return;
+    }
+
+    let mut typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut valueParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (defStore.get(calleeDefId)) {
+      Option::SOME(Analyzer::Definition::Function(function_)) -> {
+        typeParams = Bounds::copyDefinitionIds(&function_.typeParams);
+        valueParams = Bounds::copyDefinitionIds(&function_.params);
+      },
+      Option::SOME(Analyzer::Definition::Method(method)) -> {
+        typeParams = Bounds::copyDefinitionIds(&method.typeParams);
+        valueParams = Bounds::copyDefinitionIds(&method.params);
+        ownerOpt = Option::SOME(method.owner);
+      },
+      _ -> {},
+    };
+
+    if (typeParams.length() == 0) {
+      if (let Option::SOME(ownerDefId) = ownerOpt) {
+        typeParams = Bounds::declaredTypeParams(defStore, ownerDefId);
+      }
+    }
+
+    if (typeParams.length() != typeArgs.length()) {
+      return;
+    }
+
+    // A method's parameter list may lead with its receiver, which the call
+    // keeps apart from its arguments.
+    let mut paramOffset: u64 = 0;
+
+    if (valueParams.length() > args.length()) {
+      paramOffset = valueParams.length() - args.length();
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < typeParams.length()) {
+      let Option::SOME(typeParamDefId) = typeParams.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(typeArg) = typeArgs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut paramSymbol: Option<Analyzer::SymbolId> = Option::NONE;
+      let mut requiresSend: boolean = false;
+      let mut requiresSync: boolean = false;
+
+      if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*typeParamDefId)) {
+        paramSymbol = Option::SOME(typeParam.name);
+        requiresSend = Bounds::containsName(&typeParam.bounds, "Send");
+        requiresSync = Bounds::containsName(&typeParam.bounds, "Sync");
+      }
+
+      let Option::SOME(symbol) = paramSymbol else {
+        index += 1;
+        continue;
+      };
+
+      if ((!requiresSend && !requiresSync) || !Bounds::isFunctionType(defStore, typeStore, *typeArg)) {
+        index += 1;
+        continue;
+      }
+
+      let mut judged: boolean = false;
+      let mut argIndex: u64 = 0;
+
+      while (argIndex < args.length()) {
+        let Option::SOME(argId) = args.get(argIndex) else {
+          argIndex += 1;
+          continue;
+        };
+        let Option::SOME(valueParam) = valueParams.get(argIndex + paramOffset) else {
+          argIndex += 1;
+          continue;
+        };
+
+        if (Bounds::isParamType(defStore, typeStore, *valueParam, symbol)) {
+          judged = true;
+
+          if (requiresSend) {
+            Bounds::checkFunctionArgument(defStore, typeStore, symbols, hir, scope, calleeDefId, symbol, *argId, false, diagnostics);
+          }
+
+          if (requiresSync) {
+            Bounds::checkFunctionArgument(defStore, typeStore, symbols, hir, scope, calleeDefId, symbol, *argId, true, diagnostics);
+          }
+        }
+
+        argIndex += 1;
+      }
+
+      if (!judged) {
+        let bound: str = Analyzer::Typecheck::threadSafetyTraitName(requiresSync && !requiresSend);
+        Bounds::reportFunctionValue(defStore, symbols, calleeDefId, symbol, bound, span, diagnostics);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Judges one function-typed argument against `Send` (`sync` false) or
+  /// `Sync` (`sync` true).
+  function checkFunctionArgument(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    scope: &Vector<Analyzer::DefinitionId>,
+    calleeDefId: Analyzer::DefinitionId,
+    paramSymbol: Analyzer::SymbolId,
+    argId: Hir::HirId,
+    sync: boolean,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let bound: str = Analyzer::Typecheck::threadSafetyTraitName(sync);
+
+    let Option::SOME(argNode) = hir.get(argId) else {
+      return;
+    };
+
+    let argSpan: SourceSpan = argNode.span;
+
+    match (&argNode.kind) {
+      Hir::HirKind::Closure(closure) -> {
+        let mut captureIndex: u64 = 0;
+
+        while (captureIndex < closure.captures.length()) {
+          let Option::SOME(capture) = closure.captures.get(captureIndex) else {
+            captureIndex += 1;
+            continue;
+          };
+          let Option::SOME(capturedType) = Hir::declaredTypeOf(defStore, capture.sourceDef) else {
+            captureIndex += 1;
+            continue;
+          };
+
+          // A value moved into the closure has to be Send; one the closure
+          // reads through a shared reference has to be Sync, since both
+          // threads can reach it. A Sync closure is shared as a whole, so
+          // everything it holds has to be Sync.
+          let mut requiredSync: boolean = sync;
+          let mut access: str = "by value";
+
+          match (capture.mode) {
+            Hir::CaptureMode::ByValue -> {},
+            Hir::CaptureMode::ByRef -> {
+              requiredSync = true;
+              access = "by reference";
+            },
+            Hir::CaptureMode::ByMutRef -> {
+              access = "by mutable reference";
+            },
+          };
+
+          let mut visitedTypes: Vector<u32> = Vector::new<u32>();
+
+          if (!Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, capturedType, requiredSync, scope, &mut visitedTypes)) {
+            let mut name: str = "?";
+
+            if (let Option::SOME(definition) = defStore.get(capture.sourceDef)) {
+              if (let Option::SOME(text) = symbols.resolve(definition.name())) {
+                name = text;
+              }
+            }
+
+            let typeName: String = typeStore.nameOfResolved(capturedType, &*defStore, &*symbols);
+            let required: str = Analyzer::Typecheck::threadSafetyTraitName(requiredSync);
+            let message: String = `closure passed as '${Bounds::symbolName(symbols, paramSymbol)}: ${bound}' captures '${name}' ${access}, and '${typeName.toStr()}' is not ${required}`;
+            let label: String = `'${name}' is captured here`;
+
+            let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::CLOSURE_CAPTURE_NOT_THREAD_SAFE, message.toStr(), argSpan);
+            diagnostic.addLabel(LabelKind::PRIMARY, argSpan, label.toStr());
+
+            let mut bag: &mut DiagnosticBag = diagnostics;
+            bag.push(diagnostic);
+          }
+
+          captureIndex += 1;
+        }
+      },
+      Hir::HirKind::Variable(defId) -> {
+        if (!Bounds::isNamedFunction(defStore, defId)) {
+          Bounds::reportFunctionValue(defStore, symbols, calleeDefId, paramSymbol, bound, argSpan, diagnostics);
+        }
+      },
+      Hir::HirKind::StaticAccess(defId) -> {
+        if (!Bounds::isNamedFunction(defStore, defId)) {
+          Bounds::reportFunctionValue(defStore, symbols, calleeDefId, paramSymbol, bound, argSpan, diagnostics);
+        }
+      },
+      _ -> {
+        Bounds::reportFunctionValue(defStore, symbols, calleeDefId, paramSymbol, bound, argSpan, diagnostics);
+      },
+    };
+  }
+
+  function reportFunctionValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    calleeDefId: Analyzer::DefinitionId,
+    paramSymbol: Analyzer::SymbolId,
+    bound: str,
+    span: SourceSpan,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let mut calleeName: str = "?";
+
+    if (let Option::SOME(definition) = defStore.get(calleeDefId)) {
+      if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+        calleeName = name;
+      }
+    }
+
+    let message: String = `function value passed as '${Bounds::symbolName(symbols, paramSymbol)}: ${bound}' of '${calleeName}' cannot be checked: only a closure written at the call or a named function shows what it captures`;
+
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::FUNCTION_VALUE_NOT_THREAD_SAFE, message.toStr(), span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, "pass a closure literal or a named function here");
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+  }
+
+  function isNamedFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    return match (defStore.get(defId)) {
+      Option::SOME(Analyzer::Definition::Function(_)) | Option::SOME(Analyzer::Definition::Method(_)) -> true,
+      _ -> false,
+    };
+  }
+
+  function symbolName(symbols: &mut Analyzer::SymbolTable, symbol: Analyzer::SymbolId): str {
+    if (let Option::SOME(name) = symbols.resolve(symbol)) {
+      return name;
+    }
+
+    return "?";
+  }
+
+  /// Whether the value parameter is declared with exactly the type parameter
+  /// named `symbol` as its type.
+  function isParamType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    valueParam: Analyzer::DefinitionId,
+    symbol: Analyzer::SymbolId,
+  ): boolean {
+    let Option::SOME(declared) = Hir::declaredTypeOf(defStore, valueParam) else {
+      return false;
+    };
+
+    return match (typeStore.get(declared)) {
+      Option::SOME(Analyzer::Type::Param(paramSymbol)) -> paramSymbol.raw() == symbol.raw(),
+      _ -> false,
+    };
+  }
+
+  function isFunctionType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    return match (typeStore.get(resolved.typeId)) {
+      Option::SOME(Analyzer::Type::Function(_)) -> true,
+      _ -> false,
+    };
   }
 
   /// Walks one body in source order. A type that fails is reported once per
@@ -184,7 +570,7 @@ export namespace Bounds {
       return;
     }
 
-    Bounds::checkArguments(defStore, typeStore, symbols, enclosing, calleeDefId, &params, typeArgs, span, diagnostics);
+    Bounds::checkArguments(defStore, typeStore, symbols, enclosing, calleeDefId, &params, typeArgs, true, span, diagnostics);
   }
 
   /// Checks every generic record or enum instantiated anywhere inside the
@@ -251,7 +637,7 @@ export namespace Bounds {
         let params: Vector<Analyzer::DefinitionId> = Bounds::declaredTypeParams(defStore, definition);
 
         if (params.length() == components.length()) {
-          Bounds::checkArguments(defStore, typeStore, symbols, enclosing, definition, &params, &components, span, diagnostics);
+          Bounds::checkArguments(defStore, typeStore, symbols, enclosing, definition, &params, &components, false, span, diagnostics);
         }
       }
 
@@ -277,6 +663,7 @@ export namespace Bounds {
     generic: Analyzer::DefinitionId,
     params: &Vector<Analyzer::DefinitionId>,
     typeArgs: &Vector<Analyzer::TypeId>,
+    acceptFunctions: boolean,
     span: SourceSpan,
     diagnostics: &mut DiagnosticBag,
   ): void {
@@ -304,7 +691,7 @@ export namespace Bounds {
 
       while (boundIndex < bounds.length()) {
         if (let Option::SOME(bound) = bounds.get(boundIndex)) {
-          if (!Bounds::satisfies(defStore, typeStore, symbols, enclosing, *typeArg, bound)) {
+          if (!Bounds::satisfies(defStore, typeStore, symbols, enclosing, *typeArg, bound, acceptFunctions)) {
             Bounds::reportUnsatisfied(defStore, typeStore, symbols, generic, paramName, bound.toStr(), *typeArg, span, diagnostics);
           }
         }
@@ -325,12 +712,25 @@ export namespace Bounds {
     enclosing: Analyzer::DefinitionId,
     typeArg: Analyzer::TypeId,
     bound: &String,
+    acceptFunctions: boolean,
   ): boolean {
     let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeArg);
 
     // A cyclic alias is reported where it is declared.
     if (resolved.cycleAlias.isSome()) {
       return true;
+    }
+
+    if (bound.equals("Send") || bound.equals("Sync")) {
+      // A function type says nothing about what a closure captured. A call
+      // argument is judged by `checkClosureCaptures` once captures are known.
+      if (acceptFunctions && Bounds::isFunctionType(defStore, typeStore, resolved.typeId)) {
+        return true;
+      }
+
+      let scope: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
+      let mut visited: Vector<u32> = Vector::new<u32>();
+      return Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, resolved.typeId, bound.equals("Sync"), &scope, &mut visited);
     }
 
     if (bound.equals("Copy")) {
@@ -473,13 +873,22 @@ export namespace Bounds {
     let message: String = `type '${typeName.toStr()}' does not satisfy the bound '${parameter}: ${bound}' of '${genericName}'`;
     let mut label: String = `'${typeName.toStr()}' cannot implement '${bound}'`;
 
+    let boundText: String = `${bound}`;
+    let threadSafety: boolean = boundText.equals("Send") || boundText.equals("Sync");
+
+    if (threadSafety) {
+      label = `'${typeName.toStr()}' holds a raw pointer, a function value or another member that is not ${bound}`;
+    }
+
     if (let Option::SOME(type_) = typeStore.get(typeArg)) {
       match (type_) {
         Analyzer::Type::Param(_) -> {
           label = `add '${bound}' to the bounds of '${typeName.toStr()}'`;
         },
         Analyzer::Type::Record(_) | Analyzer::Type::Enum(_) | Analyzer::Type::Instance(_) -> {
-          label = `declare \`@implements(${bound})\` on '${typeName.toStr()}'`;
+          if (!threadSafety) {
+            label = `declare \`@implements(${bound})\` on '${typeName.toStr()}'`;
+          }
         },
         _ -> {},
       };
@@ -510,6 +919,21 @@ export namespace Bounds {
 
   function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
     let mut copy: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copy.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copy;
+  }
+
+  function copyHirIds(source: &Vector<Hir::HirId>): Vector<Hir::HirId> {
+    let mut copy: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     let mut index: u64 = 0;
 
     while (index < source.length()) {

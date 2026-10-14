@@ -1,0 +1,47 @@
+// Send and Sync are judged from a type's structure: primitives, records of
+// primitives, tuples and arrays are both. A record that declares them keeps
+// its declaration even when a field is not, and `@allow` silences the
+// warning that declaration gets. A type parameter satisfies them by declaring
+// them as bounds.
+@allow(thread_safety)
+@implements(Send, Sync)
+record Handle {
+  public raw: *mut i32;
+}
+
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+enum Shape {
+  CIRCLE(i32),
+  SQUARE(Point),
+}
+
+function send<T: Send>(value: T): i32 {
+  return 1;
+}
+
+function share<T: Sync>(value: &T): i32 {
+  return 1;
+}
+
+function forward<U: Send & Sync>(value: U): i32 {
+  return send(value) + share(&value);
+}
+
+function main(): i32 {
+  let point: Point = Point { x: 1, y: 2 };
+  let handle: Handle = Handle { raw: 0 as *mut i32 };
+  let pair = (1, true);
+  let values: i32[3] = [1, 2, 3];
+  let text: str = "text";
+
+  let mut total: i32 = send(7) + send(2.5) + send('c') + send(text);
+  total += send(point) + send(pair) + send(values) + send(Shape::CIRCLE(3));
+  total += send(handle) + share(&handle) + send(&point);
+  total += forward(5);
+
+  return total;
+}

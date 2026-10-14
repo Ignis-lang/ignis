@@ -186,7 +186,7 @@ function main(): i32 {
 }
 ```
 
-A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`.
+A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and function values are neither, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements`, which the `thread_safety` lint warns about when its structure disagrees (A0254). A closure bound to a `Send` or `Sync` type parameter is judged by its captures at the call (A0252); any other function value is rejected there (A0253).
 
 ## 4. Declarations
 
