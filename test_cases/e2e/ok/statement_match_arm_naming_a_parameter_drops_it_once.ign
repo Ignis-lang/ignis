@@ -1,0 +1,46 @@
+// e2e: std
+// A match in statement position discards its value. An arm that names an
+// owning parameter hands it to nobody, so the parameter is dropped once, by its
+// own schedule, and the discarded result is not dropped again. An arm that
+// builds a fresh value still drops it.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Tri {
+  A,
+  B,
+  C,
+}
+
+function discard(outer: Tri, inner: Tri, one: Tracked, two: Tracked): void {
+  match (outer) {
+    Tri::A -> match (inner) {
+      Tri::A -> one,
+      _ -> two,
+    },
+    Tri::B -> {
+      let local: Tracked = Tracked { id: 30 };
+      local
+    },
+    _ -> Tracked { id: 40 },
+  };
+
+  Io::println("end");
+}
+
+function main(): i32 {
+  discard(Tri::A, Tri::A, Tracked { id: 1 }, Tracked { id: 2 });
+  discard(Tri::A, Tri::B, Tracked { id: 3 }, Tracked { id: 4 });
+  discard(Tri::B, Tri::A, Tracked { id: 5 }, Tracked { id: 6 });
+  discard(Tri::C, Tri::A, Tracked { id: 7 }, Tracked { id: 8 });
+
+  return 0;
+}

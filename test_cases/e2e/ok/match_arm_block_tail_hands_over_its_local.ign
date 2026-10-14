@@ -1,0 +1,50 @@
+// e2e: std
+// A match arm whose block declares a value and names it as its tail hands that
+// value to the match result. The block's scope ends right after, and it must
+// not drop what it just handed out.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function pick(flag: i32): String {
+  let chosen: String = match (flag) {
+    1 -> {
+      let local: String = String::create("one");
+      local
+    },
+    _ -> String::create("other"),
+  };
+
+  return chosen;
+}
+
+function pickTracked(flag: i32): Tracked {
+  let chosen: Tracked = match (flag) {
+    1 -> {
+      let other: Tracked = Tracked { id: 10 };
+      let local: Tracked = Tracked { id: 11 };
+      local
+    },
+    _ -> Tracked { id: 20 },
+  };
+
+  return chosen;
+}
+
+function main(): i32 {
+  let first: String = pick(1);
+  let second: String = pick(2);
+  Io::println(`${first.toStr()} ${second.toStr()}`.toStr());
+
+  let tracked: Tracked = pickTracked(1);
+  Io::println(`picked ${tracked.id}`.toStr());
+
+  return 0;
+}

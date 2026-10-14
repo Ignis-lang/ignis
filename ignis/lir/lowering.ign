@@ -2522,7 +2522,9 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::Match(matchNode) -> {
-        return LirLowering::lowerMatch(defStore, typeStore, hirStore, dropSchedules, function_, state, &matchNode, nodeType, nodeSpan);
+        let discarded: boolean = dropSchedules.isDiscardedMatch(hirId.raw());
+
+        return LirLowering::lowerMatch(defStore, typeStore, hirStore, dropSchedules, function_, state, &matchNode, nodeType, nodeSpan, discarded);
       },
       Hir::HirKind::LetElse(letElseNode) -> {
         LirLowering::lowerLetElse(defStore, typeStore, hirStore, dropSchedules, function_, state, &letElseNode, nodeSpan);
@@ -4799,6 +4801,7 @@ export namespace LirLowering {
     matchNode: &Hir::HirMatch,
     nodeType: Analyzer::TypeId,
     nodeSpan: SourceSpan,
+    discarded: boolean,
   ): Lir::Operand {
     let movingArms: boolean = state.movingResult;
     state.movingResult = false;
@@ -4901,7 +4904,9 @@ export namespace LirLowering {
     let mut resultSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
     let mut hasResult: boolean = false;
 
-    if (!LirLowering::producesNoValue(typeStore, nodeType)) {
+    // A discarded match keeps no result: each arm discards its own value below, an
+    // owned temporary freed there and a named value left to its schedule.
+    if (!LirLowering::producesNoValue(typeStore, nodeType) && !discarded) {
       resultSlot = LirLowering::allocSyntheticLocal(function_, nodeType);
       hasResult = true;
     }
@@ -5091,9 +5096,9 @@ export namespace LirLowering {
 
       let bodyLive: boolean = !state.terminated;
 
-      // A match that produces no value discards each arm's value, so an owned
-      // temporary an arm evaluates to is freed here, the way an expression
-      // statement frees its own. A named value is left to its schedule.
+      // A match that produces no value, or whose value is discarded, discards each
+      // arm's value, so an owned temporary an arm evaluates to is freed here, the way
+      // an expression statement frees its own. A named value is left to its schedule.
       if (bodyLive && !hasResult && LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, arm.body)) {
         let mut bodyType: Analyzer::TypeId = nodeType;
 

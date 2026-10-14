@@ -1,0 +1,32 @@
+// e2e: std
+// A match arm binds a closure, aliases it with a second local and names the
+// alias as its tail. The alias chain still ends at a closure literal the arm
+// built, so the binding receiving the match result owns that environment and
+// moving it into another binding moves the environment too.
+import Io from "std::io";
+
+function chooseThroughAnAlias(): i32 {
+  let mut current = (): i32 -> 0;
+  let mut previous = (): i32 -> 0;
+
+  for (let index = 1; index < 4; index++) {
+    let value: i32 = index * 7;
+    previous = current;
+    current = match (index) {
+      1 -> {
+        let first = (): i32 -> value;
+        let second = first;
+        second
+      },
+      _ -> (): i32 -> value + 1,
+    };
+  }
+
+  return previous() + current();
+}
+
+function main(): i32 {
+  Io::println(`result ${chooseThroughAnAlias()}`.toStr());
+
+  return 0;
+}

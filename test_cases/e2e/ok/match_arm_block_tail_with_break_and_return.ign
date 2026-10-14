@@ -1,0 +1,61 @@
+// e2e: std
+// A match arm block that declares the value it names as its tail can also
+// leave early: `break`, `continue` and `return` drop the local on their own
+// path, and only the path reaching the tail hands it to the match result.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function sumInALoop(): i32 {
+  let mut total: i32 = 0;
+
+  for (let index = 0; index < 5; index++) {
+    let chosen: Tracked = match (index % 2) {
+      0 -> {
+        let local: Tracked = Tracked { id: index };
+        if (index == 4) {
+          break;
+        }
+        if (index == 2) {
+          continue;
+        }
+        local
+      },
+      _ -> Tracked { id: 100 + index },
+    };
+    total = total + chosen.id;
+  }
+
+  return total;
+}
+
+function returnEarly(flag: i32): Tracked {
+  let chosen: Tracked = match (flag) {
+    1 -> {
+      let local: Tracked = Tracked { id: 50 };
+      if (flag == 1) {
+        return Tracked { id: 51 };
+      }
+      local
+    },
+    _ -> Tracked { id: 52 },
+  };
+
+  return chosen;
+}
+
+function main(): i32 {
+  Io::println(`total ${sumInALoop()}`.toStr());
+
+  let early: Tracked = returnEarly(1);
+  Io::println(`early ${early.id}`.toStr());
+
+  return 0;
+}

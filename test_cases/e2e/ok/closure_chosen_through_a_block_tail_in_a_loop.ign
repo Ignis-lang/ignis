@@ -1,0 +1,31 @@
+// e2e: std
+// A match arm hands a closure it bound in its own block to a binding declared
+// before the loop. The binding owns that closure's environment, so moving the
+// binding into another one moves the environment too, and overwriting it next
+// iteration drops only the closure it still holds.
+import Io from "std::io";
+
+function chooseInALoop(): i32 {
+  let mut current = (): i32 -> 0;
+  let mut previous = (): i32 -> 0;
+
+  for (let index = 1; index < 4; index++) {
+    let value: i32 = index * 7;
+    previous = current;
+    current = match (index) {
+      1 -> {
+        let local = (): i32 -> value;
+        local
+      },
+      _ -> (): i32 -> value + 1,
+    };
+  }
+
+  return previous() + current();
+}
+
+function main(): i32 {
+  Io::println(`chosen ${chooseInALoop()}`.toStr());
+
+  return 0;
+}

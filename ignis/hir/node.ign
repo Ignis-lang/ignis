@@ -1343,12 +1343,111 @@ export namespace Hir {
     resultsRef.push(valueId);
   }
 
+  /// Like `collectValueResults`, but a result naming a binding that a `let`
+  /// inside `valueId` declares and nothing inside `valueId` reassigns is
+  /// replaced by that initializer's results. Borrow checking hands such a
+  /// binding over to the value at the end of its block, so the value owns
+  /// what the initializer produced; a binding declared outside keeps its own
+  /// value and stays a result.
+  function collectOwnedValueResults(
+    hir: &Hir::HirStore,
+    valueId: Hir::HirId,
+    results: &mut Vector<Hir::HirId>
+  ): void {
+    Hir::collectOwnedValueResultsWithin(hir, valueId, valueId, results);
+  }
+
+  /// `collectOwnedValueResults` for `nodeId`, a part of `valueId`. Every step
+  /// of an alias chain (`let second = first; second`) looks up the next `let`
+  /// in the whole of `valueId`, where all of them are declared.
+  function collectOwnedValueResultsWithin(
+    hir: &Hir::HirStore,
+    valueId: Hir::HirId,
+    nodeId: Hir::HirId,
+    results: &mut Vector<Hir::HirId>
+  ): void {
+    let mut direct: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Hir::collectValueResults(hir, nodeId, &mut direct);
+
+    let mut index: u64 = 0;
+
+    while (index < direct.length()) {
+      if (let Option::SOME(resultId) = direct.get(index)) {
+        let mut initializer: Option<Hir::HirId> = Option::NONE;
+
+        if (let Option::SOME(resultNode) = hir.get(*resultId)) {
+          if (let Hir::HirKind::Variable(defId) = &resultNode.kind) {
+            initializer = Hir::handedOverInitializer(hir, valueId, defId);
+          }
+        }
+
+        if (let Option::SOME(initializerId) = initializer) {
+          Hir::collectOwnedValueResultsWithin(hir, valueId, initializerId, results);
+        } else {
+          let mut resultsRef: &mut Vector<Hir::HirId> = results;
+          resultsRef.push(*resultId);
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The initializer of the `let` inside `valueId` that declares `defId`, when
+  /// no assignment inside `valueId` writes to `defId`.
+  function handedOverInitializer(
+    hir: &Hir::HirStore,
+    valueId: Hir::HirId,
+    defId: Analyzer::DefinitionId
+  ): Option<Hir::HirId> {
+    let mut initializer: Option<Hir::HirId> = Option::NONE;
+    let mut pending: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    pending.push(valueId);
+
+    while (let Option::SOME(nodeId) = pending.pop()) {
+      let Option::SOME(node) = hir.get(nodeId) else {
+        continue;
+      };
+
+      match (&node.kind) {
+        Hir::HirKind::Let(letNode) -> {
+          if (letNode.name.raw() == defId.raw()) {
+            initializer = letNode.value;
+          }
+        },
+        Hir::HirKind::Assign(assignNode) -> {
+          if (let Option::SOME(targetNode) = hir.get(assignNode.target)) {
+            if (let Hir::HirKind::Variable(targetDef) = &targetNode.kind) {
+              if (targetDef.raw() == defId.raw()) {
+                return Option::NONE;
+              }
+            }
+          }
+        },
+        _ -> {},
+      };
+
+      let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+      let mut childIndex: u64 = 0;
+
+      while (childIndex < children.length()) {
+        if (let Option::SOME(childId) = children.get(childIndex)) {
+          pending.push(*childId);
+        }
+
+        childIndex += 1;
+      }
+    }
+
+    return initializer;
+  }
+
   /// The closure literals `valueId` can evaluate to: the value itself when it
   /// is one, or the closure literals among its block tail, `if` branches and
   /// `match` arms. See `collectValueResults`.
   function valueClosureLiterals(hir: &Hir::HirStore, valueId: Hir::HirId): Vector<Hir::HirId> {
     let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
-    Hir::collectValueResults(hir, valueId, &mut results);
+    Hir::collectOwnedValueResults(hir, valueId, &mut results);
 
     let mut literals: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     let mut index: u64 = 0;
@@ -1378,7 +1477,7 @@ export namespace Hir {
     typeStore: &mut Analyzer::TypeStore,
   ): boolean {
     let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
-    Hir::collectValueResults(hir, valueId, &mut results);
+    Hir::collectOwnedValueResults(hir, valueId, &mut results);
 
     let mut literalCount: u64 = 0;
     let mut index: u64 = 0;
