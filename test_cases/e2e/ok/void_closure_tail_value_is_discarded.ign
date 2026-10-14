@@ -1,0 +1,81 @@
+// e2e: std
+// A closure returning `void` still ends with whatever its body's tail is. That
+// value is discarded like a statement's: an owned temporary is dropped right
+// there, a match ending the body drops the value of the arm it takes, a local
+// named as the tail is dropped at its scope end, and a parameter or a field of
+// a captured record keeps its owner's drop, as it does when a closure discards
+// it in a statement. A closure that returns its tail still hands it to the
+// caller.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+record Holder {
+  public first: Tracked;
+  public second: Tracked;
+}
+
+function make(id: i32): Tracked {
+  return Tracked { id: id };
+}
+
+function main(): i32 {
+  let temporary = (): void -> {
+    make(1)
+  };
+  let parameter = (value: Tracked): void -> {
+    value
+  };
+  let chosen = (flag: i32, value: Tracked): void -> {
+    match (flag) {
+      1 -> value,
+      _ -> make(13),
+    }
+  };
+  let local = (): void -> {
+    let held: Tracked = Tracked { id: 5 };
+    held
+  };
+  let expression = (): void -> Tracked { id: 7 };
+  let holder: Holder = Holder { first: make(20), second: make(21) };
+  let field = (): void -> {
+    holder.first
+  };
+  let statement = (): void -> {
+    holder.second;
+  };
+  let returned = (): Tracked -> {
+    let held: Tracked = Tracked { id: 6 };
+    held
+  };
+
+  temporary();
+  Io::println("after temporary");
+  parameter(make(2));
+  Io::println("after parameter");
+  chosen(1, make(11));
+  Io::println("after chosen 1");
+  chosen(2, make(12));
+  Io::println("after chosen 2");
+  local();
+  Io::println("after local");
+  expression();
+  Io::println("after expression");
+  field();
+  field();
+  statement();
+  statement();
+  Io::println("after field");
+
+  let kept: Tracked = returned();
+  Io::println(`kept ${kept.id}`.toStr());
+
+  return 0;
+}

@@ -6935,7 +6935,11 @@ export namespace Borrowck {
     return result;
   }
 
-  function collectStatementPositionNodes(hir: &Hir::HirStore): Vector<u32> {
+  function collectStatementPositionNodes(
+    hir: &Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+  ): Vector<u32> {
     let mut result: Vector<u32> = Vector::new<u32>();
     let mut pending: Vector<u32> = Vector::new<u32>();
     let mut index: u64 = 0;
@@ -6967,6 +6971,24 @@ export namespace Borrowck {
       index += 1;
     }
 
+    // A function returning `void` returns nothing, so the value its body ends
+    // with, such as a closure body's tail, is discarded like a statement's. The
+    // body checked and lowered is the one registered for the function: a
+    // capturing closure's thunk gets a rewritten copy of the closure's body.
+    let mut bodyIndex: u64 = 0;
+
+    while (bodyIndex < hir.functionBodies.length()) {
+      if (let Option::SOME(functionDef) = hir.functionBodies.keyAt(bodyIndex)) {
+        if (let Option::SOME(bodyId) = hir.functionBodies.valueAt(bodyIndex)) {
+          if (!Borrowck::functionReturnsValue(defStore, typeStore, functionDef)) {
+            Borrowck::discardRaw(&mut result, &mut pending, bodyId.raw());
+          }
+        }
+      }
+
+      bodyIndex += 1;
+    }
+
     while (let Option::SOME(current) = pending.pop()) {
       if (let Option::SOME(node) = hir.nodes.get(current as u64)) {
         match (&node.kind) {
@@ -6992,6 +7014,49 @@ export namespace Borrowck {
     }
 
     return result;
+  }
+
+  /// The node whose value a body produces: the tail of a block body, nothing
+  /// for a block without one, and an expression body itself.
+  function bodyResultNode(hir: &Hir::HirStore, bodyId: Hir::HirId): Option<Hir::HirId> {
+    let Option::SOME(node) = hir.get(bodyId) else {
+      return Option::NONE;
+    };
+
+    if (let Hir::HirKind::Block(block) = &node.kind) {
+      return block.expression;
+    }
+
+    return Option::SOME(bodyId);
+  }
+
+  /// Whether the function `functionId` returns a value: its return type is
+  /// neither `void` nor `never`.
+  function functionReturnsValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    functionId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(functionId) else {
+      return true;
+    };
+
+    let returnType: Analyzer::TypeId = match (definition) {
+      Analyzer::Definition::Function(functionDef) -> functionDef.returnType,
+      Analyzer::Definition::Method(methodDef) -> methodDef.returnType,
+      _ -> {
+        return true;
+      },
+    };
+
+    let Option::SOME(type_) = typeStore.get(returnType) else {
+      return true;
+    };
+
+    return match (type_) {
+      Analyzer::Type::VOID | Analyzer::Type::NEVER -> false,
+      _ -> true,
+    };
   }
 
   /// Record `raw` as discarded and queue it, unless it already was.
@@ -7059,7 +7124,12 @@ export namespace Borrowck {
       index += 1;
     }
 
-    if (Borrowck::nodeProducesValue(typeStore, hir, bodyId)) {
+    // A body hands its tail out only when the function returns it: the tail of
+    // a closure returning `void` is discarded. A closure's thunk body wraps the
+    // closure's own body, so the function's return type decides, not the node.
+    let bodyReturnsTail: boolean = Borrowck::nodeProducesValue(typeStore, hir, bodyId) && Borrowck::functionReturnsValue(defStore, typeStore, functionId);
+
+    if (bodyReturnsTail) {
       Borrowck::markTailHandoverChain(hir, &mut state, bodyId);
     }
 
@@ -7152,7 +7222,7 @@ export namespace Borrowck {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
     let mut reportEvents: Vector<Borrowck::OwnershipEvent> = Vector::new<Borrowck::OwnershipEvent>();
     let mut schedules: Hir::DropSchedules = Hir::DropSchedules::init();
-    let statementPositionNodes: Vector<u32> = Borrowck::collectStatementPositionNodes(hir);
+    let statementPositionNodes: Vector<u32> = Borrowck::collectStatementPositionNodes(hir, defStore, typeStore);
     let mut discardedIndex: u64 = 0;
 
     while (discardedIndex < statementPositionNodes.length()) {
