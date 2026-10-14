@@ -120,6 +120,18 @@ that is not marked `@noescape` is an error.
 `@noescape` on a parameter is the promise that the closure will not outlive the call, which is what
 lets the capture stay a pointer instead of a heap allocation.
 
+`@sendable` on a parameter of function type says the closure may run on another thread. Every
+argument passed to it is checked where it is passed: a closure written there may only capture
+values that are `Send` by value, or `Sync` by reference; a named function and a forwarded
+`@sendable` parameter are accepted; a closure held in a variable is rejected, since what it
+captured is not known there. See [traits](/docs/language/traits) for `Send` and `Sync`.
+
+```ignis
+function spawn(@sendable task: () -> i32): i32 {
+    return task();
+}
+```
+
 ```ignis
 function forEach(data: *i32, len: i32, @noescape f: (i32) -> void): void {
     let mut i: i32 = 0;

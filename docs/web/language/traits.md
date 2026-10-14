@@ -73,13 +73,23 @@ Two rules that catch people out:
 
 - Primitives, `str`, ranges and raw C function pointers are both.
 - Raw pointers (`*T`, `*mut T`) are neither: the compiler does not track what they point to.
-- `&T` is either one only when `T` is `Sync`; `&mut T` follows `T`. Slices follow `&T`.
+- `&T` is either one only when `T` is `Sync`; `&mut T` follows `T`. Slices (`T[]`) follow `&T`.
 - Arrays, tuples, records and enums are `Send` (or `Sync`) when every element, field or payload is,
   with a generic instance judged after its type arguments are substituted.
-- A function value is neither. A closure written at a call to `function spawn<F: Send>(task: F)` is
-  judged by what it captures: a value it moves in has to be `Send`, one it reads by reference has
-  to be `Sync`. A named function has nothing to capture and is accepted. A function value held in a
-  variable is rejected (A0253), since its captures cannot be known there.
+- A function value is neither. Only a call argument is judged: a closure written at a call to
+  `function spawn<F: Send>(task: F)`, or to a `@sendable` parameter, is judged by what it captures.
+  A value it moves in has to be `Send`, one it reads by reference has to be `Sync`, and a closure
+  bound to `Sync` may not capture anything by mutable reference. A named function has nothing to
+  capture and is accepted, and so is a `@sendable` parameter forwarded as is. A function value held
+  in a variable is rejected (A0253), since its captures cannot be known there.
+
+`F: Send` cannot be called inside the function; `@sendable` on a function-typed parameter can:
+
+```ignis
+function spawn(@sendable task: () -> i32): i32 {
+    return task();
+}
+```
 
 A type whose structure says no can still declare `@implements(Send)` or `@implements(Sync)`, for
 example a record that guards a raw pointer itself. The declaration is honored, and the

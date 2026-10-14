@@ -39,6 +39,7 @@ inline(always) function hotPath(x: i32): i32 {
 | --- | --- |
 | `@takes` | An extern parameter that consumes ownership |
 | `@noescape` | A closure parameter that will not outlive the call |
+| `@sendable` | A function parameter whose argument may run on another thread (only on function types, A0255) |
 
 ```ignis
 extern rt {

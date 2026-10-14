@@ -614,6 +614,46 @@ export namespace Analyzer {
       };
     }
 
+    /// Rejects `@sendable` on a parameter whose declared type is not a
+    /// function type: the attribute judges what a closure captures, and only
+    /// a function value can carry captures. An alias is left alone, since
+    /// aliases may not be resolved yet when parameters are.
+    function checkSendableParameter(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      paramDefId: Analyzer::DefinitionId,
+      paramPatId: Ast::PatternId,
+      declaredType: Analyzer::TypeId,
+    ): void {
+      if (!defStore.isSendable(paramDefId)) {
+        return;
+      }
+
+      let accepted: boolean = match (typeStore.get(declaredType)) {
+        Option::SOME(Analyzer::Type::Function(_)) | Option::SOME(Analyzer::Type::Alias(_)) | Option::NONE -> true,
+        _ -> false,
+      };
+
+      if (accepted) {
+        return;
+      }
+
+      let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(paramPatId) else {
+        return;
+      };
+
+      let message: String = `\`@sendable\` on parameter '${binding.name.toStr()}', whose type is not a function type`;
+      emitTypeDiagnosticLabeled(
+        state,
+        binding.span,
+        DiagnosticCode::SENDABLE_PARAMETER_NOT_FUNCTION,
+        message.toStr(),
+        "`@sendable` only applies to a parameter of function type",
+      );
+    }
+
     /// Patch `VariableDef.declaredType` at `varDefId` via `DefinitionStore::replace`.
     function patchVariableType(
       defStore: &mut Analyzer::DefinitionStore,
@@ -1825,6 +1865,7 @@ export namespace Analyzer {
               if (let Option::SOME(annotationTypeId) = annotationOpt) {
                 let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
                 patchVariableType(defStore, *paramDefId, resolved);
+                checkSendableParameter(state, defStore, typeStore, module, *paramDefId, *paramPatId, resolved);
               }
               paramIndex += 1;
             }
@@ -2082,6 +2123,7 @@ export namespace Analyzer {
         if (let Option::SOME(annotationTypeId) = annotationOpt) {
           let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
           patchVariableType(defStore, *paramDefId, resolved);
+          checkSendableParameter(state, defStore, typeStore, module, *paramDefId, *paramPatId, resolved);
         }
 
         paramIndex += 1;

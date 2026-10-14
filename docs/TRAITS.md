@@ -203,20 +203,44 @@ The compiler answers them from a type's structure:
 |------|--------|--------|
 | Integer and float primitives, `boolean`, `char`, `str`, `void`, `never`, atoms, ranges, raw C function pointers | yes | yes |
 | `*T`, `*mut T` | no | no |
-| `&T`, `[T]` | when `T` is `Sync` | when `T` is `Sync` |
+| `&T`, slices `T[]` | when `T` is `Sync` | when `T` is `Sync` |
 | `&mut T` | when `T` is `Send` | when `T` is `Sync` |
 | Fixed arrays, tuples | when every element is | when every element is |
 | Records, enums, generic instances | declared, or every field / payload is | declared, or every field / payload is |
-| Function values | judged at the call (below) | judged at the call (below) |
+| Function values | no; only a call argument is judged, at the call (below) | no; only a call argument is judged, at the call (below) |
 | Type parameters | when the parameter declares the bound | when the parameter declares the bound |
 
 A function type does not record what a closure captured, so a function-typed argument bound to a
-`Send` or `Sync` type parameter is judged where it is passed, once captures are known:
+`Send` or `Sync` type parameter, or passed to a `@sendable` parameter, is judged where it is
+passed, once captures are known. Anywhere else, such as a field of `Holder<() -> i32>`, a function
+type is neither `Send` nor `Sync`.
 
 - a closure literal: every capture moved in by value has to be `Send` (`Sync` for a `Sync` bound),
-  and every capture read by reference has to be `Sync`; otherwise A0252,
+  and every capture read by reference has to be `Sync`. For a `Sync` bound, a capture by mutable
+  reference is rejected outright: a closure shared between threads may run on several of them at
+  once. Otherwise A0252,
 - a named function: accepted, it has no environment,
+- a `@sendable` parameter of the enclosing function, forwarded as is: accepted, its own caller was
+  checked,
 - any other function value: rejected (A0253).
+
+#### `@sendable`
+
+A type parameter `F: Send` cannot be called inside the function. `@sendable` on a parameter of
+function type gives the same check at every call while keeping the parameter an ordinary,
+callable function value. Arguments are judged with the `Send` rules above. `@sendable` on a
+parameter that is not of function type is an error (A0255). It combines with `@noescape`, which
+keeps deciding where by-reference captures are allowed.
+
+```ignis
+function spawn(@sendable task: () -> i32): i32 {
+  return task();
+}
+
+function later(@sendable task: () -> i32): i32 {
+  return spawn(task);   // ok: forwarded
+}
+```
 
 A record or enum can declare `@implements(Send)` or `@implements(Sync)` when its structure does not
 prove it, for example when it guards a raw pointer itself. The declaration wins, and the
@@ -557,3 +581,4 @@ record or enum it reports, which overrides the module level for that declaration
 | A0252 | Closure bound to a `Send` / `Sync` parameter captures a value that is not thread-safe | Error |
 | A0253 | Function value bound to a `Send` / `Sync` parameter whose captures cannot be known | Error |
 | A0254 | `@implements(Send)` / `@implements(Sync)` on a type whose structure does not support it (`thread_safety` lint) | Warning |
+| A0255 | `@sendable` on a parameter that is not of function type | Error |
