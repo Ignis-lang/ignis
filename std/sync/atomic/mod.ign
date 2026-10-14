@@ -1,0 +1,537 @@
+//!
+//! # Atomics
+//!
+//! Atomic integers, booleans and pointers built on the compiler's atomic
+//! primitives (`@atomicLoad`, `@atomicStore`, `@atomicRmw`,
+//! `@atomicCompareExchange`).
+//!
+//! ## Overview
+//!
+//! Every type wraps one value and changes it only through `&self`, so a shared
+//! reference is enough to update it from several threads. The methods take the
+//! memory ordering as a runtime `Ordering` and map it to the literal ordering the
+//! primitive needs.
+//!
+//! | Type           | Value      | Integer operations |
+//! |----------------|------------|--------------------|
+//! | `AtomicBool`   | `boolean`  | no                 |
+//! | `AtomicU32`    | `u32`      | yes                |
+//! | `AtomicU64`    | `u64`      | yes                |
+//! | `AtomicI64`    | `i64`      | yes                |
+//! | `AtomicPtr<T>` | `*mut T`   | no                 |
+//!
+//! ## Orderings
+//!
+//! | Operation                  | Accepted orderings                   |
+//! |----------------------------|--------------------------------------|
+//! | `load`                     | `RELAXED`, `ACQUIRE`, `SEQ_CST`      |
+//! | `store`                    | `RELAXED`, `RELEASE`, `SEQ_CST`      |
+//! | `swap`, `fetch*`           | any                                  |
+//! | `compareExchange` success  | any                                  |
+//! | `compareExchange` failure  | `RELAXED`, `ACQUIRE`, `SEQ_CST`      |
+//!
+//! Any other ordering panics with a message naming the operation and the
+//! ordering. It is never clamped: a load that asks for `RELEASE` is a logic
+//! error, and silently weakening or strengthening it would hide that.
+//!
+//! A `compareExchange` failure ordering stronger than its success ordering is
+//! accepted and strengthens the success ordering to match, so `(RELAXED,
+//! SEQ_CST)` runs as `(SEQ_CST, SEQ_CST)`.
+//!
+//! ## Compare-exchange
+//!
+//! `compareExchange(expected, desired, success, failure)` is strong: it never
+//! fails spuriously. It returns `Result::OK(previous)` when it wrote `desired`
+//! (`previous` equals `expected`) and `Result::ERROR(observed)` with the value
+//! it found otherwise.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import AtomicU64, Ordering from "std::sync";
+//!
+//! function main(): i32 {
+//!   let counter: AtomicU64 = AtomicU64::new(0);
+//!   counter.fetchAdd(1, Ordering::RELAXED);
+//!
+//!   return counter.load(Ordering::SEQ_CST) as i32;
+//! }
+//! ```
+//!
+//! ## Arithmetic
+//!
+//! `fetchAdd` and `fetchSub` wrap on overflow. Every `fetch*` and `swap`
+//! returns the value held before the operation.
+
+/// Memory ordering of an atomic operation.
+export enum Ordering {
+  /// Atomicity only, no ordering with other memory operations.
+  RELAXED,
+
+  /// Later reads and writes stay after this load.
+  ACQUIRE,
+
+  /// Earlier reads and writes stay before this store.
+  RELEASE,
+
+  /// `ACQUIRE` and `RELEASE` for a read-modify-write.
+  ACQ_REL,
+
+  /// `ACQ_REL`, plus one total order over every `SEQ_CST` operation.
+  SEQ_CST,
+}
+
+function loadWith<T>(pointer: *T, ordering: Ordering): T {
+  return match (ordering) {
+    Ordering::RELAXED -> @atomicLoad<T>(pointer, :relaxed),
+    Ordering::ACQUIRE -> @atomicLoad<T>(pointer, :acquire),
+    Ordering::SEQ_CST -> @atomicLoad<T>(pointer, :seqCst),
+    Ordering::RELEASE -> @panic("std::sync::atomic: load cannot use Ordering::RELEASE"),
+    Ordering::ACQ_REL -> @panic("std::sync::atomic: load cannot use Ordering::ACQ_REL"),
+  };
+}
+
+function storeWith<T>(pointer: *mut T, value: T, ordering: Ordering): void {
+  match (ordering) {
+    Ordering::RELAXED -> { @atomicStore<T>(pointer, value, :relaxed); },
+    Ordering::RELEASE -> { @atomicStore<T>(pointer, value, :release); },
+    Ordering::SEQ_CST -> { @atomicStore<T>(pointer, value, :seqCst); },
+    Ordering::ACQUIRE -> { @panic("std::sync::atomic: store cannot use Ordering::ACQUIRE"); },
+    Ordering::ACQ_REL -> { @panic("std::sync::atomic: store cannot use Ordering::ACQ_REL"); },
+  };
+}
+
+function swapWith<T>(pointer: *mut T, value: T, ordering: Ordering): T {
+  return match (ordering) {
+    Ordering::RELAXED -> @atomicRmw<T>(pointer, :swap, value, :relaxed),
+    Ordering::ACQUIRE -> @atomicRmw<T>(pointer, :swap, value, :acquire),
+    Ordering::RELEASE -> @atomicRmw<T>(pointer, :swap, value, :release),
+    Ordering::ACQ_REL -> @atomicRmw<T>(pointer, :swap, value, :acqRel),
+    Ordering::SEQ_CST -> @atomicRmw<T>(pointer, :swap, value, :seqCst),
+  };
+}
+
+function addWith<T>(pointer: *mut T, value: T, ordering: Ordering): T {
+  return match (ordering) {
+    Ordering::RELAXED -> @atomicRmw<T>(pointer, :add, value, :relaxed),
+    Ordering::ACQUIRE -> @atomicRmw<T>(pointer, :add, value, :acquire),
+    Ordering::RELEASE -> @atomicRmw<T>(pointer, :add, value, :release),
+    Ordering::ACQ_REL -> @atomicRmw<T>(pointer, :add, value, :acqRel),
+    Ordering::SEQ_CST -> @atomicRmw<T>(pointer, :add, value, :seqCst),
+  };
+}
+
+function subWith<T>(pointer: *mut T, value: T, ordering: Ordering): T {
+  return match (ordering) {
+    Ordering::RELAXED -> @atomicRmw<T>(pointer, :sub, value, :relaxed),
+    Ordering::ACQUIRE -> @atomicRmw<T>(pointer, :sub, value, :acquire),
+    Ordering::RELEASE -> @atomicRmw<T>(pointer, :sub, value, :release),
+    Ordering::ACQ_REL -> @atomicRmw<T>(pointer, :sub, value, :acqRel),
+    Ordering::SEQ_CST -> @atomicRmw<T>(pointer, :sub, value, :seqCst),
+  };
+}
+
+function andWith<T>(pointer: *mut T, value: T, ordering: Ordering): T {
+  return match (ordering) {
+    Ordering::RELAXED -> @atomicRmw<T>(pointer, :and, value, :relaxed),
+    Ordering::ACQUIRE -> @atomicRmw<T>(pointer, :and, value, :acquire),
+    Ordering::RELEASE -> @atomicRmw<T>(pointer, :and, value, :release),
+    Ordering::ACQ_REL -> @atomicRmw<T>(pointer, :and, value, :acqRel),
+    Ordering::SEQ_CST -> @atomicRmw<T>(pointer, :and, value, :seqCst),
+  };
+}
+
+function orWith<T>(pointer: *mut T, value: T, ordering: Ordering): T {
+  return match (ordering) {
+    Ordering::RELAXED -> @atomicRmw<T>(pointer, :or, value, :relaxed),
+    Ordering::ACQUIRE -> @atomicRmw<T>(pointer, :or, value, :acquire),
+    Ordering::RELEASE -> @atomicRmw<T>(pointer, :or, value, :release),
+    Ordering::ACQ_REL -> @atomicRmw<T>(pointer, :or, value, :acqRel),
+    Ordering::SEQ_CST -> @atomicRmw<T>(pointer, :or, value, :seqCst),
+  };
+}
+
+function xorWith<T>(pointer: *mut T, value: T, ordering: Ordering): T {
+  return match (ordering) {
+    Ordering::RELAXED -> @atomicRmw<T>(pointer, :xor, value, :relaxed),
+    Ordering::ACQUIRE -> @atomicRmw<T>(pointer, :xor, value, :acquire),
+    Ordering::RELEASE -> @atomicRmw<T>(pointer, :xor, value, :release),
+    Ordering::ACQ_REL -> @atomicRmw<T>(pointer, :xor, value, :acqRel),
+    Ordering::SEQ_CST -> @atomicRmw<T>(pointer, :xor, value, :seqCst),
+  };
+}
+
+/// Strong compare-exchange returning the value observed.
+///
+/// Dispatches on the failure ordering first: GCC warns about, and upgrades, a
+/// failure ordering stronger than the success one, so those pairs are emitted
+/// already strengthened.
+function compareExchangeWith<T>(
+  pointer: *mut T,
+  expected: T,
+  desired: T,
+  success: Ordering,
+  failure: Ordering,
+): T {
+  return match (failure) {
+    Ordering::RELAXED -> compareExchangeFailRelaxed<T>(pointer, expected, desired, success),
+    Ordering::ACQUIRE -> compareExchangeFailAcquire<T>(pointer, expected, desired, success),
+    Ordering::SEQ_CST -> @atomicCompareExchange<T>(pointer, expected, desired, :seqCst, :seqCst),
+    Ordering::RELEASE -> @panic("std::sync::atomic: compareExchange failure cannot use Ordering::RELEASE"),
+    Ordering::ACQ_REL -> @panic("std::sync::atomic: compareExchange failure cannot use Ordering::ACQ_REL"),
+  };
+}
+
+function compareExchangeFailRelaxed<T>(
+  pointer: *mut T,
+  expected: T,
+  desired: T,
+  success: Ordering
+): T {
+  return match (success) {
+    Ordering::RELAXED -> @atomicCompareExchange<T>(pointer, expected, desired, :relaxed, :relaxed),
+    Ordering::ACQUIRE -> @atomicCompareExchange<T>(pointer, expected, desired, :acquire, :relaxed),
+    Ordering::RELEASE -> @atomicCompareExchange<T>(pointer, expected, desired, :release, :relaxed),
+    Ordering::ACQ_REL -> @atomicCompareExchange<T>(pointer, expected, desired, :acqRel, :relaxed),
+    Ordering::SEQ_CST -> @atomicCompareExchange<T>(pointer, expected, desired, :seqCst, :relaxed),
+  };
+}
+
+function compareExchangeFailAcquire<T>(
+  pointer: *mut T,
+  expected: T,
+  desired: T,
+  success: Ordering
+): T {
+  return match (success) {
+    Ordering::RELAXED -> @atomicCompareExchange<T>(pointer, expected, desired, :acquire, :acquire),
+    Ordering::ACQUIRE -> @atomicCompareExchange<T>(pointer, expected, desired, :acquire, :acquire),
+    Ordering::RELEASE -> @atomicCompareExchange<T>(pointer, expected, desired, :release, :acquire),
+    Ordering::ACQ_REL -> @atomicCompareExchange<T>(pointer, expected, desired, :acqRel, :acquire),
+    Ordering::SEQ_CST -> @atomicCompareExchange<T>(pointer, expected, desired, :seqCst, :acquire),
+  };
+}
+
+/// A `boolean` updated atomically.
+export record AtomicBool {
+  value: boolean;
+
+  /// Creates a flag holding `value`.
+  public static new(value: boolean): AtomicBool {
+    return AtomicBool { value: value };
+  }
+
+  /// Reads the flag. Panics on `RELEASE` and `ACQ_REL`.
+  public load(&self, ordering: Ordering): boolean {
+    return loadWith<boolean>((&self.value) as *boolean, ordering);
+  }
+
+  /// Writes the flag. Panics on `ACQUIRE` and `ACQ_REL`.
+  public store(&self, value: boolean, ordering: Ordering): void {
+    storeWith<boolean>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `value` and returns the previous flag.
+  public swap(&self, value: boolean, ordering: Ordering): boolean {
+    return swapWith<boolean>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `desired` if the flag is `expected`; see the module notes.
+  public compareExchange(
+    &self,
+    expected: boolean,
+    desired: boolean,
+    success: Ordering,
+    failure: Ordering,
+  ): Result<boolean, boolean> {
+    let observed: boolean = compareExchangeWith<boolean>(self.pointer(), expected, desired, success, failure);
+
+    if (observed == expected) {
+      return Result::OK(observed);
+    }
+
+    return Result::ERROR(observed);
+  }
+
+  /// The atomic primitives write through a raw pointer, which is what lets a
+  /// shared reference update the value.
+  pointer(&self): *mut boolean {
+    let shared: *boolean = (&self.value) as *boolean;
+
+    return shared as *mut boolean;
+  }
+}
+
+/// A `u32` updated atomically.
+export record AtomicU32 {
+  value: u32;
+
+  /// Creates a counter holding `value`.
+  public static new(value: u32): AtomicU32 {
+    return AtomicU32 { value: value };
+  }
+
+  /// Reads the value. Panics on `RELEASE` and `ACQ_REL`.
+  public load(&self, ordering: Ordering): u32 {
+    return loadWith<u32>((&self.value) as *u32, ordering);
+  }
+
+  /// Writes the value. Panics on `ACQUIRE` and `ACQ_REL`.
+  public store(&self, value: u32, ordering: Ordering): void {
+    storeWith<u32>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `value` and returns the previous one.
+  public swap(&self, value: u32, ordering: Ordering): u32 {
+    return swapWith<u32>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `desired` if the value is `expected`; see the module notes.
+  public compareExchange(
+    &self,
+    expected: u32,
+    desired: u32,
+    success: Ordering,
+    failure: Ordering,
+  ): Result<u32, u32> {
+    let observed: u32 = compareExchangeWith<u32>(self.pointer(), expected, desired, success, failure);
+
+    if (observed == expected) {
+      return Result::OK(observed);
+    }
+
+    return Result::ERROR(observed);
+  }
+
+  /// Adds `value`, wrapping, and returns the previous value.
+  public fetchAdd(&self, value: u32, ordering: Ordering): u32 {
+    return addWith<u32>(self.pointer(), value, ordering);
+  }
+
+  /// Subtracts `value`, wrapping, and returns the previous value.
+  public fetchSub(&self, value: u32, ordering: Ordering): u32 {
+    return subWith<u32>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise and with `value`; returns the previous value.
+  public fetchAnd(&self, value: u32, ordering: Ordering): u32 {
+    return andWith<u32>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise or with `value`; returns the previous value.
+  public fetchOr(&self, value: u32, ordering: Ordering): u32 {
+    return orWith<u32>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise xor with `value`; returns the previous value.
+  public fetchXor(&self, value: u32, ordering: Ordering): u32 {
+    return xorWith<u32>(self.pointer(), value, ordering);
+  }
+
+  pointer(&self): *mut u32 {
+    let shared: *u32 = (&self.value) as *u32;
+
+    return shared as *mut u32;
+  }
+}
+
+/// A `u64` updated atomically.
+export record AtomicU64 {
+  value: u64;
+
+  /// Creates a counter holding `value`.
+  public static new(value: u64): AtomicU64 {
+    return AtomicU64 { value: value };
+  }
+
+  /// Reads the value. Panics on `RELEASE` and `ACQ_REL`.
+  public load(&self, ordering: Ordering): u64 {
+    return loadWith<u64>((&self.value) as *u64, ordering);
+  }
+
+  /// Writes the value. Panics on `ACQUIRE` and `ACQ_REL`.
+  public store(&self, value: u64, ordering: Ordering): void {
+    storeWith<u64>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `value` and returns the previous one.
+  public swap(&self, value: u64, ordering: Ordering): u64 {
+    return swapWith<u64>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `desired` if the value is `expected`; see the module notes.
+  public compareExchange(
+    &self,
+    expected: u64,
+    desired: u64,
+    success: Ordering,
+    failure: Ordering,
+  ): Result<u64, u64> {
+    let observed: u64 = compareExchangeWith<u64>(self.pointer(), expected, desired, success, failure);
+
+    if (observed == expected) {
+      return Result::OK(observed);
+    }
+
+    return Result::ERROR(observed);
+  }
+
+  /// Adds `value`, wrapping, and returns the previous value.
+  public fetchAdd(&self, value: u64, ordering: Ordering): u64 {
+    return addWith<u64>(self.pointer(), value, ordering);
+  }
+
+  /// Subtracts `value`, wrapping, and returns the previous value.
+  public fetchSub(&self, value: u64, ordering: Ordering): u64 {
+    return subWith<u64>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise and with `value`; returns the previous value.
+  public fetchAnd(&self, value: u64, ordering: Ordering): u64 {
+    return andWith<u64>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise or with `value`; returns the previous value.
+  public fetchOr(&self, value: u64, ordering: Ordering): u64 {
+    return orWith<u64>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise xor with `value`; returns the previous value.
+  public fetchXor(&self, value: u64, ordering: Ordering): u64 {
+    return xorWith<u64>(self.pointer(), value, ordering);
+  }
+
+  pointer(&self): *mut u64 {
+    let shared: *u64 = (&self.value) as *u64;
+
+    return shared as *mut u64;
+  }
+}
+
+/// An `i64` updated atomically.
+export record AtomicI64 {
+  value: i64;
+
+  /// Creates a counter holding `value`.
+  public static new(value: i64): AtomicI64 {
+    return AtomicI64 { value: value };
+  }
+
+  /// Reads the value. Panics on `RELEASE` and `ACQ_REL`.
+  public load(&self, ordering: Ordering): i64 {
+    return loadWith<i64>((&self.value) as *i64, ordering);
+  }
+
+  /// Writes the value. Panics on `ACQUIRE` and `ACQ_REL`.
+  public store(&self, value: i64, ordering: Ordering): void {
+    storeWith<i64>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `value` and returns the previous one.
+  public swap(&self, value: i64, ordering: Ordering): i64 {
+    return swapWith<i64>(self.pointer(), value, ordering);
+  }
+
+  /// Writes `desired` if the value is `expected`; see the module notes.
+  public compareExchange(
+    &self,
+    expected: i64,
+    desired: i64,
+    success: Ordering,
+    failure: Ordering,
+  ): Result<i64, i64> {
+    let observed: i64 = compareExchangeWith<i64>(self.pointer(), expected, desired, success, failure);
+
+    if (observed == expected) {
+      return Result::OK(observed);
+    }
+
+    return Result::ERROR(observed);
+  }
+
+  /// Adds `value`, wrapping, and returns the previous value.
+  public fetchAdd(&self, value: i64, ordering: Ordering): i64 {
+    return addWith<i64>(self.pointer(), value, ordering);
+  }
+
+  /// Subtracts `value`, wrapping, and returns the previous value.
+  public fetchSub(&self, value: i64, ordering: Ordering): i64 {
+    return subWith<i64>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise and with `value`; returns the previous value.
+  public fetchAnd(&self, value: i64, ordering: Ordering): i64 {
+    return andWith<i64>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise or with `value`; returns the previous value.
+  public fetchOr(&self, value: i64, ordering: Ordering): i64 {
+    return orWith<i64>(self.pointer(), value, ordering);
+  }
+
+  /// Bitwise xor with `value`; returns the previous value.
+  public fetchXor(&self, value: i64, ordering: Ordering): i64 {
+    return xorWith<i64>(self.pointer(), value, ordering);
+  }
+
+  pointer(&self): *mut i64 {
+    let shared: *i64 = (&self.value) as *i64;
+
+    return shared as *mut i64;
+  }
+}
+
+/// A `*mut T` updated atomically.
+///
+/// Declared `Send` and `Sync` although it holds a raw pointer: every access to
+/// the pointer value itself is atomic, so sharing the slot cannot race. What the
+/// pointer points to is not protected; synchronizing the pointee is the user's
+/// job, as with any raw pointer.
+@allow(thread_safety)
+@implements(Send, Sync)
+export record AtomicPtr<T> {
+  value: *mut T;
+
+  /// Creates a slot holding `value`.
+  public static new(value: *mut T): AtomicPtr<T> {
+    return AtomicPtr { value: value };
+  }
+
+  /// Reads the pointer. Panics on `RELEASE` and `ACQ_REL`.
+  public load(&self, ordering: Ordering): *mut T {
+    return loadWith<*mut T>(self.slot() as **mut T, ordering);
+  }
+
+  /// Writes the pointer. Panics on `ACQUIRE` and `ACQ_REL`.
+  public store(&self, value: *mut T, ordering: Ordering): void {
+    storeWith<*mut T>(self.slot(), value, ordering);
+  }
+
+  /// Writes `value` and returns the previous pointer.
+  public swap(&self, value: *mut T, ordering: Ordering): *mut T {
+    return swapWith<*mut T>(self.slot(), value, ordering);
+  }
+
+  /// Writes `desired` if the pointer is `expected`; see the module notes.
+  public compareExchange(
+    &self,
+    expected: *mut T,
+    desired: *mut T,
+    success: Ordering,
+    failure: Ordering,
+  ): Result<*mut T, *mut T> {
+    let observed: *mut T = compareExchangeWith<*mut T>(self.slot(), expected, desired, success, failure);
+
+    if (observed == expected) {
+      return Result::OK(observed);
+    }
+
+    return Result::ERROR(observed);
+  }
+
+  slot(&self): *mut *mut T {
+    let shared: **mut T = (&self.value) as **mut T;
+
+    return shared as *mut *mut T;
+  }
+}

@@ -1,0 +1,236 @@
+import AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering from "std::sync";
+import Test from "std::test";
+
+/// The value an exchange that happened replaced.
+function exchangedFrom(outcome: Result<u64, u64>): u64 {
+  if (let Result::OK(previous) = outcome) {
+    return previous;
+  }
+
+  Test::assert(false);
+  return 0;
+}
+
+/// The value an exchange that did not happen observed.
+function observedBy(outcome: Result<u64, u64>): u64 {
+  if (let Result::ERROR(observed) = outcome) {
+    return observed;
+  }
+
+  Test::assert(false);
+  return 0;
+}
+
+@test
+function atomicU64LoadsWithEveryLoadOrdering(): void {
+  let counter: AtomicU64 = AtomicU64::new(7);
+
+  Test::assertEq<u64>(counter.load(Ordering::RELAXED), 7);
+  Test::assertEq<u64>(counter.load(Ordering::ACQUIRE), 7);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 7);
+}
+
+@test
+function atomicU64StoresWithEveryStoreOrdering(): void {
+  let counter: AtomicU64 = AtomicU64::new(0);
+
+  counter.store(1, Ordering::RELAXED);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 1);
+
+  counter.store(2, Ordering::RELEASE);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 2);
+
+  counter.store(3, Ordering::SEQ_CST);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 3);
+}
+
+@test
+function atomicU64SwapsWithEveryOrdering(): void {
+  let counter: AtomicU64 = AtomicU64::new(0);
+
+  Test::assertEq<u64>(counter.swap(1, Ordering::RELAXED), 0);
+  Test::assertEq<u64>(counter.swap(2, Ordering::ACQUIRE), 1);
+  Test::assertEq<u64>(counter.swap(3, Ordering::RELEASE), 2);
+  Test::assertEq<u64>(counter.swap(4, Ordering::ACQ_REL), 3);
+  Test::assertEq<u64>(counter.swap(5, Ordering::SEQ_CST), 4);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 5);
+}
+
+@test
+function atomicU64FetchAddAndSubReturnThePreviousValue(): void {
+  let counter: AtomicU64 = AtomicU64::new(10);
+
+  Test::assertEq<u64>(counter.fetchAdd(1, Ordering::RELAXED), 10);
+  Test::assertEq<u64>(counter.fetchAdd(1, Ordering::ACQUIRE), 11);
+  Test::assertEq<u64>(counter.fetchAdd(1, Ordering::RELEASE), 12);
+  Test::assertEq<u64>(counter.fetchAdd(1, Ordering::ACQ_REL), 13);
+  Test::assertEq<u64>(counter.fetchAdd(1, Ordering::SEQ_CST), 14);
+  Test::assertEq<u64>(counter.fetchSub(5, Ordering::SEQ_CST), 15);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 10);
+}
+
+@test
+function atomicU64FetchSubWraps(): void {
+  let counter: AtomicU64 = AtomicU64::new(0);
+
+  counter.fetchSub(1, Ordering::RELAXED);
+  Test::assertEq<u64>(counter.load(Ordering::RELAXED), 18446744073709551615);
+}
+
+@test
+function atomicU64BitwiseOperationsReturnThePreviousValue(): void {
+  let bits: AtomicU64 = AtomicU64::new(12);
+
+  Test::assertEq<u64>(bits.fetchAnd(10, Ordering::ACQ_REL), 12);
+  Test::assertEq<u64>(bits.fetchOr(1, Ordering::RELEASE), 8);
+  Test::assertEq<u64>(bits.fetchXor(15, Ordering::ACQUIRE), 9);
+  Test::assertEq<u64>(bits.load(Ordering::SEQ_CST), 6);
+}
+
+@test
+function atomicU64CompareExchangeSucceedsOnExpectedValue(): void {
+  let counter: AtomicU64 = AtomicU64::new(5);
+
+  let outcome: Result<u64, u64> = counter.compareExchange(5, 6, Ordering::ACQ_REL, Ordering::ACQUIRE);
+
+  Test::assertEq<u64>(exchangedFrom(outcome), 5);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 6);
+}
+
+@test
+function atomicU64CompareExchangeFailsOnOtherValue(): void {
+  let counter: AtomicU64 = AtomicU64::new(5);
+
+  let outcome: Result<u64, u64> = counter.compareExchange(4, 9, Ordering::SEQ_CST, Ordering::SEQ_CST);
+
+  Test::assertEq<u64>(observedBy(outcome), 5);
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 5);
+}
+
+@test
+function compareExchangeAcceptsEveryValidOrderingPair(): void {
+  let counter: AtomicU64 = AtomicU64::new(0);
+  let successes: Ordering[5] = [
+    Ordering::RELAXED,
+    Ordering::ACQUIRE,
+    Ordering::RELEASE,
+    Ordering::ACQ_REL,
+    Ordering::SEQ_CST,
+  ];
+  let failures: Ordering[3] = [Ordering::RELAXED, Ordering::ACQUIRE, Ordering::SEQ_CST];
+  let mut expected: u64 = 0;
+  let mut successIndex: u64 = 0;
+
+  while (successIndex < 5) {
+    let mut failureIndex: u64 = 0;
+
+    while (failureIndex < 3) {
+      let success: Ordering = successes[successIndex];
+      let failure: Ordering = failures[failureIndex];
+
+      Test::assertEq<u64>(exchangedFrom(counter.compareExchange(expected, expected + 1, success, failure)), expected);
+      Test::assertEq<u64>(observedBy(counter.compareExchange(expected, 99, success, failure)), expected + 1);
+
+      expected += 1;
+      failureIndex += 1;
+    }
+
+    successIndex += 1;
+  }
+
+  Test::assertEq<u64>(counter.load(Ordering::SEQ_CST), 15);
+}
+
+@test
+function atomicU32WrapsAndExchanges(): void {
+  let counter: AtomicU32 = AtomicU32::new(4294967295);
+
+  Test::assertEq<u32>(counter.fetchAdd(1, Ordering::RELAXED), 4294967295);
+  Test::assertEq<u32>(counter.load(Ordering::ACQUIRE), 0);
+
+  counter.store(3, Ordering::RELEASE);
+  Test::assertEq<u32>(counter.fetchSub(1, Ordering::ACQ_REL), 3);
+  Test::assertEq<u32>(counter.fetchAnd(1, Ordering::SEQ_CST), 2);
+  Test::assertEq<u32>(counter.fetchOr(4, Ordering::SEQ_CST), 0);
+  Test::assertEq<u32>(counter.fetchXor(5, Ordering::SEQ_CST), 4);
+  Test::assertEq<u32>(counter.swap(8, Ordering::SEQ_CST), 1);
+
+  let exchanged: Result<u32, u32> = counter.compareExchange(8, 9, Ordering::SEQ_CST, Ordering::RELAXED);
+  let rejected: Result<u32, u32> = counter.compareExchange(8, 10, Ordering::SEQ_CST, Ordering::RELAXED);
+
+  Test::assert(exchanged.isOk());
+  Test::assert(rejected.isError());
+  Test::assertEq<u32>(counter.load(Ordering::SEQ_CST), 9);
+}
+
+@test
+function atomicI64HandlesNegativeValues(): void {
+  let counter: AtomicI64 = AtomicI64::new(-2);
+
+  Test::assertEq<i64>(counter.fetchAdd(5, Ordering::SEQ_CST), -2);
+  Test::assertEq<i64>(counter.fetchSub(10, Ordering::SEQ_CST), 3);
+  Test::assertEq<i64>(counter.load(Ordering::SEQ_CST), -7);
+  Test::assertEq<i64>(counter.fetchAnd(-1, Ordering::RELAXED), -7);
+  Test::assertEq<i64>(counter.fetchOr(0, Ordering::RELAXED), -7);
+  Test::assertEq<i64>(counter.fetchXor(-1, Ordering::RELAXED), -7);
+  Test::assertEq<i64>(counter.load(Ordering::RELAXED), 6);
+  Test::assertEq<i64>(counter.swap(-1, Ordering::ACQ_REL), 6);
+
+  counter.store(-4, Ordering::RELEASE);
+
+  let exchanged: Result<i64, i64> = counter.compareExchange(-4, 4, Ordering::ACQUIRE, Ordering::ACQUIRE);
+
+  Test::assert(exchanged.isOk());
+  Test::assertEq<i64>(counter.load(Ordering::ACQUIRE), 4);
+}
+
+@test
+function atomicBoolSwapsStoresAndExchanges(): void {
+  let flag: AtomicBool = AtomicBool::new(false);
+
+  Test::assert(!flag.load(Ordering::RELAXED));
+  Test::assert(!flag.swap(true, Ordering::ACQ_REL));
+  Test::assert(flag.load(Ordering::ACQUIRE));
+
+  flag.store(false, Ordering::RELEASE);
+  Test::assert(!flag.load(Ordering::SEQ_CST));
+
+  let taken: Result<boolean, boolean> = flag.compareExchange(false, true, Ordering::ACQUIRE, Ordering::RELAXED);
+  let again: Result<boolean, boolean> = flag.compareExchange(false, true, Ordering::ACQUIRE, Ordering::RELAXED);
+
+  Test::assert(taken.isOk());
+  Test::assert(again.isError());
+  Test::assert(flag.load(Ordering::SEQ_CST));
+}
+
+@test
+function atomicPtrLoadsStoresSwapsAndExchanges(): void {
+  let mut first: i32 = 1;
+  let mut second: i32 = 2;
+  let firstPointer: *mut i32 = (&mut first) as *mut i32;
+  let secondPointer: *mut i32 = (&mut second) as *mut i32;
+  let slot: AtomicPtr<i32> = AtomicPtr::new<i32>(null);
+
+  Test::assert(slot.load(Ordering::ACQUIRE) == null);
+
+  slot.store(firstPointer, Ordering::RELEASE);
+  Test::assert(slot.load(Ordering::SEQ_CST) == firstPointer);
+  Test::assert(slot.swap(secondPointer, Ordering::ACQ_REL) == firstPointer);
+
+  let exchanged: Result<*mut i32, *mut i32> = slot.compareExchange(
+    secondPointer,
+    firstPointer,
+    Ordering::SEQ_CST,
+    Ordering::SEQ_CST,
+  );
+  let rejected: Result<*mut i32, *mut i32> = slot.compareExchange(
+    secondPointer,
+    null,
+    Ordering::SEQ_CST,
+    Ordering::SEQ_CST,
+  );
+
+  Test::assert(exchanged.isOk());
+  Test::assert(rejected.isError());
+  Test::assertEq<i32>(@read<i32>(slot.load(Ordering::RELAXED)), 1);
+}

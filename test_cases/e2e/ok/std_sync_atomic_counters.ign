@@ -1,0 +1,41 @@
+// e2e: std
+// The public atomic types of `std::sync` over the compiler's primitives: a
+// counter, a flag used as a try-lock, and a pointer slot.
+import AtomicBool, AtomicPtr, AtomicU64, Ordering from "std::sync";
+
+function tryLock(flag: &AtomicBool): boolean {
+  return flag.compareExchange(false, true, Ordering::ACQUIRE, Ordering::RELAXED).isOk();
+}
+
+function main(): i32 {
+  let counter: AtomicU64 = AtomicU64::new(0);
+  let mut index: u64 = 0;
+
+  while (index < 10) {
+    counter.fetchAdd(index, Ordering::RELAXED);
+    index += 1;
+  }
+
+  if (counter.load(Ordering::SEQ_CST) != 45) {
+    return 1;
+  }
+
+  let flag: AtomicBool = AtomicBool::new(false);
+
+  if (!tryLock(&flag) || tryLock(&flag)) {
+    return 2;
+  }
+
+  flag.store(false, Ordering::RELEASE);
+
+  if (!tryLock(&flag)) {
+    return 3;
+  }
+
+  let mut target: i32 = 42;
+  let slot: AtomicPtr<i32> = AtomicPtr::new<i32>(null);
+
+  slot.store((&mut target) as *mut i32, Ordering::RELEASE);
+
+  return @read<i32>(slot.load(Ordering::ACQUIRE));
+}

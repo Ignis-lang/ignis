@@ -40,6 +40,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::toml` | `Toml` | TOML document model, parsing and writing |
 | `std::format` | `Display` | `Display` trait for user-defined textual representations |
 | `std::text` | `Text` | UTF-8 byte-offset ↔ line/column position conversion (`Text::LineIndex`) |
+| `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr` | Atomic values with explicit memory ordering |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
@@ -210,6 +211,19 @@ function main(): i32 {
 
 - `Display` trait for user-defined textual representations.
 
+### `std::sync`
+
+- `Ordering` — `RELAXED`, `ACQUIRE`, `RELEASE`, `ACQ_REL`, `SEQ_CST`.
+- `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr<T>` — `new`, `load`,
+  `store`, `swap`, `compareExchange`; the integer types add `fetchAdd`, `fetchSub`,
+  `fetchAnd`, `fetchOr`, `fetchXor`. Every method takes `&self`.
+- `compareExchange` is strong and returns `Result::OK(previous)` when it wrote,
+  `Result::ERROR(observed)` when it did not.
+- An ordering the operation cannot use (a `load` with `RELEASE`, a `store` with
+  `ACQUIRE`, a `compareExchange` failure ordering of `RELEASE` or `ACQ_REL`) panics.
+- No threads yet: the types are ready for them, and the allocator counters behind
+  `Memory::stats` are already atomic.
+
 ### `std::text`
 
 - `Text::LineIndex` — converts between UTF-8 byte offsets and LSP-style line/column
@@ -285,6 +299,7 @@ and only drop to `Memory` / `Pointer` / `LibC` when necessary.
 | Dynamic arrays | `std::vector` |
 | Lookup by key / membership | `std::collections` |
 | Shared ownership | `std::rc` |
+| Atomic counters and flags | `std::sync` |
 | Filesystem I/O | `std::fs` |
 | Path manipulation | `std::path` |
 | Environment variables | `std::env` |
