@@ -491,6 +491,9 @@ export namespace Analyzer {
     /// Raw ids of the parameters written with `@sendable`. Held aside, like
     /// `docs`, so the many parameters without it carry no field for it.
     sendableParams: HashMap<u32, boolean>;
+    /// Raw ids of the thunk and drop functions capture analysis synthesizes
+    /// for closures. They are reached only through the closure that owns them.
+    closureFunctions: HashMap<u32, boolean>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -508,6 +511,7 @@ export namespace Analyzer {
         symbolOrigins: HashMap::new<u32, Analyzer::SymbolOrigin>(),
         symbolNames: HashMap::new<u32, String>(),
         sendableParams: HashMap::new<u32, boolean>(),
+        closureFunctions: HashMap::new<u32, boolean>(),
       };
     }
 
@@ -520,6 +524,18 @@ export namespace Analyzer {
     public isSendable(&self, id: Analyzer::DefinitionId): boolean {
       let raw: u32 = id.raw();
       return self.sendableParams.get(&raw).isSome();
+    }
+
+    /// Record that the function `id` is a closure thunk or drop function
+    /// synthesized by capture analysis.
+    public markClosureFunction(&mut self, id: Analyzer::DefinitionId): void {
+      self.closureFunctions.insert(id.raw(), true);
+    }
+
+    /// Whether the function `id` was synthesized for a closure.
+    public isClosureFunction(&self, id: Analyzer::DefinitionId): boolean {
+      let raw: u32 = id.raw();
+      return self.closureFunctions.get(&raw).isSome();
     }
 
     /// Record the encoded symbol segments of module `moduleIndex`'s logical

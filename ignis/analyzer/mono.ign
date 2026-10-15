@@ -3126,7 +3126,11 @@ export namespace Mono {
                 isCSymbol = true;
               }
 
-              isExported = exportAll && functionDef.typeParams.length() == 0;
+              // A closure's thunk and drop function have no type parameters
+              // even when the closure sits in a generic body and reads its
+              // type parameters, so exporting them would copy them without a
+              // substitution. They are reached through the closure instead.
+              isExported = exportAll && functionDef.typeParams.length() == 0 && !defStore.isClosureFunction(defId);
             }
           },
           Analyzer::Definition::Method(methodDef) -> {
