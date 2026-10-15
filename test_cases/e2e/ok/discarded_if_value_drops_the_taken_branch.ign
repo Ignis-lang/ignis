@@ -1,0 +1,74 @@
+// e2e: std
+// An `if` whose value is discarded keeps no result: each branch discards its
+// own value. A fresh temporary is dropped right there, a parameter keeps its
+// own drop, and a field of a captured record stays with its owner. This holds
+// at the end of a closure returning `void`, in an arm of a discarded match, and
+// for a match nested in a discarded branch, which then hands nothing over.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+record Holder {
+  public first: Tracked;
+}
+
+function make(id: i32): Tracked {
+  return Tracked { id: id };
+}
+
+function armIf(flag: i32, pick: boolean, value: Tracked): void {
+  match (flag) {
+    1 -> {
+      if (pick) { value } else { make(4) }
+    },
+    _ -> make(9),
+  };
+
+  Io::println("end arm");
+}
+
+function main(): i32 {
+  let held: Holder = Holder { first: make(1) };
+  let tail = (key: i32, value: Tracked): void -> {
+    if (key == 0) {
+      make(10)
+    } else if (key == 1) {
+      value
+    } else {
+      make(12)
+    }
+  };
+  let nested = (key: i32, value: Tracked): void -> {
+    if (key < 2) {
+      match (key) {
+        0 -> value,
+        _ -> make(20),
+      }
+    } else {
+      held.first
+    }
+  };
+
+  tail(0, make(2));
+  Io::println("after tail 0");
+  tail(1, make(3));
+  Io::println("after tail 1");
+  tail(2, make(5));
+  Io::println("after tail 2");
+  armIf(1, true, make(6));
+  armIf(1, false, make(7));
+  armIf(2, true, make(8));
+  nested(0, make(30));
+  nested(1, make(31));
+  nested(2, make(32));
+  Io::println("end");
+
+  return 0;
+}

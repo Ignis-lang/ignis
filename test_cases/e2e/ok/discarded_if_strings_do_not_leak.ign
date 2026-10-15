@@ -1,0 +1,137 @@
+// e2e: std
+// String values reaching a discarded `if` branch as a local, a parameter, a
+// field, a capture, a vector element or a generic value after monomorphization:
+// fresh strings are freed and places stay with their owners, without leaks.
+import Io from "std::io";
+import Vector from "std::vector";
+
+record Pair {
+  public first: String;
+  public second: String;
+}
+
+function text(s: str): String {
+  return String::create(s);
+}
+
+function pair(): Pair {
+  return Pair { first: text("first-xxxxxxxxxxxxxxxx"), second: text("second-xxxxxxxxxxxxxxx") };
+}
+
+function identity<T>(value: T): T {
+  return value;
+}
+
+function genericTail<T>(flag: boolean, value: T, other: T, third: T): void {
+  let body = (f: boolean, v: T, w: T): void -> {
+    if (f) {
+      v
+    } else {
+      w
+    }
+  };
+  let calls = (f: boolean, v: T): void -> {
+    if (f) {
+      identity<T>(v)
+    } else {
+      identity<T>(v)
+    }
+  };
+  body(flag, value, other);
+  calls(flag, third);
+}
+
+function main(): i32 {
+  let localTail = (flag: boolean): void -> {
+    let a: String = text("local-aaaaaaaaaaaaaaaa");
+    if (flag) {
+      a
+    } else {
+      text("fresh-bbbbbbbbbbbbbbbbb")
+    }
+  };
+  localTail(true);
+  localTail(false);
+
+  let paramTail = (flag: boolean, p: String): void -> {
+    if (flag) {
+      p
+    } else {
+      text("fresh-ccccccccccccccccc")
+    }
+  };
+  paramTail(true, text("param-dddddddddddddddd"));
+  paramTail(false, text("param-eeeeeeeeeeeeeeee"));
+
+  let fieldTail = (flag: boolean): void -> {
+    let p: Pair = pair();
+    if (flag) {
+      p.first
+    } else {
+      pair()
+    }
+  };
+  fieldTail(true);
+  fieldTail(false);
+
+  let held: Pair = pair();
+  let captureTail = (flag: boolean): void -> {
+    if (flag) {
+      held.first
+    } else {
+      text("fresh-ffffffffffffffff")
+    }
+  };
+  captureTail(true);
+  captureTail(false);
+  captureTail(true);
+
+  let refTail = (flag: boolean, r: &Pair): void -> {
+    if (flag) {
+      r.second
+    } else {
+      *r
+    }
+  };
+  refTail(true, &held);
+  refTail(false, &held);
+
+  let mut items: Vector<String> = Vector::new<String>();
+  items.push(text("item-hhhhhhhhhhhhhhhhhh"));
+  let indexTail = (flag: boolean): void -> {
+    if (flag) {
+      *items.get(0).unwrap()
+    } else {
+      text("fresh-iiiiiiiiiiiiiii")
+    }
+  };
+  indexTail(true);
+  indexTail(false);
+
+  let nested = (a: boolean, b: boolean): void -> {
+    if (a) {
+      if (b) {
+        text("n1-jjjjjjjjjjjjjjjjjjjj")
+      } else {
+        held.second
+      }
+    } else {
+      match (b) {
+        true -> text("m1-lllllllllllllllllll"),
+        false -> b ? text("m2-mmmmmmmmmmmmmmmmm") : held.first,
+      }
+    }
+  };
+  nested(true, true);
+  nested(true, false);
+  nested(false, true);
+  nested(false, false);
+
+  genericTail<String>(true, text("g1-kkkkkkkkkkkkkkkkk"), text("g2-kkkkkkkkkkkkkkkkk"), text("g3-kkkkkkkkkkkkkkk"));
+  genericTail<Pair>(false, pair(), pair(), pair());
+
+  Io::println(held.first.toStr());
+  Io::println(held.second.toStr());
+  Io::println(items.get(0).unwrap().toStr());
+  return 0;
+}

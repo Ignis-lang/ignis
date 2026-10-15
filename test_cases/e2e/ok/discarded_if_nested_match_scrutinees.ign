@@ -1,0 +1,79 @@
+// e2e: std
+// A match or `if let` nested in a discarded `if` branch is discarded too, over
+// a local, a call result or a reference scrutinee. It hands nothing over, so the
+// arm a branch takes drops its own value once and the rest keep their owners.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function make(id: i32): Tracked {
+  return Tracked { id: id };
+}
+
+function text(s: str): String {
+  return String::create(s);
+}
+function someTracked(id: i32): Option<Tracked> {
+  return Option::SOME(make(id));
+}
+
+function main(): i32 {
+  let localScrutinee = (flag: boolean, id: i32): void -> {
+    let opt: Option<Tracked> = someTracked(id);
+    if (flag) {
+      match (opt) {
+        Option::SOME(t) -> t,
+        Option::NONE -> make(0),
+      }
+    } else {
+      match (opt) {
+        Option::SOME(t) -> make(id + 1),
+        Option::NONE -> make(0),
+      }
+    }
+  };
+  localScrutinee(true, 10);
+  Io::println("-");
+  localScrutinee(false, 20);
+  Io::println("-");
+  let callScrutinee = (flag: boolean, id: i32): void -> {
+    if (flag) {
+      match (someTracked(id)) {
+        Option::SOME(t) -> t,
+        Option::NONE -> make(0),
+      }
+    } else {
+      if (let Option::SOME(t) = someTracked(id + 1)) {
+        t
+      } else {
+        make(1)
+      }
+    }
+  };
+  callScrutinee(true, 30);
+  Io::println("-");
+  callScrutinee(false, 40);
+  Io::println("-");
+  let refScrutinee = (flag: boolean, opt: &Option<Tracked>): void -> {
+    if (flag) {
+      match (opt) {
+        Option::SOME(t) -> make(t.id + 1),
+        Option::NONE -> make(0),
+      }
+    } else {
+      make(2)
+    }
+  };
+  let shared: Option<Tracked> = someTracked(50);
+  refScrutinee(true, &shared);
+  refScrutinee(false, &shared);
+  Io::println("end");
+  return 0;
+}
