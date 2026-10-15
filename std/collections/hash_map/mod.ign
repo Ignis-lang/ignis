@@ -187,11 +187,17 @@ function __hashMapStorageBytes<T>(count: u64): u64 {
   return elementSize == 0 ? 1 : count * elementSize;
 }
 
-@implements(Drop)
 /// Deterministic open-addressed map from `K` to `V`.
 ///
 /// This container owns both keys and values. Replacing or removing an entry
 /// drops the previous key/value exactly once.
+///
+/// Declared `Send` and `Sync` although it holds a raw pointer: the map
+/// owns its heap buffers exclusively, so moving it moves the only handle to the
+/// buffers, and a shared reference only reads it. An instance is
+/// Send or Sync only when `K` and `V` are.
+@allow(thread_safety)
+@implements(Drop, Send, Sync)
 export record HashMap<K: Hash & Eq, V> {
   states: *mut u8;
   hashes: *mut u64;

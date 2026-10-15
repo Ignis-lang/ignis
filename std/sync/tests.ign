@@ -1,4 +1,17 @@
-import AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering from "std::sync";
+import
+  Arc,
+  AtomicBool,
+  AtomicI64,
+  AtomicPtr,
+  AtomicU32,
+  AtomicU64,
+  Condvar,
+  Mutex,
+  MutexGuard,
+  Ordering,
+from "std::sync";
+import JoinHandle, Thread from "std::thread";
+import HashMap from "std::collections";
 import Test from "std::test";
 
 /// The value an exchange that happened replaced.
@@ -233,4 +246,149 @@ function atomicPtrLoadsStoresSwapsAndExchanges(): void {
   Test::assert(exchanged.isOk());
   Test::assert(rejected.isError());
   Test::assertEq<i32>(@read<i32>(slot.load(Ordering::RELAXED)), 1);
+}
+
+function requireSend<T: Send>(): boolean {
+  return true;
+}
+
+function requireSync<T: Sync>(): boolean {
+  return true;
+}
+
+@test
+function owningCollectionsAreSendAndSync(): void {
+  Test::assert(requireSend<String>());
+  Test::assert(requireSync<String>());
+  Test::assert(requireSend<Vector<String>>());
+  Test::assert(requireSync<Vector<u64>>());
+  Test::assert(requireSend<HashMap<u64, String>>());
+}
+
+@test
+function syncPrimitivesAreSendAndSync(): void {
+  Test::assert(requireSend<Mutex<Vector<u64>>>());
+  Test::assert(requireSync<Mutex<u64>>());
+  Test::assert(requireSend<Arc<Mutex<String>>>());
+  Test::assert(requireSync<Arc<u64>>());
+  Test::assert(requireSync<Condvar>());
+}
+
+@test
+function mutexGuardWritesThroughToTheValue(): void {
+  let mutex: Mutex<u64> = Mutex::new<u64>(1);
+
+  {
+    let mut guard: MutexGuard<u64> = mutex.lock();
+    let value: &mut u64 = guard.get();
+
+    *value += 41;
+  }
+
+  let guard: MutexGuard<u64> = mutex.lock();
+
+  Test::assertEq<u64>(*guard.read(), 42);
+}
+
+@test
+function mutexTryLockFailsWhileLocked(): void {
+  let mutex: Mutex<u64> = Mutex::new<u64>(0);
+
+  {
+    let _guard: MutexGuard<u64> = mutex.lock();
+
+    Test::assert(mutex.tryLock().isNone());
+  }
+
+  Test::assert(mutex.tryLock().isSome());
+}
+
+@test
+function mutexDropsAnOwnedValue(): void {
+  let mutex: Mutex<String> = Mutex::new<String>(String::create("owned"));
+  let guard: MutexGuard<String> = mutex.lock();
+
+  Test::assertEq<u64>(guard.read().length(), 5);
+}
+
+@test
+function arcCountsClonesAndSharesTheValue(): void {
+  let first: Arc<String> = Arc::new<String>(String::create("shared"));
+
+  Test::assertEq<u64>(first.strongCount(), 1);
+
+  {
+    let second: Arc<String> = first.clone();
+
+    Test::assertEq<u64>(second.strongCount(), 2);
+    Test::assertEq<u64>(second.get().length(), 6);
+  }
+
+  Test::assertEq<u64>(first.strongCount(), 1);
+}
+
+@test
+function arcMutexCounterAcrossThreads(): void {
+  let counter: Arc<Mutex<u64>> = Arc::new<Mutex<u64>>(Mutex::new<u64>(0));
+  let mut handles: Vector<JoinHandle<boolean>> = Vector::new<JoinHandle<boolean>>();
+  let mut index: u64 = 0;
+
+  while (index < 4) {
+    let shared: Arc<Mutex<u64>> = counter.clone();
+
+    handles.push(Thread::spawn<boolean>((): boolean -> {
+          let mut step: u64 = 0;
+
+          while (step < 1000) {
+            let mut guard: MutexGuard<u64> = (@move shared).get().lock();
+            let value: &mut u64 = guard.get();
+
+            *value += 1;
+            step += 1;
+          }
+
+          return true;
+        }));
+    index += 1;
+  }
+
+  while (handles.length() > 0) {
+    if (let Option::SOME(popped) = handles.pop()) {
+      let mut handle: JoinHandle<boolean> = popped;
+
+      Test::assert(handle.join());
+    }
+  }
+
+  let guard: MutexGuard<u64> = counter.get().lock();
+
+  Test::assertEq<u64>(*guard.read(), 4000);
+  Test::assertEq<u64>(counter.strongCount(), 1);
+}
+
+record Signal {
+  public ready: Mutex<boolean>;
+  public changed: Condvar;
+}
+
+@test
+function condvarWakesAWaiter(): void {
+  let signal: Arc<Signal> = Arc::new<Signal>(Signal { ready: Mutex::new<boolean>(false), changed: Condvar::new() });
+  let shared: Arc<Signal> = signal.clone();
+  let mut notifier: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
+      let state: &Signal = (@move shared).get();
+      let mut guard: MutexGuard<boolean> = state.ready.lock();
+      let ready: &mut boolean = guard.get();
+
+      *ready = true;
+      state.changed.notifyOne();
+      return true;
+    });
+  let mut guard: MutexGuard<boolean> = signal.get().ready.lock();
+
+  while (!*guard.read()) {
+    signal.get().changed.wait<boolean>(&mut guard);
+  }
+
+  Test::assert(notifier.join());
 }

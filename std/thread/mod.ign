@@ -16,6 +16,8 @@
 //! `JoinHandle<T>`. `join()` waits for the thread to finish and returns what the
 //! task returned. The task parameter is `@sendable`, so the compiler checks at
 //! every call that whatever the closure captures can move to another thread.
+//! The result moves from the spawned thread to the joining one, so `T` has to
+//! be Send.
 //! `join` takes `&mut self`; a handle can be joined once and joining it again
 //! panics.
 //!
@@ -263,15 +265,11 @@ function threadEntry(argument: *mut u8): *mut u8 {
 /// Declared `Send` although it holds raw pointers: the control block is shared
 /// with exactly one other thread through an atomic reference count, and the
 /// result slot is read only after `pthread_join` has synchronized with the
-/// thread that wrote it.
-///
-/// `T` carries no `Send` bound: the standard owning types (`String`,
-/// `Vector<T>`) do not declare `Send` yet, so the bound would reject ordinary
-/// results. The result is created on the spawned thread and moved out exactly
-/// once, and everything the task captured was checked by `@sendable`.
+/// thread that wrote it. The result crosses from the spawned thread to the
+/// joining one, so `T` has to be Send.
 @allow(thread_safety)
 @implements(Drop, Send)
-export record JoinHandle<T> {
+export record JoinHandle<T: Send> {
   thread: u64;
   block: *mut ThreadBlock;
   slot: *mut T;
@@ -307,7 +305,7 @@ export namespace Thread {
   /// Runs `task` on a new thread.
   ///
   /// Panics if the system cannot create the thread.
-  function spawn<T>(@sendable task: () -> T): JoinHandle<T> {
+  function spawn<T: Send>(@sendable task: () -> T): JoinHandle<T> {
     let slot: *mut T = ThreadBlocks::allocateSlot(@sizeOf<T>(), @alignOf<T>()) as *mut T;
     let cell: *mut TaskCell<T> = RawAllocator::allocateZeroedAligned(
       1,

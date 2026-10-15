@@ -1,0 +1,56 @@
+// e2e: std
+// Eight threads each lock one shared mutex ten thousand times and increment the
+// counter it guards. Every thread owns a clone of the `Arc`, so the total is
+// exact and the last clone frees the mutex.
+import JoinHandle, Thread from "std::thread";
+import Arc, Mutex, MutexGuard from "std::sync";
+
+const THREAD_COUNT: u64 = 8;
+const INCREMENTS_PER_THREAD: u64 = 10000;
+
+function main(): i32 {
+  let counter: Arc<Mutex<u64>> = Arc::new<Mutex<u64>>(Mutex::new<u64>(0));
+  let mut handles: Vector<JoinHandle<u64>> = Vector::new<JoinHandle<u64>>();
+  let mut index: u64 = 0;
+
+  while (index < THREAD_COUNT) {
+    let shared: Arc<Mutex<u64>> = counter.clone();
+
+    handles.push(Thread::spawn<u64>((): u64 -> {
+          let mut step: u64 = 0;
+
+          while (step < INCREMENTS_PER_THREAD) {
+            let mut guard: MutexGuard<u64> = (@move shared).get().lock();
+            let value: &mut u64 = guard.get();
+
+            *value += 1;
+            step += 1;
+          }
+
+          return step;
+        }));
+    index += 1;
+  }
+
+  let mut joined: u64 = 0;
+
+  while (handles.length() > 0) {
+    if (let Option::SOME(popped) = handles.pop()) {
+      let mut handle: JoinHandle<u64> = popped;
+
+      joined += handle.join();
+    }
+  }
+
+  if (joined != THREAD_COUNT * INCREMENTS_PER_THREAD) {
+    return 1;
+  }
+
+  if (counter.strongCount() != 1) {
+    return 2;
+  }
+
+  let guard: MutexGuard<u64> = counter.get().lock();
+
+  return *guard.read() == THREAD_COUNT * INCREMENTS_PER_THREAD ? 0 : 3;
+}

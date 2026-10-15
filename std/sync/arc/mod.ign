@@ -1,0 +1,150 @@
+//!
+//! # Arc
+//!
+//! Shared ownership across threads with an atomic reference count.
+//!
+//! `Arc<T>` keeps one heap allocation alive while any clone of it exists.
+//! `clone` adds a reference, dropping a clone removes one, and the last one
+//! drops the value and frees the allocation. The count is atomic, so clones
+//! can move to and drop on different threads.
+//!
+//! `get` gives only shared access: several threads may read the value at once.
+//! To mutate it, share a `Mutex` or an atomic (`Arc<Mutex<T>>`).
+//!
+//! ## Thread safety
+//!
+//! `Arc<T>` requires `T: Send & Sync`: a clone on another thread reads the same
+//! value (Sync), and whichever thread drops the last clone drops the value
+//! (Send). `Arc<Rc<i32>>` is rejected. The allocation is reached through a raw
+//! pointer, so `Arc` declares `Send` and `Sync` itself.
+//!
+//! ## Layout
+//!
+//! ```text
+//!   ┌──────────────┬─────────────┬──────────────┐
+//!   │ strong (u64) │ padding     │ T payload    │
+//!   └──────────────┴─────────────┴──────────────┘
+//!   ^ block                      ^ block + headerSize(alignOf<T>)
+//! ```
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Arc from "std::sync";
+//!
+//! function main(): i32 {
+//!   let first: Arc<i32> = Arc::new<i32>(42);
+//!   let second: Arc<i32> = first.clone();
+//!
+//!   return *second.get();
+//! }
+//! ```
+
+import Align, RawAllocator from "std::memory";
+
+const ARC_MIN_ALIGNMENT: u64 = 16;
+
+/// Operations on an `Arc` allocation.
+///
+/// Exported because a monomorphized `Arc<T>` method is emitted into the unit
+/// that instantiates it and reaches these by name. Nothing outside `Arc<T>`
+/// should call them.
+export namespace ArcBlock {
+  /// The allocation alignment for a payload aligned to `payloadAlign`.
+  function alignment(payloadAlign: u64): u64 {
+    if (payloadAlign == 0 || !Align::isPowerOfTwo(payloadAlign)) {
+      return ARC_MIN_ALIGNMENT;
+    }
+
+    return payloadAlign < ARC_MIN_ALIGNMENT ? ARC_MIN_ALIGNMENT : payloadAlign;
+  }
+
+  /// Byte offset from the block to the payload.
+  function headerSize(payloadAlign: u64): u64 {
+    return Align::alignUp(@sizeOf<u64>(), ArcBlock::alignment(payloadAlign));
+  }
+
+  /// Allocates a block with a strong count of 1 and room for the payload.
+  function allocate(payloadSize: u64, payloadAlign: u64): *mut u8 {
+    let total: u64 = ArcBlock::headerSize(payloadAlign) + payloadSize;
+    let block: *mut u8 = RawAllocator::allocateZeroedAligned(1, total, ArcBlock::alignment(payloadAlign));
+
+    @atomicStore<u64>(block as *mut u64, 1, :relaxed);
+
+    return block;
+  }
+
+  /// Adds a reference. Relaxed: the caller already holds one, so the block
+  /// cannot go away meanwhile.
+  function retain(block: *mut u8): void {
+    @atomicRmw<u64>(block as *mut u64, :add, 1, :relaxed);
+  }
+
+  /// Removes a reference and returns whether it was the last one.
+  ///
+  /// Acquire-release, so the last holder sees every write the others made to
+  /// the payload before they let go.
+  function release(block: *mut u8): boolean {
+    return @atomicRmw<u64>(block as *mut u64, :sub, 1, :acqRel) == 1;
+  }
+
+  function strongCount(block: *mut u8): u64 {
+    return @atomicLoad<u64>(block as *u64, :acquire);
+  }
+}
+
+/// A thread-safe reference-counted pointer to a `T` on the heap.
+///
+/// Declared `Send` and `Sync` although it holds a raw pointer: the count is
+/// updated atomically, the payload is only read through it, and the bound
+/// `T: Send & Sync` covers reading the value from several threads and dropping
+/// it on any of them.
+@allow(thread_safety)
+@implements(Drop, Clone, Send, Sync)
+export record Arc<T: Send & Sync> {
+  block: *mut u8;
+
+  /// Moves `value` into a new allocation with one reference.
+  public static new(value: T): Arc<T> {
+    let block: *mut u8 = ArcBlock::allocate(@sizeOf<T>(), @alignOf<T>());
+    let mut slot: *mut T = (block as u64 + ArcBlock::headerSize(@alignOf<T>())) as *mut T;
+
+    // An indexed store moves `value` into the payload; `@write` would copy it
+    // and drop the parameter at the end of this function.
+    slot[0] = value;
+
+    return Arc { block: block };
+  }
+
+  /// The shared value.
+  public get(&self): &T {
+    return self.payloadPointer() as &T;
+  }
+
+  /// The number of live references, this one included.
+  ///
+  /// Other threads may change it at any moment; it is exact only when nothing
+  /// else can clone or drop meanwhile.
+  public strongCount(&self): u64 {
+    return ArcBlock::strongCount(self.block);
+  }
+
+  /// Adds a reference to the same allocation.
+  clone(&self): Arc<T> {
+    ArcBlock::retain(self.block);
+
+    return Arc { block: self.block };
+  }
+
+  payloadPointer(&self): *mut T {
+    return (self.block as u64 + ArcBlock::headerSize(@alignOf<T>())) as *mut T;
+  }
+
+  /// Removes this reference; the last one drops the value and frees the block.
+  drop(&mut self): void {
+    if (ArcBlock::release(self.block)) {
+      @dropInPlace<T>(self.payloadPointer());
+      RawAllocator::free(self.block);
+    }
+  }
+}
