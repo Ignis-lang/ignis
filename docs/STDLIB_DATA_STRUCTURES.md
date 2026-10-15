@@ -348,6 +348,7 @@ Recent std additions complement these data structures:
 | `std::cli` | Bounded command-line parser for declared flags, options, positionals, and `--` terminators. |
 | `std::terminal` | Semantic terminal API for styling, screen/cursor commands, and terminal capability checks. |
 | `std::sync` | Atomic `boolean`, `u32`, `u64`, `i64` and pointer values (`AtomicU64`, ...) with an explicit `Ordering`. |
+| `std::thread` | `Thread::spawn` a `@sendable` task on a POSIX thread; `JoinHandle<T>` joins its result or detaches on drop. |
 
 ## 11. Current Scope
 

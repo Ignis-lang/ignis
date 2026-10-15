@@ -598,6 +598,7 @@ Common std modules include:
 | Terminal control | `std::terminal` | Styling text, clearing screen/lines, moving cursors, and checking terminal capability semantically. |
 | Data structures | `std::collections`, `std::vector` | Using `HashMap`, `HashSet`, `BitSet`, and `Vector`. |
 | Atomics | `std::sync` | Counters, flags and pointer slots updated atomically with an explicit `Ordering`. |
+| Threads | `std::thread` | Spawning a `@sendable` task on a POSIX thread, joining its result, detaching on drop. |
 
 ```toml
 # ignis.toml

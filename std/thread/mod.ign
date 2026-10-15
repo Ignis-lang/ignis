@@ -1,0 +1,349 @@
+//!
+//! # Thread
+//!
+//! Operating system threads on top of POSIX threads.
+//!
+//! ## Exports
+//!
+//! | Export          | Description                                         |
+//! |-----------------|-----------------------------------------------------|
+//! | `Thread`        | `spawn` a task on a new thread, `currentId`         |
+//! | `JoinHandle<T>` | Owns a running thread; `join` waits for its result  |
+//!
+//! ## Spawning and joining
+//!
+//! `Thread::spawn<T>(task)` runs `task` on a new thread and returns a
+//! `JoinHandle<T>`. `join()` waits for the thread to finish and returns what the
+//! task returned. The task parameter is `@sendable`, so the compiler checks at
+//! every call that whatever the closure captures can move to another thread.
+//! `join` takes `&mut self`; a handle can be joined once and joining it again
+//! panics.
+//!
+//! `T = void` is not supported yet: returning a generic `T` instantiated as
+//! `void` fails LIR verification. A task with nothing to report returns a value
+//! such as `boolean` instead.
+//!
+//! Dropping a handle without joining it detaches the thread: it keeps running,
+//! nothing waits for it, and its result is dropped when it finishes. A detached
+//! thread that is still running when `main` returns is ended with the process.
+//!
+//! ## Panics
+//!
+//! A panic in a spawned thread ends the whole process with exit code 101, the
+//! same as a panic on the main thread. There is no unwinding and `join` never
+//! observes a panicked thread.
+//!
+//! ## Ownership of a spawned thread
+//!
+//! `spawn` allocates one control block shared by the handle and the thread. It
+//! holds a reference count that starts at 2, the boxed task, and a heap slot for
+//! the result:
+//!
+//! - The thread runs the task, writes the result into the slot, and drops its
+//!   reference.
+//! - `join` waits for the thread, moves the result out of the slot and marks the
+//!   block joined. The handle still drops its reference when it goes away.
+//! - Dropping an unjoined handle detaches the thread and drops its reference.
+//!
+//! Whichever side drops the last reference drops the result still in the slot
+//! (only when nobody joined), frees the slot, the task's closures and the block.
+//! Every release happens after the task ran, so an unjoined slot always holds a
+//! result. The count is atomic, so the block is freed exactly once.
+//!
+//! ## Host assumptions
+//!
+//! `pthread_t` is bound as `u64`, which is its definition on Linux (glibc and
+//! musl) for 64-bit targets. A target whose `pthread_t` is not a 64-bit integer
+//! needs its own binding.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import JoinHandle, Thread from "std::thread";
+//!
+//! function main(): i32 {
+//!   let handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> 6 * 7);
+//!
+//!   return handle.join();
+//! }
+//! ```
+
+import RawAllocator from "std::memory";
+
+// POSIX thread primitives (pthread.h), declared locally like the other
+// `std` syscall layers. `pthread_t` is `u64`; see "Host assumptions".
+extern __thread_posix {
+  function pthread_create(
+    thread: *mut u64,
+    attributes: *mut u8,
+    start: (*mut u8) -> *mut u8,
+    argument: *mut u8
+  ): i32;
+  function pthread_join(thread: u64, result: *mut u8): i32;
+  function pthread_detach(thread: u64): i32;
+  function pthread_self(): u64;
+}
+
+/// A boxed `() -> void`, alone in its own heap cell.
+///
+/// A closure cannot be called through a pointer or a reference, so a cell is
+/// consumed by moving the closure out (`Callbacks::take`) and calling it.
+record Callback {
+  public call: () -> void;
+}
+
+/// A boxed task, alone in its own heap cell.
+///
+/// `spawn` boxes the task instead of capturing it in the `run` closure: a
+/// closure captured by value inside another closure is not dropped with the
+/// outer one, which would leak the task's environment.
+record TaskCell<T> {
+  public call: () -> T;
+}
+
+/// Control block shared by a `JoinHandle<T>` and its thread.
+///
+/// It is not generic, so the capture-free `threadEntry` can run it: the typed
+/// work lives in the two callbacks, which own the task and the result slot.
+record ThreadBlock {
+  /// Live references: the handle and the thread. Updated atomically.
+  public references: u64;
+
+  /// 1 once `join` moved the result out, so dropping the handle does not detach.
+  public joined: u64;
+
+  /// Runs the task and stores its result in the slot. Taken by the thread.
+  public run: *mut Callback;
+
+  /// Drops the result left in the slot. Run by the last release unless joined.
+  public discard: *mut Callback;
+
+  /// Heap storage for the task's result, freed by the last release.
+  public slot: *mut u8;
+}
+
+/// Operations on the control block.
+///
+/// Exported because a monomorphized `JoinHandle<T>` method is emitted into the
+/// unit that instantiates it and reaches these by name. Nothing outside this
+/// module should call them.
+export namespace ThreadBlocks {
+  /// Allocates a block over `slot` holding `run` and `discard`, with two references.
+  function allocate(slot: *mut u8, run: () -> void, discard: () -> void): *mut ThreadBlock {
+    let block: *mut ThreadBlock = RawAllocator::allocateZeroedAligned(
+      1,
+      @sizeOf<ThreadBlock>(),
+      @alignOf<ThreadBlock>(),
+    ) as *mut ThreadBlock;
+    let mut target: *mut ThreadBlock = block;
+
+    target[0] = ThreadBlock {
+      references: 2,
+      joined: 0,
+      run: ThreadBlocks::box(run),
+      discard: ThreadBlocks::box(discard),
+      slot: slot,
+    };
+
+    return block;
+  }
+
+  function box(call: () -> void): *mut Callback {
+    let cell: *mut Callback = RawAllocator::allocateZeroedAligned(1, @sizeOf<Callback>(), @alignOf<Callback>()) as *mut Callback;
+    let mut target: *mut Callback = cell;
+
+    target[0] = Callback { call: call };
+
+    return cell;
+  }
+
+  /// Moves the closure out of `cell`, frees the cell and runs the closure once.
+  function runAndFree(cell: *mut Callback): void {
+    let callback: Callback = @read<Callback>(cell);
+
+    RawAllocator::free(cell as *mut u8);
+
+    let call: () -> void = callback.call;
+
+    call();
+  }
+
+  /// Drops the closure in `cell` without running it and frees the cell.
+  function dropAndFree(cell: *mut Callback): void {
+    @dropInPlace<Callback>(cell);
+    RawAllocator::free(cell as *mut u8);
+  }
+
+  /// Allocates storage for one result of `size` bytes aligned to `alignment`.
+  ///
+  /// A `void` result has size zero; it still gets one byte so the slot has an
+  /// address of its own.
+  function allocateSlot(size: u64, alignment: u64): *mut u8 {
+    return RawAllocator::allocateZeroedAligned(1, size == 0 ? 1 : size, alignment);
+  }
+
+  /// Drops one reference; the last one destroys the block.
+  function release(block: *mut ThreadBlock): void {
+    let previous: u64 = @atomicRmw<u64>(ThreadBlocks::referencesOf(block), :sub, 1, :acqRel);
+
+    if (previous != 1) {
+      return;
+    }
+
+    // Every release happens after the thread ran its task, so the slot holds a
+    // result unless `join` moved it out.
+    if (ThreadBlocks::isJoined(block)) {
+      ThreadBlocks::dropAndFree(block[0].discard);
+    } else {
+      ThreadBlocks::runAndFree(block[0].discard);
+    }
+
+    RawAllocator::free(block[0].slot);
+    RawAllocator::free(block as *mut u8);
+  }
+
+  function referencesOf(block: *mut ThreadBlock): *mut u64 {
+    return block as *mut u64;
+  }
+
+  // `joined` is the second `u64` field, so it sits right after `references`.
+  function joinedOf(block: *mut ThreadBlock): *mut u64 {
+    return (block as u64 + @sizeOf<u64>()) as *mut u64;
+  }
+
+  function markJoined(block: *mut ThreadBlock): void {
+    @atomicStore<u64>(ThreadBlocks::joinedOf(block), 1, :release);
+  }
+
+  function isJoined(block: *mut ThreadBlock): boolean {
+    return @atomicLoad<u64>(ThreadBlocks::joinedOf(block) as *u64, :acquire) == 1;
+  }
+
+  /// Starts a thread running `block`. Panics if the system refuses.
+  function start(block: *mut ThreadBlock): u64 {
+    let mut thread: u64 = 0;
+
+    if (__thread_posix::pthread_create((&mut thread) as *mut u64, null, threadEntry, block as *mut u8) != 0) {
+      @panic("Thread::spawn: pthread_create failed");
+    }
+
+    return thread;
+  }
+
+  /// Waits for `thread` to finish. Panics if it cannot be joined.
+  function join(thread: u64): void {
+    if (__thread_posix::pthread_join(thread, null) != 0) {
+      @panic("JoinHandle::join: pthread_join failed");
+    }
+  }
+
+  function detach(thread: u64): void {
+    __thread_posix::pthread_detach(thread);
+  }
+}
+
+/// Entry point of every spawned thread, handed to `pthread_create`.
+///
+/// It has to be a named, capture-free function to cross into C as a function
+/// pointer; the block carries the typed task.
+function threadEntry(argument: *mut u8): *mut u8 {
+  let block: *mut ThreadBlock = argument as *mut ThreadBlock;
+
+  ThreadBlocks::runAndFree(block[0].run);
+  ThreadBlocks::release(block);
+
+  return null;
+}
+
+/// Owns a spawned thread and the result it will produce.
+///
+/// `join` waits for the result. Dropping the handle without joining detaches
+/// the thread.
+///
+/// Declared `Send` although it holds raw pointers: the control block is shared
+/// with exactly one other thread through an atomic reference count, and the
+/// result slot is read only after `pthread_join` has synchronized with the
+/// thread that wrote it.
+///
+/// `T` carries no `Send` bound: the standard owning types (`String`,
+/// `Vector<T>`) do not declare `Send` yet, so the bound would reject ordinary
+/// results. The result is created on the spawned thread and moved out exactly
+/// once, and everything the task captured was checked by `@sendable`.
+@allow(thread_safety)
+@implements(Drop, Send)
+export record JoinHandle<T> {
+  thread: u64;
+  block: *mut ThreadBlock;
+  slot: *mut T;
+
+  /// Waits for the thread to finish and returns the value its task returned.
+  ///
+  /// Takes `&mut self` rather than consuming the handle: a by-value `self`
+  /// method on a record with a destructor does not compile yet. The handle is
+  /// spent afterwards; joining it again panics.
+  public join(&mut self): T {
+    if (ThreadBlocks::isJoined(self.block)) {
+      @panic("JoinHandle::join: the thread was already joined");
+    }
+
+    ThreadBlocks::join(self.thread);
+
+    ThreadBlocks::markJoined(self.block);
+
+    return @read<T>(self.slot);
+  }
+
+  drop(&mut self): void {
+    if (!ThreadBlocks::isJoined(self.block)) {
+      ThreadBlocks::detach(self.thread);
+    }
+
+    ThreadBlocks::release(self.block);
+  }
+}
+
+/// Thread creation and identity.
+export namespace Thread {
+  /// Runs `task` on a new thread.
+  ///
+  /// Panics if the system cannot create the thread.
+  function spawn<T>(@sendable task: () -> T): JoinHandle<T> {
+    let slot: *mut T = ThreadBlocks::allocateSlot(@sizeOf<T>(), @alignOf<T>()) as *mut T;
+    let cell: *mut TaskCell<T> = RawAllocator::allocateZeroedAligned(
+      1,
+      @sizeOf<TaskCell<T>>(),
+      @alignOf<TaskCell<T>>(),
+    ) as *mut TaskCell<T>;
+    let mut target: *mut TaskCell<T> = cell;
+
+    target[0] = TaskCell { call: task };
+
+    let block: *mut ThreadBlock = ThreadBlocks::allocate(
+      slot as *mut u8,
+      (): void -> {
+        let boxed: TaskCell<T> = @read<TaskCell<T>>(cell);
+
+        RawAllocator::free(cell as *mut u8);
+
+        let call: () -> T = boxed.call;
+
+        @write<T>(slot, call());
+      },
+      (): void -> {
+        @dropInPlace<T>(slot);
+      },
+    );
+    let thread: u64 = ThreadBlocks::start(block);
+
+    return JoinHandle {
+      thread: thread,
+      block: block,
+      slot: slot,
+    };
+  }
+
+  /// The calling thread's `pthread_t`.
+  function currentId(): u64 {
+    return __thread_posix::pthread_self();
+  }
+}

@@ -1,0 +1,53 @@
+// e2e: std
+// Eight threads each add to one shared atomic counter ten thousand times. The
+// counter lives on the heap and the threads reach it through its address,
+// because a raw pointer itself is not Send.
+import JoinHandle, Thread from "std::thread";
+import AtomicU64, Ordering from "std::sync";
+import RawAllocator from "std::memory";
+
+const THREAD_COUNT: u64 = 8;
+const INCREMENTS_PER_THREAD: u64 = 10000;
+
+function main(): i32 {
+  let storage: *mut u8 = RawAllocator::allocateZeroedAligned(1, @sizeOf<AtomicU64>(), @alignOf<AtomicU64>());
+  let address: u64 = storage as u64;
+  let mut handles: Vector<JoinHandle<u64>> = Vector::new<JoinHandle<u64>>();
+  let mut index: u64 = 0;
+
+  while (index < THREAD_COUNT) {
+    handles.push(Thread::spawn<u64>((): u64 -> {
+          let counter: *mut AtomicU64 = address as *mut AtomicU64;
+          let mut step: u64 = 0;
+
+          while (step < INCREMENTS_PER_THREAD) {
+            (*counter).fetchAdd(1, Ordering::RELAXED);
+            step += 1;
+          }
+
+          return step;
+        }));
+    index += 1;
+  }
+
+  let mut joined: u64 = 0;
+
+  while (handles.length() > 0) {
+    if (let Option::SOME(popped) = handles.pop()) {
+      let mut handle: JoinHandle<u64> = popped;
+
+      joined += handle.join();
+    }
+  }
+
+  let counter: *mut AtomicU64 = storage as *mut AtomicU64;
+  let total: u64 = (*counter).load(Ordering::SEQ_CST);
+
+  RawAllocator::free(storage);
+
+  if (joined != THREAD_COUNT * INCREMENTS_PER_THREAD) {
+    return 1;
+  }
+
+  return total == THREAD_COUNT * INCREMENTS_PER_THREAD ? 0 : 2;
+}

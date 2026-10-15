@@ -41,6 +41,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::format` | `Display` | `Display` trait for user-defined textual representations |
 | `std::text` | `Text` | UTF-8 byte-offset ↔ line/column position conversion (`Text::LineIndex`) |
 | `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr` | Atomic values with explicit memory ordering |
+| `std::thread` | `Thread`, `JoinHandle<T>` | Spawn, join and detach POSIX threads |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
@@ -221,8 +222,20 @@ function main(): i32 {
   `Result::ERROR(observed)` when it did not.
 - An ordering the operation cannot use (a `load` with `RELEASE`, a `store` with
   `ACQUIRE`, a `compareExchange` failure ordering of `RELEASE` or `ACQ_REL`) panics.
-- No threads yet: the types are ready for them, and the allocator counters behind
-  `Memory::stats` are already atomic.
+- The allocator counters behind `Memory::stats` are atomic, so allocation is
+  thread-safe.
+
+### `std::thread`
+
+- `Thread::spawn<T>(@sendable task: () -> T): JoinHandle<T>` — runs `task` on a new
+  POSIX thread. The compiler checks what the closure captures (`@sendable`).
+- `JoinHandle<T>::join(&mut self): T` — waits for the thread and returns the task's
+  result; joining twice panics. Dropping an unjoined handle detaches the thread.
+- `Thread::currentId(): u64` — the calling thread's `pthread_t`.
+- A panic in any thread ends the process with exit code 101.
+- `T = void` is not supported yet (generic `void` returns fail LIR verification);
+  return a value instead.
+- `std::io` output is not audited for concurrent use yet.
 
 ### `std::text`
 
@@ -300,6 +313,7 @@ and only drop to `Memory` / `Pointer` / `LibC` when necessary.
 | Lookup by key / membership | `std::collections` |
 | Shared ownership | `std::rc` |
 | Atomic counters and flags | `std::sync` |
+| Threads | `std::thread` |
 | Filesystem I/O | `std::fs` |
 | Path manipulation | `std::path` |
 | Environment variables | `std::env` |
