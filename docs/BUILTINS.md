@@ -328,7 +328,7 @@ Any other ordering is an error (A0250).
 
 **Compare-exchange.** `@atomicCompareExchange` is strong: it does not fail spuriously. It writes `desired` when the memory holds `expected` and returns the value it observed, so the exchange happened exactly when the result equals `expected`.
 
-**Code generation.** The C backend emits GCC builtins with `__ATOMIC_*` ordering constants: `__atomic_load_n`, `__atomic_store_n`, `__atomic_exchange_n` for `:swap`, `__atomic_fetch_add`/`sub`/`and`/`or`/`xor`, `__atomic_compare_exchange_n` with `weak` set to 0 and the observed value read back through a temporary, and `__atomic_thread_fence`. The QBE backend does not support atomics yet and rejects a program that uses one.
+**Code generation.** The C backend emits GCC builtins with `__ATOMIC_*` ordering constants: `__atomic_load_n`, `__atomic_store_n`, `__atomic_exchange_n` for `:swap`, `__atomic_fetch_add`/`sub`/`and`/`or`/`xor`, `__atomic_compare_exchange_n` with `weak` set to 0 and the observed value read back through a temporary, and `__atomic_thread_fence`. QBE IL has no atomic instructions, so the QBE backend calls GCC's libatomic instead: the sized entry points `__atomic_load_N`, `__atomic_store_N`, `__atomic_exchange_N`, `__atomic_fetch_add_N`/`sub`/`and`/`or`/`xor`, `__atomic_compare_exchange_N` (strong, with `expected` passed through a stack slot and read back as the observed value) and `atomic_thread_fence`, where `N` is the byte size of `T`. A QBE link adds `-latomic` after `-Wl,--as-needed`, so only a program that uses an atomic depends on the library.
 
 ---
 

@@ -89,7 +89,7 @@ The compare-exchange is strong: the exchange happened exactly when the result eq
 let previous: u64 = @atomicRmw<u64>(counter, :add, 1, :relaxed);
 ```
 
-The C backend emits GCC `__atomic_*` builtins. The QBE backend does not support atomics yet.
+The C backend emits GCC `__atomic_*` builtins. The QBE backend calls GCC's libatomic, which a QBE build links.
 
 ## Zero and fill
 
