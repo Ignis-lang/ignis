@@ -269,6 +269,8 @@ function main(): void {
 }
 ```
 
+The check follows types, not values. A pointer converted to an integer (`pointer as u64`) is an integer, which is Send, so it crosses threads unchecked and turns back into a pointer on the other side. That conversion is the explicit way out of the check, and the code that writes it is responsible for synchronizing every access through the pointer.
+
 ### Trait Bounds
 
 A type parameter can be bounded by one or more traits, joined with `&`. Every instantiation has to
