@@ -6396,7 +6396,7 @@ export namespace Borrowck {
           // arm's value into the match result, which it does when the match
           // produces a value that is used. A match typed `void` stores nothing, and
           // neither does one whose value is discarded (`Hir::DropSchedules::
-          // discardedMatches`), so the binding stays owned and the arm-end schedule
+          // discardedResults`), so the binding stays owned and the arm-end schedule
           // frees it.
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
             if (matchProducesValue && matchValueIsUsed) {
@@ -7056,6 +7056,13 @@ export namespace Borrowck {
               Borrowck::discardRaw(&mut result, &mut pending, tail.raw());
             }
           },
+          Hir::HirKind::If(ifNode) -> {
+            Borrowck::discardRaw(&mut result, &mut pending, ifNode.thenBranch.raw());
+
+            if (let Option::SOME(elseBranch) = ifNode.elseBranch) {
+              Borrowck::discardRaw(&mut result, &mut pending, elseBranch.raw());
+            }
+          },
           _ -> {},
         };
       }
@@ -7276,9 +7283,12 @@ export namespace Borrowck {
     while (discardedIndex < statementPositionNodes.length()) {
       if (let Option::SOME(nodeRaw) = statementPositionNodes.get(discardedIndex)) {
         if (let Option::SOME(node) = hir.nodes.get(*nodeRaw as u64)) {
-          if (let Hir::HirKind::Match(_) = &node.kind) {
-            schedules.discardedMatches.push(*nodeRaw);
-          }
+          match (&node.kind) {
+            Hir::HirKind::Match(_) | Hir::HirKind::If(_) -> {
+              schedules.discardedResults.push(*nodeRaw);
+            },
+            _ -> {},
+          };
         }
       }
 

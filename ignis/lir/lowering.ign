@@ -2517,7 +2517,9 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::If(ifNode) -> {
-        return LirLowering::lowerIf(defStore, typeStore, hirStore, dropSchedules, function_, state, &ifNode, nodeType, nodeSpan);
+        let discarded: boolean = dropSchedules.isDiscardedResult(hirId.raw());
+
+        return LirLowering::lowerIf(defStore, typeStore, hirStore, dropSchedules, function_, state, &ifNode, nodeType, nodeSpan, discarded);
       },
       Hir::HirKind::Loop(loopNode) -> {
         LirLowering::lowerLoop(defStore, typeStore, hirStore, dropSchedules, function_, state, &loopNode);
@@ -2563,7 +2565,7 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::Match(matchNode) -> {
-        let discarded: boolean = dropSchedules.isDiscardedMatch(hirId.raw());
+        let discarded: boolean = dropSchedules.isDiscardedResult(hirId.raw());
 
         return LirLowering::lowerMatch(defStore, typeStore, hirStore, dropSchedules, function_, state, &matchNode, nodeType, nodeSpan, discarded);
       },
@@ -5569,8 +5571,10 @@ export namespace LirLowering {
     ifNode: &Hir::HirIf,
     nodeType: Analyzer::TypeId,
     nodeSpan: SourceSpan,
+    discarded: boolean,
   ): Lir::Operand {
-    let movingBranches: boolean = state.movingResult;
+    // A discarded `if` moves nothing into a result.
+    let movingBranches: boolean = state.movingResult && !discarded;
     state.movingResult = false;
 
     let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.condition);
@@ -5582,7 +5586,8 @@ export namespace LirLowering {
     let mut resultSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
     let mut hasResult: boolean = false;
 
-    if (!LirLowering::producesNoValue(typeStore, nodeType)) {
+    // A discarded `if` keeps no result: each branch discards its own value below.
+    if (!LirLowering::producesNoValue(typeStore, nodeType) && !discarded) {
       resultSlot = LirLowering::allocSyntheticLocal(function_, nodeType);
       hasResult = true;
     }
@@ -5597,6 +5602,11 @@ export namespace LirLowering {
     let thenValue: Lir::Operand = LirLowering::lowerResultValue(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.thenBranch, movingBranches);
 
     let thenLive: boolean = !state.terminated;
+
+    if (thenLive && !hasResult) {
+      LirLowering::discardBranchValue(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.thenBranch, &thenValue);
+    }
+
     LirLowering::storeResult(typeStore, function_, state, hasResult && thenLive, resultSlot, thenValue);
 
     // A branch also drops a closure owner the other branch handed to the
@@ -5612,6 +5622,11 @@ export namespace LirLowering {
       let elseValue: Lir::Operand = LirLowering::lowerResultValue(defStore, typeStore, hirStore, dropSchedules, function_, state, elseId, movingBranches);
 
       let elseLive: boolean = !state.terminated;
+
+      if (elseLive && !hasResult) {
+        LirLowering::discardBranchValue(defStore, typeStore, hirStore, dropSchedules, function_, state, elseId, &elseValue);
+      }
+
       LirLowering::storeResult(typeStore, function_, state, hasResult && elseLive, resultSlot, elseValue);
 
       if (elseLive) {
@@ -5636,6 +5651,44 @@ export namespace LirLowering {
     }
 
     return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+  }
+
+  /// Frees the value an `if` branch evaluates to when the `if` keeps no result,
+  /// the way a discarded match arm frees its own: an owned temporary is freed and
+  /// a place is left to its owner, a closure capture included.
+  function discardBranchValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    branchId: Hir::HirId,
+    branchValue: &Lir::Operand,
+  ): void {
+    if (!LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, branchId)) {
+      return;
+    }
+
+    if (LirLowering::discardedPlaceIsCaptured(state, hirStore, branchId)) {
+      return;
+    }
+
+    let mut branchType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+    let mut hasType: boolean = false;
+
+    if (let Option::SOME(resultId) = Borrowck::bodyResultNode(hirStore, branchId)) {
+      if (let Option::SOME(resultNode) = hirStore.get(resultId)) {
+        branchType = resultNode.typeId;
+        hasType = true;
+      }
+    }
+
+    if (!hasType) {
+      return;
+    }
+
+    LirLowering::dropStatementValue(defStore, typeStore, function_, state, Lir::copyOperand(branchValue), branchType);
   }
 
   /// The oracle's `lower_loop` for infinite, while and for shapes.

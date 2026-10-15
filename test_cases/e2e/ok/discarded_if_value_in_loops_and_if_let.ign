@@ -1,0 +1,129 @@
+// e2e: std
+// An `if` whose value is discarded inside loops with `break` and `continue`,
+// with a `return` in a branch, with `if let` conditions that keep or move their
+// binding, and in a function with `defer`. Each branch discards only its own
+// value, so every owned value is dropped exactly once.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+function make(id: i32): Tracked {
+  return Tracked { id: id };
+}
+
+function text(s: str): String {
+  return String::create(s);
+}
+
+function maybe(flag: boolean, id: i32): Option<Tracked> {
+  if (flag) {
+    return Option::SOME(make(id));
+  }
+  return Option::NONE;
+}
+
+function deferred(flag: boolean): void {
+  defer Io::println("deferred ran");
+  let keep: Tracked = make(500);
+  match (flag) {
+    true -> {
+      if (flag) { make(501) } else { keep }
+    },
+    false -> {
+      if (flag) { make(502) } else { keep }
+    },
+  };
+  Io::println("deferred body end");
+}
+
+function main(): i32 {
+  let loops = (limit: i32): void -> {
+    let mut index: i32 = 0;
+    while (index < limit) {
+      index += 1;
+      let keep: Tracked = make(100 + index);
+      if (index == 2) {
+        continue;
+      } else if (index == 4) {
+        break;
+      } else {
+        make(200 + index)
+      }
+      Io::println(`iter ${index}`.toStr());
+    }
+    Io::println("loops end");
+  };
+  loops(6);
+
+  let returns = (key: i32): void -> {
+    let keep: Tracked = make(300);
+    if (key == 0) {
+      return;
+    } else {
+      make(301)
+    }
+    Io::println("returns tail");
+  };
+  returns(0);
+  returns(1);
+
+  let ifLet = (flag: boolean): void -> {
+    if (let Option::SOME(t) = maybe(flag, 400)) {
+      Io::println(`got ${t.id}`.toStr());
+      make(401)
+    } else {
+      make(402)
+    }
+  };
+  ifLet(true);
+  ifLet(false);
+
+  let ifLetMoves = (flag: boolean): void -> {
+    if (let Option::SOME(t) = maybe(flag, 410)) {
+      t
+    } else {
+      make(411)
+    }
+  };
+  ifLetMoves(true);
+  ifLetMoves(false);
+
+  let ifLetChain = (flag: boolean, other: boolean): void -> {
+    if (let Option::SOME(t) = maybe(flag, 420) && other) {
+      make(421)
+    } else {
+      make(422)
+    }
+  };
+  ifLetChain(true, true);
+  ifLetChain(true, false);
+  ifLetChain(false, true);
+
+  deferred(true);
+  deferred(false);
+
+  let strings = (flag: boolean): void -> {
+    let mut index: i32 = 0;
+    while (index < 3) {
+      index += 1;
+      if (flag) {
+        text("loop-string-aaaaaaaaaaaa")
+      } else if (index == 2) {
+        continue;
+      } else {
+        text("loop-string-bbbbbbbbbbbb")
+      }
+    }
+  };
+  strings(true);
+  strings(false);
+  Io::println("end");
+  return 0;
+}
