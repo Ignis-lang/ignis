@@ -1,0 +1,130 @@
+// e2e: std
+// Atomics on narrow widths through generic functions, compare-exchange in loops,
+// closures and discarded results; QBE has to match the C target exactly.
+import Io from "std::io";
+
+function fetchSub<T>(ptr: *mut T, value: T): T {
+  return @atomicRmw<T>(ptr, :sub, value, :seqCst);
+}
+
+function cas<T>(ptr: *mut T, expected: T, desired: T): T {
+  return @atomicCompareExchange<T>(ptr, expected, desired, :acqRel, :acquire);
+}
+
+function load<T>(ptr: *T): T {
+  return @atomicLoad<T>(ptr, :seqCst);
+}
+
+function narrowSigns(): void {
+  let mut a: i8 = 1;
+  let pa: *mut i8 = (&mut a) as *mut i8;
+  let r1: i8 = fetchSub<i8>(pa, 3);
+  let r2: i8 = fetchSub<i8>(pa, 3);
+  let wide: i64 = r2 as i64;
+  let sum: i32 = (r2 as i32) + 1000;
+  Io::println(`i8 ${r1} ${r2} ${wide} ${sum} ${r2 < 0} ${r2 / 2} ${load<i8>(pa as *i8)}`.toStr());
+  let mut h: i16 = 1;
+  let ph: *mut i16 = (&mut h) as *mut i16;
+  let h1: i16 = fetchSub<i16>(ph, 3);
+  let h2: i16 = fetchSub<i16>(ph, 3);
+  Io::println(`i16 ${h1} ${h2} ${h2 as i64} ${(h2 as i32) + 100000} ${h2 < 0}`.toStr());
+  let mut u: u8 = 1;
+  let pu: *mut u8 = (&mut u) as *mut u8;
+  let u1: u8 = fetchSub<u8>(pu, 3);
+  let u2: u8 = fetchSub<u8>(pu, 3);
+  Io::println(`u8 ${u1} ${u2} ${u2 as i64} ${(u2 as u32) + 1000}`.toStr());
+  let mut w: u16 = 1;
+  let pw: *mut u16 = (&mut w) as *mut u16;
+  let w2: u16 = fetchSub<u16>(pw, 3);
+  let w3: u16 = fetchSub<u16>(pw, 3);
+  Io::println(`u16 ${w2} ${w3} ${w3 as i64} ${(w3 as u32) + 100000}`.toStr());
+  let mut i: i32 = 1;
+  let pi: *mut i32 = (&mut i) as *mut i32;
+  let i2: i32 = fetchSub<i32>(pi, 3);
+  let i3: i32 = fetchSub<i32>(pi, 3);
+  Io::println(`i32 ${i2} ${i3} ${i3 as i64}`.toStr());
+  let mut c: i8 = -7;
+  let pc: *mut i8 = (&mut c) as *mut i8;
+  let observed: i8 = cas<i8>(pc, 5, 6);
+  let observed2: i8 = cas<i8>(pc, -7, -8);
+  Io::println(`cas i8 ${observed} ${observed as i64} ${observed2} ${c} ${observed == -7}`.toStr());
+  let mut cu: u16 = 65000;
+  let pcu: *mut u16 = (&mut cu) as *mut u16;
+  let o16: u16 = cas<u16>(pcu, 1, 2);
+  Io::println(`cas u16 ${o16} ${o16 as i64}`.toStr());
+  let mut cb: boolean = true;
+  let ob: boolean = cas<boolean>((&mut cb) as *mut boolean, false, false);
+  let ob2: boolean = cas<boolean>((&mut cb) as *mut boolean, true, false);
+  Io::println(`cas bool ${ob} ${ob2} ${cb}`.toStr());
+}
+
+function spinIncrement(ptr: *mut u32, times: u32): u32 {
+  let mut done: u32 = 0;
+  let mut retries: u32 = 0;
+  while (done < times) {
+    let current: u32 = @atomicLoad<u32>(ptr as *u32, :relaxed);
+    let seen: u32 = @atomicCompareExchange<u32>(ptr, current, current + 1, :acqRel, :relaxed);
+    if (seen == current) {
+      done += 1;
+    } else {
+      retries += 1;
+    }
+    let bad: u32 = @atomicCompareExchange<u32>(ptr, 999999, 0, :seqCst, :seqCst);
+    if (bad == 999999) {
+      retries += 100;
+    }
+  }
+  return retries;
+}
+
+function loops(): void {
+  let mut counter: u32 = 0;
+  let p: *mut u32 = (&mut counter) as *mut u32;
+  let retries: u32 = spinIncrement(p, 100000);
+  let mut i: u64 = 0;
+  let mut big: u64 = 0;
+  let pb: *mut u64 = (&mut big) as *mut u64;
+  let mut small: i8 = 0;
+  let ps: *mut i8 = (&mut small) as *mut i8;
+  for (let k: i32 = 0; k < 1000; k++) {
+    let prev: i8 = @atomicCompareExchange<i8>(ps, small, small - 1, :seqCst, :seqCst);
+    i += @atomicRmw<u64>(pb, :add, prev as u64, :relaxed);
+  }
+  Io::println(`loop ${counter} ${retries} ${big} ${small} ${i}`.toStr());
+}
+
+function discard(): void {
+  let mut v: i32 = 1;
+  let p: *mut i32 = (&mut v) as *mut i32;
+  @atomicCompareExchange<i32>(p, 1, 2, :seqCst, :seqCst);
+  @atomicRmw<i32>(p, :add, 5, :relaxed);
+  @atomicLoad<i32>(p as *i32, :relaxed);
+  Io::println(`discard ${v}`.toStr());
+}
+
+function closures(): void {
+  let mut v: u64 = 10;
+  let p: *mut u64 = (&mut v) as *mut u64;
+  let bump = (n: u64): u64 -> @atomicRmw<u64>(p, :add, n, :seqCst);
+  let swap = (old: u64, new: u64): u64 -> {
+    @fence(:seqCst);
+    @atomicCompareExchange<u64>(p, old, new, :seqCst, :relaxed)
+  };
+  let a: u64 = bump(5);
+  let b: u64 = swap(15, 100);
+  let c: u64 = swap(15, 200);
+  let mut s: i16 = -1;
+  let ps: *mut i16 = (&mut s) as *mut i16;
+  let dec = (): i16 -> @atomicRmw<i16>(ps, :sub, 1, :acqRel);
+  let d1: i16 = dec();
+  let d2: i16 = dec();
+  Io::println(`closure ${a} ${b} ${c} ${v} ${d1} ${d2} ${s}`.toStr());
+}
+
+function main(): i32 {
+  narrowSigns();
+  loops();
+  discard();
+  closures();
+  return 0;
+}
