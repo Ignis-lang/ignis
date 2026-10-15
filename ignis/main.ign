@@ -737,13 +737,15 @@ function toolchainLinkerFlagsText(profile: &BuildProfile): String {
   return text;
 }
 
-/// The libraries a build links: `libm` for a hosted build, none for a
-/// freestanding one.
+/// The libraries a build links: `libm` and `libpthread` for a hosted build,
+/// none for a freestanding one. `std::thread` calls pthread; on glibc 2.34 and
+/// later it lives in libc and `-lpthread` resolves to an empty stub.
 function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
   let mut libs: Vector<String> = Vector::new<String>();
 
   if (!profile.freestanding) {
     libs.push(String::create("m"));
+    libs.push(String::create("pthread"));
   }
 
   return libs;
