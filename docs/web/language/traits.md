@@ -97,6 +97,9 @@ example a record that guards a raw pointer itself. The declaration is honored, a
 structure to prove it; when the declaration is deliberate, `@allow(thread_safety)` on the record
 keeps it without the warning.
 
+On a generic type the declaration covers only its own fields: an instance has the trait only when
+every type argument has it too. `Vector<String>` is Send; `Vector<*mut i32>` is not.
+
 ```ignis
 @allow(thread_safety)
 @implements(Send, Sync)

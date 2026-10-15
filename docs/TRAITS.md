@@ -248,6 +248,12 @@ prove it, for example when it guards a raw pointer itself. The declaration wins,
 breaks it. `@allow(thread_safety)` on the record or enum, or on a top-level function for the whole
 module, silences it.
 
+On a generic record or enum the declaration speaks only for its own fields: an instance is Send
+(or Sync) only when every type argument is too, so `Vector<String>` is Send and
+`Vector<*mut i32>` is not. A type that needs a different condition states it as bounds on its own
+type parameters, as `Arc<T: Send & Sync>` does. `String`, `Vector<T>` and `HashMap<K, V>` declare
+both traits this way; `Rc` and `Weak` declare neither.
+
 ```ignis
 @allow(thread_safety)
 @implements(Send, Sync)
