@@ -1,6 +1,6 @@
 # QBE backend
 
-The QBE target lowers the self-hosted compiler's LIR directly to QBE IL. The C target remains the default. This first slice is hosted-only; it still uses the configured `cc` to assemble and the existing linker to link.
+The QBE target lowers the self-hosted compiler's LIR directly to QBE IL. The C target remains the default. This first slice is hosted-only; it still uses the configured `cc` to assemble and the existing linker to link. Atomic builtins become calls into GCC's libatomic, since QBE IL has no atomic instructions; a QBE link therefore adds `-Wl,--as-needed` and `-latomic`. The toolchain has to provide libatomic for every hosted QBE link, even for a program without atomics, and `--as-needed` also applies to the `-lm` the link adds, so a QBE binary that uses no math function does not depend on libm. Libraries passed through `[build] cflags` come before `--as-needed` and are linked as before.
 
 ## Build and inspect
 

@@ -712,6 +712,12 @@ function toolchainLinkFlags(profile: &BuildProfile): Vector<String> {
     index += 1;
   }
 
+  // Keeps the `-latomic` of `toolchainLinkLibraries` out of the executable's
+  // dependencies when no atomic builtin references it.
+  if (!profile.freestanding && profile.backend.equals("qbe")) {
+    flags.push(String::create("-Wl,--as-needed"));
+  }
+
   return flags;
 }
 
@@ -746,6 +752,12 @@ function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
   if (!profile.freestanding) {
     libs.push(String::create("m"));
     libs.push(String::create("pthread"));
+  }
+
+  // QBE has no atomic instructions, so its units call libatomic for every
+  // atomic builtin. The C backend inlines them and needs nothing.
+  if (!profile.freestanding && profile.backend.equals("qbe")) {
+    libs.push(String::create("atomic"));
   }
 
   return libs;

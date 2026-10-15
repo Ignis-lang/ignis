@@ -47,6 +47,8 @@ export namespace LirLowering {
     /// a reference scrutinee, which names a place inside the referent and
     /// must outlive the match.
     public byrefCaptureRaws: Vector<u32>;
+    /// Every capture a thunk extracts from its environment, whatever its mode.
+    public captureRaws: Vector<u32>;
     /// Locals whose address the function body takes (`&name`, `&mut name`, or a
     /// field or element of one). A non-droppable pattern binding destructured out
     /// of a reference scrutinee becomes a place, like a droppable one, only when
@@ -86,6 +88,7 @@ export namespace LirLowering {
         syntheticFrameStarts: Vector::new<u64>(),
         loadAliasTempRaws: Vector::new<u32>(),
         byrefCaptureRaws: Vector::new<u32>(),
+        captureRaws: Vector::new<u32>(),
         addressTakenDefRaws: HashSet::new<u32>(),
         closureLocalDefRaws: Vector::new<u32>(),
         closureLocalTypeRaws: Vector::new<u32>(),
@@ -1811,7 +1814,7 @@ export namespace LirLowering {
         // statement is the last point at which anything can own it.
         let innerValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
 
-        if (LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, innerId)) {
+        if (LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, innerId) && !LirLowering::discardedPlaceIsCaptured(state, hirStore, innerId)) {
           LirLowering::dropStatementValue(defStore, typeStore, function_, state, Lir::copyOperand(&innerValue), innerType);
         }
 
@@ -3049,6 +3052,9 @@ export namespace LirLowering {
       }));
 
       LirLowering::registerLocal(state, capture.sourceDef, captureLocal);
+
+      let mut capturesRef: &mut LirLowering::LowerState = state;
+      capturesRef.captureRaws.push(capture.sourceDef.raw());
 
       if (isByref) {
         LirLowering::markByrefCapture(state, capture.sourceDef);
@@ -4829,6 +4835,51 @@ export namespace LirLowering {
     return dropSchedules.isBorrowedPatternBinding(defId);
   }
 
+  /// Whether the place a discarded value names, following block tails, is
+  /// rooted at a closure capture. The environment owns a capture for every call
+  /// of the closure: a by-value capture stays in it, and a by-reference one is
+  /// a bitwise copy of the referent. Freeing a part of it in the thunk would
+  /// free what its owner frees again.
+  function discardedPlaceIsCaptured(
+    state: &mut LirLowering::LowerState,
+    hirStore: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hirStore.get(nodeId) else {
+      return false;
+    };
+
+    if (let Hir::HirKind::Block(block) = &node.kind) {
+      if (let Option::SOME(tail) = block.expression) {
+        return LirLowering::discardedPlaceIsCaptured(state, hirStore, tail);
+      }
+
+      return false;
+    }
+
+    let Option::SOME(root) = Borrowck::assignTargetRootLocal(hirStore, nodeId) else {
+      return false;
+    };
+
+    return LirLowering::containsRawU32(&state.captureRaws, root.raw());
+  }
+
+  function containsRawU32(values: &Vector<u32>, raw: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(existing) = values.get(index)) {
+        if (*existing == raw) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   function lowerMatch(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -4841,7 +4892,8 @@ export namespace LirLowering {
     nodeSpan: SourceSpan,
     discarded: boolean,
   ): Lir::Operand {
-    let movingArms: boolean = state.movingResult;
+    // A discarded match moves nothing into a result.
+    let movingArms: boolean = state.movingResult && !discarded;
     state.movingResult = false;
 
     let mut tupleElements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
@@ -5137,7 +5189,7 @@ export namespace LirLowering {
       // A match that produces no value, or whose value is discarded, discards each
       // arm's value, so an owned temporary an arm evaluates to is freed here, the way
       // an expression statement frees its own. A named value is left to its schedule.
-      if (bodyLive && !hasResult && LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, arm.body)) {
+      if (bodyLive && !hasResult && LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, arm.body) && !LirLowering::discardedPlaceIsCaptured(state, hirStore, arm.body)) {
         let mut bodyType: Analyzer::TypeId = nodeType;
 
         if (let Option::SOME(bodyNode) = hirStore.get(arm.body)) {
@@ -5986,7 +6038,30 @@ export namespace LirLowering {
         );
       }
 
-      let bodyValue: Lir::Operand = LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);
+      // A void function returns nothing, so its body's value moves nowhere.
+      let mut bodyValue: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Undef(returnType));
+
+      if (LirLowering::isVoidType(typeStore, returnType)) {
+        bodyValue = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);
+      } else {
+        bodyValue = LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);
+      }
+
+      // A body of a function returning `void` that still ends with a value, such
+      // as a closure body's tail, discards it the way an expression statement
+      // does: an owned temporary is freed here and a named value is left to its
+      // schedule.
+      if (!state.terminated && LirLowering::isVoidType(typeStore, returnType) && LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, bodyId) && !LirLowering::discardedPlaceIsCaptured(&mut state, hirStore, bodyId)) {
+        let mut bodyType: Analyzer::TypeId = returnType;
+
+        if (let Option::SOME(resultId) = Borrowck::bodyResultNode(hirStore, bodyId)) {
+          if (let Option::SOME(resultNode) = hirStore.get(resultId)) {
+            bodyType = resultNode.typeId;
+          }
+        }
+
+        LirLowering::dropStatementValue(defStore, typeStore, &mut function_, &mut state, Lir::copyOperand(&bodyValue), bodyType);
+      }
 
       // A body that falls off its end returns implicitly: nothing for a void
       // function, its value otherwise. The value is the block's tail, which

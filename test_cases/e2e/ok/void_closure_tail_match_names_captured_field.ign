@@ -1,0 +1,49 @@
+// e2e: std
+// A match ending a closure that returns `void` discards the value of the arm it
+// takes. An arm naming a field of a captured record reads it through the
+// environment, which keeps owning it across calls, so only the arms building a
+// fresh value drop anything.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+record Holder {
+  public first: Tracked;
+  public second: Tracked;
+}
+
+function make(id: i32): Tracked {
+  return Tracked { id: id };
+}
+
+function main(): i32 {
+  let held: Holder = Holder { first: make(1), second: make(2) };
+  let block = (key: i32): void -> {
+    match (key) {
+      0 -> held.first,
+      1 -> held.second,
+      _ -> make(9),
+    }
+  };
+  let expression = (key: i32): void -> match (key) {
+    0 -> held.first,
+    _ -> make(8),
+  };
+
+  block(0);
+  block(0);
+  block(1);
+  block(2);
+  expression(0);
+  expression(3);
+  Io::println("after");
+
+  return 0;
+}

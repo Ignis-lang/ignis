@@ -1943,6 +1943,18 @@ export namespace CodegenQbe {
           }
         }
 
+        // A compare-exchange passes `expected` by address, so it needs one
+        // eight-byte slot for the whole function, never one per iteration.
+        if (let Lir::Instr::Atomic(node) = instruction) {
+          if (let Hir::AtomicOperation::COMPARE_EXCHANGE = node.operation) {
+            if (let Option::SOME(dest) = node.dest) {
+              let slot: String = CodegenQbe::freshTemp(emitter);
+              emitter.out.pushStr(`    ${slot.toStr()} =l alloc8 8\n`.toStr());
+              context.reserve(dest.raw(), slot);
+            }
+          }
+        }
+
         if (let Lir::Instr::MakeSlice(node) = instruction) {
           let destOperand: Lir::Operand = Lir::Operand::Temp(node.dest);
           let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand) else {
@@ -2344,8 +2356,8 @@ export namespace CodegenQbe {
       Lir::Instr::UnaryOp(node) -> {
         CodegenQbe::qbeEmitUnaryOp(emitter, defStore, typeStore, symbols, function_, &node);
       },
-      Lir::Instr::Atomic(_) -> {
-        CodegenQbe::failFor(emitter, instruction);
+      Lir::Instr::Atomic(node) -> {
+        CodegenQbe::qbeEmitAtomic(emitter, defStore, typeStore, symbols, function_, context, &node);
       },
       Lir::Instr::Call(node) -> {
         CodegenQbe::qbeEmitCall(emitter, defStore, typeStore, symbols, function_, &node);
@@ -3180,6 +3192,161 @@ export namespace CodegenQbe {
     let prefix: String = `${destName.toStr()} =${reference.toStr()} `;
 
     CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &prefix);
+  }
+
+  /// The libatomic `int` constant of a memory ordering, as `__ATOMIC_*`
+  /// defines it.
+  function qbeAtomicOrdering(ordering: Hir::AtomicOrdering): u32 {
+    return match (ordering) {
+      Hir::AtomicOrdering::RELAXED -> 0,
+      Hir::AtomicOrdering::ACQUIRE -> 2,
+      Hir::AtomicOrdering::RELEASE -> 3,
+      Hir::AtomicOrdering::ACQ_REL -> 4,
+      Hir::AtomicOrdering::SEQ_CST -> 5,
+    };
+  }
+
+  /// The libatomic entry point of an operation, without its size suffix.
+  function qbeAtomicFunction(operation: Hir::AtomicOperation): str {
+    return match (operation) {
+      Hir::AtomicOperation::LOAD -> "__atomic_load",
+      Hir::AtomicOperation::STORE -> "__atomic_store",
+      Hir::AtomicOperation::SWAP -> "__atomic_exchange",
+      Hir::AtomicOperation::ADD -> "__atomic_fetch_add",
+      Hir::AtomicOperation::SUB -> "__atomic_fetch_sub",
+      Hir::AtomicOperation::AND -> "__atomic_fetch_and",
+      Hir::AtomicOperation::OR -> "__atomic_fetch_or",
+      Hir::AtomicOperation::XOR -> "__atomic_fetch_xor",
+      Hir::AtomicOperation::COMPARE_EXCHANGE -> "__atomic_compare_exchange",
+      Hir::AtomicOperation::FENCE -> "atomic_thread_fence",
+    };
+  }
+
+  /// One atomic builtin as a call into libatomic, since QBE has no atomic
+  /// instructions. The sized entry points (`__atomic_fetch_add_8`, ...) take
+  /// the value in its C class; narrow values are already normalized, which is
+  /// the extension the C ABI asks of the caller. The libatomic
+  /// compare-exchange is strong and writes the observed value back through
+  /// `expected`, so `expected` goes through the slot `qbeReserveSlots` set
+  /// aside and the result is read back from it.
+  function qbeEmitAtomic(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    context: &mut CodegenQbe::QbeFuncCtx,
+    node: &Lir::InstrAtomic,
+  ): void {
+    let ordering: u32 = CodegenQbe::qbeAtomicOrdering(node.ordering);
+
+    if (let Hir::AtomicOperation::FENCE = node.operation) {
+      emitter.out.pushStr(`    call $atomic_thread_fence(w ${ordering})\n`.toStr());
+      return;
+    }
+
+    let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, node.ty) else {
+      CodegenQbe::failNamed(emitter, "Atomic");
+      return;
+    };
+    let Option::SOME(letter) = CodegenQbe::qbeItemLetter(defStore, typeStore, node.ty) else {
+      CodegenQbe::failNamed(emitter, "Atomic");
+      return;
+    };
+    let size: u64 = match (letter.equals("b")) {
+      true -> 1,
+      false -> match (letter.equals("h")) {
+        true -> 2,
+        false -> match (letter.equals("w")) {
+          true -> 4,
+          false -> 8,
+        },
+      },
+    };
+    let name: String = `${CodegenQbe::qbeAtomicFunction(node.operation)}_${size}`;
+
+    let Option::SOME(pointerOperand) = node.operands.get(0) else {
+      CodegenQbe::failNamed(emitter, "Atomic");
+      return;
+    };
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, pointerOperand) else {
+      return;
+    };
+
+    let mut values: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 1;
+
+    while (index < node.operands.length()) {
+      if (let Option::SOME(operand) = node.operands.get(index)) {
+        let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, operand) else {
+          return;
+        };
+
+        values.push(value);
+      }
+
+      index += 1;
+    }
+
+    let mut args: Vector<String> = Vector::new<String>();
+
+    args.push(`l ${pointer.toStr()}`);
+
+    if (let Hir::AtomicOperation::COMPARE_EXCHANGE = node.operation) {
+      let Option::SOME(dest) = node.dest else {
+        CodegenQbe::failNamed(emitter, "Atomic");
+        return;
+      };
+      let Option::SOME(slot) = context.slotFor(dest.raw()) else {
+        CodegenQbe::failNamed(emitter, "Atomic");
+        return;
+      };
+      let Option::SOME(expected) = values.get(0) else {
+        CodegenQbe::failNamed(emitter, "Atomic");
+        return;
+      };
+      let Option::SOME(desired) = values.get(1) else {
+        CodegenQbe::failNamed(emitter, "Atomic");
+        return;
+      };
+
+      CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, node.ty, expected, &slot);
+      args.push(`l ${slot.toStr()}`);
+      args.push(`${cls.toStr()} ${desired.toStr()}`);
+      args.push(`w ${ordering}`);
+      args.push(`w ${CodegenQbe::qbeAtomicOrdering(node.failureOrdering)}`);
+
+      let noPrefix: String = String::create("");
+
+      CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &noPrefix);
+
+      let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, node.ty) else {
+        CodegenQbe::failNamed(emitter, "Atomic");
+        return;
+      };
+
+      emitter.out.pushStr(`    %t${dest.raw()} =${cls.toStr()} ${load.toStr()} ${slot.toStr()}\n`.toStr());
+      return;
+    }
+
+    if (let Option::SOME(value) = values.get(0)) {
+      args.push(`${cls.toStr()} ${value.toStr()}`);
+    }
+
+    args.push(`w ${ordering}`);
+
+    let Option::SOME(dest) = node.dest else {
+      let noPrefix: String = String::create("");
+
+      CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &noPrefix);
+      return;
+    };
+
+    let destName: String = `%t${dest.raw()}`;
+    let prefix: String = `${destName.toStr()} =${cls.toStr()} `;
+
+    CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &prefix);
+    CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, node.ty, &destName);
   }
 
   function qbeEmitCast(
