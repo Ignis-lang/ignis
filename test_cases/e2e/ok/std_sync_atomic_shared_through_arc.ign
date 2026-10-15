@@ -1,0 +1,29 @@
+// e2e: std
+// Atomics are not Copy, so threads share one through an Arc. Every thread's
+// update has to reach the atomic that main reads.
+import JoinHandle, Thread from "std::thread";
+import Arc, AtomicU64, Ordering from "std::sync";
+
+function main(): i32 {
+  let counter: Arc<AtomicU64> = Arc::new<AtomicU64>(AtomicU64::new(0));
+  let mut handles: Vector<JoinHandle<u64>> = Vector::new<JoinHandle<u64>>();
+  let mut index: u64 = 0;
+
+  while (index < 4) {
+    let shared: Arc<AtomicU64> = counter.clone();
+
+    handles.push(Thread::spawn<u64>((): u64 -> {
+      return (@move shared).get().fetchAdd(5, Ordering::SEQ_CST);
+    }));
+    index += 1;
+  }
+
+  while (handles.length() > 0) {
+    if (let Option::SOME(popped) = handles.pop()) {
+      let mut handle: JoinHandle<u64> = popped;
+      handle.join();
+    }
+  }
+
+  return counter.get().load(Ordering::SEQ_CST) as i32;
+}

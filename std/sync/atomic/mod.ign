@@ -34,9 +34,11 @@
 //! ordering. It is never clamped: a load that asks for `RELEASE` is a logic
 //! error, and silently weakening or strengthening it would hide that.
 //!
-//! A `compareExchange` failure ordering stronger than its success ordering is
-//! accepted and strengthens the success ordering to match, so `(RELAXED,
-//! SEQ_CST)` runs as `(SEQ_CST, SEQ_CST)`.
+//! Two `compareExchange` pairs run stronger than written, because GCC rejects a
+//! failure ordering stronger than the success one: a `SEQ_CST` failure runs the
+//! success ordering as `SEQ_CST` too, and `(RELAXED, ACQUIRE)` runs as
+//! `(ACQUIRE, ACQUIRE)`. Every other valid pair, including `(RELEASE, ACQUIRE)`,
+//! runs as written.
 //!
 //! ## Compare-exchange
 //!
@@ -213,8 +215,17 @@ function compareExchangeFailAcquire<T>(
 }
 
 /// A `boolean` updated atomically.
+///
+/// Not Copy: a copy would be a second, unrelated atomic, so an update made
+/// through one would never reach the other. Share one between threads through
+/// `Arc`, or lend `&self` to a `@noescape` task.
+@implements(Drop)
 export record AtomicBool {
   value: boolean;
+
+  /// Nothing to release; declaring `Drop` keeps the type from being Copy.
+  drop(&mut self): void {
+  }
 
   /// Creates a flag holding `value`.
   public static new(value: boolean): AtomicBool {
@@ -263,8 +274,17 @@ export record AtomicBool {
 }
 
 /// A `u32` updated atomically.
+///
+/// Not Copy: a copy would be a second, unrelated atomic, so an update made
+/// through one would never reach the other. Share one between threads through
+/// `Arc`, or lend `&self` to a `@noescape` task.
+@implements(Drop)
 export record AtomicU32 {
   value: u32;
+
+  /// Nothing to release; declaring `Drop` keeps the type from being Copy.
+  drop(&mut self): void {
+  }
 
   /// Creates a counter holding `value`.
   public static new(value: u32): AtomicU32 {
@@ -336,8 +356,17 @@ export record AtomicU32 {
 }
 
 /// A `u64` updated atomically.
+///
+/// Not Copy: a copy would be a second, unrelated atomic, so an update made
+/// through one would never reach the other. Share one between threads through
+/// `Arc`, or lend `&self` to a `@noescape` task.
+@implements(Drop)
 export record AtomicU64 {
   value: u64;
+
+  /// Nothing to release; declaring `Drop` keeps the type from being Copy.
+  drop(&mut self): void {
+  }
 
   /// Creates a counter holding `value`.
   public static new(value: u64): AtomicU64 {
@@ -409,8 +438,17 @@ export record AtomicU64 {
 }
 
 /// An `i64` updated atomically.
+///
+/// Not Copy: a copy would be a second, unrelated atomic, so an update made
+/// through one would never reach the other. Share one between threads through
+/// `Arc`, or lend `&self` to a `@noescape` task.
+@implements(Drop)
 export record AtomicI64 {
   value: i64;
+
+  /// Nothing to release; declaring `Drop` keeps the type from being Copy.
+  drop(&mut self): void {
+  }
 
   /// Creates a counter holding `value`.
   public static new(value: i64): AtomicI64 {
@@ -487,10 +525,18 @@ export record AtomicI64 {
 /// the pointer value itself is atomic, so sharing the slot cannot race. What the
 /// pointer points to is not protected; synchronizing the pointee is the user's
 /// job, as with any raw pointer.
+///
+/// Not Copy: a copy would be a second, unrelated atomic, so an update made
+/// through one would never reach the other. Share one between threads through
+/// `Arc`, or lend `&self` to a `@noescape` task.
 @allow(thread_safety)
-@implements(Send, Sync)
+@implements(Drop, Send, Sync)
 export record AtomicPtr<T> {
   value: *mut T;
+
+  /// Nothing to release; declaring `Drop` keeps the type from being Copy.
+  drop(&mut self): void {
+  }
 
   /// Creates a slot holding `value`.
   public static new(value: *mut T): AtomicPtr<T> {
