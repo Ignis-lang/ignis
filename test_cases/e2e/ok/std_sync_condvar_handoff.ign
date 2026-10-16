@@ -1,0 +1,74 @@
+// e2e: std
+// A producer hands a thousand numbers to a consumer through a one-item slot.
+// Each side waits on the condition variable until the slot is in the state it
+// needs, so every number arrives once and in order.
+import JoinHandle, Thread from "std::thread";
+import Arc, Condvar, Mutex, MutexGuard from "std::sync";
+
+const ITEM_COUNT: u64 = 1000;
+
+record Slot {
+  public value: u64;
+  public full: boolean;
+}
+
+record Handoff {
+  public slot: Mutex<Slot>;
+  public changed: Condvar;
+}
+
+function produce(handoff: &Handoff): u64 {
+  let mut next: u64 = 1;
+
+  while (next <= ITEM_COUNT) {
+    let mut guard: MutexGuard<Slot> = handoff.slot.lock();
+
+    while (guard.read().full) {
+      handoff.changed.wait<Slot>(&mut guard);
+    }
+
+    let slot: &mut Slot = guard.get();
+
+    slot.value = next;
+    slot.full = true;
+    handoff.changed.notifyAll();
+    next += 1;
+  }
+
+  return ITEM_COUNT;
+}
+
+function main(): i32 {
+  let handoff: Arc<Handoff> = Arc::new<Handoff>(Handoff {
+      slot: Mutex::new<Slot>(Slot { value: 0, full: false }),
+      changed: Condvar::new(),
+    });
+  let shared: Arc<Handoff> = handoff.clone();
+  let mut producer: JoinHandle<u64> = Thread::spawn<u64>((): u64 -> produce((@move shared).get()));
+  let mut expected: u64 = 1;
+  let mut outOfOrder: u64 = 0;
+
+  while (expected <= ITEM_COUNT) {
+    let mut guard: MutexGuard<Slot> = handoff.get().slot.lock();
+
+    while (!guard.read().full) {
+      handoff.get().changed.wait<Slot>(&mut guard);
+    }
+
+    let slot: &mut Slot = guard.get();
+
+    if (slot.value != expected) {
+      outOfOrder += 1;
+    }
+
+    slot.full = false;
+    handoff.get().changed.notifyAll();
+    expected += 1;
+  }
+
+  if (producer.join() != ITEM_COUNT) {
+    return 1;
+  }
+
+  return outOfOrder == 0 ? 0 : 2;
+}

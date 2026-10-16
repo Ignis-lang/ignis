@@ -1584,7 +1584,8 @@ export namespace Analyzer {
     /// since every holder reads the same value. A function value is neither,
     /// because its type does not say what it captured; callers judge closure
     /// arguments by their captures instead. A record or enum that declares the
-    /// trait in `@implements` is taken at its word; any other is judged by its
+    /// trait in `@implements` is taken at its word, provided every type
+    /// argument of an instance has the trait too; any other is judged by its
     /// fields or payloads, with an instance's type arguments substituted in. A
     /// type parameter is judged by the bounds it declares among `scope`, and
     /// one that is not in scope is accepted rather than judged against the
@@ -1682,8 +1683,10 @@ export namespace Analyzer {
       }
 
       if (let Option::SOME(defId) = nominal) {
+        // A declaration speaks for the type's own fields, not for what its
+        // type arguments hold, so those still have to carry the trait.
         if (Analyzer::Typecheck::declaresThreadSafety(defStore, defId, sync)) {
-          return true;
+          return Analyzer::Typecheck::allThreadSafe(defStore, typeStore, &typeArguments, sync, scope, visited);
         }
 
         let typeRaw: u32 = resolved.typeId.raw();

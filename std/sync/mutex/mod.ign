@@ -1,0 +1,235 @@
+//!
+//! # Mutex and Condvar
+//!
+//! Mutual exclusion and condition variables on top of POSIX threads.
+//!
+//! ## Exports
+//!
+//! | Export          | Description                                          |
+//! |-----------------|------------------------------------------------------|
+//! | `Mutex<T>`      | Owns a `T` that one thread at a time may access      |
+//! | `MutexGuard<T>` | Proof that the mutex is locked; unlocks on drop      |
+//! | `Condvar`       | Lets a thread sleep until another one notifies it    |
+//!
+//! ## Locking
+//!
+//! `lock` blocks until the calling thread owns the mutex and returns a guard;
+//! `tryLock` returns `Option::NONE` instead of blocking when another thread
+//! holds it. The guard reaches the value with `read` and `get`, and dropping
+//! the guard unlocks the mutex. Locking a mutex again on the thread that holds
+//! it deadlocks, as a default POSIX mutex does.
+//!
+//! A guard has to be dropped on the thread that locked the mutex. It holds raw
+//! pointers, so it is not Send and cannot be moved into a spawned task.
+//!
+//! ## Thread safety
+//!
+//! `Mutex<T>` requires `T: Send`. Its fields are the lock storage, which is
+//! plain bytes, and the value, so it is Send when `T` is and Sync when `T` is.
+//! It needs no declaration. To share a mutex between threads, put it in an
+//! `Arc` (`Arc<Mutex<T>>`).
+//!
+//! ## Waiting
+//!
+//! `Condvar::wait(&mut guard)` atomically unlocks the guard's mutex and sleeps
+//! until a notification, then locks it again before returning. Wakeups can be
+//! spurious, so wait in a loop that re-checks the condition.
+//!
+//! ## Host assumptions
+//!
+//! The `pthread_mutex_t` and `pthread_cond_t` are stored inline, in `u64`
+//! arrays sized for Linux x86-64 glibc: 40 bytes for a mutex and 48 bytes for a
+//! condition variable, both 8-byte aligned. Another target needs its own sizes.
+//!
+//! An initialized glibc mutex or condition variable holds no pointer to
+//! itself, so moving one that nobody is using is safe there. A `Mutex` must not
+//! move while a guard is alive, and a `Condvar` must not move while a thread
+//! waits on it: the guard and the waiter hold their addresses. Keeping them in
+//! an `Arc`, or in a local that stays put, satisfies both.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Mutex, MutexGuard from "std::sync";
+//!
+//! function main(): i32 {
+//!   let mutex: Mutex<i32> = Mutex::new<i32>(41);
+//!   let mut guard: MutexGuard<i32> = mutex.lock();
+//!   let value: &mut i32 = guard.get();
+//!
+//!   *value += 1;
+//!
+//!   return *guard.read();
+//! }
+//! ```
+
+// POSIX mutex and condition variable primitives (pthread.h), declared locally
+// like the other `std` syscall layers. Both are passed as untyped storage; see
+// "Host assumptions".
+extern __sync_posix {
+  function pthread_mutex_init(mutex: *mut u8, attributes: *mut u8): i32;
+  function pthread_mutex_destroy(mutex: *mut u8): i32;
+  function pthread_mutex_lock(mutex: *mut u8): i32;
+  function pthread_mutex_trylock(mutex: *mut u8): i32;
+  function pthread_mutex_unlock(mutex: *mut u8): i32;
+  function pthread_cond_init(condition: *mut u8, attributes: *mut u8): i32;
+  function pthread_cond_destroy(condition: *mut u8): i32;
+  function pthread_cond_wait(condition: *mut u8, mutex: *mut u8): i32;
+  function pthread_cond_signal(condition: *mut u8): i32;
+  function pthread_cond_broadcast(condition: *mut u8): i32;
+}
+
+/// Owns a value that one thread at a time may reach, through a `MutexGuard`.
+@implements(Drop)
+export record Mutex<T: Send> {
+  /// Storage of the `pthread_mutex_t`: 40 bytes, 8-byte aligned.
+  storage: u64[5];
+  value: T;
+
+  /// Creates an unlocked mutex owning `value`.
+  ///
+  /// Panics if the system cannot initialize the mutex.
+  public static new(value: T): Mutex<T> {
+    let mutex: Mutex<T> = Mutex {
+      storage: @zeroed<u64[5]>(),
+      value: value,
+    };
+
+    if (__sync_posix::pthread_mutex_init(mutex.lockPointer(), null) != 0) {
+      @panic("Mutex::new: pthread_mutex_init failed");
+    }
+
+    return mutex;
+  }
+
+  /// Blocks until the calling thread owns the mutex.
+  ///
+  /// Panics if the system reports an error.
+  public lock(&self): MutexGuard<T> {
+    if (__sync_posix::pthread_mutex_lock(self.lockPointer()) != 0) {
+      @panic("Mutex::lock: pthread_mutex_lock failed");
+    }
+
+    return MutexGuard {
+      lock: self.lockPointer(),
+      value: self.valuePointer(),
+    };
+  }
+
+  /// Locks the mutex if no thread holds it, without blocking.
+  ///
+  /// Returns `Option::NONE` when another thread, or this one, holds it.
+  public tryLock(&self): Option<MutexGuard<T>> {
+    if (__sync_posix::pthread_mutex_trylock(self.lockPointer()) != 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(MutexGuard {
+        lock: self.lockPointer(),
+        value: self.valuePointer(),
+      });
+  }
+
+  lockPointer(&self): *mut u8 {
+    let shared: *u64[5] = (&self.storage) as *u64[5];
+
+    return shared as *mut u8;
+  }
+
+  valuePointer(&self): *mut T {
+    let shared: *T = (&self.value) as *T;
+
+    return shared as *mut T;
+  }
+
+  /// Destroys the mutex and drops the value. No guard may be alive.
+  drop(&mut self): void {
+    __sync_posix::pthread_mutex_destroy(self.lockPointer());
+    @dropInPlace<T>(self.valuePointer());
+  }
+}
+
+/// A locked `Mutex<T>`: gives access to the value and unlocks on drop.
+///
+/// It holds the mutex's addresses, so it is neither Send nor Sync and the
+/// mutex must not move while it is alive.
+@implements(Drop)
+export record MutexGuard<T> {
+  lock: *mut u8;
+  value: *mut T;
+
+  /// The guarded value, for reading.
+  public read(&self): &T {
+    return self.value as &T;
+  }
+
+  /// The guarded value, for reading and writing.
+  public get(&mut self): &mut T {
+    return self.value as &mut T;
+  }
+
+  /// The address of the `pthread_mutex_t` this guard holds, for `Condvar`.
+  public lockPointer(&self): *mut u8 {
+    return self.lock;
+  }
+
+  /// Unlocks the mutex.
+  drop(&mut self): void {
+    __sync_posix::pthread_mutex_unlock(self.lock);
+  }
+}
+
+/// A condition variable: a thread waits on it while holding a `MutexGuard`,
+/// and another one wakes it with `notifyOne` or `notifyAll`.
+///
+/// It is plain storage, so it is Send and Sync. Pair each condition variable
+/// with one mutex; waiting with guards of different mutexes is undefined.
+@implements(Drop)
+export record Condvar {
+  /// Storage of the `pthread_cond_t`: 48 bytes, 8-byte aligned.
+  storage: u64[6];
+
+  /// Creates a condition variable nobody waits on.
+  ///
+  /// Panics if the system cannot initialize it.
+  public static new(): Condvar {
+    let condition: Condvar = Condvar { storage: @zeroed<u64[6]>() };
+
+    if (__sync_posix::pthread_cond_init(condition.conditionPointer(), null) != 0) {
+      @panic("Condvar::new: pthread_cond_init failed");
+    }
+
+    return condition;
+  }
+
+  /// Unlocks the guard's mutex, sleeps until notified, and locks it again.
+  ///
+  /// The guard owns the mutex again when this returns. Wakeups can be
+  /// spurious: call it in a loop that re-checks the condition.
+  public wait<T>(&self, guard: &mut MutexGuard<T>): void {
+    if (__sync_posix::pthread_cond_wait(self.conditionPointer(), guard.lockPointer()) != 0) {
+      @panic("Condvar::wait: pthread_cond_wait failed");
+    }
+  }
+
+  /// Wakes one waiting thread, if any.
+  public notifyOne(&self): void {
+    __sync_posix::pthread_cond_signal(self.conditionPointer());
+  }
+
+  /// Wakes every waiting thread.
+  public notifyAll(&self): void {
+    __sync_posix::pthread_cond_broadcast(self.conditionPointer());
+  }
+
+  conditionPointer(&self): *mut u8 {
+    let shared: *u64[6] = (&self.storage) as *u64[6];
+
+    return shared as *mut u8;
+  }
+
+  /// Destroys the condition variable. No thread may be waiting on it.
+  drop(&mut self): void {
+    __sync_posix::pthread_cond_destroy(self.conditionPointer());
+  }
+}

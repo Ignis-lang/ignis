@@ -1,0 +1,69 @@
+// e2e: std
+// Clones of an `Arc` count up and down, moving to other threads and dropping
+// there; the value is dropped exactly once, when the last clone goes away.
+import JoinHandle, Thread from "std::thread";
+import Arc, AtomicU64, Ordering from "std::sync";
+
+/// Counts its own drops in a shared counter reached by address.
+@implements(Drop)
+record Tracked {
+  public drops: u64;
+  public label: String;
+
+  drop(&mut self): void {
+    let counter: *mut AtomicU64 = self.drops as *mut AtomicU64;
+
+    (*counter).fetchAdd(1, Ordering::SEQ_CST);
+    self.label.drop();
+  }
+}
+
+function main(): i32 {
+  let drops: AtomicU64 = AtomicU64::new(0);
+  let address: u64 = ((&drops) as *AtomicU64) as u64;
+  {
+    let first: Arc<Tracked> = Arc::new<Tracked>(Tracked { drops: address, label: String::create("tracked") });
+
+    if (first.strongCount() != 1) {
+      return 1;
+    }
+
+    let mut handles: Vector<JoinHandle<u64>> = Vector::new<JoinHandle<u64>>();
+    let mut index: u64 = 0;
+
+    while (index < 4) {
+      let clone: Arc<Tracked> = first.clone();
+
+      handles.push(Thread::spawn<u64>((): u64 -> (@move clone).get().label.length()));
+      index += 1;
+    }
+
+    let mut lengths: u64 = 0;
+
+    while (handles.length() > 0) {
+      if (let Option::SOME(popped) = handles.pop()) {
+        let mut handle: JoinHandle<u64> = popped;
+
+        lengths += handle.join();
+      }
+    }
+
+    if (lengths != 28 || first.strongCount() != 1) {
+      return 2;
+    }
+
+    {
+      let second: Arc<Tracked> = first.clone();
+
+      if (second.strongCount() != 2) {
+        return 3;
+      }
+    }
+
+    if (first.strongCount() != 1 || drops.load(Ordering::SEQ_CST) != 0) {
+      return 4;
+    }
+  }
+
+  return drops.load(Ordering::SEQ_CST) == 1 ? 0 : 5;
+}

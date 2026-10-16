@@ -40,6 +40,8 @@ The design goal is to stay small, explicit and predictable.
 | `std::toml` | `Toml` | TOML document model, parsing and writing |
 | `std::format` | `Display` | `Display` trait for user-defined textual representations |
 | `std::text` | `Text` | UTF-8 byte-offset ↔ line/column position conversion (`Text::LineIndex`) |
+| `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr`, `Mutex`, `MutexGuard`, `Condvar`, `Arc` | Atomic values, locks, condition variables and shared ownership across threads |
+| `std::thread` | `Thread`, `JoinHandle<T>` | Spawn, join and detach POSIX threads |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
@@ -210,6 +212,42 @@ function main(): i32 {
 
 - `Display` trait for user-defined textual representations.
 
+### `std::sync`
+
+- `Ordering` — `RELAXED`, `ACQUIRE`, `RELEASE`, `ACQ_REL`, `SEQ_CST`.
+- `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr<T>` — `new`, `load`,
+  `store`, `swap`, `compareExchange`; the integer types add `fetchAdd`, `fetchSub`,
+  `fetchAnd`, `fetchOr`, `fetchXor`. Every method takes `&self`. Atomics are not Copy:
+  share one between threads through `Arc`, or lend it to a `@noescape` task.
+- `compareExchange` is strong and returns `Result::OK(previous)` when it wrote,
+  `Result::ERROR(observed)` when it did not.
+- An ordering the operation cannot use (a `load` with `RELEASE`, a `store` with
+  `ACQUIRE`, a `compareExchange` failure ordering of `RELEASE` or `ACQ_REL`) panics.
+- The allocator counters behind `Memory::stats` are atomic, so allocation is
+  thread-safe.
+- `Mutex<T: Send>` — `new`, `lock(&self): MutexGuard<T>` (blocks), `tryLock(&self):
+  Option<MutexGuard<T>>`. The guard gives `read(&self): &T` and `get(&mut self): &mut T`
+  and unlocks when it is dropped. No poisoning; locking twice from one thread deadlocks.
+- `Condvar` — `wait(&self, guard)`, `notifyOne`, `notifyAll`, used with a `MutexGuard`.
+- `Arc<T: Send & Sync>` — `new`, `clone`, `get(&self): &T`, `strongCount`; the value is
+  dropped when the last clone is.
+- `Mutex` and `Condvar` hold a `pthread_mutex_t` (40 bytes) and `pthread_cond_t`
+  (48 bytes) inline, the sizes on Linux x86-64 with glibc. A `Mutex` or `Condvar` must
+  not move while a guard or a waiter uses it; keep it in place, typically inside an
+  `Arc`.
+
+### `std::thread`
+
+- `Thread::spawn<T: Send>(@sendable task: () -> T): JoinHandle<T>` — runs `task` on a new
+  POSIX thread. The compiler checks what the closure captures (`@sendable`).
+- `JoinHandle<T>::join(&mut self): T` — waits for the thread and returns the task's
+  result; joining twice panics. Dropping an unjoined handle detaches the thread.
+- `Thread::currentId(): u64` — the calling thread's `pthread_t`.
+- A panic in any thread ends the process with exit code 101.
+- `T = void` is not supported yet (generic `void` returns fail LIR verification);
+  return a value instead.
+- `std::io` output is not audited for concurrent use yet.
+
 ### `std::text`
 
 - `Text::LineIndex` — converts between UTF-8 byte offsets and LSP-style line/column
@@ -285,6 +323,8 @@ and only drop to `Memory` / `Pointer` / `LibC` when necessary.
 | Dynamic arrays | `std::vector` |
 | Lookup by key / membership | `std::collections` |
 | Shared ownership | `std::rc` |
+| Atomic counters and flags | `std::sync` |
+| Threads | `std::thread` |
 | Filesystem I/O | `std::fs` |
 | Path manipulation | `std::path` |
 | Environment variables | `std::env` |

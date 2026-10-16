@@ -1,0 +1,17 @@
+// e2e: err
+// An atomic is not Copy, so a task cannot take a private copy of it. Using it
+// through `&self` captures it by reference, and a reference cannot escape into
+// a spawned task: the program is rejected instead of updating a stale copy.
+import JoinHandle, Thread from "std::thread";
+import AtomicU64, Ordering from "std::sync";
+
+function main(): i32 {
+  let counter: AtomicU64 = AtomicU64::new(0);
+  let mut handle: JoinHandle<u64> = Thread::spawn<u64>((): u64 -> {
+    return counter.fetchAdd(5, Ordering::SEQ_CST);
+  });
+
+  handle.join();
+
+  return counter.load(Ordering::SEQ_CST) as i32;
+}

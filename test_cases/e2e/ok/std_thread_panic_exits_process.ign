@@ -1,0 +1,15 @@
+// e2e: std
+// e2e: allow-leak
+// A panic in a spawned thread ends the whole process with exit code 101; the
+// main thread never gets past `join`. Leak checking is off because `exit(101)`
+// runs while the main thread's handle and the thread's control block are live.
+import JoinHandle, Thread from "std::thread";
+
+function main(): i32 {
+  let mut handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> {
+      @panic("spawned thread failed");
+      return 0;
+    });
+
+  return handle.join();
+}

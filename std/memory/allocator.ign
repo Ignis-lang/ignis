@@ -70,7 +70,9 @@ record AllocHeader {
 /// Live allocator counters.
 ///
 /// The fields are process globals with translation-unit linkage, so every
-/// reader has to live in this file.
+/// reader has to live in this file. Every access is atomic and relaxed: the
+/// counters order nothing else, they only have to stay exact when several
+/// threads allocate at once.
 record AllocStats {
   static mut ALLOCS_LIVE: u64 = 0;
   static mut BYTES_LIVE: u64 = 0;
@@ -154,16 +156,32 @@ function allocAlignedRaw(size: u64, alignment: u64): *mut u8 {
   return aligned as *mut u8;
 }
 
+function addCounter(counter: *mut u64, value: u64): void {
+  @atomicRmw<u64>(counter, :add, value, :relaxed);
+}
+
+function subCounter(counter: *mut u64, value: u64): void {
+  @atomicRmw<u64>(counter, :sub, value, :relaxed);
+}
+
+function readCounter(counter: *mut u64): u64 {
+  return @atomicLoad<u64>(counter as *u64, :relaxed);
+}
+
+function clearCounter(counter: *mut u64): void {
+  @atomicStore<u64>(counter, 0, :relaxed);
+}
+
 function trackAlloc(size: u64): void {
-  AllocStats::ALLOCS_LIVE += 1;
-  AllocStats::BYTES_LIVE += size;
-  AllocStats::ALLOC_TOTAL += 1;
+  addCounter((&mut AllocStats::ALLOCS_LIVE) as *mut u64, 1);
+  addCounter((&mut AllocStats::BYTES_LIVE) as *mut u64, size);
+  addCounter((&mut AllocStats::ALLOC_TOTAL) as *mut u64, 1);
 }
 
 function trackFree(size: u64): void {
-  AllocStats::ALLOCS_LIVE -= 1;
-  AllocStats::BYTES_LIVE -= size;
-  AllocStats::FREE_TOTAL += 1;
+  subCounter((&mut AllocStats::ALLOCS_LIVE) as *mut u64, 1);
+  subCounter((&mut AllocStats::BYTES_LIVE) as *mut u64, size);
+  addCounter((&mut AllocStats::FREE_TOTAL) as *mut u64, 1);
 }
 
 /// The process allocator behind `Memory` and `GlobalAllocator`.
@@ -235,7 +253,8 @@ export namespace RawAllocator {
       LibC::MemoryOperations::memcpy(moved as *mut void, pointer as *void, copySize);
     }
 
-    AllocStats::BYTES_LIVE = AllocStats::BYTES_LIVE - header.size + size;
+    addCounter((&mut AllocStats::BYTES_LIVE) as *mut u64, size);
+    subCounter((&mut AllocStats::BYTES_LIVE) as *mut u64, header.size);
 
     @configFlag(@feature("alloc-trace"))
     AllocTrace::recordRealloc(pointer, moved, size);
@@ -283,20 +302,23 @@ export namespace RawAllocator {
   }
 
   /// Returns a snapshot of the live allocator counters.
+  ///
+  /// Each counter is read atomically on its own, so while other threads
+  /// allocate the four values need not describe one single instant.
   function stats(): Stats {
     return Stats {
-      allocsLive: AllocStats::ALLOCS_LIVE,
-      bytesLive: AllocStats::BYTES_LIVE,
-      allocTotal: AllocStats::ALLOC_TOTAL,
-      freeTotal: AllocStats::FREE_TOTAL,
+      allocsLive: readCounter((&mut AllocStats::ALLOCS_LIVE) as *mut u64),
+      bytesLive: readCounter((&mut AllocStats::BYTES_LIVE) as *mut u64),
+      allocTotal: readCounter((&mut AllocStats::ALLOC_TOTAL) as *mut u64),
+      freeTotal: readCounter((&mut AllocStats::FREE_TOTAL) as *mut u64),
     };
   }
 
   /// Clears every allocator counter, including the live ones.
   function resetStats(): void {
-    AllocStats::ALLOCS_LIVE = 0;
-    AllocStats::BYTES_LIVE = 0;
-    AllocStats::ALLOC_TOTAL = 0;
-    AllocStats::FREE_TOTAL = 0;
+    clearCounter((&mut AllocStats::ALLOCS_LIVE) as *mut u64);
+    clearCounter((&mut AllocStats::BYTES_LIVE) as *mut u64);
+    clearCounter((&mut AllocStats::ALLOC_TOTAL) as *mut u64);
+    clearCounter((&mut AllocStats::FREE_TOTAL) as *mut u64);
   }
 }

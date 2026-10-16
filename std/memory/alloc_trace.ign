@@ -50,6 +50,19 @@
 //! until something fills it. The slots are reserved and zeroed; writing
 //! `backtrace()` into them is separate work.
 //!
+//! ## Threads
+//!
+//! Every public entry point holds a spin lock (`AllocTraceState::LOCKED`, taken
+//! with an atomic compare-exchange) for its whole run, so allocations from
+//! several threads update the table, the counters and the log one at a time. The
+//! lock is not reentrant, which is safe because the ledger never allocates
+//! through `RawAllocator`.
+//!
+//! The entry-point claim `beginEntryPoint` makes is process-wide, not
+//! per-thread: an allocation another thread records between the claim and its
+//! release can be logged under the claimed entry point. Only the label is
+//! affected; counts and checks stay exact.
+//!
 //! ## Failure behavior
 //!
 //! A double free, or a free of an unknown address while nothing has overflowed,
@@ -95,6 +108,7 @@ record AllocTraceState {
   static mut SCRATCH: *mut u8 = null;
   static mut SINK: *mut void = null;
   static mut READY: boolean = false;
+  static mut LOCKED: boolean = false;
   static mut QUIET: boolean = false;
   static mut EXIT_ON_ERROR: boolean = true;
   static mut CAPACITY: u64 = 0;
@@ -162,6 +176,19 @@ export namespace AllocTrace {
   const ENTRY_NONE: u8 = 255;
 
   const STDERR_FD: i32 = 2;
+
+  /// Spins until this thread owns the ledger.
+  function lock(): void {
+    let flag: *mut boolean = (&mut AllocTraceState::LOCKED) as *mut boolean;
+
+    while (@atomicCompareExchange<boolean>(flag, false, true, :acquire, :relaxed)) {
+    }
+  }
+
+  /// Hands the ledger back; pairs with `lock`.
+  function unlock(): void {
+    @atomicStore<boolean>((&mut AllocTraceState::LOCKED) as *mut boolean, false, :release);
+  }
 
   function entryPointName(entryPoint: u8): str {
     if (entryPoint == AllocTrace::ENTRY_ALLOCATE) {
@@ -647,12 +674,16 @@ export namespace AllocTrace {
   /// this the log would name the inner entry point. Paired with `endEntryPoint`,
   /// and safe because an allocator entry point never reenters another.
   function beginEntryPoint(entryPoint: u8): void {
+    AllocTrace::lock();
     AllocTraceState::PENDING_ENTRY_POINT = entryPoint;
+    AllocTrace::unlock();
   }
 
   /// Releases the claim `beginEntryPoint` made, taken or not.
   function endEntryPoint(): void {
+    AllocTrace::lock();
     AllocTraceState::PENDING_ENTRY_POINT = AllocTrace::ENTRY_NONE;
+    AllocTrace::unlock();
   }
 
   function effectiveEntryPoint(entryPoint: u8): u8 {
@@ -665,6 +696,12 @@ export namespace AllocTrace {
 
   /// Records an allocation `entryPoint` just handed out.
   function recordAlloc(pointer: *mut u8, size: u64, entryPoint: u8): void {
+    AllocTrace::lock();
+    AllocTrace::recordAllocLocked(pointer, size, entryPoint);
+    AllocTrace::unlock();
+  }
+
+  function recordAllocLocked(pointer: *mut u8, size: u64, entryPoint: u8): void {
     if (pointer == null) {
       return;
     }
@@ -708,6 +745,12 @@ export namespace AllocTrace {
 
   /// Records a release of `pointer`, reporting a double or unknown free.
   function recordFree(pointer: *mut u8, entryPoint: u8): void {
+    AllocTrace::lock();
+    AllocTrace::recordFreeLocked(pointer, entryPoint);
+    AllocTrace::unlock();
+  }
+
+  function recordFreeLocked(pointer: *mut u8, entryPoint: u8): void {
     if (pointer == null) {
       return;
     }
@@ -785,6 +828,12 @@ export namespace AllocTrace {
 
   /// Records the move `reallocateAligned` performs without going through `free`.
   function recordRealloc(previous: *mut u8, moved: *mut u8, size: u64): void {
+    AllocTrace::lock();
+    AllocTrace::recordReallocLocked(previous, moved, size);
+    AllocTrace::unlock();
+  }
+
+  function recordReallocLocked(previous: *mut u8, moved: *mut u8, size: u64): void {
     AllocTrace::ensureReady();
 
     if (!AllocTrace::usable()) {
@@ -852,6 +901,12 @@ export namespace AllocTrace {
   /// Safe to call at any point in a run, and safe to call when nothing was
   /// ever traced.
   function report(): void {
+    AllocTrace::lock();
+    AllocTrace::reportLocked();
+    AllocTrace::unlock();
+  }
+
+  function reportLocked(): void {
     if (!AllocTraceState::READY || !AllocTrace::usable()) {
       return;
     }
@@ -921,59 +976,110 @@ export namespace AllocTrace {
 
   /// Live tracked allocations.
   function liveCount(): u64 {
-    return AllocTraceState::LIVE;
+    AllocTrace::lock();
+
+    let result: u64 = AllocTraceState::LIVE;
+
+    AllocTrace::unlock();
+
+    return result;
   }
 
   /// Events the table had no room for.
   function overflowCount(): u64 {
-    return AllocTraceState::OVERFLOWED;
+    AllocTrace::lock();
+
+    let result: u64 = AllocTraceState::OVERFLOWED;
+
+    AllocTrace::unlock();
+
+    return result;
   }
 
   /// Live allocations the table had no room to record.
   function untrackedLiveCount(): u64 {
-    return AllocTraceState::UNTRACKED_LIVE;
+    AllocTrace::lock();
+
+    let result: u64 = AllocTraceState::UNTRACKED_LIVE;
+
+    AllocTrace::unlock();
+
+    return result;
   }
 
   /// Releases of addresses the table never recorded.
   function untrackedFreeCount(): u64 {
-    return AllocTraceState::UNTRACKED_FREES;
+    AllocTrace::lock();
+
+    let result: u64 = AllocTraceState::UNTRACKED_FREES;
+
+    AllocTrace::unlock();
+
+    return result;
   }
 
   /// Table slots, after the environment and the power-of-two rounding.
   function slotCount(): u64 {
+    AllocTrace::lock();
     AllocTrace::ensureReady();
 
-    return AllocTraceState::CAPACITY;
+    let result: u64 = AllocTraceState::CAPACITY;
+
+    AllocTrace::unlock();
+
+    return result;
   }
 
   /// Events recorded since the last reset.
   function eventCount(): u64 {
-    return AllocTraceState::SEQUENCE;
+    AllocTrace::lock();
+
+    let result: u64 = AllocTraceState::SEQUENCE;
+
+    AllocTrace::unlock();
+
+    return result;
   }
 
   /// Double frees and unknown frees seen since the last reset.
   function errorCount(): u64 {
-    return AllocTraceState::ERRORS;
+    AllocTrace::lock();
+
+    let result: u64 = AllocTraceState::ERRORS;
+
+    AllocTrace::unlock();
+
+    return result;
   }
 
   /// Turns the per-event log on or off, leaving the reports alone.
   ///
   /// The same switch `IGNIS_ALLOC_TRACE_QUIET=1` sets at startup.
   function setQuiet(enabled: boolean): void {
+    AllocTrace::lock();
     AllocTrace::ensureReady();
     AllocTraceState::QUIET = enabled;
+    AllocTrace::unlock();
   }
 
   /// Turns the process exit on a double or unknown free on or off.
   ///
   /// Off is for tests that have to observe the detection and keep running.
   function setExitOnError(enabled: boolean): void {
+    AllocTrace::lock();
     AllocTrace::ensureReady();
     AllocTraceState::EXIT_ON_ERROR = enabled;
+    AllocTrace::unlock();
   }
 
   /// Empties the table and clears every counter.
   function reset(): void {
+    AllocTrace::lock();
+    AllocTrace::resetLocked();
+    AllocTrace::unlock();
+  }
+
+  function resetLocked(): void {
     AllocTrace::ensureReady();
 
     if (!AllocTrace::usable()) {

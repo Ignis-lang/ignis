@@ -1,0 +1,60 @@
+// e2e: std
+// `tryLock` fails without blocking while another thread holds the mutex, and
+// succeeds once that thread lets it go.
+import JoinHandle, Thread from "std::thread";
+import Arc, AtomicU64, Mutex, MutexGuard, Ordering from "std::sync";
+
+record Shared {
+  public value: Mutex<u64>;
+  public holding: AtomicU64;
+  public release: AtomicU64;
+}
+
+function main(): i32 {
+  let shared: Arc<Shared> = Arc::new<Shared>(Shared {
+      value: Mutex::new<u64>(0),
+      holding: AtomicU64::new(0),
+      release: AtomicU64::new(0),
+    });
+  let forHolder: Arc<Shared> = shared.clone();
+  let mut holder: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
+      let state: &Shared = (@move forHolder).get();
+      let mut guard: MutexGuard<u64> = state.value.lock();
+      let value: &mut u64 = guard.get();
+
+      *value = 7;
+      state.holding.store(1, Ordering::RELEASE);
+
+      while (state.release.load(Ordering::ACQUIRE) == 0) {
+      }
+
+      return true;
+    });
+
+  while (shared.get().holding.load(Ordering::ACQUIRE) == 0) {
+  }
+
+  let mut failures: i32 = 0;
+  let mut attempt: u64 = 0;
+
+  while (attempt < 100) {
+    if (let Option::SOME(_) = shared.get().value.tryLock()) {
+      failures += 1;
+    }
+
+    attempt += 1;
+  }
+
+  shared.get().release.store(1, Ordering::RELEASE);
+  holder.join();
+
+  if (failures != 0) {
+    return 1;
+  }
+
+  if (let Option::SOME(guard) = shared.get().value.tryLock()) {
+    return *guard.read() == 7 ? 0 : 2;
+  }
+
+  return 3;
+}

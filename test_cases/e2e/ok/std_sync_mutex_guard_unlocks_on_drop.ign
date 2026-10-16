@@ -1,0 +1,28 @@
+// e2e: std
+// Dropping a guard unlocks its mutex: locking the same mutex twice in a row on
+// one thread does not deadlock, and the second guard sees the first write.
+import Mutex, MutexGuard from "std::sync";
+
+function main(): i32 {
+  let mutex: Mutex<String> = Mutex::new<String>(String::create("a"));
+
+  {
+    let mut first: MutexGuard<String> = mutex.lock();
+    let text: &mut String = first.get();
+
+    text.pushChar('b');
+  }
+
+  {
+    let mut second: MutexGuard<String> = mutex.lock();
+    let text: &mut String = second.get();
+
+    text.pushChar('c');
+  }
+
+  if (let Option::SOME(third) = mutex.tryLock()) {
+    return third.read().length() == 3 ? 0 : 1;
+  }
+
+  return 2;
+}

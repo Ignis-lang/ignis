@@ -1,0 +1,30 @@
+// e2e: std
+// e2e: allow-leak
+// Dropping a handle without joining detaches the thread. It still runs to the
+// end and frees its own block; leak checking is off because the process may
+// exit before the detached thread has released it.
+import JoinHandle, Thread from "std::thread";
+import AtomicU64, Ordering from "std::sync";
+import RawAllocator from "std::memory";
+
+function main(): i32 {
+  let storage: *mut u8 = RawAllocator::allocateZeroedAligned(1, @sizeOf<AtomicU64>(), @alignOf<AtomicU64>());
+  let address: u64 = storage as u64;
+
+  {
+    let _detached: JoinHandle<String> = Thread::spawn<String>((): String -> {
+        let flag: *mut AtomicU64 = address as *mut AtomicU64;
+
+        (*flag).store(1, Ordering::RELEASE);
+        return String::create("dropped by the thread");
+      });
+  }
+
+  let flag: *mut AtomicU64 = storage as *mut AtomicU64;
+
+  while ((*flag).load(Ordering::ACQUIRE) == 0) {
+  }
+
+  RawAllocator::free(storage);
+  return 0;
+}

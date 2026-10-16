@@ -1,0 +1,95 @@
+import JoinHandle, Thread from "std::thread";
+import AtomicU64, Ordering from "std::sync";
+import RawAllocator from "std::memory";
+import Test from "std::test";
+
+const THREAD_COUNT: u64 = 8;
+const INCREMENTS_PER_THREAD: u64 = 10000;
+
+@test
+function joinReturnsTheTaskResult(): void {
+  let mut handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> 6 * 7);
+
+  Test::assertEq<i32>(handle.join(), 42);
+}
+
+@test
+function joinReturnsAnOwnedResult(): void {
+  let mut handle: JoinHandle<String> = Thread::spawn<String>((): String -> String::create("from a thread"));
+  let result: String = handle.join();
+
+  Test::assertEq<u64>(result.length(), 13);
+}
+
+@test
+function spawnedThreadsShareAnAtomicCounter(): void {
+  let storage: *mut u8 = RawAllocator::allocateZeroedAligned(1, @sizeOf<AtomicU64>(), @alignOf<AtomicU64>());
+  let address: u64 = storage as u64;
+  let mut handles: Vector<JoinHandle<u64>> = Vector::new<JoinHandle<u64>>();
+  let mut index: u64 = 0;
+
+  while (index < THREAD_COUNT) {
+    handles.push(Thread::spawn<u64>((): u64 -> {
+          let counter: *mut AtomicU64 = address as *mut AtomicU64;
+          let mut step: u64 = 0;
+
+          while (step < INCREMENTS_PER_THREAD) {
+            (*counter).fetchAdd(1, Ordering::RELAXED);
+            step += 1;
+          }
+
+          return step;
+        }));
+    index += 1;
+  }
+
+  while (handles.length() > 0) {
+    if (let Option::SOME(popped) = handles.pop()) {
+      let mut handle: JoinHandle<u64> = popped;
+
+      Test::assertEq<u64>(handle.join(), INCREMENTS_PER_THREAD);
+    }
+  }
+
+  let counter: *mut AtomicU64 = storage as *mut AtomicU64;
+
+  Test::assertEq<u64>((*counter).load(Ordering::SEQ_CST), THREAD_COUNT * INCREMENTS_PER_THREAD);
+  RawAllocator::free(storage);
+}
+
+@test
+function droppedHandleDetachesTheThread(): void {
+  let storage: *mut u8 = RawAllocator::allocateZeroedAligned(1, @sizeOf<AtomicU64>(), @alignOf<AtomicU64>());
+  let address: u64 = storage as u64;
+
+  {
+    let _detached: JoinHandle<String> = Thread::spawn<String>((): String -> {
+        let counter: *mut AtomicU64 = address as *mut AtomicU64;
+
+        (*counter).store(1, Ordering::RELEASE);
+        return String::create("discarded");
+      });
+  }
+
+  let counter: *mut AtomicU64 = storage as *mut AtomicU64;
+
+  while ((*counter).load(Ordering::ACQUIRE) == 0) {
+  }
+
+  RawAllocator::free(storage);
+  Test::assert(Thread::currentId() != 0);
+}
+
+function requireSend<T: Send>(): boolean {
+  return true;
+}
+
+@test
+function joinHandleIsSend(): void {
+  Test::assert(requireSend<JoinHandle<i32>>());
+}
+
+@test
+function joinHandleOfAnOwnedResultIsSend(): void {
+  Test::assert(requireSend<JoinHandle<Vector<String>>>());
+}

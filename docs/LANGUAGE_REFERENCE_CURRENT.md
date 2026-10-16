@@ -186,7 +186,7 @@ function main(): i32 {
 }
 ```
 
-A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and function values are neither, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements`, which the `thread_safety` lint warns about when its structure disagrees (A0254). A closure bound to a `Send` or `Sync` type parameter, or passed to a parameter marked `@sendable`, is judged by its captures at the call (A0252), and a closure bound to `Sync` may not capture by mutable reference; a named function or a forwarded `@sendable` parameter is accepted, and any other function value is rejected there (A0253). `@sendable` is valid only on a parameter of function type (A0255), which stays callable inside the function.
+A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and function values are neither, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements` (for a generic one, every type argument must also have the trait), which the `thread_safety` lint warns about when its structure disagrees (A0254). A closure bound to a `Send` or `Sync` type parameter, or passed to a parameter marked `@sendable`, is judged by its captures at the call (A0252), and a closure bound to `Sync` may not capture by mutable reference; a named function or a forwarded `@sendable` parameter is accepted, and any other function value is rejected there (A0253). `@sendable` is valid only on a parameter of function type (A0255), which stays callable inside the function.
 
 ## 4. Declarations
 
@@ -597,6 +597,8 @@ Common std modules include:
 | CLI parsing | `std::cli` | Building a bounded command parser for declared flags, options, positionals, and `--`. |
 | Terminal control | `std::terminal` | Styling text, clearing screen/lines, moving cursors, and checking terminal capability semantically. |
 | Data structures | `std::collections`, `std::vector` | Using `HashMap`, `HashSet`, `BitSet`, and `Vector`. |
+| Synchronization | `std::sync` | Atomics with an explicit `Ordering`, `Mutex` and its guard, `Condvar`, and `Arc` for sharing a value across threads. |
+| Threads | `std::thread` | Spawning a `@sendable` task on a POSIX thread, joining its result, detaching on drop. |
 
 ```toml
 # ignis.toml

@@ -231,6 +231,22 @@
       "doc": "  \n# String Module  \n  \nOwned, heap-backed UTF-8 byte string type and related utilities.  \n  \n## Overview  \n  \n`String` is a value-type record whose `data` buffer lives on the heap.  \nIt implements `Drop` so the buffer is freed automatically when the  \nowning binding goes out of scope, and `Clone` for explicit deep copies.  \nIts storage is an owned UTF-8 byte buffer with a byte-counted `len` field.  \n  \n`str` is the primitive immutable string-slice type (`const char*` in C).  \nIn v0.4 it remains a borrowed NUL-terminated UTF-8 byte view.  \nString literals have type `str`. Use `String::create(s)` to create an  \nowned copy from a `str`.  \n  \nInterior NUL bytes are preserved in owned storage.  \ntoStr() is a zero-copy interop view.  \nC-string consumers may stop at the first interior NUL.  \n  \n## Memory Layout  \n  \n```text  \n  String  \n  ┌──────────────┐  \n  │ data ────────┼──────► ┌───┬───┬───┬───┬───┬───┬───┬───┐  \n  │ len: 5       │        │ h │ e │ l │ l │ o │   │   │   │  \n  │ cap: 8       │        └───┴───┴───┴───┴───┴───┴───┴───┘  \n  └──────────────┘        ◄── used bytes ──►◄─ reserved ──►  \n```  \n  \nFields mirror the C runtime's `IgnisString` layout exactly:  \n- `data` — pointer to the backing byte buffer (or `null` before init)  \n- `len`  — number of bytes currently stored  \n- `cap`  — total bytes allocated  \n  \n## UTF-8 Scanning and Bytes  \n  \n`String` stays byte-backed. APIs that need parser or diagnostic offsets keep  \nthose byte positions internal to the caller while decoding `char` values at  \nexplicit byte boundaries.  \n  \n`charAt` and `pushChar` work with decoded `char` values, while `byteAt`,  \n`pushByte`, `forEachByte`, `findByte`, `trimWhere`, and `split` keep raw byte  \nbehavior explicit.  \n  \n## Higher-Order Iteration Methods  \n  \nString provides callback-based operations for char/byte iteration,  \nsearching, trimming, and splitting:  \n  \n| Method        | Callback signature   | Returns            | Description                        |  \n|---------------|----------------------|--------------------|------------------------------------|  \n| `forEach`     | `(char) -> void`     | `void`             | Iterate scalar `char` values       |  \n| `forEachByte` | `(u8) -> void`       | `void`             | Iterate over every byte            |  \n| `map`         | `(char) -> char`     | `String`           | Transform scalar `char` values     |  \n| `mapBytes`    | `(u8) -> u8`         | `String`           | Transform bytes directly           |  \n| `findByte`    | `(u8) -> boolean`    | `Option<u64>`      | Index of first matching byte       |  \n| `findLastByte`| `(u8) -> boolean`    | `Option<u64>`      | Index of last matching byte        |  \n| `trimWhere`   | `(u8) -> boolean`    | `String`           | Strip leading/trailing bytes       |  \n| `split`       | `(u8) -> boolean`    | `Vector<String>`   | Split into segments                |  \n  \nAll callbacks are `@noescape`: the closure must not outlive the method call.  \n  \n## Byte Conversion  \n  \n| Method    | Returns         | Description                        |  \n|-----------|-----------------|------------------------------------|  \n| `toBytes` | `Vector<u8>`    | Copy bytes into a byte vector      |  \n| `toChars` | `Vector<char>`  | Copy bytes into a char vector      |  \n  \n## Numeric Conversions  \n  \n`String::create` is overloaded for all numeric primitives (`i8` through  \n`f64`), plus `str`. Extension methods provide `.toString()` on every  \nprimitive type.  \n  \n## Example  \n  \n```ignis  \nimport String from \"std::string\";  \nimport Io from \"std::io\";  \n  \nfunction main(): i32 {  \n  let greeting: String = String::create(\"hello\");  \n  let world: str = \" world\";  \n  let msg: String = greeting.concat(world);  \n  \n  Io::println(msg);  \n  \n  // Byte-level: trim whitespace and split on commas  \n  let csv: String = String::create(\"  a,b,c  \");  \n  let trimmed: String = csv.trimWhere((b: u8): boolean -> { return b == 32; });  \n  let parts: Vector<String> = trimmed.split((b: u8): boolean -> { return b == 44; });  \n  // parts: [\"a\", \"b\", \"c\"]  \n  \n  return 0;  \n}  \n```"
     },
     {
+      "name": "std::sync",
+      "doc": "  \n# Sync  \n  \nSynchronization building blocks.  \n  \n## Exports  \n  \n| Export          | Description                            |  \n|-----------------|----------------------------------------|  \n| `Ordering`      | Memory ordering of an atomic operation |  \n| `AtomicBool`    | `boolean` updated atomically           |  \n| `AtomicU32`     | `u32` updated atomically               |  \n| `AtomicU64`     | `u64` updated atomically               |  \n| `AtomicI64`     | `i64` updated atomically               |  \n| `AtomicPtr<T>`  | `*mut T` updated atomically            |  \n| `Mutex<T>`      | Value one thread at a time may access  |  \n| `MutexGuard<T>` | A locked mutex; unlocks on drop        |  \n| `Condvar`       | Sleep until another thread notifies    |  \n| `Arc<T>`        | Shared ownership with an atomic count  |  \n  \nSee `std::sync::atomic` for the ordering rules and the `compareExchange`  \nresult shape, `std::sync::mutex` for locking and waiting, and  \n`std::sync::arc` for shared ownership."
+    },
+    {
+      "name": "std::sync::arc",
+      "doc": "  \n# Arc  \n  \nShared ownership across threads with an atomic reference count.  \n  \n`Arc<T>` keeps one heap allocation alive while any clone of it exists.  \n`clone` adds a reference, dropping a clone removes one, and the last one  \ndrops the value and frees the allocation. The count is atomic, so clones  \ncan move to and drop on different threads.  \n  \n`get` gives only shared access: several threads may read the value at once.  \nTo mutate it, share a `Mutex` or an atomic (`Arc<Mutex<T>>`).  \n  \n## Thread safety  \n  \n`Arc<T>` requires `T: Send & Sync`: a clone on another thread reads the same  \nvalue (Sync), and whichever thread drops the last clone drops the value  \n(Send). `Arc<Rc<i32>>` is rejected. The allocation is reached through a raw  \npointer, so `Arc` declares `Send` and `Sync` itself.  \n  \n## Layout  \n  \n```text  \n  ┌──────────────┬─────────────┬──────────────┐  \n  │ strong (u64) │ padding     │ T payload    │  \n  └──────────────┴─────────────┴──────────────┘  \n  ^ block                      ^ block + headerSize(alignOf<T>)  \n```  \n  \n## Example  \n  \n```ignis  \nimport Arc from \"std::sync\";  \n  \nfunction main(): i32 {  \n  let first: Arc<i32> = Arc::new<i32>(42);  \n  let second: Arc<i32> = first.clone();  \n  \n  return *second.get();  \n}  \n```"
+    },
+    {
+      "name": "std::sync::atomic",
+      "doc": "  \n# Atomics  \n  \nAtomic integers, booleans and pointers built on the compiler's atomic  \nprimitives (`@atomicLoad`, `@atomicStore`, `@atomicRmw`,  \n`@atomicCompareExchange`).  \n  \n## Overview  \n  \nEvery type wraps one value and changes it only through `&self`, so a shared  \nreference is enough to update it from several threads. The methods take the  \nmemory ordering as a runtime `Ordering` and map it to the literal ordering the  \nprimitive needs.  \n  \n| Type           | Value      | Integer operations |  \n|----------------|------------|--------------------|  \n| `AtomicBool`   | `boolean`  | no                 |  \n| `AtomicU32`    | `u32`      | yes                |  \n| `AtomicU64`    | `u64`      | yes                |  \n| `AtomicI64`    | `i64`      | yes                |  \n| `AtomicPtr<T>` | `*mut T`   | no                 |  \n  \n## Orderings  \n  \n| Operation                  | Accepted orderings                   |  \n|----------------------------|--------------------------------------|  \n| `load`                     | `RELAXED`, `ACQUIRE`, `SEQ_CST`      |  \n| `store`                    | `RELAXED`, `RELEASE`, `SEQ_CST`      |  \n| `swap`, `fetch*`           | any                                  |  \n| `compareExchange` success  | any                                  |  \n| `compareExchange` failure  | `RELAXED`, `ACQUIRE`, `SEQ_CST`      |  \n  \nAny other ordering panics with a message naming the operation and the  \nordering. It is never clamped: a load that asks for `RELEASE` is a logic  \nerror, and silently weakening or strengthening it would hide that.  \n  \nTwo `compareExchange` pairs run stronger than written, because GCC rejects a  \nfailure ordering stronger than the success one: a `SEQ_CST` failure runs the  \nsuccess ordering as `SEQ_CST` too, and `(RELAXED, ACQUIRE)` runs as  \n`(ACQUIRE, ACQUIRE)`. Every other valid pair, including `(RELEASE, ACQUIRE)`,  \nruns as written.  \n  \n## Compare-exchange  \n  \n`compareExchange(expected, desired, success, failure)` is strong: it never  \nfails spuriously. It returns `Result::OK(previous)` when it wrote `desired`  \n(`previous` equals `expected`) and `Result::ERROR(observed)` with the value  \nit found otherwise.  \n  \n## Example  \n  \n```ignis  \nimport AtomicU64, Ordering from \"std::sync\";  \n  \nfunction main(): i32 {  \n  let counter: AtomicU64 = AtomicU64::new(0);  \n  counter.fetchAdd(1, Ordering::RELAXED);  \n  \n  return counter.load(Ordering::SEQ_CST) as i32;  \n}  \n```  \n  \n## Arithmetic  \n  \n`fetchAdd` and `fetchSub` wrap on overflow. Every `fetch*` and `swap`  \nreturns the value held before the operation."
+    },
+    {
+      "name": "std::sync::mutex",
+      "doc": "  \n# Mutex and Condvar  \n  \nMutual exclusion and condition variables on top of POSIX threads.  \n  \n## Exports  \n  \n| Export          | Description                                          |  \n|-----------------|------------------------------------------------------|  \n| `Mutex<T>`      | Owns a `T` that one thread at a time may access      |  \n| `MutexGuard<T>` | Proof that the mutex is locked; unlocks on drop      |  \n| `Condvar`       | Lets a thread sleep until another one notifies it    |  \n  \n## Locking  \n  \n`lock` blocks until the calling thread owns the mutex and returns a guard;  \n`tryLock` returns `Option::NONE` instead of blocking when another thread  \nholds it. The guard reaches the value with `read` and `get`, and dropping  \nthe guard unlocks the mutex. Locking a mutex again on the thread that holds  \nit deadlocks, as a default POSIX mutex does.  \n  \nA guard has to be dropped on the thread that locked the mutex. It holds raw  \npointers, so it is not Send and cannot be moved into a spawned task.  \n  \n## Thread safety  \n  \n`Mutex<T>` requires `T: Send`. Its fields are the lock storage, which is  \nplain bytes, and the value, so it is Send when `T` is and Sync when `T` is.  \nIt needs no declaration. To share a mutex between threads, put it in an  \n`Arc` (`Arc<Mutex<T>>`).  \n  \n## Waiting  \n  \n`Condvar::wait(&mut guard)` atomically unlocks the guard's mutex and sleeps  \nuntil a notification, then locks it again before returning. Wakeups can be  \nspurious, so wait in a loop that re-checks the condition.  \n  \n## Host assumptions  \n  \nThe `pthread_mutex_t` and `pthread_cond_t` are stored inline, in `u64`  \narrays sized for Linux x86-64 glibc: 40 bytes for a mutex and 48 bytes for a  \ncondition variable, both 8-byte aligned. Another target needs its own sizes.  \n  \nAn initialized glibc mutex or condition variable holds no pointer to  \nitself, so moving one that nobody is using is safe there. A `Mutex` must not  \nmove while a guard is alive, and a `Condvar` must not move while a thread  \nwaits on it: the guard and the waiter hold their addresses. Keeping them in  \nan `Arc`, or in a local that stays put, satisfies both.  \n  \n## Example  \n  \n```ignis  \nimport Mutex, MutexGuard from \"std::sync\";  \n  \nfunction main(): i32 {  \n  let mutex: Mutex<i32> = Mutex::new<i32>(41);  \n  let mut guard: MutexGuard<i32> = mutex.lock();  \n  let value: &mut i32 = guard.get();  \n  \n  *value += 1;  \n  \n  return *guard.read();  \n}  \n```"
+    },
+    {
       "name": "std::terminal",
       "doc": "  \n# Terminal Module  \n  \nSemantic terminal helpers for ANSI-capable command-line applications.  \n  \n## Purpose  \n  \nUse this module when a program needs **readable terminal intent** instead of  \nmanually assembling ANSI fragments.  \n  \nThe public API answers questions like:  \n- \"How do I render text in red and then reset the terminal?\"  \n- \"How do I clear the screen or move the cursor?\"  \n- \"How do I avoid styling output when stdout is not a terminal?\"  \n  \nThe module intentionally does **not** expose raw ANSI assembly as the primary  \ncontract. Callers work with `Terminal::Style`, `Terminal::Screen`, and  \n`Terminal::Cursor`, while private helpers translate those semantic requests  \ninto escape sequences.  \n  \n## Quick path  \n  \n1. Build a style with `Terminal::Style::new()`.  \n2. Apply colors and attributes.  \n3. Call `apply(text)` or use `colorText` / `styledText`.  \n4. Check `isOutputTerminal()` before styling if plain output is required for  \n   redirected streams.  \n  \n## Public surface  \n  \n| Area | API | Use when |  \n|------|-----|----------|  \n| Text styling | `Terminal::Style`, `colorText`, `styledText`, `reset` | You want semantic color/attribute output with automatic trailing reset |  \n| Screen control | `Terminal::Screen::clear`, `clearLine` | You need simple full-screen or line clearing |  \n| Cursor control | `Terminal::Cursor::{moveTo, save, restore, hide, show}` | You need TUI-style cursor positioning or visibility control |  \n| Capability checks | `isInputTerminal`, `isOutputTerminal`, `isErrorTerminal` | You need to branch on whether a file descriptor is a terminal |  \n| Window size | `outputSize`, `errorSize` | You need to fit a line to the terminal's width |  \n  \n## Design boundary  \n  \n```text  \n  Caller intent  \n  ┌──────────────────────────────────────────────────────┐  \n  │ Terminal::Style::new().foreground(...).apply(text)  │  \n  │ Terminal::Screen::clear()                           │  \n  │ Terminal::Cursor::moveTo(row, column)               │  \n  └──────────────────────────┬───────────────────────────┘  \n                             │ semantic API  \n                             ▼  \n  Private implementation  \n  ┌──────────────────────────────────────────────────────┐  \n  │ ansiSgr(code)                                        │  \n  │ ansiCsi(command)                                    │  \n  └──────────────────────────────────────────────────────┘  \n```  \n  \nThis split is deliberate:  \n- Public code stays easy to read and review.  \n- Escape-sequence details stay centralized.  \n- Tests can assert high-level behavior without calling low-level helpers.  \n  \n## Behavior notes  \n  \n- Styled helpers append a trailing reset automatically.  \n- Cursor coordinates are **one-based**, matching common ANSI terminal usage.  \n- Capability checks currently rely on `isatty` through `std::libc` and are  \n  therefore limited to the supported POSIX-style hosts enabled by the  \n  `@configFlag` annotations.  \n- This module does not implement raw mode, alternate screen buffers, event  \n  input, or terminal layout/widgets.  \n  \n## Example  \n  \n```ignis  \nimport Terminal from \"std::terminal\";  \n  \nfunction main(): i32 {  \n  if (Terminal::isOutputTerminal()) {  \n    let mut style: Terminal::Style = Terminal::Style::new();  \n    style.foreground(Terminal::TerminalColor::GREEN);  \n    style.attribute(Terminal::TerminalAttribute::BOLD);  \n  }  \n  \n  let heading: String = Terminal::colorText(\"ready\", Terminal::TerminalColor::GREEN);  \n  let clear: String = Terminal::Screen::clear();  \n  let moveHome: String = Terminal::Cursor::moveTo(1, 1);  \n  return 0;  \n}  \n```"
     },
@@ -241,6 +257,10 @@
     {
       "name": "std::text",
       "doc": "  \n# Text  \n  \nPosition conversion between UTF-8 byte offsets and editor positions.  \n  \n## Overview  \n  \nCompiler spans are UTF-8 byte offsets into a source text. Editors that  \nspeak the Language Server Protocol address the same text as a 0-based line  \nplus a 0-based column counted in UTF-16 code units, the protocol's default  \nposition encoding. `Text::LineIndex` converts in both directions.  \n  \n```text  \n  source: \"a😀b\\n\"          bytes: a=0  😀=1..5  b=5  \\n=6  \n  \n  byte offset 5  ── position ──▶  line 0, character 3   (a=1, 😀=2)  \n  line 0, character 3  ── offset ──▶  byte offset 5  \n```  \n  \n## APIs  \n  \n| Function                          | Description                                  |  \n|-----------------------------------|----------------------------------------------|  \n| `Text::LineIndex::create`         | Index a source text (takes ownership)        |  \n| `Text::LineIndex::position`       | Byte offset to line and UTF-16 column        |  \n| `Text::LineIndex::offset`         | Line and UTF-16 column to byte offset        |  \n| `Text::LineIndex::endPosition`    | Position of the end of the text              |  \n| `Text::LineIndex::lineCount`      | Number of lines (a trailing `\\n` opens one)  |  \n| `Text::utf16Length`               | UTF-16 code units of the whole text          |  \n  \n## Semantics  \n  \nThe rules mirror the host language server (`crates/ignis_lsp/src/convert.rs`):  \n  \n- Only `\\n` starts a new line. In CRLF text the `\\r` is the last column of  \n  its line, so the offset just before `\\n` has a column one past the text.  \n- A character outside the Basic Multilingual Plane (4 UTF-8 bytes) counts as  \n  two UTF-16 units, every other character as one.  \n- `position` of an offset inside a multi-byte character reports the column  \n  of that character's first byte. An offset past the end reports the end.  \n- `offset` of a column past the end of a line walks through the line break  \n  and lands on the start of the next line. A column that falls inside a  \n  surrogate pair lands after the character. A line past the last one  \n  returns the text length.  \n- The host only indexes valid UTF-8. Here, a byte that does not start a  \n  complete, well-formed sequence counts as one character of one byte and one  \n  UTF-16 unit, the width of the U+FFFD replacement character.  \n  \n## Example  \n  \n```ignis  \nimport String from \"std::string\";  \nimport Text from \"std::text\";  \n  \nfunction main(): i32 {  \n  let index: Text::LineIndex = Text::LineIndex::create(String::create(\"hola\\nmundo\\n\"));  \n  \n  let position: Text::Position = index.position(7);  \n  // position.line == 1, position.character == 2  \n  \n  let offset: u64 = index.offset(Text::Position { line: 1, character: 2 });  \n  // offset == 7  \n  return 0;  \n}  \n```"
+    },
+    {
+      "name": "std::thread",
+      "doc": "  \n# Thread  \n  \nOperating system threads on top of POSIX threads.  \n  \n## Exports  \n  \n| Export          | Description                                         |  \n|-----------------|-----------------------------------------------------|  \n| `Thread`        | `spawn` a task on a new thread, `currentId`         |  \n| `JoinHandle<T>` | Owns a running thread; `join` waits for its result  |  \n  \n## Spawning and joining  \n  \n`Thread::spawn<T>(task)` runs `task` on a new thread and returns a  \n`JoinHandle<T>`. `join()` waits for the thread to finish and returns what the  \ntask returned. The task parameter is `@sendable`, so the compiler checks at  \nevery call that whatever the closure captures can move to another thread.  \nThe result moves from the spawned thread to the joining one, so `T` has to  \nbe Send.  \n`join` takes `&mut self`; a handle can be joined once and joining it again  \npanics.  \n  \n`T = void` is not supported yet: returning a generic `T` instantiated as  \n`void` fails LIR verification. A task with nothing to report returns a value  \nsuch as `boolean` instead.  \n  \nDropping a handle without joining it detaches the thread: it keeps running,  \nnothing waits for it, and its result is dropped when it finishes. A detached  \nthread that is still running when `main` returns is ended with the process,  \ntogether with whatever it still owns, so its control block and anything it  \nhas not dropped yet are never freed. Join every thread whose cleanup has to  \nfinish before the program ends.  \n  \n## Panics  \n  \nA panic in a spawned thread ends the whole process with exit code 101, the  \nsame as a panic on the main thread. There is no unwinding and `join` never  \nobserves a panicked thread.  \n  \n## Ownership of a spawned thread  \n  \n`spawn` allocates one control block shared by the handle and the thread. It  \nholds a reference count that starts at 2, the boxed task, and a heap slot for  \nthe result:  \n  \n- The thread runs the task, writes the result into the slot, and drops its  \n  reference.  \n- `join` waits for the thread, moves the result out of the slot and marks the  \n  block joined. The handle still drops its reference when it goes away.  \n- Dropping an unjoined handle detaches the thread and drops its reference.  \n  \nWhichever side drops the last reference drops the result still in the slot  \n(only when nobody joined), frees the slot, the task's closures and the block.  \nEvery release happens after the task ran, so an unjoined slot always holds a  \nresult. The count is atomic, so the block is freed exactly once.  \n  \n## Host assumptions  \n  \n`pthread_t` is bound as `u64`, which is its definition on Linux (glibc and  \nmusl) for 64-bit targets. A target whose `pthread_t` is not a 64-bit integer  \nneeds its own binding.  \n  \n## Example  \n  \n```ignis  \nimport JoinHandle, Thread from \"std::thread\";  \n  \nfunction main(): i32 {  \n  let handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> 6 * 7);  \n  \n  return handle.join();  \n}  \n```"
     },
     {
       "name": "std::time"
@@ -867,7 +887,7 @@
       "kind": "record",
       "visibility": "public",
       "signature": "record HashMap<K, V>",
-      "doc": "Deterministic open-addressed map from `K` to `V`.  \n  \nThis container owns both keys and values. Replacing or removing an entry  \ndrops the previous key/value exactly once.",
+      "doc": "Deterministic open-addressed map from `K` to `V`.  \n  \nThis container owns both keys and values. Replacing or removing an entry  \ndrops the previous key/value exactly once.  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the map  \nowns its heap buffers exclusively, so moving it moves the only handle to the  \nbuffers, and a shared reference only reads it. An instance is  \nSend or Sync only when `K` and `V` are.",
       "members": [
         {
           "name": "states",
@@ -9567,7 +9587,7 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace Memory",
-      "doc": "Memory allocation and manipulation namespace.  \n  \nProvides type-safe wrappers around the raw memory allocation functions.  \nAll allocation functions return typed pointers, and generic functions  \nautomatically calculate sizes based on the type parameter.  \n  \n# Thread Safety  \n  \nThe underlying allocator is typically thread-safe (depends on the C runtime),  \nbut concurrent access to the same memory region requires external  \nsynchronization."
+      "doc": "Memory allocation and manipulation namespace.  \n  \nProvides type-safe wrappers around the raw memory allocation functions.  \nAll allocation functions return typed pointers, and generic functions  \nautomatically calculate sizes based on the type parameter.  \n  \n# Thread Safety  \n  \nAllocation and release are thread-safe: the blocks come from the C  \n`malloc`, and the allocator counters behind `stats` are updated atomically.  \nConcurrent access to the same memory region still requires external  \nsynchronization."
     },
     {
       "module": "std::memory",
@@ -9803,7 +9823,7 @@
       "kind": "record",
       "visibility": "private",
       "signature": "record AllocStats",
-      "doc": "Live allocator counters.  \n  \nThe fields are process globals with translation-unit linkage, so every  \nreader has to live in this file."
+      "doc": "Live allocator counters.  \n  \nThe fields are process globals with translation-unit linkage, so every  \nreader has to live in this file. Every access is atomic and relaxed: the  \ncounters order nothing else, they only have to stay exact when several  \nthreads allocate at once."
     },
     {
       "module": "std::memory::allocator",
@@ -9908,7 +9928,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function stats(): Stats",
-      "doc": "Returns a snapshot of the live allocator counters."
+      "doc": "Returns a snapshot of the live allocator counters.  \n  \nEach counter is read atomically on its own, so while other threads  \nallocate the four values need not describe one single instant."
     },
     {
       "module": "std::memory::allocator",
@@ -9955,6 +9975,14 @@
     },
     {
       "module": "std::memory::allocator",
+      "path": "std::memory::allocator::addCounter",
+      "name": "addCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function addCounter(counter: *mut u64, value: u64): void"
+    },
+    {
+      "module": "std::memory::allocator",
       "path": "std::memory::allocator::alignUp",
       "name": "alignUp",
       "kind": "function",
@@ -9981,6 +10009,14 @@
     },
     {
       "module": "std::memory::allocator",
+      "path": "std::memory::allocator::clearCounter",
+      "name": "clearCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function clearCounter(counter: *mut u64): void"
+    },
+    {
+      "module": "std::memory::allocator",
       "path": "std::memory::allocator::headerOf",
       "name": "headerOf",
       "kind": "function",
@@ -10004,6 +10040,22 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function isPowerOfTwo(value: u64): boolean"
+    },
+    {
+      "module": "std::memory::allocator",
+      "path": "std::memory::allocator::readCounter",
+      "name": "readCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function readCounter(counter: *mut u64): u64"
+    },
+    {
+      "module": "std::memory::allocator",
+      "path": "std::memory::allocator::subCounter",
+      "name": "subCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function subCounter(counter: *mut u64, value: u64): void"
     },
     {
       "module": "std::memory::allocator",
@@ -12263,7 +12315,7 @@
       "kind": "record",
       "visibility": "public",
       "signature": "record String",
-      "doc": "Owned, heap-backed UTF-8 byte string.  \n  \nThe `data` buffer is heap-allocated and freed when the String is dropped.  \nThe record stores an owned UTF-8 byte buffer with byte-counted length and  \na trailing NUL byte for interop. Character APIs decode UTF-8 scalars while  \nbyte APIs remain explicit.  \n  \nImplements `Drop` for automatic cleanup and `Clone` for deep copies.  \n  \n# Fields  \n  \n* `data` - Raw pointer to the heap byte buffer (`null` when uninitialized).  \n* `len`  - Number of bytes currently stored.  \n* `cap`  - Total capacity of the buffer in bytes.  \n  \n# Example  \n  \n```ignis  \nimport String from \"std::string\";  \n  \nlet s: String = String::create(\"ignis\");  \nlet len: u64 = s.length();  // 5  \nlet c: Option<char> = s.charAt(0);  // Option::SOME('i')  \n```",
+      "doc": "Owned, heap-backed UTF-8 byte string.  \n  \nThe `data` buffer is heap-allocated and freed when the String is dropped.  \nThe record stores an owned UTF-8 byte buffer with byte-counted length and  \na trailing NUL byte for interop. Character APIs decode UTF-8 scalars while  \nbyte APIs remain explicit.  \n  \nImplements `Drop` for automatic cleanup and `Clone` for deep copies.  \n  \n# Fields  \n  \n* `data` - Raw pointer to the heap byte buffer (`null` when uninitialized).  \n* `len`  - Number of bytes currently stored.  \n* `cap`  - Total capacity of the buffer in bytes.  \n  \n# Example  \n  \n```ignis  \nimport String from \"std::string\";  \n  \nlet s: String = String::create(\"ignis\");  \nlet len: u64 = s.length();  // 5  \nlet c: Option<char> = s.charAt(0);  // Option::SOME('i')  \n```  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the string  \nowns its heap buffer exclusively, so moving it moves the only handle to the  \nbuffer, and a shared reference only reads it.",
       "members": [
         {
           "name": "data",
@@ -13084,6 +13136,869 @@
       "doc": "Copies a borrowed `str` into an owned String."
     },
     {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ARC_MIN_ALIGNMENT",
+      "name": "ARC_MIN_ALIGNMENT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ARC_MIN_ALIGNMENT: u64"
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::Arc",
+      "name": "Arc",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Arc<T>",
+      "doc": "A thread-safe reference-counted pointer to a `T` on the heap.  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the count is  \nupdated atomically, the payload is only read through it, and the bound  \n`T: Send & Sync` covers reading the value from several threads and dropping  \nit on any of them.",
+      "members": [
+        {
+          "name": "block",
+          "kind": "field",
+          "signature": "block: *mut u8"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(value: T): Arc<T>",
+          "doc": "Moves `value` into a new allocation with one reference."
+        },
+        {
+          "name": "clone",
+          "kind": "method",
+          "signature": "clone(&self): Arc<T>",
+          "doc": "Adds a reference to the same allocation."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Removes this reference; the last one drops the value and frees the block."
+        },
+        {
+          "name": "get",
+          "kind": "method",
+          "signature": "get(&self): &T",
+          "doc": "The shared value."
+        },
+        {
+          "name": "payloadPointer",
+          "kind": "method",
+          "signature": "payloadPointer(&self): *mut T"
+        },
+        {
+          "name": "strongCount",
+          "kind": "method",
+          "signature": "strongCount(&self): u64",
+          "doc": "The number of live references, this one included.  \n  \nOther threads may change it at any moment; it is exact only when nothing  \nelse can clone or drop meanwhile."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ArcBlock",
+      "name": "ArcBlock",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace ArcBlock",
+      "doc": "Operations on an `Arc` allocation.  \n  \nExported because a monomorphized `Arc<T>` method is emitted into the unit  \nthat instantiates it and reaches these by name. Nothing outside `Arc<T>`  \nshould call them."
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ArcBlock::alignment",
+      "name": "alignment",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function alignment(payloadAlign: u64): u64",
+      "doc": "The allocation alignment for a payload aligned to `payloadAlign`."
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ArcBlock::allocate",
+      "name": "allocate",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function allocate(payloadSize: u64, payloadAlign: u64): *mut u8",
+      "doc": "Allocates a block with a strong count of 1 and room for the payload."
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ArcBlock::headerSize",
+      "name": "headerSize",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function headerSize(payloadAlign: u64): u64",
+      "doc": "Byte offset from the block to the payload."
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ArcBlock::release",
+      "name": "release",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function release(block: *mut u8): boolean",
+      "doc": "Removes a reference and returns whether it was the last one.  \n  \nAcquire-release, so the last holder sees every write the others made to  \nthe payload before they let go."
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ArcBlock::retain",
+      "name": "retain",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function retain(block: *mut u8): void",
+      "doc": "Adds a reference. Relaxed: the caller already holds one, so the block  \ncannot go away meanwhile."
+    },
+    {
+      "module": "std::sync::arc",
+      "path": "std::sync::arc::ArcBlock::strongCount",
+      "name": "strongCount",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function strongCount(block: *mut u8): u64"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::AtomicBool",
+      "name": "AtomicBool",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record AtomicBool",
+      "doc": "A `boolean` updated atomically.  \n  \nNot Copy: a copy would be a second, unrelated atomic, so an update made  \nthrough one would never reach the other. Share one between threads through  \n`Arc`, or lend `&self` to a `@noescape` task.",
+      "members": [
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: boolean"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(value: boolean): AtomicBool",
+          "doc": "Creates a flag holding `value`."
+        },
+        {
+          "name": "compareExchange",
+          "kind": "method",
+          "signature": "compareExchange(&self, expected: boolean, desired: boolean, success: Ordering, failure: Ordering): Result<boolean, boolean>",
+          "doc": "Writes `desired` if the flag is `expected`; see the module notes."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Nothing to release; declaring `Drop` keeps the type from being Copy."
+        },
+        {
+          "name": "load",
+          "kind": "method",
+          "signature": "load(&self, ordering: Ordering): boolean",
+          "doc": "Reads the flag. Panics on `RELEASE` and `ACQ_REL`."
+        },
+        {
+          "name": "pointer",
+          "kind": "method",
+          "signature": "pointer(&self): *mut boolean",
+          "doc": "The atomic primitives write through a raw pointer, which is what lets a  \nshared reference update the value."
+        },
+        {
+          "name": "store",
+          "kind": "method",
+          "signature": "store(&self, value: boolean, ordering: Ordering): void",
+          "doc": "Writes the flag. Panics on `ACQUIRE` and `ACQ_REL`."
+        },
+        {
+          "name": "swap",
+          "kind": "method",
+          "signature": "swap(&self, value: boolean, ordering: Ordering): boolean",
+          "doc": "Writes `value` and returns the previous flag."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::AtomicI64",
+      "name": "AtomicI64",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record AtomicI64",
+      "doc": "An `i64` updated atomically.  \n  \nNot Copy: a copy would be a second, unrelated atomic, so an update made  \nthrough one would never reach the other. Share one between threads through  \n`Arc`, or lend `&self` to a `@noescape` task.",
+      "members": [
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: i64"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(value: i64): AtomicI64",
+          "doc": "Creates a counter holding `value`."
+        },
+        {
+          "name": "compareExchange",
+          "kind": "method",
+          "signature": "compareExchange(&self, expected: i64, desired: i64, success: Ordering, failure: Ordering): Result<i64, i64>",
+          "doc": "Writes `desired` if the value is `expected`; see the module notes."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Nothing to release; declaring `Drop` keeps the type from being Copy."
+        },
+        {
+          "name": "fetchAdd",
+          "kind": "method",
+          "signature": "fetchAdd(&self, value: i64, ordering: Ordering): i64",
+          "doc": "Adds `value`, wrapping, and returns the previous value."
+        },
+        {
+          "name": "fetchAnd",
+          "kind": "method",
+          "signature": "fetchAnd(&self, value: i64, ordering: Ordering): i64",
+          "doc": "Bitwise and with `value`; returns the previous value."
+        },
+        {
+          "name": "fetchOr",
+          "kind": "method",
+          "signature": "fetchOr(&self, value: i64, ordering: Ordering): i64",
+          "doc": "Bitwise or with `value`; returns the previous value."
+        },
+        {
+          "name": "fetchSub",
+          "kind": "method",
+          "signature": "fetchSub(&self, value: i64, ordering: Ordering): i64",
+          "doc": "Subtracts `value`, wrapping, and returns the previous value."
+        },
+        {
+          "name": "fetchXor",
+          "kind": "method",
+          "signature": "fetchXor(&self, value: i64, ordering: Ordering): i64",
+          "doc": "Bitwise xor with `value`; returns the previous value."
+        },
+        {
+          "name": "load",
+          "kind": "method",
+          "signature": "load(&self, ordering: Ordering): i64",
+          "doc": "Reads the value. Panics on `RELEASE` and `ACQ_REL`."
+        },
+        {
+          "name": "pointer",
+          "kind": "method",
+          "signature": "pointer(&self): *mut i64"
+        },
+        {
+          "name": "store",
+          "kind": "method",
+          "signature": "store(&self, value: i64, ordering: Ordering): void",
+          "doc": "Writes the value. Panics on `ACQUIRE` and `ACQ_REL`."
+        },
+        {
+          "name": "swap",
+          "kind": "method",
+          "signature": "swap(&self, value: i64, ordering: Ordering): i64",
+          "doc": "Writes `value` and returns the previous one."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::AtomicPtr",
+      "name": "AtomicPtr",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record AtomicPtr<T>",
+      "doc": "A `*mut T` updated atomically.  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: every access to  \nthe pointer value itself is atomic, so sharing the slot cannot race. What the  \npointer points to is not protected; synchronizing the pointee is the user's  \njob, as with any raw pointer.  \n  \nNot Copy: a copy would be a second, unrelated atomic, so an update made  \nthrough one would never reach the other. Share one between threads through  \n`Arc`, or lend `&self` to a `@noescape` task.",
+      "members": [
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: *mut T"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(value: *mut T): AtomicPtr<T>",
+          "doc": "Creates a slot holding `value`."
+        },
+        {
+          "name": "compareExchange",
+          "kind": "method",
+          "signature": "compareExchange(&self, expected: *mut T, desired: *mut T, success: Ordering, failure: Ordering): Result<*mut T, *mut T>",
+          "doc": "Writes `desired` if the pointer is `expected`; see the module notes."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Nothing to release; declaring `Drop` keeps the type from being Copy."
+        },
+        {
+          "name": "load",
+          "kind": "method",
+          "signature": "load(&self, ordering: Ordering): *mut T",
+          "doc": "Reads the pointer. Panics on `RELEASE` and `ACQ_REL`."
+        },
+        {
+          "name": "slot",
+          "kind": "method",
+          "signature": "slot(&self): *mut *mut T"
+        },
+        {
+          "name": "store",
+          "kind": "method",
+          "signature": "store(&self, value: *mut T, ordering: Ordering): void",
+          "doc": "Writes the pointer. Panics on `ACQUIRE` and `ACQ_REL`."
+        },
+        {
+          "name": "swap",
+          "kind": "method",
+          "signature": "swap(&self, value: *mut T, ordering: Ordering): *mut T",
+          "doc": "Writes `value` and returns the previous pointer."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::AtomicU32",
+      "name": "AtomicU32",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record AtomicU32",
+      "doc": "A `u32` updated atomically.  \n  \nNot Copy: a copy would be a second, unrelated atomic, so an update made  \nthrough one would never reach the other. Share one between threads through  \n`Arc`, or lend `&self` to a `@noescape` task.",
+      "members": [
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: u32"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(value: u32): AtomicU32",
+          "doc": "Creates a counter holding `value`."
+        },
+        {
+          "name": "compareExchange",
+          "kind": "method",
+          "signature": "compareExchange(&self, expected: u32, desired: u32, success: Ordering, failure: Ordering): Result<u32, u32>",
+          "doc": "Writes `desired` if the value is `expected`; see the module notes."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Nothing to release; declaring `Drop` keeps the type from being Copy."
+        },
+        {
+          "name": "fetchAdd",
+          "kind": "method",
+          "signature": "fetchAdd(&self, value: u32, ordering: Ordering): u32",
+          "doc": "Adds `value`, wrapping, and returns the previous value."
+        },
+        {
+          "name": "fetchAnd",
+          "kind": "method",
+          "signature": "fetchAnd(&self, value: u32, ordering: Ordering): u32",
+          "doc": "Bitwise and with `value`; returns the previous value."
+        },
+        {
+          "name": "fetchOr",
+          "kind": "method",
+          "signature": "fetchOr(&self, value: u32, ordering: Ordering): u32",
+          "doc": "Bitwise or with `value`; returns the previous value."
+        },
+        {
+          "name": "fetchSub",
+          "kind": "method",
+          "signature": "fetchSub(&self, value: u32, ordering: Ordering): u32",
+          "doc": "Subtracts `value`, wrapping, and returns the previous value."
+        },
+        {
+          "name": "fetchXor",
+          "kind": "method",
+          "signature": "fetchXor(&self, value: u32, ordering: Ordering): u32",
+          "doc": "Bitwise xor with `value`; returns the previous value."
+        },
+        {
+          "name": "load",
+          "kind": "method",
+          "signature": "load(&self, ordering: Ordering): u32",
+          "doc": "Reads the value. Panics on `RELEASE` and `ACQ_REL`."
+        },
+        {
+          "name": "pointer",
+          "kind": "method",
+          "signature": "pointer(&self): *mut u32"
+        },
+        {
+          "name": "store",
+          "kind": "method",
+          "signature": "store(&self, value: u32, ordering: Ordering): void",
+          "doc": "Writes the value. Panics on `ACQUIRE` and `ACQ_REL`."
+        },
+        {
+          "name": "swap",
+          "kind": "method",
+          "signature": "swap(&self, value: u32, ordering: Ordering): u32",
+          "doc": "Writes `value` and returns the previous one."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::AtomicU64",
+      "name": "AtomicU64",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record AtomicU64",
+      "doc": "A `u64` updated atomically.  \n  \nNot Copy: a copy would be a second, unrelated atomic, so an update made  \nthrough one would never reach the other. Share one between threads through  \n`Arc`, or lend `&self` to a `@noescape` task.",
+      "members": [
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: u64"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(value: u64): AtomicU64",
+          "doc": "Creates a counter holding `value`."
+        },
+        {
+          "name": "compareExchange",
+          "kind": "method",
+          "signature": "compareExchange(&self, expected: u64, desired: u64, success: Ordering, failure: Ordering): Result<u64, u64>",
+          "doc": "Writes `desired` if the value is `expected`; see the module notes."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Nothing to release; declaring `Drop` keeps the type from being Copy."
+        },
+        {
+          "name": "fetchAdd",
+          "kind": "method",
+          "signature": "fetchAdd(&self, value: u64, ordering: Ordering): u64",
+          "doc": "Adds `value`, wrapping, and returns the previous value."
+        },
+        {
+          "name": "fetchAnd",
+          "kind": "method",
+          "signature": "fetchAnd(&self, value: u64, ordering: Ordering): u64",
+          "doc": "Bitwise and with `value`; returns the previous value."
+        },
+        {
+          "name": "fetchOr",
+          "kind": "method",
+          "signature": "fetchOr(&self, value: u64, ordering: Ordering): u64",
+          "doc": "Bitwise or with `value`; returns the previous value."
+        },
+        {
+          "name": "fetchSub",
+          "kind": "method",
+          "signature": "fetchSub(&self, value: u64, ordering: Ordering): u64",
+          "doc": "Subtracts `value`, wrapping, and returns the previous value."
+        },
+        {
+          "name": "fetchXor",
+          "kind": "method",
+          "signature": "fetchXor(&self, value: u64, ordering: Ordering): u64",
+          "doc": "Bitwise xor with `value`; returns the previous value."
+        },
+        {
+          "name": "load",
+          "kind": "method",
+          "signature": "load(&self, ordering: Ordering): u64",
+          "doc": "Reads the value. Panics on `RELEASE` and `ACQ_REL`."
+        },
+        {
+          "name": "pointer",
+          "kind": "method",
+          "signature": "pointer(&self): *mut u64"
+        },
+        {
+          "name": "store",
+          "kind": "method",
+          "signature": "store(&self, value: u64, ordering: Ordering): void",
+          "doc": "Writes the value. Panics on `ACQUIRE` and `ACQ_REL`."
+        },
+        {
+          "name": "swap",
+          "kind": "method",
+          "signature": "swap(&self, value: u64, ordering: Ordering): u64",
+          "doc": "Writes `value` and returns the previous one."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::Ordering",
+      "name": "Ordering",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum Ordering",
+      "doc": "Memory ordering of an atomic operation.",
+      "members": [
+        {
+          "name": "RELAXED",
+          "kind": "variant",
+          "signature": "RELAXED"
+        },
+        {
+          "name": "ACQUIRE",
+          "kind": "variant",
+          "signature": "ACQUIRE"
+        },
+        {
+          "name": "RELEASE",
+          "kind": "variant",
+          "signature": "RELEASE"
+        },
+        {
+          "name": "ACQ_REL",
+          "kind": "variant",
+          "signature": "ACQ_REL"
+        },
+        {
+          "name": "SEQ_CST",
+          "kind": "variant",
+          "signature": "SEQ_CST"
+        }
+      ]
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::addWith",
+      "name": "addWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function addWith<T>(pointer: *mut T, value: T, ordering: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::andWith",
+      "name": "andWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function andWith<T>(pointer: *mut T, value: T, ordering: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::compareExchangeFailAcquire",
+      "name": "compareExchangeFailAcquire",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function compareExchangeFailAcquire<T>(pointer: *mut T, expected: T, desired: T, success: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::compareExchangeFailRelaxed",
+      "name": "compareExchangeFailRelaxed",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function compareExchangeFailRelaxed<T>(pointer: *mut T, expected: T, desired: T, success: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::compareExchangeWith",
+      "name": "compareExchangeWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function compareExchangeWith<T>(pointer: *mut T, expected: T, desired: T, success: Ordering, failure: Ordering): T",
+      "doc": "Strong compare-exchange returning the value observed.  \n  \nDispatches on the failure ordering first: GCC warns about, and upgrades, a  \nfailure ordering stronger than the success one, so those pairs are emitted  \nalready strengthened."
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::loadWith",
+      "name": "loadWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function loadWith<T>(pointer: *T, ordering: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::orWith",
+      "name": "orWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function orWith<T>(pointer: *mut T, value: T, ordering: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::storeWith",
+      "name": "storeWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function storeWith<T>(pointer: *mut T, value: T, ordering: Ordering): void"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::subWith",
+      "name": "subWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function subWith<T>(pointer: *mut T, value: T, ordering: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::swapWith",
+      "name": "swapWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function swapWith<T>(pointer: *mut T, value: T, ordering: Ordering): T"
+    },
+    {
+      "module": "std::sync::atomic",
+      "path": "std::sync::atomic::xorWith",
+      "name": "xorWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function xorWith<T>(pointer: *mut T, value: T, ordering: Ordering): T"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::Condvar",
+      "name": "Condvar",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Condvar",
+      "doc": "A condition variable: a thread waits on it while holding a `MutexGuard`,  \nand another one wakes it with `notifyOne` or `notifyAll`.  \n  \nIt is plain storage, so it is Send and Sync. Pair each condition variable  \nwith one mutex; waiting with guards of different mutexes is undefined.",
+      "members": [
+        {
+          "name": "storage",
+          "kind": "field",
+          "signature": "storage: u64[6]",
+          "doc": "Storage of the `pthread_cond_t`: 48 bytes, 8-byte aligned."
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Condvar",
+          "doc": "Creates a condition variable nobody waits on.  \n  \nPanics if the system cannot initialize it."
+        },
+        {
+          "name": "conditionPointer",
+          "kind": "method",
+          "signature": "conditionPointer(&self): *mut u8"
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Destroys the condition variable. No thread may be waiting on it."
+        },
+        {
+          "name": "notifyAll",
+          "kind": "method",
+          "signature": "notifyAll(&self): void",
+          "doc": "Wakes every waiting thread."
+        },
+        {
+          "name": "notifyOne",
+          "kind": "method",
+          "signature": "notifyOne(&self): void",
+          "doc": "Wakes one waiting thread, if any."
+        },
+        {
+          "name": "wait",
+          "kind": "method",
+          "signature": "wait(&self, guard: &mut MutexGuard<T>): void",
+          "doc": "Unlocks the guard's mutex, sleeps until notified, and locks it again.  \n  \nThe guard owns the mutex again when this returns. Wakeups can be  \nspurious: call it in a loop that re-checks the condition."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::Mutex",
+      "name": "Mutex",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Mutex<T>",
+      "doc": "Owns a value that one thread at a time may reach, through a `MutexGuard`.",
+      "members": [
+        {
+          "name": "storage",
+          "kind": "field",
+          "signature": "storage: u64[5]",
+          "doc": "Storage of the `pthread_mutex_t`: 40 bytes, 8-byte aligned."
+        },
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: T"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(value: T): Mutex<T>",
+          "doc": "Creates an unlocked mutex owning `value`.  \n  \nPanics if the system cannot initialize the mutex."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Destroys the mutex and drops the value. No guard may be alive."
+        },
+        {
+          "name": "lock",
+          "kind": "method",
+          "signature": "lock(&self): MutexGuard<T>",
+          "doc": "Blocks until the calling thread owns the mutex.  \n  \nPanics if the system reports an error."
+        },
+        {
+          "name": "lockPointer",
+          "kind": "method",
+          "signature": "lockPointer(&self): *mut u8"
+        },
+        {
+          "name": "tryLock",
+          "kind": "method",
+          "signature": "tryLock(&self): Option<MutexGuard<T>>",
+          "doc": "Locks the mutex if no thread holds it, without blocking.  \n  \nReturns `Option::NONE` when another thread, or this one, holds it."
+        },
+        {
+          "name": "valuePointer",
+          "kind": "method",
+          "signature": "valuePointer(&self): *mut T"
+        }
+      ]
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::MutexGuard",
+      "name": "MutexGuard",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record MutexGuard<T>",
+      "doc": "A locked `Mutex<T>`: gives access to the value and unlocks on drop.  \n  \nIt holds the mutex's addresses, so it is neither Send nor Sync and the  \nmutex must not move while it is alive.",
+      "members": [
+        {
+          "name": "lock",
+          "kind": "field",
+          "signature": "lock: *mut u8"
+        },
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: *mut T"
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Unlocks the mutex."
+        },
+        {
+          "name": "get",
+          "kind": "method",
+          "signature": "get(&mut self): &mut T",
+          "doc": "The guarded value, for reading and writing."
+        },
+        {
+          "name": "lockPointer",
+          "kind": "method",
+          "signature": "lockPointer(&self): *mut u8",
+          "doc": "The address of the `pthread_mutex_t` this guard holds, for `Condvar`."
+        },
+        {
+          "name": "read",
+          "kind": "method",
+          "signature": "read(&self): &T",
+          "doc": "The guarded value, for reading."
+        }
+      ]
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix",
+      "name": "__sync_posix",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace __sync_posix"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_cond_broadcast",
+      "name": "pthread_cond_broadcast",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_cond_broadcast(condition: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_cond_destroy",
+      "name": "pthread_cond_destroy",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_cond_destroy(condition: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_cond_init",
+      "name": "pthread_cond_init",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_cond_init(condition: *mut u8, attributes: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_cond_signal",
+      "name": "pthread_cond_signal",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_cond_signal(condition: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_cond_wait",
+      "name": "pthread_cond_wait",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_cond_wait(condition: *mut u8, mutex: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_mutex_destroy",
+      "name": "pthread_mutex_destroy",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_mutex_destroy(mutex: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_mutex_init",
+      "name": "pthread_mutex_init",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_mutex_init(mutex: *mut u8, attributes: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_mutex_lock",
+      "name": "pthread_mutex_lock",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_mutex_lock(mutex: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_mutex_trylock",
+      "name": "pthread_mutex_trylock",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_mutex_trylock(mutex: *mut u8): i32"
+    },
+    {
+      "module": "std::sync::mutex",
+      "path": "std::sync::mutex::__sync_posix::pthread_mutex_unlock",
+      "name": "pthread_mutex_unlock",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_mutex_unlock(mutex: *mut u8): i32"
+    },
+    {
       "module": "std::terminal",
       "path": "std::terminal::Terminal",
       "name": "Terminal",
@@ -13808,6 +14723,344 @@
       "visibility": "public",
       "signature": "function textUtf8SequenceLength(text: &String, index: u64): u64",
       "doc": "Returns the byte length of the well-formed UTF-8 sequence starting at  \n`index`, or 1 when the byte there does not start one.  \n  \nOverlong encodings, surrogate code points and values above U+10FFFF are  \nrejected with the same lead and second-byte ranges `str::from_utf8` uses,  \nso every accepted sequence is one the host could have indexed."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::Callback",
+      "name": "Callback",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Callback",
+      "doc": "A boxed `() -> void`, alone in its own heap cell.  \n  \nA closure cannot be called through a pointer or a reference, so a cell is  \nconsumed by moving the closure out (`Callbacks::take`) and calling it.",
+      "members": [
+        {
+          "name": "call",
+          "kind": "field",
+          "signature": "call: fn() -> void"
+        }
+      ]
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::JoinHandle",
+      "name": "JoinHandle",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record JoinHandle<T>",
+      "doc": "Owns a spawned thread and the result it will produce.  \n  \n`join` waits for the result. Dropping the handle without joining detaches  \nthe thread.  \n  \nDeclared `Send` although it holds raw pointers: the control block is shared  \nwith exactly one other thread through an atomic reference count, and the  \nresult slot is read only after `pthread_join` has synchronized with the  \nthread that wrote it. The result crosses from the spawned thread to the  \njoining one, so `T` has to be Send.",
+      "members": [
+        {
+          "name": "thread",
+          "kind": "field",
+          "signature": "thread: u64"
+        },
+        {
+          "name": "block",
+          "kind": "field",
+          "signature": "block: *mut ThreadBlock"
+        },
+        {
+          "name": "slot",
+          "kind": "field",
+          "signature": "slot: *mut T"
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void"
+        },
+        {
+          "name": "join",
+          "kind": "method",
+          "signature": "join(&mut self): T",
+          "doc": "Waits for the thread to finish and returns the value its task returned.  \n  \nTakes `&mut self` rather than consuming the handle: a by-value `self`  \nmethod on a record with a destructor does not compile yet. The handle is  \nspent afterwards; joining it again panics."
+        }
+      ]
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::TaskCell",
+      "name": "TaskCell",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record TaskCell<T>",
+      "doc": "A boxed task, alone in its own heap cell.  \n  \n`spawn` boxes the task instead of capturing it in the `run` closure: a  \nclosure captured by value inside another closure is not dropped with the  \nouter one, which would leak the task's environment.",
+      "members": [
+        {
+          "name": "call",
+          "kind": "field",
+          "signature": "call: fn() -> T"
+        }
+      ]
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::Thread",
+      "name": "Thread",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Thread",
+      "doc": "Thread creation and identity."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::Thread::currentId",
+      "name": "currentId",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function currentId(): u64",
+      "doc": "The calling thread's `pthread_t`."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::Thread::spawn",
+      "name": "spawn",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function spawn<T>(task: fn() -> T): JoinHandle<T>",
+      "doc": "Runs `task` on a new thread.  \n  \nPanics if the system cannot create the thread."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlock",
+      "name": "ThreadBlock",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record ThreadBlock",
+      "doc": "Control block shared by a `JoinHandle<T>` and its thread.  \n  \nIt is not generic, so the capture-free `threadEntry` can run it: the typed  \nwork lives in the two callbacks, which own the task and the result slot.",
+      "members": [
+        {
+          "name": "references",
+          "kind": "field",
+          "signature": "references: u64",
+          "doc": "Live references: the handle and the thread. Updated atomically."
+        },
+        {
+          "name": "joined",
+          "kind": "field",
+          "signature": "joined: u64",
+          "doc": "1 once `join` moved the result out, so dropping the handle does not detach."
+        },
+        {
+          "name": "run",
+          "kind": "field",
+          "signature": "run: *mut Callback",
+          "doc": "Runs the task and stores its result in the slot. Taken by the thread."
+        },
+        {
+          "name": "discard",
+          "kind": "field",
+          "signature": "discard: *mut Callback",
+          "doc": "Drops the result left in the slot. Run by the last release unless joined."
+        },
+        {
+          "name": "slot",
+          "kind": "field",
+          "signature": "slot: *mut u8",
+          "doc": "Heap storage for the task's result, freed by the last release."
+        }
+      ]
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks",
+      "name": "ThreadBlocks",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace ThreadBlocks",
+      "doc": "Operations on the control block.  \n  \nExported because a monomorphized `JoinHandle<T>` method is emitted into the  \nunit that instantiates it and reaches these by name. Nothing outside this  \nmodule should call them."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::allocate",
+      "name": "allocate",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function allocate(slot: *mut u8, run: fn() -> void, discard: fn() -> void): *mut ThreadBlock",
+      "doc": "Allocates a block over `slot` holding `run` and `discard`, with two references."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::allocateSlot",
+      "name": "allocateSlot",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function allocateSlot(size: u64, alignment: u64): *mut u8",
+      "doc": "Allocates storage for one result of `size` bytes aligned to `alignment`.  \n  \nA `void` result has size zero; it still gets one byte so the slot has an  \naddress of its own."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::box",
+      "name": "box",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function box(call: fn() -> void): *mut Callback"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::detach",
+      "name": "detach",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function detach(thread: u64): void"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::dropAndFree",
+      "name": "dropAndFree",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function dropAndFree(cell: *mut Callback): void",
+      "doc": "Drops the closure in `cell` without running it and frees the cell."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::isJoined",
+      "name": "isJoined",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isJoined(block: *mut ThreadBlock): boolean"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::join",
+      "name": "join",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function join(thread: u64): void",
+      "doc": "Waits for `thread` to finish. Panics if it cannot be joined."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::joinedOf",
+      "name": "joinedOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function joinedOf(block: *mut ThreadBlock): *mut u64"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::markJoined",
+      "name": "markJoined",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function markJoined(block: *mut ThreadBlock): void"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::referencesOf",
+      "name": "referencesOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function referencesOf(block: *mut ThreadBlock): *mut u64"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::release",
+      "name": "release",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function release(block: *mut ThreadBlock): void",
+      "doc": "Drops one reference; the last one destroys the block."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::runAndFree",
+      "name": "runAndFree",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function runAndFree(cell: *mut Callback): void",
+      "doc": "Moves the closure out of `cell`, frees the cell and runs the closure once."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::ThreadBlocks::start",
+      "name": "start",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function start(block: *mut ThreadBlock): u64",
+      "doc": "Starts a thread running `block`. Panics if the system refuses."
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__closure_drop_0",
+      "name": "__closure_drop_0",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_drop_0(__closure_drop_env_0: *mut u8): void"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__closure_drop_1",
+      "name": "__closure_drop_1",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_drop_1(__closure_drop_env_1: *mut u8): void"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__closure_thunk_0",
+      "name": "__closure_thunk_0",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_thunk_0(__closure_env_0: *mut u8): void"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__closure_thunk_1",
+      "name": "__closure_thunk_1",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_thunk_1(__closure_env_1: *mut u8): void"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__thread_posix",
+      "name": "__thread_posix",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace __thread_posix"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__thread_posix::pthread_create",
+      "name": "pthread_create",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_create(thread: *mut u64, attributes: *mut u8, start: fn(*mut u8) -> *mut u8, argument: *mut u8): i32"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__thread_posix::pthread_detach",
+      "name": "pthread_detach",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_detach(thread: u64): i32"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__thread_posix::pthread_join",
+      "name": "pthread_join",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_join(thread: u64, result: *mut u8): i32"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::__thread_posix::pthread_self",
+      "name": "pthread_self",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pthread_self(): u64"
+    },
+    {
+      "module": "std::thread",
+      "path": "std::thread::threadEntry",
+      "name": "threadEntry",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function threadEntry(argument: *mut u8): *mut u8",
+      "doc": "Entry point of every spawned thread, handed to `pthread_create`.  \n  \nIt has to be a named, capture-free function to cross into C as a function  \npointer; the block carries the typed task."
     },
     {
       "module": "std::time",
@@ -16438,7 +17691,7 @@
       "kind": "record",
       "visibility": "public",
       "signature": "record Vector<T>",
-      "doc": "Growable contiguous array of `T`.  \n  \n# Example  \n  \n```ignis  \nimport Vector from \"std::vector\";  \n  \nfunction main(): i32 {  \n  let mut values: Vector<i32> = Vector::new<i32>();  \n  values.push(1);  \n  values.push(2);  \n  // Vector is automatically dropped here  \n  return 0;  \n}  \n```",
+      "doc": "Growable contiguous array of `T`.  \n  \n# Example  \n  \n```ignis  \nimport Vector from \"std::vector\";  \n  \nfunction main(): i32 {  \n  let mut values: Vector<i32> = Vector::new<i32>();  \n  values.push(1);  \n  values.push(2);  \n  // Vector is automatically dropped here  \n  return 0;  \n}  \n```  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the vector  \nowns its heap buffer exclusively, so moving it moves the only handle to the  \nbuffer, and a shared reference only reads it. An instance is  \nSend or Sync only when `T` is.",
       "members": [
         {
           "name": "data",

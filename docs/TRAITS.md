@@ -248,6 +248,12 @@ prove it, for example when it guards a raw pointer itself. The declaration wins,
 breaks it. `@allow(thread_safety)` on the record or enum, or on a top-level function for the whole
 module, silences it.
 
+On a generic record or enum the declaration speaks only for its own fields: an instance is Send
+(or Sync) only when every type argument is too, so `Vector<String>` is Send and
+`Vector<*mut i32>` is not. A type that needs a different condition states it as bounds on its own
+type parameters, as `Arc<T: Send & Sync>` does. `String`, `Vector<T>` and `HashMap<K, V>` declare
+both traits this way; `Rc` and `Weak` declare neither.
+
 ```ignis
 @allow(thread_safety)
 @implements(Send, Sync)
@@ -262,6 +268,8 @@ function main(): void {
   spawn((): i32 -> count);   // ok: captures an i32
 }
 ```
+
+The check follows types, not values. A pointer converted to an integer (`pointer as u64`) is an integer, which is Send, so it crosses threads unchecked and turns back into a pointer on the other side. That conversion is the explicit way out of the check, and the code that writes it is responsible for synchronizing every access through the pointer.
 
 ### Trait Bounds
 
