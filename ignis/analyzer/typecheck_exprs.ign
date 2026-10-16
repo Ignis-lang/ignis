@@ -1148,6 +1148,11 @@ export namespace Analyzer {
           return Option::NONE;
         };
 
+        // `signature` points into the type store, which checking the arguments
+        // grows and may move: copy what the check reads.
+        let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+        let returnType: Analyzer::TypeId = signature.returnType;
+
         return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
           state,
           defStore,
@@ -1157,8 +1162,8 @@ export namespace Analyzer {
           resolvedBodies,
           callExprId,
           call,
-          &signature.params,
-          signature.returnType,
+          &paramTypes,
+          returnType,
         );
       }
 
@@ -1368,6 +1373,11 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
+      // `signature` points into the type store, which checking the arguments
+      // grows and may move: copy what the check reads.
+      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+      let returnType: Analyzer::TypeId = signature.returnType;
+
       return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
         state,
         defStore,
@@ -1377,8 +1387,8 @@ export namespace Analyzer {
         resolvedBodies,
         callExprId,
         call,
-        &signature.params,
-        signature.returnType,
+        &paramTypes,
+        returnType,
       );
     }
 
@@ -10949,12 +10959,15 @@ export namespace Analyzer {
           elementTypeOpt = Option::SOME(element);
         },
         Analyzer::Type::Range(range) -> {
-          if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, span, range.element)) {
-            Analyzer::Typecheck::emitRangeBoundNotInteger(state, defStore, typeStore, symbols, span, range.element);
+          // `range` comes from the type store, which the integer check can grow: read it first.
+          let rangeElement: Analyzer::TypeId = range.element;
+
+          if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, span, rangeElement)) {
+            Analyzer::Typecheck::emitRangeBoundNotInteger(state, defStore, typeStore, symbols, span, rangeElement);
             return Option::NONE;
           }
 
-          elementTypeOpt = Option::SOME(range.element);
+          elementTypeOpt = Option::SOME(rangeElement);
         },
         Analyzer::Type::Record(defId) -> {
           recordDefId = Option::SOME(defId);
