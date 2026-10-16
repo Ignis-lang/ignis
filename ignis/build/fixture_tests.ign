@@ -609,8 +609,9 @@ export namespace FixtureTests {
   /// the end of the stream.
   function splitLeakReport(errText: &String): FixtureLeakSplit {
     let header: String = String::create("ERROR: LeakSanitizer:");
+    let threadNotice: String = String::create("==Unable to get registers from thread ");
 
-    if (!errText.contains(&header)) {
+    if (!errText.contains(&header) && !errText.contains(&threadNotice)) {
       return FixtureLeakSplit {
         program: errText.clone(),
         leak: String::new(),
@@ -644,7 +645,7 @@ export namespace FixtureTests {
 
         leak.push(line);
         leakLines += 1;
-      } else {
+      } else if (!FixtureTests::isThreadRegistersNotice(line)) {
         if (programLines > 0) {
           program.pushStr("\n");
         }
@@ -658,6 +659,75 @@ export namespace FixtureTests {
       program: program,
       leak: leak,
     };
+  }
+
+  /// Whether `line` is exactly `==<pid>==Unable to get registers from thread <tid>.`
+  ///
+  /// LeakSanitizer prints it, on an exit that is otherwise clean, when a
+  /// joined thread is still being torn down by the kernel as the process ends.
+  /// It reports nothing about the program, and its timing makes any threaded
+  /// fixture flaky, so it is dropped from the stderr a baseline compares.
+  function isThreadRegistersNotice(line: &String): boolean {
+    let middle: str = "==Unable to get registers from thread ";
+
+    if (!line.startsWith("==")) {
+      return false;
+    }
+
+    let mut index: u64 = 2;
+    let pidStart: u64 = index;
+
+    while (index < line.length()) {
+      let Option::SOME(byte) = line.byteAt(index) else {
+        return false;
+      };
+
+      if (byte < 48 || byte > 57) {
+        break;
+      }
+
+      index += 1;
+    }
+
+    if (index == pidStart) {
+      return false;
+    }
+
+    let rest: String = line.substringBytes(index, line.length());
+
+    if (!rest.startsWith(middle)) {
+      return false;
+    }
+
+    let threadStart: u64 = index + String::create(middle).length();
+
+    if (line.length() < threadStart + 2) {
+      return false;
+    }
+
+    let Option::SOME(lastByte) = line.byteAt(line.length() - 1) else {
+      return false;
+    };
+
+    if (lastByte != 46) {
+      return false;
+    }
+
+    index = threadStart;
+
+    while (index < line.length() - 1) {
+      let Option::SOME(byte) = line.byteAt(index) else {
+        return false;
+      };
+
+      if (byte < 48 || byte > 57) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
   }
 
   function cellAt(common: &Vector<u64>, columns: u64, row: u64, column: u64): u64 {
@@ -1351,6 +1421,30 @@ function fixtureLeakReportIsSplitAwayFromProgramOutput(): void {
 
   Test::assertEq<str>(split.program.toStr(), "hello");
   Test::assertEq<str>(split.leak.toStr(), "==12==ERROR: LeakSanitizer: detected memory leaks\ndetail");
+}
+
+@test
+function fixtureLeakSplitDropsTheThreadRegistersNotice(): void {
+  let errText: String = String::create("before\n==2211518==Unable to get registers from thread 2211517.\nafter");
+  let split: FixtureLeakSplit = FixtureTests::splitLeakReport(&errText);
+
+  Test::assertEq<str>(split.program.toStr(), "before\nafter");
+  Test::assertEq<str>(split.leak.toStr(), "");
+
+  let alone: String = String::create("==7==Unable to get registers from thread 8.\n");
+  let aloneSplit: FixtureLeakSplit = FixtureTests::splitLeakReport(&alone);
+
+  Test::assertEq<str>(aloneSplit.program.toStr(), "");
+}
+
+@test
+function fixtureLeakSplitKeepsLinesThatOnlyResembleTheThreadRegistersNotice(): void {
+  let errText: String = String::create(
+    "==x==Unable to get registers from thread 1.\n==1==Unable to get registers from thread 1\n==1==Unable to get registers from thread 1. extra\nprefix ==1==Unable to get registers from thread 1.\n==1==Unable to get registers from thread .",
+  );
+  let split: FixtureLeakSplit = FixtureTests::splitLeakReport(&errText);
+
+  Test::assertEq<str>(split.program.toStr(), errText.toStr());
 }
 
 @test
