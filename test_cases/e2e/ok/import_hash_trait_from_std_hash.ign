@@ -1,0 +1,32 @@
+// e2e: std
+//
+// `std::hash` exports `Hash` alongside `Hasher`, although `std::collections` declares a
+// trait of the same name.
+import Hash, Hasher from "std::hash";
+
+@implements(Hash)
+record Key {
+  id: u64;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeU64(self.id);
+  }
+}
+
+function digest(value: &Key): u64 {
+  let mut hasher: Hasher = Hasher::new();
+  value.hash(&mut hasher);
+  return hasher.finish();
+}
+
+function main(): i32 {
+  let first: Key = Key { id: 7 };
+  let second: Key = Key { id: 7 };
+
+  if (digest(&first) == digest(&second)) {
+    return 0;
+  }
+
+  return 1;
+}
