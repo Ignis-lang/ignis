@@ -3111,7 +3111,11 @@ export namespace LirLowering {
         continue;
       }
 
-      if (!Borrowck::needsDropType(defStore, typeStore, capture.typeInEnv)) {
+      // A closure captured by an escaping closure moves into its environment;
+      // one captured by a non-escaping closure stays owned by its binding.
+      let capturesClosure: boolean = freesEnv && Hir::typeIsFunction(typeStore, capture.typeInEnv);
+
+      if (!capturesClosure && !Borrowck::needsDropType(defStore, typeStore, capture.typeInEnv)) {
         index += 1;
         continue;
       }
@@ -3126,6 +3130,23 @@ export namespace LirLowering {
         fieldIndex: capture.fieldIndex,
         fieldType: capture.typeInEnv,
       }));
+
+      if (capturesClosure) {
+        let closureTemp: Lir::TempId = LirLowering::freshTemp(function_, capture.typeInEnv, span);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+          dest: closureTemp,
+          ptr: Lir::Operand::Temp(fieldPointer),
+        }));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::DropClosure(Lir::InstrDropClosure {
+          closure: Lir::Operand::Temp(closureTemp),
+          closureType: capture.typeInEnv,
+        }));
+
+        index += 1;
+        continue;
+      }
 
       LirLowering::pushInstr(function_, state, Lir::Instr::DropInPlace(Lir::InstrDropInPlace {
         ptr: Lir::Operand::Temp(fieldPointer),
