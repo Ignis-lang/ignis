@@ -249,10 +249,237 @@ export namespace Analyzer {
       stateRef.localMutableFlags = Vector::new<boolean>();
       stateRef.localPlaceMutableFlags = Vector::new<boolean>();
 
+      Analyzer::Typecheck::checkSignatureBounds(state, defStore, typeStore, symbols, module, functionDefId, function_, &signature);
+
       Analyzer::Typecheck::pushScope(state);
       Analyzer::Typecheck::bindFunctionParameters(state, defStore, typeStore, symbols, resolvedBodies, module, function_, &signature.params);
       Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, function_.body);
       Analyzer::Typecheck::popScope(state);
+    }
+
+    /// Checks the bounds of the generic instances a declared type names. The
+    /// bounds pass only meets the types of expressions, so a field, payload or
+    /// parameter type that no expression has would otherwise go unchecked.
+    function checkDeclaredTypeBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      enclosing: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+      span: SourceSpan,
+    ): void {
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      Analyzer::TypeBounds::checkType(defStore, typeStore, symbols, enclosing, typeId, span, &mut stateRef.diagnostics);
+    }
+
+    /// Checks the parameter and return types of a function or method, each at
+    /// its own span.
+    function checkSignatureBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      functionDefId: Analyzer::DefinitionId,
+      function_: &Ast::Item::Function,
+      signature: &Analyzer::Typecheck::FunctionSignature,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < signature.params.length()) {
+        let Option::SOME(paramDefId) = signature.params.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(Analyzer::Definition::Variable(parameter)) = defStore.get(*paramDefId)) {
+          declaredType = Option::SOME(parameter.declaredType);
+        }
+
+        let mut span: SourceSpan = function_.span;
+
+        if (let Option::SOME(patternId) = function_.parameters.get(index)) {
+          span = Analyzer::Typecheck::patternSpanOr(module, *patternId, function_.span);
+        }
+
+        if (let Option::SOME(typeId) = declaredType) {
+          Analyzer::Typecheck::checkDeclaredTypeBounds(state, defStore, typeStore, symbols, functionDefId, typeId, span);
+        }
+
+        index += 1;
+      }
+
+      let mut returnSpan: SourceSpan = function_.span;
+
+      if (let Option::SOME(returnTypeId) = function_.returnType) {
+        if (let Option::SOME(typeNode) = module.types.get(returnTypeId)) {
+          returnSpan = Ast::Serializer::typeSpan(typeNode);
+        }
+      }
+
+      Analyzer::Typecheck::checkDeclaredTypeBounds(state, defStore, typeStore, symbols, functionDefId, signature.returnType, returnSpan);
+    }
+
+    /// Checks the type of every field, instance and static, a record declares.
+    function checkRecordFieldBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      recordDefId: Analyzer::DefinitionId,
+      record_: &Ast::Item::Record,
+    ): void {
+      let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut staticFields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordDefId)) {
+        fields = Analyzer::Typecheck::copyDefinitionIdVector(&recordDef.fields);
+        staticFields = Analyzer::Typecheck::copyDefinitionIdVector(&recordDef.staticFields);
+      }
+
+      Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, recordDefId, &fields, &record_.fields, record_.span);
+      Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, recordDefId, &staticFields, &record_.fields, record_.span);
+    }
+
+    /// Checks every variant payload type and static field type an enum declares.
+    function checkEnumMemberBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      enumDefId: Analyzer::DefinitionId,
+      enum_: &Ast::Item::Enum,
+    ): void {
+      let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut staticFields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(enumDefId)) {
+        variants = Analyzer::Typecheck::copyDefinitionIdVector(&enumDef.variants);
+        staticFields = Analyzer::Typecheck::copyDefinitionIdVector(&enumDef.staticFields);
+      }
+
+      Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, enumDefId, &variants, &enum_.variants, enum_.span);
+      Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, enumDefId, &staticFields, &enum_.variants, enum_.span);
+    }
+
+    /// Checks the declared types of `members`, each at the span of the member
+    /// pattern that names it, or at `fallback` when none does.
+    function checkMemberBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      owner: Analyzer::DefinitionId,
+      members: &Vector<Analyzer::DefinitionId>,
+      memberPatterns: &Vector<Ast::PatternId>,
+      fallback: SourceSpan,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < members.length()) {
+        let Option::SOME(memberDefId) = members.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        let mut nameOpt: Option<Analyzer::SymbolId> = Option::NONE;
+
+        match (defStore.get(*memberDefId)) {
+          Option::SOME(Analyzer::Definition::Field(field)) -> {
+            types.push(field.fieldType);
+            nameOpt = Option::SOME(field.name);
+          },
+          Option::SOME(Analyzer::Definition::Variable(variable)) -> {
+            types.push(variable.declaredType);
+            nameOpt = Option::SOME(variable.name);
+          },
+          Option::SOME(Analyzer::Definition::Variant(variant)) -> {
+            types = Analyzer::Typecheck::copyTypeIdVector(&variant.payload);
+            nameOpt = Option::SOME(variant.name);
+          },
+          _ -> {},
+        };
+
+        let mut span: SourceSpan = fallback;
+
+        if (let Option::SOME(name) = nameOpt) {
+          if (let Option::SOME(text) = symbols.resolve(name)) {
+            span = Analyzer::Typecheck::memberPatternSpan(module, memberPatterns, text, fallback);
+          }
+        }
+
+        let mut typeIndex: u64 = 0;
+
+        while (typeIndex < types.length()) {
+          if (let Option::SOME(typeId) = types.get(typeIndex)) {
+            Analyzer::Typecheck::checkDeclaredTypeBounds(state, defStore, typeStore, symbols, owner, *typeId, span);
+          }
+
+          typeIndex += 1;
+        }
+
+        index += 1;
+      }
+    }
+
+    /// The span of the first member pattern named `name`: a field or unit
+    /// variant binding, or a payload variant's path.
+    function memberPatternSpan(
+      module: &Ast::Module,
+      memberPatterns: &Vector<Ast::PatternId>,
+      name: str,
+      fallback: SourceSpan,
+    ): SourceSpan {
+      let mut index: u64 = 0;
+
+      while (index < memberPatterns.length()) {
+        if (let Option::SOME(patternId) = memberPatterns.get(index)) {
+          match (module.patterns.get(*patternId)) {
+            Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
+              if (binding.name.equals(name)) {
+                return binding.span;
+              }
+            },
+            Option::SOME(Ast::Pattern::Node::Path(path)) -> {
+              if (path.segments.length() > 0) {
+                if (let Option::SOME(last) = path.segments.get(path.segments.length() - 1)) {
+                  if (last.equals(name)) {
+                    return path.span;
+                  }
+                }
+              }
+            },
+            _ -> {},
+          };
+        }
+
+        index += 1;
+      }
+
+      return fallback;
+    }
+
+    function patternSpanOr(
+      module: &Ast::Module,
+      patternId: Ast::PatternId,
+      fallback: SourceSpan
+    ): SourceSpan {
+      return match (module.patterns.get(patternId)) {
+        Option::SOME(Ast::Pattern::Node::Wildcard(value)) -> value.span,
+        Option::SOME(Ast::Pattern::Node::Binding(value)) -> value.span,
+        Option::SOME(Ast::Pattern::Node::Literal(value)) -> value.span,
+        Option::SOME(Ast::Pattern::Node::Path(value)) -> value.span,
+        Option::SOME(Ast::Pattern::Node::Tuple(value)) -> value.span,
+        Option::SOME(Ast::Pattern::Node::Or(value)) -> value.span,
+        Option::NONE -> fallback,
+      };
     }
 
     function checkConstantItem(
@@ -790,6 +1017,8 @@ export namespace Analyzer {
               record_.span,
             );
 
+            Analyzer::Typecheck::checkRecordFieldBounds(state, defStore, typeStore, symbols, module, recordDefId, &record_);
+
             Analyzer::Typecheck::checkRecordStaticFields(
               state,
               defStore,
@@ -824,6 +1053,8 @@ export namespace Analyzer {
               enumDefId,
               enum_.span,
             );
+
+            Analyzer::Typecheck::checkEnumMemberBounds(state, defStore, typeStore, symbols, module, enumDefId, &enum_);
 
             Analyzer::Typecheck::checkEnumStaticFields(
               state,

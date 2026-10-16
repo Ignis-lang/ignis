@@ -3618,7 +3618,9 @@ export namespace Analyzer {
 
     /// The type-parameter definitions nameable inside `enclosing`: the callable's
     /// own parameters first, then those of the record, enum or trait declaring it,
-    /// so an inner parameter shadows an outer one written with the same name.
+    /// so an inner parameter shadows an outer one written with the same name. A
+    /// record, enum or trait as `enclosing` scopes its own parameters, which is
+    /// what its field and payload types see.
     function typeParamsInScope(
       defStore: &mut Analyzer::DefinitionStore,
       enclosing: Analyzer::DefinitionId,
@@ -3634,6 +3636,9 @@ export namespace Analyzer {
           Analyzer::Definition::Method(method) -> {
             scoped = Analyzer::Typecheck::copyDefinitionIdVector(&method.typeParams);
             ownerOpt = Option::SOME(method.owner);
+          },
+          Analyzer::Definition::Record(_) | Analyzer::Definition::Enum(_) | Analyzer::Definition::Trait(_) -> {
+            ownerOpt = Option::SOME(enclosing);
           },
           _ -> {},
         };
