@@ -1680,9 +1680,8 @@ export namespace Hir {
   ///
   /// A closure argument moves into its parameter (see
   /// `Borrowck::paramTakesClosureEnv`), so a callee that hands it straight
-  /// back returns a value its caller owns like any other result. An indirect
-  /// closure call is still left unowned when one of its arguments is a
-  /// closure.
+  /// back returns a value its caller owns like any other result, through a
+  /// direct call or a closure call alike.
   function bindingOwnsClosureEnv(
     hir: &Hir::HirStore,
     valueId: Hir::HirId,
@@ -1698,12 +1697,8 @@ export namespace Hir {
       return true;
     }
 
-    if (let Hir::HirKind::CallClosure(closureCall) = &node.kind) {
-      return Hir::typeIsFunction(typeStore, valueType) && !Hir::anyFunctionTypedNode(hir, typeStore, &closureCall.args);
-    }
-
     let isCall: boolean = match (&node.kind) {
-      Hir::HirKind::Call(_) | Hir::HirKind::MethodCall(_) -> true,
+      Hir::HirKind::Call(_) | Hir::HirKind::MethodCall(_) | Hir::HirKind::CallClosure(_) -> true,
       _ -> false,
     };
 
@@ -1712,29 +1707,6 @@ export namespace Hir {
     }
 
     return Hir::typeIsFunction(typeStore, valueType);
-  }
-
-  /// Whether any of `nodes` evaluates to a closure.
-  function anyFunctionTypedNode(
-    hir: &Hir::HirStore,
-    typeStore: &mut Analyzer::TypeStore,
-    nodes: &Vector<Hir::HirId>,
-  ): boolean {
-    let mut index: u64 = 0;
-
-    while (index < nodes.length()) {
-      if (let Option::SOME(nodeId) = nodes.get(index)) {
-        if (let Option::SOME(argument) = hir.get(*nodeId)) {
-          if (Hir::typeIsFunction(typeStore, argument.typeId)) {
-            return true;
-          }
-        }
-      }
-
-      index += 1;
-    }
-
-    return false;
   }
 
   /// The declared type of a parameter or variable definition.
