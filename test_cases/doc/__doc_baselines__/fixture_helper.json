@@ -4508,7 +4508,7 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace Memory",
-      "doc": "Memory allocation and manipulation namespace.  \n  \nProvides type-safe wrappers around the raw memory allocation functions.  \nAll allocation functions return typed pointers, and generic functions  \nautomatically calculate sizes based on the type parameter.  \n  \n# Thread Safety  \n  \nThe underlying allocator is typically thread-safe (depends on the C runtime),  \nbut concurrent access to the same memory region requires external  \nsynchronization."
+      "doc": "Memory allocation and manipulation namespace.  \n  \nProvides type-safe wrappers around the raw memory allocation functions.  \nAll allocation functions return typed pointers, and generic functions  \nautomatically calculate sizes based on the type parameter.  \n  \n# Thread Safety  \n  \nAllocation and release are thread-safe: the blocks come from the C  \n`malloc`, and the allocator counters behind `stats` are updated atomically.  \nConcurrent access to the same memory region still requires external  \nsynchronization."
     },
     {
       "module": "std::memory",
@@ -4744,7 +4744,7 @@
       "kind": "record",
       "visibility": "private",
       "signature": "record AllocStats",
-      "doc": "Live allocator counters.  \n  \nThe fields are process globals with translation-unit linkage, so every  \nreader has to live in this file."
+      "doc": "Live allocator counters.  \n  \nThe fields are process globals with translation-unit linkage, so every  \nreader has to live in this file. Every access is atomic and relaxed: the  \ncounters order nothing else, they only have to stay exact when several  \nthreads allocate at once."
     },
     {
       "module": "std::memory::allocator",
@@ -4849,7 +4849,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function stats(): Stats",
-      "doc": "Returns a snapshot of the live allocator counters."
+      "doc": "Returns a snapshot of the live allocator counters.  \n  \nEach counter is read atomically on its own, so while other threads  \nallocate the four values need not describe one single instant."
     },
     {
       "module": "std::memory::allocator",
@@ -4896,6 +4896,14 @@
     },
     {
       "module": "std::memory::allocator",
+      "path": "std::memory::allocator::addCounter",
+      "name": "addCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function addCounter(counter: *mut u64, value: u64): void"
+    },
+    {
+      "module": "std::memory::allocator",
       "path": "std::memory::allocator::alignUp",
       "name": "alignUp",
       "kind": "function",
@@ -4922,6 +4930,14 @@
     },
     {
       "module": "std::memory::allocator",
+      "path": "std::memory::allocator::clearCounter",
+      "name": "clearCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function clearCounter(counter: *mut u64): void"
+    },
+    {
+      "module": "std::memory::allocator",
       "path": "std::memory::allocator::headerOf",
       "name": "headerOf",
       "kind": "function",
@@ -4945,6 +4961,22 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function isPowerOfTwo(value: u64): boolean"
+    },
+    {
+      "module": "std::memory::allocator",
+      "path": "std::memory::allocator::readCounter",
+      "name": "readCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function readCounter(counter: *mut u64): u64"
+    },
+    {
+      "module": "std::memory::allocator",
+      "path": "std::memory::allocator::subCounter",
+      "name": "subCounter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function subCounter(counter: *mut u64, value: u64): void"
     },
     {
       "module": "std::memory::allocator",
@@ -5662,7 +5694,7 @@
       "kind": "record",
       "visibility": "public",
       "signature": "record String",
-      "doc": "Owned, heap-backed UTF-8 byte string.  \n  \nThe `data` buffer is heap-allocated and freed when the String is dropped.  \nThe record stores an owned UTF-8 byte buffer with byte-counted length and  \na trailing NUL byte for interop. Character APIs decode UTF-8 scalars while  \nbyte APIs remain explicit.  \n  \nImplements `Drop` for automatic cleanup and `Clone` for deep copies.  \n  \n# Fields  \n  \n* `data` - Raw pointer to the heap byte buffer (`null` when uninitialized).  \n* `len`  - Number of bytes currently stored.  \n* `cap`  - Total capacity of the buffer in bytes.  \n  \n# Example  \n  \n```ignis  \nimport String from \"std::string\";  \n  \nlet s: String = String::create(\"ignis\");  \nlet len: u64 = s.length();  // 5  \nlet c: Option<char> = s.charAt(0);  // Option::SOME('i')  \n```",
+      "doc": "Owned, heap-backed UTF-8 byte string.  \n  \nThe `data` buffer is heap-allocated and freed when the String is dropped.  \nThe record stores an owned UTF-8 byte buffer with byte-counted length and  \na trailing NUL byte for interop. Character APIs decode UTF-8 scalars while  \nbyte APIs remain explicit.  \n  \nImplements `Drop` for automatic cleanup and `Clone` for deep copies.  \n  \n# Fields  \n  \n* `data` - Raw pointer to the heap byte buffer (`null` when uninitialized).  \n* `len`  - Number of bytes currently stored.  \n* `cap`  - Total capacity of the buffer in bytes.  \n  \n# Example  \n  \n```ignis  \nimport String from \"std::string\";  \n  \nlet s: String = String::create(\"ignis\");  \nlet len: u64 = s.length();  // 5  \nlet c: Option<char> = s.charAt(0);  // Option::SOME('i')  \n```  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the string  \nowns its heap buffer exclusively, so moving it moves the only handle to the  \nbuffer, and a shared reference only reads it.",
       "members": [
         {
           "name": "data",
@@ -6619,7 +6651,7 @@
       "kind": "record",
       "visibility": "public",
       "signature": "record Vector<T>",
-      "doc": "Growable contiguous array of `T`.  \n  \n# Example  \n  \n```ignis  \nimport Vector from \"std::vector\";  \n  \nfunction main(): i32 {  \n  let mut values: Vector<i32> = Vector::new<i32>();  \n  values.push(1);  \n  values.push(2);  \n  // Vector is automatically dropped here  \n  return 0;  \n}  \n```",
+      "doc": "Growable contiguous array of `T`.  \n  \n# Example  \n  \n```ignis  \nimport Vector from \"std::vector\";  \n  \nfunction main(): i32 {  \n  let mut values: Vector<i32> = Vector::new<i32>();  \n  values.push(1);  \n  values.push(2);  \n  // Vector is automatically dropped here  \n  return 0;  \n}  \n```  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the vector  \nowns its heap buffer exclusively, so moving it moves the only handle to the  \nbuffer, and a shared reference only reads it. An instance is  \nSend or Sync only when `T` is.",
       "members": [
         {
           "name": "data",
