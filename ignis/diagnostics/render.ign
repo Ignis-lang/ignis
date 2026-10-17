@@ -93,11 +93,45 @@ function annotationFor(
   };
 }
 
+/// The index of the first file in `files` whose path is `path`.
+function fileIndexOf(files: &Vector<SourceFile>, path: str): Option<u64> {
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    if (let Option::SOME(file) = files.get(index) && path.equals(file.path.asStr())) {
+      return Option::SOME(index);
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Whether `span` points into one of `files` other than `source`. Such a label
+/// renders in that file's own snippet; any other renders against `source`.
+function pointsIntoAnotherFile(
+  span: &SourceSpan,
+  source: &SourceFile,
+  files: &Vector<SourceFile>
+): boolean {
+  if (span.filePath.equals(source.path.asStr())) {
+    return false;
+  }
+
+  return fileIndexOf(files, span.filePath).isSome();
+}
+
 /// The annotations of `diagnostic`, primary span first, then every label in
-/// insertion order. The first primary label covering exactly the primary span
-/// is folded into it. A primary label that repeats the diagnostic message
-/// carries no text, since the header already shows it.
-function collectAnnotations(diagnostic: &Diagnostic, source: &SourceFile): Vector<Annotation> {
+/// insertion order, except labels that point into another file of `files`.
+/// The first primary label covering exactly the primary span is folded into
+/// it. A primary label that repeats the diagnostic message carries no text,
+/// since the header already shows it.
+function collectAnnotations(
+  diagnostic: &Diagnostic,
+  source: &SourceFile,
+  files: &Vector<SourceFile>
+): Vector<Annotation> {
   let primarySpan: SourceSpan = diagnostic.primarySpan;
   let diagnosticMessage: str = diagnostic.messageText();
   let mut primaryMessage: str = "";
@@ -112,6 +146,12 @@ function collectAnnotations(diagnostic: &Diagnostic, source: &SourceFile): Vecto
     };
 
     let labelSpan: SourceSpan = label.span;
+
+    if (pointsIntoAnotherFile(&labelSpan, source, files)) {
+      labelIndex += 1;
+      continue;
+    }
+
     let primary: boolean = label.kind == LabelKind::PRIMARY;
     let mut message: str = label.messageText();
 
@@ -142,6 +182,87 @@ function collectAnnotations(diagnostic: &Diagnostic, source: &SourceFile): Vecto
   }
 
   return annotations;
+}
+
+/// The annotations of the labels of `diagnostic` that point into `file`, in
+/// insertion order.
+function collectLabelsIn(diagnostic: &Diagnostic, file: &SourceFile): Vector<Annotation> {
+  let mut annotations: Vector<Annotation> = Vector::new<Annotation>();
+  let mut labelIndex: u64 = 0;
+
+  while (labelIndex < diagnostic.labels.length()) {
+    if (let Option::SOME(label) = diagnostic.labels.get(labelIndex) && label.span.filePath.equals(file.path.asStr())) {
+      let labelSpan: SourceSpan = label.span;
+
+      annotations.push(annotationFor(file, &labelSpan, label.kind == LabelKind::PRIMARY, label.messageText()));
+    }
+
+    labelIndex += 1;
+  }
+
+  return annotations;
+}
+
+/// Where the first label of `diagnostic` that points into `file` starts.
+function firstLabelStartIn(diagnostic: &Diagnostic, file: &SourceFile): u64 {
+  let mut labelIndex: u64 = 0;
+
+  while (labelIndex < diagnostic.labels.length()) {
+    if (let Option::SOME(label) = diagnostic.labels.get(labelIndex) && label.span.filePath.equals(file.path.asStr())) {
+      return label.span.start;
+    }
+
+    labelIndex += 1;
+  }
+
+  return 0;
+}
+
+/// The snippet of another file that labels of a diagnostic point into.
+record ForeignSnippet {
+  public fileIndex: u64;
+
+  /// Where the first label into the file starts, shown after `:::`.
+  public location: SourceLocation;
+  public annotations: Vector<Annotation>;
+}
+
+/// The snippet of `files[fileIndex]` for `diagnostic`, or `NONE` when that file
+/// is `source`, repeats an earlier path, or holds none of its labels.
+function foreignSnippetFor(
+  diagnostic: &Diagnostic,
+  source: &SourceFile,
+  files: &Vector<SourceFile>,
+  fileIndex: u64
+): Option<ForeignSnippet> {
+  let Option::SOME(file) = files.get(fileIndex) else {
+    return Option::NONE;
+  };
+  let path: str = file.path.asStr();
+
+  if (path.equals(source.path.asStr())) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(firstIndex) = fileIndexOf(files, path) else {
+    return Option::NONE;
+  };
+
+  if (firstIndex != fileIndex) {
+    return Option::NONE;
+  }
+
+  let labels: Vector<Annotation> = collectLabelsIn(diagnostic, file);
+
+  if (labels.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(ForeignSnippet {
+      fileIndex: fileIndex,
+      location: file.lineCol(firstLabelStartIn(diagnostic, file)),
+      annotations: labels,
+    });
 }
 
 /// The smallest annotated line index strictly greater than `after`, or any
@@ -299,16 +420,19 @@ function appendSnippet(
   }
 }
 
+/// Writes `marker` and `path:line:column`: `-->` for the primary location,
+/// `:::` for a snippet of another file.
 function appendLocation(
   output: &mut String,
   style: &SnippetStyle,
   source: &SourceFile,
-  location: SourceLocation
+  location: SourceLocation,
+  marker: str
 ): void {
   let mut outputRef: &mut String = output;
 
   outputRef.pushRepeated(" ", style.gutterWidth);
-  Terminal::appendStyled(output, "-->", style.useAnsi, Terminal::TerminalColor::BLUE, true);
+  Terminal::appendStyled(output, marker, style.useAnsi, Terminal::TerminalColor::BLUE, true);
   outputRef.pushStr(" ");
   outputRef.pushStr(source.path.asStr());
   outputRef.pushChar(':');
@@ -394,19 +518,66 @@ export namespace DiagnosticRenderer {
     return Terminal::isErrorTerminal();
   }
 
+  /// Renders `diagnostic` against `source`, every label included.
   function render(diagnostic: &Diagnostic, source: &SourceFile, useAnsi: boolean): String {
+    let noOtherFiles: Vector<SourceFile> = Vector::new<SourceFile>();
+
+    return DiagnosticRenderer::renderAcross(diagnostic, source, &noOtherFiles, useAnsi);
+  }
+
+  /// Renders `diagnostic` against `source`, the file of its primary span. A
+  /// label that points into another file of `files` is shown in a snippet of
+  /// that file after the primary one; a label whose file is not among `files`
+  /// renders against `source`.
+  function renderAcross(
+    diagnostic: &Diagnostic,
+    source: &SourceFile,
+    files: &Vector<SourceFile>,
+    useAnsi: boolean
+  ): String {
     let mut rendered: String = String::new();
-    let annotations: Vector<Annotation> = collectAnnotations(diagnostic, source);
+    let annotations: Vector<Annotation> = collectAnnotations(diagnostic, source, files);
+    let mut foreignSnippets: Vector<ForeignSnippet> = Vector::new<ForeignSnippet>();
+    let mut gutterWidth: u64 = gutterWidthFor(&annotations);
+    let mut fileIndex: u64 = 0;
+
+    while (fileIndex < files.length()) {
+      if (let Option::SOME(snippet) = foreignSnippetFor(diagnostic, source, files, fileIndex)) {
+        let width: u64 = gutterWidthFor(&snippet.annotations);
+
+        if (width > gutterWidth) {
+          gutterWidth = width;
+        }
+
+        foreignSnippets.push(snippet);
+      }
+
+      fileIndex += 1;
+    }
+
     let style: SnippetStyle = SnippetStyle {
       useAnsi: useAnsi,
       severityColor: severityColor(diagnostic.severity),
-      gutterWidth: gutterWidthFor(&annotations),
+      gutterWidth: gutterWidth,
     };
 
     appendHeader(&mut rendered, diagnostic, &style);
-    appendLocation(&mut rendered, &style, source, source.lineCol(diagnostic.primarySpan.start));
+    appendLocation(&mut rendered, &style, source, source.lineCol(diagnostic.primarySpan.start), "-->");
     appendEmptyGutterLine(&mut rendered, &style);
     appendSnippet(&mut rendered, &style, source, &annotations);
+
+    let mut snippetIndex: u64 = 0;
+
+    while (snippetIndex < foreignSnippets.length()) {
+      if (let Option::SOME(snippet) = foreignSnippets.get(snippetIndex) && let Option::SOME(file) = files.get(snippet.fileIndex)) {
+        appendLocation(&mut rendered, &style, file, snippet.location, ":::");
+        appendEmptyGutterLine(&mut rendered, &style);
+        appendSnippet(&mut rendered, &style, file, &snippet.annotations);
+      }
+
+      snippetIndex += 1;
+    }
+
     appendEmptyGutterLine(&mut rendered, &style);
     appendNotes(&mut rendered, diagnostic, &style);
 
