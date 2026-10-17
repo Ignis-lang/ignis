@@ -9,7 +9,7 @@ import Vector from "std::vector";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
-import SourceFile, DiagnosticBag, Severity from "@compiler::diagnostics";
+import SourceFile, SourceSpan, DiagnosticBag, Severity from "@compiler::diagnostics";
 import Borrowck from "@compiler::analyzer::borrowck";
 import Capture from "@compiler::analyzer::capture";
 import Lowering from "@compiler::analyzer::lowering";
@@ -48,6 +48,7 @@ function qbeContains(haystack: &String, needle: str): boolean {
 record QbeEmission {
   public source: String;
   public error: Option<String>;
+  public errorSpan: Option<SourceSpan>;
   public functions: u64;
   public defStore: Analyzer::DefinitionStore;
   public symbols: Analyzer::SymbolTable;
@@ -142,6 +143,7 @@ function qbeEmitWithHarnessRoot(source: str, rootName: str): QbeEmission {
   return QbeEmission {
     source: emitted.source,
     error: emitted.error,
+    errorSpan: emitted.errorSpan,
     functions: emitted.functions,
     defStore: defStore,
     symbols: symbols,
@@ -279,6 +281,19 @@ function qbeFailsClosedOnUnsupportedRecordLayouts(): void {
   let aligned: QbeEmission = qbeEmit("@aligned(32) record Wide { public x: i32; } function main(): i32 { let value: Wide = Wide { x: 42 }; return value.x; }");
   Test::assert(aligned.error.isSome());
   Test::assert(aligned.source.length() == 0);
+}
+
+@test
+function qbeReportsAnUnsupportedInstructionAtItsFunction(): void {
+  let source: str = "function main(): i32 { return (half(4.0) as i32) - 2; }\nfunction half(value: f64): f64 { return value / 2.0; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isSome());
+  let Option::SOME(span) = emission.errorSpan else {
+    Test::fail();
+    return;
+  };
+  let bodyStart: u64 = 87;
+  Test::assertEq<u64>(span.start, bodyStart);
 }
 
 @test

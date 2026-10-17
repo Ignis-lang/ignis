@@ -8,6 +8,7 @@ import Lir from "@compiler::lir";
 import CodegenC from "../mod";
 import Abi from "@compiler::abi";
 import Id from "@compiler::ids";
+import Diagnostic, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
 
 /// LIR -> QBE IL emission for the Ignis selfhost compiler.
 ///
@@ -55,6 +56,9 @@ export namespace CodegenQbe {
   record EmitOutput {
     public source: String;
     public error: Option<String>;
+    /// Where `error` is reported: the body of the function that holds the
+    /// unsupported instruction, or none when it is outside every function.
+    public errorSpan: Option<SourceSpan>;
     public functions: u64;
   }
 
@@ -73,6 +77,8 @@ export namespace CodegenQbe {
     public data: String;
     /// The first unsupported instruction, if any.
     public error: Option<String>;
+    /// The span `error` is reported at, once known.
+    public errorSpan: Option<SourceSpan>;
     /// Interned string literals, deduplicated by content.
     public literals: Vector<String>;
     /// Counter for the emitter's own temporaries, kept apart from the LIR's
@@ -86,6 +92,7 @@ export namespace CodegenQbe {
         out: String::create(""),
         data: String::create("# Data\n"),
         error: Option::NONE,
+        errorSpan: Option::NONE,
         literals: Vector::new<String>(),
         fresh: 0,
         hasPanicFormat: false,
@@ -6228,11 +6235,13 @@ export namespace CodegenQbe {
     if (!CodegenC::isVoidType(typeStore, entry.returnType)) {
       if (CodegenQbe::qbeClass(defStore, typeStore, entry.returnType).isNone()) {
         CodegenQbe::failNamed(emitter, "EntryPoint");
+        emitter.errorSpan = Option::SOME(entry.span);
         return false;
       }
 
       if (!(CodegenQbe::qbeClass(defStore, typeStore, entry.returnType).unwrapOr(String::create("")).equals("w"))) {
         CodegenQbe::failNamed(emitter, "EntryPoint");
+        emitter.errorSpan = Option::SOME(entry.span);
         return false;
       }
     }
@@ -6449,6 +6458,20 @@ export namespace CodegenQbe {
     return reachable;
   }
 
+  /// The `B4004` diagnostic for `output.error`. It points at the body of the
+  /// function that holds the unsupported instruction and its label says so,
+  /// since LIR instructions carry no span of their own.
+  function errorDiagnostic(output: &CodegenQbe::EmitOutput, message: str): Diagnostic {
+    let Option::SOME(span) = output.errorSpan else {
+      return Diagnostic::new(Severity::ERROR, "B4004", message, SourceSpan::new("", 0, 0));
+    };
+
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "B4004", message, span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, "in this function (the unsupported instruction has no span of its own)");
+
+    return diagnostic;
+  }
+
   /// The QBE IL for the whole program, or the first unsupported instruction.
   /// A run that meets anything unsupported fails closed: `source` stays empty
   /// and `error` carries the exact instruction name, so the driver reports a
@@ -6533,6 +6556,7 @@ export namespace CodegenQbe {
       return CodegenQbe::EmitOutput {
         source: String::create(""),
         error: emitter.error,
+        errorSpan: emitter.errorSpan,
         functions: 0,
       };
     }
@@ -6551,9 +6575,16 @@ export namespace CodegenQbe {
       }
 
       if (emitter.error.isSome()) {
+        // LIR instructions carry no source span, so the function holding the
+        // unsupported one is the closest site there is.
+        if (emitter.errorSpan.isNone()) {
+          emitter.errorSpan = Option::SOME(function_.span);
+        }
+
         return CodegenQbe::EmitOutput {
           source: String::create(""),
           error: emitter.error,
+          errorSpan: emitter.errorSpan,
           functions: 0,
         };
       }
@@ -6567,6 +6598,7 @@ export namespace CodegenQbe {
       return CodegenQbe::EmitOutput {
         source: String::create(""),
         error: emitter.error,
+        errorSpan: emitter.errorSpan,
         functions: 0,
       };
     }
@@ -6576,6 +6608,7 @@ export namespace CodegenQbe {
     return CodegenQbe::EmitOutput {
       source: `${head.toStr()}${emitter.data.toStr()}# Code\n${emitter.out.toStr()}`,
       error: Option::NONE,
+      errorSpan: Option::NONE,
       functions: functions,
     };
   }
