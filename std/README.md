@@ -229,6 +229,9 @@ function main(): i32 {
   Option<MutexGuard<T>>`. The guard gives `read(&self): &T` and `get(&mut self): &mut T`
   and unlocks when it is dropped. No poisoning; locking twice from one thread deadlocks.
 - `Condvar` — `wait(&self, guard)`, `notifyOne`, `notifyAll`, used with a `MutexGuard`.
+- Every pthread return code is checked. A failed unlock, notification or destruction
+  panics with a `std::sync:` message; it signals misuse, such as dropping a `Mutex`
+  while a guard holds it or a `Condvar` while a thread waits on it.
 - `Arc<T: Send & Sync>` — `new`, `clone`, `get(&self): &T`, `strongCount`; the value is
   dropped when the last clone is.
 - `Mutex` and `Condvar` hold a `pthread_mutex_t` (40 bytes) and `pthread_cond_t`
@@ -240,12 +243,13 @@ function main(): i32 {
 
 - `Thread::spawn<T: Send>(@sendable task: () -> T): JoinHandle<T>` — runs `task` on a new
   POSIX thread. The compiler checks what the closure captures (`@sendable`).
-- `JoinHandle<T>::join(&mut self): T` — waits for the thread and returns the task's
-  result; joining twice panics. Dropping an unjoined handle detaches the thread.
+- `JoinHandle<T>::join(self): T` — waits for the thread and returns the task's
+  result. It consumes the handle, so joining twice is a use-after-move compile error.
+  Dropping an unjoined handle detaches the thread.
+- A task with nothing to report returns `void`: `Thread::spawn<void>` gives a
+  `JoinHandle<void>` whose `join` only waits.
 - `Thread::currentId(): u64` — the calling thread's `pthread_t`.
 - A panic in any thread ends the process with exit code 101.
-- `T = void` is not supported yet (generic `void` returns fail LIR verification);
-  return a value instead.
 - `std::io` output is not audited for concurrent use yet.
 
 ### `std::text`

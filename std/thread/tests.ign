@@ -8,14 +8,14 @@ const INCREMENTS_PER_THREAD: u64 = 10000;
 
 @test
 function joinReturnsTheTaskResult(): void {
-  let mut handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> 6 * 7);
+  let handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> 6 * 7);
 
   Test::assertEq<i32>(handle.join(), 42);
 }
 
 @test
 function joinReturnsAnOwnedResult(): void {
-  let mut handle: JoinHandle<String> = Thread::spawn<String>((): String -> String::create("from a thread"));
+  let handle: JoinHandle<String> = Thread::spawn<String>((): String -> String::create("from a thread"));
   let result: String = handle.join();
 
   Test::assertEq<u64>(result.length(), 13);
@@ -44,9 +44,7 @@ function spawnedThreadsShareAnAtomicCounter(): void {
   }
 
   while (handles.length() > 0) {
-    if (let Option::SOME(popped) = handles.pop()) {
-      let mut handle: JoinHandle<u64> = popped;
-
+    if (let Option::SOME(handle) = handles.pop()) {
       Test::assertEq<u64>(handle.join(), INCREMENTS_PER_THREAD);
     }
   }
@@ -78,6 +76,24 @@ function droppedHandleDetachesTheThread(): void {
 
   RawAllocator::free(storage);
   Test::assert(Thread::currentId() != 0);
+}
+
+@test
+function joinWaitsForAVoidTask(): void {
+  let storage: *mut u8 = RawAllocator::allocateZeroedAligned(1, @sizeOf<AtomicU64>(), @alignOf<AtomicU64>());
+  let address: u64 = storage as u64;
+  let handle: JoinHandle<void> = Thread::spawn<void>((): void -> {
+      let counter: *mut AtomicU64 = address as *mut AtomicU64;
+
+      (*counter).store(1, Ordering::RELEASE);
+    });
+
+  handle.join();
+
+  let counter: *mut AtomicU64 = storage as *mut AtomicU64;
+
+  Test::assertEq<u64>((*counter).load(Ordering::ACQUIRE), 1);
+  RawAllocator::free(storage);
 }
 
 function requireSend<T: Send>(): boolean {

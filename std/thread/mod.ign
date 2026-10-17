@@ -18,12 +18,11 @@
 //! every call that whatever the closure captures can move to another thread.
 //! The result moves from the spawned thread to the joining one, so `T` has to
 //! be Send.
-//! `join` takes `&mut self`; a handle can be joined once and joining it again
-//! panics.
+//! `join` takes `self`: it consumes the handle, so a handle is joined at most
+//! once and using it after `join` is a use-after-move compile error.
 //!
-//! `T = void` is not supported yet: returning a generic `T` instantiated as
-//! `void` fails LIR verification. A task with nothing to report returns a value
-//! such as `boolean` instead.
+//! A task with nothing to report returns `void`: `Thread::spawn<void>` gives a
+//! `JoinHandle<void>` whose `join` only waits.
 //!
 //! Dropping a handle without joining it detaches the thread: it keeps running,
 //! nothing waits for it, and its result is dropped when it finishes. A detached
@@ -47,7 +46,7 @@
 //! - The thread runs the task, writes the result into the slot, and drops its
 //!   reference.
 //! - `join` waits for the thread, moves the result out of the slot and marks the
-//!   block joined. The handle still drops its reference when it goes away.
+//!   block joined. The consumed handle drops its reference when `join` returns.
 //! - Dropping an unjoined handle detaches the thread and drops its reference.
 //!
 //! Whichever side drops the last reference drops the result still in the slot
@@ -270,14 +269,9 @@ export record JoinHandle<T: Send> {
 
   /// Waits for the thread to finish and returns the value its task returned.
   ///
-  /// Takes `&mut self` rather than consuming the handle: a by-value `self`
-  /// method on a record with a destructor does not compile yet. The handle is
-  /// spent afterwards; joining it again panics.
-  public join(&mut self): T {
-    if (ThreadBlocks::isJoined(self.block)) {
-      @panic("JoinHandle::join: the thread was already joined");
-    }
-
+  /// Consumes the handle; its destructor runs when `join` returns and only
+  /// releases the control block, since the thread is joined by then.
+  public join(self): T {
     ThreadBlocks::join(self.thread);
 
     ThreadBlocks::markJoined(self.block);

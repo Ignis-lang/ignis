@@ -300,7 +300,13 @@ function mutexTryLockFailsWhileLocked(): void {
     Test::assert(mutex.tryLock().isNone());
   }
 
-  Test::assert(mutex.tryLock().isSome());
+  // A temporary is dropped when the function returns, after `mutex`, so the
+  // guard is bound in a block that ends before the mutex is destroyed.
+  {
+    let relocked: Option<MutexGuard<u64>> = mutex.tryLock();
+
+    Test::assert(relocked.isSome());
+  }
 }
 
 @test
@@ -353,9 +359,7 @@ function arcMutexCounterAcrossThreads(): void {
   }
 
   while (handles.length() > 0) {
-    if (let Option::SOME(popped) = handles.pop()) {
-      let mut handle: JoinHandle<boolean> = popped;
-
+    if (let Option::SOME(handle) = handles.pop()) {
       Test::assert(handle.join());
     }
   }
@@ -375,7 +379,7 @@ record Signal {
 function condvarWakesAWaiter(): void {
   let signal: Arc<Signal> = Arc::new<Signal>(Signal { ready: Mutex::new<boolean>(false), changed: Condvar::new() });
   let shared: Arc<Signal> = signal.clone();
-  let mut notifier: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
+  let notifier: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
       let state: &Signal = (@move shared).get();
       let mut guard: MutexGuard<boolean> = state.ready.lock();
       let ready: &mut boolean = guard.get();

@@ -1,0 +1,18 @@
+// e2e: std
+// e2e: allow-leak
+// Dropping a `Mutex` while a guard still holds it is misuse:
+// `pthread_mutex_destroy` refuses and the drop panics with exit code 101.
+// Leak checking is off because `exit(101)` runs while the guard is live.
+import Mutex, MutexGuard from "std::sync";
+
+function main(): i32 {
+  let mut guard: Option<MutexGuard<i32>> = Option::NONE;
+
+  {
+    let mutex: Mutex<i32> = Mutex::new<i32>(1);
+
+    guard = Option::SOME(mutex.lock());
+  }
+
+  return 0;
+}

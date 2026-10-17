@@ -1,0 +1,24 @@
+// e2e: std
+// A task with nothing to report returns `void`; `join` on its handle only
+// waits for the thread to finish.
+import JoinHandle, Thread from "std::thread";
+import AtomicU64, Ordering from "std::sync";
+import RawAllocator from "std::memory";
+
+function main(): i32 {
+  let storage: *mut u8 = RawAllocator::allocateZeroedAligned(1, @sizeOf<AtomicU64>(), @alignOf<AtomicU64>());
+  let address: u64 = storage as u64;
+  let handle: JoinHandle<void> = Thread::spawn<void>((): void -> {
+      let flag: *mut AtomicU64 = address as *mut AtomicU64;
+
+      (*flag).store(7, Ordering::RELEASE);
+    });
+
+  handle.join();
+
+  let flag: *mut AtomicU64 = storage as *mut AtomicU64;
+  let value: u64 = (*flag).load(Ordering::ACQUIRE);
+
+  RawAllocator::free(storage);
+  return value as i32;
+}
