@@ -3621,17 +3621,7 @@ export namespace CodegenC {
             returnText = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, functionType.returnType);
 
             let params: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&functionType.params);
-            let mut paramIndex: u64 = 0;
-
-            while (paramIndex < params.length()) {
-              if (let Option::SOME(paramType) = params.get(paramIndex)) {
-                let text: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *paramType);
-                callParams.pushStr(", ");
-                callParams.pushStr(text.toStr());
-              }
-
-              paramIndex += 1;
-            }
+            CodegenC::pushClosureCallParams(defStore, typeStore, symbols, closures, &params, &mut callParams);
           }
         }
 
@@ -3678,9 +3668,13 @@ export namespace CodegenC {
 
         while (argIndex < node.args.length()) {
           if (let Option::SOME(argument) = node.args.get(argIndex)) {
-            let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, argument);
-            call.pushStr(", ");
-            call.pushStr(value.toStr());
+            // A `void` argument was already evaluated into its operand; the
+            // thunk's `call` slot has no parameter for it.
+            if (!CodegenC::operandIsVoid(typeStore, function_, argument)) {
+              let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, argument);
+              call.pushStr(", ");
+              call.pushStr(value.toStr());
+            }
           }
 
           argIndex += 1;
@@ -5373,17 +5367,7 @@ export namespace CodegenC {
           returnText = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, functionType.returnType);
 
           let params: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&functionType.params);
-          let mut paramIndex: u64 = 0;
-
-          while (paramIndex < params.length()) {
-            if (let Option::SOME(paramType) = params.get(paramIndex)) {
-              let text: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *paramType);
-              callParams.pushStr(", ");
-              callParams.pushStr(text.toStr());
-            }
-
-            paramIndex += 1;
-          }
+          CodegenC::pushClosureCallParams(defStore, typeStore, symbols, closures, &params, &mut callParams);
         }
       }
 
@@ -5598,7 +5582,7 @@ export namespace CodegenC {
       };
 
       let returnText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, signature.returnType);
-      let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &signature.params);
+      let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &signature.params, false);
       let name: String = CodegenC::mangledName(defStore, symbols, *defId);
       let line: String = `extern ${returnText.toStr()} ${name.toStr()}(${paramText.toStr()});\n`;
 
@@ -5722,7 +5706,7 @@ export namespace CodegenC {
       }
 
       let returnText: String = CodegenC::formatCReturnType(defStore, typeStore, symbols, closures, resultType);
-      let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &params);
+      let paramText: String = CodegenC::formatCParamTypes(defStore, typeStore, symbols, closures, &params, true);
       let name: String = CodegenC::rawFunctionTypeName(typeId);
       let line: String = `typedef ${returnText.toStr()} (*${name.toStr()})(${paramText.toStr()});\n`;
 
@@ -5735,34 +5719,68 @@ export namespace CodegenC {
   }
 
   /// `types` as a C parameter type list, `void` when it is empty.
+  /// `dropVoid` leaves `void` entries out, as an Ignis-defined function has no
+  /// C parameter for them; an extern declaration keeps the list as written.
   function formatCParamTypes(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     closures: &CodegenC::ClosureTables,
     types: &Vector<Analyzer::TypeId>,
+    dropVoid: boolean,
   ): String {
-    if (types.isEmpty()) {
-      return String::create("void");
-    }
-
     let mut text: String = String::new();
+    let mut emitted: u64 = 0;
     let mut index: u64 = 0;
 
     while (index < types.length()) {
       if (let Option::SOME(typeId) = types.get(index)) {
-        if (index > 0) {
-          text.pushStr(", ");
-        }
+        if (!dropVoid || !CodegenC::isVoidType(typeStore, *typeId)) {
+          if (emitted > 0) {
+            text.pushStr(", ");
+          }
 
-        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *typeId);
-        text.pushStr(typeText.toStr());
+          let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *typeId);
+          text.pushStr(typeText.toStr());
+          emitted += 1;
+        }
       }
 
       index += 1;
     }
 
+    if (emitted == 0) {
+      return String::create("void");
+    }
+
     return text;
+  }
+
+  /// Appends `, <type>` to `callParams` for each closure parameter in
+  /// `params`, the erased `call` slot shape after its `u8*` environment. A
+  /// `void` parameter has no C counterpart, as in the thunk itself.
+  function pushClosureCallParams(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    closures: &CodegenC::ClosureTables,
+    params: &Vector<Analyzer::TypeId>,
+    callParams: &mut String,
+  ): void {
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < params.length()) {
+      if (let Option::SOME(paramType) = params.get(paramIndex)) {
+        if (!CodegenC::isVoidType(typeStore, *paramType)) {
+          let text: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *paramType);
+          let mut paramsRef: &mut String = callParams;
+          paramsRef.pushStr(", ");
+          paramsRef.pushStr(text.toStr());
+        }
+      }
+
+      paramIndex += 1;
+    }
   }
 
   /// `<type> a0, <type> a1, ...` for a definition's parameters, and the
@@ -5784,8 +5802,14 @@ export namespace CodegenC {
     let mut index: u64 = 0;
 
     while (index < types.length()) {
+      // A `void` parameter has no C counterpart on either side of an adapter.
       if (let Option::SOME(typeId) = types.get(index)) {
-        if (index > 0) {
+        if (CodegenC::isVoidType(typeStore, *typeId)) {
+          index += 1;
+          continue;
+        }
+
+        if (declarations.length() > 0) {
           declarations.pushStr(", ");
           arguments.pushStr(", ");
         }
@@ -5927,13 +5951,13 @@ export namespace CodegenC {
 
       let mut declarations: String = params.declarations;
 
-      if (paramTypes.isEmpty()) {
+      if (declarations.length() == 0) {
         declarations = String::create("void");
       }
 
       let mut forwarded: String = String::create("NULL");
 
-      if (!paramTypes.isEmpty()) {
+      if (params.arguments.length() > 0) {
         forwarded.pushStr(", ");
         forwarded.pushStr(params.arguments.toStr());
       }
@@ -5977,7 +6001,7 @@ export namespace CodegenC {
 
       let mut declarations: String = String::create("u8* env");
 
-      if (!paramTypes.isEmpty()) {
+      if (params.declarations.length() > 0) {
         declarations.pushStr(", ");
         declarations.pushStr(params.declarations.toStr());
       }
