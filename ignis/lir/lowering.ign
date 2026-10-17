@@ -39,6 +39,10 @@ export namespace LirLowering {
     /// When each synthetic local started holding its value, parallel to
     /// `syntheticLocalRaws`, on the same clock as `liveDefOrders`.
     public syntheticLocalOrders: Vector<u64>;
+    /// Synthetic locals that hold a closure, with its type in the parallel
+    /// `syntheticClosureTypeRaws`. Their drop tears the environment down.
+    public syntheticClosureLocalRaws: Vector<u32>;
+    public syntheticClosureTypeRaws: Vector<u32>;
     /// When each named local started holding its value: a `let` records it
     /// once its initializer is stored, any other binding when it gets its
     /// slot. The latest entry for a definition wins. Scope-end and exit drops
@@ -97,6 +101,8 @@ export namespace LirLowering {
         syntheticLocalRaws: Vector::new<u32>(),
         syntheticFrameStarts: Vector::new<u64>(),
         syntheticLocalOrders: Vector::new<u64>(),
+        syntheticClosureLocalRaws: Vector::new<u32>(),
+        syntheticClosureTypeRaws: Vector::new<u32>(),
         liveDefRaws: Vector::new<u32>(),
         liveDefOrders: Vector::new<u64>(),
         liveClock: 0,
@@ -831,9 +837,46 @@ export namespace LirLowering {
       return;
     };
     let localRaw: u32 = *raw;
+    let mut closureIndex: u64 = 0;
+
+    while (closureIndex < state.syntheticClosureLocalRaws.length()) {
+      if (let Option::SOME(closureRaw) = state.syntheticClosureLocalRaws.get(closureIndex)) {
+        if (*closureRaw == localRaw) {
+          let Option::SOME(typeRaw) = state.syntheticClosureTypeRaws.get(closureIndex) else {
+            return;
+          };
+          let closureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*typeRaw);
+
+          LirLowering::emitClosureLocalDrop(function_, state, Id::fromRaw<Lir::LocalTag>(localRaw), closureType);
+
+          return;
+        }
+      }
+
+      closureIndex += 1;
+    }
 
     LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
       local: Id::fromRaw<Lir::LocalTag>(localRaw),
+    }));
+  }
+
+  function emitClosureLocalDrop(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    local: Lir::LocalId,
+    closureType: Analyzer::TypeId,
+  ): void {
+    let closureTemp: Lir::TempId = LirLowering::freshTemp(function_, closureType, SourceSpan::new("", 0, 0));
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+      dest: closureTemp,
+      source: local,
+    }));
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::DropClosure(Lir::InstrDropClosure {
+      closure: Lir::Operand::Temp(closureTemp),
+      closureType: closureType,
     }));
   }
 
@@ -919,6 +962,67 @@ export namespace LirLowering {
     }));
 
     LirLowering::registerSyntheticLocal(state, local);
+
+    return Lir::Operand::Local(local);
+  }
+
+  /// The closure type of a call that returns a closure. Such a value owns its
+  /// environment, which `Borrowck::needsDropType` does not see, so it needs
+  /// its own drop when no destination takes it.
+  function ownedClosureCallType(
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(node) = hirStore.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    if (!Hir::typeIsFunction(typeStore, node.typeId)) {
+      return Option::NONE;
+    }
+
+    return match (&node.kind) {
+      Hir::HirKind::Call(_) | Hir::HirKind::CallClosure(_) | Hir::HirKind::MethodCall(_) -> Option::SOME(node.typeId),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Stores an owned closure temporary in an unnamed local, then either drops
+  /// it at once (`dropNow`) or leaves it to the innermost temporary frame.
+  function spillClosureTemp(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operand: Lir::Operand,
+    closureType: Analyzer::TypeId,
+    dropNow: boolean,
+  ): Lir::Operand {
+    let mut tempRaw: u32 = 0;
+    let mut isTemp: boolean = false;
+
+    if (let Lir::Operand::Temp(tempId) = &operand) {
+      tempRaw = tempId.raw();
+      isTemp = true;
+    }
+
+    if (!isTemp || LirLowering::isLoadAliasTemp(state, Id::fromRaw<Lir::TempTag>(tempRaw))) {
+      return operand;
+    }
+
+    let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, closureType);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: local,
+      value: operand,
+    }));
+
+    if (dropNow) {
+      LirLowering::emitClosureLocalDrop(function_, state, local, closureType);
+    } else {
+      state.syntheticClosureLocalRaws.push(local.raw());
+      state.syntheticClosureTypeRaws.push(closureType.raw());
+      LirLowering::registerSyntheticLocal(state, local);
+    }
 
     return Lir::Operand::Local(local);
   }
@@ -1165,7 +1269,15 @@ export namespace LirLowering {
     paramIndex: u64,
   ): Lir::Operand {
     if (Borrowck::paramIsNoEscape(defStore, params, paramIndex)) {
-      return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, argId);
+      let lent: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, argId);
+
+      // A closure a call just returned is lent to the callee but owned by
+      // nobody else, so the temporary frame has to drop it.
+      if (let Option::SOME(closureType) = LirLowering::ownedClosureCallType(typeStore, hirStore, argId)) {
+        return LirLowering::spillClosureTemp(function_, state, lent, closureType, false);
+      }
+
+      return lent;
     }
 
     return LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, function_, state, argId);
@@ -1898,7 +2010,9 @@ export namespace LirLowering {
         // statement is the last point at which anything can own it.
         let innerValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
 
-        if (LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, innerId) && !LirLowering::discardedPlaceIsCaptured(state, hirStore, innerId)) {
+        if (let Option::SOME(closureType) = LirLowering::ownedClosureCallType(typeStore, hirStore, innerId)) {
+          LirLowering::spillClosureTemp(function_, state, Lir::copyOperand(&innerValue), closureType, true);
+        } else if (LirLowering::discardedValueIsOwned(typeStore, hirStore, dropSchedules, innerId) && !LirLowering::discardedPlaceIsCaptured(state, hirStore, innerId)) {
           LirLowering::dropStatementValue(defStore, typeStore, function_, state, Lir::copyOperand(&innerValue), innerType);
         }
 
