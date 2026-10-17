@@ -1,0 +1,51 @@
+// Generic parameters instantiated with `void` take no C parameter, and the
+// call passes no argument for them; the argument expression still runs.
+// `@read<T>` and `@write<T>` with `T = void` move no bytes.
+function first<T>(value: T): T {
+  return value;
+}
+
+function both<T>(count: i32, value: T, extra: i32): i32 {
+  return count + extra;
+}
+
+record Counter<T> {
+  public total: i32;
+
+  public add(&mut self, value: T, amount: i32): i32 {
+    self.total = self.total + amount;
+    return self.total;
+  }
+}
+
+function copyAt<T>(source: *T, destination: *mut T): T {
+  let value: T = @read<T>(source);
+  @write<T>(destination, value);
+  return @read<T>(source);
+}
+
+function bump(counter: &mut i32): void {
+  let mut counterRef: &mut i32 = counter;
+  counterRef += 1;
+}
+
+function main(): i32 {
+  let mut calls: i32 = 0;
+  first<void>(bump(&mut calls));
+
+  let sum: i32 = both<void>(1, bump(&mut calls), 2);
+
+  let mut counter: Counter<void> = Counter { total: 0 };
+  let total: i32 = counter.add(bump(&mut calls), 4);
+
+  let mut slot: i32 = 0;
+  let source: *void = (&slot) as *void;
+  let destination: *mut void = (&mut slot) as *mut void;
+  copyAt<void>(source, destination);
+
+  if (calls != 3 || sum != 3 || total != 4) {
+    return 1;
+  }
+
+  return 0;
+}

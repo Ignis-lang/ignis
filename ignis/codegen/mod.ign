@@ -1227,11 +1227,7 @@ export namespace CodegenC {
     let name: String = CodegenC::mangledName(defStore, symbols, function_.defId);
 
     let mut signature: String = `${returnText.toStr()} ${name.toStr()}(`;
-
-    if (function_.params.length() == 0) {
-      signature.pushStr("void");
-    }
-
+    let mut emittedParams: u64 = 0;
     let mut index: u64 = 0;
 
     while (index < function_.params.length()) {
@@ -1248,7 +1244,14 @@ export namespace CodegenC {
         }
       }
 
-      if (index > 0) {
+      // A `void` parameter, as in a generic `T` instantiated with `void`,
+      // carries no value, so it has no C parameter; its temp keeps its index.
+      if (CodegenC::isVoidType(typeStore, paramType)) {
+        index += 1;
+        continue;
+      }
+
+      if (emittedParams > 0) {
         signature.pushStr(", ");
       }
 
@@ -1259,7 +1262,12 @@ export namespace CodegenC {
       let declaration: String = `${paramText.toStr()} t${index}`;
       signature.pushStr(declaration.toStr());
 
+      emittedParams += 1;
       index += 1;
+    }
+
+    if (emittedParams == 0) {
+      signature.pushStr("void");
     }
 
     signature.pushStr(")");
@@ -1440,7 +1448,13 @@ export namespace CodegenC {
     };
 
     let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, receiver);
-    let access: String = `(${value.toStr()})->`;
+    let mut access: String = `(${value.toStr()})->`;
+
+    // A by-value `self` receiver is the struct itself, not a pointer to it.
+    if (CodegenC::operandType(function_, receiver).isSome() && !CodegenC::operandIsIndirect(typeStore, function_, receiver)) {
+      access = `(${value.toStr()}).`;
+    }
+
     let site: SourceSpan = CodegenC::operandSpan(function_, receiver);
 
     CodegenC::emitDropStateGuard(defStore, symbols, output, hooks, &access, site);
@@ -3024,11 +3038,20 @@ export namespace CodegenC {
   ): void {
     match (instruction) {
       Lir::Instr::Load(node) -> {
+        // A `void` value has no C storage, so moving it emits nothing.
+        if (CodegenC::tempIsVoid(typeStore, function_, node.dest)) {
+          return;
+        }
+
         let line: String = `    t${node.dest.raw()} = l${node.source.raw()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
       Lir::Instr::Store(node) -> {
+        if (CodegenC::operandIsVoid(typeStore, function_, &node.value)) {
+          return;
+        }
+
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
         let mut line: String = `    l${node.dest.raw()} = ${value.toStr()};\n`;
 
@@ -3043,6 +3066,10 @@ export namespace CodegenC {
         outputRef.pushStr(line.toStr());
       },
       Lir::Instr::LoadPtr(node) -> {
+        if (CodegenC::tempIsVoid(typeStore, function_, node.dest)) {
+          return;
+        }
+
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let mut line: String = `    t${node.dest.raw()} = *${pointer.toStr()};\n`;
 
@@ -3058,6 +3085,10 @@ export namespace CodegenC {
         outputRef.pushStr(line.toStr());
       },
       Lir::Instr::StorePtr(node) -> {
+        if (CodegenC::operandIsVoid(typeStore, function_, &node.value)) {
+          return;
+        }
+
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
         let mut line: String = `    *${pointer.toStr()} = ${value.toStr()};\n`;
@@ -3071,6 +3102,10 @@ export namespace CodegenC {
         outputRef.pushStr(line.toStr());
       },
       Lir::Instr::Copy(node) -> {
+        if (CodegenC::tempIsVoid(typeStore, function_, node.dest)) {
+          return;
+        }
+
         let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.source);
         let line: String = `    t${node.dest.raw()} = ${source.toStr()};\n`;
         let mut outputRef: &mut String = output;
@@ -3323,12 +3358,22 @@ export namespace CodegenC {
         call.pushStr("(");
 
         let mut argIndex: u64 = 0;
+        let mut emittedArgs: u64 = 0;
 
         while (argIndex < node.args.length()) {
           if (let Option::SOME(argument) = node.args.get(argIndex)) {
-            if (argIndex > 0) {
+            // A `void` argument was already evaluated into its operand; its
+            // parameter has no C counterpart.
+            if (!calleeIsExtern && CodegenC::operandIsVoid(typeStore, function_, argument)) {
+              argIndex += 1;
+              continue;
+            }
+
+            if (emittedArgs > 0) {
               call.pushStr(", ");
             }
+
+            emittedArgs += 1;
 
             let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, argument);
 
@@ -3375,6 +3420,11 @@ export namespace CodegenC {
         outputRef.pushStr("    /* nop */\n");
       },
       Lir::Instr::BuiltinLoad(node) -> {
+        // `@read<void>` and `@write<void>` move no bytes.
+        if (CodegenC::isVoidType(typeStore, node.ty)) {
+          return;
+        }
+
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);
         let qualifier: str = CodegenC::volatileQualifier(node.volatile);
@@ -3383,6 +3433,10 @@ export namespace CodegenC {
         outputRef.pushStr(line.toStr());
       },
       Lir::Instr::BuiltinStore(node) -> {
+        if (CodegenC::isVoidType(typeStore, node.ty)) {
+          return;
+        }
+
         let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.ptr);
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
         let target: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.ty);

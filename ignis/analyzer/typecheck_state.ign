@@ -1220,8 +1220,9 @@ export namespace Analyzer {
 
       match (node) {
         Analyzer::Type::Reference(reference) -> {
-          let inner: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, reference.referent, depth + 1);
+          // `reference` comes from the type store, which normalizing grows: read it first.
           let mutable: boolean = reference.mutable;
+          let inner: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, reference.referent, depth + 1);
 
           // The host collapses a reference to a reference: `& &T` is `&T`.
           if (let Option::SOME(innerNode) = typeStore.get(inner)) {
@@ -3618,7 +3619,9 @@ export namespace Analyzer {
 
     /// The type-parameter definitions nameable inside `enclosing`: the callable's
     /// own parameters first, then those of the record, enum or trait declaring it,
-    /// so an inner parameter shadows an outer one written with the same name.
+    /// so an inner parameter shadows an outer one written with the same name. A
+    /// record, enum or trait as `enclosing` scopes its own parameters, which is
+    /// what its field and payload types see.
     function typeParamsInScope(
       defStore: &mut Analyzer::DefinitionStore,
       enclosing: Analyzer::DefinitionId,
@@ -3634,6 +3637,9 @@ export namespace Analyzer {
           Analyzer::Definition::Method(method) -> {
             scoped = Analyzer::Typecheck::copyDefinitionIdVector(&method.typeParams);
             ownerOpt = Option::SOME(method.owner);
+          },
+          Analyzer::Definition::Record(_) | Analyzer::Definition::Enum(_) | Analyzer::Definition::Trait(_) -> {
+            ownerOpt = Option::SOME(enclosing);
           },
           _ -> {},
         };

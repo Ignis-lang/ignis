@@ -1148,6 +1148,11 @@ export namespace Analyzer {
           return Option::NONE;
         };
 
+        // `signature` points into the type store, which checking the arguments
+        // grows and may move: copy what the check reads.
+        let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+        let returnType: Analyzer::TypeId = signature.returnType;
+
         return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
           state,
           defStore,
@@ -1157,8 +1162,8 @@ export namespace Analyzer {
           resolvedBodies,
           callExprId,
           call,
-          &signature.params,
-          signature.returnType,
+          &paramTypes,
+          returnType,
         );
       }
 
@@ -1368,6 +1373,11 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
+      // `signature` points into the type store, which checking the arguments
+      // grows and may move: copy what the check reads.
+      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+      let returnType: Analyzer::TypeId = signature.returnType;
+
       return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
         state,
         defStore,
@@ -1377,8 +1387,8 @@ export namespace Analyzer {
         resolvedBodies,
         callExprId,
         call,
-        &signature.params,
-        signature.returnType,
+        &paramTypes,
+        returnType,
       );
     }
 
@@ -7966,12 +7976,16 @@ export namespace Analyzer {
 
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let pointerType: Analyzer::TypeId = typeStoreRef.mutablePointer(valueType);
+      let sharedPointerType: Analyzer::TypeId = typeStoreRef.pointer(valueType);
+      let referenceType: Analyzer::TypeId = typeStoreRef.reference(valueType);
+      let mutableReferenceType: Analyzer::TypeId = typeStoreRef.mutableReference(valueType);
       let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
       let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
 
       let isEq: boolean = call.name.equals("eq");
       let isRead: boolean = call.name.equals("read") || call.name.equals("readVolatile");
       let isWrite: boolean = call.name.equals("write") || call.name.equals("writeVolatile");
+      let isDropInPlace: boolean = call.name.equals("dropInPlace");
       let mut expectedCount: u64 = 1;
       if (isEq || isWrite) {
         expectedCount = 2;
@@ -7982,6 +7996,7 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
+      let mut argumentsValid: boolean = true;
       let mut argIndex: u64 = 0;
       while (argIndex < call.arguments.length()) {
         let Option::SOME(argExprId) = call.arguments.get(argIndex) else {
@@ -7989,14 +8004,16 @@ export namespace Analyzer {
           continue;
         };
 
-        // @eq compares two T values; the pointer family points its first
-        // argument at T and @write supplies a T second.
+        // @eq compares two values through `&T`; the pointer family points its
+        // first argument at T and @write supplies a T second.
         let mut expectedArg: Analyzer::TypeId = pointerType;
-        if (isEq || (isWrite && argIndex == 1)) {
+        if (isEq) {
+          expectedArg = referenceType;
+        } else if (isWrite && argIndex == 1) {
           expectedArg = valueType;
         }
 
-        let _argType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        let argType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
           state,
           defStore,
           typeStore,
@@ -8006,7 +8023,41 @@ export namespace Analyzer {
           *argExprId,
           Option::SOME(expectedArg),
         );
+
+        // An argument of the wrong shape is read as the pointer or reference
+        // the generated code expects, so it has to be rejected here.
+        if (let Option::SOME(actualType) = argType) {
+          let mut satisfied: boolean = Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedArg, actualType);
+
+          // A mutable reference also lends a shared view of its referent, a
+          // read only needs a pointer it can read through, and a drop in
+          // place can run on a value it holds a mutable reference to.
+          let mut alternative: Option<Analyzer::TypeId> = Option::NONE;
+          if (isEq) {
+            alternative = Option::SOME(mutableReferenceType);
+          } else if (isRead && argIndex == 0) {
+            alternative = Option::SOME(sharedPointerType);
+          } else if (isDropInPlace && argIndex == 0) {
+            alternative = Option::SOME(mutableReferenceType);
+          }
+
+          if (let Option::SOME(alternativeType) = alternative) {
+            if (!satisfied) {
+              satisfied = Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, alternativeType, actualType);
+            }
+          }
+
+          if (!satisfied) {
+            Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, call.span, argIndex + 1, expectedArg, actualType);
+            argumentsValid = false;
+          }
+        }
+
         argIndex += 1;
+      }
+
+      if (!argumentsValid) {
+        return Option::NONE;
       }
 
       // `@read`/`@write` and their volatile forms dereference their first
@@ -10908,12 +10959,15 @@ export namespace Analyzer {
           elementTypeOpt = Option::SOME(element);
         },
         Analyzer::Type::Range(range) -> {
-          if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, span, range.element)) {
-            Analyzer::Typecheck::emitRangeBoundNotInteger(state, defStore, typeStore, symbols, span, range.element);
+          // `range` comes from the type store, which the integer check can grow: read it first.
+          let rangeElement: Analyzer::TypeId = range.element;
+
+          if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, span, rangeElement)) {
+            Analyzer::Typecheck::emitRangeBoundNotInteger(state, defStore, typeStore, symbols, span, rangeElement);
             return Option::NONE;
           }
 
-          elementTypeOpt = Option::SOME(range.element);
+          elementTypeOpt = Option::SOME(rangeElement);
         },
         Analyzer::Type::Record(defId) -> {
           recordDefId = Option::SOME(defId);

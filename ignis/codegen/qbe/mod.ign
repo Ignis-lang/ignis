@@ -5408,6 +5408,9 @@ export namespace CodegenQbe {
     return enumDef;
   }
 
+  /// `@eq<T>` takes both operands as `&T`. A primitive or `str` comparison
+  /// loads the values through them first, as the C backend dereferences
+  /// them; an `equals` method takes the references as they are.
   function qbeEmitBuiltinEq(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
@@ -5416,44 +5419,53 @@ export namespace CodegenQbe {
     function_: &Lir::FunctionLir,
     node: &Lir::InstrBuiltinEq,
   ): void {
+    let Option::SOME(left) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
+      return;
+    };
+
+    let Option::SOME(right) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.right) else {
+      return;
+    };
+
     match (node.kind) {
       Lir::BuiltinEqKind::Primitive -> {
         let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, node.ty) else {
           CodegenQbe::failNamed(emitter, "BuiltinEq");
           return;
         };
-
-        let Option::SOME(left) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
+        let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, node.ty) else {
+          CodegenQbe::failNamed(emitter, "BuiltinEq");
           return;
         };
 
-        let Option::SOME(right) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.right) else {
-          return;
-        };
-
+        // A narrow load sign- or zero-extends into the full class, so the
+        // loaded values compare like the C operands do.
+        let leftValue: String = CodegenQbe::freshTemp(emitter);
+        let rightValue: String = CodegenQbe::freshTemp(emitter);
         let compare: String = `ceq${cls.toStr()}`;
-        let line: String = `    %t${node.dest.raw()} =w ${compare.toStr()} ${left.toStr()}, ${right.toStr()}\n`;
 
-        emitter.out.pushStr(line.toStr());
+        emitter.out.pushStr(`    ${leftValue.toStr()} =${cls.toStr()} ${load.toStr()} ${left.toStr()}\n`.toStr());
+        emitter.out.pushStr(`    ${rightValue.toStr()} =${cls.toStr()} ${load.toStr()} ${right.toStr()}\n`.toStr());
+        emitter.out.pushStr(`    %t${node.dest.raw()} =w ${compare.toStr()} ${leftValue.toStr()}, ${rightValue.toStr()}\n`.toStr());
       },
       Lir::BuiltinEqKind::Str -> {
-        let Option::SOME(left) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.left) else {
-          return;
-        };
-
-        let Option::SOME(right) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.right) else {
-          return;
-        };
-
+        let leftValue: String = CodegenQbe::freshTemp(emitter);
+        let rightValue: String = CodegenQbe::freshTemp(emitter);
         let call: String = CodegenQbe::freshTemp(emitter);
-        let compare: String = `    ${call.toStr()} =w call $strcmp(l ${left.toStr()}, l ${right.toStr()})\n`;
-        let line: String = `    %t${node.dest.raw()} =w ceqw ${call.toStr()}, 0\n`;
 
-        emitter.out.pushStr(compare.toStr());
-        emitter.out.pushStr(line.toStr());
+        emitter.out.pushStr(`    ${leftValue.toStr()} =l loadl ${left.toStr()}\n`.toStr());
+        emitter.out.pushStr(`    ${rightValue.toStr()} =l loadl ${right.toStr()}\n`.toStr());
+        emitter.out.pushStr(`    ${call.toStr()} =w call $strcmp(l ${leftValue.toStr()}, l ${rightValue.toStr()})\n`.toStr());
+        emitter.out.pushStr(`    %t${node.dest.raw()} =w ceqw ${call.toStr()}, 0\n`.toStr());
       },
-      _ -> {
-        CodegenQbe::failNamed(emitter, "BuiltinEq");
+      Lir::BuiltinEqKind::Method(methodId) -> {
+        // `equals(&self, other: &T)` returns a `boolean`, which comes back as
+        // a byte in a `w`.
+        let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+        let call: String = CodegenQbe::freshTemp(emitter);
+
+        emitter.out.pushStr(`    ${call.toStr()} =w call $${name.toStr()}(l ${left.toStr()}, l ${right.toStr()})\n`.toStr());
+        emitter.out.pushStr(`    %t${node.dest.raw()} =w extub ${call.toStr()}\n`.toStr());
       },
     };
   }
@@ -6320,7 +6332,15 @@ export namespace CodegenQbe {
       Lir::Instr::Cast(node) -> { CodegenQbe::addOperandFunction(reachable, &node.source); },
       Lir::Instr::UnaryOp(node) -> { CodegenQbe::addOperandFunction(reachable, &node.operand); },
       Lir::Instr::BinOp(node) -> { CodegenQbe::addOperandFunction(reachable, &node.left); CodegenQbe::addOperandFunction(reachable, &node.right); },
-      Lir::Instr::BuiltinEq(node) -> { CodegenQbe::addOperandFunction(reachable, &node.left); CodegenQbe::addOperandFunction(reachable, &node.right); },
+      Lir::Instr::BuiltinEq(node) -> {
+        CodegenQbe::addOperandFunction(reachable, &node.left);
+        CodegenQbe::addOperandFunction(reachable, &node.right);
+
+        // An `equals` method reached only through `@eq` is still called.
+        if (let Lir::BuiltinEqKind::Method(methodId) = node.kind) {
+          CodegenQbe::addReachable(reachable, methodId);
+        }
+      },
       Lir::Instr::GetElementPtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.base); CodegenQbe::addOperandFunction(reachable, &node.index); },
       Lir::Instr::GetFieldPtr(node) -> { CodegenQbe::addOperandFunction(reachable, &node.base); },
       Lir::Instr::MakeClosure(node) -> {

@@ -2776,16 +2776,21 @@ export namespace Analyzer {
 
       match (existing) {
         Analyzer::Definition::TypeAlias(old) -> {
+          // `old` points into the definition store, which binding the type
+          // parameters grows and may move: read it first.
+          let name: Analyzer::SymbolId = old.name;
+          let visibility: Analyzer::Visibility = old.visibility;
+          let aliasedType: Analyzer::TypeId = old.aliasedType;
           let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &alias.genericParameters, defId);
 
           let mut typesRef: &mut Analyzer::TypeStore = typeStore;
           let realTypeId: Analyzer::TypeId = typesRef.aliasType(defId);
 
           let updated: Analyzer::TypeAliasDef = Analyzer::TypeAliasDef {
-            name: old.name,
-            visibility: old.visibility,
+            name: name,
+            visibility: visibility,
             typeParams: typeParams,
-            aliasedType: old.aliasedType,
+            aliasedType: aliasedType,
             typeId: realTypeId,
           };
           let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
@@ -2848,6 +2853,11 @@ export namespace Analyzer {
 
       match (existing) {
         Analyzer::Definition::Trait(old) -> {
+          // `old` points into the definition store, which binding the type
+          // parameters and methods grows and may move: read it first.
+          let name: Analyzer::SymbolId = old.name;
+          let visibility: Analyzer::Visibility = old.visibility;
+          let typeId: Analyzer::TypeId = old.typeId;
           let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &trait_.genericParameters, defId);
           let methods: Vector<Analyzer::DefinitionId> = bindTraitMethods(
             state,
@@ -2861,12 +2871,12 @@ export namespace Analyzer {
           );
 
           let updated: Analyzer::TraitDef = Analyzer::TraitDef {
-            name: old.name,
-            visibility: old.visibility,
+            name: name,
+            visibility: visibility,
             typeParams: typeParams,
             methods: methods,
             assocTypes: Vector::new<Analyzer::DefinitionId>(),
-            typeId: old.typeId,
+            typeId: typeId,
           };
           let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
           defsRef.replace(defId, Analyzer::Definition::Trait(updated));

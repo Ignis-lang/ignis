@@ -1,0 +1,27 @@
+// An expression-bodied closure whose body names one of its own owned
+// parameters returns that value, so it must not drop it on the way out.
+// The caller owns what comes back, through a closure call too. Returning a
+// field of a parameter or a fresh value keeps working.
+record Pair {
+  public name: String;
+  public count: i32;
+}
+
+function makeInner(base: i32): () -> i32 {
+  return (): i32 -> base;
+}
+
+function main(): i32 {
+  let identity = (text: String): String -> text;
+  let first: String = identity(String::create("hello"));
+  let pass = (f: () -> i32): () -> i32 -> f;
+  let second = pass(makeInner(7));
+  let named = makeInner(9);
+  let passedNamed = pass(named);
+  let nameOf = (pair: Pair): String -> pair.name;
+  let third: String = nameOf(Pair { name: String::create("abc"), count: 1 });
+  let copyOf = (text: String): String -> String::create(text.toStr());
+  let fourth: String = copyOf(String::create("abcd"));
+
+  return first.length() as i32 + second() + passedNamed() + third.length() as i32 + fourth.length() as i32;
+}

@@ -1,0 +1,29 @@
+// A closure captured by value by an escaping closure moves into its
+// environment, so the escaping closure's drop function drops it, through
+// chains of captures and whether or not it is ever called. A closure captured
+// by a non-escaping closure stays owned by its binding and is dropped once.
+function apply(f: () -> i32): i32 {
+  return f();
+}
+
+function makeInner(base: i32): () -> i32 {
+  return (): i32 -> base;
+}
+
+function makeChain(base: i32): () -> i32 {
+  let inner = makeInner(base);
+  let middle = (): i32 -> inner() + 1;
+
+  return (): i32 -> middle() + 1;
+}
+
+function main(): i32 {
+  let inner = makeInner(10);
+  let local = (): i32 -> inner() + 2;
+  let first: i32 = local();
+  let chain = makeChain(20);
+  let second: i32 = apply(chain);
+  let unused = makeChain(30);
+
+  return first + second;
+}

@@ -1835,7 +1835,16 @@ export namespace LirLowering {
           let returnType: Analyzer::TypeId = function_.returnType;
           let value: Lir::Operand = LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
 
-          returned = Option::SOME(LirLowering::coerceOperandToType(typeStore, function_, state, value, valueType, returnType, valueSpan));
+          // A generic `T` instantiated with `void` still returns its value in
+          // the source; the value is evaluated for its effects only.
+          let coerced: Lir::Operand = LirLowering::coerceOperandToType(typeStore, function_, state, value, valueType, returnType, valueSpan);
+          let candidate: Option<Lir::Operand> = Option::SOME(coerced);
+
+          if (!LirLowering::isVoidType(typeStore, returnType)) {
+            returned = candidate;
+          } else {
+            let _discarded: Option<Lir::Operand> = candidate;
+          }
         }
 
         // The returned value is already evaluated, so unwinding here cannot
@@ -3102,7 +3111,11 @@ export namespace LirLowering {
         continue;
       }
 
-      if (!Borrowck::needsDropType(defStore, typeStore, capture.typeInEnv)) {
+      // A closure captured by an escaping closure moves into its environment;
+      // one captured by a non-escaping closure stays owned by its binding.
+      let capturesClosure: boolean = freesEnv && Hir::typeIsFunction(typeStore, capture.typeInEnv);
+
+      if (!capturesClosure && !Borrowck::needsDropType(defStore, typeStore, capture.typeInEnv)) {
         index += 1;
         continue;
       }
@@ -3117,6 +3130,23 @@ export namespace LirLowering {
         fieldIndex: capture.fieldIndex,
         fieldType: capture.typeInEnv,
       }));
+
+      if (capturesClosure) {
+        let closureTemp: Lir::TempId = LirLowering::freshTemp(function_, capture.typeInEnv, span);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+          dest: closureTemp,
+          ptr: Lir::Operand::Temp(fieldPointer),
+        }));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::DropClosure(Lir::InstrDropClosure {
+          closure: Lir::Operand::Temp(closureTemp),
+          closureType: capture.typeInEnv,
+        }));
+
+        index += 1;
+        continue;
+      }
 
       LirLowering::pushInstr(function_, state, Lir::Instr::DropInPlace(Lir::InstrDropInPlace {
         ptr: Lir::Operand::Temp(fieldPointer),

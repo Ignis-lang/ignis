@@ -209,12 +209,12 @@ function fromAddress(addr: u64): *i32 {
 
 ### `@read<T>(ptr)`
 
-Reads a value of type `T` from a mutable pointer.
+Reads a value of type `T` through a pointer.
 
 | | |
 |---|---|
 | **Type arguments** | 1 type |
-| **Arguments** | 1 expression (`*mut T`) |
+| **Arguments** | 1 expression (`*mut T` or `*T`) |
 | **Returns** | `T` |
 
 ```ignis
@@ -223,7 +223,7 @@ function load(ptr: *mut i32): i32 {
 }
 ```
 
-The pointer argument must be exactly `*mut T`. Passing `null` is a compile-time error when statically known.
+The pointer argument must be a `*mut T` or a `*T`; any other argument type is an error (A0018). Passing `null` is a compile-time error when statically known.
 
 ---
 
@@ -243,18 +243,18 @@ function store(ptr: *mut i32, value: i32): void {
 }
 ```
 
-The first argument must be exactly `*mut T`. Passing `null` is a compile-time error when statically known.
+The first argument must be exactly `*mut T` and the second a `T`; any other argument type is an error (A0018). Passing `null` is a compile-time error when statically known.
 
 ---
 
 ### `@readVolatile<T>(ptr)`
 
-Reads a value of type `T` from a mutable pointer with a volatile access.
+Reads a value of type `T` through a pointer with a volatile access.
 
 | | |
 |---|---|
 | **Type arguments** | 1 type |
-| **Arguments** | 1 expression (`*mut T`) |
+| **Arguments** | 1 expression (`*mut T` or `*T`) |
 | **Returns** | `T` |
 
 ```ignis
@@ -414,7 +414,7 @@ Runs drop glue for `T` at the given address.
 | | |
 |---|---|
 | **Type arguments** | 1 type |
-| **Arguments** | 1 expression (`*mut T`) |
+| **Arguments** | 1 expression (`*mut T` or `&mut T`) |
 | **Returns** | `void` |
 
 ```ignis
@@ -422,6 +422,8 @@ function dropValue(ptr: *mut i32): void {
     @dropInPlace<i32>(ptr);
 }
 ```
+
+Any other argument type is an error (A0018).
 
 If `T` does not need drop, this is a no-op.
 
@@ -487,6 +489,8 @@ Supported categories today:
 - records and enums implementing canonical `std::hash::Eq`
 
 Unsupported equality must be rejected during analysis before code generation.
+
+Each argument must be a `&T` or a `&mut T`; any other argument type is an error (A0018).
 
 ---
 

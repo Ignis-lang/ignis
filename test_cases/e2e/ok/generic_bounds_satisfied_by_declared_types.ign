@@ -1,0 +1,45 @@
+// Declared field, payload and signature types that satisfy their bounds,
+// including a generic owner that forwards its own bounded parameter.
+trait Weigh {
+  weigh(&self): i32;
+}
+
+@implements(Weigh)
+record Stone {
+  public grams: i32;
+
+  weigh(&self): i32 {
+    return self.grams;
+  }
+}
+
+record Scale<T: Weigh> {
+  public item: T;
+}
+
+record Wrapper<U: Weigh> {
+  public scale: Scale<U>;
+}
+
+enum Slot<V: Weigh> {
+  FULL(Scale<V>),
+  EMPTY,
+}
+
+function measure(scale: &Scale<Stone>): i32 {
+  return scale.item.weigh();
+}
+
+function main(): i32 {
+  let wrapper: Wrapper<Stone> = Wrapper { scale: Scale { item: Stone { grams: 7 } } };
+  let slot: Slot<Stone> = Slot::EMPTY;
+
+  match (slot) {
+    Slot::FULL(_) -> {
+      return 1;
+    },
+    Slot::EMPTY -> {},
+  };
+
+  return measure(&wrapper.scale);
+}
