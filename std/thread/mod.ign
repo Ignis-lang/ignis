@@ -97,15 +97,6 @@ record Callback {
   public call: () -> void;
 }
 
-/// A boxed task, alone in its own heap cell.
-///
-/// `spawn` boxes the task instead of capturing it in the `run` closure: a
-/// closure captured by value inside another closure is not dropped with the
-/// outer one, which would leak the task's environment.
-record TaskCell<T> {
-  public call: () -> T;
-}
-
 /// Control block shared by a `JoinHandle<T>` and its thread.
 ///
 /// It is not generic, so the capture-free `threadEntry` can run it: the typed
@@ -310,25 +301,10 @@ export namespace Thread {
   /// Panics if the system cannot create the thread.
   function spawn<T: Send>(@sendable task: () -> T): JoinHandle<T> {
     let slot: *mut T = ThreadBlocks::allocateSlot(@sizeOf<T>(), @alignOf<T>()) as *mut T;
-    let cell: *mut TaskCell<T> = RawAllocator::allocateZeroedAligned(
-      1,
-      @sizeOf<TaskCell<T>>(),
-      @alignOf<TaskCell<T>>(),
-    ) as *mut TaskCell<T>;
-    let mut target: *mut TaskCell<T> = cell;
-
-    target[0] = TaskCell { call: task };
-
     let block: *mut ThreadBlock = ThreadBlocks::allocate(
       slot as *mut u8,
       (): void -> {
-        let boxed: TaskCell<T> = @read<TaskCell<T>>(cell);
-
-        RawAllocator::free(cell as *mut u8);
-
-        let call: () -> T = boxed.call;
-
-        @write<T>(slot, call());
+        @write<T>(slot, task());
       },
       (): void -> {
         @dropInPlace<T>(slot);

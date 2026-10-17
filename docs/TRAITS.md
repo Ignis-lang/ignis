@@ -286,7 +286,10 @@ a function, a method, a record or an enum:
   `@implements(Sync)` declaration. A closure bound to a `Send` or `Sync` parameter is judged by
   what it captures (A0252); any other function value is rejected (A0253).
 
-A type argument that misses a bound is an error (A0247).
+A type argument that misses a bound is an error (A0247). Declared types are checked too, even
+when no expression has them: record and static field types, enum payload types, and the parameter
+and return types of every function and method, called or not. A generic record or enum's own
+type parameter used there satisfies a bound only when it declares the bound itself.
 
 ### Current Limit
 

@@ -1,0 +1,55 @@
+// e2e: std
+// Generic code whose parameter, field and function types nest the type
+// parameter inside other generic and compound types, instantiated with several
+// types. Substituting such a type interns new types while the generic one is
+// still being read, which once read through a reference into the moved type store.
+import Vector from "std::vector";
+import Option from "std::option";
+
+record Bag<T> {
+  items: Vector<T>;
+  spare: Option<Vector<T>>;
+}
+
+function countOf<T>(items: &Vector<T>): u64 {
+  return items.length();
+}
+
+function takeAll<T>(items: Vector<T>): u64 {
+  return items.length();
+}
+
+function applyPair<T>(items: &Vector<T>, value: T, count: (&Vector<T>, T) -> u64): u64 {
+  return count(items, value);
+}
+
+function bagOf<T>(value: T, other: T): Bag<T> {
+  let mut items: Vector<T> = Vector::new<T>();
+  items.push(value);
+  items.push(other);
+
+  let mut extra: Vector<T> = Vector::new<T>();
+  extra.push(other);
+
+  return Bag { items: items, spare: Option::SOME(extra) };
+}
+
+function measure<T>(value: T, other: T): u64 {
+  let bag: Bag<T> = bagOf<T>(value, other);
+  let mut counted: u64 = countOf<T>(&bag.items) + applyPair<T>(&bag.items, value, (items: &Vector<T>, item: T): u64 -> items.length() + 1);
+
+  if (let Option::SOME(spare) = &bag.spare) {
+    counted += countOf<T>(&spare);
+  }
+
+  let mut copy: Vector<T> = Vector::new<T>();
+  copy.push(other);
+
+  return counted + takeAll<T>(copy);
+}
+
+function main(): i32 {
+  let total: u64 = measure<i32>(1, 2) + measure<u8>(3, 4) + measure<boolean>(true, false) + measure<f64>(1.5, 2.5) + measure<char>('a', 'b');
+
+  return total as i32;
+}

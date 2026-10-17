@@ -1242,6 +1242,225 @@ export namespace Analyzer {
       }
     }
 
+    function copyDefinitionIds(
+      source: &Vector<Analyzer::DefinitionId>
+    ): Vector<Analyzer::DefinitionId> {
+      let mut copied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        if (let Option::SOME(definition) = source.get(index)) {
+          copied.push(*definition);
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    /// The types a record's fields or an enum's variant payloads hold inline,
+    /// with the owner's type parameters replaced by `typeArguments` when given.
+    function nominalMemberTypes(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      owner: Analyzer::DefinitionId,
+      typeArguments: &Vector<Analyzer::TypeId>,
+    ): Vector<Analyzer::TypeId> {
+      let mut memberIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      match (defStore.get(owner)) {
+        Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+          memberIds = Analyzer::Checks::copyDefinitionIds(&recordDef.fields);
+          typeParams = Analyzer::Checks::copyDefinitionIds(&recordDef.typeParams);
+        },
+        Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+          memberIds = Analyzer::Checks::copyDefinitionIds(&enumDef.variants);
+          typeParams = Analyzer::Checks::copyDefinitionIds(&enumDef.typeParams);
+        },
+        _ -> {},
+      };
+
+      let mut declared: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < memberIds.length()) {
+        if (let Option::SOME(memberId) = memberIds.get(memberIndex)) {
+          match (defStore.get(*memberId)) {
+            Option::SOME(Analyzer::Definition::Field(fieldDef)) -> {
+              declared.push(fieldDef.fieldType);
+            },
+            Option::SOME(Analyzer::Definition::Variant(variantDef)) -> {
+              let mut payloadIndex: u64 = 0;
+
+              while (payloadIndex < variantDef.payload.length()) {
+                if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+                  declared.push(*payloadType);
+                }
+
+                payloadIndex += 1;
+              }
+            },
+            _ -> {},
+          };
+        }
+
+        memberIndex += 1;
+      }
+
+      let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &typeParams);
+
+      if (typeArguments.isEmpty() || typeParamSymbols.length() != typeArguments.length()) {
+        return declared;
+      }
+
+      let mut substituted: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut declaredIndex: u64 = 0;
+
+      while (declaredIndex < declared.length()) {
+        if (let Option::SOME(declaredType) = declared.get(declaredIndex)) {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          substituted.push(typeStoreRef.substitute(*declaredType, &typeParamSymbols, typeArguments));
+        }
+
+        declaredIndex += 1;
+      }
+
+      return substituted;
+    }
+
+    /// Whether a value of `typeId` holds a value of the record or enum
+    /// `target` inline, through fields, payloads, tuples, arrays and aliases.
+    /// Pointers, references, slices and functions hold it out of line.
+    ///
+    /// `visited` keeps every other nominal from being expanded twice, so a
+    /// different recursive type met on the way ends the walk instead of
+    /// looping; `depth` bounds generic types whose arguments grow.
+    function typeHoldsInline(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+      target: Analyzer::DefinitionId,
+      visited: &mut Vector<u32>,
+      depth: u64,
+    ): boolean {
+      if (depth > 64) {
+        return false;
+      }
+
+      let mut visitedIndex: u64 = 0;
+
+      while (visitedIndex < visited.length()) {
+        if (let Option::SOME(seen) = visited.get(visitedIndex)) {
+          if (*seen == typeId.raw()) {
+            return false;
+          }
+        }
+
+        visitedIndex += 1;
+      }
+
+      let mut visitedRef: &mut Vector<u32> = visited;
+      visitedRef.push(typeId.raw());
+
+      let mut inner: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut owner: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut typeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      match (typeStore.get(typeId)) {
+        Option::SOME(Analyzer::Type::Record(definition)) -> {
+          owner = Option::SOME(definition);
+        },
+        Option::SOME(Analyzer::Type::Enum(definition)) -> {
+          owner = Option::SOME(definition);
+        },
+        Option::SOME(Analyzer::Type::Instance(instance)) -> {
+          owner = Option::SOME(instance.definition);
+          typeArguments = Analyzer::Typecheck::copyVariantPayloadTypeIds(&instance.typeArguments);
+        },
+        Option::SOME(Analyzer::Type::Tuple(tuple)) -> {
+          inner = Analyzer::Typecheck::copyVariantPayloadTypeIds(&tuple.elements);
+        },
+        Option::SOME(Analyzer::Type::FixedArray(element, _)) -> {
+          inner.push(element);
+        },
+        Option::SOME(Analyzer::Type::Alias(definition)) -> {
+          if (let Option::SOME(Analyzer::Definition::TypeAlias(aliasDef)) = defStore.get(definition)) {
+            inner.push(aliasDef.aliasedType);
+          }
+        },
+        _ -> {},
+      };
+
+      if (let Option::SOME(definition) = owner) {
+        if (definition.raw() == target.raw()) {
+          return true;
+        }
+
+        inner = Analyzer::Checks::nominalMemberTypes(defStore, typeStore, definition, &typeArguments);
+      }
+
+      let mut innerIndex: u64 = 0;
+
+      while (innerIndex < inner.length()) {
+        if (let Option::SOME(innerType) = inner.get(innerIndex)) {
+          if (Analyzer::Checks::typeHoldsInline(defStore, typeStore, *innerType, target, visited, depth + 1)) {
+            return true;
+          }
+        }
+
+        innerIndex += 1;
+      }
+
+      return false;
+    }
+
+    /// Reject a record or enum that holds itself inline: its size would be
+    /// infinite, so it has no layout to emit.
+    function checkInlineRecursion(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      name: &String,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(defId) = Analyzer::Checks::findItemDef(pass1, pass2, itemId) else {
+        return;
+      };
+
+      let noTypeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let memberTypes: Vector<Analyzer::TypeId> = Analyzer::Checks::nominalMemberTypes(
+        defStore,
+        typeStore,
+        defId,
+        &noTypeArguments,
+      );
+      let mut visited: Vector<u32> = Vector::new<u32>();
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < memberTypes.length()) {
+        if (let Option::SOME(memberType) = memberTypes.get(memberIndex)) {
+          if (Analyzer::Checks::typeHoldsInline(defStore, typeStore, *memberType, defId, &mut visited, 0)) {
+            let message: String = `type '${name.toStr()}' contains itself without indirection`;
+            Analyzer::Checks::emitError(
+              diagnostics,
+              span,
+              DiagnosticCode::RECURSIVE_TYPE_WITHOUT_INDIRECTION,
+              message.toStr(),
+              "its size would be infinite; hold the recursive value through a pointer",
+            );
+            return;
+          }
+        }
+
+        memberIndex += 1;
+      }
+    }
+
     /// Check one item: functions and methods get the missing-return check
     /// and body walk, namespaces recurse, exports unwrap, constants walk
     /// their value, and everything else is skipped.
@@ -1275,6 +1494,7 @@ export namespace Analyzer {
         },
         Ast::Item::Node::Record(record_) -> {
           Analyzer::Checks::checkCLayoutRecord(diagnostics, defStore, typeStore, module, pass1, pass2, itemId, &record_);
+          Analyzer::Checks::checkInlineRecursion(diagnostics, defStore, typeStore, pass1, pass2, itemId, &record_.name, record_.span);
           Analyzer::Checks::checkMethods(
             diagnostics,
             defStore,
@@ -1290,6 +1510,7 @@ export namespace Analyzer {
           Analyzer::Checks::checkExternRecords(diagnostics, defStore, typeStore, module, pass1, pass2, &externItem.items);
         },
         Ast::Item::Node::Enum(enum_) -> {
+          Analyzer::Checks::checkInlineRecursion(diagnostics, defStore, typeStore, pass1, pass2, itemId, &enum_.name, enum_.span);
           Analyzer::Checks::checkMethods(
             diagnostics,
             defStore,

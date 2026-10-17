@@ -1101,6 +1101,22 @@ export namespace Analyzer {
     }
   }
 
+  /// Copies a list of type ids out of a type the store may move.
+  function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+    let mut copy: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copy.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copy;
+  }
+
   /// The key the type store's interning index uses.
   ///
   /// `Analyzer::Type` carries no `Hash` implementation, so a compound type is
@@ -1823,6 +1839,9 @@ export namespace Analyzer {
         return typeId;
       };
 
+      // `kind` points into `self.types`, which the recursive calls below grow
+      // and may move: every arm reads what it needs before recursing.
+
       match (kind) {
         Analyzer::Type::I8 -> { return typeId; },
         Analyzer::Type::I16 -> { return typeId; },
@@ -1844,26 +1863,30 @@ export namespace Analyzer {
         Analyzer::Type::Enum(_) -> { return typeId; },
         Analyzer::Type::Alias(_) -> { return typeId; },
         Analyzer::Type::Pointer(p) -> {
-          let substitutedPointee: Analyzer::TypeId = self.substitute(p.pointee, params, args);
+          let pointee: Analyzer::TypeId = p.pointee;
+          let mutable: boolean = p.mutable;
+          let substitutedPointee: Analyzer::TypeId = self.substitute(pointee, params, args);
 
-          if (substitutedPointee.raw() == p.pointee.raw()) {
+          if (substitutedPointee.raw() == pointee.raw()) {
             return typeId;
           }
 
-          if (p.mutable) {
+          if (mutable) {
             return self.mutablePointer(substitutedPointee);
           }
 
           return self.pointer(substitutedPointee);
         },
         Analyzer::Type::Reference(r) -> {
-          let substitutedReferent: Analyzer::TypeId = self.substitute(r.referent, params, args);
+          let referent: Analyzer::TypeId = r.referent;
+          let mutable: boolean = r.mutable;
+          let substitutedReferent: Analyzer::TypeId = self.substitute(referent, params, args);
 
-          if (substitutedReferent.raw() == r.referent.raw()) {
+          if (substitutedReferent.raw() == referent.raw()) {
             return typeId;
           }
 
-          if (r.mutable) {
+          if (mutable) {
             return self.mutableReference(substitutedReferent);
           }
 
@@ -1879,13 +1902,15 @@ export namespace Analyzer {
           return self.slice(substitutedElement);
         },
         Analyzer::Type::Range(range) -> {
-          let substitutedElement: Analyzer::TypeId = self.substitute(range.element, params, args);
+          let element: Analyzer::TypeId = range.element;
+          let inclusive: boolean = range.inclusive;
+          let substitutedElement: Analyzer::TypeId = self.substitute(element, params, args);
 
-          if (substitutedElement.raw() == range.element.raw()) {
+          if (substitutedElement.raw() == element.raw()) {
             return typeId;
           }
 
-          return self.range(substitutedElement, range.inclusive);
+          return self.range(substitutedElement, inclusive);
         },
         Analyzer::Type::FixedArray(element, length) -> {
           let substitutedElement: Analyzer::TypeId = self.substitute(element, params, args);
@@ -1897,12 +1922,13 @@ export namespace Analyzer {
           return self.fixedArray(substitutedElement, length);
         },
         Analyzer::Type::Tuple(t) -> {
+          let elements: Vector<Analyzer::TypeId> = Analyzer::copyTypeIds(&t.elements);
           let mut changed: boolean = false;
           let mut newElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
           let mut index: u64 = 0;
 
-          while (index < t.elements.length()) {
-            let Option::SOME(elementId) = t.elements.get(index) else {
+          while (index < elements.length()) {
+            let Option::SOME(elementId) = elements.get(index) else {
               index += 1;
               continue;
             };
@@ -1924,12 +1950,14 @@ export namespace Analyzer {
           return typeId;
         },
         Analyzer::Type::Function(f) -> {
+          let paramTypes: Vector<Analyzer::TypeId> = Analyzer::copyTypeIds(&f.params);
+          let returnType: Analyzer::TypeId = f.returnType;
           let mut changed: boolean = false;
           let mut newParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
           let mut index: u64 = 0;
 
-          while (index < f.params.length()) {
-            let Option::SOME(paramTypeId) = f.params.get(index) else {
+          while (index < paramTypes.length()) {
+            let Option::SOME(paramTypeId) = paramTypes.get(index) else {
               index += 1;
               continue;
             };
@@ -1944,9 +1972,9 @@ export namespace Analyzer {
             index += 1;
           }
 
-          let substitutedReturnType: Analyzer::TypeId = self.substitute(f.returnType, params, args);
+          let substitutedReturnType: Analyzer::TypeId = self.substitute(returnType, params, args);
 
-          if (substitutedReturnType.raw() != f.returnType.raw()) {
+          if (substitutedReturnType.raw() != returnType.raw()) {
             changed = true;
           }
 
@@ -1957,12 +1985,14 @@ export namespace Analyzer {
           return typeId;
         },
         Analyzer::Type::RawFunction(f) -> {
+          let paramTypes: Vector<Analyzer::TypeId> = Analyzer::copyTypeIds(&f.params);
+          let returnType: Analyzer::TypeId = f.returnType;
           let mut changed: boolean = false;
           let mut newParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
           let mut index: u64 = 0;
 
-          while (index < f.params.length()) {
-            let Option::SOME(paramTypeId) = f.params.get(index) else {
+          while (index < paramTypes.length()) {
+            let Option::SOME(paramTypeId) = paramTypes.get(index) else {
               index += 1;
               continue;
             };
@@ -1977,9 +2007,9 @@ export namespace Analyzer {
             index += 1;
           }
 
-          let substitutedReturnType: Analyzer::TypeId = self.substitute(f.returnType, params, args);
+          let substitutedReturnType: Analyzer::TypeId = self.substitute(returnType, params, args);
 
-          if (substitutedReturnType.raw() != f.returnType.raw()) {
+          if (substitutedReturnType.raw() != returnType.raw()) {
             changed = true;
           }
 
@@ -2012,12 +2042,14 @@ export namespace Analyzer {
           return typeId;
         },
         Analyzer::Type::Instance(instance) -> {
+          let typeArguments: Vector<Analyzer::TypeId> = Analyzer::copyTypeIds(&instance.typeArguments);
+          let definition: Analyzer::DefinitionId = instance.definition;
           let mut changed: boolean = false;
           let mut newTypeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
           let mut index: u64 = 0;
 
-          while (index < instance.typeArguments.length()) {
-            let Option::SOME(typeArgumentId) = instance.typeArguments.get(index) else {
+          while (index < typeArguments.length()) {
+            let Option::SOME(typeArgumentId) = typeArguments.get(index) else {
               index += 1;
               continue;
             };
@@ -2033,7 +2065,7 @@ export namespace Analyzer {
           }
 
           if (changed) {
-            return self.instance(instance.definition, newTypeArguments);
+            return self.instance(definition, newTypeArguments);
           }
 
           return typeId;

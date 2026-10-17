@@ -7190,6 +7190,14 @@ export namespace Borrowck {
 
     Borrowck::checkNode(defStore, typeStore, symbols, hir, &mut state, diagnostics, schedules, bodyId);
 
+    // A body's tail is returned like a `return` would return it. A tail that
+    // names a binding of the function's root scope, such as a parameter, is
+    // not handed over by any block, so without this the function's exit
+    // would drop the value it is returning.
+    if (bodyReturnsTail && state.reachable) {
+      Borrowck::markTailReturned(defStore, typeStore, hir, &mut state, Borrowck::innermostTail(hir, bodyId));
+    }
+
     // A body's final expression is its result, handed to the caller like a
     // returned value.
     Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, &mut state, diagnostics, bodyId);
@@ -7214,6 +7222,57 @@ export namespace Borrowck {
 
         index += 1;
       }
+    }
+  }
+
+  /// The node a body's value finally comes from, following block tails.
+  function innermostTail(hir: &Hir::HirStore, nodeId: Hir::HirId): Hir::HirId {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return nodeId;
+    };
+
+    if (let Hir::HirKind::Block(block) = &node.kind) {
+      if (let Option::SOME(tail) = block.expression) {
+        return Borrowck::innermostTail(hir, tail);
+      }
+    }
+
+    return nodeId;
+  }
+
+  /// Marks the binding a function's tail value moves out of, and every
+  /// closure environment it carries, as returned. Mirrors the `Return` arm of
+  /// `checkNode`, minus what that arm already checked while visiting the node.
+  function markTailReturned(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    tail: Hir::HirId,
+  ): void {
+    if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, tail)) {
+      if (!state.isEnvironmentCapture(source.raw()) && state.isMoveValid(source.raw())) {
+        Borrowck::noteMove(state, source, Borrowck::OwnershipReport::CONSUMER_RETURN, Borrowck::closingSpanOf(hir, tail));
+
+        let mut returnRef: &mut Borrowck::State = state;
+        returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
+      }
+    }
+
+    let mut closureEnvOwners: Vector<u32> = Vector::new<u32>();
+    Borrowck::collectClosureEnvOwners(hir, state, tail, &mut closureEnvOwners);
+
+    let mut ownerIndex: u64 = 0;
+
+    while (ownerIndex < closureEnvOwners.length()) {
+      if (let Option::SOME(owner) = closureEnvOwners.get(ownerIndex)) {
+        if (state.isMoveValid(*owner)) {
+          let mut closureRef: &mut Borrowck::State = state;
+          closureRef.setMoveValue(*owner, Borrowck::MOVE_RETURNED);
+        }
+      }
+
+      ownerIndex += 1;
     }
   }
 

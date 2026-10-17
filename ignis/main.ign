@@ -191,6 +191,78 @@ function renderBagCollecting(bag: &DiagnosticBag, file: &SourceFile, report: &mu
   Output::message(DiagnosticRenderer::renderBag(bag, file, false));
 }
 
+/// Render a diagnostic bag that covers the whole program, each diagnostic
+/// against the module its primary span points into. A span whose file is not
+/// among `files` falls back to the entry module.
+///
+/// The renderer reads every label of one diagnostic from the same file, so a
+/// label that points into another module still renders against this one.
+function renderProgramBag(
+  bag: &DiagnosticBag,
+  files: &Vector<SourceFile>,
+  entry: &SourceFile,
+  useAnsi: boolean,
+): String {
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (index > 0) {
+      rendered.pushStr("\n");
+    }
+
+    let mut current: String = DiagnosticRenderer::render(diagnostic, entry, useAnsi);
+    let spanPath: String = String::create(diagnostic.primarySpan.filePath);
+    let mut fileIndex: u64 = 0;
+
+    while (fileIndex < files.length()) {
+      if (let Option::SOME(candidate) = files.get(fileIndex)) {
+        if (spanPath.equals(candidate.path.asStr())) {
+          current = DiagnosticRenderer::render(diagnostic, candidate, useAnsi);
+          break;
+        }
+      }
+
+      fileIndex += 1;
+    }
+
+    rendered.push(&current);
+    index += 1;
+  }
+
+  return rendered;
+}
+
+/// `renderBagCollecting` for a bag that covers the whole program.
+function renderProgramBagCollecting(
+  bag: &DiagnosticBag,
+  files: &Vector<SourceFile>,
+  entry: &SourceFile,
+  report: &mut String,
+): void {
+  if (bag.isEmpty()) {
+    return;
+  }
+
+  let styled: String = renderProgramBag(bag, files, entry, true);
+
+  let mut reportRef: &mut String = report;
+  reportRef.push(&styled);
+  reportRef.pushChar('\n');
+
+  if (DiagnosticRenderer::stderrUsesColor()) {
+    Output::message(styled);
+    return;
+  }
+
+  Output::message(renderProgramBag(bag, files, entry, false));
+}
+
 /// `text` without its ANSI escape sequences: every `ESC [` up to and including
 /// the sequence's final byte (`@` through `~`) is dropped.
 export function stripAnsiEscapes(text: &String): String {
@@ -1731,7 +1803,7 @@ export function compileDiscovered(
   if (quiet) {
     collectDiagnosticMessages(&handlerDiagnostics, Severity::ERROR, false, &mut errorMessages);
   } else {
-    renderBagCollecting(&handlerDiagnostics, file, &mut report);
+    renderProgramBagCollecting(&handlerDiagnostics, &files, file, &mut report);
   }
 
   if (!quiet) {
@@ -1953,7 +2025,7 @@ export function compileDiscovered(
     collectDiagnosticMessages(&captureDiagnostics, Severity::WARNING, false, &mut warningMessages);
   } else {
     printStatus(formatPhaseLine("capture", captureErrors, captureWarnings), verbose);
-    renderBagCollecting(&captureDiagnostics, file, &mut report);
+    renderProgramBagCollecting(&captureDiagnostics, &files, file, &mut report);
   }
 
   // A `@test` function is reached from the harness translation unit and from
@@ -2084,7 +2156,7 @@ export function compileDiscovered(
     collectDiagnosticMessages(&checked.diagnostics, Severity::WARNING, false, &mut warningMessages);
   } else {
     printStatus(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings), verbose);
-    renderBagCollecting(&checked.diagnostics, file, &mut report);
+    renderProgramBagCollecting(&checked.diagnostics, &files, file, &mut report);
   }
 
   // A check answers whether the program is well formed, so it stops with the
@@ -2250,7 +2322,7 @@ export function compileDiscovered(
           if (quiet) {
             collectDiagnosticMessages(&diagnostics, Severity::ERROR, false, &mut errorMessages);
           } else {
-            renderBagCollecting(&diagnostics, file, &mut report);
+            renderProgramBagCollecting(&diagnostics, &hooks.sources, file, &mut report);
           }
           return CompiledProgram {
             source: String::new(),
@@ -2287,7 +2359,7 @@ export function compileDiscovered(
     if (quiet) {
       collectDiagnosticMessages(&panicDiagnostics, Severity::ERROR, false, &mut errorMessages);
     } else {
-      renderBagCollecting(&panicDiagnostics, file, &mut report);
+      renderProgramBagCollecting(&panicDiagnostics, &hooks.sources, file, &mut report);
     }
 
     return CompiledProgram {
@@ -3200,6 +3272,27 @@ function mainSampleFixtureNamed(name: str): FixtureCase {
 /// reported as `success: true` with a non-empty `skipped` reason, mirroring
 /// the host's `fixture_execution_result(case, true, String::new(), Some(reason))`
 /// path in `run_single_fixture`.
+@test
+function programBagRendersEachDiagnosticAgainstItsOwnModule(): void {
+  let entryText: str = "function main(): i32 {\n  return 0;\n}\n";
+  let entry: SourceFile = SourceFile::create("entry.ign", entryText);
+  let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
+  files.push(SourceFile::create("entry.ign", entryText));
+  files.push(SourceFile::create("helper.ign", "let a: i32 = 1;\nlet b: i32 = 2;\n"));
+
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(Diagnostic::new(Severity::ERROR, "O0003", "in helper", SourceSpan::new("helper.ign", 20, 21)));
+  bag.push(Diagnostic::new(Severity::ERROR, "O0003", "elsewhere", SourceSpan::new("missing.ign", 2, 3)));
+
+  let rendered: String = renderProgramBag(&bag, &files, &entry, false);
+
+  let helperLocation: String = String::create("helper.ign:2:5");
+  let entryLocation: String = String::create("entry.ign:1:3");
+
+  Test::assert(rendered.contains(&helperLocation));
+  Test::assert(rendered.contains(&entryLocation));
+}
+
 @test
 function mainFixtureOutcomeReportsAHeldSkipContractAsPassing(): void {
   let fixture: FixtureCase = mainSampleFixtureNamed("e2e::ownership::stillUnimplemented");

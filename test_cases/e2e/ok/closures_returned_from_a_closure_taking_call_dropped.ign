@@ -1,0 +1,43 @@
+// A closure argument moves into its parameter, so a closure returned by a
+// callee that takes one is a value the caller owns, whatever it holds: a fresh
+// closure, one capturing the parameter, or the parameter itself.
+function fresh(f: () -> i32): () -> i32 {
+  let n: i32 = 3;
+
+  return (): i32 -> n;
+}
+
+function wrapping(f: () -> i32): () -> i32 {
+  return (): i32 -> f() + 4;
+}
+
+function same(f: () -> i32): () -> i32 {
+  return f;
+}
+
+function makeInner(base: i32): () -> i32 {
+  return (): i32 -> base;
+}
+
+record Factory {
+  public offset: i32;
+
+  public build(&self, f: () -> i32): () -> i32 {
+    let offset: i32 = self.offset;
+
+    return (): i32 -> f() + offset;
+  }
+}
+
+function main(): i32 {
+  let first = fresh((): i32 -> 1);
+  let second = wrapping(makeInner(10));
+  let third = same(makeInner(20));
+  let literalBase: i32 = 5;
+  let fourth = same((): i32 -> literalBase);
+  let factory: Factory = Factory { offset: 100 };
+  let fifth = factory.build(makeInner(1));
+  let unused = wrapping(makeInner(30));
+
+  return first() + second() + third() + fourth() + fifth();
+}

@@ -993,13 +993,16 @@ export namespace Mono {
 
     if (let Option::SOME(definition) = defStore.get(paramDefId)) {
       if (let Analyzer::Definition::Variable(variableDef) = definition) {
-        let substituted: Analyzer::TypeId = Mono::substituteType(defStore, typeStore, symbols, state, subst, variableDef.declaredType);
+        // `variableDef` points into the definition store, which substituting
+        // the type grows and may move: read it first.
+        let declaredType: Analyzer::TypeId = variableDef.declaredType;
         let clonedName: Analyzer::SymbolId = variableDef.name;
         let clonedVisibility: Analyzer::Visibility = variableDef.visibility;
         let clonedMutable: boolean = variableDef.mutable;
         let clonedTakes: boolean = variableDef.takes;
         let clonedNoEscape: boolean = variableDef.noEscape;
         let clonedAlignment: Option<u64> = variableDef.alignment;
+        let substituted: Analyzer::TypeId = Mono::substituteType(defStore, typeStore, symbols, state, subst, declaredType);
 
         let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
         cloned = Option::SOME(defStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
@@ -3697,10 +3700,13 @@ export namespace Mono {
 
       if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
         if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
+          // `fieldDef` points into the definition store, which substituting
+          // the field type grows and may move: read it first.
+          let fieldType: Analyzer::TypeId = fieldDef.fieldType;
           clonedName = fieldDef.name;
-          clonedType = Mono::substituteType(defStore, typeStore, symbols, state, subst, fieldDef.fieldType);
           clonedIndex = fieldDef.index;
           clonedAlignment = fieldDef.alignment;
+          clonedType = Mono::substituteType(defStore, typeStore, symbols, state, subst, fieldType);
           haveField = true;
         }
       }
