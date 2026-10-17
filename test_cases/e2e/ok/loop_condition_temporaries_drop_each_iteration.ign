@@ -1,0 +1,81 @@
+// e2e: std
+// A loop condition runs once per iteration, and so does a `for` update: each
+// run's temporaries are dropped once, at the end of that iteration or on the
+// exit edge, never overwritten by the next run. A condition evaluated
+// `iterations + 1` times drops `iterations + 1` values. The `String`
+// conditions leak under the fixture runner's leak check if any run is lost.
+import Io from "std::io";
+
+@implements(Drop)
+record Counted {
+  public value: i32;
+  public drops: *mut i32;
+
+  public below(&self, limit: i32): boolean {
+    return self.value < limit;
+  }
+
+  drop(&mut self): void {
+    let mut target: *mut i32 = self.drops;
+
+    target[0] = target[0] + 1;
+  }
+}
+
+function counted(value: i32, drops: *mut i32): Counted {
+  return Counted { value: value, drops: drops };
+}
+
+function label(index: i32): String {
+  return String::create(index);
+}
+
+function main(): i32 {
+  let mut whileDrops: i32 = 0;
+  let whileCounter: *mut i32 = (&mut whileDrops) as *mut i32;
+  let mut index: i32 = 0;
+
+  while (counted(index, whileCounter).below(4)) {
+    index += 1;
+  }
+
+  let mut breakDrops: i32 = 0;
+  let breakCounter: *mut i32 = (&mut breakDrops) as *mut i32;
+  let mut step: i32 = 0;
+
+  while (counted(step, breakCounter).below(10)) {
+    step += 1;
+
+    if (step == 2) {
+      continue;
+    }
+
+    if (step == 3) {
+      break;
+    }
+  }
+
+  let mut forDrops: i32 = 0;
+  let forCounter: *mut i32 = (&mut forDrops) as *mut i32;
+  let mut updateDrops: i32 = 0;
+  let updateCounter: *mut i32 = (&mut updateDrops) as *mut i32;
+
+  for (let position: i32 = 0; counted(position, forCounter).below(3); position += counted(1, updateCounter).value) {
+  }
+
+  let mut labelIndex: i32 = 0;
+
+  while (label(labelIndex).length() > 0 && labelIndex < 3) {
+    labelIndex += 1;
+  }
+
+  for (let labelPosition: i32 = 0; label(labelPosition).length() > 0 && labelPosition < 3; labelPosition += label(1).length() as i32) {
+  }
+
+  Io::println(`while: ${whileDrops}`);
+  Io::println(`break: ${breakDrops}`);
+  Io::println(`for: ${forDrops}`);
+  Io::println(`update: ${updateDrops}`);
+
+  return whileDrops == 5 && breakDrops == 3 && forDrops == 4 && updateDrops == 3 ? 0 : 1;
+}
