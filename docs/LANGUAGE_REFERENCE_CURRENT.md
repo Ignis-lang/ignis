@@ -313,6 +313,20 @@ record Counter {
 }
 ```
 
+A field of function type is called like a method: `value.name(args)` calls the field `name` when the record has no instance method of that name. The receiver can be a record value or a reference to one (`&` or `&mut`), the same receivers a method call accepts; through a pointer, dereference first: `(*pointer).name(args)`. The field may be typed by an alias of a function type, and on a generic record the field's type takes the instance's type arguments. A record that declares an instance method and a function-typed field with the same name is an error at the method (A0257).
+
+```ignis
+record Handler {
+    public onEvent: (i32) -> i32;
+}
+
+function dispatch(handler: &Handler, event: i32): i32 {
+    return handler.onEvent(event);
+}
+```
+
+Any expression whose type is a function type can be called directly, so `(handler.onEvent)(1)` and `makeHandler()(1)` work as well.
+
 Records support static fields and static methods:
 
 ```ignis

@@ -39,6 +39,25 @@ may do:
 A method declared without a receiver is not callable on an instance. Use `static` for constructors
 and other associated functions.
 
+## Fields of function type
+
+A field of function type is called with method syntax when the record has no method of that name.
+It works on a value and through `&` and `&mut` references; through a pointer, dereference first.
+
+```ignis
+record Handler {
+    public onEvent: (i32) -> i32;
+}
+
+function dispatch(handler: &Handler, event: i32): i32 {
+    return handler.onEvent(event);
+}
+```
+
+A record cannot declare an instance method and a function-typed field with the same name (A0257):
+the call would be ambiguous. Any expression of function type can also be called directly, as in
+`(handler.onEvent)(1)`.
+
 ## Static members
 
 Records carry static fields and static methods, reached through `::`.

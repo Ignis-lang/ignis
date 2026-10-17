@@ -2093,25 +2093,33 @@ export namespace Lowering {
       });
     }
 
-    let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
-      &output.resolvedBodies.bodyResolution,
-      call.callee.raw(),
-    ) else {
-      return Lowering::errorNode(hir, typeStore, call.span);
-    };
-
     let mut localCallee: boolean = false;
     let mut calleeDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
 
-    match (resolved) {
-      Analyzer::ResolverBodies::ResolvedRef::Local(_) -> {
-        localCallee = true;
-      },
-      Analyzer::ResolverBodies::ResolvedRef::Definition(resolvedDef) -> {
-        calleeDefOpt = Option::SOME(resolvedDef);
-      },
-      _ -> {},
-    };
+    if (let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
+      &output.resolvedBodies.bodyResolution,
+      call.callee.raw(),
+    )) {
+      match (resolved) {
+        Analyzer::ResolverBodies::ResolvedRef::Local(_) -> {
+          localCallee = true;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Definition(resolvedDef) -> {
+          calleeDefOpt = Option::SOME(resolvedDef);
+        },
+        _ -> {},
+      };
+    } else {
+      // A callee that names nothing, such as `(holder.callback)`, is a
+      // function-typed value the typechecker already accepted.
+      let calleeType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, call.callee);
+
+      if (Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, calleeType).isNone()) {
+        return Lowering::errorNode(hir, typeStore, call.span);
+      }
+
+      localCallee = true;
+    }
 
     if (let Option::SOME(selectedDef) = Lowering::lookupCallTarget(&output.typecheck, exprId)) {
       calleeDefOpt = Option::SOME(selectedDef);
@@ -2128,30 +2136,7 @@ export namespace Lowering {
     // A callee resolving to a local is a function-typed value (a closure or
     // function parameter): the call goes through the value, not a definition.
     if (localCallee) {
-      let closureCallee: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, call.callee);
-
-      let closureArgs: Vector<Hir::HirId> = Lowering::lowerExpressionList(
-        defStore,
-        typeStore,
-        symbols,
-        module,
-        output,
-        locals,
-        hir,
-        &call.arguments,
-      );
-
-      let closureCallType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
-
-      let mut closureHirRef: &mut Hir::HirStore = hir;
-      return closureHirRef.alloc(Hir::HirNode {
-        kind: Hir::HirKind::CallClosure(Hir::HirCallClosure {
-          callee: closureCallee,
-          args: closureArgs,
-        }),
-        span: call.span,
-        typeId: closureCallType,
-      });
+      return Lowering::lowerCallThroughValue(defStore, typeStore, symbols, module, output, locals, hir, exprId, call);
     }
 
     let Option::SOME(calleeDef) = calleeDefOpt else {
@@ -2521,6 +2506,74 @@ export namespace Lowering {
     });
   }
 
+  /// A `CallClosure` of `call`: its callee is a function-typed value, so the
+  /// value is lowered and called rather than a definition.
+  function lowerCallThroughValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    call: &Ast::Expression::Call,
+  ): Hir::HirId {
+    let closureCallee: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, call.callee);
+
+    let closureArgs: Vector<Hir::HirId> = Lowering::lowerExpressionList(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      &call.arguments,
+    );
+
+    let closureCallType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+    let mut closureHirRef: &mut Hir::HirStore = hir;
+    return closureHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::CallClosure(Hir::HirCallClosure {
+        callee: closureCallee,
+        args: closureArgs,
+      }),
+      span: call.span,
+      typeId: closureCallType,
+    });
+  }
+
+  /// Whether the record `receiverType` names, generic or not, declares a field
+  /// `name` of function type.
+  function receiverHasFunctionField(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    receiverType: Analyzer::TypeId,
+    name: str,
+  ): boolean {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, receiverType);
+    let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (typeStore.get(resolved.typeId)) {
+      Option::SOME(Analyzer::Type::Record(recordDefId)) -> {
+        ownerOpt = Option::SOME(recordDefId);
+      },
+      Option::SOME(Analyzer::Type::Instance(instance)) -> {
+        ownerOpt = Option::SOME(instance.definition);
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(owner) = ownerOpt else {
+      return false;
+    };
+
+    return Analyzer::Typecheck::recordFunctionFieldType(defStore, typeStore, symbols, owner, name).isSome();
+  }
+
   /// Lowers `obj.method(args)` to `HirKind::MethodCall`.
   ///
   /// The method is found the way the typechecker finds it: the receiver's
@@ -2664,6 +2717,12 @@ export namespace Lowering {
           span: memberAccess.span,
           typeId: extensionType,
         });
+      }
+
+      // With no method of the name, the typechecker accepted a call through a
+      // field of function type: the field's value is the closure called.
+      if (Lowering::receiverHasFunctionField(defStore, typeStore, symbols, receiverType, memberAccess.member.toStr())) {
+        return Lowering::lowerCallThroughValue(defStore, typeStore, symbols, module, output, locals, hir, exprId, call);
       }
 
       return Lowering::errorNode(hir, typeStore, call.span);

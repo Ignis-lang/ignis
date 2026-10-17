@@ -1100,6 +1100,29 @@ export namespace Analyzer {
 
       let resolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, call.callee);
       let Option::SOME(resolved) = resolvedOpt else {
+        // A callee that names nothing, such as `(holder.callback)`, is still
+        // callable when its value has a function type.
+        if (let Option::SOME(calleeType) = _calleeType) {
+          if (let Option::SOME(functionType) = Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, calleeType)) {
+            if (call.typeArguments.length() > 0) {
+              Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on calls through function values");
+              return Option::NONE;
+            }
+
+            return Analyzer::Typecheck::checkCallThroughFunctionType(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              callExprId,
+              call,
+              functionType,
+            );
+          }
+        }
+
         Analyzer::Typecheck::emitUnsupported(state, call.span, "direct calls without resolved callee");
         return Option::NONE;
       };
@@ -1333,11 +1356,65 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (let Option::SOME(Analyzer::Type::Function(_)) = typeStore.get(declared)) {
-        return Option::SOME(declared);
+      return Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, declared);
+    }
+
+    /// `typeId` with its alias chain resolved, when that is a function type.
+    /// Whether a value can be called is decided on what its type names, not on
+    /// the alias spelling it.
+    function functionTypeThroughAliases(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      if (let Option::SOME(Analyzer::Type::Function(_)) = typeStore.get(resolved.typeId)) {
+        return Option::SOME(resolved.typeId);
       }
 
       return Option::NONE;
+    }
+
+    /// Typechecks a call whose callee is a function-typed value: `calleeType`
+    /// is that value's type, aliases already resolved.
+    function checkCallThroughFunctionType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      calleeType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(Analyzer::Type::Function(signature)) = typeStore.get(calleeType) else {
+        Analyzer::Typecheck::emitCallOnNonCallable(state, defStore, typeStore, symbols, call.span, calleeType);
+        return Option::NONE;
+      };
+
+      // `signature` points into the type store, which checking the arguments
+      // grows and may move: copy what the check reads.
+      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+      let returnType: Analyzer::TypeId = signature.returnType;
+
+      return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &paramTypes,
+        returnType,
+      );
     }
 
     function checkCallThroughLocal(
@@ -1363,22 +1440,17 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let Option::SOME(calleeType) = typeStore.get(binding.typeId) else {
+      if (typeStore.get(binding.typeId).isNone()) {
         Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through local values");
         return Option::NONE;
-      };
+      }
 
-      let Analyzer::Type::Function(signature) = calleeType else {
+      let Option::SOME(functionType) = Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, binding.typeId) else {
         Analyzer::Typecheck::emitCallOnNonCallable(state, defStore, typeStore, symbols, call.span, binding.typeId);
         return Option::NONE;
       };
 
-      // `signature` points into the type store, which checking the arguments
-      // grows and may move: copy what the check reads.
-      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
-      let returnType: Analyzer::TypeId = signature.returnType;
-
-      return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+      return Analyzer::Typecheck::checkCallThroughFunctionType(
         state,
         defStore,
         typeStore,
@@ -1387,8 +1459,7 @@ export namespace Analyzer {
         resolvedBodies,
         callExprId,
         call,
-        &paramTypes,
-        returnType,
+        functionType,
       );
     }
 
@@ -2098,6 +2169,25 @@ export namespace Analyzer {
       }
 
       let Option::SOME(methodDefId) = instanceOpt else {
+        // With no method of the name, `value.name(args)` calls a field of
+        // function type. A record cannot declare both (A0257).
+        if (let Option::SOME(fieldType) = Analyzer::Typecheck::recordFunctionFieldType(defStore, typeStore, symbols, owner.defId, memberName)) {
+          return Analyzer::Typecheck::checkFunctionFieldCall(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            callExprId,
+            call,
+            memberExprId,
+            ma,
+            receiverType,
+            fieldType,
+          );
+        }
+
         let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
           defStore,
           &owner.staticMethods,
@@ -3660,6 +3750,111 @@ export namespace Analyzer {
       }
 
       return Option::NONE;
+    }
+
+    /// The declared type of the record `ownerDefId`'s field `name`, when that
+    /// type, aliases resolved, is a function type.
+    function recordFunctionFieldType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ownerDefId: Analyzer::DefinitionId,
+      name: str,
+    ): Option<Analyzer::TypeId> {
+      let mut fieldIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(ownerDefId)) {
+        fieldIds = Analyzer::Typecheck::copyDefinitionIdVector(&recordDef.fields);
+      }
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let fieldSymbol: Analyzer::SymbolId = symbolsRef.intern(name);
+      let mut index: u64 = 0;
+
+      while (index < fieldIds.length()) {
+        let mut fieldType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(fieldDefId) = fieldIds.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldDefId)) {
+            if (fieldDef.name.raw() == fieldSymbol.raw()) {
+              fieldType = Option::SOME(fieldDef.fieldType);
+            }
+          }
+        }
+
+        if (let Option::SOME(found) = fieldType) {
+          if (Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, found).isNone()) {
+            return Option::NONE;
+          }
+
+          return Option::SOME(found);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Typechecks `value.name(args)` where `name` is a field of function type
+    /// on the receiver: the field's value is the callee. A generic receiver
+    /// gets the field type with its type arguments substituted.
+    function checkFunctionFieldCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      memberExprId: Ast::ExpressionId,
+      ma: &Ast::Expression::MemberAccess,
+      receiverType: Analyzer::TypeId,
+      declaredFieldType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on calls through function values");
+        return Option::NONE;
+      }
+
+      let mut fieldType: Analyzer::TypeId = declaredFieldType;
+      let peeked: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, receiverType);
+
+      if (let Option::SOME(Analyzer::Type::Instance(_)) = typeStore.get(peeked.typeId)) {
+        let Option::SOME(substituted) = Analyzer::Typecheck::checkMemberAccessOnInstanceReceiver(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          memberExprId,
+          ma,
+          receiverType,
+        ) else {
+          return Option::NONE;
+        };
+
+        fieldType = substituted;
+      } else {
+        Analyzer::Typecheck::recordExprType(state, memberExprId, fieldType);
+      }
+
+      let Option::SOME(functionType) = Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, fieldType) else {
+        Analyzer::Typecheck::emitCallOnNonCallable(state, defStore, typeStore, symbols, call.span, fieldType);
+        return Option::NONE;
+      };
+
+      return Analyzer::Typecheck::checkCallThroughFunctionType(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        functionType,
+      );
     }
 
     /// The declared name of `defId`, for diagnostics that name the owner of a

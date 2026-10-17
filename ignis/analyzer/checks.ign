@@ -1461,6 +1461,100 @@ export namespace Analyzer {
       }
     }
 
+    /// Reject a record whose instance method and function-typed field share a
+    /// name: `value.name(args)` calls a function-typed field as well as a
+    /// method, so the call would be ambiguous.
+    function checkMethodFieldNameClash(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      record_: &Ast::Item::Record,
+    ): void {
+      let Option::SOME(recordDefId) = Analyzer::Checks::findItemDef(pass1, pass2, itemId) else {
+        return;
+      };
+
+      let mut fieldIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(recordDefId)) {
+        fieldIds = Analyzer::Checks::copyDefinitionIds(&recordDef.fields);
+      }
+
+      let mut methodIndex: u64 = 0;
+
+      while (methodIndex < record_.methods.length()) {
+        let Option::SOME(methodItemId) = record_.methods.get(methodIndex) else {
+          methodIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(Ast::Item::Node::Function(function_)) = module.items.get(*methodItemId) else {
+          methodIndex += 1;
+          continue;
+        };
+
+        let mut methodName: Option<Analyzer::SymbolId> = Option::NONE;
+
+        if (let Option::SOME(methodDefId) = Analyzer::Checks::findItemDef(pass1, pass2, *methodItemId)) {
+          if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(methodDefId)) {
+            if (!methodDef.isStatic) {
+              methodName = Option::SOME(methodDef.name);
+            }
+          }
+        }
+
+        if (let Option::SOME(name) = methodName) {
+          if (Analyzer::Checks::hasFunctionFieldNamed(defStore, typeStore, &fieldIds, name)) {
+            let message: String = `record '${record_.name.toStr()}' has both a method and a field of function type named '${function_.name.toStr()}'`;
+            Analyzer::Checks::emitError(
+              diagnostics,
+              function_.span,
+              DiagnosticCode::METHOD_AND_FUNCTION_FIELD_SHARE_NAME,
+              message.toStr(),
+              "a call through this name could mean either; rename the method or the field",
+            );
+          }
+        }
+
+        methodIndex += 1;
+      }
+    }
+
+    /// Whether one of `fieldIds` is named `name` and has a function type,
+    /// aliases resolved.
+    function hasFunctionFieldNamed(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      fieldIds: &Vector<Analyzer::DefinitionId>,
+      name: Analyzer::SymbolId,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < fieldIds.length()) {
+        let mut fieldType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(fieldId) = fieldIds.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+            if (fieldDef.name.raw() == name.raw()) {
+              fieldType = Option::SOME(fieldDef.fieldType);
+            }
+          }
+        }
+
+        if (let Option::SOME(found) = fieldType) {
+          return Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, found).isSome();
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// Check one item: functions and methods get the missing-return check
     /// and body walk, namespaces recurse, exports unwrap, constants walk
     /// their value, and everything else is skipped.
@@ -1495,6 +1589,7 @@ export namespace Analyzer {
         Ast::Item::Node::Record(record_) -> {
           Analyzer::Checks::checkCLayoutRecord(diagnostics, defStore, typeStore, module, pass1, pass2, itemId, &record_);
           Analyzer::Checks::checkInlineRecursion(diagnostics, defStore, typeStore, pass1, pass2, itemId, &record_.name, record_.span);
+          Analyzer::Checks::checkMethodFieldNameClash(diagnostics, defStore, typeStore, module, pass1, pass2, itemId, &record_);
           Analyzer::Checks::checkMethods(
             diagnostics,
             defStore,
