@@ -61,6 +61,10 @@ function totalByReference(): i32 {
 }
 ```
 
+The iterable is evaluated once. Temporaries it creates, such as the vector in
+`for (let x of makeValues().toSlice())`, live until the loop ends and are dropped once after it.
+A view into them can be used in the body but not stored into a local declared outside the loop.
+
 Pattern-driven loops are covered in [pattern matching](/docs/language/pattern-matching).
 
 ## defer

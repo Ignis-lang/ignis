@@ -1,0 +1,94 @@
+// e2e: std
+// The temporaries a `for ... of` iterable creates live through the whole loop,
+// like a `match` scrutinee lives through its arms, and are dropped exactly once
+// after it: on the normal end, after a `break`, and on an early `return`.
+import Io from "std::io";
+import Vector from "std::vector";
+
+@implements(Drop)
+record Bag {
+  public label: i32;
+  public items: Vector<i32>;
+
+  public values(&self): i32[] {
+    return self.items.toSlice();
+  }
+
+  drop(&mut self): void {
+    Io::println(`drop bag ${self.label}`);
+    @dropInPlace<Vector<i32>>(&mut self.items);
+  }
+}
+
+function makeValues(): Vector<i32> {
+  let mut values: Vector<i32> = Vector::new<i32>();
+  values.push(1);
+  values.push(2);
+  values.push(3);
+  return values;
+}
+
+function makeBag(label: i32): Bag {
+  return Bag { label: label, items: makeValues() };
+}
+
+function sumOfTemporary(): i32 {
+  let mut total: i32 = 0;
+
+  for (let value of makeValues().toSlice()) {
+    total += value;
+  }
+
+  return total;
+}
+
+function dropsAfterTheLoop(): void {
+  for (let value of makeBag(1).values()) {
+    Io::println(`value ${value}`);
+  }
+
+  Io::println("after loop");
+}
+
+function dropsOnceAfterBreak(): void {
+  for (let value of makeBag(2).values()) {
+    if (value == 2) {
+      break;
+    }
+
+    Io::println(`value ${value}`);
+  }
+
+  Io::println("after break");
+}
+
+function dropsOnceOnReturn(): i32 {
+  for (let value of makeBag(3).values()) {
+    if (value == 2) {
+      return value;
+    }
+  }
+
+  return 0;
+}
+
+function nestedLoops(): i32 {
+  let mut total: i32 = 0;
+
+  for (let outer of makeBag(4).values()) {
+    for (let inner of makeBag(outer * 10).values()) {
+      total += outer * inner;
+    }
+  }
+
+  return total;
+}
+
+function main(): i32 {
+  Io::println(`sum ${sumOfTemporary()}`);
+  dropsAfterTheLoop();
+  dropsOnceAfterBreak();
+  Io::println(`returned ${dropsOnceOnReturn()}`);
+  Io::println(`nested ${nestedLoops()}`);
+  return 0;
+}
