@@ -5643,6 +5643,43 @@ export namespace Lowering {
     });
   }
 
+  /// A slice is iterated like the iterable-record protocol: its C struct
+  /// holds `data` as member 0 and `len` as member 1, which the field access
+  /// emitter names for a slice base.
+  function forOfSliceShape(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Lowering::ForOfRecord> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let mut elementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(resolved.typeId)) {
+      if (let Analyzer::Type::Slice(element) = typeNode) {
+        elementTypeOpt = Option::SOME(element);
+      }
+    }
+
+    let Option::SOME(elementType) = elementTypeOpt else {
+      return Option::NONE;
+    };
+
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let dataType: Analyzer::TypeId = typeStoreRef.mutablePointer(elementType);
+
+    return Option::SOME(Lowering::ForOfRecord {
+      elementType: elementType,
+      dataType: dataType,
+      dataIndex: 0,
+      lengthIndex: 1,
+    });
+  }
+
   function forOfBindingShape(
     module: &Ast::Module,
     patternId: Ast::PatternId,
@@ -6678,7 +6715,11 @@ export namespace Lowering {
     }
 
     let fixedShape: Option<Lowering::ForOfFixed> = Lowering::forOfFixedShape(defStore, typeStore, iterableType);
-    let recordShape: Option<Lowering::ForOfRecord> = Lowering::forOfRecordShape(defStore, typeStore, symbols, iterableType);
+    let mut recordShape: Option<Lowering::ForOfRecord> = Lowering::forOfRecordShape(defStore, typeStore, symbols, iterableType);
+
+    if (recordShape.isNone()) {
+      recordShape = Lowering::forOfSliceShape(defStore, typeStore, iterableType);
+    }
 
     if (fixedShape.isNone() && recordShape.isNone()) {
       return Lowering::errorNode(hir, typeStore, span);

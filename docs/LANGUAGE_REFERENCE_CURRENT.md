@@ -1080,6 +1080,8 @@ for (let x: &i32 of arr) {
 }
 ```
 
+A slice iterates the same way, whether it is a local, a parameter or the result of a call such as `for (let x of values.toSlice())`. An iterable that is not a plain name is evaluated once, before the first iteration.
+
 A range is also an iterable. `for (let i of a..b)` is a counted loop with no allocation: the bounds are evaluated once, `a` first, so changing a variable the bounds read from inside the body does not change the loop, and `i` is a copy of a hidden counter. A range value iterates the same way.
 
 ```ignis

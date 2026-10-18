@@ -381,6 +381,7 @@ export namespace CodegenC {
     while (true) {
       let mut record_: Option<Analyzer::DefinitionId> = Option::NONE;
       let mut pointee: Option<Analyzer::TypeId> = Option::NONE;
+      let mut isSlice: boolean = false;
 
       if (let Option::SOME(typeNode) = typeStore.get(current)) {
         match (typeNode) {
@@ -393,8 +394,19 @@ export namespace CodegenC {
           Analyzer::Type::Reference(reference) -> {
             pointee = Option::SOME(reference.referent);
           },
+          Analyzer::Type::Slice(_) -> {
+            isSlice = true;
+          },
           _ -> {},
         };
+      }
+
+      if (isSlice) {
+        if (fieldIndex == 0) {
+          return String::create("data");
+        }
+
+        return String::create("len");
       }
 
       if (let Option::SOME(defId) = record_) {
