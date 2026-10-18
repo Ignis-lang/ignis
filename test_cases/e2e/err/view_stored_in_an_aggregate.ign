@@ -1,0 +1,46 @@
+// e2e: err
+//
+// A view stored into a field of a local, or into a record, enum or tuple built in
+// place, lives as long as that local or that value: a view of a temporary is rejected
+// there just as in a plain `let`, and so is returning an aggregate that holds a view
+// of a local.
+import Io from "std::io";
+
+record Holder {
+  public name: str;
+}
+
+function fieldAssignment(): void {
+  let mut holder: Holder = Holder { name: "" };
+
+  holder.name = String::create("abc").toStr();
+  Io::println(holder.name);
+}
+
+function recordInitializer(): void {
+  let holder: Holder = Holder { name: String::create("abc").toStr() };
+
+  Io::println(holder.name);
+}
+
+function enumPayload(): void {
+  let wrapped: Option<str> = Option::SOME(String::create("abc").toStr());
+
+  if (let Option::SOME(text) = wrapped) {
+    Io::println(text);
+  }
+}
+
+function returnedAggregate(): Holder {
+  let owned: String = String::create("abc");
+
+  return Holder { name: owned.toStr() };
+}
+
+function main(): i32 {
+  fieldAssignment();
+  recordInitializer();
+  enumPayload();
+  Io::println(returnedAggregate().name);
+  return 0;
+}

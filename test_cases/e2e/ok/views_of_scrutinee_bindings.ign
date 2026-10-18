@@ -1,0 +1,72 @@
+// e2e: std
+//
+// Views of pattern bindings, loop bindings and aggregates that stay within the
+// lifetime of what they view are accepted: a binding of a temporary scrutinee used
+// and viewed inside its own arm, a view of a local scrutinee kept outside the match,
+// an `Option<&T>` taken from a local vector, a view stored into a field of a local
+// declared in the same scope as its owner, and a record built with a view of a local.
+import Io from "std::io";
+import Arc from "std::sync";
+import Vector from "std::vector";
+
+enum Wrap {
+  Some(String),
+}
+
+record Holder {
+  public name: str;
+}
+
+function makeWrap(): Wrap {
+  return Wrap::Some(String::create("arm"));
+}
+
+function makeShared(): Arc<Wrap> {
+  return Arc::new<Wrap>(Wrap::Some(String::create("shared")));
+}
+
+function main(): i32 {
+  match (makeWrap()) {
+    Wrap::Some(inner) -> {
+      let view: str = inner.toStr();
+      Io::println(view);
+    },
+  };
+
+  match (makeShared().get()) {
+    Wrap::Some(inner) -> {
+      let view: str = inner.toStr();
+      Io::println(view);
+    },
+  };
+
+  let local: Arc<Wrap> = makeShared();
+  let mut kept: str = "";
+
+  match (local.get()) {
+    Wrap::Some(inner) -> {
+      kept = inner.toStr();
+    },
+  };
+
+  Io::println(kept);
+
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(String::create("first"));
+
+  if (let Option::SOME(first) = values.get(0)) {
+    kept = first.toStr();
+  }
+
+  Io::println(kept);
+
+  let owned: String = String::create("field");
+  let mut holder: Holder = Holder { name: "" };
+
+  holder.name = owned.toStr();
+  Io::println(holder.name);
+
+  let built: Holder = Holder { name: owned.toStr() };
+  Io::println(built.name);
+  return 0;
+}

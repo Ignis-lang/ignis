@@ -151,6 +151,11 @@ A view must not outlive its owner:
   temporary is dropped when its statement ends.
 - Storing a view of a local into a binding of an outer scope is an error (A0202).
 - Returning a view of a local or of a temporary is an error (A0043).
+- The same holds for a view kept inside a value: a record field, an enum payload, a tuple
+  element, an `Option<&T>` a method returned, or the value a `match` arm produces.
+- A pattern binding lives in its scrutinee. A view of a binding of a temporary scrutinee can
+  be used inside the arm but not stored into a local declared outside it, and a
+  `let ... else` cannot bind into a temporary by reference.
 - While a binding keeps a view, its owner is borrowed until the end of the scope, so mutating
   or moving the owner (A0258) is reported.
 

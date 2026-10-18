@@ -1,0 +1,45 @@
+// e2e: err
+//
+// A loop binding that views the iterated value must not be stored into a local
+// declared outside the loop: a `while let` over a temporary drops the temporary after
+// every condition, and the value a `for ... of` loop iterates dies with the loop.
+import Io from "std::io";
+import Vector from "std::vector";
+
+function makeVector(): Vector<String> {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(String::create("abc"));
+  return values;
+}
+
+function makeArray(): String[1] {
+  return [String::create("abc")];
+}
+
+function whileLetOverATemporary(): void {
+  let mut kept: str = "";
+  let mut index: u64 = 0;
+
+  while (let Option::SOME(item) = makeVector().get(index)) {
+    kept = item.toStr();
+    index += 1;
+  }
+
+  Io::println(kept);
+}
+
+function forOfOverATemporary(): void {
+  let mut kept: str = "";
+
+  for (let item: &String of makeArray()) {
+    kept = item.toStr();
+  }
+
+  Io::println(kept);
+}
+
+function main(): i32 {
+  whileLetOverATemporary();
+  forOfOverATemporary();
+  return 0;
+}

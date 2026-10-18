@@ -840,6 +840,8 @@ A view must not outlive its owner:
 - A `let` or an assignment that keeps a view of a temporary (a call result, a method result, any expression that is not a place) is an error (A0202). The temporary is dropped when its statement ends.
 - An assignment that stores a view of a local into a binding declared in an outer scope is an error (A0202).
 - Returning a view of a local of the function, or of a temporary, is an error (A0043).
+- The same rules apply to a view kept inside a value: a field, an enum payload or a tuple or vector element built in place, an assignment into a field of a local, an `Option<&T>` a method returned, and the value a `match` arm produces.
+- A pattern binding lives in its scrutinee. When the scrutinee is a temporary, it is dropped when the `match`, `if let` or `while let` condition ends: a view of the binding may be used and kept inside the arm, but not stored into a local declared outside it, and a `let ... else` may not bind into a temporary by reference. An owned arm binding is dropped at the end of its arm, so the same holds for a view of it.
 - While a view kept by a binding is in scope, its owner is borrowed. Mutating the owner meanwhile is reported by the borrow rules above, and moving it is an error (A0258). The borrow lasts until the end of the scope, not until the view's last use.
 
 Using a view of a temporary inside the statement that created it is fine, for example as a call argument or inside a template literal. To keep the view, bind the owner to a local first:
