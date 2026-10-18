@@ -813,6 +813,8 @@ Types with `@implements(Drop)` must provide a `drop(&mut self): void` method. Th
 
 Double-drop and use-after-drop are compile-time errors. A runtime drop guard provides defense-in-depth.
 
+A temporary (a value produced by a call or another expression and not bound to a name) is dropped at the end of the full statement that created it: an expression statement, a `let`, an assignment, a `return`. An `if` condition's temporaries live through the branch that runs and a `match` scrutinee's through the arm, and both are dropped when the whole `if` or `match` ends. A temporary is never dropped in the middle of a statement, so `consume(make().toStr())` and `${make().toStr()}` in a template literal are valid. Temporaries of one statement are dropped newest first. A view that would outlive its temporary is rejected at compile time (A0202, see Views below).
+
 ### 6.5 Borrow Checking
 
 References follow exclusivity rules:

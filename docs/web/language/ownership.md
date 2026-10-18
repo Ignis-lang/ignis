@@ -112,6 +112,12 @@ at every exit: the end of a scope, an early `return`, a `break` or `continue`, a
 variable is overwritten. Double drops and use-after-drop are compile-time errors, with a runtime
 guard behind them as a second line of defence.
 
+A temporary, a value no name holds, is dropped at the end of the statement that created it. An
+`if` condition's temporaries last through the branch and a `match` scrutinee's through the arm.
+A temporary never dies mid-statement, so passing `make().toStr()` as an argument or using it in
+a template literal is fine. Keeping a view of a temporary past its statement is rejected (A0202,
+see Views below).
+
 ## Borrowing
 
 References follow exclusivity:

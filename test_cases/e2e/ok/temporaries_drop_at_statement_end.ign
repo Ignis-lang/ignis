@@ -1,0 +1,71 @@
+// e2e: std
+// A temporary dies at the end of the full statement that created it, before the
+// next statement runs, never at the end of a subexpression. Covers an expression
+// statement, a `let` initializer that does not keep the temporary, a call
+// argument, a template literal, an `if` condition (alive through the branch) and a
+// `match` scrutinee (alive through the arm). A `tryLock` guard made in an `if`
+// condition is released when the `if` ends, so a later `lock` in the same block
+// does not deadlock.
+import Io from "std::io";
+import Mutex, MutexGuard from "std::sync";
+
+@implements(Drop)
+record Noisy {
+  public value: i32;
+
+  public ok(&self): boolean {
+    return true;
+  }
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.value}`);
+  }
+}
+
+function make(value: i32): Noisy {
+  return Noisy { value: value };
+}
+
+function take(flag: boolean): void {
+  Io::println(`take ${flag}`);
+}
+
+function main(): i32 {
+  make(1).ok();
+  Io::println("after statement");
+
+  let value: i32 = make(2).value;
+  Io::println(`after let ${value}`);
+
+  take(make(3).ok());
+  Io::println("after call");
+
+  Io::println(`template ${make(4).value} ${make(5).value}`);
+  Io::println("after template");
+
+  if (make(6).ok()) {
+    Io::println("in if");
+  }
+
+  Io::println("after if");
+
+  match (make(7).ok()) {
+    true -> Io::println("in match"),
+    false -> Io::println("unreachable"),
+  };
+
+  Io::println("after match");
+
+  let mutex: Mutex<u64> = Mutex::new<u64>(0);
+
+  if (mutex.tryLock().isSome()) {
+    Io::println("try locked");
+  }
+
+  let mut guard: MutexGuard<u64> = mutex.lock();
+  let slot: &mut u64 = guard.get();
+
+  *slot = 1;
+  Io::println("locked again");
+  return 0;
+}
