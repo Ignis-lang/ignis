@@ -5278,13 +5278,19 @@ export namespace CodegenC {
 
   /// One `{ data, len }` struct per concrete slice type in the store, as the
   /// host emits. Slices over a type parameter belong to generic templates
-  /// monomorphization already replaced and get no struct.
+  /// monomorphization already replaced and get no struct. With `forward` set
+  /// only the tags are declared, so a closure signature or a function pointer
+  /// can name a slice parameter before its definition. The definitions go
+  /// ahead of the record definitions, since a record, an enum payload or a
+  /// tuple can hold a slice by value; a slice only points at its elements, so
+  /// the forward declarations of their types are enough.
   function emitSliceTypes(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     closures: &CodegenC::ClosureTables,
+    forward: boolean,
   ): void {
     let mut emittedAny: boolean = false;
     let mut rawId: u32 = 0;
@@ -5317,10 +5323,18 @@ export namespace CodegenC {
       }
 
       let name: String = CodegenC::sliceStructName(typeId);
+      let mut outputRef: &mut String = output;
+
+      if (forward) {
+        let declaration: String = `struct ${name.toStr()};\n`;
+        outputRef.pushStr(declaration.toStr());
+        rawId += 1;
+        continue;
+      }
+
       let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, elementType);
       let definition: String = `struct ${name.toStr()} {\n    ${elementText.toStr()}* data;\n    u64 len;\n};\n`;
 
-      let mut outputRef: &mut String = output;
       outputRef.pushStr(definition.toStr());
 
       rawId += 1;
@@ -6495,6 +6509,8 @@ export namespace CodegenC {
       forwardIndex += 1;
     }
 
+    CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures, true);
+
     // Closure signature structs are emitted before record/enum definitions: a
     // closure struct only needs its `call`/`drop_fn` field types (function
     // pointers) and its `env` field (`u8*`), so a forward-declared record
@@ -6520,6 +6536,7 @@ export namespace CodegenC {
     CodegenC::emitRawFunctionTypedefs(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::emitRangeTypes(defStore, typeStore, symbols, &mut source, closures);
+    CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures, false);
 
     source.pushStr("\n// Type definitions\n");
 
@@ -6541,7 +6558,6 @@ export namespace CodegenC {
     // just on the capturing side instead of the parameter side.
     CodegenC::emitClosureEnvStructs(defStore, typeStore, symbols, &mut source, closures);
 
-    CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures);
     CodegenC::emitArrayReturnTypes(defStore, typeStore, symbols, &mut source, closures, false);
 
     CodegenC::emitLayoutAssertions(defStore, typeStore, symbols, &mut source, closures, &typeDefs);
