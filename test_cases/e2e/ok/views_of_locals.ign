@@ -1,0 +1,59 @@
+// e2e: std
+//
+// Views of values that outlive them are accepted: a view of a local in the same scope,
+// a view used in a nested block, a view chained through method results and a view
+// local, a view of a temporary consumed inside the statement that created it (argument
+// position and template literals), and a view of a parameter's referent returned to
+// the caller.
+import Arc from "std::sync";
+
+record Holder {
+  public name: String;
+
+  public nameView(&self): str {
+    return self.name.toStr();
+  }
+}
+
+function measure(text: str): u64 {
+  let copy: String = String::create(text);
+  return copy.length();
+}
+
+function nameOf(holder: &Holder): str {
+  return holder.nameView();
+}
+
+function makeHolder(): Holder {
+  return Holder { name: String::create("temporary") };
+}
+
+function main(): i32 {
+  let owned: String = String::create("abc");
+  let view: str = owned.toStr();
+  let alias: str = view;
+  let mut total: u64 = measure(alias);
+
+  {
+    total += measure(view);
+  }
+
+  let shared: Arc<Holder> = Arc::new<Holder>(Holder { name: String::create("shared") });
+  let holder: &Holder = shared.get();
+  let chained: str = shared.get().name.toStr();
+  let viaLocal: str = holder.nameView();
+  let mut outer: str = "";
+
+  {
+    outer = holder.nameView();
+  }
+
+  total += measure(chained) + measure(viaLocal) + measure(outer) + measure(nameOf(holder));
+  total += measure(makeHolder().nameView());
+  total += measure(String::create("argument").toStr());
+
+  let message: String = `${owned.toStr()} and ${makeHolder().name.toStr()}`;
+  total += message.length();
+
+  return total as i32;
+}

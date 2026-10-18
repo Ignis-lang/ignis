@@ -131,6 +131,42 @@ function main(): i32 {
 }
 ```
 
+### Views
+
+A method that takes `&self` or `&mut self` and returns a `str`, a `&T`, a `&mut T` or a
+slice returns a view of its receiver: the result points into the receiver's storage. A `str`
+result counts as a view only when the receiver's type needs a drop, the way `String` does. The
+owner is followed through method chains, field access, indexing, references and locals that
+were initialized from a view. Free functions do not produce views.
+
+A view must not outlive its owner:
+
+- Keeping a view of a temporary in a `let` or an assignment is an error (A0202). The
+  temporary is dropped when its statement ends.
+- Storing a view of a local into a binding of an outer scope is an error (A0202).
+- Returning a view of a local or of a temporary is an error (A0043).
+- While a binding keeps a view, its owner is borrowed until the end of the scope, so mutating
+  or moving the owner (A0258) is reported.
+
+A view of a temporary used inside the statement that created it is fine, as a call argument
+or in a template literal. To keep it, bind the owner to a local first:
+
+```ignis
+function measure(text: str): u64 {
+    let copy: String = String::create(text);
+
+    return copy.length();
+}
+
+function main(): i32 {
+    // let text: str = String::create("abc").toStr();   // error A0202
+    let owned: String = String::create("abc");
+    let text: str = owned.toStr();
+
+    return (measure(text) + measure(String::create("abc").toStr())) as i32;
+}
+```
+
 ## Patterns and matching
 
 What a destructuring pattern binds depends on what you matched, not on what the payload

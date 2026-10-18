@@ -829,6 +829,27 @@ let r2 = &x;          // OK: multiple shared refs
 // let m = &mut x;     // ERROR: mutable ref while shared refs exist
 ```
 
+#### Views
+
+A method that takes `&self` or `&mut self` and returns a `str`, a `&T`, a `&mut T` or a slice returns a *view* of its receiver: the result points into the receiver's storage. A `str` result counts as a view only when the receiver's type needs a drop (it owns heap storage, like `String`). The owner of a view is found through method chains (`a.b().c()` views `a`), field access, indexing, references, dereferences, and locals that were themselves initialized from a view. Free functions do not produce views.
+
+A view must not outlive its owner:
+
+- A `let` or an assignment that keeps a view of a temporary (a call result, a method result, any expression that is not a place) is an error (A0202). The temporary is dropped when its statement ends.
+- An assignment that stores a view of a local into a binding declared in an outer scope is an error (A0202).
+- Returning a view of a local of the function, or of a temporary, is an error (A0043).
+- While a view kept by a binding is in scope, its owner is borrowed. Mutating the owner meanwhile is reported by the borrow rules above, and moving it is an error (A0258). The borrow lasts until the end of the scope, not until the view's last use.
+
+Using a view of a temporary inside the statement that created it is fine, for example as a call argument or inside a template literal. To keep the view, bind the owner to a local first:
+
+```ignis
+// let text: str = String::create("abc").toStr();   // ERROR A0202
+let owned: String = String::create("abc");
+let text: str = owned.toStr();                       // OK: owned outlives text
+
+consume(String::create("abc").toStr());              // OK: used within the statement
+```
+
 ### 6.6 FFI Ownership
 
 Extern functions do not consume ownership by default. To indicate that an extern function takes ownership of a parameter, use `@takes`:

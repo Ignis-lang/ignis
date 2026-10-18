@@ -1,0 +1,46 @@
+// e2e: err
+//
+// A live view holds a borrow of its owner: moving the owner, or calling a `&mut self`
+// method on it, is rejected while the view is alive, including when the view itself
+// came from a `&mut self` method.
+import Mutex, MutexGuard from "std::sync";
+
+function take(owned: String): void {
+  return;
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function moveWhileViewed(): void {
+  let owned: String = String::create("abc");
+  let text: str = owned.toStr();
+
+  take(owned);
+  consume(text);
+}
+
+function mutateWhileViewed(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+
+  owned.pushChar('d');
+  consume(text);
+}
+
+function mutateWhileMutablyViewed(): void {
+  let mutex: Mutex<u64> = Mutex::new<u64>(0);
+  let mut guard: MutexGuard<u64> = mutex.lock();
+  let slot: &mut u64 = guard.get();
+  let again: &mut u64 = guard.get();
+
+  *slot = *again + 1;
+}
+
+function main(): i32 {
+  moveWhileViewed();
+  mutateWhileViewed();
+  mutateWhileMutablyViewed();
+  return 0;
+}
