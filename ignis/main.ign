@@ -14,6 +14,7 @@ import
   Diagnostic,
   DiagnosticBag,
   DiagnosticRenderer,
+  LabelKind,
   Severity,
   SourceFile,
   SourceSpan,
@@ -192,11 +193,9 @@ function renderBagCollecting(bag: &DiagnosticBag, file: &SourceFile, report: &mu
 }
 
 /// Render a diagnostic bag that covers the whole program, each diagnostic
-/// against the module its primary span points into. A span whose file is not
-/// among `files` falls back to the entry module.
-///
-/// The renderer reads every label of one diagnostic from the same file, so a
-/// label that points into another module still renders against this one.
+/// against the module its primary span points into. A label that points into
+/// another module renders in a snippet of that module. A span whose file is
+/// not among `files` falls back to the entry module.
 function renderProgramBag(
   bag: &DiagnosticBag,
   files: &Vector<SourceFile>,
@@ -216,14 +215,14 @@ function renderProgramBag(
       rendered.pushStr("\n");
     }
 
-    let mut current: String = DiagnosticRenderer::render(diagnostic, entry, useAnsi);
+    let mut current: String = DiagnosticRenderer::renderAcross(diagnostic, entry, files, useAnsi);
     let spanPath: String = String::create(diagnostic.primarySpan.filePath);
     let mut fileIndex: u64 = 0;
 
     while (fileIndex < files.length()) {
       if (let Option::SOME(candidate) = files.get(fileIndex)) {
         if (spanPath.equals(candidate.path.asStr())) {
-          current = DiagnosticRenderer::render(diagnostic, candidate, useAnsi);
+          current = DiagnosticRenderer::renderAcross(diagnostic, candidate, files, useAnsi);
           break;
         }
       }
@@ -2316,7 +2315,7 @@ export function compileDiscovered(
           &mut defStore, &mut typeStore, &mut symbols, &lirResult.program, &qbeRoots, &hooks.foreignDefinitions,
         );
         if (let Option::SOME(message) = &qbe.error) {
-          let diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "B4004", message.toStr(), SourceSpan::new("", 0, 0));
+          let diagnostic: Diagnostic = CodegenQbe::errorDiagnostic(&qbe, message.toStr());
           let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
           diagnostics.push(diagnostic);
           if (quiet) {
@@ -3291,6 +3290,30 @@ function programBagRendersEachDiagnosticAgainstItsOwnModule(): void {
 
   Test::assert(rendered.contains(&helperLocation));
   Test::assert(rendered.contains(&entryLocation));
+}
+
+@test
+function programBagRendersALabelAgainstItsOwnModule(): void {
+  let entryText: str = "function main(): i32 {\n  return 0;\n}\n";
+  let entry: SourceFile = SourceFile::create("entry.ign", entryText);
+  let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
+  files.push(SourceFile::create("entry.ign", entryText));
+  files.push(SourceFile::create("helper.ign", "let a: i32 = 1;\nlet b: i32 = 2;\n"));
+
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "O0003", "in entry", SourceSpan::new("entry.ign", 25, 31));
+  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new("helper.ign", 20, 21), "declared here");
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+
+  let rendered: String = renderProgramBag(&bag, &files, &entry, false);
+
+  let entryLocation: String = String::create("entry.ign:2:3");
+  let helperLocation: String = String::create("helper.ign:2:5");
+  let helperLine: String = String::create("let b: i32 = 2;");
+
+  Test::assert(rendered.contains(&entryLocation));
+  Test::assert(rendered.contains(&helperLocation));
+  Test::assert(rendered.contains(&helperLine));
 }
 
 @test

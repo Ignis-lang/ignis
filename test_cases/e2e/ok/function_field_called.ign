@@ -1,0 +1,59 @@
+// `value.name(args)` calls a record field of function type when the record
+// has no method of that name: by value, through `&` and `&mut` references,
+// through a dereferenced pointer, with the field typed by an alias, and on a
+// generic record. Any callee expression of function type can also be called
+// directly, as `(value.name)(args)` or `make()()`.
+type Step = (i32) -> i32;
+
+record Holder {
+  public callback: () -> i32;
+  public step: Step;
+  public count: i32;
+
+  public total(&self): i32 {
+    return self.count;
+  }
+}
+
+record Box<T> {
+  public produce: () -> T;
+}
+
+function viaReference(holder: &Holder): i32 {
+  return holder.callback();
+}
+
+function viaMutableReference(holder: &mut Holder): i32 {
+  holder.count = holder.count + 1;
+  return holder.step(holder.count);
+}
+
+function viaPointer(holder: *mut Holder): i32 {
+  return (*holder).callback();
+}
+
+function make(): () -> i32 {
+  return (): i32 -> 2;
+}
+
+function main(): i32 {
+  let base: i32 = 5;
+  let mut holder: Holder = Holder {
+    callback: (): i32 -> base,
+    step: (value: i32): i32 -> value * 10,
+    count: 0,
+  };
+
+  let byValue: i32 = holder.callback();
+  let byReference: i32 = viaReference(&holder);
+  let byMutableReference: i32 = viaMutableReference(&mut holder);
+  let byPointer: i32 = viaPointer((&mut holder) as *mut Holder);
+  let parenthesized: i32 = (holder.callback)();
+  let returned: i32 = make()();
+
+  let boxed: Box<i32> = Box { produce: (): i32 -> 7 };
+  let generic: i32 = boxed.produce();
+
+  // 5 + 5 + 10 + 5 + 5 + 2 + 7 + 1
+  return byValue + byReference + byMutableReference + byPointer + parenthesized + returned + generic + holder.total() - 40;
+}

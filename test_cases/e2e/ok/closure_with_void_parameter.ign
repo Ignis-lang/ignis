@@ -1,0 +1,31 @@
+// Closures whose parameter is `void` take no C parameter for it: not in the
+// thunk, not in the closure's `call` slot, not at the indirect call. The
+// argument expression still runs.
+function bump(counter: &mut i32): void {
+  let mut counterRef: &mut i32 = counter;
+  counterRef += 1;
+}
+
+function apply<T>(callback: (T) -> i32, value: T): i32 {
+  return callback(value);
+}
+
+function seven(value: void): i32 {
+  return 7;
+}
+
+function main(): i32 {
+  let mut calls: i32 = 0;
+  let literal = (value: void): i32 -> 7;
+  let named: (void) -> i32 = seven;
+
+  let direct: i32 = literal(bump(&mut calls));
+  let generic: i32 = apply<void>(literal, bump(&mut calls));
+  let throughName: i32 = named(bump(&mut calls));
+
+  if (calls != 3 || direct + generic + throughName != 21) {
+    return 1;
+  }
+
+  return 0;
+}

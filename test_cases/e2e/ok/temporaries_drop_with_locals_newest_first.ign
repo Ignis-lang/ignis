@@ -1,0 +1,63 @@
+// e2e: std
+// A temporary lives until the end of its block, and it dies together with the
+// named locals of that block in reverse creation order: a temporary made after
+// a local dies before it, and one made before a local dies after it. Covers
+// the temporaries of an expression statement, an `if` condition, a `let`
+// initializer, a call argument and a `while` condition, at a block end and at
+// a `return`.
+import Io from "std::io";
+
+@implements(Drop)
+record Noisy {
+  public value: i32;
+
+  public ok(&self): boolean {
+    return true;
+  }
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.value}`);
+  }
+}
+
+function make(value: i32): Noisy {
+  return Noisy { value: value };
+}
+
+function take(flag: boolean): void {
+  Io::println(`take ${flag}`);
+}
+
+function main(): i32 {
+  {
+    let first: Noisy = make(1);
+
+    make(2).ok();
+    let second: Noisy = make(3);
+
+    if (make(4).ok()) {
+      Io::println("in if");
+    }
+
+    let value: i32 = make(5).value;
+    let third: Noisy = make(value + 1);
+
+    take(make(7).ok());
+    Io::println("block end");
+  }
+
+  Io::println("loop");
+
+  let before: Noisy = make(10);
+  let mut count: i32 = 0;
+
+  while (make(20 + count).ok() && count < 1) {
+    count += 1;
+  }
+
+  let after: Noisy = make(30);
+
+  make(40).ok();
+  Io::println("return");
+  return 0;
+}

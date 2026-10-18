@@ -35,6 +35,14 @@
 //! until a notification, then locks it again before returning. Wakeups can be
 //! spurious, so wait in a loop that re-checks the condition.
 //!
+//! ## Errors
+//!
+//! Every POSIX call's return code is checked. `lock`, `new` and `wait` panic
+//! with the function's name when it fails. An unlock, a notification or a
+//! destruction that fails panics with a message that starts with `std::sync:`:
+//! it means the lock was misused, for example a `Mutex` dropped while a guard
+//! still holds it, or a `Condvar` dropped while a thread waits on it.
+//!
 //! ## Host assumptions
 //!
 //! The `pthread_mutex_t` and `pthread_cond_t` are stored inline, in `u64`
@@ -143,8 +151,13 @@ export record Mutex<T: Send> {
   }
 
   /// Destroys the mutex and drops the value. No guard may be alive.
+  ///
+  /// Panics if the system refuses, as it does while a guard holds the mutex.
   drop(&mut self): void {
-    __sync_posix::pthread_mutex_destroy(self.lockPointer());
+    if (__sync_posix::pthread_mutex_destroy(self.lockPointer()) != 0) {
+      @panic("std::sync: Mutex::drop: pthread_mutex_destroy failed; is a guard still alive?");
+    }
+
     @dropInPlace<T>(self.valuePointer());
   }
 }
@@ -174,8 +187,12 @@ export record MutexGuard<T> {
   }
 
   /// Unlocks the mutex.
+  ///
+  /// Panics if the system refuses.
   drop(&mut self): void {
-    __sync_posix::pthread_mutex_unlock(self.lock);
+    if (__sync_posix::pthread_mutex_unlock(self.lock) != 0) {
+      @panic("std::sync: MutexGuard::drop: pthread_mutex_unlock failed");
+    }
   }
 }
 
@@ -213,13 +230,21 @@ export record Condvar {
   }
 
   /// Wakes one waiting thread, if any.
+  ///
+  /// Panics if the system refuses.
   public notifyOne(&self): void {
-    __sync_posix::pthread_cond_signal(self.conditionPointer());
+    if (__sync_posix::pthread_cond_signal(self.conditionPointer()) != 0) {
+      @panic("std::sync: Condvar::notifyOne: pthread_cond_signal failed");
+    }
   }
 
   /// Wakes every waiting thread.
+  ///
+  /// Panics if the system refuses.
   public notifyAll(&self): void {
-    __sync_posix::pthread_cond_broadcast(self.conditionPointer());
+    if (__sync_posix::pthread_cond_broadcast(self.conditionPointer()) != 0) {
+      @panic("std::sync: Condvar::notifyAll: pthread_cond_broadcast failed");
+    }
   }
 
   conditionPointer(&self): *mut u8 {
@@ -229,7 +254,11 @@ export record Condvar {
   }
 
   /// Destroys the condition variable. No thread may be waiting on it.
+  ///
+  /// Panics if the system refuses.
   drop(&mut self): void {
-    __sync_posix::pthread_cond_destroy(self.conditionPointer());
+    if (__sync_posix::pthread_cond_destroy(self.conditionPointer()) != 0) {
+      @panic("std::sync: Condvar::drop: pthread_cond_destroy failed; is a thread still waiting?");
+    }
   }
 }
