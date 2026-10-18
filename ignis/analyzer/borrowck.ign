@@ -62,9 +62,6 @@ import _ from "./ownership_report";
 ///     oracle see that a callee dropped through a reference it was handed.
 ///   - Synthetic temporaries are not tracked as values: no move or drop state
 ///     follows them. They matter only as the owner of a view (below).
-///   - Views produced by free functions. The view rule covers methods alone,
-///     because a free function returning `str` or `&T` may hand out a literal
-///     or a static as easily as an argument's storage.
 ///   - Slices built by `MakeSlice` from a local fixed array: the conversion is
 ///     not a method call, so it produces no tracked view.
 ///   - Assignment to an immutable local: the Rust oracle emits that from the
@@ -109,7 +106,11 @@ import _ from "./ownership_report";
 ///     where it points but holds no borrow of its owner, for the same reason:
 ///     mutating a map after reading `map.get(key)` into a local is common.
 ///   - Views a callee stores out of its arguments (`values.push(make().toStr())`)
-///     and views produced by free functions are not tracked.
+///     are not tracked.
+///   - A free function, extern function or static method returning a view is
+///     read as a view of all its `&T`/`str`/slice arguments
+///     (`callArgumentsViewOwner`). One that returns a literal or a fresh
+///     allocation is a false positive; the fix is to bind the argument.
 ///   - A pattern binding that needs no drop and is destructured by reference
 ///     out of a referenced scrutinee is not tracked.
 ///
@@ -3075,7 +3076,7 @@ export namespace Borrowck {
   /// or a view method's receiver lives in (so `a.b().c()` points into `a`),
   /// or, for a view local, the owner recorded when it was initialized (the
   /// variable-initializer chain). Any other view value, such as a `str` field
-  /// read out of a record or a reference a free function returned, points to
+  /// read out of a record, points to
   /// storage that is not tracked.
   function pointeeOwnerOf(
     defStore: &mut Analyzer::DefinitionStore,
@@ -3091,6 +3092,7 @@ export namespace Borrowck {
     let mut storage: Option<Hir::HirId> = Option::NONE;
     let mut passedThrough: Option<Hir::HirId> = Option::NONE;
     let mut variable: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut callArguments: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
 
     // A value-producing block, `if` or `match` points wherever the value it
     // produces on some path does; the first tracked owner found decides.
@@ -3130,14 +3132,23 @@ export namespace Borrowck {
         storage = Option::SOME(reference.expression);
       },
       Hir::HirKind::MethodCall(call) -> {
-        if (Borrowck::methodCallIsView(defStore, typeStore, hir, &call, node.typeId)) {
+        if (call.receiver.isNone()) {
+          callArguments = Borrowck::copyHirIds(&call.args);
+        } else if (Borrowck::methodCallIsView(defStore, typeStore, hir, &call, node.typeId)) {
           storage = call.receiver;
         } else if (Borrowck::methodCallPassesViewThrough(defStore, typeStore, hir, &call, node.typeId)) {
           passedThrough = call.receiver;
         }
       },
+      Hir::HirKind::Call(call) -> {
+        callArguments = Borrowck::copyHirIds(&call.args);
+      },
       _ -> {},
     };
+
+    if (callArguments.length() > 0 && Borrowck::typeHoldsView(defStore, typeStore, node.typeId)) {
+      return Borrowck::callArgumentsViewOwner(defStore, typeStore, hir, state, &callArguments);
+    }
 
     if (let Option::SOME(storageId) = storage) {
       return Borrowck::storageOwnerOf(defStore, typeStore, hir, state, storageId);
@@ -3172,6 +3183,62 @@ export namespace Borrowck {
     }
 
     return Borrowck::externalViewOwner();
+  }
+
+  /// Where the view a free function or a static method returns points: into
+  /// any of its arguments of a view type (`&T`, `&mut T`, `str`, a slice),
+  /// since nothing in its signature says which one. The shortest-lived owner
+  /// decides: a temporary before any local, a local declared deeper before
+  /// one declared shallower. Arguments of any other type create no
+  /// dependency. Extern functions follow the same rule.
+  function callArgumentsViewOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    arguments: &Vector<Hir::HirId>,
+  ): Borrowck::ViewOwner {
+    let mut chosen: Borrowck::ViewOwner = Borrowck::externalViewOwner();
+    let mut chosenDepth: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < arguments.length()) {
+      if (let Option::SOME(argument) = arguments.get(index)) {
+        let mut argumentKind: u32 = Borrowck::VIEW_TYPE_NONE;
+
+        if (let Option::SOME(argumentType) = Borrowck::nodeTypeOf(hir, *argument)) {
+          argumentKind = Borrowck::viewTypeKind(defStore, typeStore, argumentType);
+        }
+
+        if (argumentKind == Borrowck::VIEW_TYPE_REFERENCE || argumentKind == Borrowck::VIEW_TYPE_STR || argumentKind == Borrowck::VIEW_TYPE_SLICE) {
+          let owner: Borrowck::ViewOwner = Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, *argument);
+
+          if (owner.kind == Borrowck::VIEW_OWNER_TEMPORARY && !owner.scoped) {
+            return owner;
+          }
+
+          if (owner.kind != Borrowck::VIEW_OWNER_EXTERNAL) {
+            let mut depth: u64 = owner.depth;
+
+            if (owner.kind == Borrowck::VIEW_OWNER_LOCAL) {
+              depth = match (state.localDepth(owner.local.raw())) {
+                Option::SOME(value) -> value,
+                Option::NONE -> 0,
+              };
+            }
+
+            if (chosen.kind == Borrowck::VIEW_OWNER_EXTERNAL || depth > chosenDepth) {
+              chosen = owner;
+              chosenDepth = depth;
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return chosen;
   }
 
   /// The owner of the view a binding keeps when it stores `value`: the value

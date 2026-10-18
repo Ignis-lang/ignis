@@ -143,7 +143,10 @@ A method that takes `&self` or `&mut self` and returns a `str`, a `&T`, a `&mut 
 slice returns a view of its receiver: the result points into the receiver's storage. A `str`
 result counts as a view only when the receiver's type needs a drop, the way `String` does. The
 owner is followed through method chains, field access, indexing, references and locals that
-were initialized from a view. Free functions do not produce views.
+were initialized from a view. A free function, an extern function or a static method
+that returns a view returns a view of each of its `&T`, `&mut T`, `str` and slice arguments, and
+the shortest-lived owner among them counts. Other arguments create no dependency. When such a
+function really returns a literal or a fresh copy, bind its argument to a local first.
 
 A view must not outlive its owner:
 

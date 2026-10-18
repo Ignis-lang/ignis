@@ -833,7 +833,7 @@ let r2 = &x;          // OK: multiple shared refs
 
 #### Views
 
-A method that takes `&self` or `&mut self` and returns a `str`, a `&T`, a `&mut T` or a slice returns a *view* of its receiver: the result points into the receiver's storage. A `str` result counts as a view only when the receiver's type needs a drop (it owns heap storage, like `String`). The owner of a view is found through method chains (`a.b().c()` views `a`), field access, indexing, references, dereferences, and locals that were themselves initialized from a view. Free functions do not produce views.
+A method that takes `&self` or `&mut self` and returns a `str`, a `&T`, a `&mut T` or a slice returns a *view* of its receiver: the result points into the receiver's storage. A `str` result counts as a view only when the receiver's type needs a drop (it owns heap storage, like `String`). The owner of a view is found through method chains (`a.b().c()` views `a`), field access, indexing, references, dereferences, and locals that were themselves initialized from a view. A free function, an extern function or a static method whose result is a `str`, a `&T`, a `&mut T`, a slice or a value holding one (`Option<&T>`) returns a view of every argument whose type is a `&T`, a `&mut T`, a `str` or a slice: the signature does not say which one, so the shortest-lived of their owners counts. Arguments of any other type (integers, owned values, raw pointers) create no dependency. A function that actually returns a literal or a fresh allocation is still read this way; bind the argument to a local first, or pass the bytes as a raw pointer and length.
 
 A view must not outlive its owner:
 
@@ -852,6 +852,14 @@ let owned: String = String::create("abc");
 let text: str = owned.toStr();                       // OK: owned outlives text
 
 consume(String::create("abc").toStr());              // OK: used within the statement
+```
+
+The same fix applies to a function result:
+
+```ignis
+// let picked: str = pick(String::create("abc").toStr());   // ERROR A0202
+let owned: String = String::create("abc");
+let picked: str = pick(owned.toStr());                       // OK
 ```
 
 ### 6.6 FFI Ownership
