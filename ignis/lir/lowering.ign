@@ -1693,6 +1693,70 @@ export namespace LirLowering {
     return Vector::new<Analyzer::TypeId>();
   }
 
+  /// `&place` lowers to the place's address, a temp typed as a raw pointer to
+  /// the place, while the expression itself is a reference. A returned
+  /// reference is cast back to the declared reference type, the one value
+  /// whose type the verifier compares.
+  function retypePlacePointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operand: Lir::Operand,
+    targetType: Analyzer::TypeId,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let Lir::Operand::Temp(temp) = operand else {
+      return operand;
+    };
+
+    let Option::SOME(tempType) = function_.tempType(temp) else {
+      return operand;
+    };
+
+    let resolvedTarget: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, targetType);
+    let mut targetPointee: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(targetNode) = typeStore.get(resolvedTarget.typeId)) {
+      if (let Analyzer::Type::Reference(reference) = targetNode) {
+        targetPointee = Option::SOME(reference.referent);
+      }
+    }
+
+    let Option::SOME(targetInner) = targetPointee else {
+      return operand;
+    };
+
+    let mut sourcePointee: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(sourceNode) = typeStore.get(tempType)) {
+      if (let Analyzer::Type::Pointer(pointer) = sourceNode) {
+        sourcePointee = Option::SOME(pointer.pointee);
+      }
+    }
+
+    let Option::SOME(sourceInner) = sourcePointee else {
+      return operand;
+    };
+
+    let canonicalSource: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, sourceInner).typeId;
+    let canonicalTarget: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, targetInner).typeId;
+
+    if (canonicalSource.raw() != canonicalTarget.raw()) {
+      return operand;
+    }
+
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, targetType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Cast(Lir::InstrCast {
+      dest: dest,
+      source: operand,
+      targetType: targetType,
+    }));
+
+    return Lir::Operand::Temp(dest);
+  }
+
   /// Maps a HIR literal to a LIR constant. Every numeric width widens into
   /// the Rust model's `Int`/`UInt`/`Float` carriers with the node's own type.
   function constFromLiteral(
@@ -2085,7 +2149,8 @@ export namespace LirLowering {
           // A generic `T` instantiated with `void` still returns its value in
           // the source; the value is evaluated for its effects only.
           let coerced: Lir::Operand = LirLowering::coerceOperandToType(typeStore, function_, state, value, valueType, returnType, valueSpan);
-          let candidate: Option<Lir::Operand> = Option::SOME(coerced);
+          let retyped: Lir::Operand = LirLowering::retypePlacePointer(defStore, typeStore, function_, state, coerced, returnType, valueSpan);
+          let candidate: Option<Lir::Operand> = Option::SOME(retyped);
 
           if (!LirLowering::isVoidType(typeStore, returnType)) {
             returned = candidate;

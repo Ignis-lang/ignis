@@ -1,0 +1,24 @@
+// e2e: err
+// `nameRef` returns `&self.name`, a view of the receiver: keeping it in a
+// binding that outlives the receiver is rejected.
+import String from "std::string";
+
+record Person {
+  public name: String;
+
+  public nameRef(&self): &String {
+    return &self.name;
+  }
+}
+
+function main(): i32 {
+  let fallback: String = String::create("none");
+  let mut view: &String = &fallback;
+
+  {
+    let person: Person = Person { name: String::create("Ada") };
+    view = person.nameRef();
+  }
+
+  return view.length() as i32;
+}
