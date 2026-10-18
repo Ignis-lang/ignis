@@ -1,0 +1,60 @@
+// e2e: err
+//
+// A free function or a static method returning a view returns a view of its view-typed
+// arguments, so keeping the result past the statement is rejected when an argument
+// points into a temporary, and returning it is rejected when an argument points into a
+// local of the function.
+import Io from "std::io";
+import Arc from "std::sync";
+
+record Foo {
+  public name: String;
+
+  public static pickName(foo: &Foo): &String {
+    return &foo.name;
+  }
+}
+
+function makeShared(): Arc<Foo> {
+  return Arc::new<Foo>(Foo { name: String::create("abc") });
+}
+
+function same(foo: &Foo): &Foo {
+  return foo;
+}
+
+function pick(text: str): str {
+  return text;
+}
+
+function referenceOfATemporary(): void {
+  let kept: &Foo = same(makeShared().get());
+
+  Io::println(kept.name.toStr());
+}
+
+function strOfATemporary(): void {
+  let kept: str = pick(String::create("abc").toStr());
+
+  Io::println(kept);
+}
+
+function staticMethodOfATemporary(): void {
+  let kept: &String = Foo::pickName(makeShared().get());
+
+  Io::println(kept.toStr());
+}
+
+function returnedViewOfALocal(): str {
+  let owned: String = String::create("abc");
+
+  return pick(owned.toStr());
+}
+
+function main(): i32 {
+  referenceOfATemporary();
+  strOfATemporary();
+  staticMethodOfATemporary();
+  Io::println(returnedViewOfALocal());
+  return 0;
+}

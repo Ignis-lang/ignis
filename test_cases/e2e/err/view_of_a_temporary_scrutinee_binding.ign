@@ -1,0 +1,71 @@
+// e2e: err
+//
+// A pattern binding lives in its scrutinee. When the scrutinee is a temporary, it is
+// dropped when the `match`, `if let` or `let ... else` statement ends, so a view of
+// the binding must not be stored into a local declared outside the arm, and a
+// `let ... else` must not bind into a temporary by reference at all. An owned arm
+// binding is dropped at the end of its arm, so the same holds for a view of it.
+import Io from "std::io";
+import Arc from "std::sync";
+
+enum Wrap {
+  Some(String),
+}
+
+function makeWrap(): Wrap {
+  return Wrap::Some(String::create("abc"));
+}
+
+function makeShared(): Arc<Wrap> {
+  return Arc::new<Wrap>(makeWrap());
+}
+
+function ownedArmBinding(): void {
+  let mut kept: str = "";
+
+  match (makeWrap()) {
+    Wrap::Some(inner) -> {
+      kept = inner.toStr();
+    },
+  };
+
+  Io::println(kept);
+}
+
+function ownedLetConditionBinding(): void {
+  let mut kept: str = "";
+
+  if (let Wrap::Some(inner) = makeWrap()) {
+    kept = inner.toStr();
+  }
+
+  Io::println(kept);
+}
+
+function borrowedArmBinding(): void {
+  let mut kept: str = "";
+
+  match (makeShared().get()) {
+    Wrap::Some(inner) -> {
+      kept = inner.toStr();
+    },
+  };
+
+  Io::println(kept);
+}
+
+function borrowedLetElseBinding(): void {
+  let Wrap::Some(inner) = makeShared().get() else {
+    return;
+  };
+
+  Io::println(inner.toStr());
+}
+
+function main(): i32 {
+  ownedArmBinding();
+  ownedLetConditionBinding();
+  borrowedArmBinding();
+  borrowedLetElseBinding();
+  return 0;
+}

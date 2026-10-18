@@ -1970,9 +1970,22 @@ export namespace LirLowering {
 
         let mut statementIndex: u64 = 0;
 
+        // Each full statement owns the temporaries it spills: they live through
+        // the whole statement (call arguments, template literals, an `if`
+        // condition with its branches, a `match` scrutinee with its arms) and
+        // die before the next statement runs. An exit inside the statement
+        // drops them on its own path, because every exit unwinds the frames
+        // down to its target.
         while (statementIndex < block.statements.length()) {
           if (let Option::SOME(statementId) = block.statements.get(statementIndex)) {
+            LirLowering::pushSyntheticFrame(state);
             let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *statementId);
+
+            if (!state.terminated) {
+              LirLowering::emitCurrentSyntheticDrops(function_, state);
+            }
+
+            LirLowering::popSyntheticFrame(state);
           }
 
           statementIndex += 1;

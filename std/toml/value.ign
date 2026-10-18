@@ -49,7 +49,9 @@ function tomlPathSegments(path: &String): Vector<String> {
 /// ```
 function tomlOwnedStr(value: str): str {
   let owned: String = String::create(value);
-  return tomlOwnedStr(&owned);
+  let bytes: Vector<u8> = owned.toBytes();
+
+  return tomlOwnedBytes(bytes.asPtr(), bytes.length());
 }
 
 /// Copies a `String` into TOML-owned NUL-terminated storage.
@@ -77,11 +79,19 @@ function tomlOwnedStr(value: str): str {
 /// ```
 function tomlOwnedStr(value: &String): str {
   let bytes: Vector<u8> = value.toBytes();
-  let length: u64 = bytes.length();
+
+  return tomlOwnedBytes(bytes.asPtr(), bytes.length());
+}
+
+/// Copies `length` bytes at `data` into TOML-owned NUL-terminated storage.
+///
+/// Takes a raw pointer rather than a view so the result is not read as a view
+/// of the caller's buffer: the storage it returns is a fresh allocation.
+function tomlOwnedBytes(data: *u8, length: u64): str {
   let raw: *mut u8 = Memory::allocateVector<u8>(length + 1);
 
   if (length > 0) {
-    Memory::copy<u8>(raw, bytes.asPtr(), length);
+    Memory::copy<u8>(raw, data, length);
   }
 
   @write<u8>(raw + length, 0);

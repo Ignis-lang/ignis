@@ -60,18 +60,59 @@ import _ from "./ownership_report";
 ///     and is never produced.
 ///   - The interprocedural `&mut`-parameter drop summaries, which let the
 ///     oracle see that a callee dropped through a reference it was handed.
-///   - Synthetic temporaries: neither oracle tracks a value that never reaches
-///     a named local, and neither does this walk.
-///   - `str`-view lifetimes (A0202), slice-view borrows, and return-of-local
-///     reference (A0043): all three need `needs_drop`-aware view tracking plus
-///     the variable-initializer chain, and the selfhost lowering does not
-///     produce the slice/`MakeSlice` shapes they key on yet.
-///   - Moves out of a borrowed place (A0186) and the borrowed-pattern-binding
-///     bookkeeping behind it.
+///   - Synthetic temporaries are not tracked as values: no move or drop state
+///     follows them. They matter only as the owner of a view (below).
+///   - Slices built by `MakeSlice` from a local fixed array: the conversion is
+///     not a method call, so it produces no tracked view.
 ///   - Assignment to an immutable local: the Rust oracle emits that from the
 ///     typechecker (A0013), not from either HIR checker; the selfhost
 ///     typechecker already emits its own equivalent (A0067), so duplicating
 ///     it here would report the same program twice.
+///
+/// Views (A0202, A0043, A0258), beyond the oracles: a method taking `&self`
+/// or `&mut self` whose result is a `str`, a `&T`, a `&mut T` or a slice
+/// returns a view of its receiver; a `str` result counts only when the
+/// receiver's type needs a drop, because a receiver owning no heap storage
+/// can only hand out a `str` that lives elsewhere. `pointeeOwnerOf` and
+/// `storageOwnerOf` follow the owner through method chains, field access,
+/// indexing, references, dereferences and view locals (the
+/// variable-initializer chain). Rejected: a `let`, an assignment to a local
+/// or a `return` that keeps a view of a temporary; a `let` or assignment that
+/// keeps a view of a local declared deeper than the binding; a `return` of a
+/// view of any local of the function. A kept view of a live local holds a
+/// borrow of it until the scope of the store ends, so the existing borrow
+/// rules report mutating the owner and A0258 reports moving it.
+///
+/// The same rules reach views kept less directly: an aggregate holding a
+/// reference (`Option<&T>`) a `&self` method returned, passed on by a
+/// by-value method (`unwrap`); the fields, payloads and elements of a record,
+/// enum, tuple or vector built in place; an assignment into a field or an
+/// element of a local; the value a block tail, an `if` or a `match` arm
+/// produces; and pattern bindings. An owned pattern binding is a local of its
+/// arm. A binding destructured by reference, or a reference copied out of a
+/// by-value scrutinee, lives in the scrutinee's storage: a local it views, or
+/// a temporary scrutinee that lives through the arms (`temporaryStorageOf`),
+/// which a `let ... else` binding would outlive. Limits:
+///   - The borrow is scope-based like every named borrow here, not
+///     liveness-based: it lasts to the end of the scope after the view's last
+///     use. A view stored by an assignment is released when the scope the
+///     assignment sits in ends, which can be earlier than the binding's own.
+///   - The borrow is shared even for a `&mut T` view, because
+///     monomorphization drops reference mutability (see
+///     `bindingIsMutableReference`).
+///   - A0258 is limited to owners of method and aggregate views: moving a
+///     local after the last use of a plain `let r = &x` stays accepted.
+///   - A binding holding an aggregate view (`Option<&T>`) is checked for
+///     where it points but holds no borrow of its owner, for the same reason:
+///     mutating a map after reading `map.get(key)` into a local is common.
+///   - Views a callee stores out of its arguments (`values.push(make().toStr())`)
+///     are not tracked.
+///   - A free function, extern function or static method returning a view is
+///     read as a view of all its `&T`/`str`/slice arguments
+///     (`callArgumentsViewOwner`). One that returns a literal or a fresh
+///     allocation is a false positive; the fix is to bind the argument.
+///   - A pattern binding that needs no drop and is destructured by reference
+///     out of a referenced scrutinee is not tracked.
 ///
 /// Known divergences from the oracles, as opposed to unported rules:
 ///   - Granularity is whole-local, exactly like both oracles: a borrow or a
@@ -296,6 +337,50 @@ export namespace Borrowck {
     /// no drop function stays copyable.
     moveOnlyClosureOwners: Vector<u32>;
 
+    /// The scope depth each parameter and `let`-declared local was declared at,
+    /// as a flat map. A view stored into a binding is rejected when its owner
+    /// was declared deeper than the binding, because the owner is dropped
+    /// first. Locals introduced any other way (pattern bindings, loop
+    /// variables) have no entry, and no depth comparison is made for them.
+    localDepthDefs: Vector<u32>;
+    localDepths: Vector<u64>;
+
+    /// Locals that hold a view, mapped to the local whose storage the view
+    /// points into, as a flat map: `viewDefs[i]` views `viewOwners[i]`. This
+    /// is the variable-initializer chain: a view taken from a view local
+    /// borrows from the original owner, not from the view local.
+    viewDefs: Vector<u32>;
+    viewOwners: Vector<u32>;
+
+    /// Parallel to `viewDefs`: set when the view came from a method call, so
+    /// the binding holds a borrow of the owner taken for the view itself.
+    /// `let r = &x` maps `r` to `x` for the chain but leaves this clear.
+    viewFromMethod: Vector<u32>;
+
+    /// Locals whose storage is a temporary that lives only to a given scope
+    /// depth: a pattern binding destructured by reference out of a temporary
+    /// scrutinee lives in that temporary, which dies when the `match` (or the
+    /// `if let`, the `while let` condition) ends, and so does any view local
+    /// taken from such a binding inside the arm. `temporaryStorageNodes[i]` is
+    /// the raw `HirId` of the temporary, for the diagnostic. Entries are
+    /// switched off by `temporaryStorageActive` when the local is reassigned.
+    temporaryStorageDefs: Vector<u32>;
+    temporaryStorageDepths: Vector<u64>;
+    temporaryStorageNodes: Vector<u32>;
+    temporaryStorageActive: Vector<u32>;
+
+    /// Locals some aggregate stored into a binding holds a view of, such as
+    /// `owned` in `let holder = Holder { name: owned.toStr() };`. Like a method
+    /// view, the binding holds a borrow of them, so moving them is reported.
+    aggregateViewOwners: Vector<u32>;
+
+    /// Moves of a local that was borrowed at the time, in walk order. The
+    /// consumption sites hold no diagnostic bag, so `checkFunction` reports
+    /// these once the walk ends. A loop body walked twice records the same
+    /// move twice; `recordMovedWhileBorrowed` keeps one.
+    movedWhileBorrowedDefs: Vector<u32>;
+    movedWhileBorrowedSpans: Vector<SourceSpan>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -368,6 +453,18 @@ export namespace Borrowck {
         envsCapturedByEscapingClosures: Vector::new<u32>(),
         bindingsAssignedClosureEnv: Vector::new<u32>(),
         moveOnlyClosureOwners: Vector::new<u32>(),
+        localDepthDefs: Vector::new<u32>(),
+        localDepths: Vector::new<u64>(),
+        viewDefs: Vector::new<u32>(),
+        viewOwners: Vector::new<u32>(),
+        viewFromMethod: Vector::new<u32>(),
+        temporaryStorageDefs: Vector::new<u32>(),
+        temporaryStorageDepths: Vector::new<u64>(),
+        temporaryStorageNodes: Vector::new<u32>(),
+        temporaryStorageActive: Vector::new<u32>(),
+        aggregateViewOwners: Vector::new<u32>(),
+        movedWhileBorrowedDefs: Vector::new<u32>(),
+        movedWhileBorrowedSpans: Vector::new<SourceSpan>(),
         reachable: true,
         inDefer: false,
         inDropMethod: false,
@@ -380,6 +477,229 @@ export namespace Borrowck {
 
     public setReportEnabled(&mut self, value: boolean): void {
       self.reportEnabled = value;
+    }
+
+    public recordLocalDepth(&mut self, defRaw: u32, depth: u64): void {
+      self.localDepthDefs.push(defRaw);
+      self.localDepths.push(depth);
+    }
+
+    /// The depth `defRaw` was declared at, or `NONE` when it was not
+    /// declared by a `let` or as a parameter.
+    public localDepth(&self, defRaw: u32): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < self.localDepthDefs.length()) {
+        if (let Option::SOME(candidate) = self.localDepthDefs.get(index)) {
+          if (*candidate == defRaw) {
+            if (let Option::SOME(depth) = self.localDepths.get(index)) {
+              return Option::SOME(*depth);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Records that `viewRaw` now holds a view of `ownerRaw`, replacing
+    /// whatever it viewed before. `fromMethod` is set for a view a method call
+    /// produced.
+    public setViewOwner(&mut self, viewRaw: u32, ownerRaw: u32, fromMethod: boolean): void {
+      let mut index: u64 = 0;
+
+      while (index < self.viewDefs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(candidate) = self.viewDefs.get(index)) {
+          found = *candidate == viewRaw;
+        }
+
+        if (found) {
+          self.viewOwners.set(index, ownerRaw);
+          self.viewFromMethod.set(index, Borrowck::boolAsFlag(fromMethod));
+          return;
+        }
+
+        index += 1;
+      }
+
+      self.viewDefs.push(viewRaw);
+      self.viewOwners.push(ownerRaw);
+      self.viewFromMethod.push(Borrowck::boolAsFlag(fromMethod));
+    }
+
+    /// Records that `viewRaw` no longer views any local. A view of storage
+    /// this function does not own is not tracked, so it maps to itself, which
+    /// `viewOwnerOf` reads as no owner.
+    public clearViewOwner(&mut self, viewRaw: u32): void {
+      if (self.viewOwnerOf(viewRaw).isSome()) {
+        self.setViewOwner(viewRaw, viewRaw, false);
+      }
+    }
+
+    public viewOwnerOf(&self, viewRaw: u32): Option<u32> {
+      let mut index: u64 = 0;
+
+      while (index < self.viewDefs.length()) {
+        if (let Option::SOME(candidate) = self.viewDefs.get(index)) {
+          if (*candidate == viewRaw) {
+            if (let Option::SOME(owner) = self.viewOwners.get(index)) {
+              if (*owner == viewRaw) {
+                return Option::NONE;
+              }
+
+              return Option::SOME(*owner);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Records that the storage of `defRaw` is the temporary `nodeRaw`, alive
+    /// down to scope depth `depth`.
+    public setTemporaryStorage(&mut self, defRaw: u32, depth: u64, nodeRaw: u32): void {
+      self.temporaryStorageDefs.push(defRaw);
+      self.temporaryStorageDepths.push(depth);
+      self.temporaryStorageNodes.push(nodeRaw);
+      self.temporaryStorageActive.push(1);
+    }
+
+    public clearTemporaryStorage(&mut self, defRaw: u32): void {
+      let mut index: u64 = 0;
+
+      while (index < self.temporaryStorageDefs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(candidate) = self.temporaryStorageDefs.get(index)) {
+          found = *candidate == defRaw;
+        }
+
+        if (found) {
+          self.temporaryStorageActive.set(index, 0);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// The temporary `defRaw` lives in, as a scoped temporary owner, when it
+    /// is one.
+    public temporaryStorageOf(&self, defRaw: u32): Option<Borrowck::ViewOwner> {
+      let mut index: u64 = self.temporaryStorageDefs.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        if (let Option::SOME(candidate) = self.temporaryStorageDefs.get(index)) {
+          if (*candidate == defRaw) {
+            if (let Option::SOME(active) = self.temporaryStorageActive.get(index)) {
+              if (*active == 0) {
+                return Option::NONE;
+              }
+            }
+
+            let mut depth: u64 = 0;
+            let mut nodeRaw: u32 = 0;
+
+            if (let Option::SOME(entry) = self.temporaryStorageDepths.get(index)) {
+              depth = *entry;
+            }
+
+            if (let Option::SOME(entry) = self.temporaryStorageNodes.get(index)) {
+              nodeRaw = *entry;
+            }
+
+            return Option::SOME(Borrowck::scopedTemporaryViewOwner(Id::fromRaw<Hir::NodeTag>(nodeRaw), depth));
+          }
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    public markAggregateViewOwner(&mut self, ownerRaw: u32): void {
+      self.aggregateViewOwners.push(ownerRaw);
+    }
+
+    /// Whether some local holds a view a method call produced of `ownerRaw`.
+    /// Read only together with the borrow map: a view whose scope ended
+    /// released its borrow.
+    public isViewOwner(&self, ownerRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.aggregateViewOwners.length()) {
+        if (let Option::SOME(owner) = self.aggregateViewOwners.get(index)) {
+          if (*owner == ownerRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      index = 0;
+
+      while (index < self.viewOwners.length()) {
+        if (let Option::SOME(owner) = self.viewOwners.get(index)) {
+          if (let Option::SOME(fromMethod) = self.viewFromMethod.get(index)) {
+            if (*owner == ownerRaw && *fromMethod == 1) {
+              return true;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    public recordMovedWhileBorrowed(&mut self, defRaw: u32, span: SourceSpan): void {
+      let mut index: u64 = 0;
+
+      while (index < self.movedWhileBorrowedDefs.length()) {
+        let mut seen: boolean = false;
+
+        if (let Option::SOME(candidate) = self.movedWhileBorrowedDefs.get(index)) {
+          if (let Option::SOME(seenSpan) = self.movedWhileBorrowedSpans.get(index)) {
+            seen = *candidate == defRaw && seenSpan.start == span.start && seenSpan.end == span.end;
+          }
+        }
+
+        if (seen) {
+          return;
+        }
+
+        index += 1;
+      }
+
+      self.movedWhileBorrowedDefs.push(defRaw);
+      self.movedWhileBorrowedSpans.push(span);
+    }
+
+    public movedWhileBorrowedCount(&self): u64 {
+      return self.movedWhileBorrowedDefs.length();
+    }
+
+    public movedWhileBorrowedDefAt(&self, index: u64): Option<u32> {
+      return match (self.movedWhileBorrowedDefs.get(index)) {
+        Option::SOME(defRaw) -> Option::SOME(*defRaw),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    public movedWhileBorrowedSpanAt(&self, index: u64): Option<SourceSpan> {
+      return match (self.movedWhileBorrowedSpans.get(index)) {
+        Option::SOME(span) -> Option::SOME(*span),
+        Option::NONE -> Option::NONE,
+      };
     }
 
     public setReportSuppressed(&mut self, value: boolean): void {
@@ -1296,6 +1616,9 @@ export namespace Borrowck {
     codes.push(DiagnosticCode::INCONSISTENT_MOVE_IN_BRANCHES);
     codes.push(DiagnosticCode::INCONSISTENT_DROP_IN_BRANCHES);
     codes.push(DiagnosticCode::MUTATED_WHILE_BORROWED);
+    codes.push(DiagnosticCode::MOVED_WHILE_BORROWED);
+    codes.push(DiagnosticCode::VIEW_OUTLIVES_OWNER);
+    codes.push(DiagnosticCode::RETURN_OF_LOCAL_VIEW);
     codes.push(DiagnosticCode::DROP_ON_COMPLEX_RECEIVER);
     return codes;
   }
@@ -2272,6 +2595,1297 @@ export namespace Borrowck {
     };
   }
 
+  // --- views ------------------------------------------------------------------------
+
+  /// How a value refers to storage, for the view rules: not at all (an owned
+  /// value, or a type no view rule covers), as a `&T` or `&mut T`, as a `str`,
+  /// as a slice, or as a raw pointer.
+  const VIEW_TYPE_NONE: u32 = 0;
+  const VIEW_TYPE_REFERENCE: u32 = 1;
+  const VIEW_TYPE_STR: u32 = 2;
+  const VIEW_TYPE_SLICE: u32 = 3;
+  const VIEW_TYPE_POINTER: u32 = 4;
+
+  /// Where a view points: storage this function does not own (a parameter's
+  /// referent, a static, a literal, a closure environment), a local of the
+  /// function, or a temporary of the statement.
+  const VIEW_OWNER_EXTERNAL: u32 = 0;
+  const VIEW_OWNER_LOCAL: u32 = 1;
+  const VIEW_OWNER_TEMPORARY: u32 = 2;
+
+  /// The owner of a view. `local` is meaningful for `VIEW_OWNER_LOCAL` and
+  /// `node` (the temporary's expression) for `VIEW_OWNER_TEMPORARY`. A
+  /// temporary is `scoped` when it outlives its own statement's end only in
+  /// the sense that matters here: it is the scrutinee of a `match` and lives
+  /// through the arms, which sit at scope depth `depth` and deeper.
+  record ViewOwner {
+    public kind: u32;
+    public local: Analyzer::DefinitionId;
+    public node: Hir::HirId;
+    public scoped: boolean;
+    public depth: u64;
+  }
+
+  function externalViewOwner(): Borrowck::ViewOwner {
+    return Borrowck::ViewOwner {
+      kind: Borrowck::VIEW_OWNER_EXTERNAL,
+      local: Id::fromRaw<Analyzer::DefinitionTag>(0),
+      node: Id::fromRaw<Hir::NodeTag>(0),
+      scoped: false,
+      depth: 0,
+    };
+  }
+
+  function localViewOwner(local: Analyzer::DefinitionId, node: Hir::HirId): Borrowck::ViewOwner {
+    return Borrowck::ViewOwner {
+      kind: Borrowck::VIEW_OWNER_LOCAL,
+      local: local,
+      node: node,
+      scoped: false,
+      depth: 0,
+    };
+  }
+
+  function temporaryViewOwner(node: Hir::HirId): Borrowck::ViewOwner {
+    return Borrowck::ViewOwner {
+      kind: Borrowck::VIEW_OWNER_TEMPORARY,
+      local: Id::fromRaw<Analyzer::DefinitionTag>(0),
+      node: node,
+      scoped: false,
+      depth: 0,
+    };
+  }
+
+  function scopedTemporaryViewOwner(node: Hir::HirId, depth: u64): Borrowck::ViewOwner {
+    return Borrowck::ViewOwner {
+      kind: Borrowck::VIEW_OWNER_TEMPORARY,
+      local: Id::fromRaw<Analyzer::DefinitionTag>(0),
+      node: node,
+      scoped: true,
+      depth: depth,
+    };
+  }
+
+  function viewTypeKind(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): u32 {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return Borrowck::VIEW_TYPE_NONE;
+    };
+
+    let mut aliased: Option<Analyzer::TypeId> = Option::NONE;
+
+    let kind: u32 = match (type_) {
+      Analyzer::Type::STR -> Borrowck::VIEW_TYPE_STR,
+      Analyzer::Type::Reference(_) -> Borrowck::VIEW_TYPE_REFERENCE,
+      Analyzer::Type::Slice(_) -> Borrowck::VIEW_TYPE_SLICE,
+      Analyzer::Type::Pointer(_) -> Borrowck::VIEW_TYPE_POINTER,
+      Analyzer::Type::Alias(aliasDefId) -> {
+        aliased = Borrowck::aliasedTypeOf(defStore, aliasDefId);
+        Borrowck::VIEW_TYPE_NONE
+      },
+      _ -> Borrowck::VIEW_TYPE_NONE,
+    };
+
+    if (let Option::SOME(target) = aliased) {
+      return Borrowck::viewTypeKind(defStore, typeStore, target);
+    }
+
+    return kind;
+  }
+
+  /// `typeId` with every outer reference removed.
+  function referentTypeOf(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): Analyzer::TypeId {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return typeId;
+    };
+
+    let referent: Option<Analyzer::TypeId> = match (type_) {
+      Analyzer::Type::Reference(reference) -> Option::SOME(reference.referent),
+      _ -> Option::NONE,
+    };
+
+    if (let Option::SOME(inner) = referent) {
+      return Borrowck::referentTypeOf(typeStore, inner);
+    }
+
+    return typeId;
+  }
+
+  function nodeTypeOf(hir: &Hir::HirStore, nodeId: Hir::HirId): Option<Analyzer::TypeId> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(node.typeId);
+  }
+
+  /// Whether a method call returns a view of its receiver: an instance method
+  /// taking `&self` or `&mut self` whose result is a `&T`, a `&mut T`, a slice
+  /// or a `str`. A `str` result is a view only when the receiver owns heap
+  /// storage (its type needs a drop): a receiver that owns nothing can only
+  /// hand out a `str` that lives elsewhere, such as a literal it holds.
+  function methodCallIsView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    call: &Hir::HirMethodCall,
+    resultType: Analyzer::TypeId,
+  ): boolean {
+    let Option::SOME(receiver) = call.receiver else {
+      return false;
+    };
+
+    let Option::SOME(definition) = defStore.get(call.method) else {
+      return false;
+    };
+
+    let takesSelfByReference: boolean = match (definition) {
+      Analyzer::Definition::Method(method) -> !method.isStatic && !method.selfByValue,
+      _ -> false,
+    };
+
+    if (!takesSelfByReference) {
+      return false;
+    }
+
+    let resultKind: u32 = Borrowck::viewTypeKind(defStore, typeStore, resultType);
+
+    if (resultKind == Borrowck::VIEW_TYPE_REFERENCE || resultKind == Borrowck::VIEW_TYPE_SLICE) {
+      return true;
+    }
+
+    if (resultKind != Borrowck::VIEW_TYPE_STR) {
+      return Borrowck::typeHoldsReference(defStore, typeStore, resultType);
+    }
+
+    let Option::SOME(receiverType) = Borrowck::nodeTypeOf(hir, receiver) else {
+      return false;
+    };
+
+    return Borrowck::needsDropType(defStore, typeStore, Borrowck::referentTypeOf(typeStore, receiverType));
+  }
+
+  /// Whether a method taking its receiver by value hands on the references
+  /// the receiver holds, such as `unwrap` on an `Option<&T>`: both the
+  /// receiver's type and the result's hold a reference, so the result points
+  /// wherever the receiver did.
+  function methodCallPassesViewThrough(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    call: &Hir::HirMethodCall,
+    resultType: Analyzer::TypeId,
+  ): boolean {
+    let Option::SOME(receiver) = call.receiver else {
+      return false;
+    };
+
+    if (!Borrowck::methodSelfByValue(defStore, call.method)) {
+      return false;
+    }
+
+    let Option::SOME(receiverType) = Borrowck::nodeTypeOf(hir, receiver) else {
+      return false;
+    };
+
+    if (!Borrowck::typeHoldsReference(defStore, typeStore, receiverType)) {
+      return false;
+    }
+
+    let resultKind: u32 = Borrowck::viewTypeKind(defStore, typeStore, resultType);
+
+    return resultKind == Borrowck::VIEW_TYPE_REFERENCE || resultKind == Borrowck::VIEW_TYPE_SLICE || Borrowck::typeHoldsReference(defStore, typeStore, resultType);
+  }
+
+  /// Whether a value of this type holds a `&T`, a `&mut T` or a slice, as
+  /// itself or inside a tuple, a fixed array, a record field or an enum
+  /// payload (`Option<&T>`). Raw pointers and `str` are not followed: a `str`
+  /// kept inside an aggregate is too often a literal or a static to count.
+  function typeHoldsReference(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut visiting: Vector<u32> = Vector::new<u32>();
+    return Borrowck::typeHoldsReferenceInner(defStore, typeStore, typeId, &mut visiting);
+  }
+
+  function typeHoldsReferenceInner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    visiting: &mut Vector<u32>,
+  ): boolean {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isEnum: boolean = false;
+    let mut aliased: Option<Analyzer::TypeId> = Option::NONE;
+    let mut holds: boolean = false;
+
+    match (type_) {
+      Analyzer::Type::Reference(_) -> {
+        holds = true;
+      },
+      Analyzer::Type::Slice(_) -> {
+        holds = true;
+      },
+      Analyzer::Type::FixedArray(element, _) -> {
+        components.push(element);
+      },
+      Analyzer::Type::Tuple(tuple) -> {
+        components = Borrowck::copyTypeIds(&tuple.elements);
+      },
+      Analyzer::Type::Record(defId) -> {
+        nominal = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominal = Option::SOME(defId);
+        isEnum = true;
+      },
+      Analyzer::Type::Alias(aliasDefId) -> {
+        aliased = Borrowck::aliasedTypeOf(defStore, aliasDefId);
+      },
+      _ -> {},
+    };
+
+    if (holds) {
+      return true;
+    }
+
+    if (let Option::SOME(target) = aliased) {
+      return Borrowck::typeHoldsReferenceInner(defStore, typeStore, target, visiting);
+    }
+
+    if (let Option::SOME(defId) = nominal) {
+      if (Borrowck::containsRaw(visiting, defId.raw())) {
+        return false;
+      }
+
+      let mut visitingRef: &mut Vector<u32> = visiting;
+      visitingRef.push(defId.raw());
+
+      if (isEnum) {
+        components = Borrowck::enumPayloadTypes(defStore, defId);
+      } else {
+        components = Borrowck::recordFieldTypes(defStore, defId);
+      }
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < components.length()) {
+      if (let Option::SOME(component) = components.get(index)) {
+        if (Borrowck::typeHoldsReferenceInner(defStore, typeStore, *component, visiting)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+    let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copied.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  /// Whether `binding` is declared as a `&mut T`. A view method stored into
+  /// such a binding hands out write access to its owner, so the binding holds
+  /// a mutable borrow; every other view holds a shared one.
+  ///
+  /// `Mono::concretizeType` rebuilds every reference as a shared one, so after
+  /// monomorphization this answers `false` for every binding and a `&mut T`
+  /// view holds a shared borrow: it still conflicts with a `&mut self` call on
+  /// the owner, but not with a shared use. Answers correctly once
+  /// monomorphization keeps the mutability.
+  function bindingIsMutableReference(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    binding: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(bindingType) = Borrowck::variableTypeOf(defStore, binding) else {
+      return false;
+    };
+
+    let Option::SOME(type_) = typeStore.get(bindingType) else {
+      return false;
+    };
+
+    let mut referent: Option<Analyzer::TypeId> = Option::NONE;
+
+    match (type_) {
+      Analyzer::Type::Reference(reference) -> {
+        referent = Option::SOME(reference.referent);
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(referentType) = referent else {
+      return false;
+    };
+
+    let mut internRef: &mut Analyzer::TypeStore = typeStore;
+    let mutableType: Analyzer::TypeId = internRef.mutableReference(referentType);
+
+    return mutableType.raw() == bindingType.raw();
+  }
+
+  /// Where the storage of the place or value `nodeId` lives: the local it is
+  /// part of, following field access and indexing; whatever a dereference or
+  /// a value of a view type points to; storage this function does not own
+  /// for a static, a pattern binding destructured out of a reference, or a
+  /// closure environment capture; and a temporary for any other expression.
+  function storageOwnerOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+  ): Borrowck::ViewOwner {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Borrowck::externalViewOwner();
+    };
+
+    // A receiver that already is a reference (or a `str`, a slice) names the
+    // storage it points to, not its own bytes.
+    if (Borrowck::viewTypeKind(defStore, typeStore, node.typeId) != Borrowck::VIEW_TYPE_NONE) {
+      return Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, nodeId);
+    }
+
+    let mut base: Option<Hir::HirId> = Option::NONE;
+    let mut pointer: Option<Hir::HirId> = Option::NONE;
+    let mut variable: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut external: boolean = false;
+    let mut elements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut isTuple: boolean = false;
+
+    match (&node.kind) {
+      // A tuple built in place, as a `match` scrutinee: what a pattern binds
+      // out of it lives wherever its elements do.
+      Hir::HirKind::TupleLiteral(tupleElements) -> {
+        elements = Borrowck::copyHirIds(&tupleElements);
+        isTuple = true;
+      },
+      Hir::HirKind::Variable(defId) -> {
+        variable = Option::SOME(defId);
+      },
+      Hir::HirKind::StaticAccess(_) -> {
+        external = true;
+      },
+      Hir::HirKind::FieldAccess(access) -> {
+        base = Option::SOME(access.base);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        base = Option::SOME(indexNode.base);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        pointer = Option::SOME(inner);
+      },
+      _ -> {},
+    };
+
+    if (external) {
+      return Borrowck::externalViewOwner();
+    }
+
+    if (isTuple) {
+      let mut elementIndex: u64 = 0;
+
+      while (elementIndex < elements.length()) {
+        // Only a referenced element or a nested tuple can be borrowed from;
+        // a pattern takes any other element out by value.
+        if (let Option::SOME(element) = elements.get(elementIndex)) {
+          let mut bindsByReference: boolean = false;
+
+          if (let Option::SOME(elementNode) = hir.get(*element)) {
+            bindsByReference = Borrowck::viewTypeKind(defStore, typeStore, elementNode.typeId) != Borrowck::VIEW_TYPE_NONE;
+
+            if (let Hir::HirKind::TupleLiteral(_) = &elementNode.kind) {
+              bindsByReference = true;
+            }
+          }
+
+          if (bindsByReference) {
+            let owner: Borrowck::ViewOwner = Borrowck::storageOwnerOf(defStore, typeStore, hir, state, *element);
+
+            if (owner.kind != Borrowck::VIEW_OWNER_EXTERNAL) {
+              return owner;
+            }
+          }
+        }
+
+        elementIndex += 1;
+      }
+
+      return Borrowck::externalViewOwner();
+    }
+
+    if (let Option::SOME(baseId) = base) {
+      return Borrowck::storageOwnerOf(defStore, typeStore, hir, state, baseId);
+    }
+
+    if (let Option::SOME(pointerId) = pointer) {
+      return Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, pointerId);
+    }
+
+    if (let Option::SOME(defId) = variable) {
+      // A binding destructured out of a reference names the storage the
+      // reference pointed to: a local, a temporary scrutinee, or storage this
+      // function does not own.
+      if (state.isBorrowedBinding(defId.raw())) {
+        if (let Option::SOME(ownerRaw) = state.viewOwnerOf(defId.raw())) {
+          return Borrowck::localViewOwner(Id::fromRaw<Analyzer::DefinitionTag>(ownerRaw), nodeId);
+        }
+
+        if (let Option::SOME(temporary) = state.temporaryStorageOf(defId.raw())) {
+          return temporary;
+        }
+
+        return Borrowck::externalViewOwner();
+      }
+
+      return Borrowck::localViewOwner(defId, nodeId);
+    }
+
+    return Borrowck::temporaryViewOwner(nodeId);
+  }
+
+  /// Where the view value `nodeId` points: the storage a reference expression
+  /// or a view method's receiver lives in (so `a.b().c()` points into `a`),
+  /// or, for a view local, the owner recorded when it was initialized (the
+  /// variable-initializer chain). Any other view value, such as a `str` field
+  /// read out of a record, points to
+  /// storage that is not tracked.
+  function pointeeOwnerOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+  ): Borrowck::ViewOwner {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Borrowck::externalViewOwner();
+    };
+
+    let mut storage: Option<Hir::HirId> = Option::NONE;
+    let mut passedThrough: Option<Hir::HirId> = Option::NONE;
+    let mut variable: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut callArguments: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    // A value-producing block, `if` or `match` points wherever the value it
+    // produces on some path does; the first tracked owner found decides.
+    let mut results: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    match (&node.kind) {
+      Hir::HirKind::Block(block) -> {
+        if (let Option::SOME(tail) = block.expression) {
+          results.push(tail);
+        }
+      },
+      Hir::HirKind::If(ifNode) -> {
+        results.push(ifNode.thenBranch);
+
+        if (let Option::SOME(elseBranch) = ifNode.elseBranch) {
+          results.push(elseBranch);
+        }
+      },
+      Hir::HirKind::TupleLiteral(tupleElements) -> {
+        results = Borrowck::copyHirIds(&tupleElements);
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            results.push(arm.body);
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::Variable(defId) -> {
+        variable = Option::SOME(defId);
+      },
+      Hir::HirKind::Reference(reference) -> {
+        storage = Option::SOME(reference.expression);
+      },
+      Hir::HirKind::MethodCall(call) -> {
+        if (call.receiver.isNone()) {
+          callArguments = Borrowck::copyHirIds(&call.args);
+        } else if (Borrowck::methodCallIsView(defStore, typeStore, hir, &call, node.typeId)) {
+          storage = call.receiver;
+        } else if (Borrowck::methodCallPassesViewThrough(defStore, typeStore, hir, &call, node.typeId)) {
+          passedThrough = call.receiver;
+        }
+      },
+      Hir::HirKind::Call(call) -> {
+        callArguments = Borrowck::copyHirIds(&call.args);
+      },
+      _ -> {},
+    };
+
+    if (callArguments.length() > 0 && Borrowck::typeHoldsView(defStore, typeStore, node.typeId)) {
+      return Borrowck::callArgumentsViewOwner(defStore, typeStore, hir, state, &callArguments);
+    }
+
+    if (let Option::SOME(storageId) = storage) {
+      return Borrowck::storageOwnerOf(defStore, typeStore, hir, state, storageId);
+    }
+
+    if (let Option::SOME(receiverId) = passedThrough) {
+      return Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, receiverId);
+    }
+
+    let mut resultIndex: u64 = 0;
+
+    while (resultIndex < results.length()) {
+      if (let Option::SOME(result) = results.get(resultIndex)) {
+        let owner: Borrowck::ViewOwner = Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, *result);
+
+        if (owner.kind != Borrowck::VIEW_OWNER_EXTERNAL) {
+          return owner;
+        }
+      }
+
+      resultIndex += 1;
+    }
+
+    if (let Option::SOME(defId) = variable) {
+      if (let Option::SOME(ownerRaw) = state.viewOwnerOf(defId.raw())) {
+        return Borrowck::localViewOwner(Id::fromRaw<Analyzer::DefinitionTag>(ownerRaw), nodeId);
+      }
+
+      if (let Option::SOME(temporary) = state.temporaryStorageOf(defId.raw())) {
+        return temporary;
+      }
+    }
+
+    return Borrowck::externalViewOwner();
+  }
+
+  /// Where the view a free function or a static method returns points: into
+  /// any of its arguments of a view type (`&T`, `&mut T`, `str`, a slice),
+  /// since nothing in its signature says which one. The shortest-lived owner
+  /// decides: a temporary before any local, a local declared deeper before
+  /// one declared shallower. Arguments of any other type create no
+  /// dependency. Extern functions follow the same rule.
+  function callArgumentsViewOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    arguments: &Vector<Hir::HirId>,
+  ): Borrowck::ViewOwner {
+    let mut chosen: Borrowck::ViewOwner = Borrowck::externalViewOwner();
+    let mut chosenDepth: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < arguments.length()) {
+      if (let Option::SOME(argument) = arguments.get(index)) {
+        let mut argumentKind: u32 = Borrowck::VIEW_TYPE_NONE;
+
+        if (let Option::SOME(argumentType) = Borrowck::nodeTypeOf(hir, *argument)) {
+          argumentKind = Borrowck::viewTypeKind(defStore, typeStore, argumentType);
+        }
+
+        if (argumentKind == Borrowck::VIEW_TYPE_REFERENCE || argumentKind == Borrowck::VIEW_TYPE_STR || argumentKind == Borrowck::VIEW_TYPE_SLICE) {
+          let owner: Borrowck::ViewOwner = Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, *argument);
+
+          if (owner.kind == Borrowck::VIEW_OWNER_TEMPORARY && !owner.scoped) {
+            return owner;
+          }
+
+          if (owner.kind != Borrowck::VIEW_OWNER_EXTERNAL) {
+            let mut depth: u64 = owner.depth;
+
+            if (owner.kind == Borrowck::VIEW_OWNER_LOCAL) {
+              depth = match (state.localDepth(owner.local.raw())) {
+                Option::SOME(value) -> value,
+                Option::NONE -> 0,
+              };
+            }
+
+            if (chosen.kind == Borrowck::VIEW_OWNER_EXTERNAL || depth > chosenDepth) {
+              chosen = owner;
+              chosenDepth = depth;
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return chosen;
+  }
+
+  /// The owner of the view a binding keeps when it stores `value`: the value
+  /// has to be a `&T`, `&mut T`, slice or `str` for there to be a view at
+  /// all. Raw pointers are not tracked.
+  function keptViewOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    value: Hir::HirId,
+  ): Borrowck::ViewOwner {
+    let Option::SOME(valueType) = Borrowck::nodeTypeOf(hir, value) else {
+      return Borrowck::externalViewOwner();
+    };
+
+    if (!Borrowck::typeHoldsView(defStore, typeStore, valueType)) {
+      return Borrowck::externalViewOwner();
+    }
+
+    return Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, value);
+  }
+
+  /// Whether a value of this type can be a view: a `&T`, a `&mut T`, a slice,
+  /// a `str`, or an aggregate holding a reference (`Option<&T>`). Raw
+  /// pointers are not tracked.
+  function typeHoldsView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let kind: u32 = Borrowck::viewTypeKind(defStore, typeStore, typeId);
+
+    if (kind == Borrowck::VIEW_TYPE_POINTER) {
+      return false;
+    }
+
+    if (kind != Borrowck::VIEW_TYPE_NONE) {
+      return true;
+    }
+
+    return Borrowck::typeHoldsReference(defStore, typeStore, typeId);
+  }
+
+  /// How a diagnostic names the owner of a view: `'name'` for a local, the
+  /// call for a call or method result, and a generic phrase otherwise.
+  function describeViewOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    owner: &Borrowck::ViewOwner,
+  ): String {
+    if (owner.kind == Borrowck::VIEW_OWNER_LOCAL) {
+      let name: String = Borrowck::definitionName(defStore, symbols, owner.local);
+
+      // The local a `for ... of` desugars its iterated value into.
+      if (name.startsWith("__for_of_tmp")) {
+        return String::create("the value a 'for ... of' loop iterates");
+      }
+
+      return `'${name}'`;
+    }
+
+    let Option::SOME(node) = hir.get(owner.node) else {
+      return String::create("a temporary value");
+    };
+
+    let mut callee: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (&node.kind) {
+      Hir::HirKind::Call(call) -> {
+        callee = Option::SOME(call.callee);
+      },
+      Hir::HirKind::MethodCall(call) -> {
+        callee = Option::SOME(call.method);
+      },
+      _ -> {},
+    };
+
+    if (let Option::SOME(calleeId) = callee) {
+      let name: String = Borrowck::definitionName(defStore, symbols, calleeId);
+      return `the temporary result of '${name}(...)'`;
+    }
+
+    return String::create("a temporary value");
+  }
+
+  /// Reports a binding or a return that keeps a view past its owner. The
+  /// primary label sits on the statement, a secondary one on the owner when
+  /// it is a temporary, whose span is the expression to bind first.
+  function emitViewOutlivesOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    owner: &Borrowck::ViewOwner,
+    isReturn: boolean,
+    span: SourceSpan,
+  ): void {
+    let description: String = Borrowck::describeViewOwner(defStore, symbols, hir, owner);
+    let isTemporary: boolean = owner.kind == Borrowck::VIEW_OWNER_TEMPORARY;
+    let mut code: str = DiagnosticCode::VIEW_OUTLIVES_OWNER;
+    let mut message: String = String::create("");
+    let mut label: str = "";
+    let mut help: String = String::create("");
+
+    if (isReturn) {
+      code = DiagnosticCode::RETURN_OF_LOCAL_VIEW;
+
+      if (isTemporary) {
+        message = `Cannot return a view of ${description}, which is dropped when the function returns`;
+      } else {
+        message = `Cannot return a view of local ${description}, which is dropped when the function returns`;
+      }
+
+      label = "the returned view points into storage this function drops";
+      help = String::create("return an owned value instead of a view");
+    } else if (isTemporary) {
+      message = `Cannot keep a view of ${description}, which is dropped at the end of the statement`;
+      label = "the view is kept past the statement";
+      help = String::create("bind the value to a local first, then take the view from that local");
+    } else {
+      message = `Cannot keep a view of ${description} in a binding that outlives it`;
+      label = "the binding outlives the scope of the view's owner";
+      help = `declare ${description} in the scope of the binding, or store an owned copy`;
+    }
+
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message.toStr(), span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, label);
+
+    if (isTemporary) {
+      if (let Option::SOME(node) = hir.get(owner.node)) {
+        diagnostic.addLabel(LabelKind::SECONDARY, node.span, "temporary created here");
+      }
+    }
+
+    diagnostic.setHelp(help.toStr());
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+
+    let mut ownerId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (owner.kind == Borrowck::VIEW_OWNER_LOCAL) {
+      ownerId = Option::SOME(owner.local);
+    }
+
+    Borrowck::noteDiagnostic(state, code, ownerId, span);
+  }
+
+  /// Checks a `let` or an assignment that stores `value` into `binding`,
+  /// declared at `bindingDepth` (`NONE` when unknown), and records the view
+  /// the binding now holds. A kept view of a temporary is rejected; so is a
+  /// view of a local declared deeper than the binding. A kept view of a live
+  /// local holds a borrow of that local until the scope the store happens in
+  /// ends, so moving or mutating the owner meanwhile is reported.
+  ///
+  /// A view copied from another view local (`let b: str = a;`) takes no
+  /// borrow of its own: `a` already holds it, and a second mutable borrow
+  /// would conflict with the first.
+  function recordKeptView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    binding: Analyzer::DefinitionId,
+    bindingDepth: Option<u64>,
+    value: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
+
+    let mut clearRef: &mut Borrowck::State = state;
+    clearRef.clearViewOwner(binding.raw());
+    clearRef.clearTemporaryStorage(binding.raw());
+
+    Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, bindingDepth, value, span);
+
+    if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
+      return;
+    }
+
+    if (owner.kind == Borrowck::VIEW_OWNER_TEMPORARY) {
+      // A view of a scrutinee taken inside an arm may be kept by a binding of
+      // that arm: the scrutinee outlives it. The binding then lives in the
+      // scrutinee too.
+      if (owner.scoped) {
+        if (let Option::SOME(depth) = bindingDepth) {
+          if (depth >= owner.depth) {
+            let mut storageRef: &mut Borrowck::State = state;
+            storageRef.setTemporaryStorage(binding.raw(), owner.depth, owner.node.raw());
+            return;
+          }
+        }
+      }
+
+      Borrowck::emitViewOutlivesOwner(defStore, symbols, hir, state, diagnostics, &owner, false, span);
+      return;
+    }
+
+    if (let Option::SOME(depth) = bindingDepth) {
+      if (let Option::SOME(ownerDepth) = state.localDepth(owner.local.raw())) {
+        if (ownerDepth > depth) {
+          Borrowck::emitViewOutlivesOwner(defStore, symbols, hir, state, diagnostics, &owner, false, span);
+          return;
+        }
+      }
+    }
+
+    let Option::SOME(node) = hir.get(value) else {
+      return;
+    };
+
+    let mut takesBorrow: boolean = true;
+    let mut mutable: boolean = false;
+
+    match (&node.kind) {
+      // `recordLetBorrow` already holds the borrow a `let x = &y` takes.
+      Hir::HirKind::Reference(_) -> {
+        takesBorrow = false;
+      },
+      Hir::HirKind::Variable(_) -> {
+        takesBorrow = false;
+      },
+      Hir::HirKind::MethodCall(_) -> {
+        mutable = Borrowck::bindingIsMutableReference(defStore, typeStore, binding);
+      },
+      _ -> {},
+    };
+
+    // An aggregate holding a view (`Option<&T>` from `get`) is checked for
+    // where it points, but holds no borrow: borrows here last to the end of
+    // the scope, and reading such a value and then mutating its owner is
+    // the common shape of lookup-then-update code.
+    if (Borrowck::viewTypeKind(defStore, typeStore, node.typeId) == Borrowck::VIEW_TYPE_NONE) {
+      takesBorrow = false;
+    }
+
+    let mut viewRef: &mut Borrowck::State = state;
+    viewRef.setViewOwner(binding.raw(), owner.local.raw(), takesBorrow);
+
+    if (!takesBorrow) {
+      return;
+    }
+
+    let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, owner.local, mutable, span, true);
+
+    let mut heldRef: &mut Borrowck::State = state;
+    heldRef.recordHeldBorrow(owner.local.raw(), mutable, granted);
+  }
+
+  /// Checks the views an aggregate built in place keeps: the fields of a record
+  /// initializer, the payload of an enum variant, the elements of a tuple or
+  /// vector literal, recursively. Each one is stored into whatever `value` is
+  /// stored into, so each obeys the rules `recordKeptView` applies to a view
+  /// stored directly; a view of a live local holds a shared borrow of it for
+  /// the rest of the scope. `bindingDepth` is `NONE` for a `return`.
+  function checkAggregateViews(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    bindingDepth: Option<u64>,
+    value: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let mut elements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Borrowck::collectAggregateElements(hir, value, &mut elements);
+
+    let mut index: u64 = 0;
+
+    while (index < elements.length()) {
+      if (let Option::SOME(element) = elements.get(index)) {
+        let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, *element);
+        Borrowck::checkKeptElementView(defStore, symbols, hir, state, diagnostics, bindingDepth, &owner, span);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The operands of the aggregate literals `value` is built from, flattened:
+  /// nested aggregates contribute their own operands instead of themselves.
+  function collectAggregateElements(
+    hir: &Hir::HirStore,
+    value: Hir::HirId,
+    output: &mut Vector<Hir::HirId>
+  ): void {
+    let Option::SOME(node) = hir.get(value) else {
+      return;
+    };
+
+    let mut operands: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    match (&node.kind) {
+      Hir::HirKind::RecordInit(init) -> {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < init.fields.length()) {
+          if (let Option::SOME(field) = init.fields.get(fieldIndex)) {
+            operands.push(field.value);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variant) -> {
+        operands = Borrowck::copyHirIds(&variant.payload);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        operands = Borrowck::copyHirIds(&elements);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        operands = Borrowck::copyHirIds(&elements);
+      },
+      _ -> {},
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < operands.length()) {
+      if (let Option::SOME(operand) = operands.get(index)) {
+        let mut outputRef: &mut Vector<Hir::HirId> = output;
+        outputRef.push(*operand);
+        Borrowck::collectAggregateElements(hir, *operand, output);
+      }
+
+      index += 1;
+    }
+  }
+
+  function copyHirIds(source: &Vector<Hir::HirId>): Vector<Hir::HirId> {
+    let mut copied: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copied.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  /// Applies the kept-view rules to one view an aggregate or a field
+  /// assignment stores. `bindingDepth` is `NONE` for a `return`, which keeps
+  /// nothing of the function alive.
+  function checkKeptElementView(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    bindingDepth: Option<u64>,
+    owner: &Borrowck::ViewOwner,
+    span: SourceSpan,
+  ): void {
+    if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
+      return;
+    }
+
+    let Option::SOME(depth) = bindingDepth else {
+      Borrowck::emitViewOutlivesOwner(defStore, symbols, hir, state, diagnostics, owner, true, span);
+      return;
+    };
+
+    if (owner.kind == Borrowck::VIEW_OWNER_TEMPORARY) {
+      if (owner.scoped && depth >= owner.depth) {
+        return;
+      }
+
+      Borrowck::emitViewOutlivesOwner(defStore, symbols, hir, state, diagnostics, owner, false, span);
+      return;
+    }
+
+    if (let Option::SOME(ownerDepth) = state.localDepth(owner.local.raw())) {
+      if (ownerDepth > depth) {
+        Borrowck::emitViewOutlivesOwner(defStore, symbols, hir, state, diagnostics, owner, false, span);
+        return;
+      }
+    }
+
+    let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, owner.local, false, span, true);
+
+    let mut heldRef: &mut Borrowck::State = state;
+    heldRef.recordHeldBorrow(owner.local.raw(), false, granted);
+    heldRef.markAggregateViewOwner(owner.local.raw());
+  }
+
+  /// Records where a pattern binding's value lives, for the view rules. An
+  /// owned binding is a local declared at `depth`. A binding destructured by
+  /// reference lives in the scrutinee's storage: a local it then views, or a
+  /// temporary scrutinee that stays alive down to `depth` (the arms of a
+  /// `match`) and no further. A `let ... else` binding outlives its statement,
+  /// so binding it by reference into a temporary is rejected outright.
+  function recordPatternBindingStorage(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    defRaw: u32,
+    borrowed: boolean,
+    scrutineeOwner: &Borrowck::ViewOwner,
+    depth: u64,
+    isLetElse: boolean,
+    span: SourceSpan,
+  ): void {
+    let mut stateRef: &mut Borrowck::State = state;
+
+    if (!borrowed) {
+      stateRef.recordLocalDepth(defRaw, depth);
+      return;
+    }
+
+    if (scrutineeOwner.kind == Borrowck::VIEW_OWNER_LOCAL) {
+      stateRef.setViewOwner(defRaw, scrutineeOwner.local.raw(), false);
+      return;
+    }
+
+    if (scrutineeOwner.kind != Borrowck::VIEW_OWNER_TEMPORARY) {
+      return;
+    }
+
+    let mut ownerDepth: u64 = depth;
+
+    if (scrutineeOwner.scoped && scrutineeOwner.depth < depth) {
+      ownerDepth = scrutineeOwner.depth;
+    }
+
+    if (isLetElse && !(scrutineeOwner.scoped && scrutineeOwner.depth <= depth)) {
+      Borrowck::emitViewOutlivesOwner(defStore, symbols, hir, state, diagnostics, scrutineeOwner, false, span);
+      return;
+    }
+
+    stateRef.setTemporaryStorage(defRaw, ownerDepth, scrutineeOwner.node.raw());
+  }
+
+  /// Gives every binding of `pattern` that copies a view out of a by-value
+  /// scrutinee holding references (`Option::SOME(item)` against
+  /// `vector.get(index)`) the storage the scrutinee points into. Bindings that
+  /// need a drop are handled by the caller; a reference-typed scrutinee is
+  /// skipped, because what a reference copied out of a referent points to is
+  /// not known.
+  function recordCopiedViewBindings(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    pattern: &Hir::HirPattern,
+    scrutinee: Hir::HirId,
+    depth: u64,
+    isLetElse: boolean,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(scrutineeType) = Borrowck::nodeTypeOf(hir, scrutinee) else {
+      return;
+    };
+
+    if (Borrowck::isReferenceType(typeStore, scrutineeType) || !Borrowck::typeHoldsReference(defStore, typeStore, scrutineeType)) {
+      return;
+    }
+
+    let mut bindings: Vector<u32> = Vector::new<u32>();
+    Borrowck::collectAllBindings(pattern, &mut bindings);
+
+    let mut owner: Borrowck::ViewOwner = Borrowck::externalViewOwner();
+    let mut ownerKnown: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < bindings.length()) {
+      if (let Option::SOME(defRaw) = bindings.get(index)) {
+        let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*defRaw);
+        let mut holdsView: boolean = false;
+
+        if (let Option::SOME(bindingType) = Borrowck::variableTypeOf(defStore, defId)) {
+          holdsView = !Borrowck::needsDropType(defStore, typeStore, bindingType) && Borrowck::typeHoldsView(defStore, typeStore, bindingType);
+        }
+
+        if (holdsView) {
+          if (!ownerKnown) {
+            owner = Borrowck::pointeeOwnerOf(defStore, typeStore, hir, state, scrutinee);
+            ownerKnown = true;
+          }
+
+          Borrowck::recordPatternBindingStorage(defStore, symbols, hir, state, diagnostics, *defRaw, true, &owner, depth, isLetElse, span);
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  function collectAllBindings(pattern: &Hir::HirPattern, output: &mut Vector<u32>): void {
+    match (pattern) {
+      Hir::HirPattern::Binding(defId) -> {
+        Borrowck::pushUniqueRaw(output, defId.raw());
+      },
+      Hir::HirPattern::Variant(variant) -> {
+        let mut index: u64 = 0;
+
+        while (index < variant.args.length()) {
+          if (let Option::SOME(argument) = variant.args.get(index)) {
+            Borrowck::collectAllBindings(argument, output);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(element) = elements.get(index)) {
+            Borrowck::collectAllBindings(element, output);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Or(patterns) -> {
+        let mut index: u64 = 0;
+
+        while (index < patterns.length()) {
+          if (let Option::SOME(alternative) = patterns.get(index)) {
+            Borrowck::collectAllBindings(alternative, output);
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  /// The local whose own storage the place `nodeId` is part of, following
+  /// field access and indexing only: a place reached through a dereference
+  /// lives wherever the reference points.
+  function placeRootLocal(hir: &Hir::HirStore, nodeId: Hir::HirId): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> Option::SOME(defId),
+      Hir::HirKind::FieldAccess(access) -> Borrowck::placeRootLocal(hir, access.base),
+      Hir::HirKind::Index(indexNode) -> Borrowck::placeRootLocal(hir, indexNode.base),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Checks an assignment into a field or an element of a local, such as
+  /// `holder.name = owned.toStr();`: the view lives as long as that local.
+  function checkPlaceAssignedView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    target: Hir::HirId,
+    value: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    // Only a place inside a local's own storage: a write through a reference
+    // reaches storage whose lifetime this function does not know.
+    let Option::SOME(root) = Borrowck::placeRootLocal(hir, target) else {
+      return;
+    };
+
+    let rootDepth: Option<u64> = state.localDepth(root.raw());
+
+    if (rootDepth.isNone()) {
+      return;
+    }
+
+    let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
+    Borrowck::checkKeptElementView(defStore, symbols, hir, state, diagnostics, rootDepth, &owner, span);
+    Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, rootDepth, value, span);
+  }
+
+  /// Rejects a `return` (or a returned body tail) whose value is a view of a
+  /// temporary or of a local of the function: both are dropped before the
+  /// caller could read through it.
+  function rejectReturnedView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    value: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, Option::NONE, value, span);
+
+    let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
+
+    if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
+      return;
+    }
+
+    Borrowck::emitViewOutlivesOwner(defStore, symbols, hir, state, diagnostics, &owner, true, span);
+  }
+
+  /// Reports every move `tryConsume` saw of a local that was borrowed at the
+  /// time, such as moving the owner of a view while the view is alive.
+  function reportMovesWhileBorrowed(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < state.movedWhileBorrowedCount()) {
+      if (let Option::SOME(defRaw) = state.movedWhileBorrowedDefAt(index)) {
+        if (let Option::SOME(span) = state.movedWhileBorrowedSpanAt(index)) {
+          let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(defRaw);
+          let name: String = Borrowck::definitionName(defStore, symbols, defId);
+          let message: String = `Cannot move '${name}' because it is borrowed`;
+
+          Borrowck::emitOwnershipError(
+            state,
+            diagnostics,
+            span,
+            DiagnosticCode::MOVED_WHILE_BORROWED,
+            message.toStr(),
+            "move happens while a borrow is live",
+            Option::SOME(defId),
+          );
+        }
+      }
+
+      index += 1;
+    }
+  }
+
   // --- manual drop queries -----------------------------------------------------------
 
   /// Whether `methodDefId` is the `drop` method of a type that declares
@@ -3155,7 +4769,17 @@ export namespace Borrowck {
 
     let functionId: Analyzer::DefinitionId = state.currentFunctionId();
 
+    // Only a view local's borrow counts here. A `let r = &x` borrow is held to
+    // the end of its scope however early `r` is last used, and moving `x` after
+    // that last use is common enough that reporting it would reject valid code.
+    let borrowed: boolean = state.borrowValue(defId.raw()) != Borrowck::BORROW_NONE && state.isViewOwner(defId.raw());
+
     let mut stateRef: &mut Borrowck::State = state;
+
+    if (borrowed) {
+      stateRef.recordMovedWhileBorrowed(defId.raw(), span);
+    }
+
     stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_MOVED);
 
     let mut schedulesRef: &mut Hir::DropSchedules = schedules;
@@ -4558,6 +6182,7 @@ export namespace Borrowck {
 
           Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, returned);
           Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, returned);
+          Borrowck::rejectReturnedView(defStore, typeStore, symbols, hir, state, diagnostics, returned, span);
         }
 
         // A return unwinds every open scope back to the function root, so it
@@ -4960,6 +6585,15 @@ export namespace Borrowck {
       Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, value);
       Borrowck::recordLetBorrow(defStore, symbols, hir, state, diagnostics, value, span);
       Borrowck::recordClosureCaptureBorrows(defStore, symbols, hir, state, diagnostics, value, span);
+    }
+
+    let depth: u64 = state.scopeDepth();
+
+    let mut depthRef: &mut Borrowck::State = state;
+    depthRef.recordLocalDepth(letNode.name.raw(), depth);
+
+    if (let Option::SOME(value) = letNode.value) {
+      Borrowck::recordKeptView(defStore, typeStore, symbols, hir, state, diagnostics, letNode.name, Option::SOME(depth), value, span);
     }
 
     // A closure local owns its environment even when its type needs no drop of
@@ -5421,6 +7055,13 @@ export namespace Borrowck {
     }
 
     Borrowck::rejectClosureMoveOutOfBorrow(typeStore, hir, state, diagnostics, assign.value);
+
+    if (let Option::SOME(target) = Borrowck::variableOf(hir, assign.target)) {
+      let targetDepth: Option<u64> = state.localDepth(target.raw());
+      Borrowck::recordKeptView(defStore, typeStore, symbols, hir, state, diagnostics, target, targetDepth, assign.value, span);
+    } else {
+      Borrowck::checkPlaceAssignedView(defStore, typeStore, symbols, hir, state, diagnostics, assign.target, assign.value, span);
+    }
   }
 
   function checkBlock(
@@ -6139,11 +7780,18 @@ export namespace Borrowck {
       );
     }
 
+    let scrutineeOwner: Borrowck::ViewOwner = Borrowck::storageOwnerOf(defStore, typeStore, hir, state, letElse.value);
+    let bindingDepth: u64 = state.scopeDepth();
+
+    Borrowck::recordCopiedViewBindings(defStore, typeStore, symbols, hir, state, diagnostics, &letElse.pattern, letElse.value, bindingDepth, true, span);
     let mut index: u64 = 0;
 
     while (index < bindings.length()) {
       if (let Option::SOME(defRaw) = bindings.get(index)) {
-        if (bindsBorrowedPayloads || Borrowck::containsRaw(&mut borrowedElementBindings, *defRaw)) {
+        let bindingIsBorrowed: boolean = bindsBorrowedPayloads || Borrowck::containsRaw(&mut borrowedElementBindings, *defRaw);
+        Borrowck::recordPatternBindingStorage(defStore, symbols, hir, state, diagnostics, *defRaw, bindingIsBorrowed, &scrutineeOwner, bindingDepth, true, span);
+
+        if (bindingIsBorrowed) {
           // The payload stays in the referenced storage: the binding is live
           // but owns nothing, so it gets no drop of its own.
           Borrowck::notePatternBinding(state, *defRaw, span);
@@ -6234,6 +7882,7 @@ export namespace Borrowck {
     }
     let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, matchNode.scrutinee);
+    let scrutineeOwner: Borrowck::ViewOwner = Borrowck::storageOwnerOf(defStore, typeStore, hir, state, matchNode.scrutinee);
 
     // Whether the match owns what a pattern takes out of it: the scrutinee is an owning
     // value and some pattern moves an owning payload out of it.
@@ -6308,9 +7957,17 @@ export namespace Borrowck {
       let borrowedMark: u64 = state.borrowedBindingCount();
       let mut bindingIndex: u64 = 0;
 
+      // Arm bindings live in the scope the arm opens, one deeper than the
+      // match; a `let` condition's bindings live in the branch it guards, which
+      // sits at the same depth.
+      let armDepth: u64 = state.scopeDepth() + 1;
+
+      Borrowck::recordCopiedViewBindings(defStore, typeStore, symbols, hir, state, diagnostics, &arm.pattern, matchNode.scrutinee, armDepth, false, span);
+
       while (bindingIndex < bindings.length()) {
         if (let Option::SOME(defRaw) = bindings.get(bindingIndex)) {
           let bindingIsBorrowed: boolean = bindsBorrowedPayloads || Borrowck::containsRaw(&mut borrowedElementBindings, *defRaw);
+          Borrowck::recordPatternBindingStorage(defStore, symbols, hir, state, diagnostics, *defRaw, bindingIsBorrowed, &scrutineeOwner, armDepth, false, span);
 
           if (!bindingIsBorrowed) {
             ownedBindings.push(*defRaw);
@@ -7167,6 +8824,8 @@ export namespace Borrowck {
 
     while (index < params.length()) {
       if (let Option::SOME(paramId) = params.get(index)) {
+        state.recordLocalDepth(paramId.raw(), state.scopeDepth());
+
         if (Borrowck::definitionNeedsDrop(defStore, typeStore, *paramId)) {
           Borrowck::declareOwned(&mut state, *paramId);
         } else if (Borrowck::paramTakesClosureEnv(defStore, typeStore, &state, *paramId)) {
@@ -7195,8 +8854,18 @@ export namespace Borrowck {
     // not handed over by any block, so without this the function's exit
     // would drop the value it is returning.
     if (bodyReturnsTail && state.reachable) {
-      Borrowck::markTailReturned(defStore, typeStore, hir, &mut state, Borrowck::innermostTail(hir, bodyId));
+      let tail: Hir::HirId = Borrowck::innermostTail(hir, bodyId);
+      Borrowck::markTailReturned(defStore, typeStore, hir, &mut state, tail);
+      let mut tailSpan: SourceSpan = Borrowck::closingSpanOf(hir, tail);
+
+      if (let Option::SOME(tailNode) = hir.get(tail)) {
+        tailSpan = tailNode.span;
+      }
+
+      Borrowck::rejectReturnedView(defStore, typeStore, symbols, hir, &mut state, diagnostics, tail, tailSpan);
     }
+
+    Borrowck::reportMovesWhileBorrowed(defStore, symbols, &mut state, diagnostics);
 
     // A body's final expression is its result, handed to the caller like a
     // returned value.

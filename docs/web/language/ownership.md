@@ -112,6 +112,12 @@ at every exit: the end of a scope, an early `return`, a `break` or `continue`, a
 variable is overwritten. Double drops and use-after-drop are compile-time errors, with a runtime
 guard behind them as a second line of defence.
 
+A temporary, a value no name holds, is dropped at the end of the statement that created it. An
+`if` condition's temporaries last through the branch and a `match` scrutinee's through the arm.
+A temporary never dies mid-statement, so passing `make().toStr()` as an argument or using it in
+a template literal is fine. Keeping a view of a temporary past its statement is rejected (A0202,
+see Views below).
+
 ## Borrowing
 
 References follow exclusivity:
@@ -128,6 +134,50 @@ function main(): i32 {
     let r2 = &x;
 
     return *r1 + *r2;
+}
+```
+
+### Views
+
+A method that takes `&self` or `&mut self` and returns a `str`, a `&T`, a `&mut T` or a
+slice returns a view of its receiver: the result points into the receiver's storage. A `str`
+result counts as a view only when the receiver's type needs a drop, the way `String` does. The
+owner is followed through method chains, field access, indexing, references and locals that
+were initialized from a view. A free function, an extern function or a static method
+that returns a view returns a view of each of its `&T`, `&mut T`, `str` and slice arguments, and
+the shortest-lived owner among them counts. Other arguments create no dependency. When such a
+function really returns a literal or a fresh copy, bind its argument to a local first.
+
+A view must not outlive its owner:
+
+- Keeping a view of a temporary in a `let` or an assignment is an error (A0202). The
+  temporary is dropped when its statement ends.
+- Storing a view of a local into a binding of an outer scope is an error (A0202).
+- Returning a view of a local or of a temporary is an error (A0043).
+- The same holds for a view kept inside a value: a record field, an enum payload, a tuple
+  element, an `Option<&T>` a method returned, or the value a `match` arm produces.
+- A pattern binding lives in its scrutinee. A view of a binding of a temporary scrutinee can
+  be used inside the arm but not stored into a local declared outside it, and a
+  `let ... else` cannot bind into a temporary by reference.
+- While a binding keeps a view, its owner is borrowed until the end of the scope, so mutating
+  or moving the owner (A0258) is reported.
+
+A view of a temporary used inside the statement that created it is fine, as a call argument
+or in a template literal. To keep it, bind the owner to a local first:
+
+```ignis
+function measure(text: str): u64 {
+    let copy: String = String::create(text);
+
+    return copy.length();
+}
+
+function main(): i32 {
+    // let text: str = String::create("abc").toStr();   // error A0202
+    let owned: String = String::create("abc");
+    let text: str = owned.toStr();
+
+    return (measure(text) + measure(String::create("abc").toStr())) as i32;
 }
 ```
 

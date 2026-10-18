@@ -813,6 +813,8 @@ Types with `@implements(Drop)` must provide a `drop(&mut self): void` method. Th
 
 Double-drop and use-after-drop are compile-time errors. A runtime drop guard provides defense-in-depth.
 
+A temporary (a value produced by a call or another expression and not bound to a name) is dropped at the end of the full statement that created it: an expression statement, a `let`, an assignment, a `return`. An `if` condition's temporaries live through the branch that runs and a `match` scrutinee's through the arm, and both are dropped when the whole `if` or `match` ends. A temporary is never dropped in the middle of a statement, so `consume(make().toStr())` and `${make().toStr()}` in a template literal are valid. Temporaries of one statement are dropped newest first. A view that would outlive its temporary is rejected at compile time (A0202, see Views below).
+
 ### 6.5 Borrow Checking
 
 References follow exclusivity rules:
@@ -827,6 +829,37 @@ let mut x: i32 = 10;
 let r1 = &x;
 let r2 = &x;          // OK: multiple shared refs
 // let m = &mut x;     // ERROR: mutable ref while shared refs exist
+```
+
+#### Views
+
+A method that takes `&self` or `&mut self` and returns a `str`, a `&T`, a `&mut T` or a slice returns a *view* of its receiver: the result points into the receiver's storage. A `str` result counts as a view only when the receiver's type needs a drop (it owns heap storage, like `String`). The owner of a view is found through method chains (`a.b().c()` views `a`), field access, indexing, references, dereferences, and locals that were themselves initialized from a view. A free function, an extern function or a static method whose result is a `str`, a `&T`, a `&mut T`, a slice or a value holding one (`Option<&T>`) returns a view of every argument whose type is a `&T`, a `&mut T`, a `str` or a slice: the signature does not say which one, so the shortest-lived of their owners counts. Arguments of any other type (integers, owned values, raw pointers) create no dependency. A function that actually returns a literal or a fresh allocation is still read this way; bind the argument to a local first, or pass the bytes as a raw pointer and length.
+
+A view must not outlive its owner:
+
+- A `let` or an assignment that keeps a view of a temporary (a call result, a method result, any expression that is not a place) is an error (A0202). The temporary is dropped when its statement ends.
+- An assignment that stores a view of a local into a binding declared in an outer scope is an error (A0202).
+- Returning a view of a local of the function, or of a temporary, is an error (A0043).
+- The same rules apply to a view kept inside a value: a field, an enum payload or a tuple or vector element built in place, an assignment into a field of a local, an `Option<&T>` a method returned, and the value a `match` arm produces.
+- A pattern binding lives in its scrutinee. When the scrutinee is a temporary, it is dropped when the `match`, `if let` or `while let` condition ends: a view of the binding may be used and kept inside the arm, but not stored into a local declared outside it, and a `let ... else` may not bind into a temporary by reference. An owned arm binding is dropped at the end of its arm, so the same holds for a view of it.
+- While a view kept by a binding is in scope, its owner is borrowed. Mutating the owner meanwhile is reported by the borrow rules above, and moving it is an error (A0258). The borrow lasts until the end of the scope, not until the view's last use.
+
+Using a view of a temporary inside the statement that created it is fine, for example as a call argument or inside a template literal. To keep the view, bind the owner to a local first:
+
+```ignis
+// let text: str = String::create("abc").toStr();   // ERROR A0202
+let owned: String = String::create("abc");
+let text: str = owned.toStr();                       // OK: owned outlives text
+
+consume(String::create("abc").toStr());              // OK: used within the statement
+```
+
+The same fix applies to a function result:
+
+```ignis
+// let picked: str = pick(String::create("abc").toStr());   // ERROR A0202
+let owned: String = String::create("abc");
+let picked: str = pick(owned.toStr());                       // OK
 ```
 
 ### 6.6 FFI Ownership

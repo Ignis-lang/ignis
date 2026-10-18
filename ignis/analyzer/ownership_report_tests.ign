@@ -460,6 +460,18 @@ function ownershipDiagnosticCases(): Vector<OwnershipDiagnosticCase> {
     "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let shared: &Resource = &held;\n  held = Resource { value: 2 };\n\n  return shared.value;\n}\n"
   ));
   cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::MOVED_WHILE_BORROWED,
+    "\nrecord Holder {\n  public resource: Resource;\n\n  public peek(&self): &Resource {\n    return &self.resource;\n  }\n}\n\nfunction consume(holder: Holder): i32 {\n  return holder.resource.value;\n}\n\nfunction main(): i32 {\n  let holder: Holder = Holder { resource: Resource { value: 1 } };\n  let view: &Resource = holder.peek();\n  let total: i32 = consume(holder);\n\n  return total + view.value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::VIEW_OUTLIVES_OWNER,
+    "\nrecord Holder {\n  public resource: Resource;\n\n  public peek(&self): &Resource {\n    return &self.resource;\n  }\n}\n\nfunction make(): Holder {\n  return Holder { resource: Resource { value: 1 } };\n}\n\nfunction main(): i32 {\n  let view: &Resource = make().peek();\n\n  return view.value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::RETURN_OF_LOCAL_VIEW,
+    "\nrecord Holder {\n  public resource: Resource;\n\n  public peek(&self): &Resource {\n    return &self.resource;\n  }\n}\n\nfunction viewOfLocal(): &Resource {\n  let holder: Holder = Holder { resource: Resource { value: 1 } };\n  return holder.peek();\n}\n\nfunction main(): i32 {\n  return viewOfLocal().value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
     DiagnosticCode::DROP_ON_COMPLEX_RECEIVER,
     "\nrecord Holder {\n  public resource: Resource;\n}\n\nfunction main(): i32 {\n  let mut holder: Holder = Holder { resource: Resource { value: 1 } };\n  holder.resource.drop();\n\n  return 0;\n}\n"
   ));
