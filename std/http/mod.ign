@@ -1,12 +1,13 @@
 //!
 //! # HTTP
 //!
-//! The sans-IO core of HTTP/1.1 on the server side: a request parser and a
+//! HTTP/1.1 on the server side. The core is sans-IO: a request parser and a
 //! response serializer that never touch a socket. Anything that speaks HTTP
 //! but is not a web application (a proxy, a test harness, a server driver)
-//! builds on this layer. The parser receives bytes and returns what they
-//! mean; the serializer turns a response into bytes and leaves writing them
-//! to the caller.
+//! builds on it. The parser receives bytes and returns what they mean; the
+//! serializer turns a response into bytes and leaves writing them to the
+//! caller. On top of it, `Http::Server` is a blocking driver that accepts
+//! connections and calls a handler with a request and a response.
 //!
 //! ## Exports
 //!
@@ -30,6 +31,12 @@
 //! | `Http::writeChunk`     | Appends one chunk of a chunked body                                  |
 //! | `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |
 //! | `Http::reasonPhrase`   | The standard reason phrase of a status                               |
+//! | `Http::Server`         | `bind(&address, config)`, `localAddress()`, `run(handler)`           |
+//! | `Http::ServerConfig`   | `threads`, `limits`, `idleTimeout`, `maxRequestsPerConnection`; `new()` gives the defaults |
+//! | `Http::Handler`        | Trait: `handle(&self, &Request, &mut Response)`                      |
+//! | `Http::Request`        | `head`, `body`; `target()`, `header(name)`, `bodyText()`             |
+//! | `Http::Response`       | `status`, `headers`, `body`; `new()`, `setStatus`, `setHeader`, `addHeader`, `write`, `writeStr` |
+//! | `Http::serveConnection` | Serves one connection with a handler                                |
 //!
 //! ## Parsing
 //!
@@ -113,6 +120,72 @@
 //! Byte inputs are `&Vector<u8>`: a slice parameter cannot report its length
 //! yet.
 //!
+//! ## Serving
+//!
+//! A handler is a record that implements `Http::Handler`. The bound check
+//! compares the name written in `@implements` with the trait's own name, so
+//! it is written `@implements(Handler)`, without the namespace.
+//!
+//! ```ignis
+//! import Http from "std::http";
+//! import IpAddress, SocketAddress from "std::net";
+//!
+//! @implements(Handler)
+//! record Greeter {
+//!   public greeting: str;
+//!
+//!   handle(&self, request: &Http::Request, response: &mut Http::Response): void {
+//!     if (!request.head.target.equals("/")) {
+//!       response.setStatus(404);
+//!       return;
+//!     }
+//!
+//!     response.setHeader("Content-Type", "text/plain");
+//!     response.writeStr(self.greeting);
+//!   }
+//! }
+//!
+//! function main(): i32 {
+//!   let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);
+//!   let Result::OK(server) = Http::Server::bind(&address, Http::ServerConfig::new()) else {
+//!     return 1;
+//!   };
+//!
+//!   return server.run<Greeter>(Greeter { greeting: "hello" }).isOk() ? 0 : 1;
+//! }
+//! ```
+//!
+//! `run` starts `ServerConfig.threads` threads (default 8). Each accepts a
+//! connection, serves it to the end and accepts the next, so up to `threads`
+//! connections are served at once. The handler is shared by all of them,
+//! which is why it has to be `Send` and `Sync` and `handle` takes `&self`.
+//! `run` returns only once every thread's `accept` failed; there is no way
+//! to stop a running server yet, so it blocks for as long as the process
+//! lives.
+//!
+//! `serveConnection` serves one accepted connection on the calling thread,
+//! which is what each `run` thread does and what a test calls directly:
+//!
+//! - A request reaches the handler once its whole body is in, bounded by
+//!   `Limits.maxBody`. `Expect: 100-continue` is not answered: the client
+//!   sends the body after its own wait.
+//! - The response always carries `Content-Length`; a `Content-Length` or
+//!   `Transfer-Encoding` the handler set is dropped. A `HEAD` request gets
+//!   the head, with the length the body would have, and no body.
+//! - The connection stays open unless the request does not keep it alive
+//!   (`RequestHead.keepAlive`), the response lists `Connection: close`, or
+//!   `maxRequestsPerConnection` (0, no limit, by default) is reached. When
+//!   it closes, the response carries `Connection: close`.
+//! - Every read waits at most `idleTimeout` (default 30 seconds). When it
+//!   expires, or the client closes, the connection ends without a response.
+//! - A malformed request gets an empty response with the parser's status
+//!   and `Connection: close`, then the connection ends.
+//! - A response the serializer rejects, a status outside 100 to 999 or a
+//!   header that holds CR or LF, is replaced by an empty 500.
+//! - Before closing, the server shuts its writing side and discards what
+//!   the client still sends for up to 2 seconds, so the close does not reset
+//!   the connection before the client reads the response.
+//!
 //! ## Example
 //!
 //! ```ignis
@@ -138,5 +211,6 @@
 import _ from "std::http::headers";
 import _ from "std::http::request";
 import _ from "std::http::response";
+import _ from "std::http::server";
 
 export Http from "./response";

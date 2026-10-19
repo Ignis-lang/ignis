@@ -3,6 +3,9 @@ import String from "std::string";
 import Vector from "std::vector";
 
 import Test from "std::test";
+import IpAddress, Shutdown, SocketAddress, TcpListener, TcpStream from "std::net";
+import JoinHandle, Thread from "std::thread";
+import Time from "std::time";
 
 function httpTestParser(): Http::RequestParser {
   return Http::RequestParser::new(Http::Limits::new());
@@ -728,4 +731,245 @@ function serializerRejectsResponseSplitting(): void {
   Test::assert(Http::writeResponse(&framed, &body, &mut out).isError());
 
   Test::assertEq<u64>(out.length(), 0);
+}
+
+/// Answers by target: `/hello` writes a body, `/status` sets a status and
+/// headers, `/echo` echoes the request body, `/bad` sets a header value that
+/// could split the response.
+@implements(Handler)
+record HttpTestHandler {
+  public greeting: str;
+
+  handle(&self, request: &Http::Request, response: &mut Http::Response): void {
+    if (request.head.target.equals("/status")) {
+      response.setStatus(201);
+      response.setHeader("X-Test", "one");
+      response.addHeader("X-Test", "two");
+      response.writeStr("made");
+      return;
+    }
+
+    if (request.head.target.equals("/echo")) {
+      response.write(&request.body);
+      return;
+    }
+
+    if (request.head.target.equals("/bad")) {
+      response.setHeader("X-Bad", "split\r\nInjected: yes");
+      response.writeStr("never sent");
+      return;
+    }
+
+    response.setHeader("Content-Type", "text/plain");
+    response.writeStr(self.greeting);
+  }
+}
+
+function httpTestServerConfig(): Http::ServerConfig {
+  let mut config: Http::ServerConfig = Http::ServerConfig::new();
+  config.idleTimeout = Time::Duration::fromSeconds(5);
+  return config;
+}
+
+/// Serves one loopback connection with `serveConnection` while a client
+/// thread writes `request` and reads until the server closes. With
+/// `closeWrite` the client then shuts its writing side, the way a client
+/// with nothing more to send ends a keep-alive connection. Returns what the
+/// client received.
+function httpTestExchange(request: str, config: Http::ServerConfig, closeWrite: boolean): String {
+  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 0);
+  let listener: TcpListener = TcpListener::bind(&address).unwrap();
+  let port: u16 = listener.localAddress().unwrap().port();
+  let message: String = String::create(request);
+
+  let client: JoinHandle<String> = Thread::spawn<String>((): String -> {
+      let target: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
+      let mut received: Vector<u8> = Vector::new<u8>();
+      let mut stream: TcpStream = TcpStream::connect(&target).unwrap();
+      let bytes: Vector<u8> = (@move message).toBytes();
+
+      if (stream.setReadTimeout(Option::SOME(Time::Duration::fromSeconds(10))).isError()) {
+        return String::create("<timeout setup failed>");
+      }
+
+      if (stream.writeAllBytes(&bytes).isError()) {
+        return String::create("<write failed>");
+      }
+
+      if (closeWrite && stream.shutdown(Shutdown::WRITE).isError()) {
+        return String::create("<shutdown failed>");
+      }
+
+      while (true) {
+        let Result::OK(read) = stream.readInto(&mut received, 65536) else {
+          break;
+        };
+
+        if (read == 0) {
+          break;
+        }
+      }
+
+      return httpTestBytesText(&received);
+    });
+
+  {
+    let mut stream: TcpStream = listener.accept().unwrap();
+    let handler: HttpTestHandler = HttpTestHandler { greeting: "hello" };
+    Test::assert(Http::serveConnection<HttpTestHandler>(&mut stream, &handler, &config).isOk());
+  }
+
+  return client.join();
+}
+
+@test
+function serverAnswersASimpleGet(): void {
+  let received: String = httpTestExchange("GET /hello HTTP/1.1\r\nHost: a\r\n\r\n", httpTestServerConfig(), true);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello");
+}
+
+@test
+function serverSendsTheStatusAndHeadersTheHandlerSet(): void {
+  let received: String = httpTestExchange("GET /status HTTP/1.1\r\n\r\n", httpTestServerConfig(), true);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 201 Created\r\nX-Test: one\r\nX-Test: two\r\nContent-Length: 4\r\n\r\nmade");
+}
+
+@test
+function serverPassesAContentLengthBodyToTheHandler(): void {
+  let received: String = httpTestExchange("POST /echo HTTP/1.1\r\nContent-Length: 7\r\n\r\npayload", httpTestServerConfig(), true);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayload");
+}
+
+@test
+function serverPassesAChunkedBodyToTheHandler(): void {
+  let received: String = httpTestExchange(
+    "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n",
+    httpTestServerConfig(),
+    true,
+  );
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nabcdefg");
+}
+
+@test
+function serverAnswersTwoRequestsOnOneKeepAliveConnection(): void {
+  let received: String = httpTestExchange(
+    "GET /hello HTTP/1.1\r\n\r\nPOST /echo HTTP/1.1\r\nContent-Length: 2\r\n\r\nok",
+    httpTestServerConfig(),
+    true,
+  );
+  Test::assertEq<str>(
+    received.toStr(),
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhelloHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+  );
+}
+
+@test
+function serverClosesAfterARequestWithConnectionClose(): void {
+  let received: String = httpTestExchange(
+    "GET /hello HTTP/1.1\r\nConnection: close\r\n\r\nGET /hello HTTP/1.1\r\n\r\n",
+    httpTestServerConfig(),
+    false,
+  );
+  Test::assertEq<str>(
+    received.toStr(),
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 5\r\n\r\nhello",
+  );
+}
+
+@test
+function serverClosesAnHttp10ConnectionByDefault(): void {
+  let received: String = httpTestExchange("GET /hello HTTP/1.0\r\n\r\n", httpTestServerConfig(), false);
+  Test::assertEq<str>(
+    received.toStr(),
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 5\r\n\r\nhello",
+  );
+}
+
+@test
+function serverClosesAfterMaxRequestsPerConnection(): void {
+  let mut config: Http::ServerConfig = httpTestServerConfig();
+  config.maxRequestsPerConnection = 1;
+  let received: String = httpTestExchange("GET /echo HTTP/1.1\r\n\r\nGET /echo HTTP/1.1\r\n\r\n", config, false);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+}
+
+@test
+function serverOmitsTheBodyForHead(): void {
+  let received: String = httpTestExchange("HEAD /hello HTTP/1.1\r\n\r\n", httpTestServerConfig(), true);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\n");
+}
+
+@test
+function serverAnswersAMalformedRequestWith400AndCloses(): void {
+  let received: String = httpTestExchange("GET /hello HTTP/1.1\r\nBad Header: x\r\n\r\n", httpTestServerConfig(), false);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+}
+
+@test
+function serverAnswersABodyOverTheLimitWith413(): void {
+  let mut config: Http::ServerConfig = httpTestServerConfig();
+  config.limits.maxBody = 4;
+  let received: String = httpTestExchange("POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nabcde", config, false);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 413 Content Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+}
+
+@test
+function serverTurnsAnInvalidResponseInto500(): void {
+  let received: String = httpTestExchange("GET /bad HTTP/1.1\r\n\r\n", httpTestServerConfig(), true);
+  Test::assertEq<str>(received.toStr(), "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+}
+
+@test
+function serverClosesAnIdleConnectionQuietly(): void {
+  let mut config: Http::ServerConfig = httpTestServerConfig();
+  config.idleTimeout = Time::Duration::fromMillis(200);
+  let received: String = httpTestExchange("", config, false);
+  Test::assertEq<str>(received.toStr(), "");
+}
+
+@test
+function serverClosesAPartialRequestWhenIdle(): void {
+  let mut config: Http::ServerConfig = httpTestServerConfig();
+  config.idleTimeout = Time::Duration::fromMillis(200);
+  let received: String = httpTestExchange("GET /hello HTTP/1.1\r\nHost:", config, false);
+  Test::assertEq<str>(received.toStr(), "");
+}
+
+@test
+function requestBodyTextRequiresValidUtf8(): void {
+  let mut parser: Http::RequestParser = httpTestParser();
+  httpTestFeed(&mut parser, "GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+  let Http::ParseEvent::HEAD(head) = parser.next() else {
+    Test::fail();
+    return;
+  };
+  let mut body: Vector<u8> = Vector::new<u8>();
+  body.push(0xC3);
+  body.push(0xA9);
+  let request: Http::Request = Http::Request { head: head, body: body };
+  Test::assertEq<str>(request.bodyText().unwrap().toStr(), "é");
+  Test::assertEq<str>(request.header("HOST").unwrap(), "a");
+  Test::assert(request.header("missing").isNone());
+
+  let mut invalid: Vector<u8> = Vector::new<u8>();
+  invalid.push(0xC3);
+  httpTestFeed(&mut parser, "GET / HTTP/1.1\r\n\r\n");
+  let Http::ParseEvent::DONE = parser.next() else {
+    Test::fail();
+    return;
+  };
+  let Http::ParseEvent::HEAD(second) = parser.next() else {
+    Test::fail();
+    return;
+  };
+  let broken: Http::Request = Http::Request { head: second, body: invalid };
+  Test::assert(broken.bodyText().isNone());
+}
+
+@test
+function responseDefaultsTo200WithAnEmptyBody(): void {
+  let response: Http::Response = Http::Response::new();
+  Test::assertEq<u16>(response.status, 200);
+  Test::assertEq<u64>(response.body.length(), 0);
+  Test::assertEq<u64>(response.headers.length(), 0);
 }

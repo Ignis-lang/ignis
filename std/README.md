@@ -43,7 +43,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr`, `Mutex`, `MutexGuard`, `Condvar`, `Arc`, `Channel`, `Sender`, `Receiver`, `ThreadPool` | Atomic values, locks, condition variables, shared ownership, channels and a thread pool |
 | `std::thread` | `Thread`, `JoinHandle<T>` | Spawn, join and detach POSIX threads |
 | `std::net` | `IpAddress`, `Ipv4Address`, `Ipv6Address`, `SocketAddress`, `TcpListener`, `TcpStream`, `Shutdown` | Numeric IP addresses and blocking or non-blocking TCP (x86_64 Linux only) |
-| `std::http` | `Http` | Sans-IO HTTP/1.1 server-side request parser and response serializer |
+| `std::http` | `Http` | HTTP/1.1 server side: sans-IO request parser and response serializer, blocking `Http::Server` driver |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
@@ -293,6 +293,19 @@ function main(): i32 {
 - `Http::writeHead`, `writeResponse` (adds `Content-Length`), `writeChunk`,
   `writeLastChunk` append to a `&mut Vector<u8>`. CR or LF in a header or reason is a
   `Http::SerializeError` and nothing is written.
+- `Http::Server::bind(&SocketAddress, Http::ServerConfig)`, `localAddress()`,
+  `run<H: Http::Handler & Send & Sync>(self, handler)` — `config.threads` threads (default
+  8) each accept and serve connections; `run` returns only when every thread's `accept`
+  failed, so a running server blocks for good. Handlers implement `trait Http::Handler`
+  (`handle(&self, &Http::Request, &mut Http::Response)`), declared as `@implements(Handler)`.
+- `Http::serveConnection<H: Http::Handler>(&mut TcpStream, &H, &Http::ServerConfig)` —
+  serves one connection: keep-alive, idle read timeout (default 30 s, closes quietly),
+  optional `maxRequestsPerConnection`. Malformed requests get the parser's status with
+  `Connection: close`; an unserializable response becomes an empty 500; `HEAD` gets no
+  body. Bodies are buffered (up to `Limits.maxBody`) and responses carry `Content-Length`.
+- `Http::Request` — `head`, `body`; `target()`, `header(name)`, `bodyText()` (`NONE` when
+  not UTF-8). `Http::Response::new()` — 200, no fields, empty body; `setStatus`,
+  `setHeader`, `addHeader`, `write(&Vector<u8>)`, `writeStr(str)`.
 
 ### `std::thread`
 

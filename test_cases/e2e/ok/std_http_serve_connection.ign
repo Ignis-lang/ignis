@@ -1,0 +1,117 @@
+// e2e: std
+// Serves one loopback connection with `Http::serveConnection`: a client
+// thread sends a GET and a POST on one keep-alive connection, closes its
+// writing side, and the program prints what the client received.
+// `Server::run` blocks for good, so it is only compiled here, behind an
+// argument count the test never passes.
+import Http from "std::http";
+import Io from "std::io";
+import IpAddress, Shutdown, SocketAddress, TcpListener, TcpStream from "std::net";
+import String from "std::string";
+import JoinHandle, Thread from "std::thread";
+import Vector from "std::vector";
+
+@implements(Handler)
+record Greeter {
+  public greeting: str;
+
+  handle(&self, request: &Http::Request, response: &mut Http::Response): void {
+    if (request.head.target.equals("/echo")) {
+      response.setHeader("Content-Type", "application/octet-stream");
+      response.write(&request.body);
+      return;
+    }
+
+    response.setHeader("Content-Type", "text/plain");
+    response.writeStr(self.greeting);
+  }
+}
+
+function loopback(port: u16): SocketAddress {
+  return SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
+}
+
+function serveForever(): i32 {
+  let address: SocketAddress = loopback(8080);
+  let Result::OK(server) = Http::Server::bind(&address, Http::ServerConfig::new()) else {
+    return 1;
+  };
+
+  return server.run<Greeter>(Greeter { greeting: "hello" }).isOk() ? 0 : 1;
+}
+
+function main(argc: i32, argv: *str): i32 {
+  if (argc > 99) {
+    return serveForever();
+  }
+
+  let address: SocketAddress = loopback(0);
+  let Result::OK(listener) = TcpListener::bind(&address) else {
+    return 1;
+  };
+  let Result::OK(local) = listener.localAddress() else {
+    return 2;
+  };
+  let port: u16 = local.port();
+
+  let client: JoinHandle<String> = Thread::spawn<String>((): String -> {
+      let target: SocketAddress = loopback(port);
+      let Result::OK(stream) = TcpStream::connect(&target) else {
+        return String::create("<connect failed>");
+      };
+      let mut connection: TcpStream = stream;
+      let request: String = String::create("GET /hello HTTP/1.1\r\nHost: a\r\n\r\nPOST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nping");
+      let bytes: Vector<u8> = request.toBytes();
+
+      if (connection.writeAllBytes(&bytes).isError() || connection.shutdown(Shutdown::WRITE).isError()) {
+        return String::create("<write failed>");
+      }
+
+      let mut received: Vector<u8> = Vector::new<u8>();
+
+      while (true) {
+        let Result::OK(read) = connection.readInto(&mut received, 65536) else {
+          break;
+        };
+
+        if (read == 0) {
+          break;
+        }
+      }
+
+      let mut text: String = String::new();
+      let mut index: u64 = 0;
+
+      // Line ends are printed as LF, so the baseline holds no CR.
+      while (index < received.length()) {
+        let byte: u8 = *received.get(index).unwrap();
+
+        if (byte != '\r' as u8) {
+          text.pushByte(byte);
+        }
+
+        index += 1;
+      }
+
+      text.pushStr("\n");
+
+      return text;
+    });
+
+  let mut served: boolean = false;
+
+  {
+    let Result::OK(stream) = listener.accept() else {
+      return 3;
+    };
+    let mut connection: TcpStream = stream;
+    let greeter: Greeter = Greeter { greeting: "hello" };
+    let config: Http::ServerConfig = Http::ServerConfig::new();
+    served = Http::serveConnection<Greeter>(&mut connection, &greeter, &config).isOk();
+  }
+
+  let received: String = client.join();
+  Io::print(received);
+  Io::println(served ? "served" : "failed");
+  return 0;
+}
