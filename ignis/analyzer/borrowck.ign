@@ -3066,12 +3066,6 @@ export namespace Borrowck {
   /// Whether `binding` is declared as a `&mut T`. A view method stored into
   /// such a binding hands out write access to its owner, so the binding holds
   /// a mutable borrow; every other view holds a shared one.
-  ///
-  /// `Mono::concretizeType` rebuilds every reference as a shared one, so after
-  /// monomorphization this answers `false` for every binding and a `&mut T`
-  /// view holds a shared borrow: it still conflicts with a `&mut self` call on
-  /// the owner, but not with a shared use. Answers correctly once
-  /// monomorphization keeps the mutability.
   function bindingIsMutableReference(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3085,23 +3079,11 @@ export namespace Borrowck {
       return false;
     };
 
-    let mut referent: Option<Analyzer::TypeId> = Option::NONE;
+    if (let Analyzer::Type::Reference(reference) = type_) {
+      return reference.mutable;
+    }
 
-    match (type_) {
-      Analyzer::Type::Reference(reference) -> {
-        referent = Option::SOME(reference.referent);
-      },
-      _ -> {},
-    };
-
-    let Option::SOME(referentType) = referent else {
-      return false;
-    };
-
-    let mut internRef: &mut Analyzer::TypeStore = typeStore;
-    let mutableType: Analyzer::TypeId = internRef.mutableReference(referentType);
-
-    return mutableType.raw() == bindingType.raw();
+    return false;
   }
 
   /// Where the storage of the place or value `nodeId` lives: the local it is

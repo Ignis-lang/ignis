@@ -839,6 +839,7 @@ export namespace Mono {
     let mut shape: u64 = 0;
     let mut innerType: Analyzer::TypeId = typeId;
     let mut arrayLength: u64 = 0;
+    let mut mutable: boolean = false;
     let mut instanceDef: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
     let mut instanceArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
     let mut elementTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
@@ -849,10 +850,12 @@ export namespace Mono {
         Analyzer::Type::Pointer(pointerType) -> {
           shape = 1;
           innerType = pointerType.pointee;
+          mutable = pointerType.mutable;
         },
         Analyzer::Type::Reference(referenceType) -> {
           shape = 2;
           innerType = referenceType.referent;
+          mutable = referenceType.mutable;
         },
         Analyzer::Type::Slice(element) -> {
           shape = 3;
@@ -893,12 +896,22 @@ export namespace Mono {
     if (shape == 1) {
       let concreteInner: Analyzer::TypeId = Mono::concretizeType(defStore, typeStore, symbols, state, innerType);
       let mut pointerStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (mutable) {
+        return pointerStoreRef.mutablePointer(concreteInner);
+      }
+
       return pointerStoreRef.pointer(concreteInner);
     }
 
     if (shape == 2) {
       let concreteInner: Analyzer::TypeId = Mono::concretizeType(defStore, typeStore, symbols, state, innerType);
       let mut referenceStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (mutable) {
+        return referenceStoreRef.mutableReference(concreteInner);
+      }
+
       return referenceStoreRef.reference(concreteInner);
     }
 
