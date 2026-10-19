@@ -1358,3 +1358,27 @@ function formatterKeepsACommentBetweenAnAttributeAndItsMember(): void {
   Test::assertEq<str>(formatOrFail(recordSource).toStr(), recordSource);
   Test::assertEq<str>(formatOrFail(enumSource).toStr(), enumSource);
 }
+
+@test
+function apiFormatsATraitDefaultMethodWithoutInheritedCopies(): void {
+  let canonical: str = "trait Describable {\n  describe(&self): i32 {\n    return 99;\n  }\n}\n\n@implements(Describable)\nrecord Item {\n  public value: i32;\n}\n";
+
+  Test::assertEq<str>(
+    formatOrFail(
+      "trait Describable {\n    describe(&self): i32 {\n        return 99;\n    }\n}\n\n@implements(Describable)\nrecord Item {\n    public value: i32;\n}\n"
+    ).toStr(),
+    canonical
+  );
+  Test::assertEq<str>(formatOrFail(canonical).toStr(), canonical);
+}
+
+@test
+function apiFormatsADefaultCallingAnotherDefault(): void {
+  let canonical: str = "trait Scored {\n  base(&self): i32;\n\n  doubled(&self): i32 {\n    return self.base() * 2;\n  }\n\n  quadrupled(&self): i32 {\n    return self.doubled() * 2;\n  }\n}\n\n@implements(Scored)\nrecord Entry {\n  public value: i32;\n\n  base(&self): i32 {\n    return self.value;\n  }\n}\n";
+
+  let first: String = formatOrFail(canonical);
+  Test::assertEq<str>(first.toStr(), canonical);
+
+  let second: String = formatOrFail(first.toStr());
+  Test::assertEq<str>(second.toStr(), canonical);
+}

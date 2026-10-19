@@ -96,6 +96,19 @@ export namespace Parser {
     diagnostics: &mut DiagnosticBag,
     flags: &CompileFlags,
   ): void {
+    Parser::parseIntoAsWritten(file, module, diagnostics, flags);
+    ParserTraitDefaults::materialize(module);
+  }
+
+  /// Parses without copying trait default methods onto implementing types, so
+  /// the module holds only the items the source wrote. The formatter reads
+  /// this shape; analysis needs the materialized one from `parseIntoWithFlags`.
+  function parseIntoAsWritten(
+    file: &SourceFile,
+    module: &mut Ast::Module,
+    diagnostics: &mut DiagnosticBag,
+    flags: &CompileFlags,
+  ): void {
     let mut lexResult: LexResult = Lexer::lex(file);
     let mut diagnosticsRef: &mut DiagnosticBag = diagnostics;
     let mut lexDiagIndex: u64 = 0;
@@ -126,8 +139,6 @@ export namespace Parser {
     }
 
     pushRoots(parser.module, &roots);
-
-    ParserTraitDefaults::materialize(parser.module);
   }
 
   /// Lex and parse `file` end-to-end, returning the populated module and the
