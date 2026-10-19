@@ -367,12 +367,12 @@ export namespace ParserDeclarations {
     let mut seen: u64 = 0;
 
     while (offset < 16) {
-      let token: Token = parserRef.tokens.peekNth(offset);
-
-      if (ParserShared::isTrivia(token.clone())) {
+      if (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
         offset += 1;
         continue;
       }
+
+      let token: Token = parserRef.tokens.peekNth(offset);
 
       if (seen == index) {
         return token;
@@ -510,12 +510,12 @@ export namespace ParserDeclarations {
     let mut sawName: boolean = false;
 
     while (offset < 16) {
-      let token: Token = parserRef.tokens.peekNth(offset);
-
-      if (ParserShared::isTrivia(token.clone())) {
+      if (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
         offset += 1;
         continue;
       }
+
+      let token: Token = parserRef.tokens.peekNth(offset);
 
       if (!sawName) {
         if (token.kindValue() == TokenKind::IDENTIFIER || token.kindValue() == TokenKind::KEYWORD) {
@@ -546,12 +546,12 @@ export namespace ParserDeclarations {
     let mut genericDepth: u64 = 0;
 
     while (offset < 32) {
-      let token: Token = parserRef.tokens.peekNth(offset);
-
-      if (ParserShared::isTrivia(token.clone())) {
+      if (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
         offset += 1;
         continue;
       }
+
+      let token: Token = parserRef.tokens.peekNth(offset);
 
       if (!sawName) {
         if (token.kindValue() == TokenKind::KEYWORD) {
@@ -1151,7 +1151,7 @@ export namespace ParserDeclarations {
       return true;
     }
 
-    parserRef.expectedToken(parserRef.current().span, "SemiColon", "expected ';' after extern function signature");
+    parserRef.expectedToken(parserRef.currentSpan(), "SemiColon", "expected ';' after extern function signature");
     return false;
   }
 
@@ -1317,7 +1317,7 @@ export namespace ParserDeclarations {
       }
 
       if (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
-        parserRef.expectedToken(parserRef.current().span, "SemiColon", "record fields must be separated by ';' or ','");
+        parserRef.expectedToken(parserRef.currentSpan(), "SemiColon", "record fields must be separated by ';' or ','");
         ParserRecovery::synchronizeTopLevel(parserRef);
         break;
       }
@@ -1468,7 +1468,7 @@ export namespace ParserDeclarations {
       // it did not expect.
       let Option::SOME(variantName) = parserRef.consumeIdentifier() else {
         parserRef.emitDiagnostic(
-          parserRef.current().span,
+          parserRef.currentSpan(),
           DiagnosticCode::UNEXPECTED_TOKEN,
           "Unexpected token",
           "expected enum variant name",
@@ -1638,7 +1638,7 @@ export namespace ParserDeclarations {
         continue;
       }
 
-      parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "expected function, const, or record declaration in extern block");
+      parserRef.emitDiagnostic(parserRef.currentSpan(), DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "expected function, const, or record declaration in extern block");
       return Option::NONE;
     }
 
@@ -1863,7 +1863,7 @@ export namespace ParserDeclarations {
     let mut parserRef: &mut ParserShared::State = parser;
 
     let elseRequired: boolean = ParserExpressions::isCompileIfElseDirectiveStart(parserRef);
-    let directiveSpan: SourceSpan = parserRef.current().span;
+    let directiveSpan: SourceSpan = parserRef.currentSpan();
 
     let Option::SOME(condition) = ParserExpressions::parseCompileDirectiveHeader(parserRef) else {
       return false;
