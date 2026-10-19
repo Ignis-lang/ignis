@@ -81,7 +81,7 @@
     },
     {
       "name": "std::http",
-      "doc": "  \n# HTTP  \n  \nThe sans-IO core of HTTP/1.1 on the server side: a request parser and a  \nresponse serializer that never touch a socket. Anything that speaks HTTP  \nbut is not a web application (a proxy, a test harness, a server driver)  \nbuilds on this layer. The parser receives bytes and returns what they  \nmean; the serializer turns a response into bytes and leaves writing them  \nto the caller.  \n  \n## Exports  \n  \n| Export                 | Description                                                          |  \n|------------------------|----------------------------------------------------------------------|  \n| `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |  \n| `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |  \n| `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |  \n| `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |  \n| `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |  \n| `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |  \n| `Http::HeaderField`    | One `name` and `value`                                               |  \n| `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |  \n| `Http::ParseError`     | `kind` and the suggested response `status`                           |  \n| `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |  \n| `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |  \n| `Http::SerializeError` | Why a response head cannot be written                                |  \n| `Http::writeHead`      | Appends a response head                                              |  \n| `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |  \n| `Http::writeBody`      | Appends body bytes unchanged                                         |  \n| `Http::writeChunk`     | Appends one chunk of a chunked body                                  |  \n| `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |  \n| `Http::reasonPhrase`   | The standard reason phrase of a status                               |  \n  \n## Parsing  \n  \n`feed` copies bytes into the parser; `next` reports the next event. Each  \nrequest produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.  \n`NEED_MORE` means the bytes fed so far are not enough to report anything  \nelse. After `DONE` the parser starts on the next request of the same  \nconnection, and bytes already fed past the end of a request belong to the  \nnext one, so keep-alive and pipelining need nothing special.  \n`RequestHead.keepAlive()` tells whether the connection stays open: an  \nHTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0  \nrequest closes it unless `Connection` lists `keep-alive`.  \n  \nEvents own their payloads: a `RequestHead` or a body chunk is a copy and  \nstays valid after more bytes are fed.  \n  \n`MALFORMED` is terminal: once the parser reports it, every later `next`  \nreports the same error, because the rest of the connection cannot be  \nframed. The `ParseError` carries the status a server should answer with  \n(400, 413, 414, 431, 501 or 505) before it closes the connection.  \nMalformed input never panics.  \n  \n## Message syntax  \n  \n- Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2  \n  allows a recipient to; a CR anywhere else is malformed.  \n- Empty lines before a request line are skipped.  \n- The request line is `method SP target SP HTTP/1.x` with exactly one space  \n  between the parts. The method is a case-sensitive token; methods other  \n  than the nine standard ones are `Method::OTHER`. The target is kept as  \n  received and must be visible ASCII.  \n- A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.  \n- A header line is `name: value`. Whitespace between the name and the  \n  colon, an obsolete line folding (a line starting with a space or a tab)  \n  and a control byte in the value are `INVALID_HEADER`. Names keep their  \n  casing; lookups ignore ASCII case.  \n  \n## Body framing  \n  \nPer RFC 9112 section 6.3:  \n  \n| Head                                   | Body                                           |  \n|----------------------------------------|------------------------------------------------|  \n| `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |  \n| Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |  \n| `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |  \n| `Content-Length: n`                    | Exactly `n` bytes                              |  \n| `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |  \n| A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |  \n| Neither                                | No body                                        |  \n  \nRepeated `Content-Length` fields, or a comma list in one, are accepted when  \nevery value is the same. Chunk extensions are ignored. Trailer fields  \nafter the last chunk are checked like header fields, counted against  \n`maxHeaders`, and discarded.  \n  \n## Limits  \n  \n| Limit            | Default   | Violation                                 |  \n|------------------|-----------|-------------------------------------------|  \n| `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |  \n| `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |  \n| `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |  \n| `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |  \n  \nLine lengths exclude the line terminator, and a length exactly at its  \nlimit is accepted. A line is rejected as soon as it grows past its limit,  \nbefore it ends, and a body as soon as its declared size passes `maxBody`,  \nso a client cannot make the parser buffer without bound.  \n  \n## Serializing  \n  \n`writeHead` appends `HTTP/1.1 <status> <reason>\\r\\n`, every header field  \nand the blank line. `writeResponse` does the same with a `Content-Length`  \nfield and appends the body. For a chunked body, add  \n`Transfer-Encoding: chunked` to the head, then call `writeChunk` for each  \npiece and `writeLastChunk` at the end. A header name, header value or  \nreason phrase holding CR or LF could split the response, so it is a  \n`SerializeError` and nothing is appended.  \n  \nByte inputs are `&Vector<u8>`: a slice parameter cannot report its length  \nyet.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport Vector from \"std::vector\";  \n  \nfunction answer(request: str, out: &mut Vector<u8>): i32 {  \n  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());  \n  parser.feedStr(request);  \n  \n  let Http::ParseEvent::HEAD(head) = parser.next() else {  \n    return 1;  \n  };  \n  \n  let mut response: Http::ResponseHead = Http::ResponseHead::create(200);  \n  response.headers.add(\"Content-Type\", \"text/plain\");  \n  let body: Vector<u8> = head.target.toBytes();  \n  \n  return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;  \n}  \n```"
+      "doc": "  \n# HTTP  \n  \nHTTP/1.1 on the server side. The core is sans-IO: a request parser and a  \nresponse serializer that never touch a socket. Anything that speaks HTTP  \nbut is not a web application (a proxy, a test harness, a server driver)  \nbuilds on it. The parser receives bytes and returns what they mean; the  \nserializer turns a response into bytes and leaves writing them to the  \ncaller. On top of it, `Http::Server` is a blocking driver that accepts  \nconnections and calls a handler with a request and a response.  \n  \n## Exports  \n  \n| Export                 | Description                                                          |  \n|------------------------|----------------------------------------------------------------------|  \n| `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |  \n| `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |  \n| `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |  \n| `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |  \n| `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |  \n| `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |  \n| `Http::HeaderField`    | One `name` and `value`                                               |  \n| `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |  \n| `Http::ParseError`     | `kind` and the suggested response `status`                           |  \n| `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |  \n| `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |  \n| `Http::SerializeError` | Why a response head cannot be written                                |  \n| `Http::writeHead`      | Appends a response head                                              |  \n| `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |  \n| `Http::writeBody`      | Appends body bytes unchanged                                         |  \n| `Http::writeChunk`     | Appends one chunk of a chunked body                                  |  \n| `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |  \n| `Http::reasonPhrase`   | The standard reason phrase of a status                               |  \n| `Http::Server`         | `bind(&address, config)`, `localAddress()`, `run(handler)`           |  \n| `Http::ServerConfig`   | `threads`, `limits`, `idleTimeout`, `maxRequestsPerConnection`; `new()` gives the defaults |  \n| `Http::Handler`        | Trait: `handle(&self, &Request, &mut Response)`                      |  \n| `Http::Request`        | `head`, `body`; `target()`, `header(name)`, `bodyText()`             |  \n| `Http::Response`       | `status`, `headers`, `body`; `new()`, `setStatus`, `setHeader`, `addHeader`, `write`, `writeStr` |  \n| `Http::serveConnection` | Serves one connection with a handler                                |  \n  \n## Parsing  \n  \n`feed` copies bytes into the parser; `next` reports the next event. Each  \nrequest produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.  \n`NEED_MORE` means the bytes fed so far are not enough to report anything  \nelse. After `DONE` the parser starts on the next request of the same  \nconnection, and bytes already fed past the end of a request belong to the  \nnext one, so keep-alive and pipelining need nothing special.  \n`RequestHead.keepAlive()` tells whether the connection stays open: an  \nHTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0  \nrequest closes it unless `Connection` lists `keep-alive`.  \n  \nEvents own their payloads: a `RequestHead` or a body chunk is a copy and  \nstays valid after more bytes are fed.  \n  \n`MALFORMED` is terminal: once the parser reports it, every later `next`  \nreports the same error, because the rest of the connection cannot be  \nframed. The `ParseError` carries the status a server should answer with  \n(400, 413, 414, 431, 501 or 505) before it closes the connection.  \nMalformed input never panics.  \n  \n## Message syntax  \n  \n- Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2  \n  allows a recipient to; a CR anywhere else is malformed.  \n- Empty lines before a request line are skipped.  \n- The request line is `method SP target SP HTTP/1.x` with exactly one space  \n  between the parts. The method is a case-sensitive token; methods other  \n  than the nine standard ones are `Method::OTHER`. The target is kept as  \n  received and must be visible ASCII.  \n- A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.  \n- A header line is `name: value`. Whitespace between the name and the  \n  colon, an obsolete line folding (a line starting with a space or a tab)  \n  and a control byte in the value are `INVALID_HEADER`. Names keep their  \n  casing; lookups ignore ASCII case.  \n  \n## Body framing  \n  \nPer RFC 9112 section 6.3:  \n  \n| Head                                   | Body                                           |  \n|----------------------------------------|------------------------------------------------|  \n| `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |  \n| Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |  \n| `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |  \n| `Content-Length: n`                    | Exactly `n` bytes                              |  \n| `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |  \n| A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |  \n| Neither                                | No body                                        |  \n  \nRepeated `Content-Length` fields, or a comma list in one, are accepted when  \nevery value is the same. Chunk extensions are ignored. Trailer fields  \nafter the last chunk are checked like header fields, counted against  \n`maxHeaders`, and discarded.  \n  \n## Limits  \n  \n| Limit            | Default   | Violation                                 |  \n|------------------|-----------|-------------------------------------------|  \n| `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |  \n| `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |  \n| `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |  \n| `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |  \n  \nLine lengths exclude the line terminator, and a length exactly at its  \nlimit is accepted. A line is rejected as soon as it grows past its limit,  \nbefore it ends, and a body as soon as its declared size passes `maxBody`,  \nso a client cannot make the parser buffer without bound.  \n  \n## Serializing  \n  \n`writeHead` appends `HTTP/1.1 <status> <reason>\\r\\n`, every header field  \nand the blank line. `writeResponse` does the same with a `Content-Length`  \nfield and appends the body. For a chunked body, add  \n`Transfer-Encoding: chunked` to the head, then call `writeChunk` for each  \npiece and `writeLastChunk` at the end. A header name, header value or  \nreason phrase holding CR or LF could split the response, so it is a  \n`SerializeError` and nothing is appended.  \n  \nByte inputs are `&Vector<u8>`: a slice parameter cannot report its length  \nyet.  \n  \n## Serving  \n  \nA handler is a record that implements `Http::Handler`. The bound check  \ncompares the name written in `@implements` with the trait's own name, so  \nit is written `@implements(Handler)`, without the namespace.  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport IpAddress, SocketAddress from \"std::net\";  \n  \n@implements(Handler)  \nrecord Greeter {  \n  public greeting: str;  \n  \n  handle(&self, request: &Http::Request, response: &mut Http::Response): void {  \n    if (!request.head.target.equals(\"/\")) {  \n      response.setStatus(404);  \n      return;  \n    }  \n  \n    response.setHeader(\"Content-Type\", \"text/plain\");  \n    response.writeStr(self.greeting);  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);  \n  let Result::OK(server) = Http::Server::bind(&address, Http::ServerConfig::new()) else {  \n    return 1;  \n  };  \n  \n  return server.run<Greeter>(Greeter { greeting: \"hello\" }).isOk() ? 0 : 1;  \n}  \n```  \n  \n`run` starts `ServerConfig.threads` threads (default 8). Each accepts a  \nconnection, serves it to the end and accepts the next, so up to `threads`  \nconnections are served at once. The handler is shared by all of them,  \nwhich is why it has to be `Send` and `Sync` and `handle` takes `&self`.  \n`run` returns only once every thread's `accept` failed; there is no way  \nto stop a running server yet, so it blocks for as long as the process  \nlives.  \n  \n`serveConnection` serves one accepted connection on the calling thread,  \nwhich is what each `run` thread does and what a test calls directly:  \n  \n- A request reaches the handler once its whole body is in, bounded by  \n  `Limits.maxBody`. `Expect: 100-continue` is not answered: the client  \n  sends the body after its own wait.  \n- The response always carries `Content-Length`; a `Content-Length` or  \n  `Transfer-Encoding` the handler set is dropped. A `HEAD` request gets  \n  the head, with the length the body would have, and no body.  \n- The connection stays open unless the request does not keep it alive  \n  (`RequestHead.keepAlive`), the response lists `Connection: close`, or  \n  `maxRequestsPerConnection` (0, no limit, by default) is reached. When  \n  it closes, the response carries `Connection: close`.  \n- Every read waits at most `idleTimeout` (default 30 seconds). When it  \n  expires, or the client closes, the connection ends without a response.  \n- A malformed request gets an empty response with the parser's status  \n  and `Connection: close`, then the connection ends.  \n- A response the serializer rejects, a status outside 100 to 999 or a  \n  header that holds CR or LF, is replaced by an empty 500.  \n- Before closing, the server shuts its writing side and discards what  \n  the client still sends for up to 2 seconds, so the close does not reset  \n  the connection before the client reads the response.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport Vector from \"std::vector\";  \n  \nfunction answer(request: str, out: &mut Vector<u8>): i32 {  \n  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());  \n  parser.feedStr(request);  \n  \n  let Http::ParseEvent::HEAD(head) = parser.next() else {  \n    return 1;  \n  };  \n  \n  let mut response: Http::ResponseHead = Http::ResponseHead::create(200);  \n  response.headers.add(\"Content-Type\", \"text/plain\");  \n  let body: Vector<u8> = head.target.toBytes();  \n  \n  return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;  \n}  \n```"
     },
     {
       "name": "std::http::headers",
@@ -94,6 +94,10 @@
     {
       "name": "std::http::response",
       "doc": "The HTTP/1.1 response serializer: `Http::ResponseHead` and the functions  \nthat append a head and a body to a byte buffer. Writing the buffer out is  \nleft to the caller."
+    },
+    {
+      "name": "std::http::server",
+      "doc": "The blocking HTTP/1.1 server driver: `Http::Server`, the `Http::Handler`  \ntrait it calls, and the `Http::Request` and `Http::Response` a handler  \nsees. It reads a connection, runs `Http::RequestParser` over it and  \nwrites what the handler answered with `Http::writeResponse`."
     },
     {
       "name": "std::io",
@@ -5219,6 +5223,330 @@
       "visibility": "private",
       "signature": "function writeHeadLines(head: &ResponseHead, out: &mut Vector<u8>): void",
       "doc": "Appends the status line and header fields of `head`, without the blank  \nline that ends the head."
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::ACCEPT_BACKOFF_MICROSECONDS",
+      "name": "ACCEPT_BACKOFF_MICROSECONDS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ACCEPT_BACKOFF_MICROSECONDS: u32"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http",
+      "name": "Http",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Http",
+      "doc": "The HTTP/1.1 server driver."
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http::Handler",
+      "name": "Handler",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait Handler",
+      "doc": "What a server calls for every complete request. The handler fills  \n`response`; the driver writes it once `handle` returns.  \n  \n`Server::run` shares one handler among all its threads, so `handle`  \ntakes `&self` and may run on several threads at once. State a handler  \nchanges has to sit behind a `Mutex` or an atomic.",
+      "members": [
+        {
+          "name": "handle",
+          "kind": "method",
+          "signature": "handle(&self, response: &mut Response): void"
+        }
+      ]
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http::Request",
+      "name": "Request",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Request",
+      "doc": "A complete request: its head and its whole body, chunked coding removed.",
+      "members": [
+        {
+          "name": "head",
+          "kind": "field",
+          "signature": "head: RequestHead"
+        },
+        {
+          "name": "body",
+          "kind": "field",
+          "signature": "body: Vector<u8>"
+        },
+        {
+          "name": "bodyText",
+          "kind": "method",
+          "signature": "bodyText(&self): Option<String>",
+          "doc": "The header fields.  \nA copy of the body as text, or `NONE` when it is not valid UTF-8."
+        },
+        {
+          "name": "header",
+          "kind": "method",
+          "signature": "header(&self, name: str): Option<str>",
+          "doc": "The value of the first header field named `name`, ignoring ASCII case."
+        },
+        {
+          "name": "target",
+          "kind": "method",
+          "signature": "target(&self): str",
+          "doc": "The request method.  \nThe request target as received, `/search?q=1` for example."
+        }
+      ]
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http::Response",
+      "name": "Response",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Response",
+      "doc": "The answer a handler builds: status 200, no header fields and an  \nempty body until the handler changes them.  \n  \nThe driver adds `Content-Length` and, when it closes the connection,  \n`Connection: close`. A `Content-Length` or `Transfer-Encoding` the  \nhandler sets is dropped. A status outside 100 to 999, or a header name  \nor value that could split the response (CR, LF), makes the driver send  \na 500 without a body instead.",
+      "members": [
+        {
+          "name": "status",
+          "kind": "field",
+          "signature": "status: u16"
+        },
+        {
+          "name": "headers",
+          "kind": "field",
+          "signature": "headers: Headers"
+        },
+        {
+          "name": "body",
+          "kind": "field",
+          "signature": "body: Vector<u8>"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Response",
+          "doc": "An empty 200 response."
+        },
+        {
+          "name": "addHeader",
+          "kind": "method",
+          "signature": "addHeader(&mut self, name: str, value: str): void",
+          "doc": "Appends a header field, keeping any with the same name."
+        },
+        {
+          "name": "setHeader",
+          "kind": "method",
+          "signature": "setHeader(&mut self, name: str, value: str): void",
+          "doc": "Replaces every header field named `name` with one holding `value`."
+        },
+        {
+          "name": "setStatus",
+          "kind": "method",
+          "signature": "setStatus(&mut self, status: u16): void",
+          "doc": "Sets the status. The reason phrase is the standard one."
+        },
+        {
+          "name": "write",
+          "kind": "method",
+          "signature": "write(&mut self, bytes: &Vector<u8>): void",
+          "doc": "Appends `bytes` to the body."
+        },
+        {
+          "name": "writeStr",
+          "kind": "method",
+          "signature": "writeStr(&mut self, text: str): void",
+          "doc": "Appends the bytes of `text` to the body."
+        }
+      ]
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http::Server",
+      "name": "Server",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Server",
+      "doc": "A blocking HTTP/1.1 server bound to an address.",
+      "members": [
+        {
+          "name": "listener",
+          "kind": "field",
+          "signature": "listener: Arc<TcpListener>"
+        },
+        {
+          "name": "config",
+          "kind": "field",
+          "signature": "config: Arc<ServerConfig>"
+        },
+        {
+          "name": "bind",
+          "kind": "method",
+          "signature": "static bind(address: &SocketAddress, config: ServerConfig): Result<Server, IoError>",
+          "doc": "Binds a listening socket to `address`. Port 0 picks a free port;  \n`localAddress` reports which."
+        },
+        {
+          "name": "localAddress",
+          "kind": "method",
+          "signature": "localAddress(&self): Result<SocketAddress, IoError>",
+          "doc": "The address the server is bound to."
+        },
+        {
+          "name": "run",
+          "kind": "method",
+          "signature": "run(self, handler: H): Result<void, IoError>",
+          "doc": "Serves connections with `handler` on `config.threads` threads.  \n  \nEach thread accepts a connection, serves it with `serveConnection`  \nand accepts the next one. An error on a connection ends only that  \nconnection. A thread stops when `accept` fails, and `run` returns  \nonce every thread stopped, with the first thread's error. There is  \nno way to stop a running server yet, so in practice `run` blocks for  \nas long as the process lives."
+        }
+      ]
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http::ServerConfig",
+      "name": "ServerConfig",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record ServerConfig",
+      "doc": "How a server runs and what it accepts from a connection.",
+      "members": [
+        {
+          "name": "threads",
+          "kind": "field",
+          "signature": "threads: u64",
+          "doc": "Threads accepting and serving connections. Each serves one  \nconnection at a time. Default 8; 0 counts as 1."
+        },
+        {
+          "name": "limits",
+          "kind": "field",
+          "signature": "limits: Limits",
+          "doc": "The parser limits for every request."
+        },
+        {
+          "name": "idleTimeout",
+          "kind": "field",
+          "signature": "idleTimeout: Duration",
+          "doc": "How long a read may wait for the client, between requests or within  \none. When it expires the connection is closed without a response.  \nDefault 30 seconds."
+        },
+        {
+          "name": "maxRequestsPerConnection",
+          "kind": "field",
+          "signature": "maxRequestsPerConnection: u64",
+          "doc": "Requests served on one connection before the server closes it; 0  \nmeans no limit. Default 0."
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): ServerConfig",
+          "doc": "The default configuration."
+        }
+      ]
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http::serveConnection",
+      "name": "serveConnection",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function serveConnection<H>(stream: &mut TcpStream, handler: &H, config: &ServerConfig): Result<void, IoError>",
+      "doc": "Serves HTTP/1.1 requests on `stream` until the connection ends.  \n  \nReads with `config.idleTimeout`, feeds the parser and calls `handler`  \nfor every complete request, then writes its response. The connection  \nstays open for the next request unless the request does not keep it  \nalive (see `RequestHead.keepAlive`), the response carries  \n`Connection: close`, or `config.maxRequestsPerConnection` is reached.  \n  \nA malformed request gets a response with the parser's status and  \n`Connection: close`, and ends the connection. A client that closes,  \nor sends nothing for `config.idleTimeout`, ends it without a response.  \nThe body is passed to the handler only once complete, so  \n`Expect: 100-continue` is not answered: the client sends the body  \nafter its own wait. A `HEAD` request gets the head the handler's  \nresponse would have, without the body.  \n  \nReturns `OK` when the connection ended in one of these ways, and the  \nerror when reading or writing the socket failed."
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::LINGER_BYTES",
+      "name": "LINGER_BYTES",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const LINGER_BYTES: u64"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::LINGER_MILLIS",
+      "name": "LINGER_MILLIS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const LINGER_MILLIS: u64"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::READ_BYTES",
+      "name": "READ_BYTES",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const READ_BYTES: u64"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::__closure_drop_0",
+      "name": "__closure_drop_0",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_drop_0(__closure_drop_env_0: *mut u8): void"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::__closure_thunk_0",
+      "name": "__closure_thunk_0",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_thunk_0(__closure_env_0: *mut u8): IoError"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::acceptLoop",
+      "name": "acceptLoop",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function acceptLoop<H>(listener: &TcpListener, handler: &H, config: &ServerConfig): IoError",
+      "doc": "One worker of `Server::run`: accepts connections and serves each in turn  \nuntil `accept` reports that the listener itself is unusable, and returns  \nthat error.  \n  \nAny other `accept` failure concerns one connection or a passing shortage  \n(a client that reset before it was accepted, no descriptors left), so the  \nworker keeps going; after a shortage it waits briefly instead of spinning."
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::appendBytes",
+      "name": "appendBytes",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function appendBytes(out: &mut Vector<u8>, bytes: &Vector<u8>): void"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::isTimeout",
+      "name": "isTimeout",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isTimeout(error: &IoError): boolean"
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::isUtf8",
+      "name": "isUtf8",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isUtf8(bytes: &Vector<u8>): boolean",
+      "doc": "Whether `bytes` is well-formed UTF-8: no truncated or overlong sequence,  \nno surrogate and nothing above U+10FFFF."
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::lingerClose",
+      "name": "lingerClose",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function lingerClose(stream: &mut TcpStream): void",
+      "doc": "Ends a connection the server decided to close: shuts the writing side,  \nthen reads and discards what the client still sends for a short while, so  \nunread input does not make the close reset the connection before the  \nclient has read the response."
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::responseHead",
+      "name": "responseHead",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function responseHead(response: &Response, close: boolean): ResponseHead",
+      "doc": "The head the driver writes for `response`: its status and header fields,  \nwithout any `Content-Length` or `Transfer-Encoding` the handler set, since  \nthe driver frames the body itself, and with `Connection: close` when the  \nconnection closes after it."
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::serializeResponse",
+      "name": "serializeResponse",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function serializeResponse(response: &Response, isHead: boolean, close: boolean): Vector<u8>",
+      "doc": "Serializes the answer to one request. A head that cannot be written  \nbecomes a 500 without a body."
     },
     {
       "module": "std::io",
