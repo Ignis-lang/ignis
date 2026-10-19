@@ -40,7 +40,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::toml` | `Toml` | TOML document model, parsing and writing |
 | `std::format` | `Display` | `Display` trait for user-defined textual representations |
 | `std::text` | `Text` | UTF-8 byte-offset ↔ line/column position conversion (`Text::LineIndex`) |
-| `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr`, `Mutex`, `MutexGuard`, `Condvar`, `Arc` | Atomic values, locks, condition variables and shared ownership across threads |
+| `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr`, `Mutex`, `MutexGuard`, `Condvar`, `Arc`, `Channel`, `Sender`, `Receiver`, `ThreadPool` | Atomic values, locks, condition variables, shared ownership, channels and a thread pool |
 | `std::thread` | `Thread`, `JoinHandle<T>` | Spawn, join and detach POSIX threads |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
@@ -238,6 +238,19 @@ function main(): i32 {
   (48 bytes) inline, the sizes on Linux x86-64 with glibc. A `Mutex` or `Condvar` must
   not move while a guard or a waiter uses it; keep it in place, typically inside an
   `Arc`.
+- `Channel::new<T: Send>(): Channel<T>` — an unbounded many-producer, many-consumer
+  channel; move its `sender` and `receiver` fields out. `Sender<T>` and `Receiver<T>`
+  are cloneable and Send; `T` need not be Sync.
+- `Sender<T>::send(&self, value): Result<void, T>` — never blocks; gives the value back
+  as `ERROR` once every receiver is gone.
+- `Receiver<T>::recv(&self): Option<T>` — blocks; `NONE` once every sender is gone and
+  the queue is empty. `tryRecv(&self): Option<T>` does not block. Values come out in
+  send order, each to exactly one receiver. Values left when the last end is dropped
+  are dropped with it.
+- `ThreadPool::new(size: u64)` — starts `size` worker threads; panics when `size` is 0.
+  `execute(&self, @sendable task: () -> void)` queues a job for the first idle worker.
+  Dropping the pool lets the workers finish every job queued before the drop, then
+  joins them.
 
 ### `std::thread`
 

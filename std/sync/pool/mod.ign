@@ -1,0 +1,172 @@
+//!
+//! # Thread pool
+//!
+//! A fixed number of worker threads that run queued jobs.
+//!
+//! ## Exports
+//!
+//! | Export       | Description                                        |
+//! |--------------|----------------------------------------------------|
+//! | `ThreadPool` | `new(size)` starts the workers; `execute` queues a job |
+//!
+//! ## Running jobs
+//!
+//! `ThreadPool::new(size)` starts `size` workers and panics when `size` is 0.
+//! `execute(task)` queues `task` and returns at once; the first idle worker
+//! takes it. Jobs start in the order they were queued, but with more than one
+//! worker they run concurrently and may finish in any order. A job that wants
+//! to report back sends on a `std::sync::Channel`.
+//!
+//! The task parameter is `@sendable`, the same as `Thread::spawn`'s, so the
+//! compiler checks that whatever the closure captures can move to a worker.
+//!
+//! ## Dropping the pool
+//!
+//! Dropping the pool queues one exit signal per worker behind the jobs already
+//! queued, and joins every worker before it returns. The queue is first in,
+//! first out, so the workers take every earlier job before any of them exits:
+//! every job queued before the drop runs to completion first. A job that
+//! never returns keeps the drop waiting forever.
+//!
+//! ## Panics
+//!
+//! A panic inside a job ends the whole process with exit code 101, as any
+//! panic in a thread does.
+//!
+//! ## Ownership of a job
+//!
+//! A closure is neither Send nor Sync, so a job cannot travel through a
+//! `Channel<() -> void>`. `execute` boxes the closure in its own heap cell, the
+//! way `Thread::spawn` does, and sends the cell as a `PoolJob`. A worker moves
+//! the closure out of the cell, frees it and runs the closure; a job that is
+//! never run drops the closure and frees the cell.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Channel, Receiver, Sender, ThreadPool from "std::sync";
+//!
+//! function main(): i32 {
+//!   let channel: Channel<i32> = Channel::new<i32>();
+//!   let sender: Sender<i32> = channel.sender;
+//!   let receiver: Receiver<i32> = channel.receiver;
+//!
+//!   {
+//!     let pool: ThreadPool = ThreadPool::new(2);
+//!
+//!     pool.execute((): void -> {
+//!       (@move sender).send(42);
+//!     });
+//!   }
+//!
+//!   return receiver.recv().unwrapOr(0);
+//! }
+//! ```
+
+import Channel, Receiver, Sender from "std::sync::channel";
+import Callback, JoinHandle, Thread, ThreadBlocks from "std::thread";
+
+/// One queued job: a boxed `() -> void`. A null cell is the signal for a
+/// worker to exit.
+///
+/// Declared `Send` although it holds a raw pointer: the closure in the cell
+/// was checked `@sendable` by `ThreadPool::execute`, and exactly one owner
+/// reaches the cell at a time.
+@allow(thread_safety)
+@implements(Drop, Send)
+export record PoolJob {
+  cell: *mut Callback;
+
+  /// Whether this is the exit signal rather than a job.
+  public isStop(&self): boolean {
+    return self.cell == null;
+  }
+
+  /// Runs the job once and frees its cell.
+  public run(&mut self): void {
+    let cell: *mut Callback = self.cell;
+
+    self.cell = null;
+    ThreadBlocks::runAndFree(cell);
+  }
+
+  /// Drops a job that never ran.
+  drop(&mut self): void {
+    if (self.cell != null) {
+      ThreadBlocks::dropAndFree(self.cell);
+    }
+  }
+}
+
+/// Runs jobs on a fixed set of worker threads.
+///
+/// See the module documentation for what dropping it waits for.
+@implements(Drop)
+export record ThreadPool {
+  jobs: Sender<PoolJob>;
+  workers: Vector<JoinHandle<void>>;
+
+  /// Starts `size` workers.
+  ///
+  /// Panics when `size` is 0.
+  public static new(size: u64): ThreadPool {
+    if (size == 0) {
+      @panic("ThreadPool::new: size must be greater than 0");
+    }
+
+    let channel: Channel<PoolJob> = Channel::new<PoolJob>();
+    let sender: Sender<PoolJob> = channel.sender;
+    let receiver: Receiver<PoolJob> = channel.receiver;
+    let mut workers: Vector<JoinHandle<void>> = Vector::new<JoinHandle<void>>();
+    let mut index: u64 = 0;
+
+    while (index < size) {
+      let worker: Receiver<PoolJob> = receiver.clone();
+
+      workers.push(Thread::spawn<void>((): void -> {
+            while (let Option::SOME(job) = (@move worker).recv()) {
+              let mut next: PoolJob = job;
+
+              if (next.isStop()) {
+                return;
+              }
+
+              next.run();
+            }
+          }));
+      index += 1;
+    }
+
+    return ThreadPool { jobs: sender, workers: workers };
+  }
+
+  /// Queues `task` for the first idle worker.
+  public execute(&self, @sendable task: () -> void): void {
+    self.jobs.send(PoolJob { cell: ThreadBlocks::box(task) });
+  }
+
+  /// Queues one exit signal per worker behind every job, and joins them all.
+  ///
+  /// The queue is first in, first out, so every job queued before the drop
+  /// is taken before any worker sees its signal.
+  drop(&mut self): void {
+    let mut index: u64 = 0;
+
+    while (index < self.workers.length()) {
+      self.jobs.send(PoolJob { cell: null });
+      index += 1;
+    }
+
+    while (let Option::SOME(worker) = self.workers.pop()) {
+      worker.join();
+    }
+
+    // A custom `drop` does not drop the fields, so release the queue's sender
+    // and the workers' storage here.
+    let jobs: *Sender<PoolJob> = (&self.jobs) as *Sender<PoolJob>;
+    let workers: *Vector<JoinHandle<void>> = (&self.workers) as *Vector<JoinHandle<void>>;
+
+    @dropInPlace<Sender<PoolJob>>(jobs as *mut Sender<PoolJob>);
+    @dropInPlace<Vector<JoinHandle<void>>>(workers as *mut Vector<JoinHandle<void>>);
+  }
+}
