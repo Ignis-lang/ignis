@@ -1,0 +1,388 @@
+//!
+//! # Socket system calls, x86_64 Linux
+//!
+//! The only file in `std::net` that knows syscall numbers, socket constants
+//! and kernel structure layouts. Everything else calls the typed functions of
+//! `NetSys`.
+//!
+//! ## Why `syscall(2)`
+//!
+//! A hosted C unit includes a fixed list of headers, and none of them declares
+//! `socket`, `bind`, `accept4` or `poll`. An `extern` declaration emits no
+//! prototype, so binding those names directly fails to compile. glibc's
+//! `syscall` is declared in `<unistd.h>`, which the unit does include. It
+//! returns -1 and sets `errno` on failure, the same contract as the libc
+//! wrappers, so `Io::IoError::lastError()` applies unchanged.
+//!
+//! `syscall` is variadic and Ignis has no variadic call syntax. Each fixed
+//! arity below is compiled against the real variadic declaration, and every
+//! argument is passed as a 64-bit integer, which is how the kernel receives
+//! them on x86_64.
+//!
+//! Once the compiler emits extern prototypes or includes the headers a std
+//! module names, these functions can call the libc wrappers instead; nothing
+//! outside this file has to change.
+//!
+//! ## Layouts
+//!
+//! | Kernel structure      | Size | Fields read or written                         |
+//! |-----------------------|------|------------------------------------------------|
+//! | `struct sockaddr_in`  | 16   | family (u16), port (u16, big endian), address (4 bytes) |
+//! | `struct sockaddr_in6` | 28   | family (u16), port (u16, big endian), flow info (u32), address (16 bytes), scope id (u32) |
+//! | `struct timeval`      | 16   | seconds (i64), microseconds (i64)              |
+//! | `struct pollfd`       | 8    | fd (i32), events (i16), returned events (i16)  |
+
+import Io from "std::io";
+import Platform from "std::libc::platform";
+import _ from "std::net::address";
+import IpAddress, Ipv4Address, Ipv6Address, SocketAddress from "std::net::address";
+
+@configFlag(@platform("linux") && @arch("x86_64"))
+extern __net_syscall {
+  @externName("syscall")
+  function syscall1(number: i64, first: i64): i64;
+
+  @externName("syscall")
+  function syscall2(number: i64, first: i64, second: i64): i64;
+
+  @externName("syscall")
+  function syscall3(number: i64, first: i64, second: i64, third: i64): i64;
+
+  @externName("syscall")
+  function syscall4(number: i64, first: i64, second: i64, third: i64, fourth: i64): i64;
+
+  @externName("syscall")
+  function syscall5(number: i64, first: i64, second: i64, third: i64, fourth: i64, fifth: i64): i64;
+
+  @externName("syscall")
+  function syscall6(
+    number: i64,
+    first: i64,
+    second: i64,
+    third: i64,
+    fourth: i64,
+    fifth: i64,
+    sixth: i64
+  ): i64;
+}
+
+/// Room for the largest address this module writes (`sockaddr_in6`, 28 bytes).
+///
+/// Exported for `std::net::tcp` only; not part of the public API.
+@configFlag(@platform("linux") && @arch("x86_64"))
+export record RawSocketAddress {
+  public first: u64;
+  public second: u64;
+  public third: u64;
+  public fourth: u64;
+}
+
+/// `struct timeval`.
+@configFlag(@platform("linux") && @arch("x86_64"))
+record RawTimeval {
+  public seconds: i64;
+  public microseconds: i64;
+}
+
+/// `struct pollfd`.
+@configFlag(@platform("linux") && @arch("x86_64"))
+record RawPollDescriptor {
+  public fd: i32;
+  public events: i16;
+  public returnedEvents: i16;
+}
+
+/// Typed socket system calls and constants for x86_64 Linux.
+///
+/// Exported only so the other `std::net` files can reach it. It is not part of
+/// the public API.
+@configFlag(@platform("linux") && @arch("x86_64"))
+export namespace NetSys {
+  const SYS_POLL: i64 = 7;
+  const SYS_CLOSE: i64 = 3;
+  const SYS_SOCKET: i64 = 41;
+  const SYS_CONNECT: i64 = 42;
+  const SYS_SENDTO: i64 = 44;
+  const SYS_RECVFROM: i64 = 45;
+  const SYS_SHUTDOWN: i64 = 48;
+  const SYS_BIND: i64 = 49;
+  const SYS_LISTEN: i64 = 50;
+  const SYS_GETSOCKNAME: i64 = 51;
+  const SYS_GETPEERNAME: i64 = 52;
+  const SYS_SETSOCKOPT: i64 = 54;
+  const SYS_GETSOCKOPT: i64 = 55;
+  const SYS_FCNTL: i64 = 72;
+  const SYS_ACCEPT4: i64 = 288;
+
+  const AF_INET: i32 = 2;
+  const AF_INET6: i32 = 10;
+  const SOCK_STREAM: i32 = 1;
+  const SOCK_NONBLOCK: i32 = 2048;
+  const SOCK_CLOEXEC: i32 = 524288;
+  const SOL_SOCKET: i32 = 1;
+  const SO_REUSEADDR: i32 = 2;
+  const SO_ERROR: i32 = 4;
+  const SO_RCVTIMEO: i32 = 20;
+  const SO_SNDTIMEO: i32 = 21;
+  const IPPROTO_TCP: i32 = 6;
+  const TCP_NODELAY: i32 = 1;
+  const MSG_NOSIGNAL: i32 = 16384;
+  const SHUT_RD: i32 = 0;
+  const SHUT_WR: i32 = 1;
+  const SHUT_RDWR: i32 = 2;
+  const POLLOUT: i16 = 4;
+  const F_GETFL: i32 = 3;
+  const F_SETFL: i32 = 4;
+  const O_NONBLOCK: i32 = 2048;
+
+  const SOCKADDR_IN_LENGTH: u32 = 16;
+  const SOCKADDR_IN6_LENGTH: u32 = 28;
+  const SOCKADDR_STORAGE_LENGTH: u32 = 32;
+
+  function pointer(value: *u8): i64 {
+    return value as u64 as i64;
+  }
+
+  /// `socket(2)`. Returns the descriptor or -1.
+  function socket(domain: i32, kind: i32, protocol: i32): i32 {
+    return __net_syscall::syscall3(SYS_SOCKET, domain as i64, kind as i64, protocol as i64) as i32;
+  }
+
+  /// `close(2)`.
+  function close(fd: i32): i32 {
+    return __net_syscall::syscall1(SYS_CLOSE, fd as i64) as i32;
+  }
+
+  /// `bind(2)`.
+  function bind(fd: i32, address: *u8, length: u32): i32 {
+    return __net_syscall::syscall3(SYS_BIND, fd as i64, NetSys::pointer(address), length as i64) as i32;
+  }
+
+  /// `listen(2)`.
+  function listen(fd: i32, backlog: i32): i32 {
+    return __net_syscall::syscall2(SYS_LISTEN, fd as i64, backlog as i64) as i32;
+  }
+
+  /// `accept4(2)`. `length` holds the room in `address` and receives the size written.
+  function accept4(fd: i32, address: *mut u8, length: *mut u32, flags: i32): i32 {
+    return __net_syscall::syscall4(
+      SYS_ACCEPT4,
+      fd as i64,
+      NetSys::pointer(address as *u8),
+      NetSys::pointer(length as *u8),
+      flags as i64,
+    ) as i32;
+  }
+
+  /// `connect(2)`.
+  function connect(fd: i32, address: *u8, length: u32): i32 {
+    return __net_syscall::syscall3(SYS_CONNECT, fd as i64, NetSys::pointer(address), length as i64) as i32;
+  }
+
+  /// `sendto(2)` with no destination, which is `send(2)`.
+  function send(fd: i32, buffer: *u8, count: u64, flags: i32): i64 {
+    return __net_syscall::syscall6(SYS_SENDTO, fd as i64, NetSys::pointer(buffer), count as i64, flags as i64, 0, 0);
+  }
+
+  /// `recvfrom(2)` with no source address, which is `recv(2)`.
+  function receive(fd: i32, buffer: *mut u8, count: u64, flags: i32): i64 {
+    return __net_syscall::syscall6(
+      SYS_RECVFROM,
+      fd as i64,
+      NetSys::pointer(buffer as *u8),
+      count as i64,
+      flags as i64,
+      0,
+      0,
+    );
+  }
+
+  /// `shutdown(2)`.
+  function shutdown(fd: i32, how: i32): i32 {
+    return __net_syscall::syscall2(SYS_SHUTDOWN, fd as i64, how as i64) as i32;
+  }
+
+  /// `setsockopt(2)`.
+  function setSocketOption(fd: i32, level: i32, name: i32, value: *u8, length: u32): i32 {
+    return __net_syscall::syscall5(
+      SYS_SETSOCKOPT,
+      fd as i64,
+      level as i64,
+      name as i64,
+      NetSys::pointer(value),
+      length as i64,
+    ) as i32;
+  }
+
+  /// `getsockopt(2)`.
+  function getSocketOption(fd: i32, level: i32, name: i32, value: *mut u8, length: *mut u32): i32 {
+    return __net_syscall::syscall5(
+      SYS_GETSOCKOPT,
+      fd as i64,
+      level as i64,
+      name as i64,
+      NetSys::pointer(value as *u8),
+      NetSys::pointer(length as *u8),
+    ) as i32;
+  }
+
+  /// `getsockname(2)`.
+  function socketName(fd: i32, address: *mut u8, length: *mut u32): i32 {
+    return __net_syscall::syscall3(
+      SYS_GETSOCKNAME,
+      fd as i64,
+      NetSys::pointer(address as *u8),
+      NetSys::pointer(length as *u8),
+    ) as i32;
+  }
+
+  /// `getpeername(2)`.
+  function peerName(fd: i32, address: *mut u8, length: *mut u32): i32 {
+    return __net_syscall::syscall3(
+      SYS_GETPEERNAME,
+      fd as i64,
+      NetSys::pointer(address as *u8),
+      NetSys::pointer(length as *u8),
+    ) as i32;
+  }
+
+  /// `poll(2)` on one descriptor. Returns the ready count, 0 on timeout, or -1.
+  ///
+  /// `timeoutMillis` is -1 to wait without a limit.
+  function pollOne(fd: i32, events: i16, timeoutMillis: i32): i32 {
+    let mut descriptor: RawPollDescriptor = RawPollDescriptor {
+      fd: fd,
+      events: events,
+      returnedEvents: 0,
+    };
+
+    return __net_syscall::syscall3(
+      SYS_POLL,
+      NetSys::pointer((&mut descriptor) as *u8),
+      1,
+      timeoutMillis as i64,
+    ) as i32;
+  }
+
+  /// `fcntl(2)` with an integer argument.
+  function fcntl(fd: i32, command: i32, argument: i32): i32 {
+    return __net_syscall::syscall3(SYS_FCNTL, fd as i64, command as i64, argument as i64) as i32;
+  }
+
+  /// Sets `SO_RCVTIMEO` or `SO_SNDTIMEO`. Zero seconds and microseconds clear it.
+  function setTimeoutOption(fd: i32, name: i32, seconds: i64, microseconds: i64): i32 {
+    let value: RawTimeval = RawTimeval {
+      seconds: seconds,
+      microseconds: microseconds,
+    };
+
+    return NetSys::setSocketOption(fd, SOL_SOCKET, name, (&value) as *u8, @sizeOf<RawTimeval>() as u32);
+  }
+
+  /// Sets an `int` socket option.
+  function setIntegerOption(fd: i32, level: i32, name: i32, value: i32): i32 {
+    let option: i32 = value;
+
+    return NetSys::setSocketOption(fd, level, name, (&option) as *u8, 4);
+  }
+
+  /// Reads an `int` socket option into `value`. Returns 0 or -1.
+  function getIntegerOption(fd: i32, level: i32, name: i32, value: &mut i32): i32 {
+    let mut length: u32 = 4;
+
+    return NetSys::getSocketOption(fd, level, name, value as *mut u8, (&mut length) as *mut u32);
+  }
+
+  /// Address family `socket(2)` needs for `address`.
+  function familyOf(address: &SocketAddress): i32 {
+    return match (address.ip()) {
+      IpAddress::V4(_) -> AF_INET,
+      IpAddress::V6(_) -> AF_INET6,
+    };
+  }
+
+  /// Writes `address` into `storage` as a `sockaddr_in` or `sockaddr_in6`.
+  ///
+  /// Returns the length to pass with it.
+  function encodeAddress(address: &SocketAddress, storage: &mut RawSocketAddress): u32 {
+    let mut target: RawSocketAddress = @zeroed<RawSocketAddress>();
+    let base: *mut u8 = (&mut target) as *mut u8;
+    let port: u16 = address.port();
+
+    @write<u8>(base + 2, (port >> 8) as u8);
+    @write<u8>(base + 3, (port & 255) as u8);
+
+    let mut length: u32 = SOCKADDR_IN_LENGTH;
+
+    if (let IpAddress::V4(ipv4) = address.ip()) {
+      @write<u16>(base as *mut u16, AF_INET as u16);
+
+      let mut index: u64 = 0;
+
+      while (index < 4) {
+        @write<u8>(base + 4 + index, ipv4.octet(index));
+        index += 1;
+      }
+    }
+
+    if (let IpAddress::V6(ipv6) = address.ip()) {
+      @write<u16>(base as *mut u16, AF_INET6 as u16);
+
+      let mut index: u64 = 0;
+
+      while (index < 8) {
+        let segment: u16 = ipv6.segment(index);
+
+        @write<u8>(base + 8 + index * 2, (segment >> 8) as u8);
+        @write<u8>(base + 9 + index * 2, (segment & 255) as u8);
+        index += 1;
+      }
+
+      length = SOCKADDR_IN6_LENGTH;
+    }
+
+    *storage = target;
+
+    return length;
+  }
+
+  /// Reads a `sockaddr_in` or `sockaddr_in6` the kernel wrote into `storage`.
+  function decodeAddress(storage: &RawSocketAddress): Result<SocketAddress, Io::IoError> {
+    let base: *u8 = storage as *u8;
+    let family: i32 = @read<u16>(base as *u16) as i32;
+    let port: u16 = ((@read<u8>(base + 2) as u16) << 8) | (@read<u8>(base + 3) as u16);
+
+    if (family == AF_INET) {
+      let ipv4: Ipv4Address = Ipv4Address::create(
+        @read<u8>(base + 4),
+        @read<u8>(base + 5),
+        @read<u8>(base + 6),
+        @read<u8>(base + 7),
+      );
+
+      return Result::OK(SocketAddress::create(IpAddress::V4(ipv4), port));
+    }
+
+    if (family == AF_INET6) {
+      let mut segments: u64 = 0;
+      let mut high: u64 = 0;
+      let mut low: u64 = 0;
+
+      while (segments < 8) {
+        let segment: u64 = ((@read<u8>(base + 8 + segments * 2) as u64) << 8) | (@read<u8>(base + 9 + segments * 2) as u64);
+
+        if (segments < 4) {
+          high = (high << 16) | segment;
+        } else {
+          low = (low << 16) | segment;
+        }
+
+        segments += 1;
+      }
+
+      return Result::OK(SocketAddress::create(IpAddress::V6(Ipv6Address::fromBits(high, low)), port));
+    }
+
+    return Result::ERROR(Io::IoError::fromErrno(Platform::EINVAL));
+  }
+}

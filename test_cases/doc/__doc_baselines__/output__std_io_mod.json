@@ -81,11 +81,11 @@
     },
     {
       "name": "std::io",
-      "doc": "  \n# I/O  \n  \nStandard output, error printing, structured I/O error types, buffered  \ndescriptor reads, and `Content-Length` message framing.  \n  \nAll types and functions live under the `Io` namespace.  \n  \n## Printing  \n  \n| Function        | Stream   | Newline | Accepts          |  \n|-----------------|----------|---------|------------------|  \n| `Io::print`     | stdout   | No      | `String`         |  \n| `Io::println`   | stdout   | Yes     | `String`, `str`  |  \n| `Io::eprint`    | stderr   | No      | `String`         |  \n| `Io::eprintln`  | stderr   | Yes     | `String`, `str`  |  \n  \n`println` and `eprintln` are overloaded for both `String` and `str`:  \n- `String` overload: the value is consumed (moved), dropped after printing,  \n  and writes `message.length()` bytes.  \n- `str` overload: writes the C string directly, no heap allocation.  \n  \n`print` and `eprint` only accept `String` (no `str` overload).  \n`String` overloads write `message.length()` bytes. `str` overloads remain  \nNUL-terminated C-string writes and may stop at the first interior NUL.  \n`str` overloads remain NUL-terminated C-string writes.  \n  \n## Error Types  \n  \n| Type              | Source file | Description                                      |  \n|-------------------|------------|--------------------------------------------------|  \n| `Io::ErrorKind`   | error.ign  | Category of the I/O error (8 variants)           |  \n| `Io::IoError`     | error.ign  | Full error: kind + raw errno + strerror message  |  \n  \n## Streams and Framing  \n  \n| Item                        | Source file | Description                               |  \n|-----------------------------|-------------|-------------------------------------------|  \n| `Stream::ByteReader`         | stream.ign  | Buffered reader over a file descriptor    |  \n| `Stream::ByteWriter`         | stream.ign  | Unbuffered whole-buffer writer            |  \n| `Stream::ReadError`          | stream.ign  | End of input, truncation, or read failure |  \n| `Stream::FrameError`         | stream.ign  | Why a framed message could not be read    |  \n| `Stream::writeAll`           | stream.ign  | Write a whole `String` to a descriptor    |  \n| `Stream::writeFramedMessage` | stream.ign  | Write a `Content-Length` framed message   |  \n  \nThese live in the `Stream` namespace, re-exported here:  \n`import Io, Stream from \"std::io\";`. `Stream::ByteReader::stdin()` reads  \nstandard input. `readFramedMessage` and  \n`writeFramedMessage` implement the header framing the Language Server  \nProtocol uses on stdin and stdout. `readFramedMessageWithin` does the same  \nbut skips, without buffering, a body longer than a caller-chosen limit.  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \nimport LibC from \"std::libc\";  \nimport String from \"std::string\";  \n  \nfunction main(): i32 {  \n  Io::println(String::create(\"hello, world!\"));  \n  \n  // I/O error from a failed syscall  \n  let fd: i32 = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if (fd == -1) {  \n    let err: Io::IoError = Io::IoError::lastError();  \n    // err.kind == Io::ErrorKind::NOT_FOUND  \n    // err.message == \"No such file or directory\"  \n    return 1;  \n  }  \n  \n  return 0;  \n}  \n```"
+      "doc": "  \n# I/O  \n  \nStandard output, error printing, structured I/O error types, buffered  \ndescriptor reads, and `Content-Length` message framing.  \n  \nAll types and functions live under the `Io` namespace.  \n  \n## Printing  \n  \n| Function        | Stream   | Newline | Accepts          |  \n|-----------------|----------|---------|------------------|  \n| `Io::print`     | stdout   | No      | `String`         |  \n| `Io::println`   | stdout   | Yes     | `String`, `str`  |  \n| `Io::eprint`    | stderr   | No      | `String`         |  \n| `Io::eprintln`  | stderr   | Yes     | `String`, `str`  |  \n  \n`println` and `eprintln` are overloaded for both `String` and `str`:  \n- `String` overload: the value is consumed (moved), dropped after printing,  \n  and writes `message.length()` bytes.  \n- `str` overload: writes the C string directly, no heap allocation.  \n  \n`print` and `eprint` only accept `String` (no `str` overload).  \n`String` overloads write `message.length()` bytes. `str` overloads remain  \nNUL-terminated C-string writes and may stop at the first interior NUL.  \n`str` overloads remain NUL-terminated C-string writes.  \n  \n## Error Types  \n  \n| Type              | Source file | Description                                      |  \n|-------------------|------------|--------------------------------------------------|  \n| `Io::ErrorKind`   | error.ign  | Category of the I/O error (14 variants)          |  \n| `Io::IoError`     | error.ign  | Full error: kind + raw errno + strerror message  |  \n  \n## Streams and Framing  \n  \n| Item                        | Source file | Description                               |  \n|-----------------------------|-------------|-------------------------------------------|  \n| `Stream::ByteReader`         | stream.ign  | Buffered reader over a file descriptor    |  \n| `Stream::ByteWriter`         | stream.ign  | Unbuffered whole-buffer writer            |  \n| `Stream::ReadError`          | stream.ign  | End of input, truncation, or read failure |  \n| `Stream::FrameError`         | stream.ign  | Why a framed message could not be read    |  \n| `Stream::writeAll`           | stream.ign  | Write a whole `String` to a descriptor    |  \n| `Stream::writeFramedMessage` | stream.ign  | Write a `Content-Length` framed message   |  \n  \nThese live in the `Stream` namespace, re-exported here:  \n`import Io, Stream from \"std::io\";`. `Stream::ByteReader::stdin()` reads  \nstandard input. `readFramedMessage` and  \n`writeFramedMessage` implement the header framing the Language Server  \nProtocol uses on stdin and stdout. `readFramedMessageWithin` does the same  \nbut skips, without buffering, a body longer than a caller-chosen limit.  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \nimport LibC from \"std::libc\";  \nimport String from \"std::string\";  \n  \nfunction main(): i32 {  \n  Io::println(String::create(\"hello, world!\"));  \n  \n  // I/O error from a failed syscall  \n  let fd: i32 = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if (fd == -1) {  \n    let err: Io::IoError = Io::IoError::lastError();  \n    // err.kind == Io::ErrorKind::NOT_FOUND  \n    // err.message == \"No such file or directory\"  \n    return 1;  \n  }  \n  \n  return 0;  \n}  \n```"
     },
     {
       "name": "std::io::error",
-      "doc": "  \n# I/O Error Types  \n  \nStructured error types for I/O operations, exposed as `Io::ErrorKind`  \nand `Io::IoError`.  \n  \n## Types  \n  \n| Type             | Description                                          |  \n|------------------|------------------------------------------------------|  \n| `Io::ErrorKind`  | Category of the I/O error (enum, 8 variants)         |  \n| `Io::IoError`    | Full error: kind + raw errno + human-readable message |  \n  \n## ErrorKind Variants  \n  \n| Variant             | Errno            | Description                          |  \n|---------------------|------------------|--------------------------------------|  \n| `NOT_FOUND`         | `ENOENT`         | No such file or directory            |  \n| `PERMISSION_DENIED` | `EACCES`         | Permission denied                    |  \n| `ALREADY_EXISTS`    | `EEXIST`         | File or resource already exists      |  \n| `INVALID_INPUT`     | `EINVAL`         | Invalid argument                     |  \n| `INTERRUPTED`       | `EINTR`          | Operation interrupted by signal      |  \n| `WOULD_BLOCK`       | `EAGAIN`         | Resource temporarily unavailable     |  \n| `TIMED_OUT`         | `ETIMEDOUT`      | Connection or operation timed out    |  \n| `OTHER`             | anything else    | Unmapped errno value                 |  \n  \n## Construction  \n  \n| Method                         | Description                              |  \n|--------------------------------|------------------------------------------|  \n| `Io::IoError::fromErrno(raw)`  | Map raw errno to kind + strerror message |  \n| `Io::IoError::lastError()`     | Read thread-local errno, then fromErrno  |  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \nimport LibC from \"std::libc\";  \n  \nfunction main(): i32 {  \n  let fd: i32 = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if (fd == -1) {  \n    let err: Io::IoError = Io::IoError::lastError();  \n    // err.kind == Io::ErrorKind::NOT_FOUND  \n    // err.raw  == 2  (ENOENT)  \n    // err.message == \"No such file or directory\"  \n    return 1;  \n  }  \n  return 0;  \n}  \n```"
+      "doc": "  \n# I/O Error Types  \n  \nStructured error types for I/O operations, exposed as `Io::ErrorKind`  \nand `Io::IoError`.  \n  \n## Types  \n  \n| Type             | Description                                          |  \n|------------------|------------------------------------------------------|  \n| `Io::ErrorKind`  | Category of the I/O error (enum, 14 variants)        |  \n| `Io::IoError`    | Full error: kind + raw errno + human-readable message |  \n  \n## ErrorKind Variants  \n  \n| Variant             | Errno            | Description                          |  \n|---------------------|------------------|--------------------------------------|  \n| `NOT_FOUND`         | `ENOENT`         | No such file or directory            |  \n| `PERMISSION_DENIED` | `EACCES`         | Permission denied                    |  \n| `ALREADY_EXISTS`    | `EEXIST`         | File or resource already exists      |  \n| `INVALID_INPUT`     | `EINVAL`         | Invalid argument                     |  \n| `INTERRUPTED`       | `EINTR`          | Operation interrupted by signal      |  \n| `WOULD_BLOCK`       | `EAGAIN`         | Resource temporarily unavailable     |  \n| `TIMED_OUT`         | `ETIMEDOUT`      | Connection or operation timed out    |  \n| `CONNECTION_REFUSED`| `ECONNREFUSED`   | Nothing listens at the remote address |  \n| `CONNECTION_RESET`  | `ECONNRESET`     | The peer reset the connection        |  \n| `ADDRESS_IN_USE`    | `EADDRINUSE`     | Local address already bound          |  \n| `ADDRESS_NOT_AVAILABLE` | `EADDRNOTAVAIL` | Local address not owned by this host |  \n| `BROKEN_PIPE`       | `EPIPE`          | Write to a pipe or socket the peer closed |  \n| `NOT_CONNECTED`     | `ENOTCONN`       | Socket is not connected              |  \n| `OTHER`             | anything else    | Unmapped errno value                 |  \n  \n## Construction  \n  \n| Method                         | Description                              |  \n|--------------------------------|------------------------------------------|  \n| `Io::IoError::fromErrno(raw)`  | Map raw errno to kind + strerror message |  \n| `Io::IoError::lastError()`     | Read thread-local errno, then fromErrno  |  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \nimport LibC from \"std::libc\";  \n  \nfunction main(): i32 {  \n  let fd: i32 = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if (fd == -1) {  \n    let err: Io::IoError = Io::IoError::lastError();  \n    // err.kind == Io::ErrorKind::NOT_FOUND  \n    // err.raw  == 2  (ENOENT)  \n    // err.message == \"No such file or directory\"  \n    return 1;  \n  }  \n  return 0;  \n}  \n```"
     },
     {
       "name": "std::io::stream",
@@ -170,6 +170,22 @@
     {
       "name": "std::memory::layout",
       "doc": "  \n# Memory Layout  \n  \nDescribes the size and alignment requirements for memory allocation.  \n  \n## Overview  \n  \nA `Layout` encapsulates two fundamental properties needed for memory  \nallocation:  \n  \n- **Size**: The number of bytes required  \n- **Alignment**: The address boundary the allocation must satisfy  \n  \nThese properties are essential for:  \n- Allocating memory for types with specific alignment requirements  \n- Creating arrays of elements with proper spacing  \n- Interfacing with low-level allocators  \n  \n## Memory Layout Concepts  \n  \n### Size vs Alignment vs Stride  \n  \n```text  \n  LAYOUT PROPERTIES FOR A TYPE  \n  ════════════════════════════════════════════════════════════════════════  \n  \n  Consider a struct with size=12, alignment=8:  \n  \n  ┌─────────────────────────────────────────────────────────────────────┐  \n  │                          Single Element                             │  \n  │                                                                     │  \n  │   Address:  0    4    8    12   16   20   24   28   32              │  \n  │             │    │    │    │    │    │    │    │    │               │  \n  │             ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼               │  \n  │            ┌─────────────────┐                                      │  \n  │            │   Data (12B)    │                                      │  \n  │            └─────────────────┘                                      │  \n  │            ◄─── size = 12 ───►                                      │  \n  └─────────────────────────────────────────────────────────────────────┘  \n  \n  ┌─────────────────────────────────────────────────────────────────────┐  \n  │                      Array of Elements                              │  \n  │                                                                     │  \n  │   Address:  0    4    8    12   16   20   24   28   32              │  \n  │             │    │    │    │    │    │    │    │    │               │  \n  │             ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼               │  \n  │            ┌─────────────────┬────┬─────────────────┬────┐          │  \n  │            │   Element 0     │pad │   Element 1     │pad │          │  \n  │            │   (12 bytes)    │(4B)│   (12 bytes)    │(4B)│          │  \n  │            └─────────────────┴────┴─────────────────┴────┘          │  \n  │            ◄──── stride = 16 ────►◄──── stride = 16 ────►           │  \n  │                                                                     │  \n  │   stride = paddedSize() = (size + align - 1) & ~(align - 1)         │  \n  │   stride = (12 + 7) & ~7 = 19 & ~7 = 16                             │  \n  └─────────────────────────────────────────────────────────────────────┘  \n```  \n  \n### Why Padding is Needed  \n  \n```text  \n  WITHOUT PADDING (WRONG):  \n  ┌─────────────────────────────────────────────────────────────────────┐  \n  │   Address:  0         12        24        36                        │  \n  │             │         │         │         │                         │  \n  │            ┌───────────┬───────────┬───────────┐                    │  \n  │            │ Element 0 │ Element 1 │ Element 2 │                    │  \n  │            └───────────┴───────────┴───────────┘                    │  \n  │                        ▲                                            │  \n  │                        │                                            │  \n  │                    Address 12 is NOT 8-byte aligned!                │  \n  │                    12 & 7 = 4 ✗                                     │  \n  └─────────────────────────────────────────────────────────────────────┘  \n  \n  WITH PADDING (CORRECT):  \n  ┌─────────────────────────────────────────────────────────────────────┐  \n  │   Address:  0         12  16        28  32        44  48            │  \n  │             │         │   │         │   │         │   │             │  \n  │            ┌───────────┬───┬───────────┬───┬───────────┬───┐        │  \n  │            │ Element 0 │pad│ Element 1 │pad│ Element 2 │pad│        │  \n  │            └───────────┴───┴───────────┴───┴───────────┴───┘        │  \n  │                            ▲               ▲                        │  \n  │                            │               │                        │  \n  │                    Address 16 IS 8-byte aligned! ✓                  │  \n  │                    16 & 7 = 0                                       │  \n  └─────────────────────────────────────────────────────────────────────┘  \n```  \n  \n## Creating Layouts  \n  \n```text  \n  LAYOUT CREATION METHODS  \n  ════════════════════════════════════════════════════════════════════════  \n  \n  Method 1: From type (recommended)  \n  ┌─────────────────────────────────────────────────────────────────────┐  \n  │  let layout: Layout = Layout::new<MyStruct>();                      │  \n  │                                                                     │  \n  │  Automatically uses @sizeOf<T>() and @alignOf<T>()                  │  \n  └─────────────────────────────────────────────────────────────────────┘  \n  \n  Method 2: From explicit size and alignment  \n  ┌─────────────────────────────────────────────────────────────────────┐  \n  │  let layout: Layout = Layout::new(1024, 16);                        │  \n  │                                                                     │  \n  │  Useful for custom allocations (e.g., SIMD-aligned buffers)         │  \n  └─────────────────────────────────────────────────────────────────────┘  \n  \n  Method 3: For arrays  \n  ┌─────────────────────────────────────────────────────────────────────┐  \n  │  let layout: Layout = Layout::new<u64>(100);                        │  \n  │                                                                     │  \n  │  Creates layout for 100 contiguous u64 elements                     │  \n  └─────────────────────────────────────────────────────────────────────┘  \n```  \n  \n## Safety  \n  \nLayout functions enforce the following invariants:  \n- Alignment is always a power of two  \n- Alignment is never zero  \n- Size does not overflow when multiplied by count  \n  \nFunctions panic on invalid inputs rather than returning errors.  \n"
+    },
+    {
+      "name": "std::net",
+      "doc": "  \n# Net  \n  \nRaw TCP with the conveniences every user needs. Load balancers, proxies and  \nnon-HTTP protocols (Redis, databases, custom binary protocols) build on this  \nlayer directly.  \n  \n## Exports  \n  \n| Export          | Description                                                        |  \n|-----------------|--------------------------------------------------------------------|  \n| `IpAddress`     | Enum with `V4(Ipv4Address)` and `V6(Ipv6Address)`; `parse`, `toString` |  \n| `Ipv4Address`   | An IPv4 address; `create`, `parse`, `octet`, `bits`                |  \n| `Ipv6Address`   | An IPv6 address; `create`, `parse`, `segment`                      |  \n| `SocketAddress` | An `IpAddress` and a port; `parse`, `toString`                     |  \n| `TcpListener`   | `bind`, `accept`, `localAddress`, `setNonBlocking`. Closes on drop |  \n| `TcpStream`     | `connect`, `connectTimeout`, `read`, `write`, `writeAll`, `shutdown`, `peerAddress`, `localAddress`, `setNoDelay`, `setReadTimeout`, `setWriteTimeout`, `setNonBlocking`. Closes on drop |  \n| `Shutdown`      | `READ`, `WRITE` or `BOTH`, for `TcpStream::shutdown`               |  \n  \n## Errors and timeouts  \n  \nEvery fallible operation returns `Result<_, Io::IoError>`. Timeouts take  \n`Time::Duration`; a zero duration is rejected with `INVALID_INPUT`.  \n  \n| Situation                                         | `Io::ErrorKind`                      |  \n|---------------------------------------------------|--------------------------------------|  \n| Nothing listens at the address `connect` targets  | `CONNECTION_REFUSED`                 |  \n| `bind` to a port another socket listens on        | `ADDRESS_IN_USE`                     |  \n| `bind` to an address this host does not own       | `ADDRESS_NOT_AVAILABLE`              |  \n| Write after the peer closed the connection        | `BROKEN_PIPE` or `CONNECTION_RESET`  |  \n| `connectTimeout` ran out of time                  | `TIMED_OUT`                          |  \n| A read or write timeout expired                   | `WOULD_BLOCK`                        |  \n| Non-blocking socket with nothing to do right now  | `WOULD_BLOCK`                        |  \n| Malformed address text                            | `INVALID_INPUT`                      |  \n  \nA read or write timeout reports `WOULD_BLOCK`, not `TIMED_OUT`, because the  \nkernel reports an expired `SO_RCVTIMEO` / `SO_SNDTIMEO` as `EAGAIN`.  \n  \n## Behavior  \n  \n- Every send passes `MSG_NOSIGNAL`, so writing to a closed peer is an error  \n  and never raises `SIGPIPE`.  \n- Sockets are created with `SOCK_CLOEXEC`, and `accept` uses `accept4` with  \n  `SOCK_CLOEXEC`, so no socket leaks into a child process.  \n- `accept`, `read`, `write` and `connect` retry on `EINTR`. An interrupted  \n  `connect` is waited for with `poll`, since calling it again would fail.  \n- `writeAll` loops over partial writes until every byte is written or a  \n  write fails.  \n- `connectTimeout` connects a non-blocking socket, waits with `poll`, reads  \n  the outcome from `SO_ERROR`, and makes the stream blocking again.  \n- `read` and `write` take a raw buffer and a byte count, like `Fs::File`.  \n- Addresses are numeric only; there is no name resolution yet.  \n  \n## Platforms  \n  \nOnly x86_64 Linux is implemented. The C unit the compiler emits includes a  \nfixed list of headers that does not declare the socket functions, and an  \n`extern` declaration emits no prototype, so the socket calls go through  \nglibc's `syscall(2)` with x86_64 Linux syscall numbers and kernel structure  \nlayouts. All of that lives in `std::net::sys::linux_x86_64`, behind  \n`@configFlag(@platform(\"linux\") && @arch(\"x86_64\"))`; on any other target  \n`std::net` does not compile. macOS (which also needs `SO_NOSIGPIPE` instead  \nof `MSG_NOSIGNAL`, and `FD_CLOEXEC` instead of `accept4`) comes once the  \ncompiler emits extern prototypes or includes the headers a module names.  \n`UdpSocket` is not part of this slice.  \n  \n## Example  \n  \n```ignis  \nimport IpAddress, SocketAddress, TcpListener, TcpStream from \"std::net\";  \nimport Io from \"std::io\";  \n  \nfunction echoOnce(listener: &TcpListener): Result<void, Io::IoError> {  \n  let mut stream: TcpStream = listener.accept()!;  \n  let mut buffer: u64 = 0;  \n  let read: i64 = stream.read((&mut buffer) as *mut void, 8)!;  \n  \n  return stream.writeAll((&buffer) as *void, read as u64);  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 7000);  \n  let Result::OK(listener) = TcpListener::bind(&address) else {  \n    return 1;  \n  };  \n  \n  return echoOnce(&listener).isOk() ? 0 : 1;  \n}  \n```"
+    },
+    {
+      "name": "std::net::address",
+      "doc": "  \n# Network addresses  \n  \n`IpAddress`, its `Ipv4Address` and `Ipv6Address` payloads, and  \n`SocketAddress`, with parsing from and formatting to text.  \n  \n## Text forms  \n  \n| Form           | Parsed                                              | Formatted                         |  \n|----------------|-----------------------------------------------------|-----------------------------------|  \n| IPv4           | Four decimal octets; no leading zeros, no spaces    | `a.b.c.d`                         |  \n| IPv6           | Up to eight hex groups, one `::`, optional IPv4 tail | RFC 5952: lowercase, longest zero run as `::` |  \n| Socket, IPv4   | `a.b.c.d:port`                                      | `a.b.c.d:port`                    |  \n| Socket, IPv6   | `[ipv6]:port`                                       | `[ipv6]:port`                     |  \n  \nAn IPv4-mapped IPv6 address (`::ffff:0:0/96`) is formatted with its IPv4  \ntail, as RFC 5952 recommends. Zone identifiers (`%eth0`) are not accepted.  \nParsing failures are `Io::ErrorKind::INVALID_INPUT` errors."
+    },
+    {
+      "name": "std::net::sys::linux_x86_64",
+      "doc": "  \n# Socket system calls, x86_64 Linux  \n  \nThe only file in `std::net` that knows syscall numbers, socket constants  \nand kernel structure layouts. Everything else calls the typed functions of  \n`NetSys`.  \n  \n## Why `syscall(2)`  \n  \nA hosted C unit includes a fixed list of headers, and none of them declares  \n`socket`, `bind`, `accept4` or `poll`. An `extern` declaration emits no  \nprototype, so binding those names directly fails to compile. glibc's  \n`syscall` is declared in `<unistd.h>`, which the unit does include. It  \nreturns -1 and sets `errno` on failure, the same contract as the libc  \nwrappers, so `Io::IoError::lastError()` applies unchanged.  \n  \n`syscall` is variadic and Ignis has no variadic call syntax. Each fixed  \narity below is compiled against the real variadic declaration, and every  \nargument is passed as a 64-bit integer, which is how the kernel receives  \nthem on x86_64.  \n  \nOnce the compiler emits extern prototypes or includes the headers a std  \nmodule names, these functions can call the libc wrappers instead; nothing  \noutside this file has to change.  \n  \n## Layouts  \n  \n| Kernel structure      | Size | Fields read or written                         |  \n|-----------------------|------|------------------------------------------------|  \n| `struct sockaddr_in`  | 16   | family (u16), port (u16, big endian), address (4 bytes) |  \n| `struct sockaddr_in6` | 28   | family (u16), port (u16, big endian), flow info (u32), address (16 bytes), scope id (u32) |  \n| `struct timeval`      | 16   | seconds (i64), microseconds (i64)              |  \n| `struct pollfd`       | 8    | fd (i32), events (i16), returned events (i16)  |"
+    },
+    {
+      "name": "std::net::tcp",
+      "doc": "  \n# TCP  \n  \n`TcpListener` and `TcpStream`, each owning one socket descriptor that is  \nclosed on drop. See the `std::net` module docs for the error and timeout  \nbehavior."
     },
     {
       "name": "std::number",
@@ -4155,6 +4171,36 @@
           "signature": "TIMED_OUT"
         },
         {
+          "name": "CONNECTION_REFUSED",
+          "kind": "variant",
+          "signature": "CONNECTION_REFUSED"
+        },
+        {
+          "name": "CONNECTION_RESET",
+          "kind": "variant",
+          "signature": "CONNECTION_RESET"
+        },
+        {
+          "name": "ADDRESS_IN_USE",
+          "kind": "variant",
+          "signature": "ADDRESS_IN_USE"
+        },
+        {
+          "name": "ADDRESS_NOT_AVAILABLE",
+          "kind": "variant",
+          "signature": "ADDRESS_NOT_AVAILABLE"
+        },
+        {
+          "name": "BROKEN_PIPE",
+          "kind": "variant",
+          "signature": "BROKEN_PIPE"
+        },
+        {
+          "name": "NOT_CONNECTED",
+          "kind": "variant",
+          "signature": "NOT_CONNECTED"
+        },
+        {
           "name": "OTHER",
           "kind": "variant",
           "signature": "OTHER"
@@ -7132,6 +7178,22 @@
     },
     {
       "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EADDRINUSE",
+      "name": "EADDRINUSE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EADDRINUSE: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EADDRNOTAVAIL",
+      "name": "EADDRNOTAVAIL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EADDRNOTAVAIL: i32"
+    },
+    {
+      "module": "std::libc::platform",
       "path": "std::libc::platform::Platform::EAGAIN",
       "name": "EAGAIN",
       "kind": "constant",
@@ -7177,6 +7239,14 @@
       "kind": "constant",
       "visibility": "private",
       "signature": "const EEXIST: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::EINPROGRESS",
+      "name": "EINPROGRESS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EINPROGRESS: i32"
     },
     {
       "module": "std::libc::platform",
@@ -7249,6 +7319,14 @@
       "kind": "constant",
       "visibility": "private",
       "signature": "const ENOSPC: i32"
+    },
+    {
+      "module": "std::libc::platform",
+      "path": "std::libc::platform::Platform::ENOTCONN",
+      "name": "ENOTCONN",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const ENOTCONN: i32"
     },
     {
       "module": "std::libc::platform",
@@ -10352,6 +10430,1251 @@
           "doc": "Returns the byte stride for repeated values of this layout.  \n  \nThis is an alias for `paddedSize()` used to make array allocation  \ncontracts explicit at the call site."
         }
       ]
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::IpAddress",
+      "name": "IpAddress",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum IpAddress",
+      "doc": "An IP address of either version.",
+      "members": [
+        {
+          "name": "V4",
+          "kind": "variant",
+          "signature": "V4(Ipv4Address)"
+        },
+        {
+          "name": "V6",
+          "kind": "variant",
+          "signature": "V6(Ipv6Address)"
+        },
+        {
+          "name": "parse",
+          "kind": "method",
+          "signature": "static parse(text: str): Result<IpAddress, IoError>",
+          "doc": "Parses an IPv4 or IPv6 address. Host names are not resolved."
+        },
+        {
+          "name": "v4",
+          "kind": "method",
+          "signature": "static v4(a: u8, b: u8, c: u8, d: u8): IpAddress",
+          "doc": "The IPv4 address `a.b.c.d`."
+        },
+        {
+          "name": "equals",
+          "kind": "method",
+          "signature": "equals(&self, other: &IpAddress): boolean",
+          "doc": "Same version and same bits. An IPv4 address never equals its IPv4-mapped IPv6 form."
+        },
+        {
+          "name": "isIpv4",
+          "kind": "method",
+          "signature": "isIpv4(&self): boolean"
+        },
+        {
+          "name": "isIpv6",
+          "kind": "method",
+          "signature": "isIpv6(&self): boolean"
+        },
+        {
+          "name": "isLoopback",
+          "kind": "method",
+          "signature": "isLoopback(&self): boolean",
+          "doc": "`127.0.0.0/8` or `::1`."
+        },
+        {
+          "name": "isUnspecified",
+          "kind": "method",
+          "signature": "isUnspecified(&self): boolean",
+          "doc": "`0.0.0.0` or `::`."
+        },
+        {
+          "name": "toString",
+          "kind": "method",
+          "signature": "toString(&self): String"
+        }
+      ]
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::Ipv4Address",
+      "name": "Ipv4Address",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Ipv4Address",
+      "doc": "An IPv4 address.",
+      "members": [
+        {
+          "name": "bits",
+          "kind": "field",
+          "signature": "bits: u32",
+          "doc": "The address as a 32-bit number, first octet in the high byte."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(a: u8, b: u8, c: u8, d: u8): Ipv4Address",
+          "doc": "The address `a.b.c.d`."
+        },
+        {
+          "name": "parse",
+          "kind": "method",
+          "signature": "static parse(text: str): Result<Ipv4Address, IoError>",
+          "doc": "Parses a dotted-quad address."
+        },
+        {
+          "name": "bits",
+          "kind": "method",
+          "signature": "bits(&self): u32",
+          "doc": "The address as a 32-bit number, first octet in the high byte."
+        },
+        {
+          "name": "isLoopback",
+          "kind": "method",
+          "signature": "isLoopback(&self): boolean",
+          "doc": "`127.0.0.0/8`."
+        },
+        {
+          "name": "isUnspecified",
+          "kind": "method",
+          "signature": "isUnspecified(&self): boolean",
+          "doc": "`0.0.0.0`."
+        },
+        {
+          "name": "octet",
+          "kind": "method",
+          "signature": "octet(&self, index: u64): u8",
+          "doc": "Octet `index` (0 to 3), from the left."
+        },
+        {
+          "name": "toString",
+          "kind": "method",
+          "signature": "toString(&self): String"
+        }
+      ]
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::Ipv6Address",
+      "name": "Ipv6Address",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Ipv6Address",
+      "doc": "An IPv6 address.",
+      "members": [
+        {
+          "name": "high",
+          "kind": "field",
+          "signature": "high: u64",
+          "doc": "Segments 0 to 3, segment 0 in the high bits."
+        },
+        {
+          "name": "low",
+          "kind": "field",
+          "signature": "low: u64",
+          "doc": "Segments 4 to 7, segment 4 in the high bits."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16): Ipv6Address",
+          "doc": "The address made of eight 16-bit segments, from the left."
+        },
+        {
+          "name": "fromBits",
+          "kind": "method",
+          "signature": "static fromBits(high: u64, low: u64): Ipv6Address",
+          "doc": "The address whose first 64 bits are `high` and last 64 bits are `low`."
+        },
+        {
+          "name": "parse",
+          "kind": "method",
+          "signature": "static parse(text: str): Result<Ipv6Address, IoError>",
+          "doc": "Parses an IPv6 address."
+        },
+        {
+          "name": "highBits",
+          "kind": "method",
+          "signature": "highBits(&self): u64",
+          "doc": "Segments 0 to 3, segment 0 in the high bits."
+        },
+        {
+          "name": "isLoopback",
+          "kind": "method",
+          "signature": "isLoopback(&self): boolean",
+          "doc": "`::1`."
+        },
+        {
+          "name": "isUnspecified",
+          "kind": "method",
+          "signature": "isUnspecified(&self): boolean",
+          "doc": "`::`."
+        },
+        {
+          "name": "lowBits",
+          "kind": "method",
+          "signature": "lowBits(&self): u64",
+          "doc": "Segments 4 to 7, segment 4 in the high bits."
+        },
+        {
+          "name": "segment",
+          "kind": "method",
+          "signature": "segment(&self, index: u64): u16",
+          "doc": "Segment `index` (0 to 7), from the left."
+        },
+        {
+          "name": "toString",
+          "kind": "method",
+          "signature": "toString(&self): String",
+          "doc": "RFC 5952 text: lowercase, no leading zeros, the longest run of two or  \nmore zero segments (the first one on a tie) written as `::`."
+        }
+      ]
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::SocketAddress",
+      "name": "SocketAddress",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record SocketAddress",
+      "doc": "An IP address and a port.",
+      "members": [
+        {
+          "name": "address",
+          "kind": "field",
+          "signature": "address: IpAddress"
+        },
+        {
+          "name": "port",
+          "kind": "field",
+          "signature": "port: u16"
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(address: IpAddress, port: u16): SocketAddress"
+        },
+        {
+          "name": "parse",
+          "kind": "method",
+          "signature": "static parse(text: str): Result<SocketAddress, IoError>",
+          "doc": "Parses `a.b.c.d:port` or `[ipv6]:port`."
+        },
+        {
+          "name": "ip",
+          "kind": "method",
+          "signature": "ip(&self): IpAddress"
+        },
+        {
+          "name": "port",
+          "kind": "method",
+          "signature": "port(&self): u16"
+        },
+        {
+          "name": "toString",
+          "kind": "method",
+          "signature": "toString(&self): String"
+        }
+      ]
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::byteOf",
+      "name": "byteOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function byteOf(text: &String, index: u64): u8"
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::hexDigitValue",
+      "name": "hexDigitValue",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function hexDigitValue(byte: u8): u16",
+      "doc": "Value of a hex digit, or 16 when `byte` is not one."
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::indexOfByte",
+      "name": "indexOfByte",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function indexOfByte(text: &String, byte: u8, start: u64): u64",
+      "doc": "Index of the first `byte` at or after `start` in `text`, or `text.length()`."
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::invalidAddress",
+      "name": "invalidAddress",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function invalidAddress(): IoError"
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::isDecimalDigit",
+      "name": "isDecimalDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isDecimalDigit(byte: u8): boolean"
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::parseIpv4Range",
+      "name": "parseIpv4Range",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseIpv4Range(text: &String, start: u64, end: u64): Result<Ipv4Address, IoError>",
+      "doc": "Parses `text[start..end]` as a dotted-quad IPv4 address."
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::parseIpv6Groups",
+      "name": "parseIpv6Groups",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseIpv6Groups(text: &String, start: u64, end: u64, allowIpv4Tail: boolean, groups: &mut Vector<u16>): Result<void, IoError>",
+      "doc": "Hex groups of one side of an IPv6 address, `text[start..end]`.  \n  \nAn empty range is no groups. When `allowIpv4Tail` is set, the last piece  \nmay be a dotted-quad IPv4 address, which counts as two groups."
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::parseIpv6Range",
+      "name": "parseIpv6Range",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseIpv6Range(text: &String, start: u64, end: u64): Result<Ipv6Address, IoError>"
+    },
+    {
+      "module": "std::net::address",
+      "path": "std::net::address::pushHex",
+      "name": "pushHex",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pushHex(output: &mut String, value: u16): void"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys",
+      "name": "NetSys",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace NetSys",
+      "doc": "Typed socket system calls and constants for x86_64 Linux.  \n  \nExported only so the other `std::net` files can reach it. It is not part of  \nthe public API."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::AF_INET",
+      "name": "AF_INET",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const AF_INET: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::AF_INET6",
+      "name": "AF_INET6",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const AF_INET6: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::F_GETFL",
+      "name": "F_GETFL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const F_GETFL: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::F_SETFL",
+      "name": "F_SETFL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const F_SETFL: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::IPPROTO_TCP",
+      "name": "IPPROTO_TCP",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const IPPROTO_TCP: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::MSG_NOSIGNAL",
+      "name": "MSG_NOSIGNAL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const MSG_NOSIGNAL: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::O_NONBLOCK",
+      "name": "O_NONBLOCK",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const O_NONBLOCK: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::POLLOUT",
+      "name": "POLLOUT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const POLLOUT: i16"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SHUT_RD",
+      "name": "SHUT_RD",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SHUT_RD: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SHUT_RDWR",
+      "name": "SHUT_RDWR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SHUT_RDWR: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SHUT_WR",
+      "name": "SHUT_WR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SHUT_WR: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SOCKADDR_IN6_LENGTH",
+      "name": "SOCKADDR_IN6_LENGTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SOCKADDR_IN6_LENGTH: u32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SOCKADDR_IN_LENGTH",
+      "name": "SOCKADDR_IN_LENGTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SOCKADDR_IN_LENGTH: u32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SOCKADDR_STORAGE_LENGTH",
+      "name": "SOCKADDR_STORAGE_LENGTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SOCKADDR_STORAGE_LENGTH: u32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SOCK_CLOEXEC",
+      "name": "SOCK_CLOEXEC",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SOCK_CLOEXEC: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SOCK_NONBLOCK",
+      "name": "SOCK_NONBLOCK",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SOCK_NONBLOCK: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SOCK_STREAM",
+      "name": "SOCK_STREAM",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SOCK_STREAM: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SOL_SOCKET",
+      "name": "SOL_SOCKET",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SOL_SOCKET: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SO_ERROR",
+      "name": "SO_ERROR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SO_ERROR: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SO_RCVTIMEO",
+      "name": "SO_RCVTIMEO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SO_RCVTIMEO: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SO_REUSEADDR",
+      "name": "SO_REUSEADDR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SO_REUSEADDR: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SO_SNDTIMEO",
+      "name": "SO_SNDTIMEO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SO_SNDTIMEO: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_ACCEPT4",
+      "name": "SYS_ACCEPT4",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_ACCEPT4: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_BIND",
+      "name": "SYS_BIND",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_BIND: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_CLOSE",
+      "name": "SYS_CLOSE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_CLOSE: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_CONNECT",
+      "name": "SYS_CONNECT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_CONNECT: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_FCNTL",
+      "name": "SYS_FCNTL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_FCNTL: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_GETPEERNAME",
+      "name": "SYS_GETPEERNAME",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_GETPEERNAME: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_GETSOCKNAME",
+      "name": "SYS_GETSOCKNAME",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_GETSOCKNAME: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_GETSOCKOPT",
+      "name": "SYS_GETSOCKOPT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_GETSOCKOPT: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_LISTEN",
+      "name": "SYS_LISTEN",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_LISTEN: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_POLL",
+      "name": "SYS_POLL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_POLL: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_RECVFROM",
+      "name": "SYS_RECVFROM",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_RECVFROM: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_SENDTO",
+      "name": "SYS_SENDTO",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_SENDTO: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_SETSOCKOPT",
+      "name": "SYS_SETSOCKOPT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_SETSOCKOPT: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_SHUTDOWN",
+      "name": "SYS_SHUTDOWN",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_SHUTDOWN: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::SYS_SOCKET",
+      "name": "SYS_SOCKET",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SYS_SOCKET: i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::TCP_NODELAY",
+      "name": "TCP_NODELAY",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const TCP_NODELAY: i32"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::accept4",
+      "name": "accept4",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function accept4(fd: i32, address: *mut u8, length: *mut u32, flags: i32): i32",
+      "doc": "`accept4(2)`. `length` holds the room in `address` and receives the size written."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::bind",
+      "name": "bind",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function bind(fd: i32, address: *u8, length: u32): i32",
+      "doc": "`bind(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::close",
+      "name": "close",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function close(fd: i32): i32",
+      "doc": "`close(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::connect",
+      "name": "connect",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function connect(fd: i32, address: *u8, length: u32): i32",
+      "doc": "`connect(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::decodeAddress",
+      "name": "decodeAddress",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function decodeAddress(storage: &RawSocketAddress): Result<SocketAddress, IoError>",
+      "doc": "Reads a `sockaddr_in` or `sockaddr_in6` the kernel wrote into `storage`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::encodeAddress",
+      "name": "encodeAddress",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function encodeAddress(address: &SocketAddress, storage: &mut RawSocketAddress): u32",
+      "doc": "Writes `address` into `storage` as a `sockaddr_in` or `sockaddr_in6`.  \n  \nReturns the length to pass with it."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::familyOf",
+      "name": "familyOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function familyOf(address: &SocketAddress): i32",
+      "doc": "Address family `socket(2)` needs for `address`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::fcntl",
+      "name": "fcntl",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function fcntl(fd: i32, command: i32, argument: i32): i32",
+      "doc": "`fcntl(2)` with an integer argument."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::getIntegerOption",
+      "name": "getIntegerOption",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function getIntegerOption(fd: i32, level: i32, name: i32, value: &mut i32): i32",
+      "doc": "Reads an `int` socket option into `value`. Returns 0 or -1."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::getSocketOption",
+      "name": "getSocketOption",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function getSocketOption(fd: i32, level: i32, name: i32, value: *mut u8, length: *mut u32): i32",
+      "doc": "`getsockopt(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::listen",
+      "name": "listen",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function listen(fd: i32, backlog: i32): i32",
+      "doc": "`listen(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::peerName",
+      "name": "peerName",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function peerName(fd: i32, address: *mut u8, length: *mut u32): i32",
+      "doc": "`getpeername(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::pointer",
+      "name": "pointer",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pointer(value: *u8): i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::pollOne",
+      "name": "pollOne",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pollOne(fd: i32, events: i16, timeoutMillis: i32): i32",
+      "doc": "`poll(2)` on one descriptor. Returns the ready count, 0 on timeout, or -1.  \n  \n`timeoutMillis` is -1 to wait without a limit."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::receive",
+      "name": "receive",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function receive(fd: i32, buffer: *mut u8, count: u64, flags: i32): i64",
+      "doc": "`recvfrom(2)` with no source address, which is `recv(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::send",
+      "name": "send",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function send(fd: i32, buffer: *u8, count: u64, flags: i32): i64",
+      "doc": "`sendto(2)` with no destination, which is `send(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::setIntegerOption",
+      "name": "setIntegerOption",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function setIntegerOption(fd: i32, level: i32, name: i32, value: i32): i32",
+      "doc": "Sets an `int` socket option."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::setSocketOption",
+      "name": "setSocketOption",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function setSocketOption(fd: i32, level: i32, name: i32, value: *u8, length: u32): i32",
+      "doc": "`setsockopt(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::setTimeoutOption",
+      "name": "setTimeoutOption",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function setTimeoutOption(fd: i32, name: i32, seconds: i64, microseconds: i64): i32",
+      "doc": "Sets `SO_RCVTIMEO` or `SO_SNDTIMEO`. Zero seconds and microseconds clear it."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::shutdown",
+      "name": "shutdown",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function shutdown(fd: i32, how: i32): i32",
+      "doc": "`shutdown(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::socket",
+      "name": "socket",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function socket(domain: i32, kind: i32, protocol: i32): i32",
+      "doc": "`socket(2)`. Returns the descriptor or -1."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::NetSys::socketName",
+      "name": "socketName",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function socketName(fd: i32, address: *mut u8, length: *mut u32): i32",
+      "doc": "`getsockname(2)`."
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::RawPollDescriptor",
+      "name": "RawPollDescriptor",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record RawPollDescriptor",
+      "doc": "`struct pollfd`.",
+      "members": [
+        {
+          "name": "fd",
+          "kind": "field",
+          "signature": "fd: i32"
+        },
+        {
+          "name": "events",
+          "kind": "field",
+          "signature": "events: i16"
+        },
+        {
+          "name": "returnedEvents",
+          "kind": "field",
+          "signature": "returnedEvents: i16"
+        }
+      ]
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::RawSocketAddress",
+      "name": "RawSocketAddress",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record RawSocketAddress",
+      "doc": "Room for the largest address this module writes (`sockaddr_in6`, 28 bytes).  \n  \nExported for `std::net::tcp` only; not part of the public API.",
+      "members": [
+        {
+          "name": "first",
+          "kind": "field",
+          "signature": "first: u64"
+        },
+        {
+          "name": "second",
+          "kind": "field",
+          "signature": "second: u64"
+        },
+        {
+          "name": "third",
+          "kind": "field",
+          "signature": "third: u64"
+        },
+        {
+          "name": "fourth",
+          "kind": "field",
+          "signature": "fourth: u64"
+        }
+      ]
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::RawTimeval",
+      "name": "RawTimeval",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record RawTimeval",
+      "doc": "`struct timeval`.",
+      "members": [
+        {
+          "name": "seconds",
+          "kind": "field",
+          "signature": "seconds: i64"
+        },
+        {
+          "name": "microseconds",
+          "kind": "field",
+          "signature": "microseconds: i64"
+        }
+      ]
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::__net_syscall",
+      "name": "__net_syscall",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace __net_syscall"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::__net_syscall::syscall1",
+      "name": "syscall1",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function syscall1(number: i64, first: i64): i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::__net_syscall::syscall2",
+      "name": "syscall2",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function syscall2(number: i64, first: i64, second: i64): i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::__net_syscall::syscall3",
+      "name": "syscall3",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function syscall3(number: i64, first: i64, second: i64, third: i64): i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::__net_syscall::syscall4",
+      "name": "syscall4",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function syscall4(number: i64, first: i64, second: i64, third: i64, fourth: i64): i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::__net_syscall::syscall5",
+      "name": "syscall5",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function syscall5(number: i64, first: i64, second: i64, third: i64, fourth: i64, fifth: i64): i64"
+    },
+    {
+      "module": "std::net::sys::linux_x86_64",
+      "path": "std::net::sys::linux_x86_64::__net_syscall::syscall6",
+      "name": "syscall6",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function syscall6(number: i64, first: i64, second: i64, third: i64, fourth: i64, fifth: i64, sixth: i64): i64"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::LISTEN_BACKLOG",
+      "name": "LISTEN_BACKLOG",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const LISTEN_BACKLOG: i32"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::MAX_POLL_MILLIS",
+      "name": "MAX_POLL_MILLIS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const MAX_POLL_MILLIS: u64"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::Shutdown",
+      "name": "Shutdown",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum Shutdown",
+      "doc": "Which directions `TcpStream::shutdown` closes.",
+      "members": [
+        {
+          "name": "READ",
+          "kind": "variant",
+          "signature": "READ"
+        },
+        {
+          "name": "WRITE",
+          "kind": "variant",
+          "signature": "WRITE"
+        },
+        {
+          "name": "BOTH",
+          "kind": "variant",
+          "signature": "BOTH"
+        }
+      ]
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::TcpListener",
+      "name": "TcpListener",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record TcpListener",
+      "doc": "A socket listening for TCP connections. Closes on drop.",
+      "members": [
+        {
+          "name": "fd",
+          "kind": "field",
+          "signature": "fd: i32"
+        },
+        {
+          "name": "bind",
+          "kind": "method",
+          "signature": "static bind(address: &SocketAddress): Result<TcpListener, IoError>",
+          "doc": "Binds a listening socket to `address`.  \n  \nPort 0 picks a free port; `localAddress` reports which. `SO_REUSEADDR` is  \nset, so a port whose previous listener closed is free again at once; a port  \nanother socket still listens on fails with `ADDRESS_IN_USE`."
+        },
+        {
+          "name": "accept",
+          "kind": "method",
+          "signature": "accept(&self): Result<TcpStream, IoError>",
+          "doc": "Waits for the next connection and returns its stream.  \n  \nThe peer address is `peerAddress` on the stream. On a non-blocking  \nlistener with nothing pending this fails with `WOULD_BLOCK`. The accepted  \nstream is blocking and closed on exec, whatever the listener is."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void"
+        },
+        {
+          "name": "fd",
+          "kind": "method",
+          "signature": "fd(&self): i32",
+          "doc": "The socket descriptor. Still owned by the listener."
+        },
+        {
+          "name": "localAddress",
+          "kind": "method",
+          "signature": "localAddress(&self): Result<SocketAddress, IoError>",
+          "doc": "The address the listener is bound to, with the port the system picked for port 0."
+        },
+        {
+          "name": "setNonBlocking",
+          "kind": "method",
+          "signature": "setNonBlocking(&mut self, nonBlocking: boolean): Result<void, IoError>",
+          "doc": "Makes `accept` fail with `WOULD_BLOCK` instead of waiting."
+        }
+      ]
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::TcpStream",
+      "name": "TcpStream",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record TcpStream",
+      "doc": "A connected TCP socket. Closes on drop.",
+      "members": [
+        {
+          "name": "fd",
+          "kind": "field",
+          "signature": "fd: i32"
+        },
+        {
+          "name": "connect",
+          "kind": "method",
+          "signature": "static connect(address: &SocketAddress): Result<TcpStream, IoError>",
+          "doc": "Connects to `address`, waiting as long as the system takes."
+        },
+        {
+          "name": "connectTimeout",
+          "kind": "method",
+          "signature": "static connectTimeout(address: &SocketAddress, timeout: Duration): Result<TcpStream, IoError>",
+          "doc": "Connects to `address`, failing with `TIMED_OUT` after `timeout`.  \n  \nA zero `timeout` is rejected with `INVALID_INPUT`. The connected stream  \nis blocking."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void"
+        },
+        {
+          "name": "fd",
+          "kind": "method",
+          "signature": "fd(&self): i32",
+          "doc": "The socket descriptor. Still owned by the stream."
+        },
+        {
+          "name": "localAddress",
+          "kind": "method",
+          "signature": "localAddress(&self): Result<SocketAddress, IoError>",
+          "doc": "The local end's address."
+        },
+        {
+          "name": "peerAddress",
+          "kind": "method",
+          "signature": "peerAddress(&self): Result<SocketAddress, IoError>",
+          "doc": "The address of the other end."
+        },
+        {
+          "name": "read",
+          "kind": "method",
+          "signature": "read(&mut self, buf: *mut void, count: u64): Result<i64, IoError>",
+          "doc": "Reads up to `count` bytes into `buf`. Returns 0 at end of input.  \n  \nWhen a read timeout expires, or a non-blocking stream has nothing to  \nread, this fails with `WOULD_BLOCK`."
+        },
+        {
+          "name": "setNoDelay",
+          "kind": "method",
+          "signature": "setNoDelay(&mut self, noDelay: boolean): Result<void, IoError>",
+          "doc": "Turns Nagle's algorithm off (`true`) or on (`false`)."
+        },
+        {
+          "name": "setNonBlocking",
+          "kind": "method",
+          "signature": "setNonBlocking(&mut self, nonBlocking: boolean): Result<void, IoError>",
+          "doc": "Makes `read` and `write` fail with `WOULD_BLOCK` instead of waiting."
+        },
+        {
+          "name": "setReadTimeout",
+          "kind": "method",
+          "signature": "setReadTimeout(&mut self, timeout: Option<Duration>): Result<void, IoError>",
+          "doc": "Limits how long a `read` waits. `NONE` waits without a limit.  \n  \nA read that times out fails with `WOULD_BLOCK`. A zero duration is  \nrejected with `INVALID_INPUT`."
+        },
+        {
+          "name": "setWriteTimeout",
+          "kind": "method",
+          "signature": "setWriteTimeout(&mut self, timeout: Option<Duration>): Result<void, IoError>",
+          "doc": "Limits how long a `write` waits. `NONE` waits without a limit.  \n  \nA write that times out fails with `WOULD_BLOCK`. A zero duration is  \nrejected with `INVALID_INPUT`."
+        },
+        {
+          "name": "shutdown",
+          "kind": "method",
+          "signature": "shutdown(&mut self, how: Shutdown): Result<void, IoError>",
+          "doc": "Closes the reading side, the writing side, or both."
+        },
+        {
+          "name": "write",
+          "kind": "method",
+          "signature": "write(&mut self, buf: *void, count: u64): Result<i64, IoError>",
+          "doc": "Writes up to `count` bytes from `buf`. Returns how many were written.  \n  \nWriting to a connection the peer closed fails with `BROKEN_PIPE` or  \n`CONNECTION_RESET`; it never raises `SIGPIPE`."
+        },
+        {
+          "name": "writeAll",
+          "kind": "method",
+          "signature": "writeAll(&mut self, buf: *void, count: u64): Result<void, IoError>",
+          "doc": "Writes all `count` bytes from `buf`, over as many writes as it takes.  \n  \nOn error some of the bytes may already be written."
+        }
+      ]
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::closeDescriptor",
+      "name": "closeDescriptor",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function closeDescriptor(fd: i32): void"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::connectDescriptor",
+      "name": "connectDescriptor",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function connectDescriptor(fd: i32, address: &SocketAddress, timeout: Option<Duration>): Result<void, IoError>",
+      "doc": "Starts connecting `fd` to `address` and waits for the outcome."
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::finishConnect",
+      "name": "finishConnect",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function finishConnect(fd: i32, start: &MonotonicInstant, timeout: Option<Duration>): Result<void, IoError>",
+      "doc": "Waits until a connect in progress on `fd` finishes and reports its outcome.  \n  \nWithout a timeout it waits as long as the connect takes. With one, it fails  \nwith `TIMED_OUT` once the timeout, counted from `start`, has expired."
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::isInterrupted",
+      "name": "isInterrupted",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isInterrupted(error: &IoError): boolean"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::localAddressOf",
+      "name": "localAddressOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function localAddressOf(fd: i32): Result<SocketAddress, IoError>"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::openSocket",
+      "name": "openSocket",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function openSocket(address: &SocketAddress, extraFlags: i32): Result<i32, IoError>",
+      "doc": "Creates a stream socket for `address`, closed on exec."
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::peerAddressOf",
+      "name": "peerAddressOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function peerAddressOf(fd: i32): Result<SocketAddress, IoError>"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::remainingMillis",
+      "name": "remainingMillis",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function remainingMillis(start: &MonotonicInstant, timeout: &Duration): Result<Option<i32>, IoError>",
+      "doc": "Milliseconds left of `timeout` since `start`, rounded up, or `NONE` once it expired."
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::setDescriptorNonBlocking",
+      "name": "setDescriptorNonBlocking",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function setDescriptorNonBlocking(fd: i32, nonBlocking: boolean): Result<void, IoError>"
+    },
+    {
+      "module": "std::net::tcp",
+      "path": "std::net::tcp::setTimeout",
+      "name": "setTimeout",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function setTimeout(fd: i32, name: i32, timeout: Option<Duration>): Result<void, IoError>",
+      "doc": "Converts a socket timeout to `SO_RCVTIMEO` / `SO_SNDTIMEO` and sets it.  \n  \n`NONE` clears it. A zero duration is rejected, since the kernel reads zero as  \nno timeout at all."
     },
     {
       "module": "std::number",

@@ -1,0 +1,99 @@
+// e2e: std
+// A client thread connects to a loopback listener, sends a line and reads the
+// echo back. The main thread accepts, echoes what it read, and both sides check
+// the addresses they see.
+import IpAddress, SocketAddress, TcpListener, TcpStream from "std::net";
+import JoinHandle, Thread from "std::thread";
+import Io from "std::io";
+import RawAllocator from "std::memory";
+import String from "std::string";
+
+const MESSAGE: str = "hello over loopback";
+const MESSAGE_LENGTH: u64 = 19;
+
+function readExactly(stream: &mut TcpStream, buffer: *mut u8, count: u64): boolean {
+  let mut received: u64 = 0;
+
+  while (received < count) {
+    let Result::OK(read) = stream.read((buffer + received) as *mut void, count - received) else {
+      return false;
+    };
+
+    if (read == 0) {
+      return false;
+    }
+
+    received += read as u64;
+  }
+
+  return true;
+}
+
+/// Reads exactly `count` bytes into a fresh string, or `NONE` if the stream ends first.
+function receive(stream: &mut TcpStream, count: u64): Option<String> {
+  let buffer: *mut u8 = RawAllocator::allocateZeroedAligned(1, count, 1);
+
+  if (!readExactly(stream, buffer, count)) {
+    RawAllocator::free(buffer);
+    return Option::NONE;
+  }
+
+  let text: String = String::create(buffer, count);
+
+  RawAllocator::free(buffer);
+
+  return Option::SOME(text);
+}
+
+function runClient(port: u16): i32 {
+  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
+  let Result::OK(connected) = TcpStream::connect(&address) else {
+    return 10;
+  };
+  let mut stream: TcpStream = connected;
+
+  if (stream.writeAll(MESSAGE as *u8 as *void, MESSAGE_LENGTH).isError()) {
+    return 11;
+  }
+
+  let Option::SOME(echo) = receive(&mut stream, MESSAGE_LENGTH) else {
+    return 12;
+  };
+
+  return echo.equals(MESSAGE) ? 0 : 13;
+}
+
+function main(): i32 {
+  let any: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 0);
+  let Result::OK(listener) = TcpListener::bind(&any) else {
+    return 1;
+  };
+  let Result::OK(local) = listener.localAddress() else {
+    return 2;
+  };
+  let port: u16 = local.port();
+  let client: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> runClient(port));
+
+  let Result::OK(accepted) = listener.accept() else {
+    return 3;
+  };
+  let mut server: TcpStream = accepted;
+  let Option::SOME(line) = receive(&mut server, MESSAGE_LENGTH) else {
+    return 4;
+  };
+
+  if (server.writeAll(line.toStr() as *u8 as *void, MESSAGE_LENGTH).isError()) {
+    return 5;
+  }
+
+  let Result::OK(peer) = server.peerAddress() else {
+    return 6;
+  };
+
+  let clientResult: i32 = client.join();
+
+  Io::println(`echoed ${line.length()} bytes`);
+  Io::println(`peer is loopback: ${peer.ip().isLoopback()}`);
+
+  return clientResult;
+}

@@ -1,0 +1,471 @@
+//!
+//! # TCP
+//!
+//! `TcpListener` and `TcpStream`, each owning one socket descriptor that is
+//! closed on drop. See the `std::net` module docs for the error and timeout
+//! behavior.
+
+import Io from "std::io";
+import Platform from "std::libc::platform";
+import Time from "std::time";
+import _ from "std::net::address";
+import SocketAddress from "std::net::address";
+import _ from "std::net::sys::linux_x86_64";
+import NetSys, RawSocketAddress from "std::net::sys::linux_x86_64";
+
+const LISTEN_BACKLOG: i32 = 128;
+const MAX_POLL_MILLIS: u64 = 2147483647;
+
+function isInterrupted(error: &Io::IoError): boolean {
+  return error.rawCode() == Platform::EINTR;
+}
+
+function closeDescriptor(fd: i32): void {
+  if (fd >= 0) {
+    NetSys::close(fd);
+  }
+}
+
+/// Creates a stream socket for `address`, closed on exec.
+function openSocket(address: &SocketAddress, extraFlags: i32): Result<i32, Io::IoError> {
+  let fd: i32 = NetSys::socket(
+    NetSys::familyOf(address),
+    NetSys::SOCK_STREAM | NetSys::SOCK_CLOEXEC | extraFlags,
+    0,
+  );
+
+  if (fd == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  return Result::OK(fd);
+}
+
+function setDescriptorNonBlocking(fd: i32, nonBlocking: boolean): Result<void, Io::IoError> {
+  let flags: i32 = NetSys::fcntl(fd, NetSys::F_GETFL, 0);
+
+  if (flags == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  let updated: i32 = nonBlocking ? flags | NetSys::O_NONBLOCK : flags & ~NetSys::O_NONBLOCK;
+
+  if (NetSys::fcntl(fd, NetSys::F_SETFL, updated) == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  return Result::OK(());
+}
+
+function localAddressOf(fd: i32): Result<SocketAddress, Io::IoError> {
+  let mut storage: RawSocketAddress = @zeroed<RawSocketAddress>();
+  let mut length: u32 = NetSys::SOCKADDR_STORAGE_LENGTH;
+
+  if (NetSys::socketName(fd, (&mut storage) as *mut u8, (&mut length) as *mut u32) == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  return NetSys::decodeAddress(&storage);
+}
+
+function peerAddressOf(fd: i32): Result<SocketAddress, Io::IoError> {
+  let mut storage: RawSocketAddress = @zeroed<RawSocketAddress>();
+  let mut length: u32 = NetSys::SOCKADDR_STORAGE_LENGTH;
+
+  if (NetSys::peerName(fd, (&mut storage) as *mut u8, (&mut length) as *mut u32) == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  return NetSys::decodeAddress(&storage);
+}
+
+/// Milliseconds left of `timeout` since `start`, rounded up, or `NONE` once it expired.
+function remainingMillis(
+  start: &Time::MonotonicInstant,
+  timeout: &Time::Duration
+): Result<Option<i32>, Io::IoError> {
+  let elapsed: Time::Duration = start.elapsed()!;
+
+  let Option::SOME(remaining) = timeout.checkedSub(elapsed) else {
+    return Result::OK(Option::NONE);
+  };
+
+  if (remaining.secs == 0 && remaining.nanos == 0) {
+    return Result::OK(Option::NONE);
+  }
+
+  if (remaining.secs >= MAX_POLL_MILLIS / 1000) {
+    return Result::OK(Option::SOME(MAX_POLL_MILLIS as i32));
+  }
+
+  let mut millis: u64 = remaining.secs * 1000 + (remaining.nanos / 1000000) as u64;
+
+  if (remaining.nanos % 1000000 != 0) {
+    millis += 1;
+  }
+
+  return Result::OK(Option::SOME(millis as i32));
+}
+
+/// Waits until a connect in progress on `fd` finishes and reports its outcome.
+///
+/// Without a timeout it waits as long as the connect takes. With one, it fails
+/// with `TIMED_OUT` once the timeout, counted from `start`, has expired.
+function finishConnect(
+  fd: i32,
+  start: &Time::MonotonicInstant,
+  timeout: Option<Time::Duration>
+): Result<void, Io::IoError> {
+  while (true) {
+    let mut waitMillis: i32 = -1;
+
+    if (let Option::SOME(limit) = timeout) {
+      let Option::SOME(millis) = remainingMillis(start, &limit)! else {
+        return Result::ERROR(Io::IoError::fromErrno(Platform::ETIMEDOUT));
+      };
+
+      waitMillis = millis;
+    }
+
+    let ready: i32 = NetSys::pollOne(fd, NetSys::POLLOUT, waitMillis);
+
+    if (ready == -1) {
+      let error: Io::IoError = Io::IoError::lastError();
+
+      if (isInterrupted(&error)) {
+        continue;
+      }
+
+      return Result::ERROR(error);
+    }
+
+    // A wait capped at `MAX_POLL_MILLIS` can end before the deadline; the next
+    // turn of the loop reports the timeout once the deadline has passed.
+    if (ready == 0) {
+      continue;
+    }
+
+    let mut pending: i32 = 0;
+
+    if (NetSys::getIntegerOption(fd, NetSys::SOL_SOCKET, NetSys::SO_ERROR, &mut pending) == -1) {
+      return Result::ERROR(Io::IoError::lastError());
+    }
+
+    if (pending != 0) {
+      return Result::ERROR(Io::IoError::fromErrno(pending));
+    }
+
+    return Result::OK(());
+  }
+
+  return Result::OK(());
+}
+
+/// Starts connecting `fd` to `address` and waits for the outcome.
+function connectDescriptor(
+  fd: i32,
+  address: &SocketAddress,
+  timeout: Option<Time::Duration>
+): Result<void, Io::IoError> {
+  let start: Time::MonotonicInstant = Time::MonotonicInstant::now()!;
+  let mut storage: RawSocketAddress = @zeroed<RawSocketAddress>();
+  let length: u32 = NetSys::encodeAddress(address, &mut storage);
+
+  if (NetSys::connect(fd, (&storage) as *u8, length) == 0) {
+    return Result::OK(());
+  }
+
+  let error: Io::IoError = Io::IoError::lastError();
+
+  // An interrupted connect keeps going in the kernel; calling `connect` again
+  // would fail with EALREADY, so wait for it like a non-blocking one.
+  if (isInterrupted(&error) || error.rawCode() == Platform::EINPROGRESS) {
+    return finishConnect(fd, &start, timeout);
+  }
+
+  return Result::ERROR(error);
+}
+
+/// Converts a socket timeout to `SO_RCVTIMEO` / `SO_SNDTIMEO` and sets it.
+///
+/// `NONE` clears it. A zero duration is rejected, since the kernel reads zero as
+/// no timeout at all.
+function setTimeout(
+  fd: i32,
+  name: i32,
+  timeout: Option<Time::Duration>
+): Result<void, Io::IoError> {
+  let mut seconds: i64 = 0;
+  let mut microseconds: i64 = 0;
+
+  if (let Option::SOME(duration) = timeout) {
+    if (duration.secs == 0 && duration.nanos == 0) {
+      return Result::ERROR(Io::IoError::fromErrno(Platform::EINVAL));
+    }
+
+    seconds = duration.secs > 9223372036854775807 ? 9223372036854775807 : duration.secs as i64;
+    microseconds = (duration.nanos / 1000) as i64;
+
+    if (seconds == 0 && microseconds == 0) {
+      microseconds = 1;
+    }
+  }
+
+  if (NetSys::setTimeoutOption(fd, name, seconds, microseconds) == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  return Result::OK(());
+}
+
+/// Which directions `TcpStream::shutdown` closes.
+export enum Shutdown {
+  /// Further reads return end of input.
+  READ,
+
+  /// Further writes fail; the peer reads end of input.
+  WRITE,
+
+  /// Both.
+  BOTH,
+}
+
+/// A socket listening for TCP connections. Closes on drop.
+@implements(Drop)
+export record TcpListener {
+  fd: i32;
+
+  /// Binds a listening socket to `address`.
+  ///
+  /// Port 0 picks a free port; `localAddress` reports which. `SO_REUSEADDR` is
+  /// set, so a port whose previous listener closed is free again at once; a port
+  /// another socket still listens on fails with `ADDRESS_IN_USE`.
+  public static bind(address: &SocketAddress): Result<TcpListener, Io::IoError> {
+    let listener: TcpListener = TcpListener { fd: openSocket(address, 0)! };
+
+    if (NetSys::setIntegerOption(listener.fd, NetSys::SOL_SOCKET, NetSys::SO_REUSEADDR, 1) == -1) {
+      return Result::ERROR(Io::IoError::lastError());
+    }
+
+    let mut storage: RawSocketAddress = @zeroed<RawSocketAddress>();
+    let length: u32 = NetSys::encodeAddress(address, &mut storage);
+
+    if (NetSys::bind(listener.fd, (&storage) as *u8, length) == -1) {
+      return Result::ERROR(Io::IoError::lastError());
+    }
+
+    if (NetSys::listen(listener.fd, LISTEN_BACKLOG) == -1) {
+      return Result::ERROR(Io::IoError::lastError());
+    }
+
+    return Result::OK(listener);
+  }
+
+  /// Waits for the next connection and returns its stream.
+  ///
+  /// The peer address is `peerAddress` on the stream. On a non-blocking
+  /// listener with nothing pending this fails with `WOULD_BLOCK`. The accepted
+  /// stream is blocking and closed on exec, whatever the listener is.
+  public accept(&self): Result<TcpStream, Io::IoError> {
+    while (true) {
+      let mut storage: RawSocketAddress = @zeroed<RawSocketAddress>();
+      let mut length: u32 = NetSys::SOCKADDR_STORAGE_LENGTH;
+      let fd: i32 = NetSys::accept4(self.fd, (&mut storage) as *mut u8, (&mut length) as *mut u32, NetSys::SOCK_CLOEXEC);
+
+      if (fd >= 0) {
+        return Result::OK(TcpStream { fd: fd });
+      }
+
+      let error: Io::IoError = Io::IoError::lastError();
+
+      if (!isInterrupted(&error)) {
+        return Result::ERROR(error);
+      }
+    }
+
+    return Result::ERROR(Io::IoError::fromErrno(Platform::EINVAL));
+  }
+
+  /// The address the listener is bound to, with the port the system picked for port 0.
+  public localAddress(&self): Result<SocketAddress, Io::IoError> {
+    return localAddressOf(self.fd);
+  }
+
+  /// Makes `accept` fail with `WOULD_BLOCK` instead of waiting.
+  public setNonBlocking(&mut self, nonBlocking: boolean): Result<void, Io::IoError> {
+    return setDescriptorNonBlocking(self.fd, nonBlocking);
+  }
+
+  /// The socket descriptor. Still owned by the listener.
+  public fd(&self): i32 {
+    return self.fd;
+  }
+
+  drop(&mut self): void {
+    closeDescriptor(self.fd);
+    self.fd = -1;
+  }
+}
+
+/// A connected TCP socket. Closes on drop.
+@implements(Drop)
+export record TcpStream {
+  fd: i32;
+
+  /// Connects to `address`, waiting as long as the system takes.
+  public static connect(address: &SocketAddress): Result<TcpStream, Io::IoError> {
+    let stream: TcpStream = TcpStream { fd: openSocket(address, 0)! };
+
+    connectDescriptor(stream.fd, address, Option::NONE)!;
+
+    return Result::OK(stream);
+  }
+
+  /// Connects to `address`, failing with `TIMED_OUT` after `timeout`.
+  ///
+  /// A zero `timeout` is rejected with `INVALID_INPUT`. The connected stream
+  /// is blocking.
+  public static connectTimeout(
+    address: &SocketAddress,
+    timeout: Time::Duration
+  ): Result<TcpStream, Io::IoError> {
+    if (timeout.secs == 0 && timeout.nanos == 0) {
+      return Result::ERROR(Io::IoError::fromErrno(Platform::EINVAL));
+    }
+
+    let stream: TcpStream = TcpStream { fd: openSocket(address, NetSys::SOCK_NONBLOCK)! };
+
+    connectDescriptor(stream.fd, address, Option::SOME(timeout))!;
+    setDescriptorNonBlocking(stream.fd, false)!;
+
+    return Result::OK(stream);
+  }
+
+  /// Reads up to `count` bytes into `buf`. Returns 0 at end of input.
+  ///
+  /// When a read timeout expires, or a non-blocking stream has nothing to
+  /// read, this fails with `WOULD_BLOCK`.
+  public read(&mut self, buf: *mut void, count: u64): Result<i64, Io::IoError> {
+    while (true) {
+      let received: i64 = NetSys::receive(self.fd, buf as *mut u8, count, 0);
+
+      if (received >= 0) {
+        return Result::OK(received);
+      }
+
+      let error: Io::IoError = Io::IoError::lastError();
+
+      if (!isInterrupted(&error)) {
+        return Result::ERROR(error);
+      }
+    }
+
+    return Result::OK(0);
+  }
+
+  /// Writes up to `count` bytes from `buf`. Returns how many were written.
+  ///
+  /// Writing to a connection the peer closed fails with `BROKEN_PIPE` or
+  /// `CONNECTION_RESET`; it never raises `SIGPIPE`.
+  public write(&mut self, buf: *void, count: u64): Result<i64, Io::IoError> {
+    while (true) {
+      let sent: i64 = NetSys::send(self.fd, buf as *u8, count, NetSys::MSG_NOSIGNAL);
+
+      if (sent >= 0) {
+        return Result::OK(sent);
+      }
+
+      let error: Io::IoError = Io::IoError::lastError();
+
+      if (!isInterrupted(&error)) {
+        return Result::ERROR(error);
+      }
+    }
+
+    return Result::OK(0);
+  }
+
+  /// Writes all `count` bytes from `buf`, over as many writes as it takes.
+  ///
+  /// On error some of the bytes may already be written.
+  public writeAll(&mut self, buf: *void, count: u64): Result<void, Io::IoError> {
+    let mut written: u64 = 0;
+
+    while (written < count) {
+      let sent: i64 = self.write(((buf as *u8) + written) as *void, count - written)!;
+
+      if (sent == 0) {
+        return Result::ERROR(Io::IoError::fromErrno(Platform::EPIPE));
+      }
+
+      written += sent as u64;
+    }
+
+    return Result::OK(());
+  }
+
+  /// Closes the reading side, the writing side, or both.
+  public shutdown(&mut self, how: Shutdown): Result<void, Io::IoError> {
+    let direction: i32 = match (how) {
+      Shutdown::READ -> NetSys::SHUT_RD,
+      Shutdown::WRITE -> NetSys::SHUT_WR,
+      Shutdown::BOTH -> NetSys::SHUT_RDWR,
+    };
+
+    if (NetSys::shutdown(self.fd, direction) == -1) {
+      return Result::ERROR(Io::IoError::lastError());
+    }
+
+    return Result::OK(());
+  }
+
+  /// The address of the other end.
+  public peerAddress(&self): Result<SocketAddress, Io::IoError> {
+    return peerAddressOf(self.fd);
+  }
+
+  /// The local end's address.
+  public localAddress(&self): Result<SocketAddress, Io::IoError> {
+    return localAddressOf(self.fd);
+  }
+
+  /// Turns Nagle's algorithm off (`true`) or on (`false`).
+  public setNoDelay(&mut self, noDelay: boolean): Result<void, Io::IoError> {
+    if (NetSys::setIntegerOption(self.fd, NetSys::IPPROTO_TCP, NetSys::TCP_NODELAY, noDelay ? 1 : 0) == -1) {
+      return Result::ERROR(Io::IoError::lastError());
+    }
+
+    return Result::OK(());
+  }
+
+  /// Limits how long a `read` waits. `NONE` waits without a limit.
+  ///
+  /// A read that times out fails with `WOULD_BLOCK`. A zero duration is
+  /// rejected with `INVALID_INPUT`.
+  public setReadTimeout(&mut self, timeout: Option<Time::Duration>): Result<void, Io::IoError> {
+    return setTimeout(self.fd, NetSys::SO_RCVTIMEO, timeout);
+  }
+
+  /// Limits how long a `write` waits. `NONE` waits without a limit.
+  ///
+  /// A write that times out fails with `WOULD_BLOCK`. A zero duration is
+  /// rejected with `INVALID_INPUT`.
+  public setWriteTimeout(&mut self, timeout: Option<Time::Duration>): Result<void, Io::IoError> {
+    return setTimeout(self.fd, NetSys::SO_SNDTIMEO, timeout);
+  }
+
+  /// Makes `read` and `write` fail with `WOULD_BLOCK` instead of waiting.
+  public setNonBlocking(&mut self, nonBlocking: boolean): Result<void, Io::IoError> {
+    return setDescriptorNonBlocking(self.fd, nonBlocking);
+  }
+
+  /// The socket descriptor. Still owned by the stream.
+  public fd(&self): i32 {
+    return self.fd;
+  }
+
+  drop(&mut self): void {
+    closeDescriptor(self.fd);
+    self.fd = -1;
+  }
+}

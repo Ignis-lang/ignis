@@ -42,6 +42,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::text` | `Text` | UTF-8 byte-offset ↔ line/column position conversion (`Text::LineIndex`) |
 | `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr`, `Mutex`, `MutexGuard`, `Condvar`, `Arc`, `Channel`, `Sender`, `Receiver`, `ThreadPool` | Atomic values, locks, condition variables, shared ownership, channels and a thread pool |
 | `std::thread` | `Thread`, `JoinHandle<T>` | Spawn, join and detach POSIX threads |
+| `std::net` | `IpAddress`, `Ipv4Address`, `Ipv6Address`, `SocketAddress`, `TcpListener`, `TcpStream`, `Shutdown` | Numeric IP addresses and blocking or non-blocking TCP (x86_64 Linux only) |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
@@ -251,6 +252,25 @@ function main(): i32 {
   `execute(&self, @sendable task: () -> void)` queues a job for the first idle worker.
   Dropping the pool lets the workers finish every job queued before the drop, then
   joins them.
+
+### `std::net`
+
+- `IpAddress` — enum `V4(Ipv4Address)` / `V6(Ipv6Address)`; `parse(text: str)`,
+  `v4(a, b, c, d)`, `toString`, `equals`, `isLoopback`, `isUnspecified`. IPv6 text is
+  formatted per RFC 5952. Numeric addresses only; there is no name resolution.
+- `SocketAddress` — `create(ip, port)`, `parse("a.b.c.d:port" | "[ipv6]:port")`, `ip`,
+  `port`, `toString`.
+- `TcpListener` — `bind(&address)`, `accept(&self): Result<TcpStream, _>`,
+  `localAddress`, `setNonBlocking`. Closes on drop.
+- `TcpStream` — `connect`, `connectTimeout(&address, Time::Duration)`,
+  `read(buf: *mut void, count)`, `write(buf: *void, count)`, `writeAll`, `shutdown`,
+  `peerAddress`, `localAddress`, `setNoDelay`, `setReadTimeout` / `setWriteTimeout`
+  (`Option<Time::Duration>`), `setNonBlocking`. Closes on drop.
+- Every fallible call returns `Result<_, Io::IoError>`. Sends use `MSG_NOSIGNAL`, so a
+  closed peer is `BROKEN_PIPE` or `CONNECTION_RESET`, never `SIGPIPE`. Sockets are
+  `SOCK_CLOEXEC`; `EINTR` is retried. An expired read or write timeout is `WOULD_BLOCK`.
+- x86_64 Linux only: the socket calls go through `syscall(2)` because the emitted C
+  does not declare the socket functions. See the `std::net` module docs.
 
 ### `std::thread`
 
