@@ -1,0 +1,731 @@
+import Http from "std::http";
+import String from "std::string";
+import Vector from "std::vector";
+
+import Test from "std::test";
+
+function httpTestParser(): Http::RequestParser {
+  return Http::RequestParser::new(Http::Limits::new());
+}
+
+function httpTestFeed(parser: &mut Http::RequestParser, text: str): void {
+  parser.feedStr(text);
+}
+
+function httpTestBytesText(bytes: &Vector<u8>): String {
+  let mut text: String = String::new();
+
+  let mut index: u64 = 0;
+
+  while (index < bytes.length()) {
+    text.pushByte(*bytes.get(index).unwrap());
+    index += 1;
+  }
+
+  return text;
+}
+
+/// Ends the last transcript line when it is a `BODY` line still collecting
+/// chunks.
+function httpTestCloseBody(transcript: &mut String): void {
+  if (transcript.length() > 0 && !transcript.endsWith("\n")) {
+    transcript.pushStr("\n");
+  }
+}
+
+/// Pulls events until the parser needs more bytes or reports a malformed
+/// request, and describes them one per line. Consecutive body chunks are
+/// joined into one `BODY` line, even across `NEED_MORE`, so the transcript
+/// does not depend on how the input was split. The bodies in these tests
+/// hold no line feed.
+function httpTestDrain(parser: &mut Http::RequestParser, transcript: &mut String): void {
+  while (true) {
+    let event: Http::ParseEvent = parser.next();
+    let isBody: boolean = match (&event) {
+      Http::ParseEvent::BODY_CHUNK(_) -> true,
+      Http::ParseEvent::NEED_MORE -> true,
+      _ -> false,
+    };
+
+    if (!isBody) {
+      httpTestCloseBody(transcript);
+    }
+
+    let mut stop: boolean = false;
+
+    match (event) {
+      Http::ParseEvent::NEED_MORE -> {
+        stop = true;
+      },
+      Http::ParseEvent::BODY_CHUNK(bytes) -> {
+        if (transcript.length() == 0 || transcript.endsWith("\n")) {
+          transcript.pushStr("BODY ");
+        }
+
+        let text: String = httpTestBytesText(&bytes);
+        transcript.push(&text);
+      },
+      Http::ParseEvent::HEAD(head) -> {
+        transcript.pushStr("HEAD ");
+        let method: String = head.method.toString();
+        transcript.push(&method);
+        transcript.pushStr(" ");
+        transcript.push(&head.target);
+        transcript.pushStr(" ");
+        transcript.pushStr(head.version.toStr());
+        transcript.pushStr(" headers=");
+        let headerCount: u64 = head.headers.length();
+        let count: String = headerCount.toString();
+        transcript.push(&count);
+        transcript.pushStr(head.keepAlive() ? " keep-alive" : " close");
+        transcript.pushStr("\n");
+      },
+      Http::ParseEvent::DONE -> {
+        transcript.pushStr("DONE\n");
+      },
+      Http::ParseEvent::MALFORMED(error) -> {
+        transcript.pushStr("MALFORMED ");
+        transcript.pushStr(error.kind.name());
+        transcript.pushStr(" ");
+        let status: String = error.status.toString();
+        transcript.push(&status);
+        transcript.pushStr("\n");
+        stop = true;
+      },
+    };
+
+    if (stop) {
+      return;
+    }
+  }
+}
+
+function httpTestParse(text: str): String {
+  let mut parser: Http::RequestParser = httpTestParser();
+  let mut transcript: String = String::new();
+  httpTestFeed(&mut parser, text);
+  httpTestDrain(&mut parser, &mut transcript);
+  httpTestCloseBody(&mut transcript);
+  return transcript;
+}
+
+function httpTestParseWith(limits: Http::Limits, text: str): String {
+  let mut parser: Http::RequestParser = Http::RequestParser::new(limits);
+  let mut transcript: String = String::new();
+  httpTestFeed(&mut parser, text);
+  httpTestDrain(&mut parser, &mut transcript);
+  httpTestCloseBody(&mut transcript);
+  return transcript;
+}
+
+/// Feeds `text` one byte at a time, draining after each byte, and returns the
+/// transcript without the `NEED_MORE` stops in between. Stops at the first
+/// `MALFORMED`, which would otherwise repeat after every byte.
+function httpTestParseBytewise(text: str): String {
+  let mut parser: Http::RequestParser = httpTestParser();
+  let mut transcript: String = String::new();
+  let owned: String = String::create(text);
+  let malformed: String = String::create("MALFORMED");
+  let mut index: u64 = 0;
+
+  while (index < owned.length() && !transcript.contains(&malformed)) {
+    let mut single: Vector<u8> = Vector::new<u8>();
+    single.push(owned.byteAt(index).unwrap());
+    parser.feed(&single);
+    httpTestDrain(&mut parser, &mut transcript);
+    index += 1;
+  }
+
+  httpTestCloseBody(&mut transcript);
+  return transcript;
+}
+
+/// The first event `text` produces, after any `NEED_MORE`-free prefix.
+function httpTestMalformed(text: str): String {
+  return httpTestParse(text);
+}
+
+function httpTestRepeat(byte: str, count: u64): String {
+  let mut text: String = String::new();
+  text.pushRepeated(byte, count);
+  return text;
+}
+
+@test
+function parsesASimpleGet(): void {
+  Test::assertEq<str>(
+    httpTestParse("GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n").toStr(),
+    "HEAD GET /index.html HTTP/1.1 headers=1 keep-alive\nDONE\n",
+  );
+}
+
+@test
+function needsMoreUntilTheHeadIsComplete(): void {
+  Test::assertEq<str>(httpTestParse("GET / HTTP/1.1\r\nHost: a\r\n").toStr(), "");
+  Test::assertEq<str>(httpTestParse("").toStr(), "");
+}
+
+@test
+function keepsHeaderCasingAndLooksUpCaseInsensitively(): void {
+  let mut parser: Http::RequestParser = httpTestParser();
+  httpTestFeed(
+    &mut parser,
+    "GET / HTTP/1.1\r\nHost: a\r\nX-Custom-Thing:  one \r\nx-custom-thing: two\r\n\r\n",
+  );
+
+  let Http::ParseEvent::HEAD(head) = parser.next() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(head.headers.length(), 3);
+  Test::assertEq<str>(head.headers.nameAt(1).unwrap(), "X-Custom-Thing");
+  Test::assertEq<str>(head.headers.valueAt(1).unwrap(), "one");
+  Test::assertEq<str>(head.headers.nameAt(2).unwrap(), "x-custom-thing");
+  Test::assertEq<str>(head.headers.get("X-CUSTOM-THING").unwrap(), "one");
+  Test::assert(head.headers.contains("host"));
+  Test::assert(!head.headers.contains("Content-Length"));
+
+  let all: Vector<String> = head.headers.getAll("x-Custom-thing");
+  Test::assertEq<u64>(all.length(), 2);
+  Test::assertEq<str>(all.get(1).unwrap().toStr(), "two");
+}
+
+@test
+function headersAddSetAndRemove(): void {
+  let mut headers: Http::Headers = Http::Headers::new();
+  headers.add("Accept", "a");
+  headers.add("Vary", "x");
+  headers.add("accept", "b");
+
+  headers.set("ACCEPT", "c");
+  Test::assertEq<u64>(headers.length(), 2);
+  Test::assertEq<str>(headers.nameAt(0).unwrap(), "Accept");
+  Test::assertEq<str>(headers.get("accept").unwrap(), "c");
+
+  headers.set("Date", "today");
+  Test::assertEq<u64>(headers.length(), 3);
+  Test::assertEq<str>(headers.nameAt(2).unwrap(), "Date");
+
+  Test::assertEq<u64>(headers.remove("vary"), 1);
+  Test::assertEq<u64>(headers.remove("vary"), 0);
+  Test::assertEq<u64>(headers.length(), 2);
+
+  let mut names: String = String::new();
+
+  let mut index: u64 = 0;
+
+  while (index < headers.length()) {
+    names.pushStr(headers.nameAt(index).unwrap());
+    names.pushStr(";");
+    index += 1;
+  }
+
+  Test::assertEq<str>(names.toStr(), "Accept;Date;");
+}
+
+@test
+function parsesAContentLengthBody(): void {
+  Test::assertEq<str>(
+    httpTestParse("POST /submit HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello").toStr(),
+    "HEAD POST /submit HTTP/1.1 headers=1 keep-alive\nBODY hello\nDONE\n",
+  );
+}
+
+@test
+function waitsForTheRestOfAContentLengthBody(): void {
+  Test::assertEq<str>(
+    httpTestParse("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhel").toStr(),
+    "HEAD POST / HTTP/1.1 headers=1 keep-alive\nBODY hel\n",
+  );
+}
+
+@test
+function acceptsRepeatedEqualContentLengths(): void {
+  Test::assertEq<str>(
+    httpTestParse("POST / HTTP/1.1\r\nContent-Length: 2, 2\r\nContent-Length: 2\r\n\r\nok").toStr(),
+    "HEAD POST / HTTP/1.1 headers=2 keep-alive\nBODY ok\nDONE\n",
+  );
+}
+
+@test
+function parsesAChunkedBodyWithExtensionsAndTrailers(): void {
+  Test::assertEq<str>(
+    httpTestParse(
+      "POST /upload HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n5;name=value\r\nhello\r\n6 ; x\r\n world\r\n0\r\nExpires: never\r\n\r\n",
+    ).toStr(),
+    "HEAD POST /upload HTTP/1.1 headers=1 keep-alive\nBODY hello world\nDONE\n",
+  );
+}
+
+@test
+function parsesUppercaseHexChunkSizes(): void {
+  Test::assertEq<str>(
+    httpTestParse(
+      "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nA\r\n0123456789\r\n0\r\n\r\n",
+    ).toStr(),
+    "HEAD POST / HTTP/1.1 headers=1 keep-alive\nBODY 0123456789\nDONE\n",
+  );
+}
+
+@test
+function feedingOneByteAtATimeYieldsTheSameEvents(): void {
+  let requests: str[4] = [
+    "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n",
+    "POST /submit HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
+    "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;a=b\r\nhello\r\n6\r\n world\r\n0\r\nX-Trailer: 1\r\n\r\nGET /next HTTP/1.0\r\n\r\n",
+    "GET / HTTP/1.1\r\nBad Header: x\r\n\r\n",
+  ];
+
+  let mut index: u64 = 0;
+
+  while (index < 4) {
+    let whole: String = httpTestParse(requests[index]);
+    let bytewise: String = httpTestParseBytewise(requests[index]);
+    Test::assertEq<str>(bytewise.toStr(), whole.toStr());
+    index += 1;
+  }
+}
+
+@test
+function parsesTwoPipelinedRequestsFromOneFeed(): void {
+  Test::assertEq<str>(
+    httpTestParse(
+      "POST /a HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcGET /b HTTP/1.1\r\nConnection: close\r\n\r\n",
+    ).toStr(),
+    "HEAD POST /a HTTP/1.1 headers=1 keep-alive\nBODY abc\nDONE\nHEAD GET /b HTTP/1.1 headers=1 close\nDONE\n",
+  );
+}
+
+@test
+function keepsLeftoverBytesForTheNextRequestAcrossFeeds(): void {
+  let mut parser: Http::RequestParser = httpTestParser();
+  let mut transcript: String = String::new();
+  httpTestFeed(&mut parser, "GET /a HTTP/1.1\r\n\r\nGET /b HT");
+  httpTestDrain(&mut parser, &mut transcript);
+  httpTestFeed(&mut parser, "TP/1.1\r\n\r\n");
+  httpTestDrain(&mut parser, &mut transcript);
+
+  Test::assertEq<str>(
+    transcript.toStr(),
+    "HEAD GET /a HTTP/1.1 headers=0 keep-alive\nDONE\nHEAD GET /b HTTP/1.1 headers=0 keep-alive\nDONE\n",
+  );
+}
+
+@test
+function appliesKeepAliveRulesPerVersion(): void {
+  Test::assertEq<str>(
+    httpTestParse("GET / HTTP/1.1\r\n\r\n").toStr(),
+    "HEAD GET / HTTP/1.1 headers=0 keep-alive\nDONE\n",
+  );
+  Test::assertEq<str>(
+    httpTestParse("GET / HTTP/1.1\r\nConnection: Upgrade, Close\r\n\r\n").toStr(),
+    "HEAD GET / HTTP/1.1 headers=1 close\nDONE\n",
+  );
+  Test::assertEq<str>(
+    httpTestParse("GET / HTTP/1.0\r\n\r\n").toStr(),
+    "HEAD GET / HTTP/1.0 headers=0 close\nDONE\n",
+  );
+  Test::assertEq<str>(
+    httpTestParse("GET / HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n").toStr(),
+    "HEAD GET / HTTP/1.0 headers=1 keep-alive\nDONE\n",
+  );
+}
+
+@test
+function acceptsBareLineFeedsAndLeadingEmptyLines(): void {
+  Test::assertEq<str>(
+    httpTestParse("\r\n\nGET / HTTP/1.1\nHost: a\n\n").toStr(),
+    "HEAD GET / HTTP/1.1 headers=1 keep-alive\nDONE\n",
+  );
+}
+
+@test
+function parsesEveryStandardMethodAndExtensionMethods(): void {
+  let methods: str[9] = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "PURGE"];
+
+  let mut index: u64 = 0;
+
+  while (index < 9) {
+    let method: str = methods[index];
+    index += 1;
+    let mut request: String = String::create(method);
+    request.pushStr(" / HTTP/1.1\r\n\r\n");
+    let mut expected: String = String::create("HEAD ");
+    expected.pushStr(method);
+    expected.pushStr(" / HTTP/1.1 headers=0 keep-alive\nDONE\n");
+    Test::assertEq<str>(httpTestParse(request.toStr()).toStr(), expected.toStr());
+  }
+
+  Test::assertEq<str>(
+    httpTestParse("CONNECT example.com:443 HTTP/1.1\r\n\r\n").toStr(),
+    "HEAD CONNECT example.com:443 HTTP/1.1 headers=0 keep-alive\nDONE\n",
+  );
+
+  let mut parser: Http::RequestParser = httpTestParser();
+  httpTestFeed(&mut parser, "M-SEARCH * HTTP/1.1\r\n\r\n");
+  let Http::ParseEvent::HEAD(head) = parser.next() else {
+    Test::fail();
+    return;
+  };
+  let isOther: boolean = match (head.method) {
+    Http::Method::OTHER(name) -> name.equals("M-SEARCH"),
+    _ -> false,
+  };
+  Test::assert(isOther);
+}
+
+@test
+function enforcesTheRequestLineLimit(): void {
+  let mut limits: Http::Limits = Http::Limits::new();
+  limits.maxRequestLine = 20;
+
+  // "GET /" + path + " HTTP/1.1" is 14 bytes plus the path.
+  let mut atLimit: String = String::create("GET /");
+  atLimit.pushRepeated("a", 6);
+  atLimit.pushStr(" HTTP/1.1\r\n\r\n");
+  Test::assertEq<str>(
+    httpTestParseWith(limits, atLimit.toStr()).toStr(),
+    "HEAD GET /aaaaaa HTTP/1.1 headers=0 keep-alive\nDONE\n",
+  );
+
+  let mut overLimit: String = String::create("GET /");
+  overLimit.pushRepeated("a", 7);
+  overLimit.pushStr(" HTTP/1.1\r\n\r\n");
+  Test::assertEq<str>(
+    httpTestParseWith(limits, overLimit.toStr()).toStr(),
+    "MALFORMED REQUEST_LINE_TOO_LONG 414\n",
+  );
+
+  // Reported before the line ends, so an endless line cannot grow the buffer.
+  let unterminated: String = httpTestRepeat("a", 21);
+  Test::assertEq<str>(
+    httpTestParseWith(limits, unterminated.toStr()).toStr(),
+    "MALFORMED REQUEST_LINE_TOO_LONG 414\n",
+  );
+  let partial: String = httpTestRepeat("a", 20);
+  Test::assertEq<str>(httpTestParseWith(limits, partial.toStr()).toStr(), "");
+}
+
+@test
+function enforcesTheHeaderLineLimit(): void {
+  let mut limits: Http::Limits = Http::Limits::new();
+  limits.maxHeaderLine = 10;
+
+  // "X-A: " is 5 bytes.
+  let mut atLimit: String = String::create("GET / HTTP/1.1\r\nX-A: ");
+  atLimit.pushRepeated("v", 5);
+  atLimit.pushStr("\r\n\r\n");
+  Test::assertEq<str>(
+    httpTestParseWith(limits, atLimit.toStr()).toStr(),
+    "HEAD GET / HTTP/1.1 headers=1 keep-alive\nDONE\n",
+  );
+
+  let mut overLimit: String = String::create("GET / HTTP/1.1\r\nX-A: ");
+  overLimit.pushRepeated("v", 6);
+  overLimit.pushStr("\r\n\r\n");
+  Test::assertEq<str>(
+    httpTestParseWith(limits, overLimit.toStr()).toStr(),
+    "MALFORMED HEADER_TOO_LONG 431\n",
+  );
+}
+
+@test
+function enforcesTheHeaderCountLimit(): void {
+  let mut limits: Http::Limits = Http::Limits::new();
+  limits.maxHeaders = 2;
+
+  Test::assertEq<str>(
+    httpTestParseWith(limits, "GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\n\r\n").toStr(),
+    "HEAD GET / HTTP/1.1 headers=2 keep-alive\nDONE\n",
+  );
+  Test::assertEq<str>(
+    httpTestParseWith(limits, "GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nC: 3\r\n\r\n").toStr(),
+    "MALFORMED TOO_MANY_HEADERS 431\n",
+  );
+  Test::assertEq<str>(
+    httpTestParseWith(
+      limits,
+      "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nA: 1\r\nB: 2\r\nC: 3\r\n\r\n",
+    ).toStr(),
+    "HEAD POST / HTTP/1.1 headers=1 keep-alive\nMALFORMED TOO_MANY_HEADERS 431\n",
+  );
+}
+
+@test
+function enforcesTheBodyLimit(): void {
+  let mut limits: Http::Limits = Http::Limits::new();
+  limits.maxBody = 4;
+
+  Test::assertEq<str>(
+    httpTestParseWith(limits, "POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd").toStr(),
+    "HEAD POST / HTTP/1.1 headers=1 keep-alive\nBODY abcd\nDONE\n",
+  );
+  Test::assertEq<str>(
+    httpTestParseWith(limits, "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nabcde").toStr(),
+    "MALFORMED BODY_TOO_LARGE 413\n",
+  );
+  Test::assertEq<str>(
+    httpTestParseWith(
+      limits,
+      "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n",
+    ).toStr(),
+    "HEAD POST / HTTP/1.1 headers=1 keep-alive\nBODY abcd\nDONE\n",
+  );
+  Test::assertEq<str>(
+    httpTestParseWith(
+      limits,
+      "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n3\r\ncde\r\n0\r\n\r\n",
+    ).toStr(),
+    "HEAD POST / HTTP/1.1 headers=1 keep-alive\nBODY ab\nMALFORMED BODY_TOO_LARGE 413\n",
+  );
+}
+
+@test
+function rejectsMalformedRequestLines(): void {
+  Test::assertEq<str>(httpTestMalformed("GET /\r\n\r\n").toStr(), "MALFORMED INVALID_REQUEST_LINE 400\n");
+  Test::assertEq<str>(
+    httpTestMalformed("GET  / HTTP/1.1\r\n\r\n").toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1 \r\n\r\n").toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("G(T / HTTP/1.1\r\n\r\n").toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET /a\rb HTTP/1.1\r\n\r\n").toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1\r\r\n\r\n").toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+}
+
+@test
+function rejectsBadVersions(): void {
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/2.0\r\n\r\n").toStr(),
+    "MALFORMED UNSUPPORTED_VERSION 505\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/0.9\r\n\r\n").toStr(),
+    "MALFORMED UNSUPPORTED_VERSION 505\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / http/1.1\r\n\r\n").toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.10\r\n\r\n").toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+}
+
+@test
+function rejectsBadHeaders(): void {
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1\r\nNoColon\r\n\r\n").toStr(),
+    "MALFORMED INVALID_HEADER 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1\r\nHost : a\r\n\r\n").toStr(),
+    "MALFORMED INVALID_HEADER 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1\r\n: a\r\n\r\n").toStr(),
+    "MALFORMED INVALID_HEADER 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1\r\nX-A: one\r\n two\r\n\r\n").toStr(),
+    "MALFORMED INVALID_HEADER 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1\r\nX-A: one\r\n\ttwo\r\n\r\n").toStr(),
+    "MALFORMED INVALID_HEADER 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("GET / HTTP/1.1\r\nX-A: a\rb\r\n\r\n").toStr(),
+    "MALFORMED INVALID_HEADER 400\n",
+  );
+  let mut controlByte: String = String::create("GET / HTTP/1.1\r\nX-A: a");
+  controlByte.pushByte(1);
+  controlByte.pushStr("b\r\n\r\n");
+  Test::assertEq<str>(httpTestMalformed(controlByte.toStr()).toStr(), "MALFORMED INVALID_HEADER 400\n");
+}
+
+@test
+function rejectsInvalidAndConflictingContentLengths(): void {
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n").toStr(),
+    "MALFORMED INVALID_CONTENT_LENGTH 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n").toStr(),
+    "MALFORMED INVALID_CONTENT_LENGTH 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nContent-Length: \r\n\r\n").toStr(),
+    "MALFORMED INVALID_CONTENT_LENGTH 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n\r\n").toStr(),
+    "MALFORMED INVALID_CONTENT_LENGTH 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n").toStr(),
+    "MALFORMED CONFLICTING_LENGTH 400\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nContent-Length: 3, 4\r\n\r\n").toStr(),
+    "MALFORMED CONFLICTING_LENGTH 400\n",
+  );
+}
+
+@test
+function rejectsTransferEncodingWithContentLength(): void {
+  Test::assertEq<str>(
+    httpTestMalformed(
+      "POST / HTTP/1.1\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+    ).toStr(),
+    "MALFORMED CONFLICTING_LENGTH 400\n",
+  );
+}
+
+@test
+function rejectsUnknownTransferCodings(): void {
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n").toStr(),
+    "MALFORMED UNSUPPORTED_TRANSFER_CODING 501\n",
+  );
+  Test::assertEq<str>(
+    httpTestMalformed("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n").toStr(),
+    "MALFORMED UNSUPPORTED_TRANSFER_CODING 501\n",
+  );
+}
+
+@test
+function rejectsBadChunks(): void {
+  let prefix: str = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+  let head: str = "HEAD POST / HTTP/1.1 headers=1 keep-alive\n";
+  let bodies: str[5] = ["xyz\r\n", "\r\n", "5 5\r\nhello\r\n", "3\r\nabcX\r\n", "FFFFFFFFFFFFFFFFFF\r\n"];
+  let expected: str[5] = [
+    "MALFORMED INVALID_CHUNK 400\n",
+    "MALFORMED INVALID_CHUNK 400\n",
+    "MALFORMED INVALID_CHUNK 400\n",
+    "BODY abc\nMALFORMED INVALID_CHUNK 400\n",
+    "MALFORMED BODY_TOO_LARGE 413\n",
+  ];
+  let mut index: u64 = 0;
+
+  while (index < 5) {
+    let mut request: String = String::create(prefix);
+    request.pushStr(bodies[index]);
+    let mut wanted: String = String::create(head);
+    wanted.pushStr(expected[index]);
+    Test::assertEq<str>(httpTestParse(request.toStr()).toStr(), wanted.toStr());
+    index += 1;
+  }
+}
+
+@test
+function malformedIsSticky(): void {
+  let mut parser: Http::RequestParser = httpTestParser();
+  httpTestFeed(&mut parser, "BROKEN\r\n\r\n");
+  let mut transcript: String = String::new();
+  httpTestDrain(&mut parser, &mut transcript);
+  httpTestFeed(&mut parser, "GET / HTTP/1.1\r\n\r\n");
+  httpTestDrain(&mut parser, &mut transcript);
+
+  Test::assertEq<str>(
+    transcript.toStr(),
+    "MALFORMED INVALID_REQUEST_LINE 400\nMALFORMED INVALID_REQUEST_LINE 400\n",
+  );
+}
+
+@test
+function serializesAResponseHeadByteExact(): void {
+  let mut head: Http::ResponseHead = Http::ResponseHead::create(404);
+  head.headers.add("Content-Type", "text/plain");
+  head.headers.add("X-Empty", "");
+  let mut out: Vector<u8> = Vector::new<u8>();
+
+  Test::assert(Http::writeHead(&head, &mut out).isOk());
+  Test::assertEq<str>(
+    httpTestBytesText(&out).toStr(),
+    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nX-Empty: \r\n\r\n",
+  );
+
+  let custom: Http::ResponseHead = Http::ResponseHead::withReason(299, "Fine");
+  let mut customOut: Vector<u8> = Vector::new<u8>();
+  Test::assert(Http::writeHead(&custom, &mut customOut).isOk());
+  Test::assertEq<str>(httpTestBytesText(&customOut).toStr(), "HTTP/1.1 299 Fine\r\n\r\n");
+  Test::assertEq<str>(Http::reasonPhrase(200), "OK");
+  Test::assertEq<str>(Http::reasonPhrase(599), "");
+}
+
+@test
+function serializesAChunkedBodyByteExact(): void {
+  let mut out: Vector<u8> = Vector::new<u8>();
+  let first: Vector<u8> = String::create("hello world, chunk").toBytes();
+  let empty: Vector<u8> = Vector::new<u8>();
+
+  Http::writeChunk(&first, &mut out);
+  Http::writeChunk(&empty, &mut out);
+  Http::writeLastChunk(&mut out);
+
+  Test::assertEq<str>(httpTestBytesText(&out).toStr(), "12\r\nhello world, chunk\r\n0\r\n\r\n");
+}
+
+@test
+function serializesAContentLengthResponseByteExact(): void {
+  let mut head: Http::ResponseHead = Http::ResponseHead::create(200);
+  head.headers.add("Content-Type", "text/plain");
+  let body: Vector<u8> = String::create("hi!").toBytes();
+  let mut out: Vector<u8> = Vector::new<u8>();
+
+  Test::assert(Http::writeResponse(&head, &body, &mut out).isOk());
+  Test::assertEq<str>(
+    httpTestBytesText(&out).toStr(),
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nhi!",
+  );
+}
+
+@test
+function serializerRejectsResponseSplitting(): void {
+  let mut out: Vector<u8> = Vector::new<u8>();
+
+  let mut badValue: Http::ResponseHead = Http::ResponseHead::create(200);
+  badValue.headers.add("Location", "/a\r\nSet-Cookie: x=1");
+  let valueResult: Result<void, Http::SerializeError> = Http::writeHead(&badValue, &mut out);
+  Test::assert(match (valueResult) {
+    Result::ERROR(Http::SerializeError::INVALID_HEADER_VALUE) -> true,
+    _ -> false,
+  });
+
+  let mut lineFeed: Http::ResponseHead = Http::ResponseHead::create(200);
+  lineFeed.headers.add("Location", "/a\nb");
+  Test::assert(Http::writeHead(&lineFeed, &mut out).isError());
+
+  let mut badName: Http::ResponseHead = Http::ResponseHead::create(200);
+  badName.headers.add("X-A\r\nX-B", "1");
+  let nameResult: Result<void, Http::SerializeError> = Http::writeHead(&badName, &mut out);
+  Test::assert(match (nameResult) {
+    Result::ERROR(Http::SerializeError::INVALID_HEADER_NAME) -> true,
+    _ -> false,
+  });
+
+  let badReason: Http::ResponseHead = Http::ResponseHead::withReason(200, "OK\r\nX: y");
+  Test::assert(Http::writeHead(&badReason, &mut out).isError());
+
+  let mut framed: Http::ResponseHead = Http::ResponseHead::create(200);
+  framed.headers.add("content-length", "1");
+  let body: Vector<u8> = String::create("x").toBytes();
+  Test::assert(Http::writeResponse(&framed, &body, &mut out).isError());
+
+  Test::assertEq<u64>(out.length(), 0);
+}

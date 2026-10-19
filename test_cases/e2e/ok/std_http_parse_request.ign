@@ -1,0 +1,59 @@
+// e2e: std
+// Parses a raw chunked POST, fed in two pieces that split the head and a
+// chunk, and prints the method, the target and the decoded body.
+import Http from "std::http";
+import Io from "std::io";
+import String from "std::string";
+
+function main(): i32 {
+  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());
+  let mut body: String = String::new();
+  let mut pieces: u64 = 0;
+
+  parser.feedStr("POST /items?id=7 HTTP/1.1\r\nHost: example.com\r\nTransfer-");
+  parser.feedStr("Encoding: chunked\r\n\r\n6\r\nhello \r\n5\r\nwor");
+
+  while (true) {
+    let event: Http::ParseEvent = parser.next();
+    let mut stop: boolean = false;
+
+    match (event) {
+      Http::ParseEvent::NEED_MORE -> {
+        if (pieces > 0) {
+          return 1;
+        }
+
+        pieces += 1;
+        parser.feedStr("ld\r\n0\r\n\r\n");
+      },
+      Http::ParseEvent::HEAD(head) -> {
+        let method: String = head.method.toString();
+        Io::println(method.toStr());
+        Io::println(head.target.toStr());
+        Io::println(head.headers.get("host").unwrap());
+      },
+      Http::ParseEvent::BODY_CHUNK(bytes) -> {
+        let mut index: u64 = 0;
+
+        while (index < bytes.length()) {
+          body.pushByte(*bytes.get(index).unwrap());
+          index += 1;
+        }
+      },
+      Http::ParseEvent::DONE -> {
+        stop = true;
+      },
+      Http::ParseEvent::MALFORMED(error) -> {
+        Io::println(error.kind.name());
+        return 2;
+      },
+    };
+
+    if (stop) {
+      break;
+    }
+  }
+
+  Io::println(body.toStr());
+  return 0;
+}

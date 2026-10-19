@@ -1,0 +1,356 @@
+//! `Http::Headers`: an ordered list of header fields, shared by requests and
+//! responses. The byte-class helpers below are exported for the parser and
+//! the serializer and are not part of `std::http`'s public API.
+
+import String from "std::string";
+import Vector from "std::vector";
+
+/// Folds an ASCII uppercase letter to lowercase and leaves every other byte
+/// alone, so non-ASCII field bytes compare exactly.
+function asciiLower(byte: u8): u8 {
+  if (byte >= 'A' as u8 && byte <= 'Z' as u8) {
+    return byte + 32;
+  }
+
+  return byte;
+}
+
+/// Whether `left` and `right` hold the same bytes, ignoring ASCII case.
+function equalsIgnoringAsciiCase(left: &String, right: str): boolean {
+  let other: String = String::create(right);
+
+  if (left.length() != other.length()) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < left.length()) {
+    let a: u8 = left.byteAt(index).unwrap();
+    let b: u8 = other.byteAt(index).unwrap();
+
+    if (asciiLower(a) != asciiLower(b)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Whether `byte` is a `tchar`, the bytes RFC 9110 allows in a token such
+/// as a method or a field name.
+export function isTokenByte(byte: u8): boolean {
+  if ((byte >= 'a' as u8 && byte <= 'z' as u8) || (byte >= 'A' as u8 && byte <= 'Z' as u8) || (byte >= '0' as u8 && byte <= '9' as u8)) {
+    return true;
+  }
+
+  let symbols: String = String::create("!#$%&'*+-.^_`|~");
+  let mut index: u64 = 0;
+
+  while (index < symbols.length()) {
+    if (symbols.byteAt(index).unwrap() == byte) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// Whether `text` is a non-empty token.
+export function isToken(text: &String): boolean {
+  if (text.length() == 0) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    if (!isTokenByte(text.byteAt(index).unwrap())) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Whether `byte` may appear in a field value: visible ASCII, space, tab
+/// and `obs-text` (0x80 to 0xFF). CR, LF, NUL and the other control bytes
+/// may not.
+export function isFieldValueByte(byte: u8): boolean {
+  return byte == '\t' as u8 || (byte >= 0x20 && byte != 0x7F);
+}
+
+/// Whether every byte of `text` may appear in a field value.
+export function isFieldValue(text: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    if (!isFieldValueByte(text.byteAt(index).unwrap())) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Whether the comma-separated list `value` has an element equal to
+/// `token`, ignoring ASCII case and the whitespace around each element.
+export function listContains(value: &String, token: str): boolean {
+  let elements: Vector<String> = listElements(value);
+  let mut index: u64 = 0;
+
+  while (index < elements.length()) {
+    if (equalsIgnoringAsciiCase(elements.get(index).unwrap(), token)) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// The elements of the comma-separated list `value`, each without its
+/// surrounding spaces and tabs. Empty elements are kept, so `a,,b` has
+/// three elements.
+export function listElements(value: &String): Vector<String> {
+  let mut elements: Vector<String> = Vector::new<String>();
+  let mut current: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index <= value.length()) {
+    let atEnd: boolean = index == value.length();
+    let byte: u8 = atEnd ? 0 : value.byteAt(index).unwrap();
+
+    if (atEnd || byte == ',' as u8) {
+      elements.push(trimFieldWhitespace(&current));
+      current.clear();
+    } else {
+      current.pushByte(byte);
+    }
+
+    index += 1;
+  }
+
+  return elements;
+}
+
+/// `text` without leading and trailing spaces and tabs (RFC 9110 `OWS`).
+export function trimFieldWhitespace(text: &String): String {
+  let mut start: u64 = 0;
+  let mut end: u64 = text.length();
+
+  while (start < end && isFieldWhitespace(text.byteAt(start).unwrap())) {
+    start += 1;
+  }
+
+  while (end > start && isFieldWhitespace(text.byteAt(end - 1).unwrap())) {
+    end -= 1;
+  }
+
+  return text.substringBytes(start, end);
+}
+
+/// Whether `byte` is a space or a tab.
+export function isFieldWhitespace(byte: u8): boolean {
+  return byte == ' ' as u8 || byte == '\t' as u8;
+}
+
+/// Whether `name` equals `other`, ignoring ASCII case.
+export function namesEqual(name: &String, other: str): boolean {
+  return equalsIgnoringAsciiCase(name, other);
+}
+
+/// HTTP header fields.
+export namespace Http {
+  /// One header field: its name as written and its value without the
+  /// surrounding whitespace.
+  record HeaderField {
+    public name: String;
+    public value: String;
+
+    /// A field holding copies of `name` and `value`.
+    public static create(name: str, value: str): HeaderField {
+      return HeaderField { name: String::create(name), value: String::create(value) };
+    }
+
+    /// A field that takes ownership of `name` and `value`.
+    public static create(name: String, value: String): HeaderField {
+      return HeaderField { name: name, value: value };
+    }
+  }
+
+  /// Header fields in the order they were added or received.
+  ///
+  /// Names keep their original casing; `get`, `getAll`, `contains`, `set`
+  /// and `remove` compare names ignoring ASCII case, as RFC 9110 requires.
+  /// Repeated names are kept as separate fields and never merged.
+  record Headers {
+    entries: Vector<HeaderField>;
+
+    /// An empty header list.
+    public static new(): Headers {
+      return Headers { entries: Vector::new<HeaderField>() };
+    }
+
+    /// The number of fields, repeated names counted once per field.
+    public length(&self): u64 {
+      return self.entries.length();
+    }
+
+    /// Whether there are no fields.
+    public isEmpty(&self): boolean {
+      return self.entries.length() == 0;
+    }
+
+    /// The name of the field at `index`, as written.
+    public nameAt(&self, index: u64): Option<str> {
+      let Option::SOME(field) = self.entries.get(index) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(field.name.toStr());
+    }
+
+    /// The value of the field at `index`.
+    public valueAt(&self, index: u64): Option<str> {
+      let Option::SOME(field) = self.entries.get(index) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(field.value.toStr());
+    }
+
+    /// The value of the first field named `name`.
+    public get(&self, name: str): Option<str> {
+      let mut index: u64 = 0;
+
+      while (index < self.entries.length()) {
+        let field: &HeaderField = self.entries.get(index).unwrap();
+
+        if (equalsIgnoringAsciiCase(&field.name, name)) {
+          return Option::SOME(field.value.toStr());
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Copies of the values of every field named `name`, in order.
+    public getAll(&self, name: str): Vector<String> {
+      let mut values: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < self.entries.length()) {
+        let field: &HeaderField = self.entries.get(index).unwrap();
+
+        if (equalsIgnoringAsciiCase(&field.name, name)) {
+          values.push(field.value.clone());
+        }
+
+        index += 1;
+      }
+
+      return values;
+    }
+
+    /// Whether some field is named `name`.
+    public contains(&self, name: str): boolean {
+      return self.get(name).isSome();
+    }
+
+    /// Appends a field, keeping any existing field with the same name.
+    public add(&mut self, name: str, value: str): void {
+      self.entries.push(HeaderField::create(name, value));
+    }
+
+    /// Appends a field that takes ownership of `name` and `value`.
+    public add(&mut self, name: String, value: String): void {
+      self.entries.push(HeaderField::create(name, value));
+    }
+
+    /// Replaces every field named `name` with one field holding `value`, at
+    /// the position of the first of them; appends it when there is none.
+    /// The first field's name keeps its casing.
+    public set(&mut self, name: str, value: str): void {
+      let mut kept: Vector<HeaderField> = Vector::new<HeaderField>();
+      let mut replaced: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index < self.entries.length()) {
+        let field: &HeaderField = self.entries.get(index).unwrap();
+
+        if (!equalsIgnoringAsciiCase(&field.name, name)) {
+          kept.push(HeaderField::create(field.name.clone(), field.value.clone()));
+        } else if (!replaced) {
+          kept.push(HeaderField::create(field.name.clone(), String::create(value)));
+          replaced = true;
+        }
+
+        index += 1;
+      }
+
+      if (!replaced) {
+        kept.push(HeaderField::create(name, value));
+      }
+
+      self.entries = kept;
+    }
+
+    /// Removes every field named `name` and returns how many there were.
+    public remove(&mut self, name: str): u64 {
+      let mut kept: Vector<HeaderField> = Vector::new<HeaderField>();
+      let mut removed: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < self.entries.length()) {
+        let field: &HeaderField = self.entries.get(index).unwrap();
+
+        if (equalsIgnoringAsciiCase(&field.name, name)) {
+          removed += 1;
+        } else {
+          kept.push(HeaderField::create(field.name.clone(), field.value.clone()));
+        }
+
+        index += 1;
+      }
+
+      self.entries = kept;
+      return removed;
+    }
+
+    /// The field at `index`.
+    public fieldAt(&self, index: u64): Option<&HeaderField> {
+      return self.entries.get(index);
+    }
+
+    /// Whether some field named `name` lists `token` in its comma-separated
+    /// value, ignoring ASCII case and the whitespace around each element.
+    /// `Connection: Upgrade, close` lists `close`.
+    public hasToken(&self, name: str, token: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.entries.length()) {
+        let field: &HeaderField = self.entries.get(index).unwrap();
+
+        if (equalsIgnoringAsciiCase(&field.name, name) && listContains(&field.value, token)) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+  }
+}

@@ -1,0 +1,142 @@
+//!
+//! # HTTP
+//!
+//! The sans-IO core of HTTP/1.1 on the server side: a request parser and a
+//! response serializer that never touch a socket. Anything that speaks HTTP
+//! but is not a web application (a proxy, a test harness, a server driver)
+//! builds on this layer. The parser receives bytes and returns what they
+//! mean; the serializer turns a response into bytes and leaves writing them
+//! to the caller.
+//!
+//! ## Exports
+//!
+//! | Export                 | Description                                                          |
+//! |------------------------|----------------------------------------------------------------------|
+//! | `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |
+//! | `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |
+//! | `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |
+//! | `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |
+//! | `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |
+//! | `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |
+//! | `Http::HeaderField`    | One `name` and `value`                                               |
+//! | `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |
+//! | `Http::ParseError`     | `kind` and the suggested response `status`                           |
+//! | `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |
+//! | `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |
+//! | `Http::SerializeError` | Why a response head cannot be written                                |
+//! | `Http::writeHead`      | Appends a response head                                              |
+//! | `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |
+//! | `Http::writeBody`      | Appends body bytes unchanged                                         |
+//! | `Http::writeChunk`     | Appends one chunk of a chunked body                                  |
+//! | `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |
+//! | `Http::reasonPhrase`   | The standard reason phrase of a status                               |
+//!
+//! ## Parsing
+//!
+//! `feed` copies bytes into the parser; `next` reports the next event. Each
+//! request produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.
+//! `NEED_MORE` means the bytes fed so far are not enough to report anything
+//! else. After `DONE` the parser starts on the next request of the same
+//! connection, and bytes already fed past the end of a request belong to the
+//! next one, so keep-alive and pipelining need nothing special.
+//! `RequestHead.keepAlive()` tells whether the connection stays open: an
+//! HTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0
+//! request closes it unless `Connection` lists `keep-alive`.
+//!
+//! Events own their payloads: a `RequestHead` or a body chunk is a copy and
+//! stays valid after more bytes are fed.
+//!
+//! `MALFORMED` is terminal: once the parser reports it, every later `next`
+//! reports the same error, because the rest of the connection cannot be
+//! framed. The `ParseError` carries the status a server should answer with
+//! (400, 413, 414, 431, 501 or 505) before it closes the connection.
+//! Malformed input never panics.
+//!
+//! ## Message syntax
+//!
+//! - Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2
+//!   allows a recipient to; a CR anywhere else is malformed.
+//! - Empty lines before a request line are skipped.
+//! - The request line is `method SP target SP HTTP/1.x` with exactly one space
+//!   between the parts. The method is a case-sensitive token; methods other
+//!   than the nine standard ones are `Method::OTHER`. The target is kept as
+//!   received and must be visible ASCII.
+//! - A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.
+//! - A header line is `name: value`. Whitespace between the name and the
+//!   colon, an obsolete line folding (a line starting with a space or a tab)
+//!   and a control byte in the value are `INVALID_HEADER`. Names keep their
+//!   casing; lookups ignore ASCII case.
+//!
+//! ## Body framing
+//!
+//! Per RFC 9112 section 6.3:
+//!
+//! | Head                                   | Body                                           |
+//! |----------------------------------------|------------------------------------------------|
+//! | `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |
+//! | Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |
+//! | `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |
+//! | `Content-Length: n`                    | Exactly `n` bytes                              |
+//! | `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |
+//! | A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |
+//! | Neither                                | No body                                        |
+//!
+//! Repeated `Content-Length` fields, or a comma list in one, are accepted when
+//! every value is the same. Chunk extensions are ignored. Trailer fields
+//! after the last chunk are checked like header fields, counted against
+//! `maxHeaders`, and discarded.
+//!
+//! ## Limits
+//!
+//! | Limit            | Default   | Violation                                 |
+//! |------------------|-----------|-------------------------------------------|
+//! | `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |
+//! | `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |
+//! | `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |
+//! | `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |
+//!
+//! Line lengths exclude the line terminator, and a length exactly at its
+//! limit is accepted. A line is rejected as soon as it grows past its limit,
+//! before it ends, and a body as soon as its declared size passes `maxBody`,
+//! so a client cannot make the parser buffer without bound.
+//!
+//! ## Serializing
+//!
+//! `writeHead` appends `HTTP/1.1 <status> <reason>\r\n`, every header field
+//! and the blank line. `writeResponse` does the same with a `Content-Length`
+//! field and appends the body. For a chunked body, add
+//! `Transfer-Encoding: chunked` to the head, then call `writeChunk` for each
+//! piece and `writeLastChunk` at the end. A header name, header value or
+//! reason phrase holding CR or LF could split the response, so it is a
+//! `SerializeError` and nothing is appended.
+//!
+//! Byte inputs are `&Vector<u8>`: a slice parameter cannot report its length
+//! yet.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Http from "std::http";
+//! import Vector from "std::vector";
+//!
+//! function answer(request: str, out: &mut Vector<u8>): i32 {
+//!   let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());
+//!   parser.feedStr(request);
+//!
+//!   let Http::ParseEvent::HEAD(head) = parser.next() else {
+//!     return 1;
+//!   };
+//!
+//!   let mut response: Http::ResponseHead = Http::ResponseHead::create(200);
+//!   response.headers.add("Content-Type", "text/plain");
+//!   let body: Vector<u8> = head.target.toBytes();
+//!
+//!   return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;
+//! }
+//! ```
+
+import _ from "std::http::headers";
+import _ from "std::http::request";
+import _ from "std::http::response";
+
+export Http from "./response";
