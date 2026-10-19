@@ -1,5 +1,6 @@
-import Stream from "std::io";
+import Io, Stream from "std::io";
 import LibC from "std::libc";
+import Platform from "std::libc::platform";
 import String from "std::string";
 
 import Test from "std::test";
@@ -545,4 +546,27 @@ function writeAllReportsAFailedWrite(): void {
     Test::fail();
     return;
   };
+}
+
+@test
+function fromErrnoMapsTheSocketErrors(): void {
+  Test::assert(Io::IoError::fromErrno(Platform::ECONNREFUSED).errorKind() == Io::ErrorKind::CONNECTION_REFUSED);
+  Test::assert(Io::IoError::fromErrno(Platform::ECONNRESET).errorKind() == Io::ErrorKind::CONNECTION_RESET);
+  Test::assert(Io::IoError::fromErrno(Platform::EADDRINUSE).errorKind() == Io::ErrorKind::ADDRESS_IN_USE);
+  Test::assert(Io::IoError::fromErrno(Platform::EADDRNOTAVAIL).errorKind() == Io::ErrorKind::ADDRESS_NOT_AVAILABLE);
+  Test::assert(Io::IoError::fromErrno(Platform::EPIPE).errorKind() == Io::ErrorKind::BROKEN_PIPE);
+  Test::assert(Io::IoError::fromErrno(Platform::ENOTCONN).errorKind() == Io::ErrorKind::NOT_CONNECTED);
+}
+
+@test
+function fromErrnoKeepsTheRawSocketErrno(): void {
+  let error: Io::IoError = Io::IoError::fromErrno(Platform::EADDRINUSE);
+
+  Test::assertEq<i32>(error.rawCode(), Platform::EADDRINUSE);
+}
+
+@test
+function fromErrnoStillMapsAnUnknownErrnoToOther(): void {
+  Test::assert(Io::IoError::fromErrno(Platform::EIO).errorKind() == Io::ErrorKind::OTHER);
+  Test::assert(Io::IoError::fromErrno(Platform::ETIMEDOUT).errorKind() == Io::ErrorKind::TIMED_OUT);
 }
