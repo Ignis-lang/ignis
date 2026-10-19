@@ -380,6 +380,49 @@ function codegenEmitsStaticMutFieldsAsWritableGlobals(): void {
   Test::assert(!emission.source.contains(&seedName));
 }
 
+/// A `@threadLocal` static field gets one copy per thread: its global carries
+/// `_Thread_local` next to the `static` storage class, while a plain `static
+/// mut` beside it stays an ordinary global.
+@test
+function codegenEmitsThreadLocalStaticFieldsAsThreadLocalGlobals(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Slots {\n  @threadLocal\n  static mut CURRENT: i32 = 7;\n  @threadLocal\n  static mut ZEROED: i64;\n  static mut SHARED: i32 = 0;\n}\n\nfunction main(): i32 {\n  Slots::CURRENT += 1;\n  Slots::SHARED = Slots::CURRENT;\n\n  return Slots::SHARED + Slots::ZEROED as i32;\n}\n",
+  );
+
+  let mut fieldNames: Vector<String> = Vector::new<String>();
+  fieldNames.push(String::create("CURRENT"));
+  fieldNames.push(String::create("ZEROED"));
+  fieldNames.push(String::create("SHARED"));
+
+  let fieldIds: Vector<u32> = codegenVariableDefIds(&mut emission.defStore, &mut emission.symbols, &fieldNames);
+
+  Test::assertEq<u64>(fieldIds.length(), 3);
+
+  let Option::SOME(currentRaw) = fieldIds.get(0) else {
+    @panic("the emitted program declares no static field named 'CURRENT'");
+  };
+
+  let Option::SOME(zeroedRaw) = fieldIds.get(1) else {
+    @panic("the emitted program declares no static field named 'ZEROED'");
+  };
+
+  let Option::SOME(sharedRaw) = fieldIds.get(2) else {
+    @panic("the emitted program declares no static field named 'SHARED'");
+  };
+
+  let currentName: String = CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, Id::fromRaw<Analyzer::DefinitionTag>(*currentRaw));
+  let zeroedName: String = CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, Id::fromRaw<Analyzer::DefinitionTag>(*zeroedRaw));
+  let sharedName: String = CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, Id::fromRaw<Analyzer::DefinitionTag>(*sharedRaw));
+
+  let current: String = `static _Thread_local i32 ${currentName.toStr()} = 7;`;
+  let zeroed: String = `static _Thread_local i64 ${zeroedName.toStr()};`;
+  let shared: String = `static i32 ${sharedName.toStr()} = 0;`;
+
+  Test::assert(emission.source.contains(&current));
+  Test::assert(emission.source.contains(&zeroed));
+  Test::assert(emission.source.contains(&shared));
+}
+
 /// A generic nominal that declares `@implements(Drop)` reaches the emitter as
 /// a monomorphized shell whose method list is empty, so the destructor of one
 /// instantiation is only found by the definition that owns it.

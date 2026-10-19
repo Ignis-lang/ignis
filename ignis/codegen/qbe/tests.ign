@@ -359,6 +359,20 @@ function qbePreservesGlobalAlignment(): void {
   qbeRunExpected(source, 0);
 }
 
+/// A `@threadLocal` static field is `thread` data, and every use names it as
+/// `thread $name`: a bare `$name` would address the initial image instead of
+/// the running thread's copy.
+@test
+function qbeEmitsThreadLocalGlobals(): void {
+  let source: str = "record Slots { @threadLocal static mut COUNT: i64 = 40; @threadLocal static mut CELLS: i32[2]; static mut SHARED: i32 = 1; } function main(): i32 { Slots::COUNT += 1; Slots::CELLS[1] = 1; Slots::SHARED = Slots::CELLS[1]; return (Slots::COUNT as i32) + Slots::SHARED - Slots::CELLS[0]; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "thread data $"));
+  Test::assert(qbeContains(&emission.source, "copy thread $"));
+  Test::assert(qbeContains(&emission.source, "\ndata $"));
+  qbeRunExpected(source, 42);
+}
+
 @test
 function qbeEmitsStringLiteralsAndGlobals(): void {
   qbeRunExpected("extern LibC { function strcmp(left: str, right: str): i32; } record Counter { static mut TOTAL: i32 = 3; } const GREETING: str = \"hey\"; function main(): i32 { let s: str = GREETING; Counter::TOTAL = Counter::TOTAL + 1; return Counter::TOTAL + strcmp(s, \"hey\"); }", 4);

@@ -2480,6 +2480,158 @@ export namespace Borrowck {
     };
   }
 
+  /// The `@threadLocal` static whose own storage the place `nodeId` names, if
+  /// any: the static itself, or a field or element of it. A projection through
+  /// a dereference, or an index or field access through a pointer, reference
+  /// or slice, addresses the pointee instead, so `(*Scheduler::CURRENT).field`
+  /// names no thread-local storage.
+  function threadLocalPlaceRoot(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    let mut base: Option<Hir::HirId> = Option::NONE;
+
+    let mut named: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> {
+        named = Option::SOME(defId);
+      },
+      Hir::HirKind::StaticAccess(defId) -> {
+        named = Option::SOME(defId);
+      },
+      Hir::HirKind::FieldAccess(access) -> {
+        base = Option::SOME(access.base);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        base = Option::SOME(indexNode.base);
+      },
+      _ -> {},
+    };
+
+    // A static field read inside a function lowers to a `Variable` of its
+    // definition, like a local; only the definition says it is thread-local.
+    if (let Option::SOME(defId) = named) {
+      if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
+        if (variable.threadLocal) {
+          return Option::SOME(defId);
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    let Option::SOME(baseId) = base else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(baseNode) = hir.get(baseId) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(baseType) = typeStore.get(baseNode.typeId) else {
+      return Option::NONE;
+    };
+
+    let throughIndirection: boolean = match (baseType) {
+      Analyzer::Type::Pointer(_) -> true,
+      Analyzer::Type::Reference(_) -> true,
+      Analyzer::Type::Slice(_) -> true,
+      Analyzer::Type::STR -> true,
+      _ -> false,
+    };
+
+    if (throughIndirection) {
+      return Option::NONE;
+    }
+
+    return Borrowck::threadLocalPlaceRoot(defStore, typeStore, hir, baseId);
+  }
+
+  /// Whether `nodeId` is a written or inserted `&` / `&mut`.
+  function isReferenceNode(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Reference(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// The return type of the function or method `callable`, if it is one.
+  function callableReturnType(
+    defStore: &mut Analyzer::DefinitionStore,
+    callable: Analyzer::DefinitionId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(callable) else {
+      return Option::NONE;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Function(functionDef) -> Option::SOME(functionDef.returnType),
+      Analyzer::Definition::Method(methodDef) -> Option::SOME(methodDef.returnType),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// A0261 when the place `place` names a thread-local's storage and `borrow`
+  /// takes a reference to it: the reference would dangle once the thread that
+  /// owns the storage exits.
+  function rejectThreadLocalBorrow(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    diagnostics: &mut DiagnosticBag,
+    place: Hir::HirId,
+    span: SourceSpan,
+    borrow: str,
+  ): void {
+    let Option::SOME(threadLocal) = Borrowck::threadLocalPlaceRoot(defStore, typeStore, hir, place) else {
+      return;
+    };
+
+    let name: String = Borrowck::definitionName(defStore, symbols, threadLocal);
+    let message: String = `cannot borrow thread-local '${name.toStr()}'`;
+    let label: String = `${borrow} would dangle once the thread that owns '${name.toStr()}' exits; read or write it by value`;
+
+    Borrowck::emitError(diagnostics, span, DiagnosticCode::THREAD_LOCAL_BORROWED, message.toStr(), label.toStr());
+  }
+
+  /// A0261 when a fixed array stored in a thread-local flows where a slice of
+  /// it is expected: the slice the array becomes points into its storage.
+  function rejectThreadLocalSlice(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    diagnostics: &mut DiagnosticBag,
+    value: Hir::HirId,
+    targetType: Analyzer::TypeId,
+  ): void {
+    let Option::SOME(Analyzer::Type::Slice(_)) = typeStore.get(targetType) else {
+      return;
+    };
+
+    let Option::SOME(valueNode) = hir.get(value) else {
+      return;
+    };
+
+    let Option::SOME(Analyzer::Type::FixedArray(_, _)) = typeStore.get(valueNode.typeId) else {
+      return;
+    };
+
+    Borrowck::rejectThreadLocalBorrow(defStore, typeStore, symbols, hir, diagnostics, value, valueNode.span, "a slice");
+  }
+
   /// The local an expression moves out of, if any: a bare variable reference
   /// whose type owns resources. Mirrors `get_moved_var`, which is why a field
   /// read or an index is not a move here.
@@ -6087,6 +6239,7 @@ export namespace Borrowck {
 
       Hir::HirKind::Reference(reference) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, reference.expression);
+        Borrowck::rejectThreadLocalBorrow(defStore, typeStore, symbols, hir, diagnostics, reference.expression, span, "a reference");
 
         if (let Option::SOME(target) = Borrowck::extractRootVariable(hir, reference.expression)) {
           let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, reference.mutable, span, true);
@@ -6151,6 +6304,10 @@ export namespace Borrowck {
       Hir::HirKind::Return(value) -> {
         if (let Option::SOME(returned) = value) {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, returned);
+
+          if (let Option::SOME(returnType) = Borrowck::callableReturnType(defStore, state.currentFunctionId())) {
+            Borrowck::rejectThreadLocalSlice(defStore, typeStore, symbols, hir, diagnostics, returned, returnType);
+          }
 
           if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, returned)) {
             if (!state.isEnvironmentCapture(source.raw())) {
@@ -6340,6 +6497,10 @@ export namespace Borrowck {
         }
       }
 
+      if (!Borrowck::methodSelfByValue(defStore, call.method) && !Borrowck::isReferenceNode(hir, receiver)) {
+        Borrowck::rejectThreadLocalBorrow(defStore, typeStore, symbols, hir, diagnostics, receiver, span, "a method call that borrows its receiver");
+      }
+
       Borrowck::checkReceiverBorrow(defStore, symbols, hir, state, diagnostics, receiver, call.method, span);
     }
 
@@ -6455,6 +6616,12 @@ export namespace Borrowck {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *argument);
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, *argument);
         Borrowck::checkTemporaryBorrow(defStore, symbols, hir, state, diagnostics, *argument, span);
+
+        if (let Option::SOME(paramId) = params.get(index + paramOffset)) {
+          if (let Option::SOME(paramType) = Borrowck::variableTypeOf(defStore, *paramId)) {
+            Borrowck::rejectThreadLocalSlice(defStore, typeStore, symbols, hir, diagnostics, *argument, paramType);
+          }
+        }
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *argument)) {
           Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_CALL_ARGUMENT);
@@ -6576,6 +6743,10 @@ export namespace Borrowck {
   ): void {
     if (let Option::SOME(value) = letNode.value) {
       Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, value);
+
+      if (let Option::SOME(declaredType) = Borrowck::variableTypeOf(defStore, letNode.name)) {
+        Borrowck::rejectThreadLocalSlice(defStore, typeStore, symbols, hir, diagnostics, value, declaredType);
+      }
 
       if (let Option::SOME(source) = Borrowck::movedValue(defStore, typeStore, hir, state, value)) {
         Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_LET_INITIALIZER);

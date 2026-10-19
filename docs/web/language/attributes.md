@@ -15,6 +15,7 @@ Attributes are written `@name` or `@name(args)` and attach to a declaration.
 | `@implements(...)` | Record, enum | Lang traits (`Drop`, `Clone`, `Copy`) or a user-defined trait |
 | `@packed` | Record | Removes padding between fields in the emitted C struct |
 | `@aligned(N)` | Record | Sets a minimum alignment |
+| `@threadLocal` | `static mut` field | Gives every thread its own copy of the field |
 | `@lang(try)` | Enum | Marks the enum try-capable, for the `!` operator |
 | `@cold` | Function | Marks the function unlikely to run |
 | `@inline`, `@inline(always)`, `@inline(never)` | Function | Inlining hint, force, or refusal |
@@ -50,6 +51,31 @@ function forEach(@noescape f: (i32) -> void, data: *i32, len: i32): void {
     return;
 }
 ```
+
+## @threadLocal
+
+`@threadLocal` on a `static mut` field gives every thread its own copy of it. Reads and writes
+look like any other `static mut` access:
+
+```ignis
+record Scheduler {
+    @threadLocal
+    static mut CURRENT: *mut Scheduler;
+}
+```
+
+- Only a `static mut` field can be thread-local. On an immutable `static` or an instance field
+  the attribute is an error (A0259); on any other declaration it is an unknown attribute (A0117).
+- The initializer is a constant expression, or absent and the field starts zeroed, as for any
+  `static mut` (A0230, A0239). Each thread starts from that value.
+- The type must not run a drop (A0260): nothing runs when a thread exits.
+- A thread-local cannot be borrowed (A0261): no `&` or `&mut` of it or of a field or element of
+  it, no `&self` or `&mut self` method call on it, and no slice of a fixed array stored in it.
+  The reference would dangle once its thread exits. Copy the value out, or call a method that
+  takes `self`. Access through a pointer stored in a thread-local, such as
+  `(*Scheduler::CURRENT).field`, reaches the pointee and is allowed.
+
+The C backend emits the global as `static _Thread_local`; the QBE backend emits `thread` data.
 
 ## @test
 

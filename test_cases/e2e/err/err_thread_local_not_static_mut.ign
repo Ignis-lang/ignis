@@ -1,0 +1,28 @@
+// e2e: err
+//
+// `@threadLocal` gives a `static mut` field one copy per thread. An immutable
+// `static` has no storage, it folds into its uses, and an instance field lives
+// in its record, so neither can be thread-local.
+
+record Config {
+  public size: i32;
+
+  @threadLocal
+  static LIMIT: i32 = 3;
+
+  @threadLocal
+  public depth: i32;
+}
+
+enum Level {
+  LOW,
+
+  @threadLocal
+  DEFAULT: i32 = 1;
+}
+
+function main(): i32 {
+  let config: Config = Config { size: 1, depth: 2 };
+
+  return config.size + config.depth + Config::LIMIT + Level::DEFAULT;
+}

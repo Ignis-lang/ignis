@@ -643,12 +643,46 @@ export namespace Analyzer {
                 binding.span,
               );
             }
+
+            Analyzer::Typecheck::checkThreadLocalNeedsNoDrop(state, defStore, typeStore, symbols, *staticDefId, &binding.name, binding.span);
           }
         }
 
         staticIndex += 1;
         patternIndex += 1;
       }
+    }
+
+    /// A `@threadLocal` field's type must not run a drop (A0260): nothing runs
+    /// when a thread exits, so its copy would never be torn down. Every type
+    /// that is not Copy runs one, either its own or one of a field or element.
+    function checkThreadLocalNeedsNoDrop(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      staticDefId: Analyzer::DefinitionId,
+      fieldName: &String,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(staticDefId) else {
+        return;
+      };
+
+      if (!variableDef.threadLocal) {
+        return;
+      }
+
+      let declaredType: Analyzer::TypeId = variableDef.declaredType;
+
+      if (Analyzer::Typecheck::isCopyType(defStore, typeStore, declaredType)) {
+        return;
+      }
+
+      let typeName: String = typeStore.nameOfResolved(declaredType, &*defStore, &*symbols);
+      let message: String = `thread-local '${fieldName.toStr()}' has type '${typeName.toStr()}', which runs a drop that no thread exit runs`;
+
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::THREAD_LOCAL_NEEDS_DROP, message.toStr());
     }
 
     /// A `static mut` field written without an initializer starts with every
@@ -733,6 +767,8 @@ export namespace Analyzer {
                 binding.span,
               );
             }
+
+            Analyzer::Typecheck::checkThreadLocalNeedsNoDrop(state, defStore, typeStore, symbols, *staticDefId, &binding.name, binding.span);
           }
         }
 

@@ -1,0 +1,86 @@
+// `@threadLocal` static fields read and write by value like any other
+// `static mut`: plain and compound assignment, field and element access, a
+// by-value method call, and access through a pointer stored in one, which
+// addresses the pointee rather than the thread-local itself.
+record Scheduler {
+  public ticks: i32;
+
+  @threadLocal
+  static mut CURRENT: *mut Scheduler;
+
+  @threadLocal
+  static mut COUNTER: i32 = 1;
+
+  @threadLocal
+  static mut ORIGIN: Point = Point { x: 2, y: 3 };
+
+  @threadLocal
+  static mut SLOTS: i32[3] = [1, 2, 3];
+
+  public tick(&mut self): void {
+    self.ticks += 1;
+  }
+
+  public ticksSoFar(&self): i32 {
+    return self.ticks;
+  }
+}
+
+record Point {
+  public x: i32;
+  public y: i32;
+
+  public sum(self): i32 {
+    return self.x + self.y;
+  }
+}
+
+enum Mode {
+  IDLE,
+
+  @threadLocal
+  static mut LAST: i32 = 4;
+}
+
+function main(): i32 {
+  let mut scheduler: Scheduler = Scheduler { ticks: 0 };
+
+  Scheduler::CURRENT = &mut scheduler as *mut Scheduler;
+  (*Scheduler::CURRENT).ticks += 2;
+  (*Scheduler::CURRENT).tick();
+
+  if ((*Scheduler::CURRENT).ticksSoFar() != 3) {
+    return 1;
+  }
+
+  Scheduler::COUNTER += 4;
+  Scheduler::COUNTER = Scheduler::COUNTER * 2;
+
+  if (Scheduler::COUNTER != 10) {
+    return 2;
+  }
+
+  Scheduler::ORIGIN.x += 10;
+
+  if (Scheduler::ORIGIN.sum() != 15) {
+    return 3;
+  }
+
+  let copy: Point = Scheduler::ORIGIN;
+
+  if (copy.x != 12) {
+    return 4;
+  }
+
+  Scheduler::SLOTS[2] = Scheduler::SLOTS[0] + Scheduler::SLOTS[1];
+
+  let elements: i32[3] = Scheduler::SLOTS;
+
+  if (elements[2] != 3) {
+    return 5;
+  }
+
+  Mode::LAST -= 4;
+
+  return Mode::LAST + scheduler.ticks - 3;
+}
