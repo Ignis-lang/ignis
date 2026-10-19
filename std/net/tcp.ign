@@ -8,6 +8,7 @@
 import Io from "std::io";
 import Platform from "std::libc::platform";
 import Time from "std::time";
+import Vector from "std::vector";
 import _ from "std::net::address";
 import SocketAddress from "std::net::address";
 import _ from "std::net::sys::linux_x86_64";
@@ -15,6 +16,7 @@ import NetSys, RawSocketAddress from "std::net::sys::linux_x86_64";
 
 const LISTEN_BACKLOG: i32 = 128;
 const MAX_POLL_MILLIS: u64 = 2147483647;
+const READ_CHUNK_BYTES: u64 = 8192;
 
 function isInterrupted(error: &Io::IoError): boolean {
   return error.rawCode() == Platform::EINTR;
@@ -363,6 +365,32 @@ export record TcpStream {
     return Result::OK(0);
   }
 
+  /// Reads at most `limit` bytes and appends them to the end of `buffer`.
+  ///
+  /// Returns how many bytes were appended; 0 means the peer closed its writing
+  /// side. A `limit` of 0 returns 0 without reading. One call reads at most
+  /// 8192 bytes. Timeouts and non-blocking streams fail with `WOULD_BLOCK`, as
+  /// in `read`. On error `buffer` is left as it was.
+  public readInto(&mut self, buffer: &mut Vector<u8>, limit: u64): Result<u64, Io::IoError> {
+    if (limit == 0) {
+      return Result::OK(0);
+    }
+
+    // `Vector` has no way to reserve space and then set its length, so the
+    // bytes land in a stack chunk first and are pushed one by one.
+    let mut chunk: u8[8192] = @zeroed<u8[8192]>();
+    let wanted: u64 = limit < READ_CHUNK_BYTES ? limit : READ_CHUNK_BYTES;
+    let received: i64 = self.read((&mut chunk[0]) as *mut void, wanted)!;
+    let mut index: u64 = 0;
+
+    while (index < received as u64) {
+      buffer.push(chunk[index]);
+      index += 1;
+    }
+
+    return Result::OK(received as u64);
+  }
+
   /// Writes up to `count` bytes from `buf`. Returns how many were written.
   ///
   /// Writing to a connection the peer closed fails with `BROKEN_PIPE` or
@@ -402,6 +430,29 @@ export record TcpStream {
     }
 
     return Result::OK(());
+  }
+
+  /// Writes up to `bytes.length()` bytes from `bytes` in one write. Returns how
+  /// many were written, which may be fewer. An empty vector writes nothing.
+  public writeBytes(&mut self, bytes: &Vector<u8>): Result<u64, Io::IoError> {
+    if (bytes.length() == 0) {
+      return Result::OK(0);
+    }
+
+    let sent: i64 = self.write(bytes.asPtr() as *void, bytes.length())!;
+
+    return Result::OK(sent as u64);
+  }
+
+  /// Writes every byte of `bytes`, over as many writes as it takes.
+  ///
+  /// On error some of the bytes may already be written.
+  public writeAllBytes(&mut self, bytes: &Vector<u8>): Result<void, Io::IoError> {
+    if (bytes.length() == 0) {
+      return Result::OK(());
+    }
+
+    return self.writeAll(bytes.asPtr() as *void, bytes.length());
   }
 
   /// Closes the reading side, the writing side, or both.
