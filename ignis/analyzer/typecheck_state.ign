@@ -890,9 +890,11 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INTEGER_OVERFLOW, message.toStr());
     }
 
-    /// Display symbol for a shift/bitwise operator in diagnostics.
-    function shiftOrBitwiseOperatorSymbol(operator: Ast::Expression::BinaryOperator): str {
+    /// Display symbol for a shift, bitwise or equality operator in diagnostics.
+    function binaryOperandOperatorSymbol(operator: Ast::Expression::BinaryOperator): str {
       return match (operator) {
+        Ast::Expression::BinaryOperator::Equal -> "==",
+        Ast::Expression::BinaryOperator::NotEqual -> "!=",
         Ast::Expression::BinaryOperator::BitAnd -> "&",
         Ast::Expression::BinaryOperator::BitOr -> "|",
         Ast::Expression::BinaryOperator::BitXor -> "^",
@@ -913,7 +915,7 @@ export namespace Analyzer {
       rightType: Analyzer::TypeId,
     ): void {
       let message: String = String::create("Binary operator '")
-        .concat(Analyzer::Typecheck::shiftOrBitwiseOperatorSymbol(operator))
+        .concat(Analyzer::Typecheck::binaryOperandOperatorSymbol(operator))
         .concat("' cannot be applied to types '")
         .concat(typeStore.nameOfResolved(leftType, &*defStore, &*symbols).toStr())
         .concat("' and '")

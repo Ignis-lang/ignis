@@ -58,6 +58,11 @@ why interpolating a variable does not move it.
 | Try | `expr!` |
 | Ternary | `cond ? a : b` |
 
+`==` and `!=` apply to numbers, `boolean`, `char`, atoms, pointers, payload-free enums of the same
+enum, and `str`. Two `str` values compare by content: the bytes up to the first NUL, not their
+addresses. Other types, including `String` and records, have no `==`; compare them with a method
+such as `equals`.
+
 ## Casts
 
 ```ignis

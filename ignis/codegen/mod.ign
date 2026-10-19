@@ -2482,6 +2482,19 @@ export namespace CodegenC {
     };
   }
 
+  /// Whether an operand is a `str` view.
+  function isStrOperand(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): boolean {
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return false;
+    };
+
+    return CodegenC::isStrType(typeStore, typeId);
+  }
+
   /// Whether an operand is an enum none of whose variants carries a payload.
   function isUnitEnumOperand(
     defStore: &mut Analyzer::DefinitionStore,
@@ -3154,7 +3167,14 @@ export namespace CodegenC {
             tagSuffix = ".tag";
           }
 
-          let line: String = CodegenC::binOpLine(defStore, typeStore, function_, &node, &left, &right, operator, tagSuffix);
+          let mut line: String = CodegenC::binOpLine(defStore, typeStore, function_, &node, &left, &right, operator, tagSuffix);
+
+          // `str` equality compares the bytes up to the terminator. The GCC
+          // builtin needs no header, so a freestanding unit compiles too.
+          if (CodegenC::isEqualityOperation(&node.op) && CodegenC::isStrOperand(typeStore, function_, &node.left)) {
+            line = `    t${node.dest.raw()} = __builtin_strcmp(${left.toStr()}, ${right.toStr()}) ${operator} 0;\n`;
+          }
+
           let mut outputRef: &mut String = output;
           outputRef.pushStr(line.toStr());
         }
