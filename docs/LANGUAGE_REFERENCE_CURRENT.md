@@ -155,6 +155,28 @@ pointer-and-length view, and `let view: i32[] = [1, 2, 3];` binds the array as a
 Slices are non-owning views; callers must keep their backing storage valid. The current
 selfhost borrow checker does not track slice-view lifetimes.
 
+Every slice, and every reference to one, has two methods:
+
+```ignis
+function sum(bytes: u8[]): u64 {
+    let n: u64 = bytes.length();
+    let p: *u8 = bytes.asPtr();
+    let mut total: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < n) {
+        total = total + (@read<u8>(p + index) as u64);
+        index = index + 1;
+    }
+
+    return total;
+}
+```
+
+`length()` is the number of elements, as `u64`. `asPtr()` is a read-only pointer `*T` to the
+first element; a slice is a read-only view, so there is no mutable form. Neither takes arguments,
+and a slice has no other method. The receiver is evaluated once.
+
 For practical guidance on when to use fixed-size arrays versus `std::vector::Vector<T>`, and how they relate to `String`, `HashMap`, and `HashSet`, see `docs/STDLIB_DATA_STRUCTURES.md`.
 
 ### 3.9 Range Types

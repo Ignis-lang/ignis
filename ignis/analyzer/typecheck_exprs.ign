@@ -2086,6 +2086,12 @@ export namespace Analyzer {
 
       let receiverType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, objectType);
 
+      if (let Option::SOME(elementType) = Analyzer::Typecheck::sliceElementType(defStore, typeStore, receiverType)) {
+        if (Analyzer::Typecheck::isSliceIntrinsicMethod(&ma.member)) {
+          return Analyzer::Typecheck::checkSliceIntrinsicCall(state, typeStore, callExprId, call, memberExprId, ma, elementType);
+        }
+      }
+
       // An `@extension(T)` function answers `value.name(args)` for a receiver
       // of type `T`, including the primitives no record or enum owns. Owner
       // methods win: the lookup only runs when the receiver has no owner able
@@ -2111,6 +2117,12 @@ export namespace Analyzer {
           extensionDefId,
           objectType,
         );
+      }
+
+      if (Analyzer::Typecheck::sliceElementType(defStore, typeStore, receiverType).isSome()) {
+        let sliceName: String = typeStore.nameOfResolved(receiverType, &*defStore, &*symbols);
+        Analyzer::Typecheck::emitFieldNotFound(state, ma.span, ma.member.toStr(), sliceName.toStr(), "a slice has only the methods length() and asPtr()");
+        return Option::NONE;
       }
 
       let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireMethodOwner(
@@ -3881,6 +3893,68 @@ export namespace Analyzer {
     /// analyzer reports a missing field and a missing method alike, naming the
     /// member and the type it was looked for on; `detail` records which lookup
     /// failed without changing that message.
+    /// The element type of a slice, through aliases; `NONE` for any other type.
+    function sliceElementType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      if (let Option::SOME(Analyzer::Type::Slice(element)) = typeStore.get(resolved.typeId)) {
+        return Option::SOME(element);
+      }
+
+      return Option::NONE;
+    }
+
+    /// The methods every slice answers without an owner: `length()` and `asPtr()`.
+    function isSliceIntrinsicMethod(name: &String): boolean {
+      return name.equals("length") || name.equals("asPtr");
+    }
+
+    /// `slice.length()` is the element count as `u64`; `slice.asPtr()` is a
+    /// read-only pointer to the first element, since a slice is a read-only view.
+    function checkSliceIntrinsicCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      memberExprId: Ast::ExpressionId,
+      ma: &Ast::Expression::MemberAccess,
+      elementType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let memberName: str = ma.member.toStr();
+
+      if (call.typeArguments.length() > 0) {
+        let message: String = `Method '${memberName}' of a slice takes no type arguments`;
+        Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::TYPE_ARGUMENT_COUNT_MISMATCH, message.toStr());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() > 0) {
+        Analyzer::Typecheck::emitArgumentCountMismatch(state, call.span, memberName, 0, call.arguments.length());
+        return Option::NONE;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let mut returnType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::U64);
+
+      if (ma.member.equals("asPtr")) {
+        returnType = typeStoreRef.pointer(elementType);
+      }
+
+      let memberAccessType: Analyzer::TypeId = typeStoreRef.functionType(Vector::new<Analyzer::TypeId>(), returnType);
+      Analyzer::Typecheck::recordExprType(state, memberExprId, memberAccessType);
+      Analyzer::Typecheck::recordExprType(state, callExprId, returnType);
+
+      return Option::SOME(returnType);
+    }
+
     function emitFieldNotFound(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,

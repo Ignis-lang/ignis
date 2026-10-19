@@ -1,0 +1,62 @@
+function sumBytes(bytes: u8[]): u64 {
+  let data: *u8 = bytes.asPtr();
+  let mut total: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bytes.length()) {
+    total = total + (@read<u8>(data + index) as u64);
+    index = index + 1;
+  }
+
+  return total;
+}
+
+function lengthThroughReference(bytes: &u8[]): u64 {
+  return bytes.length();
+}
+
+function countedView(view: u8[], calls: &mut i32): u8[] {
+  *calls = *calls + 1;
+  return view;
+}
+
+function main(): i32 {
+  let fixed: u8[4] = [1, 2, 3, 4];
+  let view: u8[] = fixed;
+
+  if (sumBytes(fixed) != 10) {
+    return 1;
+  }
+
+  if (view.length() != 4 || lengthThroughReference(&view) != 4) {
+    return 2;
+  }
+
+  let tail: u8[] = @sliceFromParts<u8>(view.asPtr() + 2, 2);
+
+  if (tail.length() != 2 || sumBytes(tail) != 7) {
+    return 3;
+  }
+
+  let empty: u8[] = @sliceFromParts<u8>(view.asPtr(), 0);
+
+  if (empty.length() != 0 || sumBytes(empty) != 0) {
+    return 4;
+  }
+
+  let mut calls: i32 = 0;
+  let counted: u64 = countedView(view, &mut calls).length();
+
+  if (counted != 4 || calls != 1) {
+    return 5;
+  }
+
+  calls = 0;
+  let first: u8 = @read<u8>(countedView(view, &mut calls).asPtr());
+
+  if (first != 1 || calls != 1) {
+    return 6;
+  }
+
+  return 0;
+}
