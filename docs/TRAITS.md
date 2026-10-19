@@ -192,7 +192,8 @@ When a record method implements a trait method, the signature must match exactly
 - Parameter types
 - Return type
 
-If a required trait method is missing, compilation fails.
+If a required trait method is missing, compilation fails (A0140), whether the trait is named bare or
+by its path. A method with a default body in the trait is not required.
 
 ### `Send` and `Sync`
 
@@ -280,7 +281,10 @@ satisfy every bound, whether the type argument is written or inferred, and wheth
 a function, a method, a record or an enum:
 
 - A record or enum satisfies a bound by naming the trait in `@implements`. Having methods with the
-  right names is not enough.
+  right names is not enough. A trait declared in a namespace can be named by its path
+  (`@implements(Shapes::Measured)`) or, where it is in scope, by its bare name. Both the
+  `@implements` argument and the bound are matched by their last path segment, so two traits with
+  the same name in different namespaces are not told apart.
 - A type parameter satisfies a bound only when it declares the same bound itself.
 - `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
   by every Copy type, since primitives have no declaration to write `@implements` on.
@@ -581,7 +585,7 @@ record or enum it reports, which overrides the module level for that declaration
 | A0137 | Extension receiver type mismatch | Error |
 | A0138 | Cannot call extension method on literal | Error |
 | A0139 | Cannot call extension method on temporary | Error |
-| A0140 | Trait requires a method that the record does not implement | Error |
+| A0140 | Record or enum names a trait in `@implements` but does not declare one of its required methods | Error |
 | A0141 | Method signature does not match trait definition | Error |
 | A0142 | Unknown trait in `@implements(...)` | Error |
 | A0143 | Traits cannot be declared in `extern` blocks | Error |
