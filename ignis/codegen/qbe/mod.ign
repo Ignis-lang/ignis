@@ -2921,6 +2921,21 @@ export namespace CodegenQbe {
       return;
     };
 
+    // `str` equality compares the bytes up to the terminator, as the C
+    // emitter does.
+    if (CodegenC::isEqualityOperation(&node.op) && CodegenC::isStrOperand(typeStore, function_, &node.left)) {
+      let call: String = CodegenQbe::freshTemp(emitter);
+      let mut compare: str = "ceqw";
+
+      if (node.op == Hir::BinaryOperation::NotEqual) {
+        compare = "cnew";
+      }
+
+      emitter.out.pushStr(`    ${call.toStr()} =w call $strcmp(l ${left.toStr()}, l ${right.toStr()})\n`.toStr());
+      emitter.out.pushStr(`    %t${node.dest.raw()} =w ${compare} ${call.toStr()}, 0\n`.toStr());
+      return;
+    }
+
     let dest: String = `%t${node.dest.raw()}`;
     let mut isCompare: boolean = false;
 
