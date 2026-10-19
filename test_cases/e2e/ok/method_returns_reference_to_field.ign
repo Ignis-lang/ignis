@@ -1,0 +1,61 @@
+// e2e: std
+// `return &self.field` hands out the field's address typed as the declared
+// reference, through `&self`, `&mut self`, a nested field and a generic field.
+import Io from "std::io";
+import String from "std::string";
+
+record Person {
+  public name: String;
+
+  public nameRef(&self): &String {
+    return &self.name;
+  }
+}
+
+record Inner {
+  public label: String;
+}
+
+record Outer {
+  public inner: Inner;
+
+  public label(&self): &String {
+    return &self.inner.label;
+  }
+
+  public labelMut(&mut self): &mut String {
+    return &mut self.inner.label;
+  }
+}
+
+record Wrapper<T> {
+  public value: T;
+
+  public valueRef(&self): &T {
+    return &self.value;
+  }
+}
+
+function nameOf(person: &Person): &String {
+  return &person.name;
+}
+
+function main(): i32 {
+  let person: Person = Person { name: String::create("Ada") };
+  let name: &String = person.nameRef();
+  Io::println(name.toStr());
+  let again: &String = nameOf(&person);
+  Io::println(again.toStr());
+
+  let mut outer: Outer = Outer { inner: Inner { label: String::create("Ada") } };
+  let label: &mut String = outer.labelMut();
+  label.pushStr(" Lovelace");
+  let shown: &String = outer.label();
+  Io::println(shown.toStr());
+
+  let wrapper: Wrapper<String> = Wrapper<String> { value: String::create("boxed") };
+  let inside: &String = wrapper.valueRef();
+  Io::println(inside.toStr());
+
+  return 0;
+}

@@ -1667,6 +1667,106 @@ export namespace LirLowering {
     return Lir::Operand::Temp(dest);
   }
 
+  /// Coerces the lowered value of the HIR node `valueId` to the type of the
+  /// storage it goes into: a fixed array stored into a slice becomes a slice
+  /// over the array, as it does for a `let`, an argument or a return.
+  function coerceValueOfNode(
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    value: Lir::Operand,
+    valueId: Hir::HirId,
+    targetType: Analyzer::TypeId,
+  ): Lir::Operand {
+    let Option::SOME(valueNode) = hirStore.get(valueId) else {
+      return value;
+    };
+
+    return LirLowering::coerceOperandToType(typeStore, function_, state, value, valueNode.typeId, targetType, valueNode.span);
+  }
+
+  /// The field types of the record `recordType` names, in declaration order;
+  /// empty for any other type. Monomorphization leaves only concrete records,
+  /// so the declared types are already the instance's.
+  function recordFieldTypesOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    recordType: Analyzer::TypeId,
+  ): Vector<Analyzer::TypeId> {
+    if (let Option::SOME(typeNode) = typeStore.get(recordType)) {
+      if (let Analyzer::Type::Record(defId) = typeNode) {
+        return Borrowck::recordFieldTypes(defStore, defId);
+      }
+    }
+
+    return Vector::new<Analyzer::TypeId>();
+  }
+
+  /// `&place` lowers to the place's address, a temp typed as a raw pointer to
+  /// the place, while the expression itself is a reference. A returned
+  /// reference is cast back to the declared reference type, the one value
+  /// whose type the verifier compares.
+  function retypePlacePointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operand: Lir::Operand,
+    targetType: Analyzer::TypeId,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let Lir::Operand::Temp(temp) = operand else {
+      return operand;
+    };
+
+    let Option::SOME(tempType) = function_.tempType(temp) else {
+      return operand;
+    };
+
+    let resolvedTarget: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, targetType);
+    let mut targetPointee: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(targetNode) = typeStore.get(resolvedTarget.typeId)) {
+      if (let Analyzer::Type::Reference(reference) = targetNode) {
+        targetPointee = Option::SOME(reference.referent);
+      }
+    }
+
+    let Option::SOME(targetInner) = targetPointee else {
+      return operand;
+    };
+
+    let mut sourcePointee: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(sourceNode) = typeStore.get(tempType)) {
+      if (let Analyzer::Type::Pointer(pointer) = sourceNode) {
+        sourcePointee = Option::SOME(pointer.pointee);
+      }
+    }
+
+    let Option::SOME(sourceInner) = sourcePointee else {
+      return operand;
+    };
+
+    let canonicalSource: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, sourceInner).typeId;
+    let canonicalTarget: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, targetInner).typeId;
+
+    if (canonicalSource.raw() != canonicalTarget.raw()) {
+      return operand;
+    }
+
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, targetType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Cast(Lir::InstrCast {
+      dest: dest,
+      source: operand,
+      targetType: targetType,
+    }));
+
+    return Lir::Operand::Temp(dest);
+  }
+
   /// Maps a HIR literal to a LIR constant. Every numeric width widens into
   /// the Rust model's `Int`/`UInt`/`Float` carriers with the node's own type.
   function constFromLiteral(
@@ -2065,7 +2165,8 @@ export namespace LirLowering {
           // A generic `T` instantiated with `void` still returns its value in
           // the source; the value is evaluated for its effects only.
           let coerced: Lir::Operand = LirLowering::coerceOperandToType(typeStore, function_, state, value, valueType, returnType, valueSpan);
-          let candidate: Option<Lir::Operand> = Option::SOME(coerced);
+          let retyped: Lir::Operand = LirLowering::retypePlacePointer(defStore, typeStore, function_, state, coerced, returnType, valueSpan);
+          let candidate: Option<Lir::Operand> = Option::SOME(retyped);
 
           if (!LirLowering::isVoidType(typeStore, returnType)) {
             returned = candidate;
@@ -2580,15 +2681,22 @@ export namespace LirLowering {
       },
       Hir::HirKind::RecordInit(recordNode) -> {
         let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+        let fieldTypes: Vector<Analyzer::TypeId> = LirLowering::recordFieldTypesOf(defStore, typeStore, nodeType);
 
         let mut fieldOperands: Vector<Lir::InitRecordField> = Vector::new<Lir::InitRecordField>();
         let mut fieldIndex: u64 = 0;
 
         while (fieldIndex < recordNode.fields.length()) {
           if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+            let mut fieldValue: Lir::Operand = LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, function_, state, field.value);
+
+            if (let Option::SOME(fieldType) = fieldTypes.get(field.fieldIndex as u64)) {
+              fieldValue = LirLowering::coerceValueOfNode(typeStore, hirStore, function_, state, fieldValue, field.value, *fieldType);
+            }
+
             fieldOperands.push(Lir::InitRecordField {
               fieldIndex: field.fieldIndex,
-              value: LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, function_, state, field.value),
+              value: fieldValue,
             });
           }
 
@@ -2622,13 +2730,24 @@ export namespace LirLowering {
       },
       Hir::HirKind::EnumVariant(variantNode) -> {
         let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+        let mut payloadTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+        if (let Option::SOME(types) = LirLowering::enumVariantPayloadTypes(defStore, typeStore, nodeType, variantNode.variantTag)) {
+          payloadTypes = types;
+        }
 
         let mut payloadOperands: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
         let mut payloadIndex: u64 = 0;
 
         while (payloadIndex < variantNode.payload.length()) {
           if (let Option::SOME(payloadId) = variantNode.payload.get(payloadIndex)) {
-            payloadOperands.push(LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, function_, state, *payloadId));
+            let mut payloadValue: Lir::Operand = LirLowering::lowerMovedValue(defStore, typeStore, hirStore, dropSchedules, function_, state, *payloadId);
+
+            if (let Option::SOME(payloadType) = payloadTypes.get(payloadIndex)) {
+              payloadValue = LirLowering::coerceValueOfNode(typeStore, hirStore, function_, state, payloadValue, *payloadId, *payloadType);
+            }
+
+            payloadOperands.push(payloadValue);
           }
 
           payloadIndex += 1;
@@ -3811,11 +3930,13 @@ export namespace LirLowering {
         return;
       };
 
+      let stored: Lir::Operand = LirLowering::coerceValueOfNode(typeStore, hirStore, function_, state, value, assignNode.value, targetType);
+
       LirLowering::emitOverwriteDrops(dropSchedules, function_, state, assignId);
 
       LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
         dest: targetSlot,
-        value: value,
+        value: stored,
       }));
 
       return;
@@ -3867,11 +3988,13 @@ export namespace LirLowering {
       return;
     };
 
+    let stored: Lir::Operand = LirLowering::coerceValueOfNode(typeStore, hirStore, function_, state, value, assignNode.value, targetType);
+
     LirLowering::emitFieldOverwriteDrop(dropSchedules, function_, state, assignId, &targetPtr, targetType);
 
     LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
       ptr: targetPtr,
-      value: value,
+      value: stored,
     }));
   }
 

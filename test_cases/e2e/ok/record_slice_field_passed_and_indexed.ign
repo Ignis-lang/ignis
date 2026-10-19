@@ -1,0 +1,89 @@
+// e2e: std
+// A record, a generic record, an enum payload and a tuple hold a slice by
+// value. The slice struct has to be complete before any of them is defined,
+// and a fixed array stored into a slice field, payload or local becomes a
+// slice over it.
+import Io from "std::io";
+import Vector from "std::vector";
+
+record View {
+  public items: i32[];
+  public count: u64;
+}
+
+record Box<T> {
+  public value: T;
+}
+
+enum Holder {
+  EMPTY,
+  FULL(i32[]),
+}
+
+function sum(view: View): i32 {
+  let mut total: i32 = 0;
+  let mut index: u64 = 0;
+
+  while (index < view.count) {
+    total = total + view.items[index];
+    index = index + 1;
+  }
+
+  return total;
+}
+
+function first(view: &View): i32 {
+  return view.items[0];
+}
+
+function secondOf(holder: Holder): i32 {
+  return match (holder) {
+    Holder::FULL(items) -> items[1],
+    Holder::EMPTY -> 0,
+  };
+}
+
+function main(): i32 {
+  let mut values: Vector<i32> = Vector::new<i32>();
+  values.push(1);
+  values.push(2);
+  values.push(3);
+
+  let fromVector: View = View { items: values.toSlice(), count: values.length() };
+  let vectorSum: i32 = sum(fromVector);
+  let vectorFirst: i32 = first(&fromVector);
+  Io::println(vectorSum.toString());
+  Io::println(vectorFirst.toString());
+
+  let data: i32[3] = [4, 5, 6];
+  let fromArray: View = View { items: data, count: 3 };
+  let arraySum: i32 = sum(fromArray);
+  let arrayLast: i32 = fromArray.items[2];
+  Io::println(arraySum.toString());
+  Io::println(arrayLast.toString());
+
+  let slice: i32[] = data;
+  let boxed: Box<i32[]> = Box<i32[]> { value: slice };
+  let boxedLast: i32 = boxed.value[2];
+  let held: Holder = Holder::FULL(slice);
+  let heldSecond: i32 = secondOf(held);
+  let tupleFirst: i32 = match ((slice, 7)) {
+    (items, offset) -> items[0] + offset,
+  };
+  Io::println(boxedLast.toString());
+  Io::println(heldSecond.toString());
+  Io::println(tupleFirst.toString());
+
+  let shorter: i32[2] = [8, 9];
+  let mut reassigned: View = View { items: data, count: 3 };
+  reassigned.items = shorter;
+  reassigned.count = 2;
+  let mut local: i32[] = data;
+  local = shorter;
+  let reassignedSum: i32 = sum(reassigned);
+  let localSecond: i32 = local[1];
+  Io::println(reassignedSum.toString());
+  Io::println(localSecond.toString());
+
+  return 0;
+}
