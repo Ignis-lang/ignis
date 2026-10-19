@@ -11,8 +11,11 @@ import Io from "std::io";
 import Time from "std::time";
 import String from "std::string";
 import RawAllocator from "std::memory";
+import Vector from "std::vector";
 
 import Test from "std::test";
+import Arc, Mutex, MutexGuard from "std::sync";
+import JoinHandle, Thread from "std::thread";
 
 function netTestParseText(text: str): String {
   return match (IpAddress::parse(text)) {
@@ -430,4 +433,188 @@ function readTimeoutExpiresWithWouldBlock(): void {
 
   Test::assert(error.errorKind() == Io::ErrorKind::WOULD_BLOCK);
   Test::assert(server.peerAddress().isOk());
+}
+
+function netTestText(bytes: &Vector<u8>): String {
+  let mut text: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < bytes.length()) {
+    text.pushByte(*bytes.get(index).unwrap());
+    index += 1;
+  }
+
+  return text;
+}
+
+@test
+function readIntoAppendsAfterTheExistingContents(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let mut buffer: Vector<u8> = String::create("kept:").toBytes();
+
+  netTestSend(&mut client, "fresh");
+
+  let Result::OK(read) = server.readInto(&mut buffer, 64) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(read, 5);
+  Test::assertEq<str>(netTestText(&buffer).toStr(), "kept:fresh");
+}
+
+@test
+function readIntoReadsAtMostTheLimit(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let mut buffer: Vector<u8> = Vector::new<u8>();
+
+  netTestSend(&mut client, "abcdefgh");
+
+  let Result::OK(first) = server.readInto(&mut buffer, 3) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(first, 3);
+  Test::assertEq<str>(netTestText(&buffer).toStr(), "abc");
+  Test::assertEq<str>(netTestReceive(&mut server, 5).toStr(), "defgh");
+}
+
+@test
+function readIntoWithAZeroLimitReturnsZero(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let mut buffer: Vector<u8> = String::create("x").toBytes();
+
+  netTestSend(&mut client, "data");
+
+  let Result::OK(read) = server.readInto(&mut buffer, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(read, 0);
+  Test::assertEq<str>(netTestText(&buffer).toStr(), "x");
+  Test::assertEq<str>(netTestReceive(&mut server, 4).toStr(), "data");
+}
+
+@test
+function readIntoReturnsZeroAfterThePeerShutsDownWriting(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let mut buffer: Vector<u8> = String::create("before").toBytes();
+
+  Test::assert(client.shutdown(Shutdown::WRITE).isOk());
+
+  let Result::OK(read) = server.readInto(&mut buffer, 16) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(read, 0);
+  Test::assertEq<str>(netTestText(&buffer).toStr(), "before");
+}
+
+@test
+function readIntoKeepsTheBufferWhenItFails(): void {
+  let listener: TcpListener = netTestListener();
+  let client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let mut buffer: Vector<u8> = String::create("unchanged").toBytes();
+  let capacityBefore: u64 = buffer.capacity();
+
+  Test::assert(server.setNonBlocking(true).isOk());
+
+  let Result::ERROR(error) = server.readInto(&mut buffer, 4096) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::WOULD_BLOCK);
+  Test::assertEq<str>(netTestText(&buffer).toStr(), "unchanged");
+  Test::assertEq<u64>(buffer.capacity(), capacityBefore);
+  Test::assert(client.peerAddress().isOk());
+}
+
+@test
+function writeAllBytesSendsALargePayloadInFull(): void {
+  let listener: TcpListener = netTestListener();
+  let client: Arc<Mutex<TcpStream>> = Arc::new<Mutex<TcpStream>>(Mutex::new<TcpStream>(netTestConnect(netTestPortOf(&listener))));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let total: u64 = 1048576;
+
+  // The writer runs on its own thread so that a host with small socket
+  // buffers makes it wait for the reader instead of blocking this test.
+  let writer: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
+      let mut payload: Vector<u8> = Vector::new<u8>(total);
+      let mut position: u64 = 0;
+
+      while (position < total) {
+        payload.push((position % 251) as u8);
+        position += 1;
+      }
+
+      let mut guard: MutexGuard<TcpStream> = (@move client).get().lock();
+      let stream: &mut TcpStream = guard.get();
+
+      if (stream.writeAllBytes(&payload).isError()) {
+        return false;
+      }
+
+      return stream.shutdown(Shutdown::WRITE).isOk();
+    });
+
+  let mut received: Vector<u8> = Vector::new<u8>();
+
+  while (true) {
+    let Result::OK(read) = server.readInto(&mut received, 65536) else {
+      Test::fail();
+      return;
+    };
+
+    if (read == 0) {
+      break;
+    }
+  }
+
+  Test::assert(writer.join());
+  Test::assertEq<u64>(received.length(), total);
+
+  let mut mismatches: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < total) {
+    if (*received.get(index).unwrap() != (index % 251) as u8) {
+      mismatches += 1;
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<u64>(mismatches, 0);
+}
+
+@test
+function writingAnEmptyVectorSendsNothing(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let empty: Vector<u8> = Vector::new<u8>();
+
+  let Result::OK(sent) = client.writeBytes(&empty) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(sent, 0);
+  Test::assert(client.writeAllBytes(&empty).isOk());
+
+  netTestSend(&mut client, "after");
+  Test::assertEq<str>(netTestReceive(&mut server, 5).toStr(), "after");
 }

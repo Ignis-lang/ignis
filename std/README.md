@@ -263,7 +263,9 @@ function main(): i32 {
 - `TcpListener` — `bind(&address)`, `accept(&self): Result<TcpStream, _>`,
   `localAddress`, `setNonBlocking`. Closes on drop.
 - `TcpStream` — `connect`, `connectTimeout(&address, Time::Duration)`,
-  `read(buf: *mut void, count)`, `write(buf: *void, count)`, `writeAll`, `shutdown`,
+  `read(buf: *mut void, count)`, `readInto(&mut Vector<u8>, limit)` (appends),
+  `write(buf: *void, count)`, `writeAll`, `writeBytes(&Vector<u8>)` / `writeAllBytes`
+  (`u8[]` overloads wait for slice length/pointer access in the compiler), `shutdown`,
   `peerAddress`, `localAddress`, `setNoDelay`, `setReadTimeout` / `setWriteTimeout`
   (`Option<Time::Duration>`), `setNonBlocking`. Closes on drop.
 - Every fallible call returns `Result<_, Io::IoError>`. Sends use `MSG_NOSIGNAL`, so a
