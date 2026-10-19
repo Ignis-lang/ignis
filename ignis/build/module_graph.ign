@@ -2,7 +2,8 @@ import Path from "std::path";
 import String from "std::string";
 import Vector from "std::vector";
 
-import SourceSpan from "@compiler::diagnostics";
+import SourceFile, SourceSpan from "@compiler::diagnostics";
+import ParseOutput from "@compiler::parser";
 
 function moduleGraphPathEquals(left: &Path::PathBuf, right: &Path::PathBuf): boolean {
   let leftText: String = left.toString();
@@ -39,20 +40,38 @@ export record BuildGraphEdge {
   public span: SourceSpan;
 }
 
+/// A module's source as discovery read it, and discovery's parse of it.
+///
+/// Every span in `output` borrows the text of `file.path`, so whoever takes
+/// the two has to keep this `file`, not a clone of it, alive for as long as it
+/// uses the module or its diagnostics. Moving the record keeps them valid.
+export record DiscoveredModule {
+  public file: SourceFile;
+  public output: ParseOutput;
+}
+
 export record BuildGraphNode {
   public path: Path::PathBuf;
   public kind: BuildModuleKind;
   public edges: Vector<BuildGraphEdge>;
+  /// Discovery's parse of the module until `ModuleGraph::takeParsed` hands it
+  /// over. It holds at most one entry: a vector, so that taking it can pop it
+  /// through a mutable borrow.
+  public parsed: Vector<DiscoveredModule>;
 }
 
 export record BuildGraph {
   public nodes: Vector<BuildGraphNode>;
   public rootIndex: Option<u64>;
+  /// How many modules a consumer had to read and parse again because their
+  /// parse had already been taken.
+  public reparsedModules: u64;
 
   public static init(): BuildGraph {
     return BuildGraph {
       nodes: Vector::new<BuildGraphNode>(),
       rootIndex: Option::NONE,
+      reparsedModules: 0,
     };
   }
 
@@ -108,6 +127,7 @@ export namespace ModuleGraph {
         path: path.clone(),
         kind: kind,
         edges: Vector::new<BuildGraphEdge>(),
+        parsed: Vector::new<DiscoveredModule>(),
       });
     }
 
@@ -124,6 +144,27 @@ export namespace ModuleGraph {
 
   function setRoot(graph: &mut BuildGraph, index: u64): void {
     graph.rootIndex = Option::SOME(index);
+  }
+
+  /// Stores discovery's parse of the module at `index`, replacing any earlier
+  /// one.
+  function setParsed(graph: &mut BuildGraph, index: u64, parsed: DiscoveredModule): void {
+    let Option::SOME(node) = graph.nodes.getMut(index) else {
+      return;
+    };
+
+    node.parsed.clear();
+    node.parsed.push(parsed);
+  }
+
+  /// Hands over discovery's parse of the module at `index`, leaving the node
+  /// without one. `NONE` once it has been taken.
+  function takeParsed(graph: &mut BuildGraph, index: u64): Option<DiscoveredModule> {
+    let Option::SOME(node) = graph.nodes.getMut(index) else {
+      return Option::NONE;
+    };
+
+    return node.parsed.pop();
   }
 
   function addEdge(

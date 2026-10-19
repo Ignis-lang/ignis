@@ -10,7 +10,7 @@ import Test from "std::test";
 import Text from "std::text";
 import Vector from "std::vector";
 
-import BuildOverrides, Resolver from "../build/resolver";
+import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
 import
@@ -649,8 +649,10 @@ function analysisPlacesTheParseErrorOfAnImportingModule(): void {
   Test::assertEq<u64>(diagnostic.start.character, 16);
 }
 
+/// Analysis reads every module from what discovery read, so a module deleted
+/// after discovery is still analyzed, and no module is parsed twice.
 @test
-function analysisReportsAModuleThatVanishedAfterDiscovery(): void {
+function analysisUsesTheDiscoveredTextOfAModuleThatVanishedAfterDiscovery(): void {
   let directory: Path::PathBuf = lspTestDirectory("vanished");
   let helper: Path::PathBuf = lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
   let path: Path::PathBuf = lspTestWrite(
@@ -662,22 +664,21 @@ function analysisReportsAModuleThatVanishedAfterDiscovery(): void {
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.stdPath = lspTestStdPath();
 
-  let Result::OK(discovery) = Resolver::discover(&path, &overrides, false) else {
+  let Result::OK(discovered) = Resolver::discover(&path, &overrides, false) else {
     Test::fail();
     return;
   };
+  let mut discovery: DiscoveryResult = discovered;
 
   if (let Result::ERROR(_) = Fs::removeFile(&helper)) {
     Test::fail();
     return;
   }
 
-  let files: Vector<FileDiagnostics> = analyzeDiscovered(&discovery, &path, &sources);
-  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&files, &path);
+  let files: Vector<FileDiagnostics> = analyzeDiscovered(&mut discovery, &path, &sources);
 
-  Test::assertEq<str>(diagnostic.code.toStr(), "B2001");
-  Test::assertEq<boolean>(diagnostic.message.startsWith("analysis stopped: cannot read source file: "), true);
-  Test::assertEq<u64>(diagnostic.start.line, 0);
+  Test::assertEq<u64>(files.length(), 0);
+  Test::assertEq<u64>(discovery.graph.reparsedModules, 0);
 }
 
 /// A `didOpen` notification body for `path` holding `text`, which must

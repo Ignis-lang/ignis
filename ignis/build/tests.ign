@@ -5,7 +5,8 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import ParseOutput, Parser from "@compiler::parser";
 
 import
   BuildArtifacts,
@@ -15,7 +16,9 @@ import
   singleFileArtifacts,
 from "./artifacts";
 import BuildFingerprint, fingerprintEquals, fingerprintSerialize from "./fingerprint";
+import DiscoveredModule from "./module_graph";
 import BuildOverrides, DiscoveryResult, Resolver from "./resolver";
+import SourceOverrides from "./sources";
 import stampProgramFingerprint from "./stamp";
 import Backends from "./backend";
 
@@ -388,4 +391,179 @@ function driverFingerprintSeparatesLinkers(): void {
   Test::assertEq<boolean>(fingerprintEquals(&moldFingerprint, &bfdFingerprint), false);
   Test::assert(!driverContains(systemFingerprint.cc.toStr(), "fuse-ld"));
   Test::assert(driverContains(moldFingerprint.cc.toStr(), "-fuse-ld=mold"));
+}
+
+/// A `std = false` project whose entry imports `./helper`, with the two
+/// sources the caller picks.
+function driverWriteImportProject(root: &Path::PathBuf, mainText: str, helperText: str): void {
+  let srcDir: Path::PathBuf = root.join("src");
+  driverEnsureDir(&srcDir);
+
+  let configPath: Path::PathBuf = root.join("ignis.toml");
+  let mainPath: Path::PathBuf = srcDir.join("main.ign");
+  let helperPath: Path::PathBuf = srcDir.join("helper.ign");
+  driverWriteText(
+    &configPath,
+    "[package]\nname = \"discovery-parse-test\"\nversion = \"0.1.0\"\n\n[ignis]\nstd = false\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n",
+  );
+  driverWriteText(&mainPath, mainText);
+  driverWriteText(&helperPath, helperText);
+}
+
+/// The diagnostics of both bags of `output`, each checked to point at
+/// `file`'s own path, counted.
+function driverCountDiagnosticsAgainst(output: &ParseOutput, file: &SourceFile): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < output.lexDiagnostics.length()) {
+    if (let Option::SOME(diagnostic) = output.lexDiagnostics.get(index)) {
+      Test::assertEq<str>(diagnostic.primarySpan.filePath, file.path.asStr());
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < output.parseDiagnostics.length()) {
+    if (let Option::SOME(diagnostic) = output.parseDiagnostics.get(index)) {
+      Test::assertEq<str>(diagnostic.primarySpan.filePath, file.path.asStr());
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Discovery hands every module over already parsed, with diagnostics that
+/// point at the module's own file, as many as a fresh parse of it reports,
+/// and without parsing any module again.
+@test
+function driverDiscoveryHandsOverEachModuleParsedAgainstItsOwnPath(): void {
+  let root: Path::PathBuf = driverTestRoot("discovery_parse");
+  driverWriteImportProject(
+    &root,
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value()\n}\n",
+    "export function value(): i32 {\n  return 1 +;\n}\n",
+  );
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let Result::OK(discovered) = Resolver::discover(&root, &overrides, false) else {
+    Test::fail();
+    return;
+  };
+  let mut discovery: DiscoveryResult = discovered;
+  let sources: SourceOverrides = SourceOverrides::none();
+  let mut modulesWithDiagnostics: u64 = 0;
+  let mut orderIndex: u64 = 0;
+
+  Test::assertEq<u64>(discovery.order.length(), 2);
+
+  while (orderIndex < discovery.order.length()) {
+    let mut nodeIndex: u64 = 0;
+    let mut nodePath: String = String::new();
+
+    {
+      let Option::SOME(nodeIndexRef) = discovery.order.get(orderIndex) else {
+        Test::fail();
+        return;
+      };
+      let Option::SOME(pathText) = discovery.graph.nodePathText(*nodeIndexRef) else {
+        Test::fail();
+        return;
+      };
+
+      nodeIndex = *nodeIndexRef;
+      nodePath = pathText;
+    }
+
+    let Option::SOME(parsed) = Resolver::takeParsedModule(&mut discovery, nodeIndex, &sources) else {
+      Test::fail();
+      return;
+    };
+
+    Test::assertEq<str>(parsed.file.path.asStr(), nodePath.toStr());
+
+    let handedOver: u64 = driverCountDiagnosticsAgainst(&parsed.output, &parsed.file);
+    let fresh: ParseOutput = Parser::parseFileWithFlags(&parsed.file, &discovery.flags);
+    Test::assertEq<u64>(handedOver, fresh.lexDiagnostics.length() + fresh.parseDiagnostics.length());
+
+    if (handedOver > 0) {
+      modulesWithDiagnostics += 1;
+    }
+
+    orderIndex += 1;
+  }
+
+  Test::assertEq<u64>(modulesWithDiagnostics, 2);
+  Test::assertEq<u64>(discovery.graph.reparsedModules, 0);
+}
+
+/// A module whose parse was already taken is read and parsed again, and
+/// counted as such.
+@test
+function driverDiscoveryParsesATakenModuleAgain(): void {
+  let root: Path::PathBuf = driverTestRoot("discovery_reparse");
+  driverWriteImportProject(
+    &root,
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+    "export function value(): i32 {\n  return 1;\n}\n",
+  );
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let Result::OK(discovered) = Resolver::discover(&root, &overrides, false) else {
+    Test::fail();
+    return;
+  };
+  let mut discovery: DiscoveryResult = discovered;
+  let sources: SourceOverrides = SourceOverrides::none();
+
+  let first: Option<DiscoveredModule> = Resolver::takeParsedModule(&mut discovery, 0, &sources);
+  Test::assertEq<u64>(discovery.graph.reparsedModules, 0);
+
+  let second: Option<DiscoveredModule> = Resolver::takeParsedModule(&mut discovery, 0, &sources);
+  Test::assertEq<u64>(discovery.graph.reparsedModules, 1);
+
+  let Option::SOME(firstModule) = first else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(secondModule) = second else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(secondModule.file.path.asStr(), firstModule.file.path.asStr());
+  Test::assertEq<u64>(secondModule.output.module.roots.length(), firstModule.output.module.roots.length());
+}
+
+/// A module that resolves but cannot be read still fails discovery.
+@test
+function driverDiscoveryReportsAnUnreadableModule(): void {
+  let root: Path::PathBuf = driverTestRoot("discovery_unreadable");
+  let srcDir: Path::PathBuf = root.join("src");
+  driverWriteImportProject(
+    &root,
+    "import value from \"./other\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+    "export function value(): i32 {\n  return 1;\n}\n",
+  );
+  let unreadable: Path::PathBuf = srcDir.join("other.ign");
+  driverEnsureDir(&unreadable);
+
+  let overrides: BuildOverrides = BuildOverrides::none();
+  let Result::ERROR(diagnostics) = Resolver::discover(&root, &overrides, false) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(diagnostic) = diagnostics.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, "B2001");
+  Test::assertEq<str>(diagnostic.messageText(), "module source could not be read");
 }

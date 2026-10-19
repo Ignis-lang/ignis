@@ -525,7 +525,7 @@ function parseErrorProject(label: str, entryText: str, helperText: str): Path::P
 /// What a check of the project at `root` renders, without its styling.
 function parseErrorReport(root: &Path::PathBuf): String {
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(root, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discover(root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -534,7 +534,7 @@ function parseErrorReport(root: &Path::PathBuf): String {
   };
   let file: SourceFile = SourceFile::create("", "");
   let options: CompileOptions = CompileOptions::build(false);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
 
   Test::assert(compiled.errors > 0);
 
@@ -576,7 +576,7 @@ function parseErrorInAnImportingModuleReportsOnlyItsParseErrors(): void {
     "import other from \"./other\";\n\nexport namespace Helper {\n  function value(): u64 {\n    let from: u64 = other();\n\n    return from;\n  }\n}\n",
   );
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -585,7 +585,7 @@ function parseErrorInAnImportingModuleReportsOnlyItsParseErrors(): void {
   };
   let file: SourceFile = SourceFile::create("", "");
   let options: CompileOptions = CompileOptions::build(false);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
   let report: String = stripAnsiEscapes(&compiled.report);
 
   Test::assertEq<u64>(compiled.errors, 2);
@@ -606,7 +606,7 @@ function parseErrorBesideAMissingImportStaysVisible(): void {
     "import absent from \"./absent\";\n\nexport namespace Helper {\n  function value(): u64 {\n    let from: u64 = absent();\n\n    return from;\n  }\n}\n",
   );
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -615,7 +615,7 @@ function parseErrorBesideAMissingImportStaysVisible(): void {
   };
   let file: SourceFile = SourceFile::create("", "");
   let options: CompileOptions = CompileOptions::build(false);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
   let report: String = stripAnsiEscapes(&compiled.report);
 
   Test::assertEq<u64>(compiled.errors, 2);

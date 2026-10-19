@@ -1,4 +1,3 @@
-import Ast from "@compiler::ast";
 import
   Diagnostic,
   DiagnosticBag,
@@ -7,7 +6,7 @@ import
   SourceFile,
   SourceSpan,
 from "@compiler::diagnostics";
-import CompileFlags, Parser from "@compiler::parser";
+import CompileFlags, ParseOutput, Parser from "@compiler::parser";
 import AliasBinding, Config, ResolvedProject from "@compiler::config";
 
 import Env from "std::env";
@@ -18,7 +17,7 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import BuildGraph, BuildModuleKind, ModuleGraph from "./module_graph";
+import BuildGraph, BuildModuleKind, DiscoveredModule, ModuleGraph from "./module_graph";
 import Manifest, StdManifest, StdManifestHeader, StdManifestModule from "./manifest";
 import Backends from "./backend";
 import SourceOverrides from "./sources";
@@ -140,9 +139,9 @@ export record DiscoveryResult {
   /// Absolute std root the project resolved to, so later build stages can
   /// locate the runtime headers and archive without re-reading the config.
   public stdRoot: Path::PathBuf;
-  /// Compile-time configuration discovery parsed the project with. The build
-  /// has to parse every module again with the same one, or the two passes
-  /// would disagree on which branches exist.
+  /// Compile-time configuration discovery parsed the project with. A module
+  /// parsed again, when its discovery parse was already taken, has to use the
+  /// same one, or the two parses would disagree on which branches exist.
   public flags: CompileFlags;
   /// `[build] opt_level` from the project file, handed to the C toolchain as
   /// `-O<level>` so the level never depends on the host driver's own default.
@@ -1240,7 +1239,11 @@ function resolverResolveImport(
   });
 }
 
+/// Reads and parses the module at `path`, stores the parse on `graph`'s node
+/// `nodeIndex` for the build to take, and returns the imports it recovered.
 function resolverExtractImports(
+  graph: &mut BuildGraph,
+  nodeIndex: u64,
   path: &Path::PathBuf,
   flags: &CompileFlags,
   sources: &SourceOverrides,
@@ -1256,27 +1259,24 @@ function resolverExtractImports(
 
   let sourceFile: SourceFile = SourceFile {
     path: path.clone(),
-    text: sourceText.clone(),
+    text: sourceText,
   };
-  let mut module: Ast::Module = Ast::Module::init();
-  let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
 
-  // Parse diagnostics do not stop discovery, which does not report them: their
-  // spans borrow this function's `sourceFile`, and the driver would render
-  // them against the entry instead of this module. The parse phase parses the
-  // module again, recovers the same imports this parse does, which are the
-  // ones followed below, and reports the diagnostics against the module's own
-  // file before anything is analyzed.
-  Parser::parseIntoWithFlags(&sourceFile, &mut module, &mut diagnostics, flags);
+  // Parse diagnostics do not stop discovery, which does not report them: the
+  // driver would render them against the entry instead of this module. The
+  // parse is kept on the module's node with its `sourceFile`, which its spans
+  // borrow, and the parse phase takes both and reports the diagnostics against
+  // the module's own file before anything is analyzed.
+  let output: ParseOutput = Parser::parseFileWithFlags(&sourceFile, flags);
 
   let mut imports: Vector<ParsedImport> = Vector::new<ParsedImport>();
   let mut rootIndex: u64 = 0;
 
-  while (rootIndex < module.roots.length()) {
-    let Option::SOME(itemId) = module.roots.get(rootIndex) else {
+  while (rootIndex < output.module.roots.length()) {
+    let Option::SOME(itemId) = output.module.roots.get(rootIndex) else {
       break;
     };
-    let Option::SOME(item) = module.items.get(*itemId) else {
+    let Option::SOME(item) = output.module.items.get(*itemId) else {
       rootIndex += 1;
       continue;
     };
@@ -1310,9 +1310,12 @@ function resolverExtractImports(
     rootIndex += 1;
   }
 
+  let hasParseDiagnostics: boolean = !output.lexDiagnostics.isEmpty() || !output.parseDiagnostics.isEmpty();
+  ModuleGraph::setParsed(graph, nodeIndex, DiscoveredModule { file: sourceFile, output: output });
+
   return Result::OK(ExtractedImports {
     imports: imports,
-    hasParseDiagnostics: !diagnostics.isEmpty(),
+    hasParseDiagnostics: hasParseDiagnostics,
   });
 }
 
@@ -1341,7 +1344,7 @@ function resolverDiscoverModule(
   let mut stackRef: &mut Vector<Path::PathBuf> = stack;
   stackRef.push(currentPath.clone());
 
-  let extracted: ExtractedImports = resolverExtractImports(currentPath, &project.flags, &project.sources)!;
+  let extracted: ExtractedImports = resolverExtractImports(graph, currentIndex, currentPath, &project.flags, &project.sources)!;
   let mut importIndex: u64 = 0;
 
   while (importIndex < extracted.imports.length()) {
@@ -2064,6 +2067,33 @@ export namespace Resolver {
     let project: ResolverProject = resolverSingleFileProject(startPath, overrides)!;
     let manifest: StdManifest = Manifest::loadFile(&project.stdManifestPath)!;
     return resolverDiscoverDocRoots(&project, &manifest);
+  }
+
+  /// Hands over discovery's parse of node `nodeIndex`. When it was already
+  /// taken, the module is read through `sources` and parsed again with the
+  /// flags discovery used, and `graph.reparsedModules` counts it. `NONE` when
+  /// the node does not exist or its source cannot be read.
+  function takeParsedModule(
+    discovery: &mut DiscoveryResult,
+    nodeIndex: u64,
+    sources: &SourceOverrides,
+  ): Option<DiscoveredModule> {
+    if (let Option::SOME(parsed) = ModuleGraph::takeParsed(&mut discovery.graph, nodeIndex)) {
+      return Option::SOME(parsed);
+    }
+
+    let Option::SOME(node) = discovery.graph.nodes.get(nodeIndex) else {
+      return Option::NONE;
+    };
+    let Result::OK(sourceText) = sources.read(&node.path) else {
+      return Option::NONE;
+    };
+
+    let file: SourceFile = SourceFile { path: node.path.clone(), text: sourceText };
+    let output: ParseOutput = Parser::parseFileWithFlags(&file, &discovery.flags);
+    discovery.graph.reparsedModules += 1;
+
+    return Option::SOME(DiscoveredModule { file: file, output: output });
   }
 
   function orderSummaryRelativeTo(discovery: &DiscoveryResult, root: &Path::PathBuf): String {
