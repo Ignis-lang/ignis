@@ -1,0 +1,433 @@
+import
+  IpAddress,
+  Ipv4Address,
+  Ipv6Address,
+  Shutdown,
+  SocketAddress,
+  TcpListener,
+  TcpStream,
+from "std::net";
+import Io from "std::io";
+import Time from "std::time";
+import String from "std::string";
+import RawAllocator from "std::memory";
+
+import Test from "std::test";
+
+function netTestParseText(text: str): String {
+  return match (IpAddress::parse(text)) {
+    Result::OK(address) -> address.toString(),
+    Result::ERROR(_) -> String::create("<invalid>"),
+  };
+}
+
+function netTestAssertInvalidAddress(text: str): void {
+  let Result::ERROR(error) = IpAddress::parse(text) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::INVALID_INPUT);
+}
+
+function netTestLoopback(port: u16): SocketAddress {
+  return SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
+}
+
+/// A listener on an ephemeral loopback port.
+function netTestListener(): TcpListener {
+  let address: SocketAddress = netTestLoopback(0);
+
+  return TcpListener::bind(&address).unwrap();
+}
+
+function netTestPortOf(listener: &TcpListener): u16 {
+  return match (listener.localAddress()) {
+    Result::OK(address) -> address.port(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return 0;
+    },
+  };
+}
+
+/// A loopback port that had a listener a moment ago and has none now.
+function netTestClosedPort(): u16 {
+  let listener: TcpListener = netTestListener();
+
+  return netTestPortOf(&listener);
+}
+
+function netTestConnect(port: u16): TcpStream {
+  let address: SocketAddress = netTestLoopback(port);
+
+  return TcpStream::connect(&address).unwrap();
+}
+
+function netTestAccept(listener: &TcpListener): TcpStream {
+  return listener.accept().unwrap();
+}
+
+function netTestSend(stream: &mut TcpStream, text: str): void {
+  let message: String = String::create(text);
+
+  let Result::OK(_) = stream.writeAll(message.toStr() as *u8 as *void, message.length()) else {
+    Test::fail();
+    return;
+  };
+}
+
+/// Reads exactly `count` bytes from `stream` as text.
+function netTestReceive(stream: &mut TcpStream, count: u64): String {
+  let mut received: String = String::new();
+  let buffer: *mut u8 = RawAllocator::allocateZeroedAligned(1, 64, 1);
+
+  while (received.length() < count) {
+    let wanted: u64 = count - received.length();
+    let chunk: u64 = wanted < 64 ? wanted : 64;
+    let read: i64 = match (stream.read(buffer as *mut void, chunk)) {
+      Result::OK(bytes) -> bytes,
+      Result::ERROR(_) -> -1,
+    };
+
+    if (read <= 0) {
+      RawAllocator::free(buffer);
+      Test::fail();
+      return received;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < read as u64) {
+      received.pushByte(buffer[index]);
+      index += 1;
+    }
+  }
+
+  RawAllocator::free(buffer);
+  return received;
+}
+
+@test
+function parsesAndFormatsIpv4Addresses(): void {
+  Test::assertEq<str>(netTestParseText("127.0.0.1").toStr(), "127.0.0.1");
+  Test::assertEq<str>(netTestParseText("0.0.0.0").toStr(), "0.0.0.0");
+  Test::assertEq<str>(netTestParseText("255.255.255.255").toStr(), "255.255.255.255");
+  Test::assertEq<str>(netTestParseText("192.168.1.20").toStr(), "192.168.1.20");
+}
+
+@test
+function ipv4AddressExposesItsOctets(): void {
+  let address: Ipv4Address = Ipv4Address::create(10, 20, 30, 40);
+
+  Test::assertEq<u8>(address.octet(0), 10);
+  Test::assertEq<u8>(address.octet(3), 40);
+  Test::assertEq<u32>(address.bits(), 169090600);
+}
+
+@test
+function rejectsInvalidIpv4Addresses(): void {
+  netTestAssertInvalidAddress("");
+  netTestAssertInvalidAddress("1.2.3");
+  netTestAssertInvalidAddress("1.2.3.4.5");
+  netTestAssertInvalidAddress("256.0.0.1");
+  netTestAssertInvalidAddress("1..2.3");
+  netTestAssertInvalidAddress("01.2.3.4");
+  netTestAssertInvalidAddress("1.2.3.4 ");
+  netTestAssertInvalidAddress("a.b.c.d");
+  netTestAssertInvalidAddress("localhost");
+}
+
+@test
+function parsesAndFormatsIpv6Addresses(): void {
+  Test::assertEq<str>(netTestParseText("::").toStr(), "::");
+  Test::assertEq<str>(netTestParseText("::1").toStr(), "::1");
+  Test::assertEq<str>(netTestParseText("2001:db8::1").toStr(), "2001:db8::1");
+  Test::assertEq<str>(netTestParseText("2001:0DB8:0000:0000:0000:0000:0000:0001").toStr(), "2001:db8::1");
+  Test::assertEq<str>(netTestParseText("fe80::").toStr(), "fe80::");
+  Test::assertEq<str>(netTestParseText("1:2:3:4:5:6:7:8").toStr(), "1:2:3:4:5:6:7:8");
+  Test::assertEq<str>(netTestParseText("1:0:0:2:0:0:0:3").toStr(), "1:0:0:2::3");
+  Test::assertEq<str>(netTestParseText("1:0:2:3:4:5:6:7").toStr(), "1:0:2:3:4:5:6:7");
+  Test::assertEq<str>(netTestParseText("::ffff:192.0.2.1").toStr(), "::ffff:192.0.2.1");
+}
+
+@test
+function ipv6AddressExposesItsSegments(): void {
+  let address: Ipv6Address = Ipv6Address::create(8193, 3512, 0, 0, 0, 0, 0, 1);
+
+  Test::assertEq<u16>(address.segment(0), 8193);
+  Test::assertEq<u16>(address.segment(1), 3512);
+  Test::assertEq<u16>(address.segment(7), 1);
+  Test::assertEq<str>(IpAddress::V6(address).toString().toStr(), "2001:db8::1");
+}
+
+@test
+function rejectsInvalidIpv6Addresses(): void {
+  netTestAssertInvalidAddress(":");
+  netTestAssertInvalidAddress(":::");
+  netTestAssertInvalidAddress("1::2::3");
+  netTestAssertInvalidAddress("1:2:3:4:5:6:7:8:9");
+  netTestAssertInvalidAddress("1:2:3:4:5:6:7");
+  netTestAssertInvalidAddress("12345::");
+  netTestAssertInvalidAddress("g::1");
+  netTestAssertInvalidAddress("1:");
+  netTestAssertInvalidAddress(":1");
+  netTestAssertInvalidAddress("::1.2.3");
+  netTestAssertInvalidAddress("[::1]");
+}
+
+@test
+function ipAddressesCompareByValue(): void {
+  let first: IpAddress = IpAddress::v4(127, 0, 0, 1);
+  let second: IpAddress = IpAddress::v4(127, 0, 0, 1);
+  let other: IpAddress = IpAddress::v4(127, 0, 0, 2);
+
+  Test::assert(first.equals(&second));
+  Test::assert(!first.equals(&other));
+  Test::assert(first.isIpv4());
+  Test::assert(first.isLoopback());
+}
+
+@test
+function formatsSocketAddresses(): void {
+  let ipv4: SocketAddress = SocketAddress::create(IpAddress::v4(10, 0, 0, 1), 8080);
+  let ipv6: SocketAddress = SocketAddress::create(IpAddress::V6(Ipv6Address::create(0, 0, 0, 0, 0, 0, 0, 1)), 443);
+
+  Test::assertEq<str>(ipv4.toString().toStr(), "10.0.0.1:8080");
+  Test::assertEq<str>(ipv6.toString().toStr(), "[::1]:443");
+  Test::assertEq<u16>(ipv4.port(), 8080);
+}
+
+@test
+function parsesSocketAddresses(): void {
+  let Result::OK(ipv4) = SocketAddress::parse("127.0.0.1:65535") else {
+    Test::fail();
+    return;
+  };
+  let Result::OK(ipv6) = SocketAddress::parse("[2001:db8::1]:80") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(ipv4.toString().toStr(), "127.0.0.1:65535");
+  Test::assertEq<str>(ipv6.toString().toStr(), "[2001:db8::1]:80");
+  Test::assert(SocketAddress::parse("127.0.0.1").isError());
+  Test::assert(SocketAddress::parse("127.0.0.1:65536").isError());
+  Test::assert(SocketAddress::parse("127.0.0.1:").isError());
+  Test::assert(SocketAddress::parse("::1:80").isError());
+  Test::assert(SocketAddress::parse("[::1]80").isError());
+}
+
+@test
+function listenerReportsTheBoundEphemeralPort(): void {
+  let listener: TcpListener = netTestListener();
+  let Result::OK(local) = listener.localAddress() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(local.port() != 0);
+  Test::assertEq<str>(local.ip().toString().toStr(), "127.0.0.1");
+}
+
+@test
+function loopbackStreamsCarryBytesBothWays(): void {
+  let listener: TcpListener = netTestListener();
+  let port: u16 = netTestPortOf(&listener);
+  let mut client: TcpStream = netTestConnect(port);
+  let mut server: TcpStream = netTestAccept(&listener);
+
+  netTestSend(&mut client, "ping from the client");
+  Test::assertEq<str>(netTestReceive(&mut server, 20).toStr(), "ping from the client");
+
+  netTestSend(&mut server, "pong");
+  Test::assertEq<str>(netTestReceive(&mut client, 4).toStr(), "pong");
+
+  let Result::OK(peer) = server.peerAddress() else {
+    Test::fail();
+    return;
+  };
+  let Result::OK(clientLocal) = client.localAddress() else {
+    Test::fail();
+    return;
+  };
+  let Result::OK(clientPeer) = client.peerAddress() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(peer.toString().toStr(), clientLocal.toString().toStr());
+  Test::assertEq<u16>(clientPeer.port(), port);
+}
+
+@test
+function readReturnsZeroAfterThePeerShutsDownWriting(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let mut server: TcpStream = netTestAccept(&listener);
+  let mut buffer: u64 = 0;
+
+  let Result::OK(_) = client.shutdown(Shutdown::WRITE) else {
+    Test::fail();
+    return;
+  };
+  let Result::OK(read) = server.read((&mut buffer) as *mut void, 8) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i64>(read, 0);
+}
+
+@test
+function streamOptionsCanBeSet(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+
+  Test::assert(client.setNoDelay(true).isOk());
+  Test::assert(client.setWriteTimeout(Option::SOME(Time::Duration::fromMillis(500))).isOk());
+  Test::assert(client.setWriteTimeout(Option::NONE).isOk());
+  Test::assert(client.setNonBlocking(false).isOk());
+
+  let Result::ERROR(error) = client.setReadTimeout(Option::SOME(Time::Duration::fromSeconds(0))) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::INVALID_INPUT);
+}
+
+@test
+function acceptOnANonBlockingListenerWithNothingPendingWouldBlock(): void {
+  let mut listener: TcpListener = netTestListener();
+
+  Test::assert(listener.setNonBlocking(true).isOk());
+
+  let Result::ERROR(error) = listener.accept() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::WOULD_BLOCK);
+}
+
+@test
+function connectingToAClosedPortIsRefused(): void {
+  let port: u16 = netTestClosedPort();
+  let address: SocketAddress = netTestLoopback(port);
+
+  let Result::ERROR(error) = TcpStream::connect(&address) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::CONNECTION_REFUSED);
+}
+
+@test
+function connectTimeoutReachesAListener(): void {
+  let listener: TcpListener = netTestListener();
+  let address: SocketAddress = netTestLoopback(netTestPortOf(&listener));
+
+  let Result::OK(connected) = TcpStream::connectTimeout(&address, Time::Duration::fromSeconds(2)) else {
+    Test::fail();
+    return;
+  };
+  let mut client: TcpStream = connected;
+  let mut server: TcpStream = netTestAccept(&listener);
+
+  // The stream is blocking again once connected.
+  netTestSend(&mut client, "after connect");
+  Test::assertEq<str>(netTestReceive(&mut server, 13).toStr(), "after connect");
+}
+
+@test
+function connectTimeoutReportsARefusedConnection(): void {
+  let port: u16 = netTestClosedPort();
+  let address: SocketAddress = netTestLoopback(port);
+
+  let Result::ERROR(error) = TcpStream::connectTimeout(&address, Time::Duration::fromSeconds(2)) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::CONNECTION_REFUSED);
+}
+
+@test
+function bindingAPortTwiceReportsAddressInUse(): void {
+  let listener: TcpListener = netTestListener();
+  let address: SocketAddress = netTestLoopback(netTestPortOf(&listener));
+
+  let Result::ERROR(error) = TcpListener::bind(&address) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::ADDRESS_IN_USE);
+}
+
+@test
+function bindingAnAddressThisHostDoesNotOwnIsReported(): void {
+  // 192.0.2.0/24 is reserved for documentation (RFC 5737), so no host owns it.
+  let address: SocketAddress = SocketAddress::create(IpAddress::v4(192, 0, 2, 1), 0);
+
+  let Result::ERROR(error) = TcpListener::bind(&address) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::ADDRESS_NOT_AVAILABLE);
+}
+
+@test
+function writingToAClosedPeerReturnsAnErrorInsteadOfRaisingSigpipe(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let server: TcpStream = netTestAccept(&listener);
+  let chunk: String = String::create("data for a peer that has gone away");
+  let mut attempts: u64 = 0;
+  let mut failure: Option<Io::IoError> = Option::NONE;
+
+  // Dropping the accepted stream closes it. The first write after that is
+  // answered with a reset; the next one fails with EPIPE, which raises SIGPIPE
+  // unless the send passes MSG_NOSIGNAL.
+  {
+    let closed: TcpStream = server;
+  }
+
+  while (attempts < 64 && failure.isNone()) {
+    if (let Result::ERROR(error) = client.writeAll(chunk.toStr() as *u8 as *void, chunk.length())) {
+      failure = Option::SOME(error);
+    }
+
+    attempts += 1;
+  }
+
+  let Option::SOME(error) = failure else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(
+    error.errorKind() == Io::ErrorKind::BROKEN_PIPE || error.errorKind() == Io::ErrorKind::CONNECTION_RESET
+  );
+}
+
+@test
+function readTimeoutExpiresWithWouldBlock(): void {
+  let listener: TcpListener = netTestListener();
+  let mut client: TcpStream = netTestConnect(netTestPortOf(&listener));
+  let server: TcpStream = netTestAccept(&listener);
+  let mut buffer: u64 = 0;
+
+  Test::assert(client.setReadTimeout(Option::SOME(Time::Duration::fromMillis(50))).isOk());
+
+  let Result::ERROR(error) = client.read((&mut buffer) as *mut void, 8) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(error.errorKind() == Io::ErrorKind::WOULD_BLOCK);
+  Test::assert(server.peerAddress().isOk());
+}

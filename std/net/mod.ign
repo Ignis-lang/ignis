@@ -1,0 +1,95 @@
+//!
+//! # Net
+//!
+//! Raw TCP with the conveniences every user needs. Load balancers, proxies and
+//! non-HTTP protocols (Redis, databases, custom binary protocols) build on this
+//! layer directly.
+//!
+//! ## Exports
+//!
+//! | Export          | Description                                                        |
+//! |-----------------|--------------------------------------------------------------------|
+//! | `IpAddress`     | Enum with `V4(Ipv4Address)` and `V6(Ipv6Address)`; `parse`, `toString` |
+//! | `Ipv4Address`   | An IPv4 address; `create`, `parse`, `octet`, `bits`                |
+//! | `Ipv6Address`   | An IPv6 address; `create`, `parse`, `segment`                      |
+//! | `SocketAddress` | An `IpAddress` and a port; `parse`, `toString`                     |
+//! | `TcpListener`   | `bind`, `accept`, `localAddress`, `setNonBlocking`. Closes on drop |
+//! | `TcpStream`     | `connect`, `connectTimeout`, `read`, `write`, `writeAll`, `shutdown`, `peerAddress`, `localAddress`, `setNoDelay`, `setReadTimeout`, `setWriteTimeout`, `setNonBlocking`. Closes on drop |
+//! | `Shutdown`      | `READ`, `WRITE` or `BOTH`, for `TcpStream::shutdown`               |
+//!
+//! ## Errors and timeouts
+//!
+//! Every fallible operation returns `Result<_, Io::IoError>`. Timeouts take
+//! `Time::Duration`; a zero duration is rejected with `INVALID_INPUT`.
+//!
+//! | Situation                                         | `Io::ErrorKind`                      |
+//! |---------------------------------------------------|--------------------------------------|
+//! | Nothing listens at the address `connect` targets  | `CONNECTION_REFUSED`                 |
+//! | `bind` to a port another socket listens on        | `ADDRESS_IN_USE`                     |
+//! | `bind` to an address this host does not own       | `ADDRESS_NOT_AVAILABLE`              |
+//! | Write after the peer closed the connection        | `BROKEN_PIPE` or `CONNECTION_RESET`  |
+//! | `connectTimeout` ran out of time                  | `TIMED_OUT`                          |
+//! | A read or write timeout expired                   | `WOULD_BLOCK`                        |
+//! | Non-blocking socket with nothing to do right now  | `WOULD_BLOCK`                        |
+//! | Malformed address text                            | `INVALID_INPUT`                      |
+//!
+//! A read or write timeout reports `WOULD_BLOCK`, not `TIMED_OUT`, because the
+//! kernel reports an expired `SO_RCVTIMEO` / `SO_SNDTIMEO` as `EAGAIN`.
+//!
+//! ## Behavior
+//!
+//! - Every send passes `MSG_NOSIGNAL`, so writing to a closed peer is an error
+//!   and never raises `SIGPIPE`.
+//! - Sockets are created with `SOCK_CLOEXEC`, and `accept` uses `accept4` with
+//!   `SOCK_CLOEXEC`, so no socket leaks into a child process.
+//! - `accept`, `read`, `write` and `connect` retry on `EINTR`. An interrupted
+//!   `connect` is waited for with `poll`, since calling it again would fail.
+//! - `writeAll` loops over partial writes until every byte is written or a
+//!   write fails.
+//! - `connectTimeout` connects a non-blocking socket, waits with `poll`, reads
+//!   the outcome from `SO_ERROR`, and makes the stream blocking again.
+//! - `read` and `write` take a raw buffer and a byte count, like `Fs::File`.
+//! - Addresses are numeric only; there is no name resolution yet.
+//!
+//! ## Platforms
+//!
+//! Only x86_64 Linux is implemented. The C unit the compiler emits includes a
+//! fixed list of headers that does not declare the socket functions, and an
+//! `extern` declaration emits no prototype, so the socket calls go through
+//! glibc's `syscall(2)` with x86_64 Linux syscall numbers and kernel structure
+//! layouts. All of that lives in `std::net::sys::linux_x86_64`, behind
+//! `@configFlag(@platform("linux") && @arch("x86_64"))`; on any other target
+//! `std::net` does not compile. macOS (which also needs `SO_NOSIGPIPE` instead
+//! of `MSG_NOSIGNAL`, and `FD_CLOEXEC` instead of `accept4`) comes once the
+//! compiler emits extern prototypes or includes the headers a module names.
+//! `UdpSocket` is not part of this slice.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import IpAddress, SocketAddress, TcpListener, TcpStream from "std::net";
+//! import Io from "std::io";
+//!
+//! function echoOnce(listener: &TcpListener): Result<void, Io::IoError> {
+//!   let mut stream: TcpStream = listener.accept()!;
+//!   let mut buffer: u64 = 0;
+//!   let read: i64 = stream.read((&mut buffer) as *mut void, 8)!;
+//!
+//!   return stream.writeAll((&buffer) as *void, read as u64);
+//! }
+//!
+//! function main(): i32 {
+//!   let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 7000);
+//!   let Result::OK(listener) = TcpListener::bind(&address) else {
+//!     return 1;
+//!   };
+//!
+//!   return echoOnce(&listener).isOk() ? 0 : 1;
+//! }
+//! ```
+
+import _ from "std::net::address";
+import _ from "std::net::tcp";
+
+export IpAddress, Ipv4Address, Ipv6Address, SocketAddress from "./address";
+export Shutdown, TcpListener, TcpStream from "./tcp";

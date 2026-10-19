@@ -1,0 +1,616 @@
+//!
+//! # Network addresses
+//!
+//! `IpAddress`, its `Ipv4Address` and `Ipv6Address` payloads, and
+//! `SocketAddress`, with parsing from and formatting to text.
+//!
+//! ## Text forms
+//!
+//! | Form           | Parsed                                              | Formatted                         |
+//! |----------------|-----------------------------------------------------|-----------------------------------|
+//! | IPv4           | Four decimal octets; no leading zeros, no spaces    | `a.b.c.d`                         |
+//! | IPv6           | Up to eight hex groups, one `::`, optional IPv4 tail | RFC 5952: lowercase, longest zero run as `::` |
+//! | Socket, IPv4   | `a.b.c.d:port`                                      | `a.b.c.d:port`                    |
+//! | Socket, IPv6   | `[ipv6]:port`                                       | `[ipv6]:port`                     |
+//!
+//! An IPv4-mapped IPv6 address (`::ffff:0:0/96`) is formatted with its IPv4
+//! tail, as RFC 5952 recommends. Zone identifiers (`%eth0`) are not accepted.
+//! Parsing failures are `Io::ErrorKind::INVALID_INPUT` errors.
+
+import Io from "std::io";
+import Platform from "std::libc::platform";
+import String from "std::string";
+
+function invalidAddress(): Io::IoError {
+  return Io::IoError::fromErrno(Platform::EINVAL);
+}
+
+function isDecimalDigit(byte: u8): boolean {
+  return byte >= 48 && byte <= 57;
+}
+
+/// Value of a hex digit, or 16 when `byte` is not one.
+function hexDigitValue(byte: u8): u16 {
+  if (byte >= 48 && byte <= 57) {
+    return (byte - 48) as u16;
+  }
+
+  if (byte >= 97 && byte <= 102) {
+    return (byte - 87) as u16;
+  }
+
+  if (byte >= 65 && byte <= 70) {
+    return (byte - 55) as u16;
+  }
+
+  return 16;
+}
+
+function byteOf(text: &String, index: u64): u8 {
+  return match (text.byteAt(index)) {
+    Option::SOME(byte) -> byte,
+    Option::NONE -> 0,
+  };
+}
+
+/// Index of the first `byte` at or after `start` in `text`, or `text.length()`.
+function indexOfByte(text: &String, byte: u8, start: u64): u64 {
+  let mut index: u64 = start;
+
+  while (index < text.length()) {
+    if (byteOf(text, index) == byte) {
+      return index;
+    }
+
+    index += 1;
+  }
+
+  return text.length();
+}
+
+/// Parses `text[start..end]` as a dotted-quad IPv4 address.
+function parseIpv4Range(text: &String, start: u64, end: u64): Result<Ipv4Address, Io::IoError> {
+  let mut bits: u32 = 0;
+  let mut parts: u64 = 0;
+  let mut index: u64 = start;
+
+  while (parts < 4) {
+    let mut value: u32 = 0;
+    let mut digits: u64 = 0;
+    let first: u64 = index;
+
+    while (index < end && isDecimalDigit(byteOf(text, index))) {
+      value = value * 10 + (byteOf(text, index) - 48) as u32;
+      digits += 1;
+      index += 1;
+
+      if (digits > 3) {
+        return Result::ERROR(invalidAddress());
+      }
+    }
+
+    if (digits == 0 || value > 255 || (digits > 1 && byteOf(text, first) == 48)) {
+      return Result::ERROR(invalidAddress());
+    }
+
+    bits = (bits << 8) | value;
+    parts += 1;
+
+    if (parts < 4) {
+      if (index >= end || byteOf(text, index) != 46) {
+        return Result::ERROR(invalidAddress());
+      }
+
+      index += 1;
+    }
+  }
+
+  if (index != end) {
+    return Result::ERROR(invalidAddress());
+  }
+
+  return Result::OK(Ipv4Address { bits: bits });
+}
+
+/// Hex groups of one side of an IPv6 address, `text[start..end]`.
+///
+/// An empty range is no groups. When `allowIpv4Tail` is set, the last piece
+/// may be a dotted-quad IPv4 address, which counts as two groups.
+function parseIpv6Groups(
+  text: &String,
+  start: u64,
+  end: u64,
+  allowIpv4Tail: boolean,
+  groups: &mut Vector<u16>,
+): Result<void, Io::IoError> {
+  if (start == end) {
+    return Result::OK(());
+  }
+
+  let mut index: u64 = start;
+
+  while (true) {
+    let pieceEnd: u64 = indexOfByte(text, 58, index) < end ? indexOfByte(text, 58, index) : end;
+    let isLast: boolean = pieceEnd == end;
+
+    if (isLast && allowIpv4Tail && indexOfByte(text, 46, index) < end) {
+      let ipv4: Ipv4Address = parseIpv4Range(text, index, end)!;
+
+      groups.push((ipv4.bits() >> 16) as u16);
+      groups.push((ipv4.bits() & 65535) as u16);
+
+      return Result::OK(());
+    }
+
+    let digits: u64 = pieceEnd - index;
+
+    if (digits == 0 || digits > 4) {
+      return Result::ERROR(invalidAddress());
+    }
+
+    let mut value: u16 = 0;
+
+    while (index < pieceEnd) {
+      let digit: u16 = hexDigitValue(byteOf(text, index));
+
+      if (digit == 16) {
+        return Result::ERROR(invalidAddress());
+      }
+
+      value = (value << 4) | digit;
+      index += 1;
+    }
+
+    groups.push(value);
+
+    if (isLast) {
+      return Result::OK(());
+    }
+
+    index = pieceEnd + 1;
+  }
+
+  return Result::OK(());
+}
+
+function parseIpv6Range(text: &String, start: u64, end: u64): Result<Ipv6Address, Io::IoError> {
+  let mut compression: u64 = end;
+  let mut index: u64 = start;
+
+  while (index + 1 < end) {
+    if (byteOf(text, index) == 58 && byteOf(text, index + 1) == 58) {
+      if (compression != end) {
+        return Result::ERROR(invalidAddress());
+      }
+
+      compression = index;
+      index += 2;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  let mut head: Vector<u16> = Vector::new<u16>();
+  let mut tail: Vector<u16> = Vector::new<u16>();
+
+  if (compression == end) {
+    parseIpv6Groups(text, start, end, true, &mut head)!;
+
+    if (head.length() != 8) {
+      return Result::ERROR(invalidAddress());
+    }
+  } else {
+    parseIpv6Groups(text, start, compression, false, &mut head)!;
+    parseIpv6Groups(text, compression + 2, end, true, &mut tail)!;
+
+    if (head.length() + tail.length() > 7) {
+      return Result::ERROR(invalidAddress());
+    }
+  }
+
+  let mut segments: Vector<u16> = Vector::new<u16>();
+  let mut position: u64 = 0;
+
+  while (position < head.length()) {
+    segments.push(*head.get(position).unwrap());
+    position += 1;
+  }
+
+  while (segments.length() + tail.length() < 8) {
+    segments.push(0);
+  }
+
+  position = 0;
+
+  while (position < tail.length()) {
+    segments.push(*tail.get(position).unwrap());
+    position += 1;
+  }
+
+  let mut high: u64 = 0;
+  let mut low: u64 = 0;
+
+  position = 0;
+
+  while (position < 8) {
+    let segment: u64 = *segments.get(position).unwrap() as u64;
+
+    if (position < 4) {
+      high = (high << 16) | segment;
+    } else {
+      low = (low << 16) | segment;
+    }
+
+    position += 1;
+  }
+
+  return Result::OK(Ipv6Address::fromBits(high, low));
+}
+
+function pushHex(output: &mut String, value: u16): void {
+  let digits: str = "0123456789abcdef";
+  let mut shift: u16 = 12;
+  let mut started: boolean = false;
+
+  while (true) {
+    let digit: u16 = (value >> shift) & 15;
+
+    if (digit != 0 || started || shift == 0) {
+      output.pushByte(@read<u8>((digits as *u8) + digit as u64));
+      started = true;
+    }
+
+    if (shift == 0) {
+      return;
+    }
+
+    shift -= 4;
+  }
+}
+
+/// An IPv4 address.
+export record Ipv4Address {
+  /// The address as a 32-bit number, first octet in the high byte.
+  bits: u32;
+
+  /// The address `a.b.c.d`.
+  public static create(a: u8, b: u8, c: u8, d: u8): Ipv4Address {
+    return Ipv4Address {
+      bits: ((a as u32) << 24) | ((b as u32) << 16) | ((c as u32) << 8) | (d as u32),
+    };
+  }
+
+  /// Parses a dotted-quad address.
+  public static parse(text: str): Result<Ipv4Address, Io::IoError> {
+    let owned: String = String::create(text);
+
+    return parseIpv4Range(&owned, 0, owned.length());
+  }
+
+  /// The address as a 32-bit number, first octet in the high byte.
+  public bits(&self): u32 {
+    return self.bits;
+  }
+
+  /// Octet `index` (0 to 3), from the left.
+  public octet(&self, index: u64): u8 {
+    return ((self.bits >> ((3 - index) * 8) as u32) & 255) as u8;
+  }
+
+  /// `127.0.0.0/8`.
+  public isLoopback(&self): boolean {
+    return (self.bits >> 24) == 127;
+  }
+
+  /// `0.0.0.0`.
+  public isUnspecified(&self): boolean {
+    return self.bits == 0;
+  }
+
+  public toString(&self): String {
+    let mut output: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < 4) {
+      if (index > 0) {
+        output.pushByte(46);
+      }
+
+      output.pushStr(String::create(self.octet(index)).toStr());
+      index += 1;
+    }
+
+    return output;
+  }
+}
+
+/// An IPv6 address.
+export record Ipv6Address {
+  /// Segments 0 to 3, segment 0 in the high bits.
+  high: u64;
+
+  /// Segments 4 to 7, segment 4 in the high bits.
+  low: u64;
+
+  /// The address made of eight 16-bit segments, from the left.
+  public static create(
+    a: u16,
+    b: u16,
+    c: u16,
+    d: u16,
+    e: u16,
+    f: u16,
+    g: u16,
+    h: u16
+  ): Ipv6Address {
+    return Ipv6Address {
+      high: ((a as u64) << 48) | ((b as u64) << 32) | ((c as u64) << 16) | (d as u64),
+      low: ((e as u64) << 48) | ((f as u64) << 32) | ((g as u64) << 16) | (h as u64),
+    };
+  }
+
+  /// The address whose first 64 bits are `high` and last 64 bits are `low`.
+  public static fromBits(high: u64, low: u64): Ipv6Address {
+    return Ipv6Address { high: high, low: low };
+  }
+
+  /// Parses an IPv6 address.
+  public static parse(text: str): Result<Ipv6Address, Io::IoError> {
+    let owned: String = String::create(text);
+
+    return parseIpv6Range(&owned, 0, owned.length());
+  }
+
+  /// Segments 0 to 3, segment 0 in the high bits.
+  public highBits(&self): u64 {
+    return self.high;
+  }
+
+  /// Segments 4 to 7, segment 4 in the high bits.
+  public lowBits(&self): u64 {
+    return self.low;
+  }
+
+  /// Segment `index` (0 to 7), from the left.
+  public segment(&self, index: u64): u16 {
+    let half: u64 = index < 4 ? self.high : self.low;
+    let shift: u64 = (3 - (index % 4)) * 16;
+
+    return ((half >> shift) & 65535) as u16;
+  }
+
+  /// `::1`.
+  public isLoopback(&self): boolean {
+    return self.high == 0 && self.low == 1;
+  }
+
+  /// `::`.
+  public isUnspecified(&self): boolean {
+    return self.high == 0 && self.low == 0;
+  }
+
+  /// RFC 5952 text: lowercase, no leading zeros, the longest run of two or
+  /// more zero segments (the first one on a tie) written as `::`.
+  public toString(&self): String {
+    let mut output: String = String::new();
+
+    if (self.high == 0 && (self.low >> 32) == 65535) {
+      let ipv4: Ipv4Address = Ipv4Address { bits: (self.low & 4294967295) as u32 };
+
+      output.pushStr("::ffff:");
+      output.pushStr(ipv4.toString().toStr());
+
+      return output;
+    }
+
+    let mut bestStart: u64 = 8;
+    let mut bestLength: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < 8) {
+      if (self.segment(index) != 0) {
+        index += 1;
+        continue;
+      }
+
+      let start: u64 = index;
+
+      while (index < 8 && self.segment(index) == 0) {
+        index += 1;
+      }
+
+      if (index - start > bestLength) {
+        bestStart = start;
+        bestLength = index - start;
+      }
+    }
+
+    if (bestLength < 2) {
+      bestStart = 8;
+    }
+
+    index = 0;
+
+    while (index < 8) {
+      if (index == bestStart) {
+        output.pushStr("::");
+        index += bestLength;
+        continue;
+      }
+
+      if (index > 0 && index != bestStart + bestLength) {
+        output.pushByte(58);
+      }
+
+      pushHex(&mut output, self.segment(index));
+      index += 1;
+    }
+
+    return output;
+  }
+}
+
+/// An IP address of either version.
+export enum IpAddress {
+  V4(Ipv4Address),
+  V6(Ipv6Address),
+
+  /// The IPv4 address `a.b.c.d`.
+  public static v4(a: u8, b: u8, c: u8, d: u8): IpAddress {
+    return IpAddress::V4(Ipv4Address::create(a, b, c, d));
+  }
+
+  /// Parses an IPv4 or IPv6 address. Host names are not resolved.
+  public static parse(text: str): Result<IpAddress, Io::IoError> {
+    let owned: String = String::create(text);
+
+    if (indexOfByte(&owned, 58, 0) < owned.length()) {
+      let ipv6: Ipv6Address = parseIpv6Range(&owned, 0, owned.length())!;
+
+      return Result::OK(IpAddress::V6(ipv6));
+    }
+
+    let ipv4: Ipv4Address = parseIpv4Range(&owned, 0, owned.length())!;
+
+    return Result::OK(IpAddress::V4(ipv4));
+  }
+
+  public isIpv4(&self): boolean {
+    return match (self) {
+      IpAddress::V4(_) -> true,
+      IpAddress::V6(_) -> false,
+    };
+  }
+
+  public isIpv6(&self): boolean {
+    return !self.isIpv4();
+  }
+
+  /// `127.0.0.0/8` or `::1`.
+  public isLoopback(&self): boolean {
+    return match (self) {
+      IpAddress::V4(ipv4) -> ipv4.isLoopback(),
+      IpAddress::V6(ipv6) -> ipv6.isLoopback(),
+    };
+  }
+
+  /// `0.0.0.0` or `::`.
+  public isUnspecified(&self): boolean {
+    return match (self) {
+      IpAddress::V4(ipv4) -> ipv4.isUnspecified(),
+      IpAddress::V6(ipv6) -> ipv6.isUnspecified(),
+    };
+  }
+
+  /// Same version and same bits. An IPv4 address never equals its IPv4-mapped IPv6 form.
+  public equals(&self, other: &IpAddress): boolean {
+    if (let IpAddress::V4(left) = self) {
+      if (let IpAddress::V4(right) = other) {
+        return left.bits() == right.bits();
+      }
+    }
+
+    if (let IpAddress::V6(left) = self) {
+      if (let IpAddress::V6(right) = other) {
+        return left.highBits() == right.highBits() && left.lowBits() == right.lowBits();
+      }
+    }
+
+    return false;
+  }
+
+  public toString(&self): String {
+    return match (self) {
+      IpAddress::V4(ipv4) -> ipv4.toString(),
+      IpAddress::V6(ipv6) -> ipv6.toString(),
+    };
+  }
+}
+
+/// An IP address and a port.
+export record SocketAddress {
+  address: IpAddress;
+  port: u16;
+
+  public static create(address: IpAddress, port: u16): SocketAddress {
+    return SocketAddress { address: address, port: port };
+  }
+
+  /// Parses `a.b.c.d:port` or `[ipv6]:port`.
+  public static parse(text: str): Result<SocketAddress, Io::IoError> {
+    let owned: String = String::create(text);
+    let length: u64 = owned.length();
+    let mut portStart: u64 = 0;
+    let mut address: IpAddress = IpAddress::v4(0, 0, 0, 0);
+
+    if (length > 0 && byteOf(&owned, 0) == 91) {
+      let close: u64 = indexOfByte(&owned, 93, 1);
+
+      if (close + 1 >= length || byteOf(&owned, close + 1) != 58) {
+        return Result::ERROR(invalidAddress());
+      }
+
+      address = IpAddress::V6(parseIpv6Range(&owned, 1, close)!);
+      portStart = close + 2;
+    } else {
+      let colon: u64 = indexOfByte(&owned, 58, 0);
+
+      if (colon == length) {
+        return Result::ERROR(invalidAddress());
+      }
+
+      address = IpAddress::V4(parseIpv4Range(&owned, 0, colon)!);
+      portStart = colon + 1;
+    }
+
+    let mut port: u32 = 0;
+    let mut index: u64 = portStart;
+
+    if (index == length || length - index > 5) {
+      return Result::ERROR(invalidAddress());
+    }
+
+    while (index < length) {
+      let byte: u8 = byteOf(&owned, index);
+
+      if (!isDecimalDigit(byte)) {
+        return Result::ERROR(invalidAddress());
+      }
+
+      port = port * 10 + (byte - 48) as u32;
+      index += 1;
+    }
+
+    if (port > 65535) {
+      return Result::ERROR(invalidAddress());
+    }
+
+    return Result::OK(SocketAddress { address: address, port: port as u16 });
+  }
+
+  public ip(&self): IpAddress {
+    return self.address;
+  }
+
+  public port(&self): u16 {
+    return self.port;
+  }
+
+  public toString(&self): String {
+    let mut output: String = String::new();
+
+    if (self.address.isIpv6()) {
+      output.pushByte(91);
+      output.pushStr(self.address.toString().toStr());
+      output.pushByte(93);
+    } else {
+      output.pushStr(self.address.toString().toStr());
+    }
+
+    output.pushByte(58);
+    output.pushStr(String::create(self.port).toStr());
+
+    return output;
+  }
+}
