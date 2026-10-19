@@ -1,0 +1,277 @@
+//! The HTTP/1.1 response serializer: `Http::ResponseHead` and the functions
+//! that append a head and a body to a byte buffer. Writing the buffer out is
+//! left to the caller.
+
+import String from "std::string";
+import Vector from "std::vector";
+
+import isFieldValue, isToken from "./headers";
+
+function pushText(out: &mut Vector<u8>, text: &String): void {
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    out.push(text.byteAt(index).unwrap());
+    index += 1;
+  }
+}
+
+function pushStr(out: &mut Vector<u8>, text: str): void {
+  let owned: String = String::create(text);
+  pushText(out, &owned);
+}
+
+function hexDigit(value: u64): u8 {
+  if (value < 10) {
+    return '0' as u8 + value as u8;
+  }
+
+  return 'a' as u8 + (value - 10) as u8;
+}
+
+/// `value` in lowercase hexadecimal, without leading zeros.
+function hexText(value: u64): String {
+  let mut digits: Vector<u8> = Vector::new<u8>();
+  let mut rest: u64 = value;
+
+  while (true) {
+    digits.push(hexDigit(rest % 16));
+    rest = rest / 16;
+
+    if (rest == 0) {
+      break;
+    }
+  }
+
+  let mut text: String = String::new();
+  let mut index: u64 = digits.length();
+
+  while (index > 0) {
+    index -= 1;
+    text.pushByte(*digits.get(index).unwrap());
+  }
+
+  return text;
+}
+
+/// Checks everything `writeHead` would write, so a head is either written
+/// whole or not at all.
+function validateHead(head: &Http::ResponseHead): Result<void, Http::SerializeError> {
+  if (head.status < 100 || head.status > 999) {
+    return Result::ERROR(Http::SerializeError::INVALID_STATUS);
+  }
+
+  if (!isFieldValue(&head.reason)) {
+    return Result::ERROR(Http::SerializeError::INVALID_REASON);
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < head.headers.length()) {
+    let field: &Http::HeaderField = head.headers.fieldAt(index).unwrap();
+
+    if (!isToken(&field.name)) {
+      return Result::ERROR(Http::SerializeError::INVALID_HEADER_NAME);
+    }
+
+    if (!isFieldValue(&field.value)) {
+      return Result::ERROR(Http::SerializeError::INVALID_HEADER_VALUE);
+    }
+
+    index += 1;
+  }
+
+  return Result::OK(());
+}
+
+/// Appends the status line and header fields of `head`, without the blank
+/// line that ends the head.
+function writeHeadLines(head: &Http::ResponseHead, out: &mut Vector<u8>): void {
+  pushStr(out, "HTTP/1.1 ");
+  let status: String = head.status.toString();
+  pushText(out, &status);
+  pushStr(out, " ");
+  pushText(out, &head.reason);
+  pushStr(out, "\r\n");
+
+  let mut index: u64 = 0;
+
+  while (index < head.headers.length()) {
+    let field: &Http::HeaderField = head.headers.fieldAt(index).unwrap();
+    pushText(out, &field.name);
+    pushStr(out, ": ");
+    pushText(out, &field.value);
+    pushStr(out, "\r\n");
+    index += 1;
+  }
+}
+
+/// HTTP/1.1 response serialization.
+export namespace Http {
+  /// Why a response head cannot be written. Nothing is appended when one of
+  /// these is returned.
+  enum SerializeError {
+    /// The status is not a three-digit number.
+    INVALID_STATUS,
+
+    /// The reason phrase holds CR, LF or another control byte.
+    INVALID_REASON,
+
+    /// A header name is empty or holds a byte that is not a token byte,
+    /// such as CR, LF, a space or a colon.
+    INVALID_HEADER_NAME,
+
+    /// A header value holds CR, LF or another control byte other than tab.
+    INVALID_HEADER_VALUE,
+
+    /// `writeResponse` writes `Content-Length` itself, so the head may not
+    /// already carry `Content-Length` or `Transfer-Encoding`.
+    FRAMING_HEADER_PRESENT,
+  }
+
+  /// The status line and header fields of a response. The version is
+  /// always HTTP/1.1.
+  record ResponseHead {
+    public status: u16;
+    public reason: String;
+    public headers: Http::Headers;
+
+    /// A head for `status` with its standard reason phrase (empty for a
+    /// status without one) and no header fields.
+    public static create(status: u16): ResponseHead {
+      return ResponseHead {
+        status: status,
+        reason: String::create(Http::reasonPhrase(status)),
+        headers: Http::Headers::new(),
+      };
+    }
+
+    /// A head for `status` with a custom reason phrase and no header fields.
+    public static withReason(status: u16, reason: str): ResponseHead {
+      return ResponseHead {
+        status: status,
+        reason: String::create(reason),
+        headers: Http::Headers::new(),
+      };
+    }
+  }
+
+  /// The RFC 9110 reason phrase for `status`, or an empty string for a
+  /// status it does not define.
+  function reasonPhrase(status: u16): str {
+    return match (status) {
+      100 -> "Continue",
+      101 -> "Switching Protocols",
+      200 -> "OK",
+      201 -> "Created",
+      202 -> "Accepted",
+      203 -> "Non-Authoritative Information",
+      204 -> "No Content",
+      205 -> "Reset Content",
+      206 -> "Partial Content",
+      300 -> "Multiple Choices",
+      301 -> "Moved Permanently",
+      302 -> "Found",
+      303 -> "See Other",
+      304 -> "Not Modified",
+      307 -> "Temporary Redirect",
+      308 -> "Permanent Redirect",
+      400 -> "Bad Request",
+      401 -> "Unauthorized",
+      402 -> "Payment Required",
+      403 -> "Forbidden",
+      404 -> "Not Found",
+      405 -> "Method Not Allowed",
+      406 -> "Not Acceptable",
+      407 -> "Proxy Authentication Required",
+      408 -> "Request Timeout",
+      409 -> "Conflict",
+      410 -> "Gone",
+      411 -> "Length Required",
+      412 -> "Precondition Failed",
+      413 -> "Content Too Large",
+      414 -> "URI Too Long",
+      415 -> "Unsupported Media Type",
+      416 -> "Range Not Satisfiable",
+      417 -> "Expectation Failed",
+      421 -> "Misdirected Request",
+      422 -> "Unprocessable Content",
+      426 -> "Upgrade Required",
+      428 -> "Precondition Required",
+      429 -> "Too Many Requests",
+      431 -> "Request Header Fields Too Large",
+      500 -> "Internal Server Error",
+      501 -> "Not Implemented",
+      502 -> "Bad Gateway",
+      503 -> "Service Unavailable",
+      504 -> "Gateway Timeout",
+      505 -> "HTTP Version Not Supported",
+      _ -> "",
+    };
+  }
+
+  /// Appends `HTTP/1.1 <status> <reason>\r\n`, each header field as
+  /// `name: value\r\n`, and the blank line that ends the head. A name,
+  /// value or reason that could split the response (CR, LF) is an error and
+  /// leaves `out` unchanged.
+  function writeHead(head: &ResponseHead, out: &mut Vector<u8>): Result<void, SerializeError> {
+    validateHead(head)!;
+    writeHeadLines(head, out);
+    pushStr(out, "\r\n");
+    return Result::OK(());
+  }
+
+  /// Appends `head` with a `Content-Length` field for `body`, then `body`.
+  /// The head must not carry `Content-Length` or `Transfer-Encoding`.
+  function writeResponse(
+    head: &ResponseHead,
+    body: &Vector<u8>,
+    out: &mut Vector<u8>
+  ): Result<void, SerializeError> {
+    if (head.headers.contains("Content-Length") || head.headers.contains("Transfer-Encoding")) {
+      return Result::ERROR(SerializeError::FRAMING_HEADER_PRESENT);
+    }
+
+    validateHead(head)!;
+    writeHeadLines(head, out);
+    pushStr(out, "Content-Length: ");
+    let bodyLength: u64 = body.length();
+    let length: String = bodyLength.toString();
+    pushText(out, &length);
+    pushStr(out, "\r\n\r\n");
+    Http::writeBody(body, out);
+    return Result::OK(());
+  }
+
+  /// Appends `bytes` unchanged, for a body framed by `Content-Length`.
+  function writeBody(bytes: &Vector<u8>, out: &mut Vector<u8>): void {
+    let data: *u8 = bytes.asPtr();
+    let mut index: u64 = 0;
+
+    while (index < bytes.length()) {
+      out.push(data[index]);
+      index += 1;
+    }
+  }
+
+  /// Appends `bytes` as one chunk of a `Transfer-Encoding: chunked` body:
+  /// the size in hexadecimal, CRLF, the bytes, CRLF. Appends nothing for
+  /// empty `bytes`, since an empty chunk would end the body.
+  function writeChunk(bytes: &Vector<u8>, out: &mut Vector<u8>): void {
+    if (bytes.length() == 0) {
+      return;
+    }
+
+    let size: String = hexText(bytes.length());
+    pushText(out, &size);
+    pushStr(out, "\r\n");
+    Http::writeBody(bytes, out);
+    pushStr(out, "\r\n");
+  }
+
+  /// Appends the last chunk, `0\r\n\r\n`, which ends a chunked body
+  /// without trailer fields.
+  function writeLastChunk(out: &mut Vector<u8>): void {
+    pushStr(out, "0\r\n\r\n");
+  }
+}

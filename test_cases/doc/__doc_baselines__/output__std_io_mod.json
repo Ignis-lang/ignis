@@ -80,6 +80,22 @@
       "doc": "  \n# Hash Module  \n  \nDeterministic hashing foundations for collections and user-defined keys.  \n  \nThe default hasher uses 64-bit FNV-1a with a fixed offset basis and no  \nrandomized seeding. Hashes are therefore deterministic for a given stdlib  \nand compiler version.  \n  \n`writeStr` hashes NUL-terminated `str` data.  \nOwned `String` values should hash all owned bytes without routing through raw `toStr()`."
     },
     {
+      "name": "std::http",
+      "doc": "  \n# HTTP  \n  \nThe sans-IO core of HTTP/1.1 on the server side: a request parser and a  \nresponse serializer that never touch a socket. Anything that speaks HTTP  \nbut is not a web application (a proxy, a test harness, a server driver)  \nbuilds on this layer. The parser receives bytes and returns what they  \nmean; the serializer turns a response into bytes and leaves writing them  \nto the caller.  \n  \n## Exports  \n  \n| Export                 | Description                                                          |  \n|------------------------|----------------------------------------------------------------------|  \n| `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |  \n| `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |  \n| `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |  \n| `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |  \n| `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |  \n| `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |  \n| `Http::HeaderField`    | One `name` and `value`                                               |  \n| `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |  \n| `Http::ParseError`     | `kind` and the suggested response `status`                           |  \n| `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |  \n| `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |  \n| `Http::SerializeError` | Why a response head cannot be written                                |  \n| `Http::writeHead`      | Appends a response head                                              |  \n| `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |  \n| `Http::writeBody`      | Appends body bytes unchanged                                         |  \n| `Http::writeChunk`     | Appends one chunk of a chunked body                                  |  \n| `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |  \n| `Http::reasonPhrase`   | The standard reason phrase of a status                               |  \n  \n## Parsing  \n  \n`feed` copies bytes into the parser; `next` reports the next event. Each  \nrequest produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.  \n`NEED_MORE` means the bytes fed so far are not enough to report anything  \nelse. After `DONE` the parser starts on the next request of the same  \nconnection, and bytes already fed past the end of a request belong to the  \nnext one, so keep-alive and pipelining need nothing special.  \n`RequestHead.keepAlive()` tells whether the connection stays open: an  \nHTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0  \nrequest closes it unless `Connection` lists `keep-alive`.  \n  \nEvents own their payloads: a `RequestHead` or a body chunk is a copy and  \nstays valid after more bytes are fed.  \n  \n`MALFORMED` is terminal: once the parser reports it, every later `next`  \nreports the same error, because the rest of the connection cannot be  \nframed. The `ParseError` carries the status a server should answer with  \n(400, 413, 414, 431, 501 or 505) before it closes the connection.  \nMalformed input never panics.  \n  \n## Message syntax  \n  \n- Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2  \n  allows a recipient to; a CR anywhere else is malformed.  \n- Empty lines before a request line are skipped.  \n- The request line is `method SP target SP HTTP/1.x` with exactly one space  \n  between the parts. The method is a case-sensitive token; methods other  \n  than the nine standard ones are `Method::OTHER`. The target is kept as  \n  received and must be visible ASCII.  \n- A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.  \n- A header line is `name: value`. Whitespace between the name and the  \n  colon, an obsolete line folding (a line starting with a space or a tab)  \n  and a control byte in the value are `INVALID_HEADER`. Names keep their  \n  casing; lookups ignore ASCII case.  \n  \n## Body framing  \n  \nPer RFC 9112 section 6.3:  \n  \n| Head                                   | Body                                           |  \n|----------------------------------------|------------------------------------------------|  \n| `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |  \n| Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |  \n| `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |  \n| `Content-Length: n`                    | Exactly `n` bytes                              |  \n| `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |  \n| A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |  \n| Neither                                | No body                                        |  \n  \nRepeated `Content-Length` fields, or a comma list in one, are accepted when  \nevery value is the same. Chunk extensions are ignored. Trailer fields  \nafter the last chunk are checked like header fields, counted against  \n`maxHeaders`, and discarded.  \n  \n## Limits  \n  \n| Limit            | Default   | Violation                                 |  \n|------------------|-----------|-------------------------------------------|  \n| `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |  \n| `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |  \n| `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |  \n| `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |  \n  \nLine lengths exclude the line terminator, and a length exactly at its  \nlimit is accepted. A line is rejected as soon as it grows past its limit,  \nbefore it ends, and a body as soon as its declared size passes `maxBody`,  \nso a client cannot make the parser buffer without bound.  \n  \n## Serializing  \n  \n`writeHead` appends `HTTP/1.1 <status> <reason>\\r\\n`, every header field  \nand the blank line. `writeResponse` does the same with a `Content-Length`  \nfield and appends the body. For a chunked body, add  \n`Transfer-Encoding: chunked` to the head, then call `writeChunk` for each  \npiece and `writeLastChunk` at the end. A header name, header value or  \nreason phrase holding CR or LF could split the response, so it is a  \n`SerializeError` and nothing is appended.  \n  \nByte inputs are `&Vector<u8>`: a slice parameter cannot report its length  \nyet.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport Vector from \"std::vector\";  \n  \nfunction answer(request: str, out: &mut Vector<u8>): i32 {  \n  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());  \n  parser.feedStr(request);  \n  \n  let Http::ParseEvent::HEAD(head) = parser.next() else {  \n    return 1;  \n  };  \n  \n  let mut response: Http::ResponseHead = Http::ResponseHead::create(200);  \n  response.headers.add(\"Content-Type\", \"text/plain\");  \n  let body: Vector<u8> = head.target.toBytes();  \n  \n  return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;  \n}  \n```"
+    },
+    {
+      "name": "std::http::headers",
+      "doc": "`Http::Headers`: an ordered list of header fields, shared by requests and  \nresponses. The byte-class helpers below are exported for the parser and  \nthe serializer and are not part of `std::http`'s public API."
+    },
+    {
+      "name": "std::http::request",
+      "doc": "The HTTP/1.1 request parser: `Http::RequestParser` and the types it  \nreports. Bytes go in with `feed`, events come out of `next`; see the  \n`std::http` module documentation for the framing and limit rules."
+    },
+    {
+      "name": "std::http::response",
+      "doc": "The HTTP/1.1 response serializer: `Http::ResponseHead` and the functions  \nthat append a head and a body to a byte buffer. Writing the buffer out is  \nleft to the caller."
+    },
+    {
       "name": "std::io",
       "doc": "  \n# I/O  \n  \nStandard output, error printing, structured I/O error types, buffered  \ndescriptor reads, and `Content-Length` message framing.  \n  \nAll types and functions live under the `Io` namespace.  \n  \n## Printing  \n  \n| Function        | Stream   | Newline | Accepts          |  \n|-----------------|----------|---------|------------------|  \n| `Io::print`     | stdout   | No      | `String`         |  \n| `Io::println`   | stdout   | Yes     | `String`, `str`  |  \n| `Io::eprint`    | stderr   | No      | `String`         |  \n| `Io::eprintln`  | stderr   | Yes     | `String`, `str`  |  \n  \n`println` and `eprintln` are overloaded for both `String` and `str`:  \n- `String` overload: the value is consumed (moved), dropped after printing,  \n  and writes `message.length()` bytes.  \n- `str` overload: writes the C string directly, no heap allocation.  \n  \n`print` and `eprint` only accept `String` (no `str` overload).  \n`String` overloads write `message.length()` bytes. `str` overloads remain  \nNUL-terminated C-string writes and may stop at the first interior NUL.  \n`str` overloads remain NUL-terminated C-string writes.  \n  \n## Error Types  \n  \n| Type              | Source file | Description                                      |  \n|-------------------|------------|--------------------------------------------------|  \n| `Io::ErrorKind`   | error.ign  | Category of the I/O error (14 variants)          |  \n| `Io::IoError`     | error.ign  | Full error: kind + raw errno + strerror message  |  \n  \n## Streams and Framing  \n  \n| Item                        | Source file | Description                               |  \n|-----------------------------|-------------|-------------------------------------------|  \n| `Stream::ByteReader`         | stream.ign  | Buffered reader over a file descriptor    |  \n| `Stream::ByteWriter`         | stream.ign  | Unbuffered whole-buffer writer            |  \n| `Stream::ReadError`          | stream.ign  | End of input, truncation, or read failure |  \n| `Stream::FrameError`         | stream.ign  | Why a framed message could not be read    |  \n| `Stream::writeAll`           | stream.ign  | Write a whole `String` to a descriptor    |  \n| `Stream::writeFramedMessage` | stream.ign  | Write a `Content-Length` framed message   |  \n  \nThese live in the `Stream` namespace, re-exported here:  \n`import Io, Stream from \"std::io\";`. `Stream::ByteReader::stdin()` reads  \nstandard input. `readFramedMessage` and  \n`writeFramedMessage` implement the header framing the Language Server  \nProtocol uses on stdin and stdout. `readFramedMessageWithin` does the same  \nbut skips, without buffering, a body longer than a caller-chosen limit.  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \nimport LibC from \"std::libc\";  \nimport String from \"std::string\";  \n  \nfunction main(): i32 {  \n  Io::println(String::create(\"hello, world!\"));  \n  \n  // I/O error from a failed syscall  \n  let fd: i32 = LibC::File::open(\"/nonexistent\", LibC::File::O_RDONLY);  \n  if (fd == -1) {  \n    let err: Io::IoError = Io::IoError::lastError();  \n    // err.kind == Io::ErrorKind::NOT_FOUND  \n    // err.message == \"No such file or directory\"  \n    return 1;  \n  }  \n  \n  return 0;  \n}  \n```"
     },
@@ -4044,6 +4060,1165 @@
       "visibility": "private",
       "signature": "function hashCStr(state: u64, value: str): u64",
       "doc": "Continues an FNV-1a hash over the bytes of a NUL-terminated `str`."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::Http",
+      "name": "Http",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Http",
+      "doc": "HTTP header fields."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::Http::HeaderField",
+      "name": "HeaderField",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record HeaderField",
+      "doc": "One header field: its name as written and its value without the  \nsurrounding whitespace.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String"
+        },
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: String"
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(name: String, value: String): HeaderField",
+          "doc": "A field that takes ownership of `name` and `value`."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(name: str, value: str): HeaderField",
+          "doc": "A field holding copies of `name` and `value`."
+        }
+      ]
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::Http::Headers",
+      "name": "Headers",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Headers",
+      "doc": "Header fields in the order they were added or received.  \n  \nNames keep their original casing; `get`, `getAll`, `contains`, `set`  \nand `remove` compare names ignoring ASCII case, as RFC 9110 requires.  \nRepeated names are kept as separate fields and never merged.",
+      "members": [
+        {
+          "name": "entries",
+          "kind": "field",
+          "signature": "entries: Vector<HeaderField>"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Headers",
+          "doc": "An empty header list."
+        },
+        {
+          "name": "add",
+          "kind": "method",
+          "signature": "add(&mut self, name: String, value: String): void",
+          "doc": "Appends a field that takes ownership of `name` and `value`."
+        },
+        {
+          "name": "add",
+          "kind": "method",
+          "signature": "add(&mut self, name: str, value: str): void",
+          "doc": "Appends a field, keeping any existing field with the same name."
+        },
+        {
+          "name": "contains",
+          "kind": "method",
+          "signature": "contains(&self, name: str): boolean",
+          "doc": "Whether some field is named `name`."
+        },
+        {
+          "name": "fieldAt",
+          "kind": "method",
+          "signature": "fieldAt(&self, index: u64): Option<&HeaderField>",
+          "doc": "The field at `index`."
+        },
+        {
+          "name": "get",
+          "kind": "method",
+          "signature": "get(&self, name: str): Option<str>",
+          "doc": "The value of the first field named `name`."
+        },
+        {
+          "name": "getAll",
+          "kind": "method",
+          "signature": "getAll(&self, name: str): Vector<String>",
+          "doc": "Copies of the values of every field named `name`, in order."
+        },
+        {
+          "name": "hasToken",
+          "kind": "method",
+          "signature": "hasToken(&self, name: str, token: str): boolean",
+          "doc": "Whether some field named `name` lists `token` in its comma-separated  \nvalue, ignoring ASCII case and the whitespace around each element.  \n`Connection: Upgrade, close` lists `close`."
+        },
+        {
+          "name": "isEmpty",
+          "kind": "method",
+          "signature": "isEmpty(&self): boolean",
+          "doc": "Whether there are no fields."
+        },
+        {
+          "name": "length",
+          "kind": "method",
+          "signature": "length(&self): u64",
+          "doc": "The number of fields, repeated names counted once per field."
+        },
+        {
+          "name": "nameAt",
+          "kind": "method",
+          "signature": "nameAt(&self, index: u64): Option<str>",
+          "doc": "The name of the field at `index`, as written."
+        },
+        {
+          "name": "remove",
+          "kind": "method",
+          "signature": "remove(&mut self, name: str): u64",
+          "doc": "Removes every field named `name` and returns how many there were."
+        },
+        {
+          "name": "set",
+          "kind": "method",
+          "signature": "set(&mut self, name: str, value: str): void",
+          "doc": "Replaces every field named `name` with one field holding `value`, at  \nthe position of the first of them; appends it when there is none.  \nThe first field's name keeps its casing."
+        },
+        {
+          "name": "valueAt",
+          "kind": "method",
+          "signature": "valueAt(&self, index: u64): Option<str>",
+          "doc": "The value of the field at `index`."
+        }
+      ]
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::asciiLower",
+      "name": "asciiLower",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function asciiLower(byte: u8): u8",
+      "doc": "Folds an ASCII uppercase letter to lowercase and leaves every other byte  \nalone, so non-ASCII field bytes compare exactly."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::equalsIgnoringAsciiCase",
+      "name": "equalsIgnoringAsciiCase",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function equalsIgnoringAsciiCase(left: &String, right: str): boolean",
+      "doc": "Whether `left` and `right` hold the same bytes, ignoring ASCII case."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::isFieldValue",
+      "name": "isFieldValue",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function isFieldValue(text: &String): boolean",
+      "doc": "Whether every byte of `text` may appear in a field value."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::isFieldValueByte",
+      "name": "isFieldValueByte",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function isFieldValueByte(byte: u8): boolean",
+      "doc": "Whether `byte` may appear in a field value: visible ASCII, space, tab  \nand `obs-text` (0x80 to 0xFF). CR, LF, NUL and the other control bytes  \nmay not."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::isFieldWhitespace",
+      "name": "isFieldWhitespace",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function isFieldWhitespace(byte: u8): boolean",
+      "doc": "Whether `byte` is a space or a tab."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::isToken",
+      "name": "isToken",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function isToken(text: &String): boolean",
+      "doc": "Whether `text` is a non-empty token."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::isTokenByte",
+      "name": "isTokenByte",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function isTokenByte(byte: u8): boolean",
+      "doc": "Whether `byte` is a `tchar`, the bytes RFC 9110 allows in a token such  \nas a method or a field name."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::listContains",
+      "name": "listContains",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function listContains(value: &String, token: str): boolean",
+      "doc": "Whether the comma-separated list `value` has an element equal to  \n`token`, ignoring ASCII case and the whitespace around each element."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::listElements",
+      "name": "listElements",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function listElements(value: &String): Vector<String>",
+      "doc": "The elements of the comma-separated list `value`, each without its  \nsurrounding spaces and tabs. Empty elements are kept, so `a,,b` has  \nthree elements."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::namesEqual",
+      "name": "namesEqual",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function namesEqual(name: &String, other: str): boolean",
+      "doc": "Whether `name` equals `other`, ignoring ASCII case."
+    },
+    {
+      "module": "std::http::headers",
+      "path": "std::http::headers::trimFieldWhitespace",
+      "name": "trimFieldWhitespace",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function trimFieldWhitespace(text: &String): String",
+      "doc": "`text` without leading and trailing spaces and tabs (RFC 9110 `OWS`)."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::DECIMAL_OVERFLOW_GUARD",
+      "name": "DECIMAL_OVERFLOW_GUARD",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const DECIMAL_OVERFLOW_GUARD: u64"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::FRAMING_CHUNKED",
+      "name": "FRAMING_CHUNKED",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const FRAMING_CHUNKED: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::FRAMING_LENGTH",
+      "name": "FRAMING_LENGTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const FRAMING_LENGTH: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::FRAMING_NONE",
+      "name": "FRAMING_NONE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const FRAMING_NONE: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Framing",
+      "name": "Framing",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Framing",
+      "doc": "How the body of a request is delimited, decided from its head.",
+      "members": [
+        {
+          "name": "mode",
+          "kind": "field",
+          "signature": "mode: u8"
+        },
+        {
+          "name": "length",
+          "kind": "field",
+          "signature": "length: u64"
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::HEX_OVERFLOW_GUARD",
+      "name": "HEX_OVERFLOW_GUARD",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const HEX_OVERFLOW_GUARD: u64"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http",
+      "name": "Http",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Http",
+      "doc": "HTTP/1.1 request parsing."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::Limits",
+      "name": "Limits",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Limits",
+      "doc": "Maximum sizes the parser accepts. A request over any of them is  \n`MALFORMED`. Lengths exclude the line terminator.",
+      "members": [
+        {
+          "name": "maxRequestLine",
+          "kind": "field",
+          "signature": "maxRequestLine: u64",
+          "doc": "Longest request line, in bytes. Default 8 KiB."
+        },
+        {
+          "name": "maxHeaderLine",
+          "kind": "field",
+          "signature": "maxHeaderLine: u64",
+          "doc": "Longest header or trailer line, and longest chunk-size line, in bytes.  \nDefault 8 KiB."
+        },
+        {
+          "name": "maxHeaders",
+          "kind": "field",
+          "signature": "maxHeaders: u64",
+          "doc": "Most header fields in a head, and separately most trailer fields  \nafter a chunked body. Default 100."
+        },
+        {
+          "name": "maxBody",
+          "kind": "field",
+          "signature": "maxBody: u64",
+          "doc": "Largest body, in bytes after chunked decoding. Default 1 MiB."
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Limits",
+          "doc": "The default limits. Override a field to change one of them."
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::Method",
+      "name": "Method",
+      "kind": "enum",
+      "visibility": "private",
+      "signature": "enum Method",
+      "doc": "The request method. Methods are case-sensitive: `get` is the  \nextension method `OTHER(\"get\")`, not `GET`.",
+      "members": [
+        {
+          "name": "GET",
+          "kind": "variant",
+          "signature": "GET"
+        },
+        {
+          "name": "HEAD",
+          "kind": "variant",
+          "signature": "HEAD"
+        },
+        {
+          "name": "POST",
+          "kind": "variant",
+          "signature": "POST"
+        },
+        {
+          "name": "PUT",
+          "kind": "variant",
+          "signature": "PUT"
+        },
+        {
+          "name": "DELETE",
+          "kind": "variant",
+          "signature": "DELETE"
+        },
+        {
+          "name": "PATCH",
+          "kind": "variant",
+          "signature": "PATCH"
+        },
+        {
+          "name": "OPTIONS",
+          "kind": "variant",
+          "signature": "OPTIONS"
+        },
+        {
+          "name": "CONNECT",
+          "kind": "variant",
+          "signature": "CONNECT"
+        },
+        {
+          "name": "TRACE",
+          "kind": "variant",
+          "signature": "TRACE"
+        },
+        {
+          "name": "OTHER",
+          "kind": "variant",
+          "signature": "OTHER(String)"
+        },
+        {
+          "name": "toString",
+          "kind": "method",
+          "signature": "toString(&self): String",
+          "doc": "The method as it appears on the request line."
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::ParseError",
+      "name": "ParseError",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record ParseError",
+      "doc": "A malformed request: what is wrong with it and the status a server  \nshould answer with before closing the connection.",
+      "members": [
+        {
+          "name": "kind",
+          "kind": "field",
+          "signature": "kind: ParseErrorKind"
+        },
+        {
+          "name": "status",
+          "kind": "field",
+          "signature": "status: u16"
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(kind: ParseErrorKind): ParseError",
+          "doc": "The error for `kind`, with its suggested status."
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::ParseErrorKind",
+      "name": "ParseErrorKind",
+      "kind": "enum",
+      "visibility": "private",
+      "signature": "enum ParseErrorKind",
+      "doc": "Why a request is malformed.",
+      "members": [
+        {
+          "name": "REQUEST_LINE_TOO_LONG",
+          "kind": "variant",
+          "signature": "REQUEST_LINE_TOO_LONG"
+        },
+        {
+          "name": "HEADER_TOO_LONG",
+          "kind": "variant",
+          "signature": "HEADER_TOO_LONG"
+        },
+        {
+          "name": "TOO_MANY_HEADERS",
+          "kind": "variant",
+          "signature": "TOO_MANY_HEADERS"
+        },
+        {
+          "name": "BODY_TOO_LARGE",
+          "kind": "variant",
+          "signature": "BODY_TOO_LARGE"
+        },
+        {
+          "name": "INVALID_REQUEST_LINE",
+          "kind": "variant",
+          "signature": "INVALID_REQUEST_LINE"
+        },
+        {
+          "name": "INVALID_HEADER",
+          "kind": "variant",
+          "signature": "INVALID_HEADER"
+        },
+        {
+          "name": "INVALID_CONTENT_LENGTH",
+          "kind": "variant",
+          "signature": "INVALID_CONTENT_LENGTH"
+        },
+        {
+          "name": "CONFLICTING_LENGTH",
+          "kind": "variant",
+          "signature": "CONFLICTING_LENGTH"
+        },
+        {
+          "name": "INVALID_CHUNK",
+          "kind": "variant",
+          "signature": "INVALID_CHUNK"
+        },
+        {
+          "name": "UNSUPPORTED_TRANSFER_CODING",
+          "kind": "variant",
+          "signature": "UNSUPPORTED_TRANSFER_CODING"
+        },
+        {
+          "name": "UNSUPPORTED_VERSION",
+          "kind": "variant",
+          "signature": "UNSUPPORTED_VERSION"
+        },
+        {
+          "name": "name",
+          "kind": "method",
+          "signature": "name(&self): str",
+          "doc": "The variant name, `INVALID_HEADER` for example."
+        },
+        {
+          "name": "status",
+          "kind": "method",
+          "signature": "status(&self): u16",
+          "doc": "The response status a server should answer with."
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::ParseEvent",
+      "name": "ParseEvent",
+      "kind": "enum",
+      "visibility": "private",
+      "signature": "enum ParseEvent",
+      "doc": "What `RequestParser::next` found in the bytes fed so far.",
+      "members": [
+        {
+          "name": "NEED_MORE",
+          "kind": "variant",
+          "signature": "NEED_MORE"
+        },
+        {
+          "name": "HEAD",
+          "kind": "variant",
+          "signature": "HEAD(RequestHead)"
+        },
+        {
+          "name": "BODY_CHUNK",
+          "kind": "variant",
+          "signature": "BODY_CHUNK(Vector<u8>)"
+        },
+        {
+          "name": "DONE",
+          "kind": "variant",
+          "signature": "DONE"
+        },
+        {
+          "name": "MALFORMED",
+          "kind": "variant",
+          "signature": "MALFORMED(ParseError)"
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::RequestHead",
+      "name": "RequestHead",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record RequestHead",
+      "doc": "The request line and header fields of one request.",
+      "members": [
+        {
+          "name": "method",
+          "kind": "field",
+          "signature": "method: Method"
+        },
+        {
+          "name": "target",
+          "kind": "field",
+          "signature": "target: String",
+          "doc": "The request target exactly as received: an origin form such as  \n`/search?q=1`, an absolute URI, an authority for `CONNECT`, or `*`."
+        },
+        {
+          "name": "version",
+          "kind": "field",
+          "signature": "version: Version"
+        },
+        {
+          "name": "headers",
+          "kind": "field",
+          "signature": "headers: Headers"
+        },
+        {
+          "name": "keepAlive",
+          "kind": "method",
+          "signature": "keepAlive(&self): boolean",
+          "doc": "Whether the connection stays open after this request (RFC 9112  \nsection 9.3): HTTP/1.1 keeps it unless `Connection` lists `close`;  \nHTTP/1.0 closes it unless `Connection` lists `keep-alive`."
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::RequestParser",
+      "name": "RequestParser",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record RequestParser",
+      "doc": "A sans-IO HTTP/1.1 request parser for one connection.  \n  \n`feed` copies bytes in; `next` reports `HEAD`, then zero or more  \n`BODY_CHUNK`, then `DONE` for each request, and `NEED_MORE` whenever  \nit has to wait. Bytes after a request belong to the next one, so  \nkeep-alive and pipelined requests need nothing special.",
+      "members": [
+        {
+          "name": "limits",
+          "kind": "field",
+          "signature": "limits: Limits"
+        },
+        {
+          "name": "buffer",
+          "kind": "field",
+          "signature": "buffer: Vector<u8>"
+        },
+        {
+          "name": "position",
+          "kind": "field",
+          "signature": "position: u64",
+          "doc": "Index of the first byte not consumed yet."
+        },
+        {
+          "name": "state",
+          "kind": "field",
+          "signature": "state: u8"
+        },
+        {
+          "name": "scan",
+          "kind": "field",
+          "signature": "scan: u64",
+          "doc": "While reading the head: where the next unchecked line starts, and  \nhow many lines (request line included) were checked so far."
+        },
+        {
+          "name": "headLines",
+          "kind": "field",
+          "signature": "headLines: u64"
+        },
+        {
+          "name": "remaining",
+          "kind": "field",
+          "signature": "remaining: u64",
+          "doc": "Body bytes left in the current `Content-Length` body or chunk."
+        },
+        {
+          "name": "bodyTotal",
+          "kind": "field",
+          "signature": "bodyTotal: u64",
+          "doc": "Body bytes declared so far by the chunks of the current request."
+        },
+        {
+          "name": "trailers",
+          "kind": "field",
+          "signature": "trailers: u64"
+        },
+        {
+          "name": "error",
+          "kind": "field",
+          "signature": "error: ParseError"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(limits: Limits): RequestParser",
+          "doc": "A parser for a new connection, enforcing `limits`."
+        },
+        {
+          "name": "buffered",
+          "kind": "method",
+          "signature": "buffered(&self): u64",
+          "doc": "The number of bytes fed and not consumed yet."
+        },
+        {
+          "name": "compact",
+          "kind": "method",
+          "signature": "compact(&mut self): void",
+          "doc": "Drops consumed bytes so the buffer holds only what is still unread."
+        },
+        {
+          "name": "fail",
+          "kind": "method",
+          "signature": "fail(&mut self, kind: ParseErrorKind): ParseEvent"
+        },
+        {
+          "name": "feed",
+          "kind": "method",
+          "signature": "feed(&mut self, bytes: &Vector<u8>): void",
+          "doc": "Appends a copy of `bytes` to the input."
+        },
+        {
+          "name": "feedStr",
+          "kind": "method",
+          "signature": "feedStr(&mut self, text: str): void",
+          "doc": "Appends the bytes of `text` to the input."
+        },
+        {
+          "name": "finishHead",
+          "kind": "method",
+          "signature": "finishHead(&mut self, end: u64, next: u64): ParseEvent"
+        },
+        {
+          "name": "next",
+          "kind": "method",
+          "signature": "next(&mut self): ParseEvent",
+          "doc": "The next event. See `ParseEvent`."
+        },
+        {
+          "name": "nextHead",
+          "kind": "method",
+          "signature": "nextHead(&mut self): ParseEvent",
+          "doc": "Checks the head line by line as bytes arrive, so limits are enforced  \nearly, and parses it once the blank line that ends it is in."
+        },
+        {
+          "name": "waitOrFail",
+          "kind": "method",
+          "signature": "waitOrFail(&mut self, start: u64, limit: u64, kind: ParseErrorKind): ParseEvent",
+          "doc": "The event for the line at `start` when `findLine` found no complete  \nline: `NEED_MORE` while it may still end within `limit`, `kind` once  \nit cannot."
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::Http::Version",
+      "name": "Version",
+      "kind": "enum",
+      "visibility": "private",
+      "signature": "enum Version",
+      "doc": "The protocol version of a request. Any other version is rejected.",
+      "members": [
+        {
+          "name": "HTTP_1_0",
+          "kind": "variant",
+          "signature": "HTTP_1_0"
+        },
+        {
+          "name": "HTTP_1_1",
+          "kind": "variant",
+          "signature": "HTTP_1_1"
+        },
+        {
+          "name": "toStr",
+          "kind": "method",
+          "signature": "toStr(&self): str",
+          "doc": "The version as it appears on the request line, `HTTP/1.1` for example."
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::LineBounds",
+      "name": "LineBounds",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record LineBounds",
+      "doc": "Where a complete line sits in the buffer: its content ends at  \n`contentEnd` (line terminator excluded) and the next line starts at  \n`nextStart`.",
+      "members": [
+        {
+          "name": "contentEnd",
+          "kind": "field",
+          "signature": "contentEnd: u64"
+        },
+        {
+          "name": "nextStart",
+          "kind": "field",
+          "signature": "nextStart: u64"
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::LineScan",
+      "name": "LineScan",
+      "kind": "enum",
+      "visibility": "private",
+      "signature": "enum LineScan",
+      "members": [
+        {
+          "name": "INCOMPLETE",
+          "kind": "variant",
+          "signature": "INCOMPLETE"
+        },
+        {
+          "name": "TOO_LONG",
+          "kind": "variant",
+          "signature": "TOO_LONG"
+        },
+        {
+          "name": "LINE",
+          "kind": "variant",
+          "signature": "LINE(LineBounds)"
+        }
+      ]
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_BODY_LENGTH",
+      "name": "STATE_BODY_LENGTH",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_BODY_LENGTH: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_CHUNK_DATA",
+      "name": "STATE_CHUNK_DATA",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_CHUNK_DATA: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_CHUNK_DATA_END",
+      "name": "STATE_CHUNK_DATA_END",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_CHUNK_DATA_END: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_CHUNK_SIZE",
+      "name": "STATE_CHUNK_SIZE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_CHUNK_SIZE: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_FAILED",
+      "name": "STATE_FAILED",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_FAILED: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_FINISHED",
+      "name": "STATE_FINISHED",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_FINISHED: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_HEAD",
+      "name": "STATE_HEAD",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_HEAD: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::STATE_TRAILERS",
+      "name": "STATE_TRAILERS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const STATE_TRAILERS: u8"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::bytesToString",
+      "name": "bytesToString",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function bytesToString(buffer: &Vector<u8>, start: u64, end: u64): String"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::findLine",
+      "name": "findLine",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function findLine(buffer: &Vector<u8>, start: u64, limit: u64): LineScan",
+      "doc": "Finds the line that starts at `start`. A line ends at LF; a CR right  \nbefore that LF belongs to the terminator, any other CR to the content.  \nThe content may be at most `limit` bytes long, which is checked before  \nthe line ends so an unterminated line cannot grow without bound."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::framingOf",
+      "name": "framingOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function framingOf(head: &RequestHead, limits: &Limits): Result<Framing, ParseErrorKind>",
+      "doc": "Decides how the body is delimited (RFC 9112 section 6.3).  \n  \n`Transfer-Encoding` together with `Content-Length` is rejected as request  \nsmuggling. The only transfer coding accepted is a lone `chunked`. Every  \n`Content-Length` element, across repeated fields and comma lists, has to  \nbe a valid count and all of them have to agree."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::hexDigitValue",
+      "name": "hexDigitValue",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function hexDigitValue(byte: u8): Option<u64>"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::isDigit",
+      "name": "isDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isDigit(byte: u8): boolean"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::isTargetByte",
+      "name": "isTargetByte",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isTargetByte(byte: u8): boolean",
+      "doc": "Whether `byte` may appear in a request target: visible ASCII only."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::parseChunkSize",
+      "name": "parseChunkSize",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseChunkSize(buffer: &Vector<u8>, start: u64, end: u64, allowed: u64): Result<u64, ParseErrorKind>",
+      "doc": "Parses `chunk-size [ BWS \";\" chunk-ext ]` from `buffer[start..end]`.  \nExtensions are skipped without interpretation. A size larger than  \n`allowed` is `BODY_TOO_LARGE`, reported before the size can overflow."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::parseContentLength",
+      "name": "parseContentLength",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseContentLength(text: &String): Option<u64>",
+      "doc": "Parses one `Content-Length` list element: one or more decimal digits."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::parseHead",
+      "name": "parseHead",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseHead(buffer: &Vector<u8>, start: u64, end: u64): Result<RequestHead, ParseErrorKind>",
+      "doc": "Parses a complete head, request line through the last header line, from  \n`buffer[start..end]`. `end` is the start of the blank line that closes it."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::parseHeaderLine",
+      "name": "parseHeaderLine",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseHeaderLine(buffer: &Vector<u8>, start: u64, end: u64, headers: &mut Headers): boolean",
+      "doc": "Parses `field-name \":\" OWS field-value OWS` from `buffer[start..end]` and  \nappends it to `headers`. A line that starts with whitespace is an  \nobsolete line folding (obs-fold), which is rejected, as is whitespace  \nbetween the name and the colon."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::parseMethod",
+      "name": "parseMethod",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseMethod(name: String): Option<Method>"
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::parseRequestLine",
+      "name": "parseRequestLine",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseRequestLine(buffer: &Vector<u8>, start: u64, end: u64, headers: Headers): Result<RequestHead, ParseErrorKind>",
+      "doc": "Parses `method SP request-target SP HTTP-version` from  \n`buffer[start..end]`, with exactly one space between the parts."
+    },
+    {
+      "module": "std::http::request",
+      "path": "std::http::request::parseVersion",
+      "name": "parseVersion",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseVersion(text: &String): Result<Version, ParseErrorKind>",
+      "doc": "Parses `HTTP/<digit>.<digit>`. A well-formed version other than 1.0 and  \n1.1 is `UNSUPPORTED_VERSION` (505); anything else is not a version at all."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http",
+      "name": "Http",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Http",
+      "doc": "HTTP/1.1 response serialization."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::ResponseHead",
+      "name": "ResponseHead",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record ResponseHead",
+      "doc": "The status line and header fields of a response. The version is  \nalways HTTP/1.1.",
+      "members": [
+        {
+          "name": "status",
+          "kind": "field",
+          "signature": "status: u16"
+        },
+        {
+          "name": "reason",
+          "kind": "field",
+          "signature": "reason: String"
+        },
+        {
+          "name": "headers",
+          "kind": "field",
+          "signature": "headers: Headers"
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(status: u16): ResponseHead",
+          "doc": "A head for `status` with its standard reason phrase (empty for a  \nstatus without one) and no header fields."
+        },
+        {
+          "name": "withReason",
+          "kind": "method",
+          "signature": "static withReason(status: u16, reason: str): ResponseHead",
+          "doc": "A head for `status` with a custom reason phrase and no header fields."
+        }
+      ]
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::SerializeError",
+      "name": "SerializeError",
+      "kind": "enum",
+      "visibility": "private",
+      "signature": "enum SerializeError",
+      "doc": "Why a response head cannot be written. Nothing is appended when one of  \nthese is returned.",
+      "members": [
+        {
+          "name": "INVALID_STATUS",
+          "kind": "variant",
+          "signature": "INVALID_STATUS"
+        },
+        {
+          "name": "INVALID_REASON",
+          "kind": "variant",
+          "signature": "INVALID_REASON"
+        },
+        {
+          "name": "INVALID_HEADER_NAME",
+          "kind": "variant",
+          "signature": "INVALID_HEADER_NAME"
+        },
+        {
+          "name": "INVALID_HEADER_VALUE",
+          "kind": "variant",
+          "signature": "INVALID_HEADER_VALUE"
+        },
+        {
+          "name": "FRAMING_HEADER_PRESENT",
+          "kind": "variant",
+          "signature": "FRAMING_HEADER_PRESENT"
+        }
+      ]
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::reasonPhrase",
+      "name": "reasonPhrase",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function reasonPhrase(status: u16): str",
+      "doc": "The RFC 9110 reason phrase for `status`, or an empty string for a  \nstatus it does not define."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::writeBody",
+      "name": "writeBody",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function writeBody(bytes: &Vector<u8>, out: &mut Vector<u8>): void",
+      "doc": "Appends `bytes` unchanged, for a body framed by `Content-Length`."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::writeChunk",
+      "name": "writeChunk",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function writeChunk(bytes: &Vector<u8>, out: &mut Vector<u8>): void",
+      "doc": "Appends `bytes` as one chunk of a `Transfer-Encoding: chunked` body:  \nthe size in hexadecimal, CRLF, the bytes, CRLF. Appends nothing for  \nempty `bytes`, since an empty chunk would end the body."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::writeHead",
+      "name": "writeHead",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function writeHead(head: &ResponseHead, out: &mut Vector<u8>): Result<void, SerializeError>",
+      "doc": "Appends `HTTP/1.1 <status> <reason>\\r\\n`, each header field as  \n`name: value\\r\\n`, and the blank line that ends the head. A name,  \nvalue or reason that could split the response (CR, LF) is an error and  \nleaves `out` unchanged."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::writeLastChunk",
+      "name": "writeLastChunk",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function writeLastChunk(out: &mut Vector<u8>): void",
+      "doc": "Appends the last chunk, `0\\r\\n\\r\\n`, which ends a chunked body  \nwithout trailer fields."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::Http::writeResponse",
+      "name": "writeResponse",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function writeResponse(head: &ResponseHead, body: &Vector<u8>, out: &mut Vector<u8>): Result<void, SerializeError>",
+      "doc": "Appends `head` with a `Content-Length` field for `body`, then `body`.  \nThe head must not carry `Content-Length` or `Transfer-Encoding`."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::hexDigit",
+      "name": "hexDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function hexDigit(value: u64): u8"
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::hexText",
+      "name": "hexText",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function hexText(value: u64): String",
+      "doc": "`value` in lowercase hexadecimal, without leading zeros."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::pushStr",
+      "name": "pushStr",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pushStr(out: &mut Vector<u8>, text: str): void"
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::pushText",
+      "name": "pushText",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pushText(out: &mut Vector<u8>, text: &String): void"
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::validateHead",
+      "name": "validateHead",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function validateHead(head: &ResponseHead): Result<void, SerializeError>",
+      "doc": "Checks everything `writeHead` would write, so a head is either written  \nwhole or not at all."
+    },
+    {
+      "module": "std::http::response",
+      "path": "std::http::response::writeHeadLines",
+      "name": "writeHeadLines",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function writeHeadLines(head: &ResponseHead, out: &mut Vector<u8>): void",
+      "doc": "Appends the status line and header fields of `head`, without the blank  \nline that ends the head."
     },
     {
       "module": "std::io",

@@ -1,0 +1,972 @@
+//! The HTTP/1.1 request parser: `Http::RequestParser` and the types it
+//! reports. Bytes go in with `feed`, events come out of `next`; see the
+//! `std::http` module documentation for the framing and limit rules.
+
+import String from "std::string";
+import Vector from "std::vector";
+
+import
+  isFieldValue,
+  isFieldWhitespace,
+  isToken,
+  isTokenByte,
+  listElements,
+  trimFieldWhitespace,
+from "./headers";
+
+const STATE_HEAD: u8 = 0;
+const STATE_BODY_LENGTH: u8 = 1;
+const STATE_CHUNK_SIZE: u8 = 2;
+const STATE_CHUNK_DATA: u8 = 3;
+const STATE_CHUNK_DATA_END: u8 = 4;
+const STATE_TRAILERS: u8 = 5;
+const STATE_FINISHED: u8 = 6;
+const STATE_FAILED: u8 = 7;
+
+const FRAMING_NONE: u8 = 0;
+const FRAMING_LENGTH: u8 = 1;
+const FRAMING_CHUNKED: u8 = 2;
+
+/// `u64::MAX / 10`: a decimal accumulator above it overflows on the next digit.
+const DECIMAL_OVERFLOW_GUARD: u64 = 1844674407370955161;
+
+/// `u64::MAX / 16`: a hexadecimal accumulator above it overflows on the next digit.
+const HEX_OVERFLOW_GUARD: u64 = 1152921504606846975;
+
+/// Where a complete line sits in the buffer: its content ends at
+/// `contentEnd` (line terminator excluded) and the next line starts at
+/// `nextStart`.
+record LineBounds {
+  public contentEnd: u64;
+  public nextStart: u64;
+}
+
+enum LineScan {
+  /// No line feed yet, and the bytes so far are within the limit.
+  INCOMPLETE,
+
+  /// The line, complete or not, is longer than the limit.
+  TOO_LONG,
+
+  LINE(LineBounds),
+}
+
+/// How the body of a request is delimited, decided from its head.
+record Framing {
+  public mode: u8;
+  public length: u64;
+}
+
+/// Finds the line that starts at `start`. A line ends at LF; a CR right
+/// before that LF belongs to the terminator, any other CR to the content.
+/// The content may be at most `limit` bytes long, which is checked before
+/// the line ends so an unterminated line cannot grow without bound.
+function findLine(buffer: &Vector<u8>, start: u64, limit: u64): LineScan {
+  let data: *u8 = buffer.asPtr();
+  let length: u64 = buffer.length();
+  let mut index: u64 = start;
+
+  while (index < length) {
+    if (data[index] == '\n' as u8) {
+      let mut contentEnd: u64 = index;
+
+      if (contentEnd > start && data[contentEnd - 1] == '\r' as u8) {
+        contentEnd -= 1;
+      }
+
+      if (contentEnd - start > limit) {
+        return LineScan::TOO_LONG;
+      }
+
+      return LineScan::LINE(LineBounds { contentEnd: contentEnd, nextStart: index + 1 });
+    }
+
+    index += 1;
+  }
+
+  let mut partial: u64 = length - start;
+
+  // A trailing CR may still turn out to be part of the terminator.
+  if (partial > 0 && data[length - 1] == '\r' as u8) {
+    partial -= 1;
+  }
+
+  if (partial > limit) {
+    return LineScan::TOO_LONG;
+  }
+
+  return LineScan::INCOMPLETE;
+}
+
+function bytesToString(buffer: &Vector<u8>, start: u64, end: u64): String {
+  let data: *u8 = buffer.asPtr();
+  let mut text: String = String::withCapacity(end - start);
+  let mut index: u64 = start;
+
+  while (index < end) {
+    text.pushByte(data[index]);
+    index += 1;
+  }
+
+  return text;
+}
+
+function parseMethod(name: String): Option<Http::Method> {
+  if (!isToken(&name)) {
+    return Option::NONE;
+  }
+
+  if (name.equals("GET")) {
+    return Option::SOME(Http::Method::GET);
+  }
+
+  if (name.equals("HEAD")) {
+    return Option::SOME(Http::Method::HEAD);
+  }
+
+  if (name.equals("POST")) {
+    return Option::SOME(Http::Method::POST);
+  }
+
+  if (name.equals("PUT")) {
+    return Option::SOME(Http::Method::PUT);
+  }
+
+  if (name.equals("DELETE")) {
+    return Option::SOME(Http::Method::DELETE);
+  }
+
+  if (name.equals("PATCH")) {
+    return Option::SOME(Http::Method::PATCH);
+  }
+
+  if (name.equals("OPTIONS")) {
+    return Option::SOME(Http::Method::OPTIONS);
+  }
+
+  if (name.equals("CONNECT")) {
+    return Option::SOME(Http::Method::CONNECT);
+  }
+
+  if (name.equals("TRACE")) {
+    return Option::SOME(Http::Method::TRACE);
+  }
+
+  return Option::SOME(Http::Method::OTHER(name));
+}
+
+function isDigit(byte: u8): boolean {
+  return byte >= '0' as u8 && byte <= '9' as u8;
+}
+
+/// Parses `HTTP/<digit>.<digit>`. A well-formed version other than 1.0 and
+/// 1.1 is `UNSUPPORTED_VERSION` (505); anything else is not a version at all.
+function parseVersion(text: &String): Result<Http::Version, Http::ParseErrorKind> {
+  if (text.length() != 8 || !text.startsWith("HTTP/") || text.byteAt(6).unwrap() != '.' as u8) {
+    return Result::ERROR(Http::ParseErrorKind::INVALID_REQUEST_LINE);
+  }
+
+  let major: u8 = text.byteAt(5).unwrap();
+  let minor: u8 = text.byteAt(7).unwrap();
+
+  if (!isDigit(major) || !isDigit(minor)) {
+    return Result::ERROR(Http::ParseErrorKind::INVALID_REQUEST_LINE);
+  }
+
+  if (major == '1' as u8 && minor == '1' as u8) {
+    return Result::OK(Http::Version::HTTP_1_1);
+  }
+
+  if (major == '1' as u8 && minor == '0' as u8) {
+    return Result::OK(Http::Version::HTTP_1_0);
+  }
+
+  return Result::ERROR(Http::ParseErrorKind::UNSUPPORTED_VERSION);
+}
+
+/// Whether `byte` may appear in a request target: visible ASCII only.
+function isTargetByte(byte: u8): boolean {
+  return byte > 0x20 && byte < 0x7F;
+}
+
+/// Parses `method SP request-target SP HTTP-version` from
+/// `buffer[start..end]`, with exactly one space between the parts.
+function parseRequestLine(
+  buffer: &Vector<u8>,
+  start: u64,
+  end: u64,
+  headers: Http::Headers,
+): Result<Http::RequestHead, Http::ParseErrorKind> {
+  let data: *u8 = buffer.asPtr();
+  let mut firstSpace: u64 = end;
+  let mut secondSpace: u64 = end;
+  let mut index: u64 = start;
+
+  while (index < end) {
+    if (data[index] == ' ' as u8) {
+      if (firstSpace == end) {
+        firstSpace = index;
+      } else if (secondSpace == end) {
+        secondSpace = index;
+      } else {
+        return Result::ERROR(Http::ParseErrorKind::INVALID_REQUEST_LINE);
+      }
+    }
+
+    index += 1;
+  }
+
+  if (secondSpace == end || firstSpace == start || secondSpace == firstSpace + 1) {
+    return Result::ERROR(Http::ParseErrorKind::INVALID_REQUEST_LINE);
+  }
+
+  let mut targetIndex: u64 = firstSpace + 1;
+
+  while (targetIndex < secondSpace) {
+    if (!isTargetByte(data[targetIndex])) {
+      return Result::ERROR(Http::ParseErrorKind::INVALID_REQUEST_LINE);
+    }
+
+    targetIndex += 1;
+  }
+
+  let versionText: String = bytesToString(buffer, secondSpace + 1, end);
+  let version: Http::Version = parseVersion(&versionText)!;
+  let Option::SOME(method) = parseMethod(bytesToString(buffer, start, firstSpace)) else {
+    return Result::ERROR(Http::ParseErrorKind::INVALID_REQUEST_LINE);
+  };
+
+  return Result::OK(
+    Http::RequestHead {
+      method: method,
+      target: bytesToString(buffer, firstSpace + 1, secondSpace),
+      version: version,
+      headers: headers,
+    },
+  );
+}
+
+/// Parses `field-name ":" OWS field-value OWS` from `buffer[start..end]` and
+/// appends it to `headers`. A line that starts with whitespace is an
+/// obsolete line folding (obs-fold), which is rejected, as is whitespace
+/// between the name and the colon.
+function parseHeaderLine(
+  buffer: &Vector<u8>,
+  start: u64,
+  end: u64,
+  headers: &mut Http::Headers
+): boolean {
+  let data: *u8 = buffer.asPtr();
+
+  if (isFieldWhitespace(data[start])) {
+    return false;
+  }
+
+  let mut colon: u64 = start;
+
+  while (colon < end && data[colon] != ':' as u8) {
+    if (!isTokenByte(data[colon])) {
+      return false;
+    }
+
+    colon += 1;
+  }
+
+  if (colon == end || colon == start) {
+    return false;
+  }
+
+  let rawValue: String = bytesToString(buffer, colon + 1, end);
+  let value: String = trimFieldWhitespace(&rawValue);
+
+  if (!isFieldValue(&value)) {
+    return false;
+  }
+
+  headers.add(bytesToString(buffer, start, colon), value);
+  return true;
+}
+
+/// Parses a complete head, request line through the last header line, from
+/// `buffer[start..end]`. `end` is the start of the blank line that closes it.
+function parseHead(
+  buffer: &Vector<u8>,
+  start: u64,
+  end: u64
+): Result<Http::RequestHead, Http::ParseErrorKind> {
+  let LineScan::LINE(requestLine) = findLine(buffer, start, end - start) else {
+    return Result::ERROR(Http::ParseErrorKind::INVALID_REQUEST_LINE);
+  };
+  let mut headers: Http::Headers = Http::Headers::new();
+  let mut lineStart: u64 = requestLine.nextStart;
+
+  while (lineStart < end) {
+    let LineScan::LINE(line) = findLine(buffer, lineStart, end - lineStart) else {
+      return Result::ERROR(Http::ParseErrorKind::INVALID_HEADER);
+    };
+
+    if (!parseHeaderLine(buffer, lineStart, line.contentEnd, &mut headers)) {
+      return Result::ERROR(Http::ParseErrorKind::INVALID_HEADER);
+    }
+
+    lineStart = line.nextStart;
+  }
+
+  return parseRequestLine(buffer, start, requestLine.contentEnd, headers);
+}
+
+/// Parses one `Content-Length` list element: one or more decimal digits.
+function parseContentLength(text: &String): Option<u64> {
+  if (text.length() == 0) {
+    return Option::NONE;
+  }
+
+  let mut value: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let byte: u8 = text.byteAt(index).unwrap();
+
+    if (!isDigit(byte)) {
+      return Option::NONE;
+    }
+
+    let digit: u64 = (byte - '0' as u8) as u64;
+
+    if (value > DECIMAL_OVERFLOW_GUARD || (value == DECIMAL_OVERFLOW_GUARD && digit > 5)) {
+      return Option::NONE;
+    }
+
+    value = value * 10 + digit;
+    index += 1;
+  }
+
+  return Option::SOME(value);
+}
+
+/// Decides how the body is delimited (RFC 9112 section 6.3).
+///
+/// `Transfer-Encoding` together with `Content-Length` is rejected as request
+/// smuggling. The only transfer coding accepted is a lone `chunked`. Every
+/// `Content-Length` element, across repeated fields and comma lists, has to
+/// be a valid count and all of them have to agree.
+function framingOf(
+  head: &Http::RequestHead,
+  limits: &Http::Limits
+): Result<Framing, Http::ParseErrorKind> {
+  let codings: Vector<String> = head.headers.getAll("Transfer-Encoding");
+  let lengths: Vector<String> = head.headers.getAll("Content-Length");
+
+  if (codings.length() > 0) {
+    if (lengths.length() > 0) {
+      return Result::ERROR(Http::ParseErrorKind::CONFLICTING_LENGTH);
+    }
+
+    let mut chunkedCount: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < codings.length()) {
+      let elements: Vector<String> = listElements(codings.get(index).unwrap());
+      let mut element: u64 = 0;
+
+      while (element < elements.length()) {
+        let coding: String = elements.get(element).unwrap().toLowerCase();
+
+        if (!coding.equals("chunked")) {
+          return Result::ERROR(Http::ParseErrorKind::UNSUPPORTED_TRANSFER_CODING);
+        }
+
+        chunkedCount += 1;
+        element += 1;
+      }
+
+      index += 1;
+    }
+
+    if (chunkedCount != 1) {
+      return Result::ERROR(Http::ParseErrorKind::UNSUPPORTED_TRANSFER_CODING);
+    }
+
+    return Result::OK(Framing { mode: FRAMING_CHUNKED, length: 0 });
+  }
+
+  if (lengths.length() == 0) {
+    return Result::OK(Framing { mode: FRAMING_NONE, length: 0 });
+  }
+
+  let mut found: boolean = false;
+  let mut conflicting: boolean = false;
+  let mut length: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < lengths.length()) {
+    let elements: Vector<String> = listElements(lengths.get(index).unwrap());
+    let mut element: u64 = 0;
+
+    while (element < elements.length()) {
+      let Option::SOME(value) = parseContentLength(elements.get(element).unwrap()) else {
+        return Result::ERROR(Http::ParseErrorKind::INVALID_CONTENT_LENGTH);
+      };
+
+      if (found && value != length) {
+        conflicting = true;
+      }
+
+      found = true;
+      length = value;
+      element += 1;
+    }
+
+    index += 1;
+  }
+
+  if (conflicting) {
+    return Result::ERROR(Http::ParseErrorKind::CONFLICTING_LENGTH);
+  }
+
+  if (length > limits.maxBody) {
+    return Result::ERROR(Http::ParseErrorKind::BODY_TOO_LARGE);
+  }
+
+  return Result::OK(Framing { mode: length == 0 ? FRAMING_NONE : FRAMING_LENGTH, length: length });
+}
+
+function hexDigitValue(byte: u8): Option<u64> {
+  if (isDigit(byte)) {
+    return Option::SOME((byte - '0' as u8) as u64);
+  }
+
+  if (byte >= 'a' as u8 && byte <= 'f' as u8) {
+    return Option::SOME((byte - 'a' as u8) as u64 + 10);
+  }
+
+  if (byte >= 'A' as u8 && byte <= 'F' as u8) {
+    return Option::SOME((byte - 'A' as u8) as u64 + 10);
+  }
+
+  return Option::NONE;
+}
+
+/// Parses `chunk-size [ BWS ";" chunk-ext ]` from `buffer[start..end]`.
+/// Extensions are skipped without interpretation. A size larger than
+/// `allowed` is `BODY_TOO_LARGE`, reported before the size can overflow.
+function parseChunkSize(
+  buffer: &Vector<u8>,
+  start: u64,
+  end: u64,
+  allowed: u64
+): Result<u64, Http::ParseErrorKind> {
+  let data: *u8 = buffer.asPtr();
+  let mut size: u64 = 0;
+  let mut index: u64 = start;
+
+  while (index < end) {
+    let Option::SOME(digit) = hexDigitValue(data[index]) else {
+      break;
+    };
+
+    if (size > HEX_OVERFLOW_GUARD) {
+      return Result::ERROR(Http::ParseErrorKind::INVALID_CHUNK);
+    }
+
+    size = size * 16 + digit;
+
+    if (size > allowed) {
+      return Result::ERROR(Http::ParseErrorKind::BODY_TOO_LARGE);
+    }
+
+    index += 1;
+  }
+
+  if (index == start) {
+    return Result::ERROR(Http::ParseErrorKind::INVALID_CHUNK);
+  }
+
+  while (index < end && isFieldWhitespace(data[index])) {
+    index += 1;
+  }
+
+  if (index < end && data[index] != ';' as u8) {
+    return Result::ERROR(Http::ParseErrorKind::INVALID_CHUNK);
+  }
+
+  return Result::OK(size);
+}
+
+/// HTTP/1.1 request parsing.
+export namespace Http {
+  /// The request method. Methods are case-sensitive: `get` is the
+  /// extension method `OTHER("get")`, not `GET`.
+  enum Method {
+    GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    PATCH,
+    OPTIONS,
+    CONNECT,
+    TRACE,
+
+    /// Any other method that is a valid RFC 9110 token, as written.
+    OTHER(String),
+
+    /// The method as it appears on the request line.
+    public toString(&self): String {
+      return match (self) {
+        Method::GET -> String::create("GET"),
+        Method::HEAD -> String::create("HEAD"),
+        Method::POST -> String::create("POST"),
+        Method::PUT -> String::create("PUT"),
+        Method::DELETE -> String::create("DELETE"),
+        Method::PATCH -> String::create("PATCH"),
+        Method::OPTIONS -> String::create("OPTIONS"),
+        Method::CONNECT -> String::create("CONNECT"),
+        Method::TRACE -> String::create("TRACE"),
+        Method::OTHER(name) -> name.clone(),
+      };
+    }
+  }
+
+  /// The protocol version of a request. Any other version is rejected.
+  enum Version {
+    HTTP_1_0,
+    HTTP_1_1,
+
+    /// The version as it appears on the request line, `HTTP/1.1` for example.
+    public toStr(&self): str {
+      return match (self) {
+        Version::HTTP_1_0 -> "HTTP/1.0",
+        Version::HTTP_1_1 -> "HTTP/1.1",
+      };
+    }
+  }
+
+  /// The request line and header fields of one request.
+  record RequestHead {
+    public method: Method;
+
+    /// The request target exactly as received: an origin form such as
+    /// `/search?q=1`, an absolute URI, an authority for `CONNECT`, or `*`.
+    public target: String;
+    public version: Version;
+    public headers: Http::Headers;
+
+    /// Whether the connection stays open after this request (RFC 9112
+    /// section 9.3): HTTP/1.1 keeps it unless `Connection` lists `close`;
+    /// HTTP/1.0 closes it unless `Connection` lists `keep-alive`.
+    public keepAlive(&self): boolean {
+      if (self.headers.hasToken("Connection", "close")) {
+        return false;
+      }
+
+      return match (self.version) {
+        Version::HTTP_1_1 -> true,
+        Version::HTTP_1_0 -> self.headers.hasToken("Connection", "keep-alive"),
+      };
+    }
+  }
+
+  /// Maximum sizes the parser accepts. A request over any of them is
+  /// `MALFORMED`. Lengths exclude the line terminator.
+  record Limits {
+    /// Longest request line, in bytes. Default 8 KiB.
+    public maxRequestLine: u64;
+
+    /// Longest header or trailer line, and longest chunk-size line, in bytes.
+    /// Default 8 KiB.
+    public maxHeaderLine: u64;
+
+    /// Most header fields in a head, and separately most trailer fields
+    /// after a chunked body. Default 100.
+    public maxHeaders: u64;
+
+    /// Largest body, in bytes after chunked decoding. Default 1 MiB.
+    public maxBody: u64;
+
+    /// The default limits. Override a field to change one of them.
+    public static new(): Limits {
+      return Limits { maxRequestLine: 8192, maxHeaderLine: 8192, maxHeaders: 100, maxBody: 1048576 };
+    }
+  }
+
+  /// Why a request is malformed.
+  enum ParseErrorKind {
+    /// The request line is longer than `Limits.maxRequestLine`. Status 414.
+    REQUEST_LINE_TOO_LONG,
+
+    /// A header or trailer line is longer than `Limits.maxHeaderLine`. Status 431.
+    HEADER_TOO_LONG,
+
+    /// More header or trailer fields than `Limits.maxHeaders`. Status 431.
+    TOO_MANY_HEADERS,
+
+    /// The body is larger than `Limits.maxBody`. Status 413.
+    BODY_TOO_LARGE,
+
+    /// The request line is not `method SP target SP version`. Status 400.
+    INVALID_REQUEST_LINE,
+
+    /// A header or trailer line is not `name: value`, has whitespace before
+    /// the colon, is a line folding, or holds a control byte. Status 400.
+    INVALID_HEADER,
+
+    /// A `Content-Length` element is not a decimal byte count. Status 400.
+    INVALID_CONTENT_LENGTH,
+
+    /// `Content-Length` values disagree, or `Transfer-Encoding` and
+    /// `Content-Length` are both present. Status 400.
+    CONFLICTING_LENGTH,
+
+    /// A chunk-size line or the line ending after chunk data is malformed. Status 400.
+    INVALID_CHUNK,
+
+    /// A transfer coding other than a single `chunked`. Status 501.
+    UNSUPPORTED_TRANSFER_CODING,
+
+    /// A well-formed version other than HTTP/1.0 and HTTP/1.1. Status 505.
+    UNSUPPORTED_VERSION,
+
+    /// The variant name, `INVALID_HEADER` for example.
+    public name(&self): str {
+      return match (self) {
+        ParseErrorKind::REQUEST_LINE_TOO_LONG -> "REQUEST_LINE_TOO_LONG",
+        ParseErrorKind::HEADER_TOO_LONG -> "HEADER_TOO_LONG",
+        ParseErrorKind::TOO_MANY_HEADERS -> "TOO_MANY_HEADERS",
+        ParseErrorKind::BODY_TOO_LARGE -> "BODY_TOO_LARGE",
+        ParseErrorKind::INVALID_REQUEST_LINE -> "INVALID_REQUEST_LINE",
+        ParseErrorKind::INVALID_HEADER -> "INVALID_HEADER",
+        ParseErrorKind::INVALID_CONTENT_LENGTH -> "INVALID_CONTENT_LENGTH",
+        ParseErrorKind::CONFLICTING_LENGTH -> "CONFLICTING_LENGTH",
+        ParseErrorKind::INVALID_CHUNK -> "INVALID_CHUNK",
+        ParseErrorKind::UNSUPPORTED_TRANSFER_CODING -> "UNSUPPORTED_TRANSFER_CODING",
+        ParseErrorKind::UNSUPPORTED_VERSION -> "UNSUPPORTED_VERSION",
+      };
+    }
+
+    /// The response status a server should answer with.
+    public status(&self): u16 {
+      return match (self) {
+        ParseErrorKind::REQUEST_LINE_TOO_LONG -> 414,
+        ParseErrorKind::HEADER_TOO_LONG -> 431,
+        ParseErrorKind::TOO_MANY_HEADERS -> 431,
+        ParseErrorKind::BODY_TOO_LARGE -> 413,
+        ParseErrorKind::UNSUPPORTED_TRANSFER_CODING -> 501,
+        ParseErrorKind::UNSUPPORTED_VERSION -> 505,
+        _ -> 400,
+      };
+    }
+  }
+
+  /// A malformed request: what is wrong with it and the status a server
+  /// should answer with before closing the connection.
+  record ParseError {
+    public kind: ParseErrorKind;
+    public status: u16;
+
+    /// The error for `kind`, with its suggested status.
+    public static create(kind: ParseErrorKind): ParseError {
+      return ParseError { kind: kind, status: kind.status() };
+    }
+  }
+
+  /// What `RequestParser::next` found in the bytes fed so far.
+  enum ParseEvent {
+    /// Nothing more can be reported until more bytes are fed.
+    NEED_MORE,
+
+    /// The request line and headers of the next request. Reported once per request.
+    HEAD(RequestHead),
+
+    /// The next piece of the body, chunked coding removed. Never empty.
+    BODY_CHUNK(Vector<u8>),
+
+    /// The current request is complete; the parser moves on to the next one.
+    DONE,
+
+    /// The request is malformed. Terminal: every later `next` reports the
+    /// same error, since the rest of the connection cannot be framed.
+    MALFORMED(ParseError),
+  }
+
+  /// A sans-IO HTTP/1.1 request parser for one connection.
+  ///
+  /// `feed` copies bytes in; `next` reports `HEAD`, then zero or more
+  /// `BODY_CHUNK`, then `DONE` for each request, and `NEED_MORE` whenever
+  /// it has to wait. Bytes after a request belong to the next one, so
+  /// keep-alive and pipelined requests need nothing special.
+  record RequestParser {
+    limits: Limits;
+    buffer: Vector<u8>;
+
+    /// Index of the first byte not consumed yet.
+    position: u64;
+    state: u8;
+
+    /// While reading the head: where the next unchecked line starts, and
+    /// how many lines (request line included) were checked so far.
+    scan: u64;
+    headLines: u64;
+
+    /// Body bytes left in the current `Content-Length` body or chunk.
+    remaining: u64;
+
+    /// Body bytes declared so far by the chunks of the current request.
+    bodyTotal: u64;
+    trailers: u64;
+    error: ParseError;
+
+    /// A parser for a new connection, enforcing `limits`.
+    public static new(limits: Limits): RequestParser {
+      return RequestParser {
+        limits: limits,
+        buffer: Vector::new<u8>(),
+        position: 0,
+        state: STATE_HEAD,
+        scan: 0,
+        headLines: 0,
+        remaining: 0,
+        bodyTotal: 0,
+        trailers: 0,
+        error: ParseError::create(ParseErrorKind::INVALID_REQUEST_LINE),
+      };
+    }
+
+    /// Appends a copy of `bytes` to the input.
+    public feed(&mut self, bytes: &Vector<u8>): void {
+      self.compact();
+      let data: *u8 = bytes.asPtr();
+      let mut index: u64 = 0;
+
+      while (index < bytes.length()) {
+        self.buffer.push(data[index]);
+        index += 1;
+      }
+    }
+
+    /// Appends the bytes of `text` to the input.
+    public feedStr(&mut self, text: str): void {
+      let owned: String = String::create(text);
+      let bytes: Vector<u8> = owned.toBytes();
+      self.feed(&bytes);
+    }
+
+    /// The number of bytes fed and not consumed yet.
+    public buffered(&self): u64 {
+      return self.buffer.length() - self.position;
+    }
+
+    /// The next event. See `ParseEvent`.
+    public next(&mut self): ParseEvent {
+      while (true) {
+        if (self.state == STATE_FAILED) {
+          return ParseEvent::MALFORMED(self.error);
+        }
+
+        if (self.state == STATE_FINISHED) {
+          self.state = STATE_HEAD;
+          self.scan = self.position;
+          self.headLines = 0;
+          self.remaining = 0;
+          self.bodyTotal = 0;
+          self.trailers = 0;
+          return ParseEvent::DONE;
+        }
+
+        if (self.state == STATE_HEAD) {
+          return self.nextHead();
+        }
+
+        if (self.state == STATE_BODY_LENGTH || self.state == STATE_CHUNK_DATA) {
+          if (self.remaining == 0) {
+            self.state = self.state == STATE_BODY_LENGTH ? STATE_FINISHED : STATE_CHUNK_DATA_END;
+            continue;
+          }
+
+          let available: u64 = self.buffer.length() - self.position;
+
+          if (available == 0) {
+            return ParseEvent::NEED_MORE;
+          }
+
+          let count: u64 = available < self.remaining ? available : self.remaining;
+          let mut chunk: Vector<u8> = Vector::new<u8>(count);
+          let data: *u8 = self.buffer.asPtr();
+          let mut index: u64 = 0;
+
+          while (index < count) {
+            chunk.push(data[self.position + index]);
+            index += 1;
+          }
+
+          self.position += count;
+          self.remaining -= count;
+          return ParseEvent::BODY_CHUNK(chunk);
+        }
+
+        if (self.state == STATE_CHUNK_SIZE) {
+          let LineScan::LINE(line) = findLine(&self.buffer, self.position, self.limits.maxHeaderLine) else {
+            return self.waitOrFail(self.position, self.limits.maxHeaderLine, ParseErrorKind::INVALID_CHUNK);
+          };
+          let allowed: u64 = self.limits.maxBody - self.bodyTotal;
+          let size: u64 = match (parseChunkSize(&self.buffer, self.position, line.contentEnd, allowed)) {
+            Result::OK(value) -> value,
+            Result::ERROR(kind) -> {
+              return self.fail(kind);
+            },
+          };
+
+          self.position = line.nextStart;
+
+          if (size == 0) {
+            self.state = STATE_TRAILERS;
+            self.trailers = 0;
+          } else {
+            self.bodyTotal += size;
+            self.remaining = size;
+            self.state = STATE_CHUNK_DATA;
+          }
+
+          continue;
+        }
+
+        if (self.state == STATE_CHUNK_DATA_END) {
+          let LineScan::LINE(line) = findLine(&self.buffer, self.position, 0) else {
+            return self.waitOrFail(self.position, 0, ParseErrorKind::INVALID_CHUNK);
+          };
+
+          self.position = line.nextStart;
+          self.state = STATE_CHUNK_SIZE;
+          continue;
+        }
+
+        // STATE_TRAILERS: trailer fields are checked like header fields and
+        // then discarded.
+        let LineScan::LINE(line) = findLine(&self.buffer, self.position, self.limits.maxHeaderLine) else {
+          return self.waitOrFail(self.position, self.limits.maxHeaderLine, ParseErrorKind::HEADER_TOO_LONG);
+        };
+
+        if (line.contentEnd == self.position) {
+          self.position = line.nextStart;
+          self.state = STATE_FINISHED;
+          continue;
+        }
+
+        let mut discarded: Http::Headers = Http::Headers::new();
+
+        if (!parseHeaderLine(&self.buffer, self.position, line.contentEnd, &mut discarded)) {
+          return self.fail(ParseErrorKind::INVALID_HEADER);
+        }
+
+        self.trailers += 1;
+
+        if (self.trailers > self.limits.maxHeaders) {
+          return self.fail(ParseErrorKind::TOO_MANY_HEADERS);
+        }
+
+        self.position = line.nextStart;
+      }
+
+      return ParseEvent::NEED_MORE;
+    }
+
+    /// Checks the head line by line as bytes arrive, so limits are enforced
+    /// early, and parses it once the blank line that ends it is in.
+    nextHead(&mut self): ParseEvent {
+      while (true) {
+        let limit: u64 = self.headLines == 0 ? self.limits.maxRequestLine : self.limits.maxHeaderLine;
+        let LineScan::LINE(line) = findLine(&self.buffer, self.scan, limit) else {
+          let kind: ParseErrorKind = self.headLines == 0 ? ParseErrorKind::REQUEST_LINE_TOO_LONG : ParseErrorKind::HEADER_TOO_LONG;
+          return self.waitOrFail(self.scan, limit, kind);
+        };
+
+        if (line.contentEnd == self.scan) {
+          // RFC 9112 section 2.2: empty lines before a request line are ignored.
+          if (self.headLines == 0) {
+            self.position = line.nextStart;
+            self.scan = line.nextStart;
+            continue;
+          }
+
+          return self.finishHead(self.scan, line.nextStart);
+        }
+
+        if (self.headLines > self.limits.maxHeaders) {
+          return self.fail(ParseErrorKind::TOO_MANY_HEADERS);
+        }
+
+        self.headLines += 1;
+        self.scan = line.nextStart;
+      }
+
+      return ParseEvent::NEED_MORE;
+    }
+
+    finishHead(&mut self, end: u64, next: u64): ParseEvent {
+      let head: RequestHead = match (parseHead(&self.buffer, self.position, end)) {
+        Result::OK(value) -> value,
+        Result::ERROR(kind) -> {
+          return self.fail(kind);
+        },
+      };
+      let framing: Framing = match (framingOf(&head, &self.limits)) {
+        Result::OK(value) -> value,
+        Result::ERROR(kind) -> {
+          return self.fail(kind);
+        },
+      };
+
+      self.position = next;
+      self.remaining = framing.length;
+
+      if (framing.mode == FRAMING_CHUNKED) {
+        self.state = STATE_CHUNK_SIZE;
+      } else if (framing.mode == FRAMING_LENGTH) {
+        self.state = STATE_BODY_LENGTH;
+      } else {
+        self.state = STATE_FINISHED;
+      }
+
+      return ParseEvent::HEAD(head);
+    }
+
+    /// The event for the line at `start` when `findLine` found no complete
+    /// line: `NEED_MORE` while it may still end within `limit`, `kind` once
+    /// it cannot.
+    waitOrFail(&mut self, start: u64, limit: u64, kind: ParseErrorKind): ParseEvent {
+      return match (findLine(&self.buffer, start, limit)) {
+        LineScan::TOO_LONG -> self.fail(kind),
+        _ -> ParseEvent::NEED_MORE,
+      };
+    }
+
+    fail(&mut self, kind: ParseErrorKind): ParseEvent {
+      self.error = ParseError::create(kind);
+      self.state = STATE_FAILED;
+      return ParseEvent::MALFORMED(self.error);
+    }
+
+    /// Drops consumed bytes so the buffer holds only what is still unread.
+    compact(&mut self): void {
+      if (self.position == 0) {
+        return;
+      }
+
+      let mut kept: Vector<u8> = Vector::new<u8>(self.buffer.length() - self.position);
+      let data: *u8 = self.buffer.asPtr();
+      let mut index: u64 = self.position;
+
+      while (index < self.buffer.length()) {
+        kept.push(data[index]);
+        index += 1;
+      }
+
+      self.buffer = kept;
+
+      // `scan` is only meaningful while reading a head; elsewhere it is reset
+      // before use.
+      self.scan = self.scan > self.position ? self.scan - self.position : 0;
+      self.position = 0;
+    }
+  }
+}

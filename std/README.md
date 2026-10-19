@@ -43,6 +43,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::sync` | `Ordering`, `AtomicBool`, `AtomicU32`, `AtomicU64`, `AtomicI64`, `AtomicPtr`, `Mutex`, `MutexGuard`, `Condvar`, `Arc`, `Channel`, `Sender`, `Receiver`, `ThreadPool` | Atomic values, locks, condition variables, shared ownership, channels and a thread pool |
 | `std::thread` | `Thread`, `JoinHandle<T>` | Spawn, join and detach POSIX threads |
 | `std::net` | `IpAddress`, `Ipv4Address`, `Ipv6Address`, `SocketAddress`, `TcpListener`, `TcpStream`, `Shutdown` | Numeric IP addresses and blocking or non-blocking TCP (x86_64 Linux only) |
+| `std::http` | `Http` | Sans-IO HTTP/1.1 server-side request parser and response serializer |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
@@ -273,6 +274,25 @@ function main(): i32 {
   `SOCK_CLOEXEC`; `EINTR` is retried. An expired read or write timeout is `WOULD_BLOCK`.
 - x86_64 Linux only: the socket calls go through `syscall(2)` because the emitted C
   does not declare the socket functions. See the `std::net` module docs.
+
+### `std::http`
+
+- `Http::RequestParser::new(Http::Limits)` — `feed(&Vector<u8>)` or `feedStr(str)` copy
+  bytes in; `next()` returns a `Http::ParseEvent`: `NEED_MORE`, `HEAD(RequestHead)` once
+  per request, zero or more `BODY_CHUNK(Vector<u8>)`, then `DONE`. Bytes past a request
+  belong to the next one (keep-alive, pipelining). `MALFORMED(ParseError)` is terminal and
+  carries a suggested status (400, 413, 414, 431, 501, 505). It never reads a socket.
+- `Http::RequestHead` — `method` (`Http::Method`, `OTHER(String)` for extension methods),
+  `target`, `version` (`HTTP_1_0` / `HTTP_1_1`), `headers`; `keepAlive()`.
+- `Http::Headers` — ordered fields, original casing kept, case-insensitive `get`,
+  `getAll`, `contains`, `hasToken`, `set`, `remove`; `add`, `length`, `nameAt`, `valueAt`.
+- Bodies: `Content-Length` or `Transfer-Encoding: chunked` (extensions ignored, trailers
+  checked and discarded). Both together, conflicting lengths and other codings are rejected.
+- `Http::Limits::new()` — request line 8 KiB, header line 8 KiB, 100 headers, 1 MiB body;
+  each is a public field.
+- `Http::writeHead`, `writeResponse` (adds `Content-Length`), `writeChunk`,
+  `writeLastChunk` append to a `&mut Vector<u8>`. CR or LF in a header or reason is a
+  `Http::SerializeError` and nothing is written.
 
 ### `std::thread`
 
