@@ -1,0 +1,103 @@
+// e2e: std
+// `return &self.field` for an enum with a payload, read directly and through a
+// nested record, next to record, scalar and generic fields, then read through
+// the returned reference, a match on the returned `&Kind` included.
+import Io from "std::io";
+import String from "std::string";
+
+enum Kind {
+  GET,
+  POST,
+  OTHER(String),
+}
+
+record Head {
+  public kind: Kind;
+  public code: i32;
+}
+
+record Point {
+  public x: i32;
+}
+
+record Request {
+  public head: Head;
+  public kind: Kind;
+  public point: Point;
+  public code: i32;
+
+  public nestedKind(&self): &Kind {
+    return &self.head.kind;
+  }
+
+  public directKind(&self): &Kind {
+    return &self.kind;
+  }
+
+  public headRef(&self): &Head {
+    return &self.head;
+  }
+
+  public pointRef(&self): &Point {
+    return &self.point;
+  }
+
+  public codeRef(&self): &i32 {
+    return &self.code;
+  }
+}
+
+record Holder<T> {
+  public value: T;
+
+  public valueRef(&self): &T {
+    return &self.value;
+  }
+}
+
+function describe(kind: &Kind): void {
+  match (kind) {
+    Kind::GET -> Io::println("GET"),
+    Kind::POST -> Io::println("POST"),
+    Kind::OTHER(name) -> Io::println(name.toStr()),
+  };
+}
+
+function main(): i32 {
+  let request: Request = Request {
+    head: Head { kind: Kind::OTHER(String::create("PATCH")), code: 7 },
+    kind: Kind::POST,
+    point: Point { x: 3 },
+    code: 42,
+  };
+
+  describe(request.nestedKind());
+  describe(request.directKind());
+
+  let nested: &Kind = request.nestedKind();
+  let isOther: boolean = match (nested) {
+    Kind::OTHER(_) -> true,
+    _ -> false,
+  };
+  if (!isOther) {
+    return 1;
+  }
+
+  let head: &Head = request.headRef();
+  describe(&head.kind);
+  if (head.code != 7) {
+    return 2;
+  }
+
+  let point: &Point = request.pointRef();
+  let code: &i32 = request.codeRef();
+  if (point.x + *code != 45) {
+    return 3;
+  }
+
+  let holder: Holder<Kind> = Holder<Kind> { value: Kind::OTHER(String::create("TRACE")) };
+  describe(holder.valueRef());
+
+  let numbers: Holder<i32> = Holder<i32> { value: 5 };
+  return *numbers.valueRef();
+}
