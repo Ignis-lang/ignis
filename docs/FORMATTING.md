@@ -36,6 +36,7 @@ refer to it.
 - Preserve structural blank lines between detached comment blocks, import groups, declarations, and block-local statement groups so sections do not collapse together.
 - Strip trailing whitespace from formatter-owned output lines and always end the file with a single trailing newline.
 - Empty high-level blocks (`namespace`, `record`, `enum`, `trait`, `extern`) canonicalize to inline `{}`.
+- A trait default method is printed once, inside its trait. Types that inherit it through `@implements` are printed as written, without the inherited method.
 - Callable parameter lists use layout-driven trailing commas: single-line canonical output drops the final comma, multiline canonical output adds the final comma.
 - Record initializers use the same rule: single-line canonical output drops the final comma, multiline canonical output adds the final comma.
 - Array literals that initialize a `let`, `const`, `return` or static field use the same rule. One written on a single line stays inline when it fits `line_width` and otherwise wraps one element per line. One written over several lines keeps its rows: elements that started on the same source line stay on one line, reindented, and every row ends with a comma, the last one included. An array literal anywhere else that the source wrote over several lines is kept as written, like a multiline call or record initializer.
