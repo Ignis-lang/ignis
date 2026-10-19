@@ -5256,6 +5256,33 @@ function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
   Test::assertEq<str>(traitMethodName(&module, overrideId).toStr(), "answer");
 }
 
+/// Scenario: a type that names a namespaced trait by its path in `@implements`
+/// inherits the trait's default methods, as it does with the bare name.
+/// Spec: TRAITS.md "Trait Bounds"; parity fixture e2e_ok::implements_namespaced_trait_default_method.
+@test
+function parserMaterializesTraitDefaultsForANamespacedTraitPath(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_namespaced_path.ign",
+    "namespace Shapes { trait Answerable { answer(&self): i32 { return 42; } } } @implements(Shapes::Answerable) record Alpha { public x: i32; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  let alphaId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+
+  Test::assertEq<u64>(recordMethodCount(&module, alphaId), 1);
+
+  let inheritedId: Ast::ItemId = recordMethodId(&module, alphaId, 0);
+  Test::assertEq<str>(traitMethodName(&module, inheritedId).toStr(), "answer");
+}
+
 /// Reads the initializer of the binding pattern `id` denotes.
 function bindingInitializer(module: &Ast::Module, id: Ast::PatternId): Option<Ast::ExpressionId> {
   match (expectPattern(module, id)) {

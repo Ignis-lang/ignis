@@ -757,7 +757,9 @@ export namespace Analyzer {
     /// order they are written, with surrounding whitespace trimmed.
     ///
     /// Attribute arguments arrive from the parser as raw lexeme text, so the
-    /// names are collected as strings rather than resolved to definitions.
+    /// names are collected as strings rather than resolved to definitions. A
+    /// path such as `Ns::Trait` keeps only its last segment, the same way
+    /// `typeParamBoundNames` records a bound, so both sides compare alike.
     function implementedTraitNames(metadata: &Ast::Metadata): Vector<String> {
       let mut names: Vector<String> = Vector::new<String>();
       let mut index: u64 = 0;
@@ -778,7 +780,7 @@ export namespace Analyzer {
 
         while (argumentIndex < attribute.arguments.length()) {
           if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
-            names.push(argument.trimAsciiWhitespace());
+            names.push(Analyzer::Binder::lastPathSegment(argument));
           }
 
           argumentIndex += 1;
@@ -1129,6 +1131,20 @@ export namespace Analyzer {
       }
 
       return segments;
+    }
+
+    /// The last `::`-separated segment of a written path, trimmed; the whole
+    /// trimmed text when it has no separator.
+    function lastPathSegment(text: &String): String {
+      let segments: Vector<String> = Analyzer::Binder::typePathSegments(text);
+
+      if (segments.length() > 0) {
+        if (let Option::SOME(last) = segments.get(segments.length() - 1)) {
+          return last.trimAsciiWhitespace();
+        }
+      }
+
+      return text.trimAsciiWhitespace();
     }
 
     /// The type path named by `@extension(Type)`.

@@ -30,7 +30,30 @@ export namespace ParserTraitDefaults {
     public methodItemId: Ast::ItemId;
   }
 
-  /// Every trait named by an `@implements(...)` attribute, in written order.
+  /// The last `::`-separated segment of an `@implements` argument, trimmed.
+  /// The analyzer keeps the same segment, so `@implements(Ns::Trait)` and
+  /// `@implements(Trait)` both match a trait declared as `Trait`.
+  function lastPathSegment(text: &String): String {
+    let colon: u8 = 58;
+    let mut start: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      if (let Option::SOME(byte) = text.byteAt(index)) {
+        if (byte == colon) {
+          start = index + 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    let segment: String = text.substring(start as i64, (text.length() - start) as i64);
+    return segment.trimAsciiWhitespace();
+  }
+
+  /// Every trait named by an `@implements(...)` attribute, in written order,
+  /// each reduced to its last path segment.
   function implementedTraitNames(metadata: &Ast::Metadata): Vector<String> {
     let mut names: Vector<String> = Vector::new<String>();
     let mut index: u64 = 0;
@@ -50,7 +73,7 @@ export namespace ParserTraitDefaults {
 
       while (argumentIndex < attribute.arguments.length()) {
         if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
-          names.push(argument.trimAsciiWhitespace());
+          names.push(ParserTraitDefaults::lastPathSegment(argument));
         }
 
         argumentIndex += 1;

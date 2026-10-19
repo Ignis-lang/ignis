@@ -31,6 +31,11 @@ record Item {
 A type opts in with `@implements(TraitName)` and then has to satisfy every method without a
 default. Missing one is a compile-time error, not a runtime surprise.
 
+A trait declared in a namespace is named by its path, `@implements(Shapes::Measured)`, or by its
+bare name where it is in scope. A generic bound `T: Shapes::Measured` accepts either form. Traits
+are matched by their last name segment, so two traits that share a name in different namespaces
+are not told apart.
+
 ## Lang traits
 
 Five traits are known to the compiler and change how values behave rather than only what methods
