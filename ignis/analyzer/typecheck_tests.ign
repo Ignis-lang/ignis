@@ -11764,6 +11764,40 @@ function typecheckBitwiseOnBooleansProducesDiagnostic(): void {
   assertSingleDiagnostic(&output, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE, "Binary operator '&' cannot be applied to types 'bool' and 'bool'");
 }
 
+/// Scenario: `"a" == "b"` and `"a" != "b"` compare two `str` views and
+/// are typed `boolean` without diagnostics.
+@test
+function typecheckStrEqualityIsBoolean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let equalExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Equal,
+    typecheckAddStringLiteral(&mut module, "a"),
+    typecheckAddStringLiteral(&mut module, "b"),
+  );
+  let notEqualExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::NotEqual,
+    typecheckAddStringLiteral(&mut module, "a"),
+    typecheckAddStringLiteral(&mut module, "b"),
+  );
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(typecheckAddExprStmt(&mut module, equalExpr));
+  stmts.push(typecheckAddExprStmt(&mut module, notEqualExpr));
+  typecheckAddSingleExprFunction(&mut module, "strEquality", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, equalExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
+  assertExprType(&output, notEqualExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
+}
+
 /// Scenario: shifting a float (`1.5 << 2`) is rejected with
 /// `INVALID_BINARY_OPERAND_TYPE`.
 /// Spec: IGN-30 — shift/bitwise binary operators.

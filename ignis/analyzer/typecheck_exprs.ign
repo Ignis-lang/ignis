@@ -338,6 +338,22 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
+        // Two `str` views compare by content, not by address.
+        let bothStr: boolean = equalityLeftResolved.cycleAlias.isNone() && equalityRightResolved.cycleAlias.isNone() && Analyzer::Typecheck::typeIdIsStr(typeStore, equalityLeftResolved.typeId) && Analyzer::Typecheck::typeIdIsStr(typeStore, equalityRightResolved.typeId);
+
+        if (bothStr) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        // Matching operand types without an equality of their own are not a
+        // mismatch: naming the operator says what is actually missing.
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)) {
+          Analyzer::Typecheck::emitInvalidBinaryOperandType(state, defStore, typeStore, symbols, b.span, b.operator, leftType, rightType);
+          return Option::NONE;
+        }
+
         Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, b.span, leftType, rightType);
         return Option::NONE;
       }
