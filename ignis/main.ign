@@ -22,7 +22,7 @@ from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
 import Config, ResolvedProject from "@compiler::config";
-import ParseOutput, Parser from "@compiler::parser";
+import ParseOutput from "@compiler::parser";
 import Hir from "@compiler::hir";
 import Id from "@compiler::ids";
 import Output from "@compiler::output";
@@ -64,6 +64,8 @@ import CCompiler from "./build/c_compiler";
 import Backend, Backends from "./build/backend";
 import Linker from "./build/linker";
 import BuildOverrides, DiscoveryResult, DocDiscovery, Resolver from "./build/resolver";
+import BuildModuleKind from "./build/module_graph";
+import SourceOverrides from "./build/sources";
 import StdManifestHeader from "./build/manifest";
 import SymbolNames from "./abi/symbols";
 import
@@ -1601,7 +1603,7 @@ function stdArchiveDefinitions(
 /// wrapper out of the emitted unit, because the test harness owns `main` in
 /// that build.
 export function compileDiscovered(
-  discovery: &DiscoveryResult,
+  discovery: &mut DiscoveryResult,
   file: &SourceFile,
   options: &CompileOptions,
 ): CompiledProgram {
@@ -1631,25 +1633,39 @@ export function compileDiscovered(
 
   let progressRoot: String = `${discovery.root.asStr()}/`;
 
+  let diskSources: SourceOverrides = SourceOverrides::none();
+
   Output::beginPhase("parse", discovery.order.length());
 
   while (orderIndex < discovery.order.length()) {
-    let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
-      Output::message("error: discovery order is incomplete");
-      return failedCompilation(1, 0);
-    };
-    let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
-      Output::message("error: discovery order references a missing module");
-      return failedCompilation(1, 0);
-    };
-    let Result::OK(moduleText) = Fs::readToString(&node.path) else {
-      Output::message(`error: cannot read source file: ${node.path.toString().toStr()}`);
+    let mut nodeIndex: u64 = 0;
+    let mut nodePath: Path::PathBuf = Path::PathBuf::new();
+    let mut nodeKind: BuildModuleKind = BuildModuleKind::PROJECT;
+
+    // Scoped, so that no borrow of `discovery` is held when the parse is taken.
+    {
+      let Option::SOME(nodeIndexRef) = discovery.order.get(orderIndex) else {
+        Output::message("error: discovery order is incomplete");
+        return failedCompilation(1, 0);
+      };
+      let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndexRef) else {
+        Output::message("error: discovery order references a missing module");
+        return failedCompilation(1, 0);
+      };
+
+      nodeIndex = *nodeIndexRef;
+      nodePath = node.path.clone();
+      nodeKind = node.kind;
+    }
+
+    let modulePath: String = nodePath.toString();
+    let Option::SOME(parsed) = Resolver::takeParsedModule(discovery, nodeIndex, &diskSources) else {
+      Output::message(`error: cannot read source file: ${modulePath.toStr()}`);
       return failedCompilation(1, 0);
     };
 
-    let modulePath: String = node.path.toString();
-    let moduleFile: SourceFile = SourceFile::create(modulePath.toStr(), moduleText.toStr());
-    let mut output: ParseOutput = Parser::parseFileWithFlags(&moduleFile, &discovery.flags);
+    let moduleFile: SourceFile = parsed.file;
+    let mut output: ParseOutput = parsed.output;
     let progressText: String = progressPath(&modulePath, &progressRoot);
     Output::advance(&progressText);
 
@@ -1671,12 +1687,12 @@ export function compileDiscovered(
 
     let moduleParses: boolean = output.lexDiagnostics.isEmpty() && output.parseDiagnostics.isEmpty();
 
-    if (moduleParses && !mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
+    if (moduleParses && !mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, nodeIndex)) {
       Output::message(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
       return failedCompilation(1, 0);
     }
 
-    let kind: Analyzer::Imports::ModuleKind = analyzerModuleKind(node.kind);
+    let kind: Analyzer::Imports::ModuleKind = analyzerModuleKind(nodeKind);
     let mut isProject: boolean = false;
 
     if (let Analyzer::Imports::ModuleKind::PROJECT = kind) {
@@ -1685,10 +1701,10 @@ export function compileDiscovered(
 
     modules.push(output.module);
     files.push(moduleFile);
-    modulePaths.push(node.path.clone());
+    modulePaths.push(nodePath);
     moduleIsProject.push(isProject);
     infos.push(Analyzer::Imports::ModuleInfo {
-      index: *nodeIndex,
+      index: nodeIndex,
       pathText: modulePath,
       kind: kind,
     });
@@ -1741,7 +1757,7 @@ export function compileDiscovered(
     &preludePaths,
   );
 
-  recordModuleSymbolPaths(&mut defStore, &infos, discovery);
+  recordModuleSymbolPaths(&mut defStore, &infos, &*discovery);
 
   let mut analyzeErrors: u64 = 0;
   let mut analyzeWarnings: u64 = 0;
@@ -2638,7 +2654,7 @@ function runCompile(
   printStatus(String::create(banner), verbose);
   printStatus(`  source: ${startPath.asStr()}`, verbose);
 
-  let discovery: DiscoveryResult = match (discoverReporting(startPath, options, false)) {
+  let mut discovery: DiscoveryResult = match (discoverReporting(startPath, options, false)) {
     Result::OK(value) -> value,
     Result::ERROR(tally) -> {
       printFailure(checkOnly ? "Check" : "Build", tally.errors, tally.warnings);
@@ -2744,7 +2760,7 @@ function runCompile(
   compileOptions.verbose = options.verbose;
   compileOptions.freestanding = profile.freestanding;
   compileOptions.stdArchive = profile.stdArchive;
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
   let mut emitted: boolean = false;
 
@@ -3004,14 +3020,15 @@ function runProgramFixture(
   }
 
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
-  let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+  let Option::SOME(discoveredFixture) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
     let reported: String = joinDiagnosticMessages(&discoveryErrors);
     return `compilation failed\n${reported.toStr()}`;
   };
+  let mut fixtureDiscovery: DiscoveryResult = discoveredFixture;
 
   let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
   let compileOptions: CompileOptions = fixtureCompileOptions(true, false);
-  let compiled: CompiledProgram = compileDiscovered(&fixtureDiscovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(&mut fixtureDiscovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     let body: String = joinDiagnosticMessages(&compiled.errorMessages);
@@ -3135,7 +3152,7 @@ function runDiagnosticsFixture(
   compareBaseline: boolean,
 ): String {
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
-  let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+  let Option::SOME(discoveredFixture) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
     if (!compareBaseline) {
       return String::new();
     }
@@ -3145,10 +3162,11 @@ function runDiagnosticsFixture(
 
     return FixtureTests::compareSnapshot(&snapshotPath, &body, options.updateSnapshots);
   };
+  let mut fixtureDiscovery: DiscoveryResult = discoveredFixture;
 
   let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
   let compileOptions: CompileOptions = fixtureCompileOptions(false, false);
-  let compiled: CompiledProgram = compileDiscovered(&fixtureDiscovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(&mut fixtureDiscovery, &file, &compileOptions);
 
   if (compiled.errorMessages.length() == 0) {
     return String::create("expected the fixture to fail compilation, but it compiled cleanly");
@@ -3175,14 +3193,15 @@ function runWarningsFixture(
   compareBaseline: boolean,
 ): String {
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
-  let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+  let Option::SOME(discoveredFixture) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
     let reported: String = joinDiagnosticMessages(&discoveryErrors);
     return `expected the fixture to compile cleanly, but it reported errors:\n${reported.toStr()}`;
   };
+  let mut fixtureDiscovery: DiscoveryResult = discoveredFixture;
 
   let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
   let compileOptions: CompileOptions = fixtureCompileOptions(false, true);
-  let compiled: CompiledProgram = compileDiscovered(&fixtureDiscovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(&mut fixtureDiscovery, &file, &compileOptions);
 
   if (compiled.errorMessages.length() > 0) {
     let reported: String = joinDiagnosticMessages(&compiled.errorMessages);
@@ -3514,16 +3533,17 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   Output::message(`Testing ${TestRunner::runHeader(startPath, &partition).toStr()}\n`);
 
-  let Option::SOME(discovery) = discoverFor(startPath, options, true) else {
+  let Option::SOME(discovered) = discoverFor(startPath, options, true) else {
     return 1;
   };
+  let mut discovery: DiscoveryResult = discovered;
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   resolveLinkerSelection(&mut profile);
   let mut compileOptions: CompileOptions = testCompileOptions();
   compileOptions.verbose = options.verbose;
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
 
   if (compiled.source.length() == 0) {
     Output::message(String::create("error: test setup failed"));
@@ -3623,7 +3643,7 @@ function runStdTests(options: &CliOptions): i32 {
   };
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&currentDir, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStdTests(&currentDir, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(&currentDir);
@@ -3640,7 +3660,7 @@ function runStdTests(options: &CliOptions): i32 {
   resolveLinkerSelection(&mut profile);
   let mut compileOptions: CompileOptions = stdTestCompileOptions(&discovery.stdRoot);
   compileOptions.verbose = options.verbose;
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     Output::message(String::create("error: test setup failed"));
@@ -4788,7 +4808,7 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   printStatus(String::create("ignis selfhost build-std"), verbose);
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(startPath);
@@ -4804,7 +4824,7 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   let base: Path::PathBuf = stdArtifactBase(&discovery.outDir, &options.outDir, &options.outputPath);
-  let outcome: StdArchiveOutcome = produceStdArchive(&discovery, &file, &profile, &base, options);
+  let outcome: StdArchiveOutcome = produceStdArchive(&mut discovery, &file, &profile, &base, options);
 
   if (outcome.errors > 0) {
     printFailure("Build", outcome.errors, outcome.warnings);
@@ -4831,7 +4851,7 @@ record StdArchiveOutcome {
 /// linked by units this build never sees. Prints the phase lines and any
 /// diagnostics, but no closing line: the caller owns that.
 function produceStdArchive(
-  discovery: &DiscoveryResult,
+  discovery: &mut DiscoveryResult,
   file: &SourceFile,
   profile: &BuildProfile,
   base: &Path::PathBuf,
@@ -4844,7 +4864,7 @@ function produceStdArchive(
   let libraryPath: Path::PathBuf = layout.stdLibPath();
   let stampPath: Path::PathBuf = layout.stdStampPath();
   let reportPath: Path::PathBuf = stampReportPathForObject(&objectPath);
-  let fingerprint: BuildFingerprint = programBuildFingerprint(discovery, profile);
+  let fingerprint: BuildFingerprint = programBuildFingerprint(&*discovery, profile);
 
   let mut guarded: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   guarded.push(sourcePath.clone());
@@ -4985,7 +5005,7 @@ function ensureStdArchive(
   outDir: &Path::PathBuf,
 ): Option<Path::PathBuf> {
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(startPath);
@@ -4998,7 +5018,7 @@ function ensureStdArchive(
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let outcome: StdArchiveOutcome = produceStdArchive(&discovery, &file, &profile, outDir, options);
+  let outcome: StdArchiveOutcome = produceStdArchive(&mut discovery, &file, &profile, outDir, options);
 
   if (outcome.errors > 0) {
     return Option::NONE;
@@ -5088,32 +5108,45 @@ record DocSources {
 
 /// Parse every discovered module, rendering lexer and parser diagnostics to
 /// stderr. `NONE` when any of them is an error.
-function parseDocSources(docDiscovery: &DocDiscovery): Option<DocSources> {
-  let discovery: &DiscoveryResult = &docDiscovery.discovery;
+function parseDocSources(docDiscovery: &mut DocDiscovery): Option<DocSources> {
   let mut sources: DocSources = DocSources {
     modules: Vector::new<Ast::Module>(),
     files: Vector::new<SourceFile>(),
     infos: Vector::new<Analyzer::Imports::ModuleInfo>(),
     names: Vector::new<String>(),
   };
+  let diskSources: SourceOverrides = SourceOverrides::none();
   let mut errors: u64 = 0;
   let mut orderIndex: u64 = 0;
 
-  while (orderIndex < discovery.order.length()) {
-    let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
-      return Option::NONE;
-    };
-    let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
-      return Option::NONE;
-    };
-    let Result::OK(moduleText) = Fs::readToString(&node.path) else {
-      Output::message(`error: cannot read source file: ${node.path.toString().toStr()}`);
+  while (orderIndex < docDiscovery.discovery.order.length()) {
+    let mut nodeIndex: u64 = 0;
+    let mut nodePath: Path::PathBuf = Path::PathBuf::new();
+    let mut nodeKind: BuildModuleKind = BuildModuleKind::PROJECT;
+
+    // Scoped, so that no borrow of the discovery is held when the parse is
+    // taken.
+    {
+      let Option::SOME(nodeIndexRef) = docDiscovery.discovery.order.get(orderIndex) else {
+        return Option::NONE;
+      };
+      let Option::SOME(node) = docDiscovery.discovery.graph.nodes.get(*nodeIndexRef) else {
+        return Option::NONE;
+      };
+
+      nodeIndex = *nodeIndexRef;
+      nodePath = node.path.clone();
+      nodeKind = node.kind;
+    }
+
+    let modulePath: String = nodePath.toString();
+    let Option::SOME(parsed) = Resolver::takeParsedModule(&mut docDiscovery.discovery, nodeIndex, &diskSources) else {
+      Output::message(`error: cannot read source file: ${modulePath.toStr()}`);
       return Option::NONE;
     };
 
-    let modulePath: String = node.path.toString();
-    let moduleFile: SourceFile = SourceFile::create(modulePath.toStr(), moduleText.toStr());
-    let mut output: ParseOutput = Parser::parseFileWithFlags(&moduleFile, &discovery.flags);
+    let moduleFile: SourceFile = parsed.file;
+    let mut output: ParseOutput = parsed.output;
 
     errors += countBySeverity(&output.lexDiagnostics, Severity::ERROR);
     errors += countBySeverity(&output.parseDiagnostics, Severity::ERROR);
@@ -5122,14 +5155,14 @@ function parseDocSources(docDiscovery: &DocDiscovery): Option<DocSources> {
 
     let moduleParses: boolean = output.lexDiagnostics.isEmpty() && output.parseDiagnostics.isEmpty();
 
-    if (moduleParses && !mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
+    if (moduleParses && !mapImportSourcesToDiscoveryTargets(&mut output.module, &docDiscovery.discovery.graph, nodeIndex)) {
       Output::message(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
       return Option::NONE;
     }
 
     let mut moduleName: String = String::new();
 
-    if (let Option::SOME(name) = docDiscovery.moduleNames.get(*nodeIndex)) {
+    if (let Option::SOME(name) = docDiscovery.moduleNames.get(nodeIndex)) {
       moduleName = name.clone();
     }
 
@@ -5137,9 +5170,9 @@ function parseDocSources(docDiscovery: &DocDiscovery): Option<DocSources> {
     sources.modules.push(output.module);
     sources.files.push(moduleFile);
     sources.infos.push(Analyzer::Imports::ModuleInfo {
-      index: *nodeIndex,
+      index: nodeIndex,
       pathText: modulePath,
-      kind: analyzerModuleKind(node.kind),
+      kind: analyzerModuleKind(nodeKind),
     });
     orderIndex += 1;
   }
@@ -5164,7 +5197,7 @@ function runDoc(options: &CliOptions): i32 {
   };
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let docDiscovery: DocDiscovery = match (Resolver::discoverDoc(&target.start, &overrides, target.projectMode)) {
+  let mut docDiscovery: DocDiscovery = match (Resolver::discoverDoc(&target.start, &overrides, target.projectMode)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let file: SourceFile = entrySourceFile(&target.start);
@@ -5173,7 +5206,7 @@ function runDoc(options: &CliOptions): i32 {
     },
   };
 
-  let Option::SOME(sources) = parseDocSources(&docDiscovery) else {
+  let Option::SOME(sources) = parseDocSources(&mut docDiscovery) else {
     return 1;
   };
 
@@ -5336,7 +5369,7 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   printStatus(String::create("ignis selfhost check-std"), verbose);
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(startPath);
@@ -5352,7 +5385,7 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let mut compileOptions: CompileOptions = stdCompileOptions();
   compileOptions.verbose = verbose;
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
 
   if (compiled.errors == 0 && compiled.source.length() == 0) {
     Output::message(String::create("error: code generation produced no C for the standard library"));
@@ -6054,7 +6087,7 @@ function freestandingFixtureErrors(relativeRoot: str): Vector<String> {
   };
 
   let projectRoot: Path::PathBuf = workingDirectory.join(relativeRoot);
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&projectRoot)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverProject(&projectRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -6067,7 +6100,7 @@ function freestandingFixtureErrors(relativeRoot: str): Vector<String> {
   options.quiet = true;
   options.freestanding = true;
 
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
 
   return compiled.errorMessages;
 }

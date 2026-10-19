@@ -23,6 +23,7 @@ import Vector from "std::vector";
 
 import analyzerModuleKind, mapImportSourcesToDiscoveryTargets from "../build/import_targets";
 import checkUnknownManifestKeys from "../build/manifest";
+import BuildModuleKind from "../build/module_graph";
 import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
@@ -264,13 +265,15 @@ function convertPending(
   return result;
 }
 
-/// Parses every module discovery ordered, reading open buffers instead of
-/// the disk, and collects their lexer and parser diagnostics.
+/// Takes discovery's parse of every module it ordered, which read open
+/// buffers instead of the disk, and collects their lexer and parser
+/// diagnostics. A module whose parse was already taken is read through
+/// `sources` and parsed again.
 ///
 /// Returns an error message when the modules no longer match what discovery
 /// saw, which means a file changed on disk in between.
 function parseDiscoveredModules(
-  discovery: &DiscoveryResult,
+  discovery: &mut DiscoveryResult,
   sources: &SourceOverrides,
 ): Result<ParsedProgram, String> {
   let mut program: ParsedProgram = ParsedProgram {
@@ -283,24 +286,32 @@ function parseDiscoveredModules(
   let mut orderIndex: u64 = 0;
 
   while (orderIndex < discovery.order.length()) {
-    let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
-      return Result::ERROR(String::create("discovery order is incomplete"));
-    };
-    let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
-      return Result::ERROR(String::create("discovery order references a missing module"));
-    };
-    let Result::OK(moduleText) = sources.read(&node.path) else {
-      return Result::ERROR(`cannot read source file: ${node.path.toString().toStr()}`);
+    let mut nodeIndex: u64 = 0;
+    let mut nodePath: Path::PathBuf = Path::PathBuf::new();
+    let mut nodeKind: BuildModuleKind = BuildModuleKind::PROJECT;
+
+    // Scoped, so that no borrow of `discovery` is held when the parse is taken.
+    {
+      let Option::SOME(nodeIndexRef) = discovery.order.get(orderIndex) else {
+        return Result::ERROR(String::create("discovery order is incomplete"));
+      };
+      let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndexRef) else {
+        return Result::ERROR(String::create("discovery order references a missing module"));
+      };
+
+      nodeIndex = *nodeIndexRef;
+      nodePath = node.path.clone();
+      nodeKind = node.kind;
+    }
+
+    let Option::SOME(parsed) = Resolver::takeParsedModule(discovery, nodeIndex, sources) else {
+      return Result::ERROR(`cannot read source file: ${nodePath.toString().toStr()}`);
     };
 
     let fileIndex: u64 = program.files.length();
-    program.files.push(SourceFile { path: node.path.clone(), text: moduleText });
+    program.files.push(parsed.file);
 
-    let Option::SOME(moduleFile) = program.files.get(fileIndex) else {
-      return Result::ERROR(String::create("parsed file list is incomplete"));
-    };
-
-    let mut output: ParseOutput = Parser::parseFileWithFlags(moduleFile, &discovery.flags);
+    let mut output: ParseOutput = parsed.output;
 
     program.frontendErrors += countErrors(&output.lexDiagnostics) + countErrors(&output.parseDiagnostics);
     collectBag(&output.lexDiagnostics, &program.files, fileIndex, &mut program.pending);
@@ -308,15 +319,15 @@ function parseDiscoveredModules(
 
     let moduleParses: boolean = output.lexDiagnostics.isEmpty() && output.parseDiagnostics.isEmpty();
 
-    if (moduleParses && !mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
-      return Result::ERROR(`import mapping is incomplete for ${node.path.toString().toStr()}`);
+    if (moduleParses && !mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, nodeIndex)) {
+      return Result::ERROR(`import mapping is incomplete for ${nodePath.toString().toStr()}`);
     }
 
     program.modules.push(output.module);
     program.infos.push(Analyzer::Imports::ModuleInfo {
-      index: *nodeIndex,
-      pathText: node.path.toString(),
-      kind: analyzerModuleKind(node.kind),
+      index: nodeIndex,
+      pathText: nodePath.toString(),
+      kind: analyzerModuleKind(nodeKind),
     });
     orderIndex += 1;
   }
@@ -556,7 +567,7 @@ export function analyzeDocuments(
     overrides.stdPath = Option::SOME(value.clone());
   }
 
-  let discovery: DiscoveryResult = match (Resolver::discover(startPath, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discover(startPath, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(failure) -> {
       let mut diagnostics: Vector<FileDiagnostics> = discoveryFailureDiagnostics(&failure, startPath, key, sources);
@@ -566,7 +577,7 @@ export function analyzeDocuments(
     },
   };
 
-  let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(&discovery, startPath, sources);
+  let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(&mut discovery, startPath, sources);
   appendProjectFileWarnings(startPath, sources, &mut analysis.diagnostics);
   appendStdManifestWarnings(&discovery.stdRoot, &mut analysis.diagnostics);
 
@@ -677,14 +688,14 @@ function appendTextDiagnostics(
 /// any. When the modules no longer match what discovery saw, the result is
 /// one error on `startPath` that says why.
 export function analyzeDiscovered(
-  discovery: &DiscoveryResult,
+  discovery: &mut DiscoveryResult,
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
 ): Vector<FileDiagnostics> {
   return analyzeDiscoveredDocuments(discovery, startPath, sources).diagnostics;
 }
 function analyzeDiscoveredDocuments(
-  discovery: &DiscoveryResult,
+  discovery: &mut DiscoveryResult,
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
 ): LspAnalysis {
@@ -701,7 +712,7 @@ function analyzeDiscoveredDocuments(
   let mut navigation: Option<NavigationIndex> = Option::NONE;
 
   if (program.frontendErrors == 0) {
-    navigation = Option::SOME(analyzeParsedModules(discovery, &mut program, sources));
+    navigation = Option::SOME(analyzeParsedModules(&*discovery, &mut program, sources));
   }
 
   return LspAnalysis {
