@@ -396,7 +396,7 @@ Error display for try-capable returns:
 
 Extern functions are declared with `extern`. When calling extern functions, pointer and reference arguments are cast through `void*` to avoid C incompatible-pointer-type warnings.
 
-A hosted unit never declares an extern function: the headers it includes do. A freestanding unit (`std = false`) has none, so it emits one prototype for each extern function it calls or takes as a C function pointer, under its C symbol, with C function pointer typedefs for function-typed parameters and results:
+A hosted unit never declares an extern function: the headers it includes do. It includes a fixed list of libc, POSIX and math headers, then every header the std manifest's `[linking.<module>]` sections name with `header` or `headers` that the fixed list does not already include, in manifest order (`header_quoted = true` writes `#include "..."`). An std module that binds a function from another C header declares that header there. A freestanding unit (`std = false`) has none, so it emits one prototype for each extern function it calls or takes as a C function pointer, under its C symbol, with C function pointer typedefs for function-typed parameters and results:
 
 ```c
 extern void platform_register_handler(ignis_fn_18);
@@ -668,8 +668,8 @@ A scalar `@zeroed` is the constant `0`, `0.0`, `false` or `null`. As with copies
 
 The generated C file is structured in this order:
 
-1. **Implicit headers** (`<stdio.h>`, `<math.h>`, `<string.h>` based on usage)
-2. **Explicit headers** (from the link plan)
+1. **Fixed headers** (`ignis_rt.h`, then libc, POSIX and `<math.h>`), in a hosted unit only
+2. **Manifest headers** (the std manifest's `[linking.*]` headers the fixed list lacks), in a hosted unit only
 3. **Type forward declarations** (`typedef struct X X;`)
 4. **Type definitions** (full struct/union bodies)
 5. **Static storage** (`static mut` fields as writable globals, and the immutable static fields and constants whose address is taken as `static const` globals; see "Zero fill")

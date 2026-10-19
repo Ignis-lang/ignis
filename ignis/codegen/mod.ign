@@ -66,6 +66,9 @@ export namespace CodegenC {
     /// Give mutable statics external linkage, which the std archive needs so
     /// that the units linked against it share its one copy of each.
     public exportStatics: boolean;
+    /// The headers the std manifest's `[linking.*]` sections name, which a
+    /// hosted unit includes after the fixed list.
+    public linkHeaders: Vector<CodegenC::LinkHeader>;
 
     public static hosted(): RuntimeHooks {
       return RuntimeHooks {
@@ -79,8 +82,16 @@ export namespace CodegenC {
         unhandledPanics: Vector::new<SourceSpan>(),
         foreignDefinitions: Vector::new<u32>(),
         exportStatics: false,
+        linkHeaders: Vector::new<CodegenC::LinkHeader>(),
       };
     }
+  }
+
+  /// One header a std manifest `[linking.<module>]` section names.
+  record LinkHeader {
+    public name: String;
+    /// Included as `#include "name"` rather than `#include <name>`.
+    public quoted: boolean;
   }
 
   /// The environment struct one closure thunk reads its captures out of.
@@ -6169,26 +6180,86 @@ export namespace CodegenC {
     outputRef.pushStr("#endif // IGNIS_RT_TYPES_H\n\n");
   }
 
-  /// A declaration for every function the C side defines.
+  /// The headers every hosted unit includes, whatever the manifest says.
+  function fixedStdHeaders(): Vector<String> {
+    let mut headers: Vector<String> = Vector::new<String>();
+    headers.push(String::create("stdlib.h"));
+    headers.push(String::create("string.h"));
+    headers.push(String::create("stdio.h"));
+    headers.push(String::create("errno.h"));
+    headers.push(String::create("ctype.h"));
+    headers.push(String::create("time.h"));
+    headers.push(String::create("signal.h"));
+    headers.push(String::create("unistd.h"));
+    headers.push(String::create("sys/mman.h"));
+    headers.push(String::create("sys/wait.h"));
+    headers.push(String::create("sys/stat.h"));
+    headers.push(String::create("dirent.h"));
+    headers.push(String::create("fcntl.h"));
+    headers.push(String::create("sys/ioctl.h"));
+    headers.push(String::create("pthread.h"));
+    headers.push(String::create("math.h"));
+    return headers;
+  }
+
+  function containsText(values: &Vector<String>, text: &String): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(value) = values.get(index)) {
+        if (value.equals(text)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// The fixed header list, then every manifest header it does not already
+  /// include, in manifest order and once each.
   ///
-  function emitStdHeaders(output: &mut String): void {
+  /// The manifest names the runtime header `runtime/ignis_rt.h`, relative to
+  /// the std root; the unit has already included it as `ignis_rt.h`.
+  function emitStdHeaders(output: &mut String, linkHeaders: &Vector<CodegenC::LinkHeader>): void {
     let mut outputRef: &mut String = output;
-    outputRef.pushStr("#include <stdlib.h>\n");
-    outputRef.pushStr("#include <string.h>\n");
-    outputRef.pushStr("#include <stdio.h>\n");
-    outputRef.pushStr("#include <errno.h>\n");
-    outputRef.pushStr("#include <ctype.h>\n");
-    outputRef.pushStr("#include <time.h>\n");
-    outputRef.pushStr("#include <signal.h>\n");
-    outputRef.pushStr("#include <unistd.h>\n");
-    outputRef.pushStr("#include <sys/mman.h>\n");
-    outputRef.pushStr("#include <sys/wait.h>\n");
-    outputRef.pushStr("#include <sys/stat.h>\n");
-    outputRef.pushStr("#include <dirent.h>\n");
-    outputRef.pushStr("#include <fcntl.h>\n");
-    outputRef.pushStr("#include <sys/ioctl.h>\n");
-    outputRef.pushStr("#include <pthread.h>\n");
-    outputRef.pushStr("#include <math.h>\n\n");
+    let mut included: Vector<String> = CodegenC::fixedStdHeaders();
+    let mut fixedIndex: u64 = 0;
+
+    while (fixedIndex < included.length()) {
+      if (let Option::SOME(header) = included.get(fixedIndex)) {
+        outputRef.pushStr(`#include <${header.toStr()}>\n`.toStr());
+      }
+
+      fixedIndex += 1;
+    }
+
+    included.push(String::create("ignis_rt.h"));
+    included.push(String::create("runtime/ignis_rt.h"));
+    let mut linkIndex: u64 = 0;
+
+    while (linkIndex < linkHeaders.length()) {
+      let Option::SOME(header) = linkHeaders.get(linkIndex) else {
+        linkIndex += 1;
+        continue;
+      };
+
+      if (!CodegenC::containsText(&included, &header.name)) {
+        if (header.quoted) {
+          outputRef.pushStr(`#include "${header.name.toStr()}"\n`.toStr());
+        } else {
+          outputRef.pushStr(`#include <${header.name.toStr()}>\n`.toStr());
+        }
+
+        included.push(header.name.clone());
+      }
+
+      linkIndex += 1;
+    }
+
+    outputRef.pushStr("\n");
   }
 
   /// One `static void <name>(u8*)` helper per type a `DropGlue` instruction
@@ -6495,11 +6566,12 @@ export namespace CodegenC {
       source.pushStr("#include \"ignis_rt.h\"\n");
 
       // The host includes the headers each linked std module names in
-      // `std/manifest.toml`; this is that list for `libc` and `math`, which every
-      // program pulls through the prelude. An extern function is then declared
-      // by its header, never by the emitter, since a second declaration with the
+      // `std/manifest.toml`: a fixed list for `libc` and `math`, which every
+      // program pulls through the prelude, then whatever else the manifest's
+      // `[linking.*]` sections add. An extern function is then declared by its
+      // header, never by the emitter, since a second declaration with the
       // emitter's spelling of the parameter types conflicts with the header's.
-      CodegenC::emitStdHeaders(&mut source);
+      CodegenC::emitStdHeaders(&mut source, &hooks.linkHeaders);
     }
 
     let tables: CodegenC::ClosureTables = CodegenC::collectClosureTables(defStore, typeStore, program);

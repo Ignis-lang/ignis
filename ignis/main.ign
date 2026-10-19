@@ -64,6 +64,7 @@ import CCompiler from "./build/c_compiler";
 import Backend, Backends from "./build/backend";
 import Linker from "./build/linker";
 import BuildOverrides, DiscoveryResult, DocDiscovery, Resolver from "./build/resolver";
+import StdManifestHeader from "./build/manifest";
 import SymbolNames from "./abi/symbols";
 import
   FixtureCase,
@@ -2287,6 +2288,7 @@ export function compileDiscovered(
   hooks.projectRoot = discovery.root.toString();
   hooks.stdRoot = discovery.stdRoot.toString();
   hooks.exportStatics = exportAll;
+  hooks.linkHeaders = codegenLinkHeaders(&discovery.linkHeaders);
 
   if (options.stdArchive) {
     hooks.foreignDefinitions = stdArchiveDefinitions(&mut defStore, &lirResult.program, &infos);
@@ -2383,6 +2385,25 @@ export function compileDiscovered(
     report: report,
     usesInlineAsm: emitResult.usesInlineAsm,
   };
+}
+
+/// The std manifest's `[linking.*]` headers, which a hosted unit includes.
+function codegenLinkHeaders(headers: &Vector<StdManifestHeader>): Vector<CodegenC::LinkHeader> {
+  let mut linkHeaders: Vector<CodegenC::LinkHeader> = Vector::new<CodegenC::LinkHeader>();
+  let mut index: u64 = 0;
+
+  while (index < headers.length()) {
+    if (let Option::SOME(header) = headers.get(index)) {
+      linkHeaders.push(CodegenC::LinkHeader {
+        name: header.name.clone(),
+        quoted: header.quoted,
+      });
+    }
+
+    index += 1;
+  }
+
+  return linkHeaders;
 }
 
 /// The runtime services the emitter routes generated code through: libc for

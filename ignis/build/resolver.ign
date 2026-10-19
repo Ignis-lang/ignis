@@ -19,7 +19,7 @@ import Test from "std::test";
 import Vector from "std::vector";
 
 import BuildGraph, BuildModuleKind, ModuleGraph from "./module_graph";
-import Manifest, StdManifest, StdManifestModule from "./manifest";
+import Manifest, StdManifest, StdManifestHeader, StdManifestModule from "./manifest";
 import Backends from "./backend";
 import SourceOverrides from "./sources";
 
@@ -178,6 +178,9 @@ export record DiscoveryResult {
   public stdEnabled: boolean;
   /// `[test] fixtures`, already resolved against the project root.
   public testFixtures: Vector<Path::PathBuf>;
+  /// The C headers the std manifest's `[linking.*]` sections name, which every
+  /// hosted C unit includes. Empty when the build has no std.
+  public linkHeaders: Vector<StdManifestHeader>;
 
   public orderCount(&self): u64 {
     return self.order.length();
@@ -470,6 +473,24 @@ function resolverProjectStdRoot(
   };
 }
 
+function resolverCloneHeaders(headers: &Vector<StdManifestHeader>): Vector<StdManifestHeader> {
+  let mut cloned: Vector<StdManifestHeader> = Vector::new<StdManifestHeader>();
+  let mut index: u64 = 0;
+
+  while (index < headers.length()) {
+    if (let Option::SOME(header) = headers.get(index)) {
+      cloned.push(StdManifestHeader {
+        name: header.name.clone(),
+        quoted: header.quoted,
+      });
+    }
+
+    index += 1;
+  }
+
+  return cloned;
+}
+
 /// The manifest discovery reads the prelude and the std modules from.
 ///
 /// A project with no std root has neither, so it gets a manifest that
@@ -485,6 +506,7 @@ function resolverLoadManifest(project: &ResolverProject): Result<StdManifest, Di
     modules: Vector::new<StdManifestModule>(),
     autoLoadModules: Vector::new<String>(),
     compileOnlyModules: Vector::new<String>(),
+    headers: Vector::new<StdManifestHeader>(),
   });
 }
 
@@ -1514,6 +1536,7 @@ function resolverDiscoverProjectRoots(
     root: project.root.clone(),
     stdEnabled: project.stdEnabled,
     testFixtures: resolverClonePaths(&project.testFixtures),
+    linkHeaders: resolverCloneHeaders(&manifest.headers),
   });
 }
 
@@ -1609,6 +1632,7 @@ function resolverDiscoverStdRoots(
     root: project.root.clone(),
     stdEnabled: project.stdEnabled,
     testFixtures: resolverClonePaths(&project.testFixtures),
+    linkHeaders: resolverCloneHeaders(&manifest.headers),
   });
 }
 
@@ -1891,6 +1915,7 @@ function resolverDiscoverDocRoots(
       root: project.root.clone(),
       stdEnabled: project.stdEnabled,
       testFixtures: resolverClonePaths(&project.testFixtures),
+      linkHeaders: resolverCloneHeaders(&manifest.headers),
     },
     moduleNames: moduleNames,
   });
