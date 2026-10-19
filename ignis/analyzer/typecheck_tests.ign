@@ -15977,3 +15977,54 @@ function typecheckBareBindingNamedAfterVariantIsRejected(): void {
     "did you mean `Shape::EMPTY`?",
   );
 }
+
+/// Analyze `source` alone and return its analysis.
+function typecheckSliceIntrinsicSource(source: str): Analyzer::AnalyzerOutput {
+  let parsed: ParseOutput = typecheckParseSource(source);
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  return typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+}
+
+/// `length()` on a slice is `u64` and `asPtr()` is a read-only pointer to the
+/// element, through a parameter, an alias and a reference to a slice.
+@test
+function typecheckSliceLengthAndAsPtr(): void {
+  let output: Analyzer::AnalyzerOutput = typecheckSliceIntrinsicSource(
+    "type Bytes = u8[];\n\nfunction go(bytes: u8[], aliased: Bytes, borrowed: &u8[]): void {\n  let count: u64 = bytes.length();\n  let first: *u8 = bytes.asPtr();\n  let aliasedCount: u64 = aliased.length();\n  let borrowedFirst: *u8 = borrowed.asPtr();\n  return;\n}\n",
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// The pointer `asPtr()` returns is read-only: it does not coerce to `*mut T`.
+@test
+function typecheckSliceAsPtrIsNotMutable(): void {
+  let output: Analyzer::AnalyzerOutput = typecheckSliceIntrinsicSource(
+    "function go(bytes: u8[]): void {\n  let first: *mut u8 = bytes.asPtr();\n  return;\n}\n",
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+}
+
+/// A slice answers only `length()` and `asPtr()`.
+@test
+function typecheckSliceUnknownMethodIsAnError(): void {
+  let output: Analyzer::AnalyzerOutput = typecheckSliceIntrinsicSource(
+    "function go(bytes: u8[]): void {\n  let count: u64 = bytes.size();\n  return;\n}\n",
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::FIELD_NOT_FOUND, "Field 'size' not found in type 'u8[]'");
+}
+
+/// Neither slice method takes arguments.
+@test
+function typecheckSliceMethodWithArgumentsIsAnError(): void {
+  let output: Analyzer::AnalyzerOutput = typecheckSliceIntrinsicSource(
+    "function go(bytes: u8[]): void {\n  let count: u64 = bytes.length(1);\n  return;\n}\n",
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS, "Function 'length' expects 0 arguments, got 1");
+}

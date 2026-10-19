@@ -22,7 +22,7 @@ import jsonIntegerMember, jsonStringMember from "./protocol";
 
 const COMPLETION_TEST_UTIL: str = "/// Doubles a value.\nexport function double(value: i32): i32 {\n  return value * 2;\n}\n\nexport record Pair {\n  public left: i32;\n  secret: i32;\n\n  public static make(): Pair {\n    return Pair { left: 1, secret: 2 };\n  }\n}\n";
 
-const COMPLETION_TEST_MAIN: str = "import double, Pair from \"./util\";\nimport Io from \"std::io\";\n\nconst SCALE: i32 = 3;\n\nnamespace Shapes {\n  const LIMIT: i32 = 4;\n\n  function area(side: i32): i32 {\n    return side * side;\n  }\n\n  namespace Inner {\n    function deep(): i32 {\n      return 1;\n    }\n  }\n}\n\nrecord Point {\n  public x: i32;\n  public y: i32;\n  hidden: i32;\n\n  public length(&self): i32 {\n    return self.x + self.y;\n  }\n\n  public static origin(): Point {\n    return Point { x: 0, y: 0, hidden: 0 };\n  }\n}\n\nenum Shape {\n  CIRCLE(i32),\n  SQUARE,\n\n  public static unit(): Shape {\n    return Shape::SQUARE;\n  }\n\n  public isRound(&self): boolean {\n    return true;\n  }\n}\n\nfunction main(): i32 {\n  let point: Point = Point::origin();\n  let shape: Shape = Shape::unit();\n  let pair: Pair = Pair::make();\n  let total: i32 = double(point.x) + point.length() + pair.left;\n  Io::println(\"done\");\n\n  if (shape.isRound()) {\n    return total;\n  }\n\n  return total + Shapes::area(Shapes::LIMIT) + SCALE;\n}\n";
+const COMPLETION_TEST_MAIN: str = "import double, Pair from \"./util\";\nimport Io from \"std::io\";\n\nconst SCALE: i32 = 3;\n\nnamespace Shapes {\n  const LIMIT: i32 = 4;\n\n  function area(side: i32): i32 {\n    return side * side;\n  }\n\n  namespace Inner {\n    function deep(): i32 {\n      return 1;\n    }\n  }\n}\n\nrecord Point {\n  public x: i32;\n  public y: i32;\n  hidden: i32;\n\n  public length(&self): i32 {\n    return self.x + self.y;\n  }\n\n  public static origin(): Point {\n    return Point { x: 0, y: 0, hidden: 0 };\n  }\n}\n\nenum Shape {\n  CIRCLE(i32),\n  SQUARE,\n\n  public static unit(): Shape {\n    return Shape::SQUARE;\n  }\n\n  public isRound(&self): boolean {\n    return true;\n  }\n}\n\nfunction main(): i32 {\n  let point: Point = Point::origin();\n  let shape: Shape = Shape::unit();\n  let pair: Pair = Pair::make();\n  let total: i32 = double(point.x) + point.length() + pair.left;\n  Io::println(\"done\");\n\n  if (shape.isRound()) {\n    return total;\n  }\n\n  return total + Shapes::area(Shapes::LIMIT) + SCALE;\n}\n\nfunction byteCount(bytes: u8[]): u64 {\n  return bytes.length();\n}\n";
 
 /// The analyzed fixture: the source of `main.ign`, its path, the standard
 /// library root and the analysis data.
@@ -193,6 +193,15 @@ function completionListsMembersAfterADot(): void {
   Test::assertEq<str>(fieldOf(&items, "length", "detail").toStr(), "fn(&self, self: &Point) -> i32");
   Test::assertEq<str>(fieldOf(&items, "length", "insertText").toStr(), "length($0)");
   Test::assertEq<str>(fieldOf(&items, "length", "kind").toStr(), "2");
+}
+
+/// A slice receiver lists its intrinsic `length()` and `asPtr()`.
+@test
+function completionListsSliceMethodsAfterADot(): void {
+  let fixture: CompletionFixture = completionFixture("slice_members");
+
+  Test::assertEq<str>(labelsAfter(&fixture, "  return bytes.length();", "bytes.").toStr(), "length asPtr");
+  Test::assertEq<str>(labelsAfter(&fixture, "  return bytes.length();", "bytes.asP").toStr(), "asPtr");
 }
 
 /// A path lists static members, variants and namespace members.

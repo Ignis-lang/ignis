@@ -84,6 +84,8 @@ export record NamespaceEntry {
 export record ReceiverType {
   public owner: Option<u32>;
   public extension: Option<u32>;
+  /// A slice, or a reference to one: it answers `length()` and `asPtr()`.
+  public isSlice: boolean;
 }
 
 /// A local or parameter of a file, by name.
@@ -913,15 +915,24 @@ function unaliased(typeId: Analyzer::TypeId, stores: &Stores): Analyzer::TypeId 
 /// Aliases are transparent, as the host resolves them before a type is
 /// stored.
 function receiverTypeOf(typeId: Analyzer::TypeId, stores: &Stores): ReceiverType {
-  let mut receiver: ReceiverType = ReceiverType { owner: Option::NONE, extension: Option::NONE };
+  let mut receiver: ReceiverType = ReceiverType { owner: Option::NONE, extension: Option::NONE, isSlice: false };
   let mut current: Analyzer::TypeId = unaliased(typeId, stores);
   let mut depth: u64 = 0;
+
+  if (let Option::SOME(Analyzer::Type::Slice(_)) = stores.types.get(current)) {
+    receiver.isSlice = true;
+  }
 
   receiver.extension = Option::SOME(current.raw());
 
   match (stores.types.get(current)) {
     Option::SOME(Analyzer::Type::Reference(reference)) -> {
-      receiver.extension = Option::SOME(unaliased(reference.referent, stores).raw());
+      let referent: Analyzer::TypeId = unaliased(reference.referent, stores);
+      receiver.extension = Option::SOME(referent.raw());
+
+      if (let Option::SOME(Analyzer::Type::Slice(_)) = stores.types.get(referent)) {
+        receiver.isSlice = true;
+      }
     },
     Option::SOME(Analyzer::Type::Pointer(pointer)) -> {
       receiver.extension = Option::SOME(unaliased(pointer.pointee, stores).raw());
@@ -1008,11 +1019,11 @@ function cachedReceiver(
   let raw: u32 = typeId.raw();
 
   if (let Option::SOME(known) = cacheRef.get(&raw)) {
-    return ReceiverType { owner: known.owner, extension: known.extension };
+    return ReceiverType { owner: known.owner, extension: known.extension, isSlice: known.isSlice };
   }
 
   let receiver: ReceiverType = receiverTypeOf(typeId, stores);
-  cacheRef.insert(raw, ReceiverType { owner: receiver.owner, extension: receiver.extension });
+  cacheRef.insert(raw, ReceiverType { owner: receiver.owner, extension: receiver.extension, isSlice: receiver.isSlice });
   return receiver;
 }
 
@@ -1063,7 +1074,7 @@ function inSourceOrder(receivers: &Vector<NamedReceiver>): Vector<NamedReceiver>
       sorted.push(NamedReceiver {
         name: receiver.name.clone(),
         start: receiver.start,
-        receiver: ReceiverType { owner: receiver.receiver.owner, extension: receiver.receiver.extension },
+        receiver: ReceiverType { owner: receiver.receiver.owner, extension: receiver.receiver.extension, isSlice: receiver.receiver.isSlice },
       });
     }
 

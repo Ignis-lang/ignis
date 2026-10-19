@@ -735,7 +735,7 @@ function receiverAt(
       while (position < file.receivers.length()) {
         if (let Option::SOME(receiver) = file.receivers.get(position)) {
           if (receiver.name.equals(&token.lexeme)) {
-            return Option::SOME(ReceiverType { owner: receiver.receiver.owner, extension: receiver.receiver.extension });
+            return Option::SOME(ReceiverType { owner: receiver.receiver.owner, extension: receiver.receiver.extension, isSlice: receiver.receiver.isSlice });
           }
         }
 
@@ -780,7 +780,7 @@ function typedSpanBefore(file: &FileCompletion, offset: u64): Option<ReceiverTyp
     return Option::NONE;
   };
 
-  return Option::SOME(ReceiverType { owner: span.receiver.owner, extension: span.receiver.extension });
+  return Option::SOME(ReceiverType { owner: span.receiver.owner, extension: span.receiver.extension, isSlice: span.receiver.isSlice });
 }
 
 function memberCandidate(member: &MemberEntry, kind: u64, priority: u64): CompletionCandidate {
@@ -819,8 +819,28 @@ function addMethods(
   }
 }
 
+/// Adds the intrinsic slice method `name` when it matches `prefix`.
+function addSliceMethod(
+  candidates: &mut Vector<CompletionCandidate>,
+  name: str,
+  detail: str,
+  prefix: &String
+): void {
+  let label: String = String::create(name);
+
+  if (!matchesPrefix(&label, prefix)) {
+    return;
+  }
+
+  let mut candidate: CompletionCandidate = candidateOf(label, CompletionItemKind::METHOD, Option::SOME(String::create(detail)), 15);
+  candidate.insertText = Option::SOME(String::create(name).concat("()"));
+  let mut candidatesRef: &mut Vector<CompletionCandidate> = candidates;
+  candidatesRef.push(candidate);
+}
+
 /// The candidates after `.`: the fields and instance methods of the
-/// receiver's record or enum, then the extension methods of its type.
+/// receiver's record or enum, the intrinsic methods of a slice, then the
+/// extension methods of its type.
 function dotCandidates(
   dotOffset: u64,
   prefix: &String,
@@ -853,6 +873,11 @@ function dotCandidates(
 
       addMethods(&mut candidates, &members.instanceMethods, prefix, analysis.module);
     }
+  }
+
+  if (receiver.isSlice) {
+    addSliceMethod(&mut candidates, "length", "fn() -> u64", prefix);
+    addSliceMethod(&mut candidates, "asPtr", "fn() -> *T", prefix);
   }
 
   if (let Option::SOME(key) = receiver.extension) {

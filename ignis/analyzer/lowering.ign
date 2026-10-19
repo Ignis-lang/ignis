@@ -2589,6 +2589,53 @@ export namespace Lowering {
   /// `Call`) have no selfhost counterpart: the analyzer has no `@extension`
   /// support, so a member that misses the instance table falls back to
   /// `Error`.
+  /// `slice.length()` and `slice.asPtr()` read the slice's own `len` (member
+  /// 1) and `data` (member 0), as for-of does; the receiver is lowered once.
+  function lowerSliceIntrinsicCall(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    call: &Ast::Expression::Call,
+    memberAccess: &Ast::Expression::MemberAccess,
+    baseType: Analyzer::TypeId,
+    elementType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let base: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, memberAccess.object);
+    let mut accessBase: Hir::HirId = base;
+
+    if (let Option::SOME(referent) = Lowering::referenceReferent(defStore, typeStore, baseType)) {
+      let mut derefHirRef: &mut Hir::HirStore = hir;
+      accessBase = derefHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Dereference(base),
+        span: memberAccess.span,
+        typeId: referent,
+      });
+    }
+
+    let mut fieldIndex: u32 = 1;
+    let mut resultType: Analyzer::TypeId = Lowering::unsignedInt64Type(typeStore);
+
+    if (memberAccess.member.equals("asPtr")) {
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      fieldIndex = 0;
+      resultType = typeStoreRef.pointer(elementType);
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+        base: accessBase,
+        fieldIndex: fieldIndex,
+      }),
+      span: call.span,
+      typeId: resultType,
+    });
+  }
+
   function lowerMethodCall(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2660,6 +2707,24 @@ export namespace Lowering {
       Option::SOME(referent) -> referent,
       Option::NONE -> baseType,
     };
+
+    if (pipedFirstArg.isNone() && Analyzer::Typecheck::isSliceIntrinsicMethod(&memberAccess.member)) {
+      if (let Option::SOME(elementType) = Analyzer::Typecheck::sliceElementType(defStore, typeStore, receiverType)) {
+        return Lowering::lowerSliceIntrinsicCall(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          hir,
+          call,
+          memberAccess,
+          baseType,
+          elementType,
+        );
+      }
+    }
 
     let methods: Vector<Analyzer::DefinitionId> = Lowering::instanceMethodTable(defStore, typeStore, receiverType);
 

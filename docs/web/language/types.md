@@ -94,12 +94,22 @@ rather than copies. Everywhere else you can treat them as types like any other.
 | `str` | The language | A borrowed, immutable string — every string literal is one |
 | `String` | `std::string` | An owned, growable string you can mutate |
 | `T[N]` | The language | A fixed-size sequence, sized at compile time |
+| `T[]` | The language | A read-only view of elements stored elsewhere |
 | `Vector<T>` | `std::vector` | A growable sequence sized at runtime |
 | `HashMap<K, V>` | `std::collections` | Lookup by key |
 | `HashSet<T>` | `std::collections` | Membership without a payload |
 | `BitSet` | `std::collections` | Membership for dense `u32` indexes |
 | `Option<T>` | The standard library | A value that may be absent |
 | `Result<T, E>` | The standard library | An operation that may fail |
+
+A slice `T[]` is a pointer and a length. A fixed array coerces to one. It has two methods:
+`length()` returns the element count as `u64`, and `asPtr()` returns a read-only `*T` to the first
+element.
+
+```ignis
+let n: u64 = bytes.length();
+let p: *u8 = bytes.asPtr();
+```
 
 `Option` and `Result` are enums marked `@lang(try)`, which is what lets the `!` operator work on
 them — see [enums](/docs/language/enums). Choosing between the rest is covered in
