@@ -306,7 +306,6 @@ spelled (see the reserved list).
   | "@" "extension" "(" (<identifier> | <primitive>) ("," "mut")? ")"
   | "@" "implements" "(" <identifier> ("," <identifier>)* ")"
   | "@" "lang" "(" "try" ")"
-  | "@" "langHook" "(" <string> ")"
   | "@" "panicHandler"
   | "@" "allocHandler"
   | "@" "freeHandler"
@@ -318,9 +317,8 @@ spelled (see the reserved list).
 // parameter is the receiver; the `mut` form allows a mutable receiver.
 // `@implements(...)` takes one or more trait names, including the lang traits
 // `Drop`, `Clone` and `Copy`. `@lang(try)` marks the `Result`/`Option` enums.
-// `@langHook("name")` applies to a namespace. `@takes` and `@noescape` are
-// parameter attributes (see <parameter>). `@cLayout` applies to a non-generic
-// record that does not implement `Drop`.
+// `@takes` and `@noescape` are parameter attributes (see <parameter>).
+// `@cLayout` applies to a non-generic record that does not implement `Drop`.
 //
 // `@panicHandler`, `@allocHandler` and `@freeHandler` apply to a function
 // definition in a freestanding build only (`[ignis] std = false` in
