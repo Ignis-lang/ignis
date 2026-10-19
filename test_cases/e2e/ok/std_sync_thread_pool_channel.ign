@@ -1,0 +1,47 @@
+// e2e: std
+// A pool of four workers squares the numbers 1 to 100 and sends each square
+// back on a channel. Every job owns a clone of the sender, so once the pool has
+// been dropped (which waits for the jobs) and the last sender is gone, the
+// receiving loop ends with every square received exactly once.
+import Channel, Receiver, Sender, ThreadPool from "std::sync";
+
+const JOB_COUNT: u64 = 100;
+
+function main(): i32 {
+  let channel: Channel<u64> = Channel::new<u64>();
+  let sender: Sender<u64> = channel.sender;
+  let receiver: Receiver<u64> = channel.receiver;
+
+  {
+    let pool: ThreadPool = ThreadPool::new(4);
+    let mut value: u64 = 1;
+
+    while (value <= JOB_COUNT) {
+      let results: Sender<u64> = sender.clone();
+      let input: u64 = value;
+
+      pool.execute((): void -> {
+        (@move results).send(input * input);
+      });
+      value += 1;
+    }
+  }
+
+  {
+    let _done: Sender<u64> = sender;
+  }
+
+  let mut count: u64 = 0;
+  let mut sum: u64 = 0;
+
+  while (let Option::SOME(square) = receiver.recv()) {
+    count += 1;
+    sum += square;
+  }
+
+  if (count != JOB_COUNT) {
+    return 1;
+  }
+
+  return sum == JOB_COUNT * (JOB_COUNT + 1) * (2 * JOB_COUNT + 1) / 6 ? 0 : 2;
+}

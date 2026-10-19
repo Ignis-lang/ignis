@@ -1,0 +1,296 @@
+//!
+//! # Channel
+//!
+//! An unbounded many-producer, many-consumer queue between threads.
+//!
+//! ## Exports
+//!
+//! | Export        | Description                                         |
+//! |---------------|-----------------------------------------------------|
+//! | `Channel<T>`  | `new` creates a channel; holds its two first ends   |
+//! | `Sender<T>`   | Puts values in the channel; cloneable and Send      |
+//! | `Receiver<T>` | Takes values out of the channel; cloneable and Send |
+//!
+//! ## Sending and receiving
+//!
+//! `Channel::new<T>()` returns a `Channel<T>` whose `sender` and `receiver`
+//! fields are the first two ends; move them out into their own bindings.
+//! Values come out in the order they went in. Every end can be cloned, and
+//! the clones can move to other threads, so any number of threads may send
+//! and receive. Each value is received exactly once, by one receiver.
+//!
+//! - `send(value)` never blocks. It returns `Result::ERROR(value)`, giving the
+//!   value back, once every receiver is gone.
+//! - `recv()` blocks until a value arrives and returns `Option::SOME(value)`.
+//!   Once every sender is gone and the queue is empty it returns
+//!   `Option::NONE`, so a receiving loop ends when the producers do.
+//! - `tryRecv()` returns `Option::NONE` instead of blocking when the queue is
+//!   empty.
+//!
+//! ## Ownership
+//!
+//! The ends share one heap block. The queue and the counts of live senders
+//! and receivers sit behind one `Mutex`, and one `Condvar` wakes blocked
+//! receivers. The end that brings both counts to zero, under the lock, drops
+//! the block: the values still in the queue are dropped with it.
+//!
+//! ## Thread safety
+//!
+//! `T` has to be Send: a value moves from the sending thread to the receiving
+//! one. It does not have to be Sync, because no thread ever holds a reference
+//! to a queued value. That is also why the block is not an `Arc`, which would
+//! require `T: Sync`. The ends hold a raw pointer to the block, so they
+//! declare `Send` themselves.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Channel, Receiver, Sender from "std::sync";
+//! import JoinHandle, Thread from "std::thread";
+//!
+//! function main(): i32 {
+//!   let channel: Channel<i32> = Channel::new<i32>();
+//!   let sender: Sender<i32> = channel.sender;
+//!   let receiver: Receiver<i32> = channel.receiver;
+//!   let producer: JoinHandle<void> = Thread::spawn<void>((): void -> {
+//!       (@move sender).send(42);
+//!     });
+//!
+//!   producer.join();
+//!
+//!   return receiver.recv().unwrapOr(0);
+//! }
+//! ```
+
+import RawAllocator from "std::memory";
+import Condvar, Mutex, MutexGuard from "std::sync::mutex";
+
+/// The values in a channel and the number of ends of each kind.
+///
+/// First in, first out with two stacks: `send` pushes on `incoming`, and a
+/// receive pops `outgoing`, refilling it from `incoming` (which reverses the
+/// order back) when it runs empty.
+///
+/// Exported because a monomorphized `Sender<T>` or `Receiver<T>` method is
+/// emitted into the unit that instantiates it and reaches it by name. Nothing
+/// outside this module should use it.
+export record ChannelQueue<T: Send> {
+  public incoming: Vector<T>;
+  public outgoing: Vector<T>;
+  public senders: u64;
+  public receivers: u64;
+
+  public push(&mut self, value: T): void {
+    self.incoming.push(value);
+  }
+
+  public pop(&mut self): Option<T> {
+    if (self.outgoing.isEmpty()) {
+      while (let Option::SOME(value) = self.incoming.pop()) {
+        self.outgoing.push(value);
+      }
+    }
+
+    return self.outgoing.pop();
+  }
+}
+
+/// State shared by every end of one channel.
+///
+/// Exported for the same reason as `ChannelQueue`.
+export record ChannelState<T: Send> {
+  public queue: Mutex<ChannelQueue<T>>;
+
+  /// Notified when a value arrives or the last sender goes.
+  public available: Condvar;
+}
+
+/// Operations on a channel's shared block.
+///
+/// Exported for the same reason as `ChannelQueue`.
+export namespace ChannelBlocks {
+  /// Moves `state` into a new heap block.
+  function allocate<T: Send>(state: ChannelState<T>): *mut ChannelState<T> {
+    let block: *mut ChannelState<T> = RawAllocator::allocateZeroedAligned(
+      1,
+      @sizeOf<ChannelState<T>>(),
+      @alignOf<ChannelState<T>>(),
+    ) as *mut ChannelState<T>;
+    let mut target: *mut ChannelState<T> = block;
+
+    // An indexed store moves `state` into the block; `@write` would copy it
+    // and drop the parameter at the end of this function.
+    target[0] = state;
+
+    return block;
+  }
+
+  /// Drops the block and what is left in its queue. Called by the end that
+  /// brought both counts to zero, after it unlocked the mutex.
+  function destroy<T: Send>(block: *mut ChannelState<T>): void {
+    @dropInPlace<ChannelState<T>>(block);
+    RawAllocator::free(block as *mut u8);
+  }
+}
+
+/// A new channel's first sender and receiver.
+///
+/// Move both fields out: `let sender: Sender<T> = channel.sender;`.
+export record Channel<T: Send> {
+  public sender: Sender<T>;
+  public receiver: Receiver<T>;
+
+  /// Creates an empty channel with one sender and one receiver.
+  public static new(): Channel<T> {
+    let block: *mut ChannelState<T> = ChannelBlocks::allocate<T>(ChannelState {
+        queue: Mutex::new<ChannelQueue<T>>(ChannelQueue {
+            incoming: Vector::new<T>(),
+            outgoing: Vector::new<T>(),
+            senders: 1,
+            receivers: 1,
+          }),
+        available: Condvar::new(),
+      });
+
+    return Channel {
+      sender: Sender { block: block },
+      receiver: Receiver { block: block },
+    };
+  }
+}
+
+/// The sending end of a channel.
+///
+/// Declared `Send` although it holds a raw pointer: the block it points to is
+/// reached only through its mutex, and freed by whichever end goes last.
+@allow(thread_safety)
+@implements(Drop, Clone, Send)
+export record Sender<T: Send> {
+  block: *mut ChannelState<T>;
+
+  /// Queues `value` for a receiver. Never blocks.
+  ///
+  /// Returns `Result::ERROR(value)` when every receiver is gone.
+  public send(&self, value: T): Result<void, T> {
+    let shared: &ChannelState<T> = self.state();
+    let mut guard: MutexGuard<ChannelQueue<T>> = shared.queue.lock();
+    let queue: &mut ChannelQueue<T> = guard.get();
+
+    if (queue.receivers == 0) {
+      return Result::ERROR(value);
+    }
+
+    queue.push(value);
+    shared.available.notifyOne();
+
+    return Result::OK(());
+  }
+
+  state(&self): &ChannelState<T> {
+    return self.block as &ChannelState<T>;
+  }
+
+  /// Adds a sender to the same channel.
+  clone(&self): Sender<T> {
+    let mut guard: MutexGuard<ChannelQueue<T>> = self.state().queue.lock();
+    let queue: &mut ChannelQueue<T> = guard.get();
+
+    queue.senders += 1;
+
+    return Sender { block: self.block };
+  }
+
+  /// Removes this sender. The last sender wakes every blocked receiver, and
+  /// the last end of either kind drops the channel.
+  drop(&mut self): void {
+    let mut last: boolean = false;
+
+    {
+      let shared: &ChannelState<T> = self.state();
+      let mut guard: MutexGuard<ChannelQueue<T>> = shared.queue.lock();
+      let queue: &mut ChannelQueue<T> = guard.get();
+
+      queue.senders -= 1;
+
+      if (queue.senders == 0) {
+        shared.available.notifyAll();
+        last = queue.receivers == 0;
+      }
+    }
+
+    if (last) {
+      ChannelBlocks::destroy<T>(self.block);
+    }
+  }
+}
+
+/// The receiving end of a channel.
+///
+/// Declared `Send` for the same reason as `Sender`.
+@allow(thread_safety)
+@implements(Drop, Clone, Send)
+export record Receiver<T: Send> {
+  block: *mut ChannelState<T>;
+
+  /// Blocks until a value arrives and returns it.
+  ///
+  /// Returns `Option::NONE` once every sender is gone and the queue is empty.
+  public recv(&self): Option<T> {
+    let shared: &ChannelState<T> = self.state();
+    let mut guard: MutexGuard<ChannelQueue<T>> = shared.queue.lock();
+
+    while (true) {
+      {
+        let queue: &mut ChannelQueue<T> = guard.get();
+        let next: Option<T> = queue.pop();
+
+        if (next.isSome() || queue.senders == 0) {
+          return next;
+        }
+      }
+
+      shared.available.wait<ChannelQueue<T>>(&mut guard);
+    }
+
+    return Option::NONE;
+  }
+
+  /// Returns the next value if one is queued, without blocking.
+  public tryRecv(&self): Option<T> {
+    let mut guard: MutexGuard<ChannelQueue<T>> = self.state().queue.lock();
+
+    return guard.get().pop();
+  }
+
+  state(&self): &ChannelState<T> {
+    return self.block as &ChannelState<T>;
+  }
+
+  /// Adds a receiver to the same channel.
+  clone(&self): Receiver<T> {
+    let mut guard: MutexGuard<ChannelQueue<T>> = self.state().queue.lock();
+    let queue: &mut ChannelQueue<T> = guard.get();
+
+    queue.receivers += 1;
+
+    return Receiver { block: self.block };
+  }
+
+  /// Removes this receiver. After the last receiver `send` fails, and the
+  /// last end of either kind drops the channel.
+  drop(&mut self): void {
+    let mut last: boolean = false;
+
+    {
+      let mut guard: MutexGuard<ChannelQueue<T>> = self.state().queue.lock();
+      let queue: &mut ChannelQueue<T> = guard.get();
+
+      queue.receivers -= 1;
+      last = queue.receivers == 0 && queue.senders == 0;
+    }
+
+    if (last) {
+      ChannelBlocks::destroy<T>(self.block);
+    }
+  }
+}

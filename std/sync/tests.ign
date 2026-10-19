@@ -5,13 +5,18 @@ import
   AtomicPtr,
   AtomicU32,
   AtomicU64,
+  Channel,
   Condvar,
   Mutex,
   MutexGuard,
   Ordering,
+  Receiver,
+  Sender,
+  ThreadPool,
 from "std::sync";
 import JoinHandle, Thread from "std::thread";
 import HashMap from "std::collections";
+import RawAllocator from "std::memory";
 import Test from "std::test";
 
 /// The value an exchange that happened replaced.
@@ -389,4 +394,301 @@ function condvarWakesAWaiter(): void {
   }
 
   Test::assert(notifier.join());
+}
+
+@test
+function channelReceivesInSendOrder(): void {
+  let channel: Channel<u64> = Channel::new<u64>();
+  let sender: Sender<u64> = channel.sender;
+  let receiver: Receiver<u64> = channel.receiver;
+
+  Test::assert(sender.send(1).isOk());
+  Test::assert(sender.send(2).isOk());
+  Test::assertEq<u64>(receiver.recv().unwrapOr(0), 1);
+  Test::assert(sender.send(3).isOk());
+  Test::assertEq<u64>(receiver.recv().unwrapOr(0), 2);
+  Test::assertEq<u64>(receiver.recv().unwrapOr(0), 3);
+}
+
+@test
+function channelRecvEndsAfterEverySenderIsGone(): void {
+  let channel: Channel<String> = Channel::new<String>();
+  let sender: Sender<String> = channel.sender;
+  let receiver: Receiver<String> = channel.receiver;
+
+  {
+    let second: Sender<String> = sender.clone();
+
+    Test::assert(second.send(String::create("left")).isOk());
+  }
+
+  Test::assert(sender.send(String::create("over")).isOk());
+
+  {
+    let _gone: Sender<String> = sender;
+  }
+
+  Test::assertEq<u64>(receiver.recv().unwrapOr(String::create("")).length(), 4);
+  Test::assertEq<u64>(receiver.recv().unwrapOr(String::create("")).length(), 4);
+  Test::assert(receiver.recv().isNone());
+  Test::assert(receiver.tryRecv().isNone());
+}
+
+@test
+function channelSendGivesTheValueBackWithoutReceivers(): void {
+  let channel: Channel<String> = Channel::new<String>();
+  let sender: Sender<String> = channel.sender;
+
+  {
+    let receiver: Receiver<String> = channel.receiver;
+    let second: Receiver<String> = receiver.clone();
+
+    Test::assert(sender.send(String::create("taken")).isOk());
+    Test::assertEq<u64>(second.recv().unwrapOr(String::create("")).length(), 5);
+  }
+
+  let outcome: Result<void, String> = sender.send(String::create("returned"));
+
+  if (let Result::ERROR(value) = outcome) {
+    Test::assertEq<u64>(value.length(), 8);
+  } else {
+    Test::assert(false);
+  }
+}
+
+@test
+function channelTryRecvOnAnEmptyQueue(): void {
+  let channel: Channel<u64> = Channel::new<u64>();
+  let sender: Sender<u64> = channel.sender;
+  let receiver: Receiver<u64> = channel.receiver;
+
+  Test::assert(receiver.tryRecv().isNone());
+  Test::assert(sender.send(7).isOk());
+  Test::assertEq<u64>(receiver.tryRecv().unwrapOr(0), 7);
+  Test::assert(receiver.tryRecv().isNone());
+}
+
+const PRODUCERS: u64 = 4;
+const VALUES_PER_PRODUCER: u64 = 1000;
+
+@test
+function channelCollectsFromManyProducers(): void {
+  let channel: Channel<u64> = Channel::new<u64>();
+  let sender: Sender<u64> = channel.sender;
+  let receiver: Receiver<u64> = channel.receiver;
+  let mut handles: Vector<JoinHandle<void>> = Vector::new<JoinHandle<void>>();
+  let mut producer: u64 = 0;
+
+  while (producer < PRODUCERS) {
+    let own: Sender<u64> = sender.clone();
+    let base: u64 = producer * VALUES_PER_PRODUCER;
+
+    handles.push(Thread::spawn<void>((): void -> {
+          let mut step: u64 = 1;
+
+          while (step <= VALUES_PER_PRODUCER) {
+            (@move own).send(base + step);
+            step += 1;
+          }
+        }));
+    producer += 1;
+  }
+
+  {
+    let _gone: Sender<u64> = sender;
+  }
+
+  let mut count: u64 = 0;
+  let mut sum: u64 = 0;
+
+  while (let Option::SOME(value) = receiver.recv()) {
+    count += 1;
+    sum += value;
+  }
+
+  while (let Option::SOME(handle) = handles.pop()) {
+    handle.join();
+  }
+
+  let total: u64 = PRODUCERS * VALUES_PER_PRODUCER;
+
+  Test::assertEq<u64>(count, total);
+  Test::assertEq<u64>(sum, total * (total + 1) / 2);
+}
+
+@test
+function channelSplitsValuesAcrossManyConsumers(): void {
+  let channel: Channel<u64> = Channel::new<u64>();
+  let sender: Sender<u64> = channel.sender;
+  let receiver: Receiver<u64> = channel.receiver;
+  let mut handles: Vector<JoinHandle<u64>> = Vector::new<JoinHandle<u64>>();
+  let mut consumer: u64 = 0;
+
+  while (consumer < 4) {
+    let own: Receiver<u64> = receiver.clone();
+
+    handles.push(Thread::spawn<u64>((): u64 -> {
+          let mut sum: u64 = 0;
+
+          while (let Option::SOME(value) = (@move own).recv()) {
+            sum += value;
+          }
+
+          return sum;
+        }));
+    consumer += 1;
+  }
+
+  let mut value: u64 = 1;
+
+  while (value <= 4000) {
+    Test::assert(sender.send(value).isOk());
+    value += 1;
+  }
+
+  {
+    let _gone: Sender<u64> = sender;
+  }
+
+  let mut sum: u64 = 0;
+
+  while (let Option::SOME(handle) = handles.pop()) {
+    sum += handle.join();
+  }
+
+  let count: u64 = 4000;
+  let expected: u64 = count * (count + 1) / 2;
+
+  Test::assertEq<u64>(sum, expected);
+  Test::assert(receiver.tryRecv().isNone());
+}
+
+/// Counts its own drops in an `AtomicU64` at `counter`.
+@implements(Drop)
+record DropCounter {
+  counter: u64;
+
+  drop(&mut self): void {
+    (*(self.counter as *mut AtomicU64)).fetchAdd(1, Ordering::SEQ_CST);
+  }
+}
+
+@test
+function channelDropsTheValuesLeftInIt(): void {
+  let storage: *mut u8 = RawAllocator::allocateZeroedAligned(1, @sizeOf<AtomicU64>(), @alignOf<AtomicU64>());
+  let address: u64 = storage as u64;
+  let drops: *mut AtomicU64 = storage as *mut AtomicU64;
+
+  {
+    let channel: Channel<DropCounter> = Channel::new<DropCounter>();
+    let sender: Sender<DropCounter> = channel.sender;
+    let receiver: Receiver<DropCounter> = channel.receiver;
+
+    sender.send(DropCounter { counter: address });
+    sender.send(DropCounter { counter: address });
+    sender.send(DropCounter { counter: address });
+
+    {
+      let _first: Option<DropCounter> = receiver.recv();
+    }
+
+    Test::assertEq<u64>((*drops).load(Ordering::SEQ_CST), 1);
+  }
+
+  Test::assertEq<u64>((*drops).load(Ordering::SEQ_CST), 3);
+  RawAllocator::free(storage);
+}
+
+@test
+function threadPoolRunsEveryJobOnce(): void {
+  let runs: Arc<AtomicU64> = Arc::new<AtomicU64>(AtomicU64::new(0));
+
+  {
+    let pool: ThreadPool = ThreadPool::new(4);
+    let mut index: u64 = 0;
+
+    while (index < 100) {
+      let shared: Arc<AtomicU64> = runs.clone();
+
+      pool.execute((): void -> {
+        (@move shared).get().fetchAdd(1, Ordering::SEQ_CST);
+      });
+      index += 1;
+    }
+  }
+
+  Test::assertEq<u64>(runs.get().load(Ordering::SEQ_CST), 100);
+  Test::assertEq<u64>(runs.strongCount(), 1);
+}
+
+@test
+function threadPoolDropWaitsForQueuedJobs(): void {
+  let runs: Arc<AtomicU64> = Arc::new<AtomicU64>(AtomicU64::new(0));
+
+  {
+    let pool: ThreadPool = ThreadPool::new(1);
+    let mut index: u64 = 0;
+
+    while (index < 20) {
+      let shared: Arc<AtomicU64> = runs.clone();
+
+      pool.execute((): void -> {
+        let mut spin: u64 = 0;
+
+        while (spin < 100000) {
+          spin += 1;
+        }
+
+        (@move shared).get().fetchAdd(1, Ordering::SEQ_CST);
+      });
+      index += 1;
+    }
+  }
+
+  Test::assertEq<u64>(runs.get().load(Ordering::SEQ_CST), 20);
+}
+
+@test
+function threadPoolRunsJobsOnSeveralThreads(): void {
+  let channel: Channel<u64> = Channel::new<u64>();
+  let sender: Sender<u64> = channel.sender;
+  let receiver: Receiver<u64> = channel.receiver;
+  let started: Arc<AtomicU64> = Arc::new<AtomicU64>(AtomicU64::new(0));
+
+  {
+    let pool: ThreadPool = ThreadPool::new(2);
+    let mut index: u64 = 0;
+
+    // Each job waits until both have started, so they cannot share a worker.
+    while (index < 2) {
+      let own: Sender<u64> = sender.clone();
+      let shared: Arc<AtomicU64> = started.clone();
+
+      pool.execute((): void -> {
+        let counter: &AtomicU64 = (@move shared).get();
+
+        counter.fetchAdd(1, Ordering::SEQ_CST);
+
+        while (counter.load(Ordering::SEQ_CST) < 2) {
+        }
+
+        (@move own).send(Thread::currentId());
+      });
+      index += 1;
+    }
+  }
+
+  let first: u64 = receiver.recv().unwrapOr(0);
+  let second: u64 = receiver.recv().unwrapOr(0);
+
+  Test::assert(first != 0);
+  Test::assert(second != 0);
+  Test::assert(first != second);
+  Test::assert(first != Thread::currentId());
+}
+
+@test
+function channelAndPoolAreSend(): void {
+  Test::assert(requireSend<Sender<String>>());
+  Test::assert(requireSend<Receiver<String>>());
 }
