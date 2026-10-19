@@ -234,6 +234,12 @@ export namespace Hir {
   record HirLet {
     public name: Analyzer::DefinitionId;
     public value: Option<Hir::HirId>;
+    /// Set on the bindings a `for ... of` loop reads its iterable through:
+    /// the hoisted iterable, whose initializer's temporaries live until the
+    /// loop ends (like a `match` scrutinee's live through the arms) instead of
+    /// dying at the end of the `let`, and the data pointer of a record or
+    /// slice iterable, which the view rules trace back to the iterable.
+    public forOfIterable: boolean;
   }
 
   record HirAssign {
@@ -767,6 +773,7 @@ export namespace Hir {
       Hir::HirKind::Let(letNode) -> Hir::HirKind::Let(Hir::HirLet {
         name: letNode.name,
         value: Hir::offsetOptionalHirId(letNode.value, offset),
+        forOfIterable: letNode.forOfIterable,
       }),
       Hir::HirKind::Assign(assign) -> Hir::HirKind::Assign(Hir::HirAssign {
         target: Hir::offsetHirId(assign.target, offset),

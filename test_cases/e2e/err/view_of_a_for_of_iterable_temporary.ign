@@ -1,0 +1,44 @@
+// e2e: err
+//
+// The temporaries of a `for ... of` iterable live only through the loop, so a
+// view into them stored in a local declared outside the loop is rejected. The
+// element a by-reference binding points to is traced through the slice too, so
+// a view of a named owner declared in a narrower scope is rejected as well.
+import Io from "std::io";
+import Vector from "std::vector";
+
+function makeStrings(): Vector<String> {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(String::create("abc"));
+  return values;
+}
+
+function viewOfATemporary(): void {
+  let mut kept: str = "";
+
+  for (let item: &String of makeStrings().toSlice()) {
+    kept = item.toStr();
+  }
+
+  Io::println(kept);
+}
+
+function viewOfAnInnerScopeOwner(): void {
+  let mut kept: str = "";
+
+  {
+    let owner: Vector<String> = makeStrings();
+
+    for (let item: &String of owner.toSlice()) {
+      kept = item.toStr();
+    }
+  }
+
+  Io::println(kept);
+}
+
+function main(): i32 {
+  viewOfATemporary();
+  viewOfAnInnerScopeOwner();
+  return 0;
+}

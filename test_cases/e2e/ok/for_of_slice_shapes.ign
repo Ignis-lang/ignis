@@ -1,0 +1,122 @@
+// e2e: std
+import Io from "std::io";
+import Vector from "std::vector";
+
+record Holder {
+  public items: Vector<i32>;
+
+  public view(&self): i32[] {
+    return self.items.toSlice();
+  }
+}
+
+function makeValues(): Vector<i32> {
+  let mut values: Vector<i32> = Vector::new<i32>();
+  values.push(1);
+  values.push(2);
+  values.push(3);
+  return values;
+}
+
+function viewOf(values: &Vector<i32>): i32[] {
+  return values.toSlice();
+}
+
+function countedView(values: &Vector<i32>, calls: &mut i32): i32[] {
+  *calls = *calls + 1;
+  return values.toSlice();
+}
+
+function sumParameter(slice: i32[]): i32 {
+  let mut total: i32 = 0;
+  for (let value of slice) {
+    total = total + value;
+  }
+  return total;
+}
+
+function show(label: str, value: i32): void {
+  let text: String = value.toString();
+  Io::println(label);
+  Io::println(text.toStr());
+}
+
+function main(): i32 {
+  let values: Vector<i32> = makeValues();
+  let mut total: i32 = 0;
+  let mut count: i32 = 0;
+
+  for (let value of values.toSlice()) {
+    total = total + value;
+    count = count + 1;
+  }
+  show("method call sum", total);
+  show("method call count", count);
+
+  total = 0;
+  let slice: i32[] = values.toSlice();
+  for (let value of slice) {
+    total = total + value;
+  }
+  show("slice local", total);
+
+  show("slice parameter", sumParameter(values.toSlice()));
+
+  total = 0;
+  for (let value of viewOf(&values)) {
+    total = total + value;
+  }
+  show("free function", total);
+
+  total = 0;
+  let holder: Holder = Holder { items: makeValues() };
+  for (let value of holder.view()) {
+    total = total + value;
+  }
+  show("method on self", total);
+
+  total = 0;
+  let mut calls: i32 = 0;
+  for (let value of countedView(&values, &mut calls)) {
+    total = total + value;
+  }
+  show("evaluated once sum", total);
+  show("evaluated once calls", calls);
+
+  total = 0;
+  for (let value: &i32 of values.toSlice()) {
+    total = total + *value;
+  }
+  show("by reference", total);
+
+  let mut mutableSlice: i32[] = values.toSlice();
+  for (let value: &mut i32 of mutableSlice) {
+    *value = *value * 10;
+  }
+  total = 0;
+  for (let value of values.toSlice()) {
+    total = total + value;
+  }
+  show("by mutable reference", total);
+
+  total = 0;
+  for (let value of values.toSlice()) {
+    if (value == 20) {
+      continue;
+    }
+    if (value == 30) {
+      break;
+    }
+    total = total + value;
+  }
+  show("break and continue", total);
+
+  count = 0;
+  let empty: Vector<i32> = Vector::new<i32>();
+  for (let value of empty.toSlice()) {
+    count = count + value;
+  }
+  show("empty", count);
+
+  return 0;
+}

@@ -813,7 +813,7 @@ Types with `@implements(Drop)` must provide a `drop(&mut self): void` method. Th
 
 Double-drop and use-after-drop are compile-time errors. A runtime drop guard provides defense-in-depth.
 
-A temporary (a value produced by a call or another expression and not bound to a name) is dropped at the end of the full statement that created it: an expression statement, a `let`, an assignment, a `return`. An `if` condition's temporaries live through the branch that runs and a `match` scrutinee's through the arm, and both are dropped when the whole `if` or `match` ends. A temporary is never dropped in the middle of a statement, so `consume(make().toStr())` and `${make().toStr()}` in a template literal are valid. Temporaries of one statement are dropped newest first. A view that would outlive its temporary is rejected at compile time (A0202, see Views below).
+A temporary (a value produced by a call or another expression and not bound to a name) is dropped at the end of the full statement that created it: an expression statement, a `let`, an assignment, a `return`. An `if` condition's temporaries live through the branch that runs and a `match` scrutinee's through the arm, and both are dropped when the whole `if` or `match` ends. A `for ... of` iterable's temporaries live through the whole loop and are dropped once when it ends, however it ends. A temporary is never dropped in the middle of a statement, so `consume(make().toStr())` and `${make().toStr()}` in a template literal are valid. Temporaries of one statement are dropped newest first. A view that would outlive its temporary is rejected at compile time (A0202, see Views below).
 
 ### 6.5 Borrow Checking
 
@@ -1079,6 +1079,8 @@ for (let x: &i32 of arr) {
     sum += *x;
 }
 ```
+
+A slice iterates the same way, whether it is a local, a parameter or the result of a call such as `for (let x of values.toSlice())`. An iterable that is not a plain name is evaluated once, before the first iteration. The temporaries it creates live until the loop ends, so `for (let x of makeValues().toSlice())` is valid; they are dropped once after the loop, on a `break` or a `return` too. A view into them may be used inside the body but not stored into a local declared outside the loop (A0202).
 
 A range is also an iterable. `for (let i of a..b)` is a counted loop with no allocation: the bounds are evaluated once, `a` first, so changing a variable the bounds read from inside the body does not change the loop, and `i` is a copy of a hidden counter. A range value iterates the same way.
 

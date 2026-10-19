@@ -3410,6 +3410,7 @@ export namespace Borrowck {
     binding: Analyzer::DefinitionId,
     bindingDepth: Option<u64>,
     value: Hir::HirId,
+    forOfIterable: boolean,
     span: SourceSpan,
   ): void {
     let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
@@ -3417,6 +3418,12 @@ export namespace Borrowck {
     let mut clearRef: &mut Borrowck::State = state;
     clearRef.clearViewOwner(binding.raw());
     clearRef.clearTemporaryStorage(binding.raw());
+
+    if (forOfIterable) {
+      if (Borrowck::recordForOfDataPointer(defStore, typeStore, hir, state, binding, bindingDepth, value)) {
+        return;
+      }
+    }
 
     Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, bindingDepth, value, span);
 
@@ -3435,6 +3442,18 @@ export namespace Borrowck {
             storageRef.setTemporaryStorage(binding.raw(), owner.depth, owner.node.raw());
             return;
           }
+        }
+      }
+
+      // The binding a `for ... of` loop reads its iterable from keeps the
+      // iterable's temporaries alive until the loop ends, which is the end of
+      // the binding's own scope: views taken from it are views of a temporary
+      // that lives at the binding's depth.
+      if (forOfIterable) {
+        if (let Option::SOME(depth) = bindingDepth) {
+          let mut loopStorageRef: &mut Borrowck::State = state;
+          loopStorageRef.setTemporaryStorage(binding.raw(), depth, owner.node.raw());
+          return;
         }
       }
 
@@ -3491,6 +3510,53 @@ export namespace Borrowck {
 
     let mut heldRef: &mut Borrowck::State = state;
     heldRef.recordHeldBorrow(owner.local.raw(), mutable, granted);
+  }
+
+  /// Raw pointers are not tracked as views, except the data pointer a `for
+  /// ... of` loop indexes a record or slice iterable through: the element a
+  /// by-reference loop binding points to lives wherever the iterable's
+  /// storage does, a local or a temporary that lives through the loop.
+  /// Returns whether `value` was such a pointer.
+  function recordForOfDataPointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    binding: Analyzer::DefinitionId,
+    bindingDepth: Option<u64>,
+    value: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hir.get(value) else {
+      return false;
+    };
+
+    if (Borrowck::viewTypeKind(defStore, typeStore, node.typeId) != Borrowck::VIEW_TYPE_POINTER) {
+      return false;
+    }
+
+    let Hir::HirKind::FieldAccess(access) = &node.kind else {
+      return false;
+    };
+
+    let owner: Borrowck::ViewOwner = Borrowck::storageOwnerOf(defStore, typeStore, hir, state, access.base);
+
+    if (owner.kind == Borrowck::VIEW_OWNER_LOCAL) {
+      let mut viewRef: &mut Borrowck::State = state;
+      viewRef.setViewOwner(binding.raw(), owner.local.raw(), false);
+    } else if (owner.kind == Borrowck::VIEW_OWNER_TEMPORARY) {
+      let mut depth: u64 = owner.depth;
+
+      if (!owner.scoped) {
+        if (let Option::SOME(bindingDepthValue) = bindingDepth) {
+          depth = bindingDepthValue;
+        }
+      }
+
+      let mut storageRef: &mut Borrowck::State = state;
+      storageRef.setTemporaryStorage(binding.raw(), depth, owner.node.raw());
+    }
+
+    return true;
   }
 
   /// Checks the views an aggregate built in place keeps: the fields of a record
@@ -6593,7 +6659,7 @@ export namespace Borrowck {
     depthRef.recordLocalDepth(letNode.name.raw(), depth);
 
     if (let Option::SOME(value) = letNode.value) {
-      Borrowck::recordKeptView(defStore, typeStore, symbols, hir, state, diagnostics, letNode.name, Option::SOME(depth), value, span);
+      Borrowck::recordKeptView(defStore, typeStore, symbols, hir, state, diagnostics, letNode.name, Option::SOME(depth), value, letNode.forOfIterable, span);
     }
 
     // A closure local owns its environment even when its type needs no drop of
@@ -7058,7 +7124,7 @@ export namespace Borrowck {
 
     if (let Option::SOME(target) = Borrowck::variableOf(hir, assign.target)) {
       let targetDepth: Option<u64> = state.localDepth(target.raw());
-      Borrowck::recordKeptView(defStore, typeStore, symbols, hir, state, diagnostics, target, targetDepth, assign.value, span);
+      Borrowck::recordKeptView(defStore, typeStore, symbols, hir, state, diagnostics, target, targetDepth, assign.value, false, span);
     } else {
       Borrowck::checkPlaceAssignedView(defStore, typeStore, symbols, hir, state, diagnostics, assign.target, assign.value, span);
     }
