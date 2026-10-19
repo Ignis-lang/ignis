@@ -1,13 +1,13 @@
 import SourceSpan from "@compiler::diagnostics";
 import Vector from "std::vector";
 
-import Token, TokenKind, Punctuation from "./token";
+import Keyword, Token, TokenKind, Punctuation from "./token";
 
 function emptySpan(): SourceSpan {
   return SourceSpan::new("", 0, 0);
 }
 
-function splitGreaterToken(token: &Token): Token {
+function splitGreaterSpan(token: &Token): SourceSpan {
   let mut start: u64 = token.span.start;
   let mut end: u64 = token.span.end;
 
@@ -19,7 +19,11 @@ function splitGreaterToken(token: &Token): Token {
     end = start;
   }
 
-  return Token::punctuation(Punctuation::GREATER, SourceSpan::new(token.span.filePath, start, end), ">");
+  return SourceSpan::new(token.span.filePath, start, end);
+}
+
+function splitGreaterToken(token: &Token): Token {
+  return Token::punctuation(Punctuation::GREATER, splitGreaterSpan(token), ">");
 }
 
 export record TokenCheckpoint {
@@ -90,6 +94,18 @@ export record TokenStream {
     return Token::eof(SourceSpan::new(last.span.filePath, last.span.start, last.span.end));
   }
 
+  private fallbackEofSpan(&self): SourceSpan {
+    if (self.tokens.length() == 0) {
+      return emptySpan();
+    }
+
+    let Option::SOME(last) = self.tokens.get(self.tokens.length() - 1) else {
+      return emptySpan();
+    };
+
+    return SourceSpan::new(last.span.filePath, last.span.start, last.span.end);
+  }
+
   private tokenAt(&self, index: u64): Token {
     let Option::SOME(token) = self.tokens.get(index) else {
       return self.fallbackEof();
@@ -135,6 +151,86 @@ export record TokenStream {
     return self.tokenAt(self.index + distance);
   }
 
+  /// Kind of the token `peekNth(distance)` returns, without copying its lexeme.
+  public peekNthKind(&self, distance: u64): TokenKind {
+    if (self.pendingGreater && distance == 0) {
+      if (self.index < self.tokens.length()) {
+        return TokenKind::PUNCTUATION;
+      }
+
+      return TokenKind::EOF;
+    }
+
+    let Option::SOME(token) = self.tokens.get(self.index + distance) else {
+      return TokenKind::EOF;
+    };
+
+    return token.kind;
+  }
+
+  /// Keyword of the token `peekNth(distance)` returns, without copying its lexeme.
+  public peekNthKeyword(&self, distance: u64): Keyword {
+    if (self.pendingGreater && distance == 0) {
+      return Keyword::NONE;
+    }
+
+    let Option::SOME(token) = self.tokens.get(self.index + distance) else {
+      return Keyword::NONE;
+    };
+
+    return token.keyword;
+  }
+
+  /// Punctuation of the token `peekNth(distance)` returns, without copying its lexeme.
+  public peekNthPunctuation(&self, distance: u64): Punctuation {
+    if (self.pendingGreater && distance == 0) {
+      if (self.index < self.tokens.length()) {
+        return Punctuation::GREATER;
+      }
+
+      return Punctuation::NONE;
+    }
+
+    let Option::SOME(token) = self.tokens.get(self.index + distance) else {
+      return Punctuation::NONE;
+    };
+
+    return token.punctuation;
+  }
+
+  /// Span of the token `peekNth(distance)` returns, without copying its lexeme.
+  public peekNthSpan(&self, distance: u64): SourceSpan {
+    if (self.pendingGreater && distance == 0) {
+      let Option::SOME(token) = self.tokens.get(self.index) else {
+        return self.fallbackEofSpan();
+      };
+
+      return splitGreaterSpan(token);
+    }
+
+    let Option::SOME(token) = self.tokens.get(self.index + distance) else {
+      return self.fallbackEofSpan();
+    };
+
+    return token.span;
+  }
+
+  public peekKind(&self): TokenKind {
+    return self.peekNthKind(0);
+  }
+
+  public peekKeyword(&self): Keyword {
+    return self.peekNthKeyword(0);
+  }
+
+  public peekPunctuation(&self): Punctuation {
+    return self.peekNthPunctuation(0);
+  }
+
+  public peekSpan(&self): SourceSpan {
+    return self.peekNthSpan(0);
+  }
+
   public bump(&mut self): Token {
     if (self.pendingGreater) {
       let Option::SOME(token) = self.tokens.get(self.index) else {
@@ -158,7 +254,7 @@ export record TokenStream {
   }
 
   public consume(&mut self, kind: TokenKind): boolean {
-    if (self.peek().kind == kind) {
+    if (self.peekKind() == kind) {
       let mut stream: &mut TokenStream = self;
       stream.bump();
       return true;

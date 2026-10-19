@@ -1,7 +1,14 @@
 import Test from "std::test";
 
 import SourceSpan from "@compiler::diagnostics";
-import Punctuation, Token, TokenCheckpoint, TokenKind, TokenStream from "@compiler::syntax";
+import
+  Keyword,
+  Punctuation,
+  Token,
+  TokenCheckpoint,
+  TokenKind,
+  TokenStream,
+from "@compiler::syntax";
 
 function streamFixtureSpan(start: u64, end: u64): SourceSpan {
   return SourceSpan::new("fixtures/stream.ign", start, end);
@@ -50,4 +57,50 @@ function tokenStreamSplitsRightShiftIntoTwoGreaterTokens(): void {
 
   Test::assert(stream.expectGreater());
   Test::assertEq<TokenKind>(stream.peek().kind, TokenKind::EOF);
+}
+
+@test
+function tokenStreamFieldLookaheadMatchesPeekNth(): void {
+  let mut stream: TokenStream = TokenStream::create();
+  stream.push(Token::keyword(Keyword::LET, streamFixtureSpan(0, 3), "let"));
+  stream.push(punctuation(Punctuation::COLON, ":", 3, 4));
+  stream.push(Token::eof(streamFixtureSpan(4, 4)));
+
+  Test::assertEq<TokenKind>(stream.peekKind(), TokenKind::KEYWORD);
+  Test::assertEq<Keyword>(stream.peekKeyword(), Keyword::LET);
+  Test::assertEq<Punctuation>(stream.peekPunctuation(), Punctuation::NONE);
+  Test::assertEq<u64>(stream.peekSpan().start, 0);
+  Test::assertEq<u64>(stream.peekSpan().end, 3);
+
+  Test::assertEq<TokenKind>(stream.peekNthKind(1), TokenKind::PUNCTUATION);
+  Test::assertEq<Punctuation>(stream.peekNthPunctuation(1), Punctuation::COLON);
+  Test::assertEq<u64>(stream.peekNthSpan(1).start, 3);
+
+  Test::assertEq<TokenKind>(stream.peekNthKind(2), TokenKind::EOF);
+  Test::assertEq<TokenKind>(stream.peekNthKind(9), TokenKind::EOF);
+  Test::assertEq<u64>(stream.peekNthSpan(9).start, 4);
+  Test::assertEq<u64>(stream.peekNthSpan(9).end, 4);
+}
+
+@test
+function tokenStreamFieldLookaheadSeesPendingGreaterSplit(): void {
+  let mut stream: TokenStream = TokenStream::create();
+  stream.push(punctuation(Punctuation::RIGHT_SHIFT, ">>", 10, 12));
+  stream.push(identifier("next", 12, 16));
+  stream.push(Token::eof(streamFixtureSpan(16, 16)));
+
+  Test::assertEq<Punctuation>(stream.peekPunctuation(), Punctuation::RIGHT_SHIFT);
+  Test::assert(stream.expectGreater());
+
+  Test::assertEq<TokenKind>(stream.peekKind(), TokenKind::PUNCTUATION);
+  Test::assertEq<Punctuation>(stream.peekPunctuation(), Punctuation::GREATER);
+  Test::assertEq<Keyword>(stream.peekKeyword(), Keyword::NONE);
+  Test::assertEq<u64>(stream.peekSpan().start, 11);
+  Test::assertEq<u64>(stream.peekSpan().end, 12);
+  Test::assertEq<TokenKind>(stream.peekNthKind(1), TokenKind::IDENTIFIER);
+  Test::assertEq<u64>(stream.peekNthSpan(1).start, 12);
+
+  let split: Token = stream.bump();
+  Test::assertEq<Punctuation>(split.punctuation, Punctuation::GREATER);
+  Test::assertEq<TokenKind>(stream.peekKind(), TokenKind::IDENTIFIER);
 }

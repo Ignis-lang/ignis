@@ -16,20 +16,26 @@ import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::synt
 import CompileFlags from "./compile_flags";
 
 export namespace ParserShared {
-  function isTrivia(token: Token): boolean {
-    return token.kindValue() == TokenKind::WHITESPACE || token.kindValue() == TokenKind::LINE_COMMENT || token.kindValue() == TokenKind::BLOCK_COMMENT || token.kindValue() == TokenKind::OUTER_DOC_COMMENT || token.kindValue() == TokenKind::INNER_DOC_COMMENT;
+  function isTriviaKind(kind: TokenKind): boolean {
+    return kind == TokenKind::WHITESPACE || kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT;
+  }
+
+  /// Lookahead distance of the first non-trivia token at or after `startOffset`.
+  function nextSignificantOffset(parser: &mut ParserShared::State, startOffset: u64): u64 {
+    let parserRef: &mut ParserShared::State = parser;
+    let mut offset: u64 = startOffset;
+
+    while (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
+      offset += 1;
+    }
+
+    return offset;
   }
 
   function nextSignificantToken(parser: &mut ParserShared::State, startOffset: u64): Token {
     let parserRef: &mut ParserShared::State = parser;
-    let token: Token = parserRef.tokens.peekNth(startOffset).clone();
-    let kind: TokenKind = token.kindValue();
-
-    if (kind == TokenKind::WHITESPACE || kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT) {
-      return ParserShared::nextSignificantToken(parserRef, startOffset + 1);
-    }
-
-    return token;
+    let offset: u64 = ParserShared::nextSignificantOffset(parserRef, startOffset);
+    return parserRef.tokens.peekNth(offset);
   }
 
   function isDocWhitespace(byte: u8): boolean {
@@ -559,25 +565,41 @@ export namespace ParserShared {
       return self.tokens.peek();
     }
 
+    public currentKind(&self): TokenKind {
+      return self.tokens.peekKind();
+    }
+
+    public currentKeyword(&self): Keyword {
+      return self.tokens.peekKeyword();
+    }
+
+    public currentPunctuation(&self): Punctuation {
+      return self.tokens.peekPunctuation();
+    }
+
+    public currentSpan(&self): SourceSpan {
+      return self.tokens.peekSpan();
+    }
+
     public bump(&mut self): Token {
       return self.tokens.bump();
     }
 
     public skipTrivia(&mut self): void {
       while (true) {
-        let token: Token = self.current();
+        let kind: TokenKind = self.currentKind();
 
-        if (token.kindValue() == TokenKind::LINE_COMMENT || token.kindValue() == TokenKind::BLOCK_COMMENT) {
+        if (kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT) {
           self.consumeCommentRun();
           continue;
         }
 
-        if (token.kindValue() == TokenKind::OUTER_DOC_COMMENT || token.kindValue() == TokenKind::INNER_DOC_COMMENT) {
+        if (kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT) {
           self.consumeCommentRun();
           continue;
         }
 
-        if (token.kindValue() == TokenKind::WHITESPACE) {
+        if (kind == TokenKind::WHITESPACE) {
           self.bump();
           continue;
         }
@@ -670,19 +692,17 @@ export namespace ParserShared {
 
     public atEof(&mut self): boolean {
       self.skipTrivia();
-      return self.current().kindValue() == TokenKind::EOF;
+      return self.currentKind() == TokenKind::EOF;
     }
 
     public atKeyword(&mut self, keyword: Keyword): boolean {
       self.skipTrivia();
-      let token: Token = self.current();
-      return token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == keyword;
+      return self.currentKind() == TokenKind::KEYWORD && self.currentKeyword() == keyword;
     }
 
     public atPunctuation(&mut self, punctuation: Punctuation): boolean {
       self.skipTrivia();
-      let token: Token = self.current();
-      return token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == punctuation;
+      return self.currentKind() == TokenKind::PUNCTUATION && self.currentPunctuation() == punctuation;
     }
 
     public consumeKeyword(&mut self, keyword: Keyword): Option<Token> {
@@ -722,7 +742,7 @@ export namespace ParserShared {
     public consumeIdentifier(&mut self): Option<Token> {
       self.skipTrivia();
 
-      if (self.current().kindValue() != TokenKind::IDENTIFIER) {
+      if (self.currentKind() != TokenKind::IDENTIFIER) {
         return Option::NONE;
       }
 
@@ -731,37 +751,31 @@ export namespace ParserShared {
 
     public expectIdentifier(&mut self, label: str): Option<Token> {
       self.skipTrivia();
-      let token: Token = self.current();
-
-      if (token.kindValue() == TokenKind::IDENTIFIER) {
+      if (self.currentKind() == TokenKind::IDENTIFIER) {
         return Option::SOME(self.bump());
       }
 
-      self.expectedToken(token.span, "Identifier", label);
+      self.expectedToken(self.currentSpan(), "Identifier", label);
       return Option::NONE;
     }
 
     public expectKeyword(&mut self, keyword: Keyword, label: str): Option<Token> {
       self.skipTrivia();
-      let token: Token = self.current();
-
-      if (token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == keyword) {
+      if (self.currentKind() == TokenKind::KEYWORD && self.currentKeyword() == keyword) {
         return Option::SOME(self.bump());
       }
 
-      self.expectedToken(token.span, keyword.diagnosticName(), label);
+      self.expectedToken(self.currentSpan(), keyword.diagnosticName(), label);
       return Option::NONE;
     }
 
     public expectPunctuation(&mut self, punctuation: Punctuation, label: str): Option<Token> {
       self.skipTrivia();
-      let token: Token = self.current();
-
-      if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == punctuation) {
+      if (self.currentKind() == TokenKind::PUNCTUATION && self.currentPunctuation() == punctuation) {
         return Option::SOME(self.bump());
       }
 
-      self.expectedToken(token.span, punctuation.diagnosticName(), label);
+      self.expectedToken(self.currentSpan(), punctuation.diagnosticName(), label);
       return Option::NONE;
     }
 

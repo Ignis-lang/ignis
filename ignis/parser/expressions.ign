@@ -822,22 +822,6 @@ export namespace ParserExpressions {
     return Option::SOME(ParserExpressions::copyExpressionIds(&expressions));
   }
 
-  function isTrivia(token: Token): boolean {
-    return token.kindValue() == TokenKind::WHITESPACE || token.kindValue() == TokenKind::LINE_COMMENT || token.kindValue() == TokenKind::BLOCK_COMMENT || token.kindValue() == TokenKind::OUTER_DOC_COMMENT || token.kindValue() == TokenKind::INNER_DOC_COMMENT;
-  }
-
-  function nextSignificantToken(parser: &mut ParserShared::State, startOffset: u64): Token {
-    let parserRef: &mut ParserShared::State = parser;
-    let token: Token = parserRef.tokens.peekNth(startOffset).clone();
-    let kind: TokenKind = token.kindValue();
-
-    if (kind == TokenKind::WHITESPACE || kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT) {
-      return ParserExpressions::nextSignificantToken(parserRef, startOffset + 1);
-    }
-
-    return token;
-  }
-
   function genericSuffixFollows(parser: &mut ParserShared::State, follower: Punctuation): boolean {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -851,19 +835,17 @@ export namespace ParserExpressions {
     let mut offset: u64 = 0;
 
     while (offset < 128) {
-      let token: Token = parserRef.tokens.peekNth(offset);
-
-      if (ParserExpressions::isTrivia(token.clone())) {
+      if (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
         offset += 1;
         continue;
       }
 
-      if (token.kindValue() != TokenKind::PUNCTUATION) {
+      if (parserRef.tokens.peekNthKind(offset) != TokenKind::PUNCTUATION) {
         offset += 1;
         continue;
       }
 
-      let punctuation: Punctuation = token.punctuationValue();
+      let punctuation: Punctuation = parserRef.tokens.peekNthPunctuation(offset);
 
       if (punctuation == Punctuation::LEFT_PAREN) {
         parenDepth += 1;
@@ -908,8 +890,8 @@ export namespace ParserExpressions {
         offset += 1;
 
         if (angleDepth == 0 && parenDepth == 0 && bracketDepth == 0) {
-          let next: Token = ParserExpressions::nextSignificantToken(parserRef, offset);
-          return next.kindValue() == TokenKind::PUNCTUATION && next.punctuationValue() == follower;
+          let next: u64 = ParserShared::nextSignificantOffset(parserRef, offset);
+          return parserRef.tokens.peekNthKind(next) == TokenKind::PUNCTUATION && parserRef.tokens.peekNthPunctuation(next) == follower;
         }
 
         continue;
@@ -920,8 +902,8 @@ export namespace ParserExpressions {
         offset += 1;
 
         if (angleDepth == 0 && parenDepth == 0 && bracketDepth == 0) {
-          let next: Token = ParserExpressions::nextSignificantToken(parserRef, offset);
-          return next.kindValue() == TokenKind::PUNCTUATION && next.punctuationValue() == follower;
+          let next: u64 = ParserShared::nextSignificantOffset(parserRef, offset);
+          return parserRef.tokens.peekNthKind(next) == TokenKind::PUNCTUATION && parserRef.tokens.peekNthPunctuation(next) == follower;
         }
 
         if (angleDepth < 0) {
@@ -948,20 +930,21 @@ export namespace ParserExpressions {
     let mut offset: u64 = 1;
 
     while (offset < 128) {
-      let token: Token = parserRef.tokens.peekNth(offset);
-
-      if (ParserExpressions::isTrivia(token.clone())) {
+      if (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
         offset += 1;
         continue;
       }
 
-      if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::LEFT_PAREN) {
+      let kind: TokenKind = parserRef.tokens.peekNthKind(offset);
+      let punctuation: Punctuation = parserRef.tokens.peekNthPunctuation(offset);
+
+      if (kind == TokenKind::PUNCTUATION && punctuation == Punctuation::LEFT_PAREN) {
         depth += 1;
         offset += 1;
         continue;
       }
 
-      if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::RIGHT_PAREN) {
+      if (kind == TokenKind::PUNCTUATION && punctuation == Punctuation::RIGHT_PAREN) {
         depth -= 1;
         offset += 1;
 
@@ -991,13 +974,13 @@ export namespace ParserExpressions {
   function lambdaReturnTypeFollows(parser: &mut ParserShared::State, startOffset: u64): boolean {
     let parserRef: &mut ParserShared::State = parser;
     let mut offset: u64 = startOffset;
-    let colon: Token = ParserExpressions::nextSignificantToken(parserRef, offset);
+    let colon: Token = ParserShared::nextSignificantToken(parserRef, offset);
 
     if (colon.kindValue() != TokenKind::PUNCTUATION || colon.punctuationValue() != Punctuation::COLON) {
       return false;
     }
 
-    while (ParserExpressions::isTrivia(parserRef.tokens.peekNth(offset).clone())) {
+    while (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
       offset += 1;
     }
 
@@ -1007,12 +990,13 @@ export namespace ParserExpressions {
     let mut sawType: boolean = false;
 
     while (offset < startOffset + 128) {
-      let token: Token = parserRef.tokens.peekNth(offset);
-      offset += 1;
-
-      if (ParserExpressions::isTrivia(token.clone())) {
+      if (ParserShared::isTriviaKind(parserRef.tokens.peekNthKind(offset))) {
+        offset += 1;
         continue;
       }
+
+      let token: Token = parserRef.tokens.peekNth(offset);
+      offset += 1;
 
       let kind: TokenKind = token.kindValue();
 
@@ -1211,7 +1195,7 @@ export namespace ParserExpressions {
       return ParserExpressions::parseCompilePredicateCall(parserRef);
     }
 
-    let span: SourceSpan = parserRef.current().span;
+    let span: SourceSpan = parserRef.currentSpan();
     parserRef.emitDiagnostic(
       span,
       DiagnosticCode::COMPILE_ERROR,
@@ -1418,7 +1402,7 @@ export namespace ParserExpressions {
       // `export X from "...";` and `export X;` carry no inner declaration.
       parserRef.skipTrivia();
 
-      if (parserRef.current().kindValue() == TokenKind::IDENTIFIER) {
+      if (parserRef.currentKind() == TokenKind::IDENTIFIER) {
         return ParserExpressions::skipToSemicolon(parserRef);
       }
 
@@ -1491,7 +1475,7 @@ export namespace ParserExpressions {
     }
 
     parserRef.emitDiagnostic(
-      parserRef.current().span,
+      parserRef.currentSpan(),
       DiagnosticCode::EXPECTED_DELIMITER,
       "Expected ',' or '}'",
       "gated declaration must close before end of file",
@@ -1605,7 +1589,7 @@ export namespace ParserExpressions {
     let mut parserRef: &mut ParserShared::State = parser;
 
     parserRef.emitDiagnostic(
-      parserRef.current().span,
+      parserRef.currentSpan(),
       DiagnosticCode::UNEXPECTED_TOKEN,
       "Unexpected token",
       "'@else' without a matching '@if'",
@@ -2515,7 +2499,7 @@ export namespace ParserExpressions {
     }
 
     return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
-      span: ParserShared::mergeSpans(startSpan, parserRef.current().span),
+      span: ParserShared::mergeSpans(startSpan, parserRef.currentSpan()),
       alternatives: ParserShared::copyPatternIds(&alternatives),
     })));
   }
@@ -3008,7 +2992,7 @@ export namespace ParserExpressions {
     let mut parserRef: &mut ParserShared::State = parser;
     let pathSpan: SourceSpan = match (parserRef.module.expressions.get(path)) {
       Option::SOME(node) -> Ast::Serializer::expressionSpan(node),
-      Option::NONE -> parserRef.current().span,
+      Option::NONE -> parserRef.currentSpan(),
     };
 
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' before record initializer") else {
