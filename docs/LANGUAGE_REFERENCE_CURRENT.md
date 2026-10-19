@@ -387,6 +387,17 @@ record Paging {
 
 An `N` smaller than the type's own alignment has no effect: the global keeps the type's alignment. An immutable static field or constant has storage only when some function takes its address (see above), so the attribute matters only then. `@aligned` is an error (`A0117`) on a module-level or `extern` constant, which a static field is not. An argument that is missing, repeated, not an integer literal, not a power of two or above 1 GiB is an error (`A0118`, `A0244`, `A0121`, `A0243`).
 
+`@threadLocal` on a `static mut` field gives every thread its own copy of it, emitted as a C `_Thread_local` global (QBE `thread` data). Reads, writes and compound assignments look like any other `static mut` access, and each thread starts from the field's initializer:
+
+```ignis
+record Scheduler {
+    @threadLocal
+    static mut CURRENT: *mut Scheduler;
+}
+```
+
+The attribute is an error on an immutable `static` field or an instance field (`A0259`). The initializer follows the `static mut` rules (`A0230`, `A0239`). The type must not run a drop (`A0260`), because nothing runs when a thread exits. A thread-local cannot be borrowed (`A0261`): neither `&` / `&mut` of it or of one of its fields or elements, nor a `&self` / `&mut self` method call on it, nor a slice of a fixed array stored in it, since the reference would dangle once its thread exits. Access through a pointer stored in a thread-local, such as `(*Scheduler::CURRENT).field` or `(*Scheduler::CURRENT).tick()`, reaches the pointee and is not affected.
+
 For standard-library records, `::new()` is the canonical constructor naming
 convention. Some std records retain `::init()` aliases for compatibility only;
 new code should use forms such as `Vector::new<T>()`, `HashMap::new<K, V>()`,

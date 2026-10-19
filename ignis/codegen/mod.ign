@@ -6394,6 +6394,7 @@ export namespace CodegenC {
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut alignment: Option<u64> = Option::NONE;
       let mut storage: str = hooks.exportStatics ? "" : "static ";
+      let mut threadLocal: str = "";
 
       if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(global.defId)) {
         declaredType = variable.declaredType;
@@ -6401,6 +6402,10 @@ export namespace CodegenC {
 
         if (!variable.mutable) {
           storage = "static const ";
+        }
+
+        if (variable.threadLocal) {
+          threadLocal = "_Thread_local ";
         }
       }
 
@@ -6422,7 +6427,7 @@ export namespace CodegenC {
       // A static another unit defines is only declared here, so every unit
       // reaches that unit's one copy.
       if (CodegenC::hasRaw(&hooks.foreignDefinitions, global.defId.raw())) {
-        let externLine: String = `extern ${declarator.toStr()};\n`;
+        let externLine: String = `extern ${threadLocal}${declarator.toStr()};\n`;
 
         outputRef.pushStr(externLine.toStr());
         index += 1;
@@ -6432,7 +6437,7 @@ export namespace CodegenC {
       // A global that is all zero bytes carries no initializer: C places it in
       // zero-initialized storage, so it occupies no space in the object file.
       if (CodegenC::isZeroGlobal(&global.parts)) {
-        let zeroLine: String = `${storage}${declarator.toStr()};\n`;
+        let zeroLine: String = `${storage}${threadLocal}${declarator.toStr()};\n`;
 
         outputRef.pushStr(zeroLine.toStr());
         index += 1;
@@ -6440,7 +6445,7 @@ export namespace CodegenC {
       }
 
       let value: String = CodegenC::formatGlobalInitializer(defStore, typeStore, symbols, closures, &global.parts);
-      let line: String = `${storage}${declarator.toStr()} = ${value.toStr()};\n`;
+      let line: String = `${storage}${threadLocal}${declarator.toStr()} = ${value.toStr()};\n`;
 
       outputRef.pushStr(line.toStr());
       index += 1;

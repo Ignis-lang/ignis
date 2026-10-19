@@ -1,0 +1,56 @@
+// e2e: std
+// A `@threadLocal` static field has one copy per thread: two threads write
+// different values to the same field and each reads back its own, and the main
+// thread's copy keeps the value it set before they started.
+import JoinHandle, Thread from "std::thread";
+
+record Slot {
+  @threadLocal
+  static mut VALUE: i64 = 5;
+
+  @threadLocal
+  static mut HITS: i32;
+}
+
+function writeAndReadBack(value: i64): i64 {
+  Slot::VALUE = value;
+  Slot::HITS += 1;
+
+  let mut spin: i32 = 0;
+
+  while (spin < 100000) {
+    Slot::HITS += 1;
+    spin += 1;
+  }
+
+  if (Slot::HITS != 100001) {
+    return -1;
+  }
+
+  return Slot::VALUE;
+}
+
+function main(): i32 {
+  Slot::VALUE = 9;
+
+  let first: JoinHandle<i64> = Thread::spawn<i64>((): i64 -> writeAndReadBack(11));
+  let second: JoinHandle<i64> = Thread::spawn<i64>((): i64 -> writeAndReadBack(22));
+
+  if (first.join() != 11) {
+    return 1;
+  }
+
+  if (second.join() != 22) {
+    return 2;
+  }
+
+  if (Slot::VALUE != 9) {
+    return 3;
+  }
+
+  if (Slot::HITS != 0) {
+    return 4;
+  }
+
+  return 0;
+}

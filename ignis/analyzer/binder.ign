@@ -1406,7 +1406,7 @@ export namespace Analyzer {
       }
 
       if (targetName.equals("field")) {
-        return name.equals("aligned");
+        return name.equals("aligned") || name.equals("threadLocal");
       }
 
       if (targetName.equals("parameter")) {
@@ -1418,6 +1418,35 @@ export namespace Analyzer {
       }
 
       return name.equals("test") || name.equals("externName") || name.equals("cold") || name.equals("deprecated") || name.equals("extension") || name.equals("directive");
+    }
+
+    /// Whether a field binding asks for thread-local storage it can have:
+    /// `@threadLocal` on a `static mut` field. On anything else the attribute
+    /// is reported by `rejectMisplacedThreadLocal` and has no effect.
+    function threadLocalAttribute(metadata: &Ast::Metadata): boolean {
+      return Analyzer::Binder::metadataIsMutable(metadata) && Analyzer::Binder::attributeSpanNamed(metadata, "threadLocal").isSome();
+    }
+
+    /// Report a `@threadLocal` on a field that is not `static mut` (A0259): an
+    /// immutable `static` has no storage, it folds into its uses, and an
+    /// instance field lives inside its record.
+    function rejectMisplacedThreadLocal(
+      state: &mut Analyzer::Binder::BinderState,
+      metadata: &Ast::Metadata,
+    ): void {
+      let Option::SOME(span) = Analyzer::Binder::attributeSpanNamed(metadata, "threadLocal") else {
+        return;
+      };
+
+      if (Analyzer::Binder::metadataIsMutable(metadata)) {
+        return;
+      }
+
+      let message: str = "'@threadLocal' applies only to a 'static mut' field";
+      let mut diag: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::THREAD_LOCAL_NOT_STATIC_MUT, message, span);
+      diag.addLabel(LabelKind::PRIMARY, span, "an immutable 'static' has no storage of its own, and an instance field lives in its record");
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
     }
 
     /// Report every attribute `target` does not accept, and every `@aligned`
@@ -1834,6 +1863,7 @@ export namespace Analyzer {
               if (isDuplicate) {
                 emitDuplicateNameDiagnostic(state, "field name", b.name.toStr(), b.span);
               } else if (Analyzer::Binder::fieldBindingIsStatic(&b)) {
+                Analyzer::Binder::rejectMisplacedThreadLocal(state, &b.metadata);
                 seenSyms.push(sym);
 
                 let staticDef: Analyzer::VariableDef = Analyzer::VariableDef {
@@ -1845,12 +1875,14 @@ export namespace Analyzer {
                   noEscape: false,
                   isExtern: false,
                   alignment: Analyzer::Binder::alignmentAttribute(&b.metadata),
+                  threadLocal: Analyzer::Binder::threadLocalAttribute(&b.metadata),
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let staticId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(staticDef));
                 Analyzer::Binder::recordPatternDoc(ast, defStore, *patId, staticId);
                 staticFields.push(staticId);
               } else {
+                Analyzer::Binder::rejectMisplacedThreadLocal(state, &b.metadata);
                 seenSyms.push(sym);
                 let fieldDef: Analyzer::FieldDef = Analyzer::FieldDef {
                   name: sym,
@@ -1937,6 +1969,7 @@ export namespace Analyzer {
                 emitDuplicateNameDiagnostic(state, "variant name", b.name.toStr(), b.span);
               } else if (b.initializer.isSome()) {
                 Analyzer::Binder::validateAttributes(state, &b.metadata, "field");
+                Analyzer::Binder::rejectMisplacedThreadLocal(state, &b.metadata);
 
                 seenSyms.push(sym);
                 let staticDef: Analyzer::VariableDef = Analyzer::VariableDef {
@@ -1948,6 +1981,7 @@ export namespace Analyzer {
                   noEscape: false,
                   isExtern: false,
                   alignment: Analyzer::Binder::alignmentAttribute(&b.metadata),
+                  threadLocal: Analyzer::Binder::threadLocalAttribute(&b.metadata),
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let staticId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(staticDef));
@@ -2094,6 +2128,7 @@ export namespace Analyzer {
                   noEscape: Analyzer::Binder::hasAttribute(&b.metadata, "noescape"),
                   isExtern: false,
                   alignment: Option::NONE,
+                  threadLocal: false,
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let paramId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(paramDef));
@@ -3147,6 +3182,7 @@ export namespace Analyzer {
         noEscape: false,
         isExtern: state.insideExtern,
         alignment: Option::NONE,
+        threadLocal: false,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(varDef));

@@ -749,6 +749,36 @@ export namespace CodegenQbe {
     return name;
   }
 
+  /// Whether `defId` is a `@threadLocal` static, which QBE names as
+  /// `thread $name`.
+  function isThreadLocalGlobal(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
+      return variable.threadLocal;
+    }
+
+    return false;
+  }
+
+  /// The QBE operand for the address of the global `defId`: `$name`, or
+  /// `thread $name` for a thread-local, which a bare `$name` would resolve to
+  /// the initial image instead of the running thread's copy.
+  function globalAddress(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    let name: String = CodegenC::mangledName(defStore, symbols, defId);
+
+    if (CodegenQbe::isThreadLocalGlobal(defStore, defId)) {
+      return `thread $${name.toStr()}`;
+    }
+
+    return `$${name.toStr()}`;
+  }
+
   function operandType(
     defStore: &mut Analyzer::DefinitionStore,
     function_: &Lir::FunctionLir,
@@ -921,8 +951,16 @@ export namespace CodegenQbe {
         return Option::SOME(`$${name.toStr()}`);
       },
       Lir::Operand::GlobalRef(defId) -> {
-        let name: String = CodegenC::mangledName(defStore, symbols, defId);
-        let address: String = `$${name.toStr()}`;
+        let mut address: String = CodegenQbe::globalAddress(defStore, symbols, defId);
+
+        // A thread-local's address is computed per thread; taking it once
+        // into a temporary keeps every use an ordinary `l` value.
+        if (CodegenQbe::isThreadLocalGlobal(defStore, defId)) {
+          let materialized: String = CodegenQbe::freshTemp(emitter);
+          let copyLine: String = `    ${materialized.toStr()} =l copy ${address.toStr()}\n`;
+          emitter.out.pushStr(copyLine.toStr());
+          address = materialized;
+        }
         let Option::SOME(ty) = CodegenQbe::operandType(defStore, function_, operand) else {
           CodegenQbe::failNamed(emitter, "GlobalRef");
           return Option::NONE;
@@ -1616,10 +1654,15 @@ export namespace CodegenQbe {
 
     let mut variableTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
     let mut declaredAlignment: u64 = 1;
+    let mut linkage: str = "";
 
     if (let Analyzer::Definition::Variable(variableDef) = definition) {
       variableTypeOpt = Option::SOME(variableDef.declaredType);
       declaredAlignment = Abi::raisedAlignment(1, variableDef.alignment);
+
+      if (variableDef.threadLocal) {
+        linkage = "thread ";
+      }
     }
 
     let Option::SOME(variableType) = variableTypeOpt else {
@@ -1756,7 +1799,7 @@ export namespace CodegenQbe {
     }
 
     let alignment: u64 = layout.alignment > declaredAlignment ? layout.alignment : declaredAlignment;
-    let line: String = `data $${name.toStr()} = align ${alignment} { ${items.toStr()} }\n`;
+    let line: String = `${linkage}data $${name.toStr()} = align ${alignment} { ${items.toStr()} }\n`;
 
     emitter.data.pushStr(line.toStr());
   }
@@ -2384,8 +2427,8 @@ export namespace CodegenQbe {
         emitter.out.pushStr(line.toStr());
       },
       Lir::Instr::AddrOfGlobal(node) -> {
-        let name: String = CodegenC::mangledName(defStore, symbols, node.def);
-        let line: String = `    %t${node.dest.raw()} =l copy $${name.toStr()}\n`;
+        let address: String = CodegenQbe::globalAddress(defStore, symbols, node.def);
+        let line: String = `    %t${node.dest.raw()} =l copy ${address.toStr()}\n`;
 
         emitter.out.pushStr(line.toStr());
       },

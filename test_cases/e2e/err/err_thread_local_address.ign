@@ -1,0 +1,85 @@
+// e2e: err
+//
+// A reference to a thread-local would dangle once its thread exits, so no
+// borrow of one is allowed: neither a written `&` or `&mut`, of the field or of
+// a part of it, nor the implicit borrow of a `&self` or `&mut self` method
+// call, nor the slice a fixed array becomes.
+
+record Counter {
+  public value: i32;
+
+  public get(&self): i32 {
+    return self.value;
+  }
+
+  public bump(&mut self): void {
+    self.value += 1;
+  }
+}
+
+record Slots {
+  @threadLocal
+  static mut COUNT: i32 = 1;
+
+  @threadLocal
+  static mut COUNTER: Counter = Counter { value: 0 };
+
+  @threadLocal
+  static mut CELLS: i32[3] = [1, 2, 3];
+}
+
+function shared(): i32 {
+  let reference: &i32 = &Slots::COUNT;
+
+  return *reference;
+}
+
+function exclusive(): void {
+  let reference: &mut i32 = &mut Slots::COUNT;
+  *reference = 2;
+}
+
+function part(): i32 {
+  let reference: &i32 = &Slots::COUNTER.value;
+
+  return *reference;
+}
+
+function element(): void {
+  let reference: &mut i32 = &mut Slots::CELLS[1];
+  *reference = 4;
+}
+
+function bump(): void {
+  Slots::COUNTER.bump();
+}
+
+function read(): i32 {
+  return Slots::COUNTER.get();
+}
+
+function sliceLocal(): i32 {
+  let view: i32[] = Slots::CELLS;
+
+  return view[0];
+}
+
+function total(values: i32[]): i32 {
+  return values[0];
+}
+
+function sliceArgument(): i32 {
+  return total(Slots::CELLS);
+}
+
+function sliceReturn(): i32[] {
+  return Slots::CELLS;
+}
+
+function main(): i32 {
+  exclusive();
+  element();
+  bump();
+
+  return shared() + part() + read() + sliceLocal() + sliceArgument() + sliceReturn()[0];
+}
