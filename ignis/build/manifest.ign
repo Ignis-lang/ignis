@@ -165,12 +165,23 @@ export record StdManifestModule {
   public path: String;
 }
 
+/// One C header a `[linking.<module>]` section names, which every hosted C
+/// unit includes.
+export record StdManifestHeader {
+  public name: String;
+  /// `header_quoted = true`: included as `#include "name"`, not `<name>`.
+  public quoted: boolean;
+}
+
 export record StdManifest {
   public path: Path::PathBuf;
   public includeDirs: Vector<String>;
   public modules: Vector<StdManifestModule>;
   public autoLoadModules: Vector<String>;
   public compileOnlyModules: Vector<String>;
+  /// Every `header` and `headers` entry of the `[linking.*]` sections, in
+  /// file order, duplicates included.
+  public headers: Vector<StdManifestHeader>;
 
   public includeDirCount(&self): u64 {
     return self.includeDirs.length();
@@ -655,6 +666,122 @@ function buildManifestReportUnknownKeyWarnings(
   Output::message(rendered);
 }
 
+/// Appends the headers one `[linking.<module>]` section declared, each with the
+/// section's `header_quoted`, which may come after the header keys.
+function buildManifestFlushLinkingHeaders(
+  names: &Vector<String>,
+  quoted: boolean,
+  out: &mut Vector<StdManifestHeader>
+): void {
+  let mut outRef: &mut Vector<StdManifestHeader> = out;
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    if (let Option::SOME(name) = names.get(index)) {
+      outRef.push(StdManifestHeader {
+        name: name.clone(),
+        quoted: quoted,
+      });
+    }
+
+    index += 1;
+  }
+}
+
+/// The C headers the `[linking.<module>]` sections of `source` (the raw text
+/// of `std/manifest.toml`) declare, in file order.
+///
+/// A `headers` array may span several lines, as std's own `[linking.libc]`
+/// does, so its continuation lines are joined up to the closing `]`, dropping
+/// comment lines and one trailing comma.
+export function parseManifestHeaders(
+  source: &String,
+  manifestPath: &Path::PathBuf
+): Result<Vector<StdManifestHeader>, DiagnosticBag> {
+  let lines: Vector<String> = source.lines();
+  let mut headers: Vector<StdManifestHeader> = Vector::new<StdManifestHeader>();
+  let mut inLinkingModule: boolean = false;
+  let mut sectionNames: Vector<String> = Vector::new<String>();
+  let mut sectionQuoted: boolean = false;
+  let mut lineOffset: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      break;
+    };
+    let trimmed: String = line.trimAsciiWhitespace();
+    let lineStart: u64 = lineOffset;
+    let lineEnd: u64 = lineOffset + line.length();
+    lineOffset += line.length() + 1;
+    index += 1;
+
+    if (trimmed.length() == 0 || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    if (let Option::SOME(sectionName) = buildManifestSectionName(&trimmed)) {
+      buildManifestFlushLinkingHeaders(&sectionNames, sectionQuoted, &mut headers);
+      sectionNames = Vector::new<String>();
+      sectionQuoted = false;
+      inLinkingModule = sectionName.startsWith("linking.") && buildManifestSplitSection(&sectionName).length() == 2;
+      continue;
+    }
+
+    if (!inLinkingModule) {
+      continue;
+    }
+
+    let Option::SOME(assignment) = buildManifestAssignmentFromLine(&trimmed) else {
+      continue;
+    };
+
+    if (assignment.key.equals("header")) {
+      let name: String = buildManifestParseString(manifestPath, "linking.header", &assignment.value, lineStart, lineEnd)!;
+      sectionNames.push(name);
+    } else if (assignment.key.equals("headers")) {
+      let mut valueText: String = assignment.value.clone();
+      let mut valueEnd: u64 = lineEnd;
+
+      while (!valueText.endsWith("]") && index < lines.length()) {
+        let Option::SOME(continuation) = lines.get(index) else {
+          break;
+        };
+        let continuationText: String = continuation.trimAsciiWhitespace();
+        valueEnd = lineOffset + continuation.length();
+        lineOffset += continuation.length() + 1;
+        index += 1;
+
+        if (continuationText.startsWith("#")) {
+          continue;
+        }
+
+        valueText = valueText.concat(&continuationText);
+      }
+
+      if (valueText.endsWith(",]")) {
+        valueText = valueText.substringBytes(0, valueText.length() - 2).concat("]");
+      }
+
+      let names: Vector<String> = buildManifestParseStringArray(manifestPath, "linking.headers", &valueText, lineStart, valueEnd)!;
+      let mut nameIndex: u64 = 0;
+
+      while (nameIndex < names.length()) {
+        if (let Option::SOME(name) = names.get(nameIndex)) {
+          sectionNames.push(name.clone());
+        }
+
+        nameIndex += 1;
+      }
+    } else if (assignment.key.equals("header_quoted")) {
+      sectionQuoted = assignment.value.equals("true");
+    }
+  }
+
+  buildManifestFlushLinkingHeaders(&sectionNames, sectionQuoted, &mut headers);
+  return Result::OK(headers);
+}
+
 export namespace Manifest {
   function loadFile(manifestPath: &Path::PathBuf): Result<StdManifest, DiagnosticBag> {
     if (!Fs::exists(manifestPath.asStr())) {
@@ -674,6 +801,7 @@ export namespace Manifest {
     let mut autoLoadModules: Vector<String> = Vector::new<String>();
     let mut compileOnlyModules: Vector<String> = Vector::new<String>();
     let unknownKeyWarnings: DiagnosticBag = checkUnknownManifestKeys(&source, manifestPath);
+    let headers: Vector<StdManifestHeader> = parseManifestHeaders(&source, manifestPath)!;
 
     let mut index: u64 = 0;
     while (index < lines.length()) {
@@ -743,6 +871,7 @@ export namespace Manifest {
       modules: modules,
       autoLoadModules: buildManifestCloneStringVector(&autoLoadModules),
       compileOnlyModules: buildManifestCloneStringVector(&compileOnlyModules),
+      headers: headers,
     });
   }
 }
@@ -1009,4 +1138,105 @@ function unknownManifestNestedLinkingSectionWarnsOnExtraSegment(): void {
   };
 
   Test::assertEq<str>(diagnostic.messageText(), "unknown key 'extra' in [linking.io]");
+}
+
+function buildManifestExpectHeaders(source: str, expected: str): void {
+  let text: String = String::create(source);
+  let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
+  let Result::OK(headers) = parseManifestHeaders(&text, &manifestPath) else {
+    Test::fail();
+    return;
+  };
+
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < headers.length()) {
+    if (let Option::SOME(header) = headers.get(index)) {
+      if (header.quoted) {
+        rendered.pushStr(`"${header.name.toStr()}" `.toStr());
+      } else {
+        rendered.pushStr(`<${header.name.toStr()}> `.toStr());
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<str>(rendered.toStr(), expected);
+}
+
+@test
+function manifestHeadersReadsHeaderAndHeadersInFileOrder(): void {
+  buildManifestExpectHeaders(
+    "[linking.net]\nheaders = [\"sys/socket.h\", \"poll.h\"]\n\n[linking.math]\nheader = \"math.h\"\n",
+    "<sys/socket.h> <poll.h> <math.h> ",
+  );
+}
+
+@test
+function manifestHeadersJoinsAMultiLineArray(): void {
+  buildManifestExpectHeaders(
+    "[linking.libc]\nheaders = [\n  \"stdlib.h\",\n  # a comment\n  \"poll.h\",\n]\n",
+    "<stdlib.h> <poll.h> ",
+  );
+}
+
+@test
+function manifestHeadersAppliesHeaderQuotedToItsSection(): void {
+  buildManifestExpectHeaders(
+    "[linking.rt]\nheader = \"runtime/rt.h\"\nheader_quoted = true\n\n[linking.math]\nheader = \"math.h\"\nheader_quoted = false\n",
+    "\"runtime/rt.h\" <math.h> ",
+  );
+}
+
+@test
+function manifestHeadersIgnoresOtherSections(): void {
+  buildManifestExpectHeaders(
+    "[toolchain]\ninclude_dirs = [\".\"]\n\n[modules]\nheader = \"header/mod.ign\"\n\n[linking.libc.header]\nheader = \"nested.h\"\n",
+    "",
+  );
+}
+
+@test
+function manifestHeadersRejectsANonStringHeader(): void {
+  let text: String = String::create("[linking.net]\nheader = 3\n");
+  let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
+  let Result::ERROR(bag) = parseManifestHeaders(&text, &manifestPath) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, BuildDiagnosticCode::INVALID_STD_MANIFEST_FIELD_TYPE);
+}
+
+@test
+function manifestLoaderKeepsTheStdLinkingHeaders(): void {
+  let manifestPath: Path::PathBuf = buildManifestFixturePath("std/manifest.toml");
+  let Result::OK(manifest) = Manifest::loadFile(&manifestPath) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(manifest.headers.length(), 16);
+  let Option::SOME(runtime) = manifest.headers.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(runtime.name.toStr(), "runtime/ignis_rt.h");
+  Test::assert(runtime.quoted);
+  let Option::SOME(math) = manifest.headers.get(15) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(math.name.toStr(), "math.h");
+  Test::assert(!math.quoted);
 }

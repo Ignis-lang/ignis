@@ -125,14 +125,29 @@ function codegenEmit(source: str): CodegenEmission {
 /// `codegenEmit`, with the functions `externalNames` names kept externally
 /// visible the way the test harness unit needs its `@test` functions.
 function codegenEmitExposing(source: str, externalNames: &Vector<String>): CodegenEmission {
-  return codegenEmitWith(source, externalNames, false);
+  let linkHeaders: Vector<CodegenC::LinkHeader> = Vector::new<CodegenC::LinkHeader>();
+
+  return codegenEmitWith(source, externalNames, false, &linkHeaders);
 }
 
 /// `codegenEmit` for a `std = false` build, which emits a freestanding unit.
 function codegenEmitFreestanding(source: str): CodegenEmission {
   let externalNames: Vector<String> = Vector::new<String>();
+  let linkHeaders: Vector<CodegenC::LinkHeader> = Vector::new<CodegenC::LinkHeader>();
 
-  return codegenEmitWith(source, &externalNames, true);
+  return codegenEmitWith(source, &externalNames, true, &linkHeaders);
+}
+
+/// `codegenEmit` with the std manifest's `[linking.*]` headers handed to the
+/// emitter.
+function codegenEmitLinking(
+  source: str,
+  linkHeaders: &Vector<CodegenC::LinkHeader>,
+  freestanding: boolean
+): CodegenEmission {
+  let externalNames: Vector<String> = Vector::new<String>();
+
+  return codegenEmitWith(source, &externalNames, freestanding, linkHeaders);
 }
 
 /// The pipeline behind `codegenEmit` and its variants, with the emitter told
@@ -142,6 +157,7 @@ function codegenEmitWith(
   source: str,
   externalNames: &Vector<String>,
   freestanding: boolean,
+  linkHeaders: &Vector<CodegenC::LinkHeader>,
 ): CodegenEmission {
   let file: SourceFile = SourceFile::create("codegen_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
@@ -228,6 +244,7 @@ function codegenEmitWith(
   let moduleInfos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
   let mut hooks: CodegenC::RuntimeHooks = CodegenC::RuntimeHooks::hosted();
   hooks.freestanding = freestanding;
+  hooks.linkHeaders = codegenCloneLinkHeaders(linkHeaders);
   hooks.sources.push(SourceFile::create("codegen_tests.ign", source));
 
   if (let Option::SOME(handler) = &handlers.panicHandler) {
@@ -1742,4 +1759,69 @@ function sizeofFixedArrayCodegenSizesArrayOfRecordsByTheMangledStructName(): voi
   let expected: String = `sizeof(struct ${structName.toStr()}[2]);`;
 
   Test::assert(codegenContains(&emission.source, expected.toStr()));
+}
+
+function codegenCloneLinkHeaders(
+  headers: &Vector<CodegenC::LinkHeader>
+): Vector<CodegenC::LinkHeader> {
+  let mut cloned: Vector<CodegenC::LinkHeader> = Vector::new<CodegenC::LinkHeader>();
+  let mut index: u64 = 0;
+
+  while (index < headers.length()) {
+    if (let Option::SOME(header) = headers.get(index)) {
+      cloned.push(CodegenC::LinkHeader {
+        name: header.name.clone(),
+        quoted: header.quoted,
+      });
+    }
+
+    index += 1;
+  }
+
+  return cloned;
+}
+
+function codegenLinkHeader(name: str, quoted: boolean): CodegenC::LinkHeader {
+  return CodegenC::LinkHeader {
+    name: String::create(name),
+    quoted: quoted,
+  };
+}
+
+/// The fixed list a hosted unit has always included, in its order.
+const CODEGEN_FIXED_STD_HEADERS: str = "#include \"ignis_rt.h\"\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <errno.h>\n#include <ctype.h>\n#include <time.h>\n#include <signal.h>\n#include <unistd.h>\n#include <sys/mman.h>\n#include <sys/wait.h>\n#include <sys/stat.h>\n#include <dirent.h>\n#include <fcntl.h>\n#include <sys/ioctl.h>\n#include <pthread.h>\n#include <math.h>\n";
+
+@test
+function codegenIncludesManifestHeadersAfterTheFixedList(): void {
+  let mut linkHeaders: Vector<CodegenC::LinkHeader> = Vector::new<CodegenC::LinkHeader>();
+  linkHeaders.push(codegenLinkHeader("runtime/ignis_rt.h", true));
+  linkHeaders.push(codegenLinkHeader("stdlib.h", false));
+  linkHeaders.push(codegenLinkHeader("sys/socket.h", false));
+  linkHeaders.push(codegenLinkHeader("math.h", false));
+  linkHeaders.push(codegenLinkHeader("poll.h", false));
+  linkHeaders.push(codegenLinkHeader("sys/socket.h", false));
+  linkHeaders.push(codegenLinkHeader("vendor/net.h", true));
+  let emission: CodegenEmission = codegenEmitLinking("function main(): i32 { return 0; }\n", &linkHeaders, false);
+
+  let expected: String = String::create(CODEGEN_FIXED_STD_HEADERS)
+    .concat("#include <sys/socket.h>\n#include <poll.h>\n#include \"vendor/net.h\"\n\n// Type forward declarations\n");
+  Test::assert(codegenContains(&emission.source, expected.toStr()));
+}
+
+@test
+function codegenWithoutManifestHeadersKeepsTheFixedList(): void {
+  let emission: CodegenEmission = codegenEmit("function main(): i32 { return 0; }\n");
+
+  let expected: String = String::create(CODEGEN_FIXED_STD_HEADERS).concat("\n// Type forward declarations\n");
+  Test::assert(codegenContains(&emission.source, expected.toStr()));
+}
+
+@test
+function codegenFreestandingUnitIgnoresManifestHeaders(): void {
+  let mut linkHeaders: Vector<CodegenC::LinkHeader> = Vector::new<CodegenC::LinkHeader>();
+  linkHeaders.push(codegenLinkHeader("sys/socket.h", false));
+  let emission: CodegenEmission = codegenEmitLinking("function main(): i32 { return 0; }\n", &linkHeaders, true);
+
+  Test::assert(!codegenContains(&emission.source, "sys/socket.h"));
+  Test::assert(!codegenContains(&emission.source, "stdlib.h"));
 }
