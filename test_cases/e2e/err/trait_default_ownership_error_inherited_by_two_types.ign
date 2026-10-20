@@ -1,0 +1,55 @@
+// e2e: err
+// Ownership and borrow errors in a trait default that do not depend on the
+// implementing type are reported once, however many types inherit it: a use
+// after move, a second mutable borrow and a move out of a borrow.
+import Vector from "std::vector";
+
+trait Shape {
+  area(&self): i32;
+
+  moved(&self): i32 {
+    let items: Vector<i32> = Vector::new<i32>();
+    let other: Vector<i32> = items;
+    return (items.length() as i32) + (other.length() as i32) + self.area();
+  }
+
+  twice(&self): i32 {
+    let mut value: i32 = self.area();
+    let first: &mut i32 = &mut value;
+    let second: &mut i32 = &mut value;
+    *first += 1;
+    *second += 1;
+    return value;
+  }
+
+  taken(&self): i32 {
+    let items: Vector<i32> = Vector::new<i32>();
+    let view: &Vector<i32> = &items;
+    let owned: Vector<i32> = *view;
+    return (owned.length() as i32) + self.area();
+  }
+}
+
+@implements(Shape)
+record Square {
+  public side: i32;
+
+  area(&self): i32 {
+    return self.side;
+  }
+}
+
+@implements(Shape)
+record Line {
+  public length: i32;
+
+  area(&self): i32 {
+    return self.length;
+  }
+}
+
+function main(): i32 {
+  let square: Square = Square { side: 2 };
+  let line: Line = Line { length: 3 };
+  return square.moved() + line.moved() + square.twice() + line.twice() + square.taken() + line.taken();
+}

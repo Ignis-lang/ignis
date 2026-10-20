@@ -1,0 +1,32 @@
+// e2e: err
+// A type error in a trait default inherited by a generic record is reported
+// once, however many instances of the record the program uses.
+trait Holder {
+  size(&self): i32;
+
+  flagged(&self): boolean {
+    let flag: boolean = self.size();
+    return flag;
+  }
+}
+
+@implements(Holder)
+record Tagged<T> {
+  public value: T;
+  public count: i32;
+
+  size(&self): i32 {
+    return self.count;
+  }
+}
+
+function main(): i32 {
+  let small: Tagged<i32> = Tagged { value: 1, count: 2 };
+  let named: Tagged<String> = Tagged { value: String::create("a"), count: 3 };
+
+  if (small.flagged() && named.flagged()) {
+    return 1;
+  }
+
+  return 0;
+}

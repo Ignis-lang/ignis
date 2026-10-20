@@ -141,6 +141,12 @@ export namespace Analyzer {
       /// the pipe enclosing it. A stack rather than a single slot because a pipe's right
       /// side may itself contain a pipe.
       public pipeValueTypes: Vector<Analyzer::TypeId>;
+      /// The diagnostics each inherited trait default produced, as
+      /// `[start, end)` ranges of `diagnostics`, with the note naming the type
+      /// that inherits it (`settleInheritedDiagnostics`).
+      public inheritedStarts: Vector<u64>;
+      public inheritedEnds: Vector<u64>;
+      public inheritedNotes: Vector<String>;
     }
 
     record AliasResolutionResult {
@@ -3593,7 +3599,9 @@ export namespace Analyzer {
         // trait that declares it, and monomorphization re-dispatches the call
         // to the concrete implementation once the parameter is substituted.
         Analyzer::Type::Param(symbol) -> {
-          let boundTraits: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::traitBoundsFor(defStore, enclosing, symbol);
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+          let boundTraits: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::traitBoundsFor(defStore, enclosing, symbol, selfSymbol);
 
           let Option::SOME(traitDefId) = boundTraits.get(0) else {
             Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PATTERN_TYPE_MISMATCH, nonOwnerMessage);
@@ -3715,6 +3723,7 @@ export namespace Analyzer {
       defStore: &mut Analyzer::DefinitionStore,
       enclosing: Analyzer::DefinitionId,
       symbol: Analyzer::SymbolId,
+      selfSymbol: Analyzer::SymbolId,
     ): Vector<Analyzer::DefinitionId> {
       let scoped: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
       let mut boundTraits: Vector<Option<Analyzer::DefinitionId>> = Vector::new<Option<Analyzer::DefinitionId>>();
@@ -3738,6 +3747,16 @@ export namespace Analyzer {
       }
 
       let mut traits: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      // Inside a trait's own method, `Self` has no written bound: the trait that
+      // owns the method answers its methods.
+      if (boundTraits.length() == 0) {
+        if (let Option::SOME(traitDefId) = Analyzer::Typecheck::traitOwningSelf(defStore, enclosing, symbol, selfSymbol)) {
+          traits.push(traitDefId);
+          return traits;
+        }
+      }
+
       let mut boundIndex: u64 = 0;
 
       while (boundIndex < boundTraits.length()) {
@@ -3839,6 +3858,33 @@ export namespace Analyzer {
       );
 
       return true;
+    }
+
+    /// The trait whose method `enclosing` is, when `symbol` is that trait's
+    /// `Self`: a trait's own methods see `Self` as a parameter bounded by the
+    /// trait, which is how a default body is checked once for every
+    /// implementing type.
+    function traitOwningSelf(
+      defStore: &mut Analyzer::DefinitionStore,
+      enclosing: Analyzer::DefinitionId,
+      symbol: Analyzer::SymbolId,
+      selfSymbol: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      if (symbol.raw() != selfSymbol.raw()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(enclosing) else {
+        return Option::NONE;
+      };
+
+      let ownerDefId: Analyzer::DefinitionId = method.owner;
+
+      if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(ownerDefId)) {
+        return Option::SOME(ownerDefId);
+      }
+
+      return Option::NONE;
     }
 
     function copyStringVector(source: &Vector<String>): Vector<String> {

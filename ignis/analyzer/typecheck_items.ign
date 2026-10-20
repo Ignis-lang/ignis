@@ -1,4 +1,4 @@
-import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, DiagnosticCode, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Vector from "std::vector";
 
@@ -1040,6 +1040,109 @@ export namespace Analyzer {
       );
     }
 
+    /// Remembers the diagnostics the copy of a trait default on one
+    /// implementing type produced, from `start` to the end of the bag.
+    function recordInheritedDiagnostics(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      start: u64,
+      inherited: &Ast::InheritedMethod,
+    ): void {
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      let end: u64 = stateRef.diagnostics.length();
+
+      if (end == start) {
+        return;
+      }
+
+      let note: String = Ast::inheritedMethodNote(inherited);
+
+      stateRef.inheritedStarts.push(start);
+      stateRef.inheritedEnds.push(end);
+      stateRef.inheritedNotes.push(note);
+    }
+
+    /// The index of the inherited range holding diagnostic `index`, if any.
+    function inheritedRangeOf(
+      state: &Analyzer::Typecheck::TypecheckState,
+      index: u64
+    ): Option<u64> {
+      let mut rangeIndex: u64 = 0;
+
+      while (rangeIndex < state.inheritedStarts.length()) {
+        if (let Option::SOME(start) = state.inheritedStarts.get(rangeIndex)) {
+          if (let Option::SOME(end) = state.inheritedEnds.get(rangeIndex)) {
+            if (index >= *start && index < *end) {
+              return Option::SOME(rangeIndex);
+            }
+          }
+        }
+
+        rangeIndex += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Settles what the copies of trait defaults reported.
+    ///
+    /// Every default body is checked once against the trait, whose `Self` sees
+    /// only the trait's methods, and again on each type that inherits it. An
+    /// error the trait-level check already reports at the same place is that
+    /// report, so the copies' version of it is dropped. What only a copy finds
+    /// depends on the implementing type: it is kept, once per type, with a note
+    /// naming the type.
+    function settleInheritedDiagnostics(state: &mut Analyzer::Typecheck::TypecheckState): void {
+      if (state.inheritedStarts.length() == 0) {
+        return;
+      }
+
+      let mut settled: DiagnosticBag = DiagnosticBag::init();
+      let mut index: u64 = 0;
+
+      while (index < state.diagnostics.length()) {
+        let Option::SOME(diagnostic) = state.diagnostics.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(rangeIndex) = Analyzer::Typecheck::inheritedRangeOf(&*state, index) else {
+          settled.push(Analyzer::copyDiagnostic(diagnostic));
+          index += 1;
+          continue;
+        };
+
+        let mut reportedByTrait: boolean = false;
+        let mut otherIndex: u64 = 0;
+
+        while (otherIndex < state.diagnostics.length()) {
+          if (Analyzer::Typecheck::inheritedRangeOf(&*state, otherIndex).isNone()) {
+            if (let Option::SOME(other) = state.diagnostics.get(otherIndex)) {
+              if (other.code.equals(diagnostic.code) && Analyzer::sameSpan(&other.primarySpan, &diagnostic.primarySpan)) {
+                reportedByTrait = true;
+              }
+            }
+          }
+
+          otherIndex += 1;
+        }
+
+        if (!reportedByTrait) {
+          let mut kept: Diagnostic = Analyzer::copyDiagnostic(diagnostic);
+
+          if (let Option::SOME(note) = state.inheritedNotes.get(rangeIndex)) {
+            kept.addNote(note.toStr());
+          }
+
+          settled.push(kept);
+        }
+
+        index += 1;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.diagnostics = settled;
+    }
+
     /// Iterate an owner's method `ItemId`s and typecheck each method body.
     /// Non-Function items in the methods vector are skipped defensively. Mirrors
     /// `ResolverBodies::walkOwnerMethodsForBody` but for typecheck traversal.
@@ -1069,6 +1172,8 @@ export namespace Analyzer {
 
         match (item) {
           Ast::Item::Node::Function(function_) -> {
+            let start: u64 = state.diagnostics.length();
+
             Analyzer::Typecheck::checkMethodItem(
               state,
               defStore,
@@ -1081,6 +1186,10 @@ export namespace Analyzer {
               *methodItemId,
               &function_,
             );
+
+            if (let Option::SOME(inherited) = module.inheritedMethod(*methodItemId)) {
+              Analyzer::Typecheck::recordInheritedDiagnostics(state, start, inherited);
+            }
           },
           Ast::Item::Node::Record(_) -> {},
           Ast::Item::Node::Enum(_) -> {},
