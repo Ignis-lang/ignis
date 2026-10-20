@@ -2,7 +2,7 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, Severity, SourceMap, SourceSpan from "@compiler::diagnostics";
 
 import fingerprintNormalizeFeatures from "./fingerprint";
 import StdManifest from "./manifest";
@@ -10,9 +10,19 @@ import StdManifest from "./manifest";
 // Diagnostic codes for build-config validation errors.
 const BUILD_CONFIG_INVALID_ENTRY: str = "B1010";
 
-function buildConfigSingleDiagnostic(code: str, message: str): DiagnosticBag {
+/// The span of a diagnostic about the build configuration, which names no
+/// source file of its own.
+function buildConfigSpan(sourceMap: &mut SourceMap): SourceSpan {
+  return SourceSpan::new(sourceMap.register("<build-config>"), 0, 0);
+}
+
+function buildConfigSingleDiagnostic(
+  sourceMap: &mut SourceMap,
+  code: str,
+  message: str
+): DiagnosticBag {
   let mut bag: DiagnosticBag = DiagnosticBag::init();
-  let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+  let span: SourceSpan = buildConfigSpan(sourceMap);
   let diagnostic: Diagnostic = Diagnostic::new(
     Severity::ERROR,
     code,
@@ -97,6 +107,7 @@ export record BuildConfig {
   //
   // Reports a diagnostic when entry is empty.
   public static fromProject(
+    sourceMap: &mut SourceMap,
     root: String,
     sourceDir: String,
     entry: String,
@@ -112,6 +123,7 @@ export record BuildConfig {
   ): Result<BuildConfig, DiagnosticBag> {
     if (entry.length() == 0) {
       return Result::ERROR(buildConfigSingleDiagnostic(
+        sourceMap,
         BUILD_CONFIG_INVALID_ENTRY,
         "build entry point could not be resolved",
       ));
@@ -166,6 +178,7 @@ export record BuildConfig {
 
 @test
 function buildConfigFromProjectHappyPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut cflags: Vector<String> = Vector::new<String>();
   cflags.push(String::create("-Wall"));
   cflags.push(String::create("-O2"));
@@ -178,6 +191,7 @@ function buildConfigFromProjectHappyPath(): void {
   features.push(String::create("alloc-trace"));
 
   let config: BuildConfig = match (BuildConfig::fromProject(
+    &mut sourceMap,
     String::create("/project/root"),
     String::create("/project/root/src"),
     String::create("/project/root/src/main.ign"),
@@ -230,11 +244,13 @@ function buildConfigFromProjectHappyPath(): void {
 
 @test
 function buildConfigFromProjectRejectsEmptyEntry(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let aliases: Vector<BuildAlias> = Vector::new<BuildAlias>();
   let cflags: Vector<String> = Vector::new<String>();
   let features: Vector<String> = Vector::new<String>();
 
   match (BuildConfig::fromProject(
+    &mut sourceMap,
     String::create("/root"),
     String::create("/root/src"),
     String::new(),

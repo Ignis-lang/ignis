@@ -1,12 +1,12 @@
 import Test from "std::test";
 
-import DiagnosticBag, Severity, SourceFile, SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag, Severity, SourceFile, SourceSpan, SourceMap from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 import ParseOutput, Parser from "@compiler::parser";
 
 function constEvalDummySpan(): SourceSpan {
-  return SourceSpan::new("const_eval_tests.ign", 0, 0);
+  return SourceSpan::detached(0, 0);
 }
 
 function constEvalAddPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
@@ -295,7 +295,8 @@ function constEvalFirstErrorCode(output: &Analyzer::AnalyzerOutput): str {
 /// Parses and analyzes `source` through the full analyzer, the way a user
 /// module goes through it, so diagnostics from every phase are visible.
 function constEvalAnalyzeSource(source: str): Analyzer::AnalyzerOutput {
-  let file: SourceFile = SourceFile::create("const_eval_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "const_eval_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(constEvalCountErrors(&parsed.lexDiagnostics), 0);
@@ -947,7 +948,8 @@ function main(): i32 {
 // ===========================================================================
 
 function constEvalParseModule(fileName: str, source: str): Ast::Module {
-  let file: SourceFile = SourceFile::create(fileName, source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, fileName, source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(constEvalCountErrors(&parsed.lexDiagnostics), 0);

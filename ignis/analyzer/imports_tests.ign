@@ -1,16 +1,16 @@
 import Test from "std::test";
 
-import DiagnosticCode, SourceFile, SourceSpan from "@compiler::diagnostics";
+import DiagnosticCode, FileId, SourceFile, SourceMap, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 import ParseOutput, Parser from "@compiler::parser";
 
 function importsDummySpan(): SourceSpan {
-  return SourceSpan::new("imports_tests.ign", 0, 0);
+  return SourceSpan::detached(0, 0);
 }
 
 function importsSpan(start: u64, end: u64): SourceSpan {
-  return SourceSpan::new("imports_tests.ign", start, end);
+  return SourceSpan::detached(start, end);
 }
 
 function importsEmptyOverlay(): Analyzer::Imports::ImportOverlay {
@@ -81,28 +81,23 @@ function importsAddFunction(
   return moduleRef.addRootItem(Ast::Item::Node::Function(importsFunctionItem(name, body)));
 }
 
-function importsAddNestedFunction(
-  module: &mut Ast::Module,
-  name: str,
-  body: Ast::StatementId,
-): Ast::ItemId {
-  let mut moduleRef: &mut Ast::Module = module;
-  return moduleRef.addItem(Ast::Item::Node::Function(importsFunctionItem(name, body)));
-}
-
-function importsNamespaceWithNestedFunction(): Ast::Module {
+/// A module whose `Outer` namespace and its `inner` function are declared in
+/// `file`.
+function importsNamespaceWithNestedFunction(file: FileId): Ast::Module {
   let mut module: Ast::Module = Ast::Module::init();
   let ret: Ast::StatementId = importsAddReturn(&mut module);
   let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
   statements.push(ret);
   let body: Ast::StatementId = importsAddBlock(&mut module, statements);
-  let nested: Ast::ItemId = importsAddNestedFunction(&mut module, "inner", body);
+  let mut inner: Ast::Item::Function = importsFunctionItem("inner", body);
+  inner.span = SourceSpan::new(file, 0, 0);
+  let nested: Ast::ItemId = module.addItem(Ast::Item::Node::Function(inner));
 
   let mut namespaceItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
   namespaceItems.push(nested);
 
   module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
-    span: importsDummySpan(),
+    span: SourceSpan::new(file, 0, 0),
     name: String::create("Outer"),
     items: namespaceItems,
     metadata: Ast::emptyMetadata(),
@@ -630,12 +625,13 @@ function analyzeProgramPreservesModulesWhenInfosAreShort(): void {
 /// so importing the namespace has to bring the name along.
 @test
 function directIndexCarriesNamespaceMembersWithRealSpans(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
 
   let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
-  modules.push(importsNamespaceWithNestedFunction());
+  modules.push(importsNamespaceWithNestedFunction(sourceMap.register("imports_tests.ign")));
 
   let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
   infos.push(importsModuleInfo(0, "namespace.ign"));
@@ -667,7 +663,7 @@ function directIndexCarriesNamespaceMembersWithRealSpans(): void {
   };
 
   Test::assertEq<str>(namespaceName, "Outer");
-  Test::assertEq<str>(declarationSpan.filePath, "imports_tests.ign");
+  Test::assertEq<str>(sourceMap.path(declarationSpan.file), "imports_tests.ign");
 
   let Option::SOME(memberSym) = analysisRecord.direct.syms.get(1) else {
     @panic("missing nested declaration symbol");
@@ -680,7 +676,7 @@ function directIndexCarriesNamespaceMembersWithRealSpans(): void {
   };
 
   Test::assertEq<str>(memberName, "inner");
-  Test::assertEq<str>(memberSpan.filePath, "imports_tests.ign");
+  Test::assertEq<str>(sourceMap.path(memberSpan.file), "imports_tests.ign");
 }
 
 @test
@@ -1259,7 +1255,8 @@ function resolveBodiesPrefersCurrentModuleGlobalOverImportOverlay(): void {
 /// Parses `source` under `pathText`, which is also the string an import line
 /// has to write to name the module.
 function importsParseModule(pathText: str, source: str): Ast::Module {
-  let file: SourceFile = SourceFile::create(pathText, source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, pathText, source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);

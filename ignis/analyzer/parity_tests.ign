@@ -1,6 +1,6 @@
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -71,7 +71,8 @@ function parityCountCode(bag: &DiagnosticBag, code: str): u64 {
 /// host accepts without complaint must not acquire a selfhost warning either,
 /// because a warning here is the shape a future false positive takes.
 function parityAcceptsSource(source: str): void {
-  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "parity_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
@@ -115,7 +116,8 @@ function parityAcceptsSource(source: str): void {
 /// reports the same warning on the same source, so emitting it here is parity,
 /// not a false positive. Anything beyond that exact count still fails.
 function parityAcceptsSourceWithLint(source: str, code: str, expectedCount: u64): void {
-  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "parity_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
@@ -161,7 +163,8 @@ function parityAcceptsSourceWithLint(source: str, code: str, expectedCount: u64)
 /// are left alone: a fixture whose point is one warning should not also freeze
 /// the lints that happen to fire on its scaffolding.
 function parityAcceptsSourceWithWarning(source: str, code: str, expectedCount: u64): void {
-  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "parity_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parityCountErrors(&parsed.lexDiagnostics), 0);
@@ -193,7 +196,8 @@ function parityAcceptsSourceWithWarning(source: str, code: str, expectedCount: u
 /// Parse errors are always rejected: a fixture the parser cannot read never
 /// reaches the phase under test.
 function parityRejectsSource(source: str, code: str, expectedCount: u64): void {
-  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "parity_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parityCountErrors(&parsed.lexDiagnostics), 0);

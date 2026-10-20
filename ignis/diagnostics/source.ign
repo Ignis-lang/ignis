@@ -3,17 +3,6 @@ import Path from "std::path";
 import Id from "@compiler::ids";
 import IndexVec from "@compiler::indexing";
 
-function storeSourceSpanPath(storage: &mut Vector<String>, value: String): str {
-  let mut storageRef: &mut Vector<String> = storage;
-  storageRef.push(value);
-
-  let Option::SOME(storedValue) = storageRef.get(storageRef.length() - 1) else {
-    @panic("failed to retain source span path");
-  };
-
-  return storedValue.toStr();
-}
-
 function parseSourceSpanNumber(text: &String, start: u64, endExclusive: u64): u64 {
   let mut value: u64 = 0;
   let mut index: u64 = start;
@@ -65,21 +54,29 @@ function clampPosition(value: u64, minValue: u64, maxValue: u64): u64 {
   return clamped;
 }
 
+/// A byte range `[start, end)` within the source file `file` names in a
+/// `SourceMap`. A span that points at no source carries `noFile()`.
 @implements(Eq)
 export record SourceSpan {
-  public filePath: str;
+  public file: FileId;
   public start: u64;
   public end: u64;
 
-  public static new(filePath: str, start: u64, end: u64): SourceSpan {
+  public static new(file: FileId, start: u64, end: u64): SourceSpan {
     return SourceSpan {
-      filePath: filePath,
+      file: file,
       start: start,
       end: end,
     };
   }
 
-  public static parse(text: &String, storage: &mut Vector<String>): SourceSpan {
+  /// A span of `[start, end)` that points at no source file.
+  public static detached(start: u64, end: u64): SourceSpan {
+    return SourceSpan::new(noFile(), start, end);
+  }
+
+  /// Parses `path:start-end`, registering `path` in `sourceMap`.
+  public static parse(text: &String, sourceMap: &mut SourceMap): SourceSpan {
     let Option::SOME(colonIndex) = text.indexOfCharFrom(':', 0) else {
       @panic("invalid span format");
     };
@@ -87,26 +84,30 @@ export record SourceSpan {
       @panic("invalid span format");
     };
 
-    let pathText: str = storeSourceSpanPath(storage, text.substringBytes(0, colonIndex));
+    let pathText: String = text.substringBytes(0, colonIndex);
+    let file: FileId = sourceMap.register(pathText.toStr());
     let start: u64 = parseSourceSpanNumber(text, colonIndex + 1, dashIndex);
     let end: u64 = parseSourceSpanNumber(text, dashIndex + 1, text.length());
 
-    return SourceSpan::new(pathText, start, end);
+    return SourceSpan::new(file, start, end);
   }
 
   public isEmpty(&self): boolean {
     return self.start == self.end;
   }
 
-  /// Returns the file-independent byte range of this span, dropping the path.
+  /// Whether the span points into a source file, rather than at `noFile()`.
+  public hasFile(&self): boolean {
+    return self.file.raw() != noFile().raw();
+  }
+
+  /// Returns the file-independent byte range of this span, dropping the file.
   public range(&self): TextRange {
     return TextRange::new(self.start, self.end);
   }
 
   equals(&self, other: &SourceSpan): boolean {
-    let leftPath: str = self.filePath;
-    let rightPath: str = other.filePath;
-    return @eq<str>(&leftPath, &rightPath) && self.start == other.start && self.end == other.end;
+    return self.file.equals(&other.file) && self.start == other.start && self.end == other.end;
   }
 }
 
@@ -183,13 +184,29 @@ export record SourceLocation {
 }
 
 export record SourceFile {
+  /// The id `path` has in the `SourceMap` the file was registered in, which
+  /// every span lexed from it carries.
+  public id: FileId;
   public path: Path::PathBuf;
   public text: String;
 
-  public static create(path: str, text: str): SourceFile {
+  /// A file at `path` holding `text`, with `path` registered in `sourceMap`.
+  public static create(sourceMap: &mut SourceMap, path: str, text: str): SourceFile {
     return SourceFile {
+      id: sourceMap.register(path),
       path: Path::PathBuf::create(path),
       text: String::create(text),
+    };
+  }
+
+  /// Like `create`, taking ownership of `path` and `text`.
+  public static fromPath(sourceMap: &mut SourceMap, path: Path::PathBuf, text: String): SourceFile {
+    let id: FileId = sourceMap.register(path.asStr());
+
+    return SourceFile {
+      id: id,
+      path: path,
+      text: text,
     };
   }
 
@@ -426,57 +443,48 @@ export record SourceFile {
 
 record FileTag {}
 
-/// Stable handle for a `SourceFile` registered in a `SourceMap`.
+/// Stable handle for a path registered in a `SourceMap`.
 export type FileId = Id<FileTag>;
 
-/// Registry of source files addressed by stable `FileId` handles.
+/// The id of no file: what a span that points at no source carries, and what
+/// the empty path registers as.
+export function noFile(): FileId {
+  return Id::fromRaw<FileTag>(0);
+}
+
+/// Registry of the paths source spans point into, addressed by `FileId`.
 ///
-/// A `SourceMap` owns every `SourceFile` it holds and hands out `FileId`s for
-/// later lookup. `addFile` deduplicates by path so requesting the same file
-/// twice returns the same handle; `addVirtual` always allocates a fresh entry
-/// for synthetic, path-less sources. Position resolution (`lineCol`,
-/// `byteLineCol`, `snippet`) is delegated to the addressed `SourceFile`.
+/// A `SourceMap` owns every path it holds, so a span stays valid for as long
+/// as the map it was registered in, whatever happens to the text its path was
+/// read from. `register` deduplicates by path, so two spans name the same file
+/// exactly when their ids are equal. The empty path is `noFile()`.
 export record SourceMap {
-  files: IndexVec<FileTag, SourceFile>;
+  paths: IndexVec<FileTag, String>;
 
   public static new(): SourceMap {
-    return SourceMap {
-      files: IndexVec::new<FileTag, SourceFile>(),
-    };
+    let mut paths: IndexVec<FileTag, String> = IndexVec::new<FileTag, String>();
+    paths.push(String::new());
+
+    return SourceMap { paths: paths };
   }
 
-  public addFile(&mut self, path: str, text: str): FileId {
-    if (let Option::SOME(existing) = self.lookupByPath(path)) {
+  /// The id of `path`, registering it when the map does not hold it yet.
+  public register(&mut self, path: str): FileId {
+    if (let Option::SOME(existing) = self.lookup(path)) {
       return existing;
     }
 
-    return self.files.push(SourceFile::create(path, text));
+    return self.paths.push(String::create(path));
   }
 
-  public addVirtual(&mut self, label: str, text: str): FileId {
-    let virtualPath: String = `<${label}>`;
-
-    return self.files.push(SourceFile::create(virtualPath.toStr(), text));
-  }
-
-  public get(&self, id: FileId): Option<&SourceFile> {
-    return self.files.get(id);
-  }
-
-  public lookupByPath(&self, path: str): Option<FileId> {
+  /// The id of `path`, when the map holds it.
+  public lookup(&self, path: str): Option<FileId> {
     let mut index: u64 = 0;
 
-    while (index < self.files.length()) {
+    while (index < self.paths.length()) {
       let id: FileId = Id::fromRaw<FileTag>(index as u32);
 
-      let Option::SOME(existing) = self.files.get(id) else {
-        break;
-      };
-
-      let existingPath: String = existing.path.toString();
-      let existingStr: str = existingPath.toStr();
-
-      if (@eq<str>(&existingStr, &path)) {
+      if (let Option::SOME(existing) = self.paths.get(id) && existing.equals(path)) {
         return Option::SOME(id);
       }
 
@@ -486,31 +494,17 @@ export record SourceMap {
     return Option::NONE;
   }
 
-  public fileCount(&self): u64 {
-    return self.files.length();
-  }
-
-  public lineCol(&self, id: FileId, position: u64): Option<SourceLocation> {
-    let Option::SOME(file) = self.files.get(id) else {
-      return Option::NONE;
+  /// The path `id` names, empty for `noFile()` or an id the map does not hold.
+  public path(&self, id: FileId): str {
+    let Option::SOME(value) = self.paths.get(id) else {
+      return "";
     };
 
-    return Option::SOME(file.lineCol(position));
+    return value.toStr();
   }
 
-  public byteLineCol(&self, id: FileId, position: u64): Option<SourceLocation> {
-    let Option::SOME(file) = self.files.get(id) else {
-      return Option::NONE;
-    };
-
-    return Option::SOME(file.byteLineCol(position));
-  }
-
-  public snippet(&self, id: FileId, span: SourceSpan): Option<String> {
-    let Option::SOME(file) = self.files.get(id) else {
-      return Option::NONE;
-    };
-
-    return Option::SOME(file.snippet(span));
+  /// The number of registered paths, the empty path included.
+  public length(&self): u64 {
+    return self.paths.length();
   }
 }

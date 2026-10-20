@@ -1,11 +1,22 @@
 import Path from "std::path";
 import String from "std::string";
 
-import Diagnostic, DiagnosticBag, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
+import
+  Diagnostic,
+  DiagnosticBag,
+  LabelKind,
+  Severity,
+  SourceMap,
+  SourceSpan,
+from "@compiler::diagnostics";
 
-function configPathSpan(path: &Path::PathBuf, start: u64, end: u64): SourceSpan {
-  let pathText: String = path.toString();
-  return SourceSpan::new(pathText.toStr(), start, end);
+function configPathSpan(
+  sourceMap: &mut SourceMap,
+  path: &Path::PathBuf,
+  start: u64,
+  end: u64
+): SourceSpan {
+  return SourceSpan::new(sourceMap.register(path.asStr()), start, end);
 }
 
 function singleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
@@ -26,30 +37,36 @@ export namespace ConfigDiagnosticCode {
 }
 
 export namespace ConfigDiagnostics {
-  function configNotFound(startPath: &Path::PathBuf): DiagnosticBag {
-    let startText: String = startPath.toString();
+  function configNotFound(sourceMap: &mut SourceMap, startPath: &Path::PathBuf): DiagnosticBag {
     let mut diagnostic: Diagnostic = Diagnostic::new(
       Severity::ERROR,
       ConfigDiagnosticCode::CONFIG_NOT_FOUND,
       "could not find ignis.toml while searching upward from the starting path",
-      SourceSpan::new(startText.toStr(), 0, 0),
+      configPathSpan(sourceMap, startPath, 0, 0),
     );
     diagnostic.setHelp("create an ignis.toml at the project root or start in single-file mode");
     return singleDiagnostic(diagnostic);
   }
 
-  function malformedToml(path: &Path::PathBuf, message: str, start: u64, end: u64): DiagnosticBag {
+  function malformedToml(
+    sourceMap: &mut SourceMap,
+    path: &Path::PathBuf,
+    message: str,
+    start: u64,
+    end: u64
+  ): DiagnosticBag {
     let mut diagnostic: Diagnostic = Diagnostic::new(
       Severity::ERROR,
       ConfigDiagnosticCode::MALFORMED_TOML,
       message,
-      configPathSpan(path, start, end),
+      configPathSpan(sourceMap, path, start, end),
     );
     diagnostic.setHelp("fix the TOML syntax before loading the project configuration");
     return singleDiagnostic(diagnostic);
   }
 
   function invalidFieldType(
+    sourceMap: &mut SourceMap,
     path: &Path::PathBuf,
     fieldPath: str,
     expected: str,
@@ -60,24 +77,31 @@ export namespace ConfigDiagnostics {
       Severity::ERROR,
       ConfigDiagnosticCode::INVALID_FIELD_TYPE,
       `config field '${fieldPath}' must be ${expected}`.toStr(),
-      configPathSpan(path, start, end),
+      configPathSpan(sourceMap, path, start, end),
     );
-    diagnostic.addLabel(LabelKind::PRIMARY, configPathSpan(path, start, end), "unexpected TOML value kind");
+    diagnostic.addLabel(LabelKind::PRIMARY, configPathSpan(sourceMap, path, start, end), "unexpected TOML value kind");
     return singleDiagnostic(diagnostic);
   }
 
-  function emptyField(path: &Path::PathBuf, fieldPath: str, start: u64, end: u64): DiagnosticBag {
+  function emptyField(
+    sourceMap: &mut SourceMap,
+    path: &Path::PathBuf,
+    fieldPath: str,
+    start: u64,
+    end: u64
+  ): DiagnosticBag {
     let mut diagnostic: Diagnostic = Diagnostic::new(
       Severity::ERROR,
       ConfigDiagnosticCode::EMPTY_FIELD,
       `config field '${fieldPath}' cannot be empty`.toStr(),
-      configPathSpan(path, start, end),
+      configPathSpan(sourceMap, path, start, end),
     );
-    diagnostic.addLabel(LabelKind::PRIMARY, configPathSpan(path, start, end), "empty values are not allowed here");
+    diagnostic.addLabel(LabelKind::PRIMARY, configPathSpan(sourceMap, path, start, end), "empty values are not allowed here");
     return singleDiagnostic(diagnostic);
   }
 
   function reservedAlias(
+    sourceMap: &mut SourceMap,
     path: &Path::PathBuf,
     aliasName: str,
     start: u64,
@@ -87,13 +111,14 @@ export namespace ConfigDiagnostics {
       Severity::ERROR,
       ConfigDiagnosticCode::RESERVED_ALIAS,
       `alias '${aliasName}' is reserved`.toStr(),
-      configPathSpan(path, start, end),
+      configPathSpan(sourceMap, path, start, end),
     );
     diagnostic.setHelp("rename the alias because 'std' is reserved for the standard library");
     return singleDiagnostic(diagnostic);
   }
 
   function pathNotFound(
+    sourceMap: &mut SourceMap,
     path: &Path::PathBuf,
     fieldPath: str,
     targetPath: &Path::PathBuf
@@ -102,7 +127,7 @@ export namespace ConfigDiagnostics {
       Severity::ERROR,
       ConfigDiagnosticCode::PATH_NOT_FOUND,
       `config path '${fieldPath}' does not exist`.toStr(),
-      configPathSpan(path, 0, 0),
+      configPathSpan(sourceMap, path, 0, 0),
     );
     let targetText: String = targetPath.toString();
     diagnostic.addNote(`resolved path: ${targetText}`.toStr());
@@ -119,6 +144,7 @@ export namespace ConfigDiagnostics {
   /// known key within edit distance 2, if any. Wording is shared byte-for-byte
   /// with the host compiler's equivalent warning (`ignis_driver::project::unknown_keys`).
   function unknownKey(
+    sourceMap: &mut SourceMap,
     path: &Path::PathBuf,
     tableLabel: str,
     key: str,
@@ -135,16 +161,20 @@ export namespace ConfigDiagnostics {
       Severity::WARNING,
       ConfigDiagnosticCode::UNKNOWN_KEY,
       message.toStr(),
-      configPathSpan(path, start, end),
+      configPathSpan(sourceMap, path, start, end),
     );
   }
 
-  function missingStdManifest(path: &Path::PathBuf, stdRoot: &Path::PathBuf): DiagnosticBag {
+  function missingStdManifest(
+    sourceMap: &mut SourceMap,
+    path: &Path::PathBuf,
+    stdRoot: &Path::PathBuf
+  ): DiagnosticBag {
     let mut diagnostic: Diagnostic = Diagnostic::new(
       Severity::ERROR,
       ConfigDiagnosticCode::MISSING_STD_MANIFEST,
       "std is enabled but std/manifest.toml could not be resolved",
-      configPathSpan(path, 0, 0),
+      configPathSpan(sourceMap, path, 0, 0),
     );
     let rootText: String = stdRoot.toString();
     diagnostic.addNote(`resolved std root: ${rootText}`.toStr());

@@ -7,7 +7,9 @@ import
   DiagnosticCode,
   Severity,
   SourceFile,
+  SourceMap,
   SourceSpan,
+  noFile,
 from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
@@ -65,7 +67,8 @@ function borrowckCountCode(bag: &DiagnosticBag, code: str): u64 {
 /// pipeline accepts and the reported diagnostics are the borrow checker's
 /// alone.
 function borrowckDiagnostics(source: str): DiagnosticBag {
-  let file: SourceFile = SourceFile::create("borrowck_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "borrowck_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(borrowckCountErrors(&parsed.lexDiagnostics), 0);
@@ -723,7 +726,8 @@ function borrowckAccumulatingSchedules(source: str): String {
 }
 
 function borrowckRenderedSchedules(source: str, accumulating: boolean): String {
-  let file: SourceFile = SourceFile::create("borrowck_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "borrowck_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(borrowckCountErrors(&parsed.lexDiagnostics), 0);
@@ -1467,7 +1471,7 @@ function pushInheritedCopy(
   while (index < starts.length()) {
     if (let Option::SOME(start) = starts.get(index)) {
       bag.push(
-        Diagnostic::new(Severity::ERROR, DiagnosticCode::USE_AFTER_MOVE, "Use of moved value 'x'", SourceSpan::new("shape.ign", *start, *start + 1)),
+        Diagnostic::new(Severity::ERROR, DiagnosticCode::USE_AFTER_MOVE, "Use of moved value 'x'", SourceSpan::new(noFile(), *start, *start + 1)),
       );
     }
 

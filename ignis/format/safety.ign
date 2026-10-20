@@ -1,7 +1,7 @@
 import String from "std::string";
 import Vector from "std::vector";
 
-import SourceFile from "@compiler::diagnostics";
+import SourceFile, SourceMap from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
 import TokenKind from "@compiler::syntax";
 
@@ -51,7 +51,8 @@ function trimEndSafety(text: &String): String {
 }
 
 function lexOrFail(label: str, source: &String): Result<LexResult, FormatError> {
-  let file: SourceFile = SourceFile::create(label, source.toStr());
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, label, source.toStr());
   let lexResult: LexResult = Lexer::lex(&file);
 
   if (lexResult.diagnostics.length() > 0) {
@@ -154,7 +155,8 @@ export namespace Format {
 
   /// Verifies the formatted output still lexes cleanly.
   function validateParseBack(formatted: &String): Result<void, FormatError> {
-    let file: SourceFile = SourceFile::create("formatter_parseback.ign", formatted.toStr());
+    let mut sourceMap: SourceMap = SourceMap::new();
+    let file: SourceFile = SourceFile::create(&mut sourceMap, "formatter_parseback.ign", formatted.toStr());
     let lexResult: LexResult = Lexer::lex(&file);
 
     if (lexResult.diagnostics.length() == 0) {

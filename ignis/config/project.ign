@@ -9,7 +9,7 @@ import TomlToken, TomlTokenKind from "std::toml::token";
 import Vector from "std::vector";
 
 import ConfigDiagnosticCode, ConfigDiagnostics from "./diagnostics";
-import DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticRenderer, SourceFile, SourceMap from "@compiler::diagnostics";
 import Output from "@compiler::output";
 
 const PROJECT_FILE: str = "ignis.toml";
@@ -250,17 +250,18 @@ export record ResolvedProject {
 }
 
 function tomlValueString(
+  sourceMap: &mut SourceMap,
   configPath: &Path::PathBuf,
   fieldPath: str,
   value: TomlValue,
 ): Result<ConfigStringValue, DiagnosticBag> {
   let Option::SOME(text) = value.asString() else {
-    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "a string", value.span.start, value.span.end));
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(sourceMap, configPath, fieldPath, "a string", value.span.start, value.span.end));
   };
 
   let owned: String = String::create(text);
   if (owned.length() == 0) {
-    return Result::ERROR(ConfigDiagnostics::emptyField(configPath, fieldPath, value.span.start, value.span.end));
+    return Result::ERROR(ConfigDiagnostics::emptyField(sourceMap, configPath, fieldPath, value.span.start, value.span.end));
   }
 
   return Result::OK(ConfigStringValue {
@@ -271,6 +272,7 @@ function tomlValueString(
 }
 
 function optionalString(
+  sourceMap: &mut SourceMap,
   document: &TomlDocument,
   configPath: &Path::PathBuf,
   fieldPath: str
@@ -279,12 +281,13 @@ function optionalString(
     return Result::OK(Option::NONE);
   };
 
-  let text: ConfigStringValue = tomlValueString(configPath, fieldPath, value)!;
+  let text: ConfigStringValue = tomlValueString(sourceMap, configPath, fieldPath, value)!;
 
   return Result::OK(Option::SOME(text));
 }
 
 function booleanOrDefault(
+  sourceMap: &mut SourceMap,
   document: &TomlDocument,
   configPath: &Path::PathBuf,
   fieldPath: str,
@@ -295,19 +298,20 @@ function booleanOrDefault(
   };
 
   if (value.kind() != TomlValueKind::BOOLEAN) {
-    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "a boolean", value.span.start, value.span.end));
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(sourceMap, configPath, fieldPath, "a boolean", value.span.start, value.span.end));
   }
 
   return Result::OK(value.asBoolean());
 }
 
 function stringOrDefault(
+  sourceMap: &mut SourceMap,
   document: &TomlDocument,
   configPath: &Path::PathBuf,
   fieldPath: str,
   defaultValue: str
 ): Result<String, DiagnosticBag> {
-  let optionValue: Option<ConfigStringValue> = optionalString(document, configPath, fieldPath)!;
+  let optionValue: Option<ConfigStringValue> = optionalString(sourceMap, document, configPath, fieldPath)!;
 
   return match (optionValue) {
     Option::SOME(value) -> Result::OK(value.value),
@@ -316,6 +320,7 @@ function stringOrDefault(
 }
 
 function integerOrDefault(
+  sourceMap: &mut SourceMap,
   document: &TomlDocument,
   configPath: &Path::PathBuf,
   fieldPath: str,
@@ -326,12 +331,12 @@ function integerOrDefault(
   };
 
   if (value.kind() != TomlValueKind::INTEGER) {
-    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "an integer", value.span.start, value.span.end));
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(sourceMap, configPath, fieldPath, "an integer", value.span.start, value.span.end));
   }
 
   let integerValue: i64 = value.asInteger();
   if (integerValue < 0) {
-    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "a non-negative integer", value.span.start, value.span.end));
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(sourceMap, configPath, fieldPath, "a non-negative integer", value.span.start, value.span.end));
   }
 
   return Result::OK(integerValue as u64);
@@ -370,6 +375,7 @@ function clonePathVector(source: &Vector<Path::PathBuf>): Vector<Path::PathBuf> 
 }
 
 function stringArrayOrDefault(
+  sourceMap: &mut SourceMap,
   document: &TomlDocument,
   configPath: &Path::PathBuf,
   fieldPath: str,
@@ -380,11 +386,11 @@ function stringArrayOrDefault(
   };
 
   if (value.kind() != TomlValueKind::ARRAY) {
-    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "an array of strings", value.span.start, value.span.end));
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(sourceMap, configPath, fieldPath, "an array of strings", value.span.start, value.span.end));
   }
 
   let Option::SOME(values) = value.asArray() else {
-    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "an array of strings", value.span.start, value.span.end));
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(sourceMap, configPath, fieldPath, "an array of strings", value.span.start, value.span.end));
   };
 
   let mut result: Vector<String> = Vector::new<String>();
@@ -395,7 +401,7 @@ function stringArrayOrDefault(
       break;
     };
 
-    let itemValue: ConfigStringValue = tomlValueString(configPath, fieldPath, item)!;
+    let itemValue: ConfigStringValue = tomlValueString(sourceMap, configPath, fieldPath, item)!;
     result.push(itemValue.value);
     index += 1;
   }
@@ -442,6 +448,7 @@ function projectIsValidFeatureName(name: &String): boolean {
 /// `projectIsValidFeatureName` for what "invalid" means and why it matters
 /// to the build fingerprint.
 function validateFeatureNameList(
+  sourceMap: &mut SourceMap,
   document: &TomlDocument,
   configPath: &Path::PathBuf,
   fieldPath: str,
@@ -463,6 +470,7 @@ function validateFeatureNameList(
       }
 
       return Result::ERROR(ConfigDiagnostics::invalidFieldType(
+        sourceMap,
         configPath,
         fieldPath,
         "feature names containing only ASCII letters, digits, '_', '.' or '-'",
@@ -496,16 +504,17 @@ function resolveEnvPath(value: &String): Path::PathBuf {
 }
 
 function canonicalExistingPath(
+  sourceMap: &mut SourceMap,
   configPath: &Path::PathBuf,
   fieldPath: str,
   path: &Path::PathBuf
 ): Result<Path::PathBuf, DiagnosticBag> {
   if (!Fs::exists(path.asStr())) {
-    return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, fieldPath, path));
+    return Result::ERROR(ConfigDiagnostics::pathNotFound(sourceMap, configPath, fieldPath, path));
   }
 
   let Result::OK(canonical) = Fs::canonicalize(path) else {
-    return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, fieldPath, path));
+    return Result::ERROR(ConfigDiagnostics::pathNotFound(sourceMap, configPath, fieldPath, path));
   };
 
   return Result::OK(canonical);
@@ -610,6 +619,7 @@ function skipLine(tokens: &Vector<TomlToken>, index: u64): u64 {
 }
 
 function parseAliases(
+  sourceMap: &mut SourceMap,
   configPath: &Path::PathBuf,
   root: &Path::PathBuf,
   source: &String
@@ -617,7 +627,7 @@ function parseAliases(
   let tokens: Vector<TomlToken> = match (Toml::lex(source)) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
-      return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, error.message, error.span.start, error.span.end));
+      return Result::ERROR(ConfigDiagnostics::malformedToml(sourceMap, configPath, error.message, error.span.start, error.span.end));
     },
   };
 
@@ -680,6 +690,7 @@ function parseAliases(
     if (valueToken.kind != TomlTokenKind::STRING) {
       return Result::ERROR(
         ConfigDiagnostics::invalidFieldType(
+          sourceMap,
           configPath,
           fieldPath.toStr(),
           "a string",
@@ -692,13 +703,13 @@ function parseAliases(
     let reservedName: String = String::create("std");
     if (token.lexeme.equals(&reservedName)) {
       return Result::ERROR(
-        ConfigDiagnostics::reservedAlias(configPath, token.lexeme.toStr(), token.span.start, token.span.end),
+        ConfigDiagnostics::reservedAlias(sourceMap, configPath, token.lexeme.toStr(), token.span.start, token.span.end),
       );
     }
 
     let rawPath: String = valueToken.lexeme.clone();
     let resolved: Path::PathBuf = resolveProjectPath(root, &rawPath);
-    let canonical: Path::PathBuf = canonicalExistingPath(configPath, fieldPath.toStr(), &resolved)!;
+    let canonical: Path::PathBuf = canonicalExistingPath(sourceMap, configPath, fieldPath.toStr(), &resolved)!;
 
     let alias: AliasBinding = AliasBinding {
       name: token.lexeme.clone(),
@@ -713,7 +724,10 @@ function parseAliases(
   return Result::OK(aliases);
 }
 
-function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, DiagnosticBag> {
+function requireStdManifest(
+  sourceMap: &mut SourceMap,
+  project: ResolvedProject
+): Result<ResolvedProject, DiagnosticBag> {
   if (project.stdEnabled || project.stdRoot.isSome()) {
     let Option::SOME(stdManifestPath) = project.stdManifestPathText() else {
       let configPath: Path::PathBuf = match (&project.configPath) {
@@ -724,7 +738,7 @@ function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, D
         Option::SOME(path) -> path.clone(),
         Option::NONE -> Path::PathBuf::create("std"),
       };
-      return Result::ERROR(ConfigDiagnostics::missingStdManifest(&configPath, &stdRoot));
+      return Result::ERROR(ConfigDiagnostics::missingStdManifest(sourceMap, &configPath, &stdRoot));
     };
 
     let manifestPath: Path::PathBuf = Path::PathBuf::create(stdManifestPath.toStr());
@@ -737,7 +751,7 @@ function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, D
         Option::SOME(path) -> path.clone(),
         Option::NONE -> Path::PathBuf::create("std"),
       };
-      return Result::ERROR(ConfigDiagnostics::missingStdManifest(&configPath, &stdRoot));
+      return Result::ERROR(ConfigDiagnostics::missingStdManifest(sourceMap, &configPath, &stdRoot));
     }
   }
 
@@ -1042,6 +1056,7 @@ function knownTopLevelKeys(): Vector<String> {
 /// exactly: the same tables, the same keys, the same wording. `aliases` is a
 /// free-form map (alias name -> path), so its keys are never checked.
 export function checkUnknownProjectKeys(
+  sourceMap: &mut SourceMap,
   document: &TomlDocument,
   configPath: &Path::PathBuf
 ): DiagnosticBag {
@@ -1130,6 +1145,7 @@ export function checkUnknownProjectKeys(
 
     let suggestion: Option<String> = cloneOptionString(&warning.suggestion);
     warnings.push(ConfigDiagnostics::unknownKey(
+      sourceMap,
       configPath,
       warning.tableLabel.toStr(),
       warning.key.toStr(),
@@ -1147,6 +1163,7 @@ export function checkUnknownProjectKeys(
 /// to stderr. Never fails the load: an unknown key is a warning, not an
 /// error.
 function reportUnknownKeyWarnings(
+  sourceMap: &mut SourceMap,
   warnings: &DiagnosticBag,
   configPath: &Path::PathBuf,
   source: &String
@@ -1156,7 +1173,7 @@ function reportUnknownKeyWarnings(
   }
 
   let pathText: String = configPath.toString();
-  let sourceFile: SourceFile = SourceFile::create(pathText.toStr(), source.toStr());
+  let sourceFile: SourceFile = SourceFile::create(sourceMap, pathText.toStr(), source.toStr());
   let rendered: String = DiagnosticRenderer::renderBag(warnings, &sourceFile, DiagnosticRenderer::stderrUsesColor());
   Output::message(rendered);
 }
@@ -1183,63 +1200,72 @@ export namespace Config {
     return Option::NONE;
   }
 
-  function loadProject(startPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
+  function loadProject(
+    sourceMap: &mut SourceMap,
+    startPath: &Path::PathBuf
+  ): Result<ResolvedProject, DiagnosticBag> {
     let Option::SOME(configPath) = Config::findProjectFile(startPath) else {
-      return Result::ERROR(ConfigDiagnostics::configNotFound(startPath));
+      return Result::ERROR(ConfigDiagnostics::configNotFound(sourceMap, startPath));
     };
 
-    return Config::loadProjectFile(&configPath);
+    return Config::loadProjectFile(sourceMap, &configPath);
   }
 
-  function loadBuildProject(startPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
-    let project: ResolvedProject = Config::loadProject(startPath)!;
-    return requireStdManifest(project);
+  function loadBuildProject(
+    sourceMap: &mut SourceMap,
+    startPath: &Path::PathBuf
+  ): Result<ResolvedProject, DiagnosticBag> {
+    let project: ResolvedProject = Config::loadProject(sourceMap, startPath)!;
+    return requireStdManifest(sourceMap, project);
   }
 
-  function loadProjectSummary(startPath: &Path::PathBuf): String {
+  function loadProjectSummary(sourceMap: &mut SourceMap, startPath: &Path::PathBuf): String {
     let Option::SOME(configPath) = Config::findProjectFile(startPath) else {
       Test::fail();
       return String::new();
     };
 
-    return Config::loadProjectFileSummary(&configPath);
+    return Config::loadProjectFileSummary(sourceMap, &configPath);
   }
 
-  function loadProjectFile(configPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
+  function loadProjectFile(
+    sourceMap: &mut SourceMap,
+    configPath: &Path::PathBuf
+  ): Result<ResolvedProject, DiagnosticBag> {
     let Result::OK(source) = Fs::readToString(configPath) else {
-      return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, PROJECT_FILE, configPath));
+      return Result::ERROR(ConfigDiagnostics::pathNotFound(sourceMap, configPath, PROJECT_FILE, configPath));
     };
 
     let document: TomlDocument = match (Toml::parse(&source)) {
       Result::OK(value) -> value,
       Result::ERROR(error) -> {
-        return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, error.message, error.span.start, error.span.end));
+        return Result::ERROR(ConfigDiagnostics::malformedToml(sourceMap, configPath, error.message, error.span.start, error.span.end));
       },
     };
 
-    let unknownKeyWarnings: DiagnosticBag = checkUnknownProjectKeys(&document, configPath);
-    reportUnknownKeyWarnings(&unknownKeyWarnings, configPath, &source);
+    let unknownKeyWarnings: DiagnosticBag = checkUnknownProjectKeys(sourceMap, &document, configPath);
+    reportUnknownKeyWarnings(sourceMap, &unknownKeyWarnings, configPath, &source);
 
     let Option::SOME(rawRoot) = configPath.parent() else {
-      return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "project.root", configPath));
+      return Result::ERROR(ConfigDiagnostics::pathNotFound(sourceMap, configPath, "project.root", configPath));
     };
 
     let Result::OK(root) = Fs::canonicalize(&rawRoot) else {
-      return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "project.root", &rawRoot));
+      return Result::ERROR(ConfigDiagnostics::pathNotFound(sourceMap, configPath, "project.root", &rawRoot));
     };
 
-    let packageNameValue: Option<ConfigStringValue> = optionalString(&document, configPath, "package.name")!;
+    let packageNameValue: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "package.name")!;
     let packageName: Option<String> = match (packageNameValue) {
       Option::SOME(value) -> Option::SOME(value.value),
       Option::NONE -> Option::NONE,
     };
-    let packageVersionValue: Option<ConfigStringValue> = optionalString(&document, configPath, "package.version")!;
+    let packageVersionValue: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "package.version")!;
     let packageVersion: Option<String> = match (packageVersionValue) {
       Option::SOME(value) -> Option::SOME(value.value),
       Option::NONE -> Option::NONE,
     };
 
-    let sourceDirOption: Option<ConfigStringValue> = optionalString(&document, configPath, "build.source_dir")!;
+    let sourceDirOption: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "build.source_dir")!;
     let sourceDirValue: ConfigStringValue = match (sourceDirOption) {
       Option::SOME(value) -> value,
       Option::NONE -> ConfigStringValue {
@@ -1248,7 +1274,7 @@ export namespace Config {
         end: 0,
       },
     };
-    let entryOption: Option<ConfigStringValue> = optionalString(&document, configPath, "build.entry")!;
+    let entryOption: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "build.entry")!;
     let entryValue: ConfigStringValue = match (entryOption) {
       Option::SOME(value) -> value,
       Option::NONE -> ConfigStringValue {
@@ -1257,7 +1283,7 @@ export namespace Config {
         end: 0,
       },
     };
-    let outDirOption: Option<ConfigStringValue> = optionalString(&document, configPath, "build.out_dir")!;
+    let outDirOption: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "build.out_dir")!;
     let outDirValue: ConfigStringValue = match (outDirOption) {
       Option::SOME(value) -> value,
       Option::NONE -> ConfigStringValue {
@@ -1267,47 +1293,47 @@ export namespace Config {
       },
     };
 
-    let bin: boolean = booleanOrDefault(&document, configPath, "build.bin", true)!;
-    let optLevel: u64 = integerOrDefault(&document, configPath, "build.opt_level", 0)!;
-    let debug: boolean = booleanOrDefault(&document, configPath, "build.debug", false)!;
-    let target: String = stringOrDefault(&document, configPath, "build.target", "c")!;
-    let targetTripleValue: Option<ConfigStringValue> = optionalString(&document, configPath, "build.target_triple")!;
+    let bin: boolean = booleanOrDefault(sourceMap, &document, configPath, "build.bin", true)!;
+    let optLevel: u64 = integerOrDefault(sourceMap, &document, configPath, "build.opt_level", 0)!;
+    let debug: boolean = booleanOrDefault(sourceMap, &document, configPath, "build.debug", false)!;
+    let target: String = stringOrDefault(sourceMap, &document, configPath, "build.target", "c")!;
+    let targetTripleValue: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "build.target_triple")!;
     let targetTriple: Option<String> = match (targetTripleValue) {
       Option::SOME(value) -> Option::SOME(value.value),
       Option::NONE -> Option::NONE,
     };
-    let cc: String = stringOrDefault(&document, configPath, "build.cc", "cc")!;
-    let linkerValue: Option<ConfigStringValue> = optionalString(&document, configPath, "build.linker")!;
+    let cc: String = stringOrDefault(sourceMap, &document, configPath, "build.cc", "cc")!;
+    let linkerValue: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "build.linker")!;
     let linker: Option<String> = match (linkerValue) {
       Option::SOME(value) -> Option::SOME(value.value),
       Option::NONE -> Option::NONE,
     };
     let emptyCflags: Vector<String> = Vector::new<String>();
-    let cflags: Vector<String> = stringArrayOrDefault(&document, configPath, "build.cflags", &emptyCflags)!;
-    let stdArchive: boolean = booleanOrDefault(&document, configPath, "build.std_archive", false)!;
+    let cflags: Vector<String> = stringArrayOrDefault(sourceMap, &document, configPath, "build.cflags", &emptyCflags)!;
+    let stdArchive: boolean = booleanOrDefault(sourceMap, &document, configPath, "build.std_archive", false)!;
     let emptyEmit: Vector<String> = Vector::new<String>();
-    let emit: Vector<String> = stringArrayOrDefault(&document, configPath, "build.emit", &emptyEmit)!;
+    let emit: Vector<String> = stringArrayOrDefault(sourceMap, &document, configPath, "build.emit", &emptyEmit)!;
     let emptyDefaultFeatures: Vector<String> = Vector::new<String>();
-    let defaultFeatures: Vector<String> = stringArrayOrDefault(&document, configPath, "build.default_features", &emptyDefaultFeatures)!;
-    validateFeatureNameList(&document, configPath, "build.default_features", &defaultFeatures)!;
+    let defaultFeatures: Vector<String> = stringArrayOrDefault(sourceMap, &document, configPath, "build.default_features", &emptyDefaultFeatures)!;
+    validateFeatureNameList(sourceMap, &document, configPath, "build.default_features", &defaultFeatures)!;
     let emptyKnownFeatures: Vector<String> = Vector::new<String>();
-    let knownFeatures: Vector<String> = stringArrayOrDefault(&document, configPath, "build.known_features", &emptyKnownFeatures)!;
-    validateFeatureNameList(&document, configPath, "build.known_features", &knownFeatures)!;
+    let knownFeatures: Vector<String> = stringArrayOrDefault(sourceMap, &document, configPath, "build.known_features", &emptyKnownFeatures)!;
+    validateFeatureNameList(sourceMap, &document, configPath, "build.known_features", &knownFeatures)!;
 
     let emptyFixtures: Vector<String> = Vector::new<String>();
-    let fixtureEntries: Vector<String> = stringArrayOrDefault(&document, configPath, "test.fixtures", &emptyFixtures)!;
+    let fixtureEntries: Vector<String> = stringArrayOrDefault(sourceMap, &document, configPath, "test.fixtures", &emptyFixtures)!;
 
-    let stdEnabled: boolean = booleanOrDefault(&document, configPath, "ignis.std", true)!;
+    let stdEnabled: boolean = booleanOrDefault(sourceMap, &document, configPath, "ignis.std", true)!;
 
     let sourceDirResolved: Path::PathBuf = resolveProjectPath(&root, &sourceDirValue.value);
-    let sourceDir: Path::PathBuf = canonicalExistingPath(configPath, "build.source_dir", &sourceDirResolved)!;
+    let sourceDir: Path::PathBuf = canonicalExistingPath(sourceMap, configPath, "build.source_dir", &sourceDirResolved)!;
 
     let entryResolved: Path::PathBuf = sourceDir.join(entryValue.value.toStr()).normalize();
-    let entryPath: Path::PathBuf = canonicalExistingPath(configPath, "build.entry", &entryResolved)!;
+    let entryPath: Path::PathBuf = canonicalExistingPath(sourceMap, configPath, "build.entry", &entryResolved)!;
 
     let outDirResolved: Path::PathBuf = resolveProjectPath(&root, &outDirValue.value);
 
-    let aliases: Vector<AliasBinding> = parseAliases(configPath, &root, &source)!;
+    let aliases: Vector<AliasBinding> = parseAliases(sourceMap, configPath, &root, &source)!;
 
     let mut testFixtures: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
     let mut fixtureIndex: u64 = 0;
@@ -1320,7 +1346,7 @@ export namespace Config {
       fixtureIndex += 1;
     }
 
-    let stdPathValue: Option<ConfigStringValue> = optionalString(&document, configPath, "ignis.std_path")!;
+    let stdPathValue: Option<ConfigStringValue> = optionalString(sourceMap, &document, configPath, "ignis.std_path")!;
 
     let mut stdRoot: Option<Path::PathBuf> = Option::NONE;
     let mut stdManifestPath: Option<Path::PathBuf> = Option::NONE;
@@ -1328,7 +1354,7 @@ export namespace Config {
       match (stdPathValue) {
         Option::SOME(value) -> {
           let resolved: Path::PathBuf = resolveProjectPath(&root, &value.value);
-          let canonical: Path::PathBuf = canonicalExistingPath(configPath, "ignis.std_path", &resolved)!;
+          let canonical: Path::PathBuf = canonicalExistingPath(sourceMap, configPath, "ignis.std_path", &resolved)!;
 
           stdManifestPath = manifestPath(&canonical);
           stdRoot = Option::SOME(canonical);
@@ -1337,7 +1363,7 @@ export namespace Config {
           match (Env::var("IGNIS_STD_PATH")) {
             Result::OK(value) -> {
               let resolved: Path::PathBuf = resolveEnvPath(&value);
-              let canonical: Path::PathBuf = canonicalExistingPath(configPath, "IGNIS_STD_PATH", &resolved)!;
+              let canonical: Path::PathBuf = canonicalExistingPath(sourceMap, configPath, "IGNIS_STD_PATH", &resolved)!;
 
               stdManifestPath = manifestPath(&canonical);
               stdRoot = Option::SOME(canonical);
@@ -1353,7 +1379,7 @@ export namespace Config {
       match (stdPathValue) {
         Option::SOME(value) -> {
           let resolved: Path::PathBuf = resolveProjectPath(&root, &value.value);
-          let canonical: Path::PathBuf = canonicalExistingPath(configPath, "ignis.std_path", &resolved)!;
+          let canonical: Path::PathBuf = canonicalExistingPath(sourceMap, configPath, "ignis.std_path", &resolved)!;
 
           stdManifestPath = manifestPath(&canonical);
           stdRoot = Option::SOME(canonical);
@@ -1392,13 +1418,14 @@ export namespace Config {
   }
 
   function loadBuildProjectFile(
+    sourceMap: &mut SourceMap,
     configPath: &Path::PathBuf
   ): Result<ResolvedProject, DiagnosticBag> {
-    let project: ResolvedProject = Config::loadProjectFile(configPath)!;
-    return requireStdManifest(project);
+    let project: ResolvedProject = Config::loadProjectFile(sourceMap, configPath)!;
+    return requireStdManifest(sourceMap, project);
   }
 
-  function loadProjectFileSummary(configPath: &Path::PathBuf): String {
+  function loadProjectFileSummary(sourceMap: &mut SourceMap, configPath: &Path::PathBuf): String {
     // `Option::unwrapOr` moves the payload out of `&self`; on an owning payload
     // the selfhost's borrow checker rejects that (the host's monomorphizer keeps
     // the binding typed as a parameter and misses it, IGN-200).
@@ -1406,7 +1433,7 @@ export namespace Config {
       Option::SOME(parent) -> parent,
       Option::NONE -> Path::PathBuf::new(),
     };
-    let Result::OK(project) = Config::loadProjectFile(configPath) else {
+    let Result::OK(project) = Config::loadProjectFile(sourceMap, configPath) else {
       Test::fail();
       return String::new();
     };
@@ -1557,9 +1584,10 @@ function assertSomeStringUnderRoot(value: Option<String>, root: &String, relativ
 
 @test
 function projectLoaderConsumesReturnedWorkspaceProjectFields(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("ignis/parser");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> {
       assertSomeString(project.packageNameText(), "ignis");
       assertSomeString(project.packageVersionText(), "0.1.0");
@@ -1587,9 +1615,10 @@ function projectLoaderConsumesReturnedWorkspaceProjectFields(): void {
 
 @test
 function projectLoaderConsumesReturnedFixtureProjectFieldsAndAliases(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/project_mode/nested/deeper");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> {
       assertSomeString(project.packageNameText(), "fixture-project");
       assertSomeString(project.packageVersionText(), "0.2.0");
@@ -1612,9 +1641,10 @@ function projectLoaderConsumesReturnedFixtureProjectFieldsAndAliases(): void {
 
 @test
 function projectLoaderConsumesBuildFixtureFields(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/config_project/nested/deeper");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> {
       assertSomeString(project.packageNameText(), "build-fixture");
       assertSomeString(project.packageVersionText(), "0.3.0");
@@ -1643,9 +1673,10 @@ function projectLoaderConsumesBuildFixtureFields(): void {
 /// is what makes the table optional.
 @test
 function projectLoaderDefaultsTestFixturesToNothing(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/project_mode/nested/deeper");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> Test::assertEq<u64>(project.testFixtureCount(), 0),
     Result::ERROR(_) -> Test::fail(),
   };
@@ -1653,12 +1684,14 @@ function projectLoaderDefaultsTestFixturesToNothing(): void {
 
 @test
 function projectLoaderReportsMissingStdManifestForBuildPlanning(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/config_missing_manifest/nested/deeper");
-  expectSingleDiagnosticCode(Config::loadBuildProject(&start), ConfigDiagnosticCode::MISSING_STD_MANIFEST);
+  expectSingleDiagnosticCode(Config::loadBuildProject(&mut sourceMap, &start), ConfigDiagnosticCode::MISSING_STD_MANIFEST);
 }
 
 @test
 function projectLoaderReportsMissingConfig(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let tempRootStr: String = `/tmp/ignis-selfhost-config-no-project-${Process::id()}`;
   let tempRoot: Path::PathBuf = Path::PathBuf::create(tempRootStr.toStr());
   defer projectRemoveDirAll(&tempRoot);
@@ -1671,13 +1704,14 @@ function projectLoaderReportsMissingConfig(): void {
     },
   };
 
-  expectSingleDiagnosticCode(Config::loadProject(&start), ConfigDiagnosticCode::CONFIG_NOT_FOUND);
+  expectSingleDiagnosticCode(Config::loadProject(&mut sourceMap, &start), ConfigDiagnosticCode::CONFIG_NOT_FOUND);
 }
 
 @test
 function projectLoaderReportsMalformedToml(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/malformed_toml/ignis.toml");
-  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::MALFORMED_TOML);
+  expectSingleDiagnosticCode(Config::loadProjectFile(&mut sourceMap, &configPath), ConfigDiagnosticCode::MALFORMED_TOML);
 }
 
 /// A `,` in `[build] known_features` is rejected: it collides with the
@@ -1685,8 +1719,9 @@ function projectLoaderReportsMalformedToml(): void {
 /// set. See `projectIsValidFeatureName`.
 @test
 function projectLoaderReportsInvalidFeatureName(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/invalid_feature_name/ignis.toml");
-  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
+  expectSingleDiagnosticCode(Config::loadProjectFile(&mut sourceMap, &configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
 }
 
 @test
@@ -1713,12 +1748,14 @@ function projectIsValidFeatureNameAcceptsAndRejects(): void {
 
 @test
 function projectLoaderReportsInvalidFieldTypes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/invalid_types/ignis.toml");
-  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
+  expectSingleDiagnosticCode(Config::loadProjectFile(&mut sourceMap, &configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
 }
 
 @test
 function projectLoaderReportsMissingEntryPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/missing_entry/ignis.toml");
-  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::PATH_NOT_FOUND);
+  expectSingleDiagnosticCode(Config::loadProjectFile(&mut sourceMap, &configPath), ConfigDiagnosticCode::PATH_NOT_FOUND);
 }

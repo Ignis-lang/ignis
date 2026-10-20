@@ -1,6 +1,6 @@
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -30,7 +30,8 @@ function captureCountErrors(bag: &DiagnosticBag): u64 {
 /// Run `source` through parse, analysis, HIR lowering and capture analysis,
 /// and return what capture analysis reported.
 function captureDiagnosticsFor(source: str): DiagnosticBag {
-  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "capture_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
@@ -128,7 +129,8 @@ function captureAcceptsRefCaptureThroughANoescapeParameter(): void {
 /// then answer whether the `let` binding named `bindingName` owns the closure
 /// environment its initializer produces, as `Hir::bindingOwnsClosureEnv` decides.
 function captureLetOwnsClosureEnv(source: str, bindingName: str): boolean {
-  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "capture_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
@@ -237,7 +239,8 @@ function captureBindingDoesNotOwnClosureMixedWithAnExistingBinding(): void {
 /// Run `source` through parse, analysis, HIR lowering and capture analysis,
 /// and count the closure literals whose environment escapes to the heap.
 function captureEscapingClosureCount(source: str): u64 {
-  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "capture_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
@@ -438,7 +441,8 @@ function captureAddModule(
   fileName: str,
   source: str,
 ): u64 {
-  let file: SourceFile = SourceFile::create(fileName, source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, fileName, source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(captureCountErrors(&parsed.parseDiagnostics), 0);

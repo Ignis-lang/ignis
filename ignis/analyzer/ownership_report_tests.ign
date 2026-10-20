@@ -1,7 +1,7 @@
 import Vector from "std::vector";
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -89,7 +89,8 @@ function ownershipReportCountEventKind(events: &Vector<Borrowck::OwnershipEvent>
 /// file named `test.ign`. `code` is the diagnostic the caller expects, or the
 /// empty string when it expects none.
 function runOwnershipReport(source: str, filter: str, code: str): OwnershipReportRun {
-  let file: SourceFile = SourceFile::create("test.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "test.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(ownershipReportCountErrors(&parsed.lexDiagnostics), 0);
@@ -134,7 +135,7 @@ function runOwnershipReport(source: str, filter: str, code: str): OwnershipRepor
   );
 
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
-  files.push(SourceFile::create("test.ign", source));
+  files.push(SourceFile::create(&mut sourceMap, "test.ign", source));
 
   let reports: Vector<Borrowck::OwnershipReport::FunctionReport> = Borrowck::OwnershipReport::build(
     &hir, &defStore, &symbols, &checked.dropSchedules, &checked.ownershipEvents, &files, "", filter,

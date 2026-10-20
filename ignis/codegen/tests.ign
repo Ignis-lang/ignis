@@ -3,7 +3,7 @@ import Path from "std::path";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 import Analyzer from "@compiler::analyzer";
 import BuildModuleKind, DiscoveryResult, Resolver from "@compiler::build";
@@ -159,7 +159,8 @@ function codegenEmitWith(
   freestanding: boolean,
   linkHeaders: &Vector<CodegenC::LinkHeader>,
 ): CodegenEmission {
-  let file: SourceFile = SourceFile::create("codegen_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "codegen_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(codegenCountErrors(&parsed.lexDiagnostics), 0);
@@ -245,7 +246,7 @@ function codegenEmitWith(
   let mut hooks: CodegenC::RuntimeHooks = CodegenC::RuntimeHooks::hosted();
   hooks.freestanding = freestanding;
   hooks.linkHeaders = codegenCloneLinkHeaders(linkHeaders);
-  hooks.sources.push(SourceFile::create("codegen_tests.ign", source));
+  hooks.sources.push(SourceFile::create(&mut sourceMap, "codegen_tests.ign", source));
 
   if (let Option::SOME(handler) = &handlers.panicHandler) {
     hooks.panicHandler = Option::SOME(handler.defId);
@@ -1345,8 +1346,9 @@ function codegenModuleInfoPositionForRelativePath(
 /// of what discovery would have produced.
 @test
 function codegenAllocTraceReportIsDecidedByRealDiscoveryNotAHandBuiltModuleInfo(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = codegenFixturePath("test_cases/selfhost/codegen/alloc_trace_relative_std");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
