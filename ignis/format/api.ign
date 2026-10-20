@@ -29,47 +29,283 @@ import _ from "./model";
 import _ from "./printer";
 import _ from "./safety";
 
-/// `String::lines()` appends a spurious trailing empty entry when the text ends
-/// with '\n', unlike Rust's `str::lines()` (repro
-/// "string-lines-trailing-newline").
-function apiLines(text: &String): Vector<String> {
-  let mut lines: Vector<String> = text.lines();
+/// Splits `text` into lines that keep their '\n' terminator, so a final line
+/// without one compares unequal to the same line with one and the diff can
+/// mark it.
+function diffLines(text: &String): Vector<String> {
+  let mut lines: Vector<String> = Vector::new<String>();
+  let mut lineStart: u64 = 0;
+  let mut index: u64 = 0;
 
-  if (text.length() > 0 && lines.length() > 0) {
-    let Option::SOME(lastByte) = text.byteAt(text.length() - 1) else {
-      return lines;
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
     };
 
-    if (lastByte == '\n' as u8) {
-      lines.pop();
+    if (byte == '\n' as u8) {
+      lines.push(text.substringBytes(lineStart, index + 1));
+      lineStart = index + 1;
     }
+
+    index += 1;
+  }
+
+  if (lineStart < text.length()) {
+    lines.push(text.substringBytes(lineStart, text.length()));
   }
 
   return lines;
 }
 
-function maxU64(left: u64, right: u64): u64 {
-  if (left > right) {
-    return left;
-  }
+function diffLinesEqual(
+  oldLines: &Vector<String>,
+  newLines: &Vector<String>,
+  oldIndex: i64,
+  newIndex: i64
+): boolean {
+  let Option::SOME(oldLine) = oldLines.get(oldIndex as u64) else {
+    return false;
+  };
+  let Option::SOME(newLine) = newLines.get(newIndex as u64) else {
+    return false;
+  };
 
-  return right;
+  return oldLine.equals(newLine);
 }
 
-function minU64(left: u64, right: u64): u64 {
-  if (left < right) {
-    return left;
+function diffVectorAt(values: &Vector<i64>, index: i64): i64 {
+  if (index < 0) {
+    return -1;
   }
 
-  return right;
+  let Option::SOME(value) = values.get(index as u64) else {
+    return -1;
+  };
+
+  return *value;
 }
 
-function saturatingSub(value: u64, amount: u64): u64 {
-  if (value < amount) {
-    return 0;
+function diffVectorSet(values: &mut Vector<i64>, index: i64, value: i64): void {
+  if (index >= 0) {
+    values.set(index as u64, value);
+  }
+}
+
+/// Marks in `oldKept`/`newKept` the lines of `oldLines[oldStart..oldEnd]` and
+/// `newLines[newStart..newEnd]` that belong to a longest common subsequence,
+/// using Myers' bisection so memory stays linear in the input size.
+function diffRange(
+  oldLines: &Vector<String>,
+  newLines: &Vector<String>,
+  oldStart: i64,
+  oldEnd: i64,
+  newStart: i64,
+  newEnd: i64,
+  oldKept: &mut Vector<boolean>,
+  newKept: &mut Vector<boolean>
+): void {
+  let mut firstOld: i64 = oldStart;
+  let mut firstNew: i64 = newStart;
+
+  while (firstOld < oldEnd && firstNew < newEnd && diffLinesEqual(oldLines, newLines, firstOld, firstNew)) {
+    oldKept.set(firstOld as u64, true);
+    newKept.set(firstNew as u64, true);
+    firstOld += 1;
+    firstNew += 1;
   }
 
-  return value - amount;
+  let mut lastOld: i64 = oldEnd;
+  let mut lastNew: i64 = newEnd;
+
+  while (lastOld > firstOld && lastNew > firstNew && diffLinesEqual(oldLines, newLines, lastOld - 1, lastNew - 1)) {
+    lastOld -= 1;
+    lastNew -= 1;
+    oldKept.set(lastOld as u64, true);
+    newKept.set(lastNew as u64, true);
+  }
+
+  let oldLength: i64 = lastOld - firstOld;
+  let newLength: i64 = lastNew - firstNew;
+
+  if (oldLength == 0 || newLength == 0) {
+    return;
+  }
+
+  let maxDistance: i64 = (oldLength + newLength + 1) / 2;
+  let offset: i64 = maxDistance;
+  let vectorLength: i64 = 2 * maxDistance + 2;
+  let mut forward: Vector<i64> = Vector::new<i64>();
+  let mut backward: Vector<i64> = Vector::new<i64>();
+  let mut fill: i64 = 0;
+
+  while (fill < vectorLength) {
+    forward.push(-1);
+    backward.push(-1);
+    fill += 1;
+  }
+
+  diffVectorSet(&mut forward, offset + 1, 0);
+  diffVectorSet(&mut backward, offset + 1, 0);
+
+  let delta: i64 = oldLength - newLength;
+  let frontOverlaps: boolean = delta % 2 != 0;
+  let mut forwardStart: i64 = 0;
+  let mut forwardEnd: i64 = 0;
+  let mut backwardStart: i64 = 0;
+  let mut backwardEnd: i64 = 0;
+  let mut distance: i64 = 0;
+  let mut splitOld: i64 = -1;
+  let mut splitNew: i64 = -1;
+
+  while (distance < maxDistance && splitOld < 0) {
+    let mut diagonal: i64 = -distance + forwardStart;
+
+    while (diagonal <= distance - forwardEnd && splitOld < 0) {
+      let diagonalOffset: i64 = offset + diagonal;
+      let mut x: i64 = 0;
+
+      if (diagonal == -distance || (diagonal != distance && diffVectorAt(&forward, diagonalOffset - 1) < diffVectorAt(&forward, diagonalOffset + 1))) {
+        x = diffVectorAt(&forward, diagonalOffset + 1);
+      } else {
+        x = diffVectorAt(&forward, diagonalOffset - 1) + 1;
+      }
+
+      let mut y: i64 = x - diagonal;
+
+      while (x < oldLength && y < newLength && diffLinesEqual(oldLines, newLines, firstOld + x, firstNew + y)) {
+        x += 1;
+        y += 1;
+      }
+
+      diffVectorSet(&mut forward, diagonalOffset, x);
+
+      if (x > oldLength) {
+        forwardEnd += 2;
+      } else if (y > newLength) {
+        forwardStart += 2;
+      } else if (frontOverlaps) {
+        let otherOffset: i64 = offset + delta - diagonal;
+
+        if (otherOffset >= 0 && otherOffset < vectorLength && diffVectorAt(&backward, otherOffset) != -1) {
+          if (x >= oldLength - diffVectorAt(&backward, otherOffset)) {
+            splitOld = x;
+            splitNew = y;
+          }
+        }
+      }
+
+      diagonal += 2;
+    }
+
+    diagonal = -distance + backwardStart;
+
+    while (diagonal <= distance - backwardEnd && splitOld < 0) {
+      let diagonalOffset: i64 = offset + diagonal;
+      let mut x: i64 = 0;
+
+      if (diagonal == -distance || (diagonal != distance && diffVectorAt(&backward, diagonalOffset - 1) < diffVectorAt(&backward, diagonalOffset + 1))) {
+        x = diffVectorAt(&backward, diagonalOffset + 1);
+      } else {
+        x = diffVectorAt(&backward, diagonalOffset - 1) + 1;
+      }
+
+      let mut y: i64 = x - diagonal;
+
+      while (x < oldLength && y < newLength && diffLinesEqual(oldLines, newLines, lastOld - x - 1, lastNew - y - 1)) {
+        x += 1;
+        y += 1;
+      }
+
+      diffVectorSet(&mut backward, diagonalOffset, x);
+
+      if (x > oldLength) {
+        backwardEnd += 2;
+      } else if (y > newLength) {
+        backwardStart += 2;
+      } else if (!frontOverlaps) {
+        let otherOffset: i64 = offset + delta - diagonal;
+
+        if (otherOffset >= 0 && otherOffset < vectorLength && diffVectorAt(&forward, otherOffset) != -1) {
+          let forwardX: i64 = diffVectorAt(&forward, otherOffset);
+          let forwardY: i64 = offset + forwardX - otherOffset;
+
+          if (forwardX >= oldLength - x) {
+            splitOld = forwardX;
+            splitNew = forwardY;
+          }
+        }
+      }
+
+      diagonal += 2;
+    }
+
+    distance += 1;
+  }
+
+  if (splitOld < 0) {
+    return;
+  }
+
+  diffRange(
+    oldLines,
+    newLines,
+    firstOld,
+    firstOld + splitOld,
+    firstNew,
+    firstNew + splitNew,
+    oldKept,
+    newKept
+  );
+  diffRange(
+    oldLines,
+    newLines,
+    firstOld + splitOld,
+    lastOld,
+    firstNew + splitNew,
+    lastNew,
+    oldKept,
+    newKept
+  );
+}
+
+/// One line of the aligned diff: kept in both texts, removed from the old
+/// one, or added by the new one. `oldLine`/`newLine` count the lines of each
+/// text that come before it.
+record DiffOperation {
+  public kind: u8;
+  public oldLine: u64;
+  public newLine: u64;
+}
+
+const DIFF_KEEP: u8 = 0;
+const DIFF_DELETE: u8 = 1;
+const DIFF_INSERT: u8 = 2;
+const DIFF_CONTEXT: u64 = 3;
+
+function pushDiffRange(output: &mut String, start: u64, count: u64): void {
+  let mut first: u64 = start + 1;
+
+  if (count == 0) {
+    first = start;
+  }
+
+  let firstText: String = first.toString();
+  output.push(&firstText);
+
+  if (count != 1) {
+    let countText: String = count.toString();
+    output.pushStr(",");
+    output.push(&countText);
+  }
+}
+
+function pushDiffLine(output: &mut String, marker: str, line: &String): void {
+  output.pushStr(marker);
+  output.push(line);
+
+  if (!line.endsWith("\n")) {
+    output.pushStr("\n\\ No newline at end of file\n");
+  }
 }
 
 /// `libc`'s `snprintf`, bound here (rather than in `std::libc`) only for
@@ -399,11 +635,12 @@ export namespace Format {
   }
 
   /// Renders a unified diff between two texts, with three lines of context
-  /// around each run of changed lines. Line-aligned rather than
-  /// longest-common-subsequence based, matching the host CLI.
+  /// around each run of changed lines. Lines are aligned on a longest common
+  /// subsequence, and changes closer than twice the context share one hunk,
+  /// as `diff -u` does.
   function unifiedDiff(path: &String, oldText: &String, newText: &String): String {
-    let oldLines: Vector<String> = apiLines(oldText);
-    let newLines: Vector<String> = apiLines(newText);
+    let oldLines: Vector<String> = diffLines(oldText);
+    let newLines: Vector<String> = diffLines(newText);
 
     let mut output: String = String::create("--- ");
     output.push(path);
@@ -411,112 +648,148 @@ export namespace Format {
     output.push(path);
     output.pushChar('\n');
 
-    let maxLines: u64 = maxU64(oldLines.length(), newLines.length());
+    let mut oldKept: Vector<boolean> = Vector::new<boolean>();
+    let mut newKept: Vector<boolean> = Vector::new<boolean>();
 
-    let mut changeStarts: Vector<u64> = Vector::new<u64>();
-    let mut changeEnds: Vector<u64> = Vector::new<u64>();
+    while (oldKept.length() < oldLines.length()) {
+      oldKept.push(false);
+    }
 
-    let mut inChange: boolean = false;
-    let mut changeStart: u64 = 0;
+    while (newKept.length() < newLines.length()) {
+      newKept.push(false);
+    }
+
+    diffRange(
+      &oldLines,
+      &newLines,
+      0,
+      oldLines.length() as i64,
+      0,
+      newLines.length() as i64,
+      &mut oldKept,
+      &mut newKept
+    );
+
+    let mut operations: Vector<DiffOperation> = Vector::new<DiffOperation>();
+    let mut oldIndex: u64 = 0;
+    let mut newIndex: u64 = 0;
+
+    while (oldIndex < oldLines.length() || newIndex < newLines.length()) {
+      let oldIsKept: boolean = match (oldKept.get(oldIndex)) {
+        Option::SOME(kept) -> *kept,
+        Option::NONE -> true,
+      };
+      let mut kind: u8 = DIFF_INSERT;
+
+      if (oldIndex < oldLines.length() && !oldIsKept) {
+        kind = DIFF_DELETE;
+      } else if (oldIndex < oldLines.length() && newIndex < newLines.length()) {
+        let newIsKept: boolean = match (newKept.get(newIndex)) {
+          Option::SOME(kept) -> *kept,
+          Option::NONE -> false,
+        };
+
+        if (newIsKept) {
+          kind = DIFF_KEEP;
+        }
+      }
+
+      operations.push(DiffOperation { kind: kind, oldLine: oldIndex, newLine: newIndex });
+
+      if (kind != DIFF_INSERT) {
+        oldIndex += 1;
+      }
+
+      if (kind != DIFF_DELETE) {
+        newIndex += 1;
+      }
+    }
+
     let mut index: u64 = 0;
 
-    while (index < maxLines) {
-      let mut linesAreEqual: boolean = false;
+    while (index < operations.length()) {
+      let Option::SOME(operation) = operations.get(index) else {
+        break;
+      };
 
-      if (index < oldLines.length() && index < newLines.length()) {
-        if (let Option::SOME(oldLine) = oldLines.get(index)) {
-          if (let Option::SOME(newLine) = newLines.get(index)) {
-            linesAreEqual = oldLine.equals(newLine);
+      if (operation.kind == DIFF_KEEP) {
+        index += 1;
+        continue;
+      }
+
+      let mut hunkStart: u64 = 0;
+
+      if (index > DIFF_CONTEXT) {
+        hunkStart = index - DIFF_CONTEXT;
+      }
+
+      let mut lastChange: u64 = index;
+      let mut scan: u64 = index + 1;
+
+      while (scan < operations.length() && scan <= lastChange + 2 * DIFF_CONTEXT + 1) {
+        if (let Option::SOME(candidate) = operations.get(scan)) {
+          if (candidate.kind != DIFF_KEEP) {
+            lastChange = scan;
           }
         }
+
+        scan += 1;
       }
 
-      if (linesAreEqual) {
-        if (inChange) {
-          changeStarts.push(changeStart);
-          changeEnds.push(index);
-          inChange = false;
-        }
-      } else {
-        if (!inChange) {
-          changeStart = index;
-          inChange = true;
-        }
+      let mut hunkEnd: u64 = lastChange + 1 + DIFF_CONTEXT;
+
+      if (hunkEnd > operations.length()) {
+        hunkEnd = operations.length();
       }
 
-      index += 1;
-    }
-
-    if (inChange) {
-      changeStarts.push(changeStart);
-      changeEnds.push(maxLines);
-    }
-
-    let mut hunkIndex: u64 = 0;
-
-    while (hunkIndex < changeStarts.length()) {
-      let Option::SOME(start) = changeStarts.get(hunkIndex) else {
-        hunkIndex += 1;
-        continue;
+      let Option::SOME(first) = operations.get(hunkStart) else {
+        break;
       };
+      let mut oldCount: u64 = 0;
+      let mut newCount: u64 = 0;
+      let mut position: u64 = hunkStart;
 
-      let Option::SOME(end) = changeEnds.get(hunkIndex) else {
-        hunkIndex += 1;
-        continue;
-      };
+      while (position < hunkEnd) {
+        if (let Option::SOME(entry) = operations.get(position)) {
+          if (entry.kind != DIFF_INSERT) {
+            oldCount += 1;
+          }
 
-      let contextBefore: u64 = saturatingSub(*start, 3);
-      let contextAfter: u64 = minU64(*end + 3, maxLines);
-      let hunkLength: u64 = contextAfter - contextBefore;
+          if (entry.kind != DIFF_DELETE) {
+            newCount += 1;
+          }
+        }
 
-      let headerStartValue: u64 = contextBefore + 1;
-      let headerStart: String = headerStartValue.toString();
-      let headerLength: String = hunkLength.toString();
+        position += 1;
+      }
 
       output.pushStr("@@ -");
-      output.push(&headerStart);
-      output.pushStr(",");
-      output.push(&headerLength);
+      pushDiffRange(&mut output, first.oldLine, oldCount);
       output.pushStr(" +");
-      output.push(&headerStart);
-      output.pushStr(",");
-      output.push(&headerLength);
+      pushDiffRange(&mut output, first.newLine, newCount);
       output.pushStr(" @@\n");
 
-      let mut lineIndex: u64 = contextBefore;
+      position = hunkStart;
 
-      while (lineIndex < contextAfter) {
-        let oldLine: Option<&String> = oldLines.get(lineIndex);
-        let newLine: Option<&String> = newLines.get(lineIndex);
-
-        if (lineIndex >= *start && lineIndex < *end) {
-          if (let Option::SOME(line) = oldLine) {
-            output.pushStr("-");
-            output.push(line);
-            output.pushChar('\n');
-          }
-
-          if (let Option::SOME(line) = newLine) {
-            output.pushStr("+");
-            output.push(line);
-            output.pushChar('\n');
-          }
-        } else {
-          if (let Option::SOME(line) = oldLine) {
-            output.pushStr(" ");
-            output.push(line);
-            output.pushChar('\n');
-          } else if (let Option::SOME(line) = newLine) {
-            output.pushStr(" ");
-            output.push(line);
-            output.pushChar('\n');
+      while (position < hunkEnd) {
+        if (let Option::SOME(entry) = operations.get(position)) {
+          if (entry.kind == DIFF_INSERT) {
+            if (let Option::SOME(line) = newLines.get(entry.newLine)) {
+              pushDiffLine(&mut output, "+", line);
+            }
+          } else if (let Option::SOME(line) = oldLines.get(entry.oldLine)) {
+            if (entry.kind == DIFF_DELETE) {
+              pushDiffLine(&mut output, "-", line);
+            } else {
+              pushDiffLine(&mut output, " ", line);
+            }
           }
         }
 
-        lineIndex += 1;
+        position += 1;
       }
 
-      hunkIndex += 1;
+      index = hunkEnd;
     }
 
     return output;

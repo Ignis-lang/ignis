@@ -135,7 +135,96 @@ function apiRendersAUnifiedDiff(): void {
 
   Test::assertEq<str>(
     diff.toStr(),
-    "--- main.ign\n+++ main.ign\n@@ -1,3 +1,3 @@\n-function main(): void { return; }\n+function main(): void {\n+  return;\n+}\n"
+    "--- main.ign\n+++ main.ign\n@@ -1 +1,3 @@\n-function main(): void { return; }\n+function main(): void {\n+  return;\n+}\n"
+  );
+}
+
+function assertUnifiedDiff(oldSource: str, newSource: str, expected: str): void {
+  let path: String = String::create("main.ign");
+  let oldText: String = String::create(oldSource);
+  let newText: String = String::create(newSource);
+
+  Test::assertEq<str>(Format::unifiedDiff(&path, &oldText, &newText).toStr(), expected);
+}
+
+@test
+function apiRendersAUnifiedDiffForMiddleLine(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    "line1\nline2\nline3\nline4\nLINE5\nline6\nline7\nline8\nline9\nline10\n",
+    "--- main.ign\n+++ main.ign\n@@ -2,7 +2,7 @@\n line2\n line3\n line4\n-line5\n+LINE5\n line6\n line7\n line8\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForFirstLine(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    "LINE1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    "--- main.ign\n+++ main.ign\n@@ -1,4 +1,4 @@\n-line1\n+LINE1\n line2\n line3\n line4\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForLastLine(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nLINE10\n",
+    "--- main.ign\n+++ main.ign\n@@ -7,4 +7,4 @@\n line7\n line8\n line9\n-line10\n+LINE10\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForNearbyChangesInOneHunk(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\n",
+    "line1\nline2\nLINE3\nline4\nline5\nline6\nline7\nline8\nLINE9\nline10\nline11\nline12\nline13\nline14\nline15\n",
+    "--- main.ign\n+++ main.ign\n@@ -1,12 +1,12 @@\n line1\n line2\n-line3\n+LINE3\n line4\n line5\n line6\n line7\n line8\n-line9\n+LINE9\n line10\n line11\n line12\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForDistantChangesInTwoHunks(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19\nline20\n",
+    "line1\nLINE2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nLINE16\nline17\nline18\nline19\nline20\n",
+    "--- main.ign\n+++ main.ign\n@@ -1,5 +1,5 @@\n line1\n-line2\n+LINE2\n line3\n line4\n line5\n@@ -13,7 +13,7 @@\n line13\n line14\n line15\n-line16\n+LINE16\n line17\n line18\n line19\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForInsertionOnlyHunk(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    "line1\nline2\nline3\nline4\nline5\nadded1\nadded2\nline6\nline7\nline8\nline9\nline10\n",
+    "--- main.ign\n+++ main.ign\n@@ -3,6 +3,8 @@\n line3\n line4\n line5\n+added1\n+added2\n line6\n line7\n line8\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForDeletionOnlyHunk(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    "line1\nline2\nline3\nline4\nline7\nline8\nline9\nline10\n",
+    "--- main.ign\n+++ main.ign\n@@ -2,8 +2,6 @@\n line2\n line3\n line4\n-line5\n-line6\n line7\n line8\n line9\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForFileWithoutATrailingNewline(): void {
+  assertUnifiedDiff(
+    "line1\nline2\nline3\nline4\nline5",
+    "line1\nline2\nline3\nline4\nline5\n",
+    "--- main.ign\n+++ main.ign\n@@ -2,4 +2,4 @@\n line2\n line3\n line4\n-line5\n\\ No newline at end of file\n+line5\n"
+  );
+}
+
+@test
+function apiRendersAUnifiedDiffForSplitLineShiftingLaterLines(): void {
+  assertUnifiedDiff(
+    "  a |> b |> c;\nline1\nline2\nline3\nline4\nline5\n  d |> e;\n}\n",
+    "  a\n    |> b\n    |> c;\nline1\nline2\nline3\nline4\nline5\n  d\n    |> e;\n}\n",
+    "--- main.ign\n+++ main.ign\n@@ -1,8 +1,11 @@\n-  a |> b |> c;\n+  a\n+    |> b\n+    |> c;\n line1\n line2\n line3\n line4\n line5\n-  d |> e;\n+  d\n+    |> e;\n }\n"
   );
 }
 
