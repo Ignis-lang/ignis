@@ -699,6 +699,19 @@ function lirLoweringPutsShortCircuitOperandsBehindABranch(): void {
   Test::assertSnapshot("lir-lowering-short-circuit", rendered.toStr());
 }
 
+/// Scenario: `Found::SOME(Origin::INSTANCE(found))` where `SOME` holds an `&Origin`,
+/// and `Found::SOME(_)`, whose only sub-pattern is a wildcard.
+/// Spec: a refutable sub-pattern dereferences the payload, which `NONE` does not
+/// have, so it sits behind a branch on the tag; a wildcard alone needs no branch.
+@test
+function lirLoweringPutsRefutableSubpatternsBehindTheTag(): void {
+  let rendered: String = lirRenderLoweredLocals(
+    "enum Origin {\n  PLAIN(u32),\n  INSTANCE(u64),\n}\n\nenum Found {\n  SOME(&Origin),\n  NONE,\n}\n\nfunction instanceOf(origin: Found): u64 {\n  if (let Found::SOME(Origin::INSTANCE(found)) = origin) {\n    return found;\n  }\n\n  return 0;\n}\n\nfunction present(origin: Found): boolean {\n  if (let Found::SOME(_) = origin) {\n    return true;\n  }\n\n  return false;\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-refutable-subpattern-guard", rendered.toStr());
+}
+
 /// Scenario: a `match` arm whose body is a second `match`, every arm of which
 /// diverges, so the inner one carries the `never` type. A slot for it would be
 /// declared with a C type that holds nothing.

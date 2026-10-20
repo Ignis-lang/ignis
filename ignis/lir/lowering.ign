@@ -4068,6 +4068,34 @@ export namespace LirLowering {
     public place: Option<Lir::Operand>;
   }
 
+  /// The join of a variant check whose sub-patterns run only after its tag matched:
+  /// `resultSlot` holds the tag result on the skipping edge and the full result on the
+  /// matching one.
+  record PatternTagGuard {
+    public mergeBlock: Lir::BlockId;
+    public resultSlot: Lir::LocalId;
+  }
+
+  /// Whether any of `patterns` can fail to match, so checking it reads the payload
+  /// as a specific variant.
+  function hasRefutableSubpattern(patterns: &Vector<Hir::HirPattern>): boolean {
+    let mut index: u64 = 0;
+
+    while (index < patterns.length()) {
+      if (let Option::SOME(pattern) = patterns.get(index)) {
+        match (pattern) {
+          Hir::HirPattern::Wildcard -> {},
+          Hir::HirPattern::Binding(_) -> {},
+          _ -> { return true; },
+        };
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   /// Manual clone for `Option<Lir::Operand>`, mirroring `Lir::copyOperand`: a place is
   /// read again by every recursive pattern check that shares it.
   function copyPlace(place: &Option<Lir::Operand>): Option<Lir::Operand> {
@@ -4432,6 +4460,33 @@ export namespace LirLowering {
           right: Lir::Operand::Const(Lir::ConstValue::UInt(variantPattern.variantTag as u64, tagType)),
         }));
 
+        // A refutable sub-pattern reads the payload as the variant it names, and one
+        // under a reference dereferences it: on any other variant that payload is
+        // another variant's bytes (`NONE` has none), so the sub-patterns run only
+        // once the tag matched. Bindings and wildcards only copy the payload, which
+        // is harmless, and keep the straight-line check.
+        let mut guardBlocks: Option<LirLowering::PatternTagGuard> = Option::NONE;
+
+        if (LirLowering::hasRefutableSubpattern(&variantPattern.args)) {
+          let payloadBlock: Lir::BlockId = LirLowering::createBlock(function_, "pattern_payload");
+          let mergeBlock: Lir::BlockId = LirLowering::createBlock(function_, "pattern_merge");
+          let resultSlot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, boolType);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+            dest: resultSlot,
+            value: Lir::Operand::Temp(tagMatch),
+          }));
+
+          LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+            condition: Lir::Operand::Temp(tagMatch),
+            thenBlock: payloadBlock,
+            elseBlock: mergeBlock,
+          }));
+
+          LirLowering::switchToBlock(state, payloadBlock);
+          guardBlocks = Option::SOME(LirLowering::PatternTagGuard { mergeBlock: mergeBlock, resultSlot: resultSlot });
+        }
+
         let mut combined: Lir::Operand = Lir::Operand::Temp(tagMatch);
         let mut checkIndex: u64 = 0;
         let mut runtimeFieldIndex: u32 = 0;
@@ -4510,6 +4565,24 @@ export namespace LirLowering {
 
           combined = Lir::Operand::Temp(andTemp);
           checkIndex += 1;
+        }
+
+        if (let Option::SOME(guard) = guardBlocks) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+            dest: guard.resultSlot,
+            value: combined,
+          }));
+          LirLowering::terminate(function_, state, Lir::Terminator::Goto(guard.mergeBlock));
+          LirLowering::switchToBlock(state, guard.mergeBlock);
+
+          let guarded: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+            dest: guarded,
+            source: guard.resultSlot,
+          }));
+
+          return Lir::Operand::Temp(guarded);
         }
 
         return combined;

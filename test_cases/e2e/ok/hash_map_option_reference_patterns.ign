@@ -1,0 +1,85 @@
+// e2e: std
+//
+// `Option<&T>` taken from `HashMap::get`, destructured through nested `if let`
+// (an enum payload under the reference, a reference returned out of the nested
+// scopes): every `NONE` lookup skips the nested check instead of dereferencing it.
+import Io from "std::io";
+import HashMap from "std::collections";
+
+record Generic {
+  public name: String;
+}
+
+enum Origin {
+  Plain(u32),
+  Instance(Generic),
+}
+
+record Entry {
+  public note: Option<String>;
+}
+
+record Store {
+  public entries: HashMap<u32, Entry>;
+  public origins: HashMap<u32, Origin>;
+
+  public originOf(&self, key: u32): Option<&Origin> {
+    return self.origins.get(&key);
+  }
+
+  public noteOf(&self, key: u32): Option<&String> {
+    if (let Option::SOME(entry) = self.entries.get(&key)) {
+      if (let Option::SOME(note) = &entry.note) {
+        return Option::SOME(&note);
+      }
+    }
+
+    return Option::NONE;
+  }
+}
+
+function describe(store: &Store, key: u32): void {
+  if (let Option::SOME(Origin::Instance(origin)) = store.originOf(key)) {
+    Io::println(origin.name.toStr());
+  } else if (let Option::SOME(Origin::Plain(7)) = store.originOf(key)) {
+    Io::println("plain seven");
+  } else {
+    Io::println("no instance");
+  }
+}
+
+function kindOf(value: Option<&Origin>): i32 {
+  return match (value) {
+    Option::SOME(Origin::Plain(_)) -> 1,
+    Option::SOME(Origin::Instance(_)) -> 2,
+    Option::NONE -> 0,
+  };
+}
+
+function main(): i32 {
+  let mut store: Store = Store { entries: HashMap::new<u32, Entry>(), origins: HashMap::new<u32, Origin>() };
+  store.entries.insert(1, Entry { note: Option::SOME(String::create("noted")) });
+  store.entries.insert(2, Entry { note: Option::NONE });
+  store.origins.insert(1, Origin::Instance(Generic { name: String::create("generic") }));
+  store.origins.insert(2, Origin::Plain(7));
+
+  describe(&store, 1);
+  describe(&store, 2);
+  describe(&store, 3);
+
+  let mut key: u32 = 1;
+
+  while (key <= 3) {
+    if (let Option::SOME(note) = store.noteOf(key)) {
+      Io::println(note.toStr());
+    } else {
+      Io::println("no note");
+    }
+
+    key += 1;
+  }
+
+  let total: i32 = kindOf(store.originOf(2)) * 100 + kindOf(store.originOf(1)) * 10 + kindOf(store.originOf(9));
+
+  return total - 120;
+}
