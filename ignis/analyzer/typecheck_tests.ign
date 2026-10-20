@@ -15146,10 +15146,11 @@ function typecheckBoundRejectsANameThatIsNotATraitInScope(): void {
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 2);
 }
 
-/// Scenario: a trait declared in a namespace is not in scope by its bare name
-/// outside it, even as the only trait of that name.
+/// Scenario: a trait declared in a namespace is not reached by its bare name
+/// outside it, even as the only trait of that name: the use is A0263, which
+/// names the path to write, and nothing else.
 @test
-function typecheckImplementsRejectsATraitOutOfScope(): void {
+function typecheckImplementsTraitOutOfScopeReportsItsPath(): void {
   let parsed: ParseOutput = typecheckParseSource(
     "namespace A {\n  trait Named {\n    first(&self): i32;\n  }\n}\n\n@implements(Named)\nrecord OnlyFirst {\n  public value: i32;\n\n  first(&self): i32 {\n    return self.value;\n  }\n}\n",
   );
@@ -15160,7 +15161,10 @@ function typecheckImplementsRejectsATraitOutOfScope(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
-  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::UNKNOWN_IMPLEMENTED_TRAIT);
+  // The use is reported once, with the path to write, not also as an
+  // unknown trait.
+  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::NAMESPACE_MEMBER_REQUIRES_PATH);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
 }
 
 /// Scenario: a type parameter bounded by two traits answers the methods of

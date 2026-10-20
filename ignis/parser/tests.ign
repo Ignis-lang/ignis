@@ -5326,12 +5326,13 @@ function parserMaterializesTheDefaultsOfTheTraitThePathNames(): void {
   Test::assertEq<str>(traitMethodName(&module, recordMethodId(&module, localId, 0)).toStr(), "secondTag");
 }
 
-/// Scenario: a bare `@implements` name is read through the enclosing
-/// namespaces only, so a trait nested in another namespace hands its defaults
-/// to no type that names it bare from outside.
-/// Spec: TRAITS.md "Implementing a Trait"; parity fixture e2e_err::trait_identity_trait_out_of_scope.
+/// Scenario: a bare `@implements` name that only names a trait nested in a
+/// namespace the type is outside of still receives that trait's defaults. The
+/// analyzer reports the use (A0263, with the path to write); copying the
+/// defaults keeps that the only error instead of adding missing methods.
+/// Spec: TRAITS.md "Implementing a Trait"; parity fixture e2e_err::namespace_member_trait_default_bare_outside.
 @test
-function parserMaterializesNoDefaultsForATraitOutOfScope(): void {
+function parserMaterializesDefaultsForATraitOutOfScope(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_trait_default_out_of_scope.ign",
     "namespace A { trait Named { firstTag(&self): i32 { return 1; } } } @implements(Named) record Outside { public x: i32; }"
@@ -5347,7 +5348,7 @@ function parserMaterializesNoDefaultsForATraitOutOfScope(): void {
     Option::NONE -> @panic("missing record Outside"),
   };
 
-  Test::assertEq<u64>(recordMethodCount(&module, outsideId), 0);
+  Test::assertEq<u64>(recordMethodCount(&module, outsideId), 1);
 }
 
 /// Reads the item at `index` inside the namespace `id` denotes.
