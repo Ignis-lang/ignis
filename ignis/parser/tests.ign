@@ -4,6 +4,7 @@ import Test from "std::test";
 
 import Diagnostic, DiagnosticBag, SourceFile, SourceSpan, SourceMap from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
 import CompileFlags, ParseOutput, Parser from "@compiler::parser";
 
 function readFixture(path: str): String {
@@ -5444,6 +5445,98 @@ function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
   let overrideId: Ast::ItemId = recordMethodId(&module, betaId, 0);
   Test::assert(overrideId.raw() != inheritedId.raw());
   Test::assertEq<str>(traitMethodName(&module, overrideId).toStr(), "answer");
+}
+
+/// The module at `index` of `modules`.
+function moduleAt(modules: &Vector<Ast::Module>, index: u64): &Ast::Module {
+  return match (modules.get(index)) {
+    Option::SOME(module) -> module,
+    Option::NONE -> @panic("missing module"),
+  };
+}
+
+/// Scenario: a type that implements a trait another module declares
+/// inherits its default as a method of its own, copied into the type's
+/// module with its signature types, and recording the trait's module and
+/// namespaces. The trait's module is only read; copying again adds nothing.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e::trait_default_cross_module.
+@test
+function parserCopiesTraitDefaultsAcrossModules(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let traitFile: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/shapes.ign",
+    "export namespace Shapes { trait Answerable { answer(&self): i32 { let value: i32 = 42; return value; } } }"
+  );
+  let implementerFile: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/main.ign",
+    "import Shapes from \"fixtures/shapes.ign\"; @implements(Shapes::Answerable) record Alpha { public x: i32; }"
+  );
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(Parser::parseFile(&traitFile).module);
+  modules.push(Parser::parseFile(&implementerFile).module);
+
+  let mut moduleSources: Vector<String> = Vector::new<String>();
+  moduleSources.push(String::create("fixtures/shapes.ign"));
+  moduleSources.push(String::create("fixtures/main.ign"));
+  let noPrelude: Vector<String> = Vector::new<String>();
+
+  let traitItems: u64 = moduleAt(&modules, 0).items.length();
+  let traitExpressions: u64 = moduleAt(&modules, 0).expressions.length();
+  let traitTypes: u64 = moduleAt(&modules, 0).types.length();
+
+  Parser::materializeCrossModuleDefaults(&mut modules, &moduleSources, &noPrelude);
+
+  let mut alphaId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(0);
+
+  {
+    let traitModule: &Ast::Module = moduleAt(&modules, 0);
+    Test::assertEq<u64>(traitModule.items.length(), traitItems);
+    Test::assertEq<u64>(traitModule.expressions.length(), traitExpressions);
+    Test::assertEq<u64>(traitModule.types.length(), traitTypes);
+
+    let implementer: &Ast::Module = moduleAt(&modules, 1);
+    alphaId = match (implementer.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+
+    Test::assertEq<u64>(recordMethodCount(implementer, alphaId), 1);
+
+    let inheritedId: Ast::ItemId = recordMethodId(implementer, alphaId, 0);
+    Test::assertEq<str>(traitMethodName(implementer, inheritedId).toStr(), "answer");
+
+    let Option::SOME(scope) = implementer.inheritedScopeOf(inheritedId) else {
+      @panic("the copy records no inherited scope");
+    };
+    let Option::SOME(sourceModule) = scope.sourceModule else {
+      @panic("the copy records no source module");
+    };
+    Test::assertEq<str>(sourceModule.toStr(), "fixtures/shapes.ign");
+    Test::assertEq<u64>(scope.namespaces.length(), 1);
+    Test::assertEq<u64>(implementer.crossModuleSources.length(), 1);
+
+    let returnType: Ast::TypeId = match (expectItem(implementer, inheritedId)) {
+    Ast::Item::Node::Function(functionItem) -> match (functionItem.returnType) {
+      Option::SOME(value) -> value,
+      Option::NONE -> @panic("the copy has no return type"),
+    },
+    _ -> @panic("the copy is not a method"),
+  };
+
+    match (expectType(implementer, returnType)) {
+    Ast::Type::Node::Path(path) -> {
+      Test::assertEq<u64>(path.segments.length(), 1);
+    },
+    _ -> {
+      @panic("the copy's return type is not the path the trait wrote");
+    },
+  };
+  }
+
+  Parser::materializeCrossModuleDefaults(&mut modules, &moduleSources, &noPrelude);
+  Test::assertEq<u64>(recordMethodCount(moduleAt(&modules, 1), alphaId), 1);
 }
 
 /// Reads the value of the `return` statement that opens method `id`'s body.
