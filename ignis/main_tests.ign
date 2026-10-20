@@ -647,3 +647,26 @@ function parseErrorInTheEntryModuleNamesItsFileLineAndColumn(): void {
 
   let _removed = Fs::removeDirAll(&root);
 }
+
+/// Ownership diagnostics are collected for the whole program, so an
+/// inconsistent move in an imported module names that module's file, line and
+/// column instead of the entry module's file at the imported module's line.
+@test
+function ownershipErrorInAnImportedModuleNamesItsFileLineAndColumn(): void {
+  let root: Path::PathBuf = parseErrorProject(
+    "ownership-error-imported",
+    "import Paths from \"./helper\";\n\nfunction main(): i32 {\n  let resolver: Paths::Resolver = Paths::Resolver { depth: 1 };\n  return resolver.run(true) as i32;\n}\n",
+    "export namespace Paths {\n  @implements(Drop)\n  record Token {\n    public value: u64;\n  }\n\n  function consume(token: Token): u64 {\n    return token.value;\n  }\n\n  export record Resolver {\n    public depth: u64;\n\n    public run(&self, flag: boolean): u64 {\n      let trimmed: Token = Token { value: 1 };\n      if (flag) {\n        consume(trimmed);\n      }\n      let mut total: u64 = trimmed.value;\n\n      let path: Token = Token { value: 2 };\n      let mut index: u64 = 0;\n      while (index < self.depth) {\n        match (index) {\n          0 -> {\n            total += consume(path);\n          },\n          _ -> {},\n        };\n        index += 1;\n      }\n\n      return total + path.value;\n    }\n  }\n}\n",
+  );
+  let report: String = parseErrorReport(&root);
+
+  Test::assert(reportContains(&report, "Variable 'trimmed' is moved in one branch but not the other"));
+  Test::assert(reportContains(&report, "src/helper.ign:16:7"));
+  Test::assert(reportContains(&report, "src/helper.ign:19:28"));
+  Test::assert(reportContains(&report, "Variable 'path' is moved in one branch but not the other"));
+  Test::assert(reportContains(&report, "src/helper.ign:24:9"));
+  Test::assert(reportContains(&report, "src/helper.ign:33:22"));
+  Test::assert(!reportContains(&report, "src/main.ign"));
+
+  let _removed = Fs::removeDirAll(&root);
+}
