@@ -1,0 +1,61 @@
+// Inside a namespace, and inside namespaces nested in it, every member is
+// reached by its bare name: records, enums, aliases, constants, functions and
+// traits, including from a method and from a nested namespace.
+namespace Geometry {
+  const UNIT: i32 = 10;
+
+  type Length = i32;
+
+  enum Shape {
+    CIRCLE,
+    SQUARE,
+  }
+
+  trait Sized {
+    side(&self): Length;
+  }
+
+  @implements(Sized)
+  record Square {
+    public length: Length;
+
+    side(&self): Length {
+      return self.length;
+    }
+
+    area(&self): i32 {
+      return scale(self.length * self.length);
+    }
+  }
+
+  function scale(value: i32): i32 {
+    return value * UNIT;
+  }
+
+  function measure<T: Sized>(value: &T): Length {
+    return value.side();
+  }
+
+  function weight(shape: Shape): i32 {
+    return match (shape) {
+      Shape::CIRCLE -> 1,
+      Shape::SQUARE -> 2,
+    };
+  }
+
+  namespace Inner {
+    function total(): i32 {
+      let square: Square = Square { length: 2 };
+      let size: Length = measure<Square>(&square);
+      return square.area() + size + weight(Shape::SQUARE) + UNIT;
+    }
+  }
+
+  function run(): i32 {
+    return Inner::total();
+  }
+}
+
+function main(): i32 {
+  return Geometry::run() - 54;
+}

@@ -297,7 +297,7 @@ function main(): i32 {
   `run<H: Http::Handler & Send & Sync>(self, handler)` — `config.threads` threads (default
   8) each accept and serve connections; `run` returns only when every thread's `accept`
   failed, so a running server blocks for good. Handlers implement `trait Http::Handler`
-  (`handle(&self, &Http::Request, &mut Http::Response)`), declared as `@implements(Handler)`.
+  (`handle(&self, &Http::Request, &mut Http::Response)`), declared as `@implements(Http::Handler)`.
 - `Http::serveConnection<H: Http::Handler>(&mut TcpStream, &H, &Http::ServerConfig)` —
   serves one connection: keep-alive, idle read timeout (default 30 s, closes quietly),
   optional `maxRequestsPerConnection`. Malformed requests get the parser's status with

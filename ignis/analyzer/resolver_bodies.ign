@@ -168,6 +168,10 @@ export namespace Analyzer {
       public globalNameSyms: Vector<Analyzer::SymbolId>;
       public globalNameDefs: Vector<Analyzer::DefinitionId>;
       public globalNameScopeKeys: Vector<u64>;
+      /// Parallel to `globalNameSyms`: the path each entry is published
+      /// under, which decides whether a bare name reaches it from the
+      /// namespaces the walk is in.
+      public globalNamePaths: Vector<String>;
 
       /// Prefix-scope table for namespace-prefix validation: one row per
       /// pass-1 entry that can act as a scope container (namespace
@@ -897,6 +901,11 @@ export namespace Analyzer {
         // matching the binder's `ItemId.raw() + 1` encoding.
         let ownScopeKey: u64 = ((*rawIdRef) as u64) + 1;
 
+        let mut publishedPath: String = String::create("");
+        if (let Option::SOME(stored) = defStore.qualifiedNameOf(*defId)) {
+          publishedPath = stored.clone();
+        }
+
         let Option::SOME(def) = defStore.get(*defId) else {
           index += 1;
           continue;
@@ -908,6 +917,7 @@ export namespace Analyzer {
             stateRef.globalNameSyms.push(rec.name);
             stateRef.globalNameDefs.push(*defId);
             stateRef.globalNameScopeKeys.push(scopeKey);
+            stateRef.globalNamePaths.push(publishedPath.clone());
             stateRef.scopeItemKeys.push(ownScopeKey);
             stateRef.scopeItemNameSyms.push(rec.name);
             stateRef.scopeItemParentKeys.push(scopeKey);
@@ -917,12 +927,14 @@ export namespace Analyzer {
             stateRef.globalNameSyms.push(en.name);
             stateRef.globalNameDefs.push(*defId);
             stateRef.globalNameScopeKeys.push(scopeKey);
+            stateRef.globalNamePaths.push(publishedPath.clone());
           },
           Analyzer::Definition::Function(f) -> {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(f.name);
             stateRef.globalNameDefs.push(*defId);
             stateRef.globalNameScopeKeys.push(scopeKey);
+            stateRef.globalNamePaths.push(publishedPath.clone());
           },
           Analyzer::Definition::Variable(v) -> {
             // ADR-B6: include all Variable defs. Pass-1 allocates only top-level
@@ -933,12 +945,14 @@ export namespace Analyzer {
             stateRef.globalNameSyms.push(v.name);
             stateRef.globalNameDefs.push(*defId);
             stateRef.globalNameScopeKeys.push(scopeKey);
+            stateRef.globalNamePaths.push(publishedPath.clone());
           },
           Analyzer::Definition::TypeAlias(alias) -> {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(alias.name);
             stateRef.globalNameDefs.push(*defId);
             stateRef.globalNameScopeKeys.push(scopeKey);
+            stateRef.globalNamePaths.push(publishedPath.clone());
           },
           Analyzer::Definition::Trait(trait_) -> {
             // Trait names are included for ADR-B3: emit a discriminating
@@ -947,6 +961,7 @@ export namespace Analyzer {
             stateRef.globalNameSyms.push(trait_.name);
             stateRef.globalNameDefs.push(*defId);
             stateRef.globalNameScopeKeys.push(scopeKey);
+            stateRef.globalNamePaths.push(publishedPath.clone());
           },
           Analyzer::Definition::Field(_) -> {},
           Analyzer::Definition::Variant(_) -> {},
@@ -962,34 +977,218 @@ export namespace Analyzer {
       }
     }
 
-    /// Linear scan of `state.globalNameSyms` for a matching symbol.
+    /// The entry of `syms`/`defs` (published under `paths`) a bare name
+    /// written inside `chain` names: the reachable one declared deepest, the
+    /// first among equals. When none is reachable, the first entry of that
+    /// name comes back marked unreachable, so the caller can report it.
+    function pickBodyCandidate(
+      syms: &Vector<Analyzer::SymbolId>,
+      defs: &Vector<Analyzer::DefinitionId>,
+      paths: &Vector<String>,
+      chain: &Vector<String>,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      let mut bestIndex: u64 = 0;
+      let mut bestDepth: u64 = 0;
+      let mut bestReachable: boolean = false;
+      let mut anyFound: boolean = false;
+      let mut i: u64 = 0;
+
+      while (i < syms.length()) {
+        let Option::SOME(stored) = syms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (stored.raw() != sym.raw() || defs.get(i).isNone()) {
+          i += 1;
+          continue;
+        }
+
+        let mut path: String = String::create("");
+        if (let Option::SOME(storedPath) = paths.get(i)) {
+          path = storedPath.clone();
+        }
+
+        if (let Option::SOME(depth) = Analyzer::Resolver::bareNameReach(&path, chain)) {
+          if (!bestReachable || depth > bestDepth) {
+            bestIndex = i;
+            bestDepth = depth;
+            bestReachable = true;
+          }
+        } else if (!anyFound) {
+          bestIndex = i;
+        }
+
+        anyFound = true;
+        i += 1;
+      }
+
+      if (!anyFound) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(defId) = defs.get(bestIndex) else {
+        return Option::NONE;
+      };
+
+      let mut path: String = String::create("");
+      if (let Option::SOME(storedPath) = paths.get(bestIndex)) {
+        path = storedPath.clone();
+      }
+
+      return Option::SOME(Analyzer::Resolver::BareCandidate { defId: *defId, reachable: bestReachable, path: path });
+    }
+
+    /// The declaration a bare name finds among this module's own: one the
+    /// namespaces the walk is in reach, or else an unreachable one.
+    function bodyGlobalCandidate(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      return Analyzer::ResolverBodies::pickBodyCandidate(
+        &state.globalNameSyms,
+        &state.globalNameDefs,
+        &state.globalNamePaths,
+        &state.namespaceChain,
+        sym,
+      );
+    }
+
+    /// The declaration a bare name finds among the imported ones, under the
+    /// same reachability rule as `bodyGlobalCandidate`.
+    function bodyImportCandidate(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      return Analyzer::ResolverBodies::pickBodyCandidate(
+        &state.importSyms,
+        &state.importDefs,
+        &state.importQualifiedNames,
+        &state.namespaceChain,
+        sym,
+      );
+    }
+
+    /// The declaration a bare name finds: one the namespaces the walk is in
+    /// reach, declared here before imported, and only past those one it does
+    /// not reach, which the caller reports.
+    function bodyBareCandidate(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      let globalOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::ResolverBodies::bodyGlobalCandidate(state, sym);
+      let importOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::ResolverBodies::bodyImportCandidate(state, sym);
+
+      if (Analyzer::Resolver::candidateReachable(&globalOpt)) {
+        return globalOpt;
+      }
+
+      if (Analyzer::Resolver::candidateReachable(&importOpt)) {
+        return importOpt;
+      }
+
+      if (globalOpt.isSome()) {
+        return globalOpt;
+      }
+
+      return importOpt;
+    }
+
+    /// The module declaration `sym` names, preferring one the namespaces the
+    /// walk is in reach by that bare name.
     ///
     /// Takes `&mut` per binder ADR-4 pattern (no auto-coercion of `&mut` to `&`).
     function bodyGlobalLookup(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
-      let mut i: u64 = 0;
+      return match (Analyzer::ResolverBodies::bodyGlobalCandidate(state, sym)) {
+        Option::SOME(candidate) -> Option::SOME(candidate.defId),
+        Option::NONE -> Option::NONE,
+      };
+    }
 
-      while (i < state.globalNameSyms.length()) {
-        let Option::SOME(stored) = state.globalNameSyms.get(i) else {
-          i += 1;
-          continue;
-        };
-
-        if (stored.raw() == sym.raw()) {
-          let Option::SOME(defId) = state.globalNameDefs.get(i) else {
-            i += 1;
-            continue;
-          };
-
-          return Option::SOME(*defId);
-        }
-
-        i += 1;
+    /// Report a bare name, or the leading segment of a path, whose candidate
+    /// is declared in a namespace or extern block the walk is not inside.
+    function reportUnreachableBodyCandidate(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      candidate: &Analyzer::Resolver::BareCandidate,
+      name: str,
+      written: str,
+      span: SourceSpan,
+    ): void {
+      if (candidate.reachable) {
+        return;
       }
 
-      return Option::NONE;
+      let container: str = Analyzer::Resolver::declaringContainer(defStore, candidate.defId);
+      let diag: Diagnostic = Analyzer::Resolver::namespaceMemberDiagnostic(span, name, &candidate.path, container, written);
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// Report a path whose leading segment names a namespace member the walk
+    /// does not reach: `Inner::helper()` written outside `Outer` has to be
+    /// `Outer::Inner::helper()`. A leading segment that only the program-wide
+    /// index knows counts as reached when any declaration of that name is.
+    function reportUnreachableBodyLeadingSegment(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(leading) = segments.get(0) else {
+        return;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(leading.toStr());
+
+      if (Analyzer::ResolverBodies::lookupLocal(&state.localStack, sym).isSome()) {
+        return;
+      }
+
+      if (Analyzer::Resolver::scopeLookup(&state.typeParamScope, sym).isSome()) {
+        return;
+      }
+
+      let bareOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::ResolverBodies::bodyBareCandidate(state, sym);
+
+      if (Analyzer::Resolver::candidateReachable(&bareOpt)) {
+        return;
+      }
+
+      if (Analyzer::Resolver::programNameReachable(&state.programSyms, &state.programQualifiedNames, sym, &state.namespaceChain)) {
+        return;
+      }
+
+      let mut path: String = String::create("");
+      let mut defId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(candidate) = bareOpt) {
+        path = candidate.path.clone();
+        defId = Option::SOME(candidate.defId);
+      } else if (let Option::SOME(entry) = Analyzer::Resolver::programFirstEntry(&state.programSyms, sym)) {
+        if (let Option::SOME(stored) = state.programQualifiedNames.get(entry)) {
+          path = stored.clone();
+        }
+        if (let Option::SOME(stored) = state.programDefs.get(entry)) {
+          defId = Option::SOME(*stored);
+        }
+      }
+
+      let Option::SOME(declared) = defId else {
+        return;
+      };
+
+      let container: str = Analyzer::Resolver::declaringContainer(defStore, declared);
+      let written: String = Analyzer::Resolver::joinSegments(segments);
+      let diag: Diagnostic = Analyzer::Resolver::namespaceMemberDiagnostic(span, leading.toStr(), &path, container, written.toStr());
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.diagnostics.push(diag);
     }
 
     /// Position of the first global-index entry whose symbol matches `sym`,
@@ -1418,27 +1617,10 @@ export namespace Analyzer {
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
-      let mut i: u64 = 0;
-
-      while (i < state.importSyms.length()) {
-        let Option::SOME(stored) = state.importSyms.get(i) else {
-          i += 1;
-          continue;
-        };
-
-        if (stored.raw() == sym.raw()) {
-          let Option::SOME(defId) = state.importDefs.get(i) else {
-            i += 1;
-            continue;
-          };
-
-          return Option::SOME(*defId);
-        }
-
-        i += 1;
-      }
-
-      return Option::NONE;
+      return match (Analyzer::ResolverBodies::bodyImportCandidate(state, sym)) {
+        Option::SOME(candidate) -> Option::SOME(candidate.defId),
+        Option::NONE -> Option::NONE,
+      };
     }
 
     function copyBodyImportOverlay(
@@ -2153,10 +2335,22 @@ export namespace Analyzer {
         return;
       }
 
-      // 3. Global name index.
-      let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
+      // 3. This module's declarations, then imports: the ones the namespaces
+      // the walk is in reach by a bare name first.
+      let bareOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::ResolverBodies::bodyBareCandidate(state, sym);
 
-      if (let Option::SOME(defId) = globalOpt) {
+      if (let Option::SOME(candidate) = bareOpt) {
+        let defId: Analyzer::DefinitionId = candidate.defId;
+
+        if (!candidate.reachable && Analyzer::ResolverBodies::isBareBuiltinName(name)) {
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("bare-builtin")),
+          );
+          return;
+        }
+
         if (Analyzer::ResolverBodies::isTraitDef(defStore, defId)) {
           let message: String = `Expected a type, but '${name}' refers to a trait`;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
@@ -2168,24 +2362,7 @@ export namespace Analyzer {
           return;
         }
 
-        Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::Definition(defId));
-        return;
-      }
-
-      let importOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyImportLookup(state, sym);
-
-      if (let Option::SOME(defId) = importOpt) {
-        if (Analyzer::ResolverBodies::isTraitDef(defStore, defId)) {
-          let message: String = `Expected a type, but '${name}' refers to a trait`;
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
-          Analyzer::ResolverBodies::recordExprRef(
-            state,
-            exprId,
-            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-          );
-          return;
-        }
-
+        Analyzer::ResolverBodies::reportUnreachableBodyCandidate(state, defStore, &candidate, name, name, span);
         Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::Definition(defId));
         return;
       }
@@ -2420,6 +2597,8 @@ export namespace Analyzer {
         return;
       }
 
+      Analyzer::ResolverBodies::reportUnreachableBodyLeadingSegment(state, defStore, symbols, &p.segments, p.span);
+
       let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
         return;
       };
@@ -2514,6 +2693,119 @@ export namespace Analyzer {
       Analyzer::ResolverBodies::recordExprRef(state, exprId, resolved);
     }
 
+    /// Report every path in the type `typeId` that only reaches a declaration
+    /// of a namespace or extern block the walk is not inside.
+    ///
+    /// Types written in a body (annotations, casts, type arguments) are
+    /// resolved by typecheck, which picks a declaration but reports nothing
+    /// about where it lives; this is the check those positions share.
+    function checkBodyTypeReach(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      typeId: Ast::TypeId,
+    ): void {
+      let Option::SOME(typeNode) = module.types.get(typeId) else {
+        return;
+      };
+
+      match (typeNode) {
+        Ast::Type::Node::Path(path) -> {
+          if (path.segments.length() > 1) {
+            Analyzer::ResolverBodies::reportUnreachableBodyLeadingSegment(state, defStore, symbols, &path.segments, path.span);
+            return;
+          }
+
+          let Option::SOME(name) = path.segments.get(0) else {
+            return;
+          };
+
+          // A primitive names no declaration. Interning its name here would
+          // also shift every symbol interned after it, atoms included.
+          if (Analyzer::Typecheck::isPrimitiveAnnotationName(name.toStr())) {
+            return;
+          }
+
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+
+          if (Analyzer::Resolver::scopeLookup(&state.typeParamScope, sym).isSome()) {
+            return;
+          }
+
+          let Option::SOME(candidate) = Analyzer::ResolverBodies::bodyBareCandidate(state, sym) else {
+            return;
+          };
+
+          if (candidate.reachable) {
+            return;
+          }
+
+          // A namespace re-opened in another file is reached through the
+          // program-wide index rather than this module's declarations.
+          if (Analyzer::Resolver::programNameReachable(&state.programSyms, &state.programQualifiedNames, sym, &state.namespaceChain)) {
+            return;
+          }
+
+          Analyzer::ResolverBodies::reportUnreachableBodyCandidate(state, defStore, &candidate, name.toStr(), name.toStr(), path.span);
+        },
+        Ast::Type::Node::Pointer(pointer) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, pointer.pointee);
+        },
+        Ast::Type::Node::Reference(reference) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, reference.target);
+        },
+        Ast::Type::Node::Tuple(tuple) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReachList(state, defStore, symbols, module, &tuple.elements);
+        },
+        Ast::Type::Node::Function(function_) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReachList(state, defStore, symbols, module, &function_.parameters);
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, function_.returnType);
+        },
+        Ast::Type::Node::Slice(slice) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, slice.element);
+        },
+        Ast::Type::Node::FixedArray(fixedArray) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, fixedArray.element);
+        },
+        Ast::Type::Node::Generic(generic) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, generic.base);
+          Analyzer::ResolverBodies::checkBodyTypeReachList(state, defStore, symbols, module, &generic.arguments);
+        },
+      };
+    }
+
+    function checkBodyTypeReachList(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      typeIds: &Vector<Ast::TypeId>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < typeIds.length()) {
+        if (let Option::SOME(typeId) = typeIds.get(index)) {
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, *typeId);
+        }
+
+        index += 1;
+      }
+    }
+
+    function checkOptionalBodyTypeReach(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      typeId: Option<Ast::TypeId>,
+    ): void {
+      if (let Option::SOME(present) = typeId) {
+        Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, present);
+      }
+    }
+
     // =========================================================================
     // Pattern walker
     // =========================================================================
@@ -2551,15 +2843,17 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      let mut found: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
-
-      if (found.isNone()) {
-        found = Analyzer::ResolverBodies::bodyImportLookup(state, sym);
-      }
-
-      let Option::SOME(defId) = found else {
+      // A constant the walk does not reach by this bare name leaves the name
+      // a binding, as if the constant did not exist.
+      let Option::SOME(candidate) = Analyzer::ResolverBodies::bodyBareCandidate(state, sym) else {
         return Option::NONE;
       };
+
+      if (!candidate.reachable) {
+        return Option::NONE;
+      }
+
+      let defId: Analyzer::DefinitionId = candidate.defId;
 
       let Option::SOME(definition) = defStore.get(defId) else {
         return Option::NONE;
@@ -2734,6 +3028,8 @@ export namespace Analyzer {
         return Analyzer::ResolverBodies::resolvePatternPath1Seg(state, defStore, symbols, p);
       }
 
+      Analyzer::ResolverBodies::reportUnreachableBodyLeadingSegment(state, defStore, symbols, &p.segments, p.span);
+
       // 2+ segments: last-two-segment lookup via `resolvePathTail`, mirroring
       // expression position. For 3+ segments a wrong prefix reports the full
       // written path once every chain-aware lookup has had its chance.
@@ -2835,11 +3131,12 @@ export namespace Analyzer {
 
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let sym: Analyzer::SymbolId = symbolsRef.intern(nameStr.toStr());
-      let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
-
-      let Option::SOME(defId) = globalOpt else {
+      let Option::SOME(candidate) = Analyzer::ResolverBodies::bodyGlobalCandidate(state, sym) else {
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create(Analyzer::ResolverBodies::UNKNOWN_SINGLE_SEGMENT_PATTERN));
       };
+
+      Analyzer::ResolverBodies::reportUnreachableBodyCandidate(state, defStore, &candidate, nameStr.toStr(), nameStr.toStr(), p.span);
+      let defId: Analyzer::DefinitionId = candidate.defId;
 
       // Only Record constructors are supported as single-segment patterns.
       // Unqualified enum variant names require qualified syntax (ADR-B9).
@@ -3144,11 +3441,13 @@ export namespace Analyzer {
         },
         Ast::Expression::Node::Cast(c) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.expression);
+          Analyzer::ResolverBodies::checkBodyTypeReach(state, defStore, symbols, module, c.targetType);
           // The target type is resolved by typecheck in `checkCastExpr` through
           // `resolveLocalAnnotation`, which rejects unknown and wrongly-qualified types.
         },
         Ast::Expression::Node::Call(c) -> {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.callee);
+          Analyzer::ResolverBodies::checkBodyTypeReachList(state, defStore, symbols, module, &c.typeArguments);
           let mut argIdx: u64 = 0;
 
           while (argIdx < c.arguments.length()) {
@@ -3272,6 +3571,7 @@ export namespace Analyzer {
           if (!Analyzer::ResolverBodies::resolveRecordInitPathAsType(state, defStore, symbols, module, ri.path)) {
             Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, ri.path);
           }
+          Analyzer::ResolverBodies::checkBodyTypeReachList(state, defStore, symbols, module, &ri.typeArguments);
           let mut fieldIdx: u64 = 0;
 
           while (fieldIdx < ri.fields.length()) {
@@ -3287,6 +3587,7 @@ export namespace Analyzer {
           }
         },
         Ast::Expression::Node::BuiltinCall(bc) -> {
+          Analyzer::ResolverBodies::checkBodyTypeReachList(state, defStore, symbols, module, &bc.typeArguments);
           let mut argIdx: u64 = 0;
 
           while (argIdx < bc.arguments.length()) {
@@ -3316,9 +3617,11 @@ export namespace Analyzer {
             };
 
             Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *paramPatId);
+            Analyzer::ResolverBodies::checkOptionalBodyTypeReach(state, defStore, symbols, module, Analyzer::Resolver::patternAnnotation(module, *paramPatId));
             paramIndex += 1;
           }
 
+          Analyzer::ResolverBodies::checkOptionalBodyTypeReach(state, defStore, symbols, module, l.returnType);
           Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, l.body);
           Analyzer::ResolverBodies::closeLambdaFrame(state, exprId);
           Analyzer::ResolverBodies::popScope(&mut state.localStack);
@@ -3419,14 +3722,17 @@ export namespace Analyzer {
 
       match (stmt) {
         Ast::Statement::Node::Variable(v) -> {
+          Analyzer::ResolverBodies::checkOptionalBodyTypeReach(state, defStore, symbols, module, v.annotation);
           Analyzer::ResolverBodies::walkLetLike(state, defStore, symbols, module, v.pattern, v.value);
         },
         Ast::Statement::Node::Let(l) -> {
+          Analyzer::ResolverBodies::checkOptionalBodyTypeReach(state, defStore, symbols, module, l.annotation);
           Analyzer::ResolverBodies::walkLetLike(state, defStore, symbols, module, l.pattern, l.value);
         },
         Ast::Statement::Node::LetElse(le) -> {
           // Order: value in outer scope → else branch in isolated scope →
           // pattern bound in current (outer) scope for subsequent statements.
+          Analyzer::ResolverBodies::checkOptionalBodyTypeReach(state, defStore, symbols, module, le.annotation);
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, le.value);
           Analyzer::ResolverBodies::pushScope(&mut state.localStack);
           Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, le.elseBranch);
@@ -3781,6 +4087,12 @@ export namespace Analyzer {
 
         match (item) {
           Ast::Item::Node::Function(fn_) -> {
+            // An inherited default reads its names in the trait's namespaces.
+            let methodChain: Vector<String> = Analyzer::Resolver::methodNamespaceChain(module, fn_.span, &state.namespaceChain);
+            let mut enterRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            let savedChain: Vector<String> = Analyzer::Resolver::copyChain(&enterRef.namespaceChain);
+            enterRef.namespaceChain = methodChain;
+
             Analyzer::ResolverBodies::walkMethodBody(
               state,
               defStore,
@@ -3793,6 +4105,9 @@ export namespace Analyzer {
               &fn_,
               ownerGenericParameters,
             );
+
+            let mut leaveRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            leaveRef.namespaceChain = savedChain;
           },
           Ast::Item::Node::Record(_) -> {},
           Ast::Item::Node::Enum(_) -> {},
@@ -4041,6 +4356,7 @@ export namespace Analyzer {
         globalNameSyms: Vector::new<Analyzer::SymbolId>(),
         globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
         globalNameScopeKeys: Vector::new<u64>(),
+        globalNamePaths: Vector::new<String>(),
         scopeItemKeys: Vector::new<u64>(),
         scopeItemNameSyms: Vector::new<Analyzer::SymbolId>(),
         scopeItemParentKeys: Vector::new<u64>(),

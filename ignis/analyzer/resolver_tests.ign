@@ -3421,8 +3421,10 @@ function globalLookupPrefersPass1OverPass2DuplicateName(): void {
 
   let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
     diagnostics: DiagnosticBag::init(),
-    globalNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
-    importNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
+    globalNameIndex: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
+    importNameIndex: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
+    globalNamePaths: HashMap::new<u32, Vector<String>>(),
+    importNamePaths: HashMap::new<u32, Vector<String>>(),
     programSyms: Vector::new<Analyzer::SymbolId>(),
     programDefs: Vector::new<Analyzer::DefinitionId>(),
     programQualifiedNames: Vector::new<String>(),
@@ -3579,4 +3581,76 @@ function resolverBareAnnotationPrefersItsOwnNamespace(): void {
   };
 
   Test::assertEq<u32>(makeDef.returnType.raw(), expectedTypeId.raw());
+}
+
+/// The chain of namespaces `segments` names, outermost first.
+function resolverChain(segments: &Vector<str>): Vector<String> {
+  let mut chain: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < segments.length()) {
+    if (let Option::SOME(segment) = segments.get(index)) {
+      chain.push(String::create(*segment));
+    }
+    index += 1;
+  }
+
+  return chain;
+}
+
+/// How deep `path` is reachable by its bare name from `chain`, or 99 when it
+/// is not.
+function resolverReach(path: str, chain: &Vector<String>): u64 {
+  let published: String = String::create(path);
+
+  return match (Analyzer::Resolver::bareNameReach(&published, chain)) {
+    Option::SOME(depth) -> depth,
+    Option::NONE -> 99,
+  };
+}
+
+@test
+function bareNameReachesTopLevelDeclarationsFromAnywhere(): void {
+  let mut segments: Vector<str> = Vector::new<str>();
+  let top: Vector<String> = resolverChain(&segments);
+  segments.push("Geometry");
+  let inside: Vector<String> = resolverChain(&segments);
+
+  Test::assertEq<u64>(resolverReach("Point", &top), 0);
+  Test::assertEq<u64>(resolverReach("Point", &inside), 0);
+}
+
+@test
+function bareNameReachesANamespaceMemberOnlyFromInsideIt(): void {
+  let mut segments: Vector<str> = Vector::new<str>();
+  let top: Vector<String> = resolverChain(&segments);
+  segments.push("Geometry");
+  let inside: Vector<String> = resolverChain(&segments);
+  segments.push("Inner");
+  let nested: Vector<String> = resolverChain(&segments);
+
+  let mut otherSegments: Vector<str> = Vector::new<str>();
+  otherSegments.push("Shapes");
+  let other: Vector<String> = resolverChain(&otherSegments);
+
+  Test::assertEq<u64>(resolverReach("Geometry::Point", &top), 99);
+  Test::assertEq<u64>(resolverReach("Geometry::Point", &other), 99);
+  Test::assertEq<u64>(resolverReach("Geometry::Point", &inside), 1);
+  Test::assertEq<u64>(resolverReach("Geometry::Point", &nested), 1);
+  Test::assertEq<u64>(resolverReach("Geometry::Inner::twice", &inside), 99);
+  Test::assertEq<u64>(resolverReach("Geometry::Inner::twice", &nested), 2);
+}
+
+@test
+function bareNameReachTreatsAQualifiedExternBlockAsOneContainer(): void {
+  let mut segments: Vector<str> = Vector::new<str>();
+  segments.push("LibC::File");
+  let inside: Vector<String> = resolverChain(&segments);
+
+  let mut outerSegments: Vector<str> = Vector::new<str>();
+  outerSegments.push("LibC");
+  let outer: Vector<String> = resolverChain(&outerSegments);
+
+  Test::assertEq<u64>(resolverReach("LibC::File::fcntl", &inside), 1);
+  Test::assertEq<u64>(resolverReach("LibC::File::fcntl", &outer), 99);
 }

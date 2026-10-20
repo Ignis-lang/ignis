@@ -41,16 +41,20 @@ export namespace Analyzer {
     /// threading because Ignis borrow checker rejects &mut fields inside records.
     ///
     /// `globalNameIndex` / `importNameIndex` map interned name symbols (keyed
-    /// by `SymbolId.raw()`) to their `DefinitionId`s. `globalNameIndex` covers
-    /// Records, Enums, TypeAliases, and Traits; `importNameIndex` covers the
-    /// direct-import overlay. Both are lookup-only — never iterated — so they
-    /// are plain `HashMap`s rather than ordered co-indexed `Vector`s (ADR-1).
-    /// Built once at the start of `resolveTypes` via insert-if-absent so the
-    /// first index built (pass-1, then real imports) wins on name collisions.
+    /// by `SymbolId.raw()`) to every `DefinitionId` of that name, in the order
+    /// they were indexed. `globalNameIndex` covers Records, Enums, TypeAliases,
+    /// and Traits; `importNameIndex` covers the direct-import overlay. A bare
+    /// lookup takes the candidate the current namespace chain reaches, the
+    /// innermost first, and the first one indexed among equals.
     record ResolverState {
       public diagnostics: DiagnosticBag;
-      public globalNameIndex: HashMap<u32, Analyzer::DefinitionId>;
-      public importNameIndex: HashMap<u32, Analyzer::DefinitionId>;
+      public globalNameIndex: HashMap<u32, Vector<Analyzer::DefinitionId>>;
+      public importNameIndex: HashMap<u32, Vector<Analyzer::DefinitionId>>;
+      /// Parallel to the buckets of `globalNameIndex` and `importNameIndex`:
+      /// the path each candidate is published or imported under, which
+      /// decides whether a bare name reaches it from the current namespace.
+      public globalNamePaths: HashMap<u32, Vector<String>>;
+      public importNamePaths: HashMap<u32, Vector<String>>;
       /// Program-wide qualified declarations (host NamespaceStore mirror).
       public programSyms: Vector<Analyzer::SymbolId>;
       public programDefs: Vector<Analyzer::DefinitionId>;
@@ -156,32 +160,374 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
-    /// O(1) `HashMap` lookup of `sym` against `state.globalNameIndex`.
+    /// The namespace part of a written path: everything before its last `::`,
+    /// or the empty string for a bare name.
+    function namespaceOfPath(path: &String): String {
+      let mut separator: u64 = 0;
+      let mut found: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index + 1 < path.length()) {
+        let mut first: u8 = 0;
+        let mut second: u8 = 0;
+
+        if (let Option::SOME(byte) = path.byteAt(index)) {
+          first = byte;
+        }
+        if (let Option::SOME(byte) = path.byteAt(index + 1)) {
+          second = byte;
+        }
+
+        if (first == 58 && second == 58) {
+          separator = index;
+          found = true;
+        }
+
+        index += 1;
+      }
+
+      if (!found) {
+        return String::create("");
+      }
+
+      return path.substringBytes(0, separator);
+    }
+
+    /// How deep in `chain` a declaration published as `path` is reachable by
+    /// its bare name: 0 for a top-level declaration, the depth of its
+    /// namespace when `chain` is inside that namespace, NONE when it is
+    /// declared in a namespace or extern block the chain is not inside.
+    function bareNameReach(path: &String, chain: &Vector<String>): Option<u64> {
+      let declaredIn: String = Analyzer::Resolver::namespaceOfPath(path);
+
+      if (declaredIn.length() == 0) {
+        return Option::SOME(0);
+      }
+
+      let mut enclosing: String = String::create("");
+      let mut depth: u64 = 0;
+
+      while (depth < chain.length()) {
+        if (let Option::SOME(segment) = chain.get(depth)) {
+          if (depth > 0) {
+            enclosing.pushStr("::");
+          }
+          enclosing.pushStr(segment.toStr());
+        }
+
+        depth += 1;
+
+        if (enclosing.equals(declaredIn.toStr())) {
+          return Option::SOME(depth);
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    /// What declares `defId`, as a diagnostic names it: an extern block for a
+    /// declaration made inside one, a namespace otherwise.
+    function declaringContainer(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId
+    ): str {
+      let Option::SOME(definition) = defStore.get(defId) else {
+        return "namespace";
+      };
+
+      let inExtern: boolean = match (definition) {
+        Analyzer::Definition::Function(function_) -> function_.isExtern,
+        Analyzer::Definition::Variable(variable) -> variable.isExtern,
+        Analyzer::Definition::Record(record_) -> record_.isExtern,
+        _ -> false,
+      };
+
+      return inExtern ? "extern block" : "namespace";
+    }
+
+    /// The error for a bare name, or the leading segment of a path, that names
+    /// a declaration of a namespace or extern block the use is not inside.
+    ///
+    /// `written` is what the use wrote; the suggestion prefixes it with the
+    /// namespace the leading segment is declared in.
+    function namespaceMemberDiagnostic(
+      span: SourceSpan,
+      leadingName: str,
+      publishedPath: &String,
+      container: str,
+      written: str,
+    ): Diagnostic {
+      let declaredIn: String = Analyzer::Resolver::namespaceOfPath(publishedPath);
+      let message: String = `'${leadingName}' is declared in ${container} '${declaredIn.toStr()}'; write '${declaredIn.toStr()}::${written}'`;
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::NAMESPACE_MEMBER_REQUIRES_PATH,
+        message.toStr(),
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, "outside its namespace, a member is reached only by its path");
+      return diag;
+    }
+
+    /// A declaration a bare name finds, and whether the namespaces the walk
+    /// is in reach it by that name.
+    record BareCandidate {
+      public defId: Analyzer::DefinitionId;
+      public reachable: boolean;
+      public path: String;
+    }
+
+    /// The candidate of `defs` (published under `paths`) a bare name written
+    /// inside `chain` names: the reachable one declared deepest, the first
+    /// indexed among equals. When none is reachable, the first candidate comes
+    /// back marked unreachable, so the caller can report it and keep going.
+    function pickBareCandidate(
+      defs: Option<&Vector<Analyzer::DefinitionId>>,
+      paths: Option<&Vector<String>>,
+      chain: &Vector<String>,
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      let Option::SOME(candidates) = defs else {
+        return Option::NONE;
+      };
+
+      let empty: Vector<String> = Vector::new<String>();
+      let mut candidatePaths: &Vector<String> = &empty;
+      if (let Option::SOME(stored) = paths) {
+        candidatePaths = stored;
+      }
+
+      let mut bestIndex: u64 = 0;
+      let mut bestDepth: u64 = 0;
+      let mut bestFound: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        let mut path: String = String::create("");
+        if (let Option::SOME(stored) = candidatePaths.get(index)) {
+          path = stored.clone();
+        }
+
+        if (let Option::SOME(depth) = Analyzer::Resolver::bareNameReach(&path, chain)) {
+          if (!bestFound || depth > bestDepth) {
+            bestIndex = index;
+            bestDepth = depth;
+            bestFound = true;
+          }
+        }
+
+        index += 1;
+      }
+
+      let Option::SOME(defId) = candidates.get(bestIndex) else {
+        return Option::NONE;
+      };
+
+      let mut path: String = String::create("");
+      if (let Option::SOME(stored) = candidatePaths.get(bestIndex)) {
+        path = stored.clone();
+      }
+
+      return Option::SOME(Analyzer::Resolver::BareCandidate { defId: *defId, reachable: bestFound, path: path });
+    }
+
+    function globalCandidate(
+      state: &mut Analyzer::Resolver::ResolverState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      let key: u32 = sym.raw();
+      return Analyzer::Resolver::pickBareCandidate(state.globalNameIndex.get(&key), state.globalNamePaths.get(&key), &state.namespaceChain);
+    }
+
+    function importCandidate(
+      state: &mut Analyzer::Resolver::ResolverState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      let key: u32 = sym.raw();
+      return Analyzer::Resolver::pickBareCandidate(state.importNameIndex.get(&key), state.importNamePaths.get(&key), &state.namespaceChain);
+    }
+
+    /// The declaration `sym` names in `state.globalNameIndex`, preferring one
+    /// the current namespace chain reaches.
     ///
     /// Takes `&mut` per binder ADR-4 pattern (no auto-coercion of &mut to &).
     function globalLookup(
       state: &mut Analyzer::Resolver::ResolverState,
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
-      let key: u32 = sym.raw();
-
-      return match (state.globalNameIndex.get(&key)) {
-        Option::SOME(defId) -> Option::SOME(*defId),
+      return match (Analyzer::Resolver::globalCandidate(state, sym)) {
+        Option::SOME(candidate) -> Option::SOME(candidate.defId),
         Option::NONE -> Option::NONE,
       };
     }
 
-    /// O(1) `HashMap` lookup of `sym` against `state.importNameIndex`.
-    function importLookup(
+    function candidateReachable(candidate: &Option<Analyzer::Resolver::BareCandidate>): boolean {
+      if (let Option::SOME(found) = candidate) {
+        return found.reachable;
+      }
+
+      return false;
+    }
+
+    /// The declaration a bare type name finds: one the current namespace
+    /// chain reaches, declared here before imported, and only past those a
+    /// declaration it does not reach, which the caller reports.
+    function bareCandidate(
       state: &mut Analyzer::Resolver::ResolverState,
       sym: Analyzer::SymbolId,
-    ): Option<Analyzer::DefinitionId> {
-      let key: u32 = sym.raw();
+    ): Option<Analyzer::Resolver::BareCandidate> {
+      let globalOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::Resolver::globalCandidate(state, sym);
+      let importOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::Resolver::importCandidate(state, sym);
 
-      return match (state.importNameIndex.get(&key)) {
-        Option::SOME(defId) -> Option::SOME(*defId),
-        Option::NONE -> Option::NONE,
+      if (Analyzer::Resolver::candidateReachable(&globalOpt)) {
+        return globalOpt;
+      }
+
+      if (Analyzer::Resolver::candidateReachable(&importOpt)) {
+        return importOpt;
+      }
+
+      if (globalOpt.isSome()) {
+        return globalOpt;
+      }
+
+      return importOpt;
+    }
+
+    /// Report `candidate` when the bare name `name` reached it only by
+    /// ignoring the namespace it is declared in.
+    function reportUnreachableCandidate(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      candidate: &Analyzer::Resolver::BareCandidate,
+      name: str,
+      written: str,
+      span: SourceSpan,
+    ): void {
+      if (candidate.reachable) {
+        return;
+      }
+
+      let container: str = Analyzer::Resolver::declaringContainer(defStore, candidate.defId);
+      let diag: Diagnostic = Analyzer::Resolver::namespaceMemberDiagnostic(span, name, &candidate.path, container, written);
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// Whether a program-index entry named `sym` is reachable by its bare
+    /// name from inside `chain`.
+    function programNameReachable(
+      syms: &Vector<Analyzer::SymbolId>,
+      paths: &Vector<String>,
+      sym: Analyzer::SymbolId,
+      chain: &Vector<String>,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < syms.length()) {
+        if (let Option::SOME(candidateSym) = syms.get(index)) {
+          if (candidateSym.raw() == sym.raw()) {
+            if (let Option::SOME(path) = paths.get(index)) {
+              if (Analyzer::Resolver::bareNameReach(path, chain).isSome()) {
+                return true;
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// The position of the first program-index entry named `sym`.
+    function programFirstEntry(
+      syms: &Vector<Analyzer::SymbolId>,
+      sym: Analyzer::SymbolId
+    ): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < syms.length()) {
+        if (let Option::SOME(candidateSym) = syms.get(index)) {
+          if (candidateSym.raw() == sym.raw()) {
+            return Option::SOME(index);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The segments of a written path joined with `::`.
+    function joinSegments(segments: &Vector<String>): String {
+      let mut written: String = String::create("");
+      let mut index: u64 = 0;
+
+      while (index < segments.length()) {
+        if (let Option::SOME(segment) = segments.get(index)) {
+          if (index > 0) {
+            written.pushStr("::");
+          }
+          written.pushStr(segment.toStr());
+        }
+        index += 1;
+      }
+
+      return written;
+    }
+
+    /// Report a qualified path whose leading segment names a namespace member
+    /// the current namespace chain does not reach: `Inner::Point` written
+    /// outside `Outer` has to be `Outer::Inner::Point`.
+    function reportUnreachableLeadingSegment(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(leading) = segments.get(0) else {
+        return;
       };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(leading.toStr());
+      let bareOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::Resolver::bareCandidate(state, sym);
+
+      if (Analyzer::Resolver::candidateReachable(&bareOpt)) {
+        return;
+      }
+
+      if (Analyzer::Resolver::programNameReachable(&state.programSyms, &state.programQualifiedNames, sym, &state.namespaceChain)) {
+        return;
+      }
+
+      let mut path: String = String::create("");
+      let mut defId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(candidate) = bareOpt) {
+        path = candidate.path.clone();
+        defId = Option::SOME(candidate.defId);
+      } else if (let Option::SOME(entry) = Analyzer::Resolver::programFirstEntry(&state.programSyms, sym)) {
+        if (let Option::SOME(stored) = state.programQualifiedNames.get(entry)) {
+          path = stored.clone();
+        }
+        if (let Option::SOME(stored) = state.programDefs.get(entry)) {
+          defId = Option::SOME(*stored);
+        }
+      }
+
+      let Option::SOME(declared) = defId else {
+        return;
+      };
+
+      let container: str = Analyzer::Resolver::declaringContainer(defStore, declared);
+      let written: String = Analyzer::Resolver::joinSegments(segments);
+      let diag: Diagnostic = Analyzer::Resolver::namespaceMemberDiagnostic(span, leading.toStr(), &path, container, written.toStr());
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      stateRef.diagnostics.push(diag);
     }
 
     /// Map a primitive type name string to its pre-interned `TypeId`.
@@ -545,6 +891,120 @@ export namespace Analyzer {
       }
 
       return Analyzer::Resolver::TypeParamScope { syms: syms, typeIds: typeIds };
+    }
+
+    /// Whether `inner` lies within `outer`, in the same file.
+    function spanContains(outer: SourceSpan, inner: SourceSpan): boolean {
+      if (outer.start > inner.start || inner.end > outer.end) {
+        return false;
+      }
+
+      let outerFile: String = String::create(outer.filePath);
+      return outerFile.equals(inner.filePath);
+    }
+
+    /// Push onto `chain` the namespaces (and extern blocks) under `itemId`
+    /// whose source contains `span`, outermost first.
+    function collectNamespaceChainAt(
+      module: &Ast::Module,
+      itemId: Ast::ItemId,
+      span: SourceSpan,
+      chain: &mut Vector<String>,
+    ): boolean {
+      let Option::SOME(item) = module.items.get(itemId) else {
+        return false;
+      };
+
+      match (item) {
+        Ast::Item::Node::Namespace(ns) -> {
+          if (!Analyzer::Resolver::spanContains(ns.span, span)) {
+            return false;
+          }
+
+          let mut chainRef: &mut Vector<String> = chain;
+          chainRef.push(ns.name.clone());
+
+          let mut childIndex: u64 = 0;
+          while (childIndex < ns.items.length()) {
+            if (let Option::SOME(childId) = ns.items.get(childIndex)) {
+              if (Analyzer::Resolver::collectNamespaceChainAt(module, *childId, span, chain)) {
+                return true;
+              }
+            }
+            childIndex += 1;
+          }
+
+          return true;
+        },
+        Ast::Item::Node::Extern(externItem) -> {
+          if (!Analyzer::Resolver::spanContains(externItem.span, span)) {
+            return false;
+          }
+
+          let mut chainRef: &mut Vector<String> = chain;
+          chainRef.push(externItem.name.clone());
+          return true;
+        },
+        Ast::Item::Node::Export(exported) -> {
+          if (let Option::SOME(innerItemId) = exported.declaration) {
+            return Analyzer::Resolver::collectNamespaceChainAt(module, innerItemId, span, chain);
+          }
+          return false;
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      @panic("unreachable: collectNamespaceChainAt match did not return");
+    }
+
+    /// The namespaces of `module` whose source contains `span`, outermost
+    /// first, or NONE when no namespace of the module does.
+    ///
+    /// An inherited trait default is a copy of the trait's method placed on
+    /// the implementing type, but its source, and so the namespace its bare
+    /// names are written in, is the trait's.
+    function namespaceChainAt(module: &Ast::Module, span: SourceSpan): Option<Vector<String>> {
+      let mut chain: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < module.roots.length()) {
+        if (let Option::SOME(rootId) = module.roots.get(index)) {
+          if (Analyzer::Resolver::collectNamespaceChainAt(module, *rootId, span, &mut chain)) {
+            return Option::SOME(chain);
+          }
+        }
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The chain a method written at `span` is read in: the namespaces around
+    /// its source when the module has any, else `current`.
+    function methodNamespaceChain(
+      module: &Ast::Module,
+      span: SourceSpan,
+      current: &Vector<String>
+    ): Vector<String> {
+      if (let Option::SOME(chain) = Analyzer::Resolver::namespaceChainAt(module, span)) {
+        return chain;
+      }
+
+      return Analyzer::Resolver::copyChain(current);
+    }
+
+    function copyChain(chain: &Vector<String>): Vector<String> {
+      let mut copy: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+      while (index < chain.length()) {
+        if (let Option::SOME(segment) = chain.get(index)) {
+          copy.push(segment.clone());
+        }
+        index += 1;
+      }
+      return copy;
     }
 
     // =========================================================================
@@ -1498,6 +1958,7 @@ export namespace Analyzer {
       // stay apart even though both end in `TypeId`. Falling back to the bare
       // last segment would accept any prefix, including one naming no namespace.
       if (qualified) {
+        Analyzer::Resolver::reportUnreachableLeadingSegment(state, defStore, symbols, &p.segments, p.span);
         let programFirstOpt: Option<Analyzer::DefinitionId> = programLookupForPath(state, sym, p);
 
         if (let Option::SOME(defId) = programFirstOpt) {
@@ -1530,24 +1991,14 @@ export namespace Analyzer {
         }
       }
 
-      // 5. Global type-name index.
-      let globalOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
+      // 5. This module's declarations, then imports: the ones the current
+      // namespace chain reaches by a bare name first.
+      let bareOpt: Option<Analyzer::Resolver::BareCandidate> = Analyzer::Resolver::bareCandidate(state, sym);
 
-      if (let Option::SOME(defId) = globalOpt) {
+      if (let Option::SOME(candidate) = bareOpt) {
+        let defId: Analyzer::DefinitionId = candidate.defId;
+
         // Trait names are not valid in type position.
-        if (isTraitDef(defStore, defId)) {
-          let message: String = `Expected a type, but '${nameStr.toStr()}' refers to a trait`;
-          emitUndefinedType(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
-          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
-          return tsRef.intern(Analyzer::Type::VOID);
-        }
-
-        return nominalTypeFor(defStore, typeStore, defId);
-      }
-
-      let importOpt: Option<Analyzer::DefinitionId> = importLookup(state, sym);
-
-      if (let Option::SOME(defId) = importOpt) {
         if (isTraitDef(defStore, defId)) {
           let message: String = `Expected a type, but '${nameStr.toStr()}' refers to a trait`;
           emitUndefinedType(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
@@ -1562,6 +2013,7 @@ export namespace Analyzer {
           return tsRef.intern(Analyzer::Type::VOID);
         }
 
+        Analyzer::Resolver::reportUnreachableCandidate(state, defStore, &candidate, nameStr.toStr(), nameStr.toStr(), p.span);
         return nominalTypeFor(defStore, typeStore, defId);
       }
 
@@ -1779,15 +2231,17 @@ export namespace Analyzer {
           let mut defIdOpt: Option<Analyzer::DefinitionId> = Option::NONE;
 
           if (baseQualified) {
+            Analyzer::Resolver::reportUnreachableLeadingSegment(state, defStore, symbols, &basePath.segments, basePathSpan);
             defIdOpt = programLookupForPath(state, sym, &basePath);
           }
 
           if (defIdOpt.isNone()) {
-            defIdOpt = globalLookup(state, sym);
-          }
-
-          if (defIdOpt.isNone()) {
-            defIdOpt = importLookup(state, sym);
+            if (let Option::SOME(candidate) = Analyzer::Resolver::bareCandidate(state, sym)) {
+              if (!baseQualified) {
+                Analyzer::Resolver::reportUnreachableCandidate(state, defStore, &candidate, baseNameStr.toStr(), baseNameStr.toStr(), basePathSpan);
+              }
+              defIdOpt = Option::SOME(candidate.defId);
+            }
           }
 
           let Option::SOME(defId) = defIdOpt else {
@@ -1913,11 +2367,9 @@ export namespace Analyzer {
         named = namespaceScopedTypeLookup(state, defStore, sym, name.toStr());
 
         if (named.isNone()) {
-          named = globalLookup(state, sym);
-        }
-
-        if (named.isNone()) {
-          named = importLookup(state, sym);
+          if (let Option::SOME(candidate) = Analyzer::Resolver::bareCandidate(state, sym)) {
+            named = Option::SOME(candidate.defId);
+          }
         }
       }
 
@@ -1941,20 +2393,6 @@ export namespace Analyzer {
       }
 
       return `no trait named '${written.toStr()}' is in scope`;
-    }
-
-    /// Whether `defId` is published at the top level of its module, outside
-    /// any namespace. A definition with no recorded path is taken as top-level.
-    function isTopLevelDeclaration(
-      defStore: &mut Analyzer::DefinitionStore,
-      defId: Analyzer::DefinitionId,
-    ): boolean {
-      let Option::SOME(qualified) = defStore.qualifiedNameOf(defId) else {
-        return true;
-      };
-
-      let separator: String = String::create("::");
-      return qualified.indexOf(&separator).isNone();
     }
 
     /// The trait a written trait path names, read the way a type path is: a
@@ -1981,6 +2419,8 @@ export namespace Analyzer {
       let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
 
       if (segments.length() > 1) {
+        Analyzer::Resolver::reportUnreachableLeadingSegment(state, defStore, symbols, segments, span);
+
         let path: Ast::Type::Path = Ast::Type::Path {
           span: span,
           segments: Analyzer::Resolver::copyStringVector(segments),
@@ -1999,21 +2439,28 @@ export namespace Analyzer {
         return Option::SOME(scoped);
       }
 
-      // The flat index keys on the bare name alone, so it also holds traits
-      // declared inside a namespace; only a top-level trait is in scope here.
-      if (let Option::SOME(defId) = globalLookup(state, sym)) {
-        if (isTraitDef(defStore, defId) && isTopLevelDeclaration(defStore, defId)) {
-          return Option::SOME(defId);
-        }
+      // A trait the entered namespaces do not reach by this name still
+      // answers, reported as A0263 with the path to write, so the use is not
+      // also an unknown trait.
+      let Option::SOME(candidate) = Analyzer::Resolver::bareCandidate(state, sym) else {
+        return Option::NONE;
+      };
+
+      if (!isTraitDef(defStore, candidate.defId)) {
+        return Option::NONE;
       }
 
-      if (let Option::SOME(defId) = importLookup(state, sym)) {
-        if (isTraitDef(defStore, defId)) {
-          return Option::SOME(defId);
-        }
+      // A language trait needs no declaration, so a namespaced trait sharing
+      // its name is not what an outside use means.
+      if (!candidate.reachable && isUndeclaredTraitName(name)) {
+        return Option::NONE;
       }
 
-      return Option::NONE;
+      if (!Analyzer::Resolver::programNameReachable(&state.programSyms, &state.programQualifiedNames, sym, &state.namespaceChain)) {
+        Analyzer::Resolver::reportUnreachableCandidate(state, defStore, &candidate, name.toStr(), name.toStr(), span);
+      }
+
+      return Option::SOME(candidate.defId);
     }
 
     /// The trimmed `::`-separated segments of a trait path written as an
@@ -2230,6 +2677,12 @@ export namespace Analyzer {
 
         match (item) {
           Ast::Item::Node::Function(fn_) -> {
+            // An inherited default reads its names in the trait's namespaces.
+            let methodChain: Vector<String> = Analyzer::Resolver::methodNamespaceChain(module, fn_.span, &state.namespaceChain);
+            let savedChain: Vector<String> = Analyzer::Resolver::copyChain(&state.namespaceChain);
+            let mut enterRef: &mut Analyzer::Resolver::ResolverState = state;
+            enterRef.namespaceChain = methodChain;
+
             resolveBoundTraits(state, defStore, symbols, methodDefId, &fn_.genericParameters);
 
             // Method's own type params (innermost) then owner scope, then Self.
@@ -2284,6 +2737,9 @@ export namespace Analyzer {
               let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, retTypeId);
               patchMethodReturnType(defStore, methodDefId, resolved);
             }
+
+            let mut leaveRef: &mut Analyzer::Resolver::ResolverState = state;
+            leaveRef.namespaceChain = savedChain;
           },
           Ast::Item::Node::Record(_) -> {},
           Ast::Item::Node::Enum(_) -> {},
@@ -2673,27 +3129,69 @@ export namespace Analyzer {
     // Top-level walk — buildGlobalNameIndex, resolveItem, resolveTypes.
     // =========================================================================
 
-    /// Insert `(sym, defId)` into `state.globalNameIndex` only if `sym` is not
-    /// already mapped, preserving first-hit-wins precedence across repeated
-    /// `buildGlobalNameIndex` calls (pass-1 before pass-2).
-    function insertGlobalNameIfAbsent(
+    /// Append `defId`, published under `path`, to the `sym` buckets of `index`
+    /// and `paths`, unless the bucket already holds it: pass-1 and pass-2 can
+    /// both list the same declaration.
+    function appendNameCandidate(
+      index: &mut HashMap<u32, Vector<Analyzer::DefinitionId>>,
+      paths: &mut HashMap<u32, Vector<String>>,
+      sym: Analyzer::SymbolId,
+      defId: Analyzer::DefinitionId,
+      path: String,
+    ): void {
+      let key: u32 = sym.raw();
+      let mut indexRef: &mut HashMap<u32, Vector<Analyzer::DefinitionId>> = index;
+      let mut pathsRef: &mut HashMap<u32, Vector<String>> = paths;
+
+      if (let Option::SOME(bucket) = indexRef.getMut(&key)) {
+        let mut position: u64 = 0;
+
+        while (position < bucket.length()) {
+          if (let Option::SOME(existing) = bucket.get(position)) {
+            if (existing.raw() == defId.raw()) {
+              return;
+            }
+          }
+          position += 1;
+        }
+
+        let mut bucketRef: &mut Vector<Analyzer::DefinitionId> = bucket;
+        bucketRef.push(defId);
+      } else {
+        let mut bucket: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+        bucket.push(defId);
+        indexRef.insert(key, bucket);
+        pathsRef.insert(key, Vector::new<String>());
+      }
+
+      let Option::SOME(pathBucket) = pathsRef.getMut(&key) else {
+        return;
+      };
+
+      let mut pathBucketRef: &mut Vector<String> = pathBucket;
+      pathBucketRef.push(path);
+    }
+
+    /// Index `defId` under `sym` with the path it is published under.
+    function insertGlobalName(
       state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
       sym: Analyzer::SymbolId,
       defId: Analyzer::DefinitionId,
     ): void {
-      let key: u32 = sym.raw();
-      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-
-      if (!stateRef.globalNameIndex.contains(&key)) {
-        stateRef.globalNameIndex.insert(key, defId);
+      let mut path: String = String::create("");
+      if (let Option::SOME(stored) = defStore.qualifiedNameOf(defId)) {
+        path = stored.clone();
       }
+
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      Analyzer::Resolver::appendNameCandidate(&mut stateRef.globalNameIndex, &mut stateRef.globalNamePaths, sym, defId, path);
     }
 
     /// Populate `state.globalNameIndex` from one `BinderOutput`. Records and
     /// Enums only — these are the only types addressable as type names.
     ///
-    /// Called twice (pass-1 then pass-2). Duplicate names not deduplicated —
-    /// first-hit wins in `globalLookup`, so pass-1 entries take precedence.
+    /// Called twice (pass-1 then pass-2); a declaration both list is indexed once.
     function buildGlobalNameIndex(
       state: &mut Analyzer::Resolver::ResolverState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2714,10 +3212,10 @@ export namespace Analyzer {
 
         match (def) {
           Analyzer::Definition::Record(rec) -> {
-            insertGlobalNameIfAbsent(state, rec.name, *defId);
+            Analyzer::Resolver::insertGlobalName(state, defStore, rec.name, *defId);
           },
           Analyzer::Definition::Enum(en) -> {
-            insertGlobalNameIfAbsent(state, en.name, *defId);
+            Analyzer::Resolver::insertGlobalName(state, defStore, en.name, *defId);
           },
           Analyzer::Definition::Function(_) -> {},
           Analyzer::Definition::Variable(_) -> {},
@@ -2728,10 +3226,10 @@ export namespace Analyzer {
           // are never addressable as type names — excluded from the flat index.
           Analyzer::Definition::Method(_) -> {},
           Analyzer::Definition::TypeAlias(alias) -> {
-            insertGlobalNameIfAbsent(state, alias.name, *defId);
+            Analyzer::Resolver::insertGlobalName(state, defStore, alias.name, *defId);
           },
           Analyzer::Definition::Trait(trait_) -> {
-            insertGlobalNameIfAbsent(state, trait_.name, *defId);
+            Analyzer::Resolver::insertGlobalName(state, defStore, trait_.name, *defId);
           },
         };
 
@@ -2803,6 +3301,8 @@ export namespace Analyzer {
         Ast::Item::Node::Extern(externItem) -> {
           // Extern signatures resolve like any other function's, or every
           // call through them would compare against VOID placeholders.
+          let mut enterRef: &mut Analyzer::Resolver::ResolverState = state;
+          enterRef.namespaceChain.push(externItem.name.clone());
           let mut externChildIndex: u64 = 0;
 
           while (externChildIndex < externItem.items.length()) {
@@ -2811,6 +3311,9 @@ export namespace Analyzer {
             }
             externChildIndex += 1;
           }
+
+          let mut leaveRef: &mut Analyzer::Resolver::ResolverState = state;
+          let _left: Option<String> = leaveRef.namespaceChain.pop();
         },
       };
     }
@@ -3007,9 +3510,9 @@ export namespace Analyzer {
       };
     }
 
-    /// Populate `state.importNameIndex` from the direct-import overlay.
-    /// Insert-if-absent so the first overlay entry for a name wins, matching
-    /// the previous linear-scan `importLookup` first-hit-wins behavior.
+    /// Populate `state.importNameIndex` from the direct-import overlay, each
+    /// entry with the path it is written as: empty for a name an import lists,
+    /// `Ns::Name` for a member brought in with its namespace.
     function appendImportOverlayToState(
       state: &mut Analyzer::Resolver::ResolverState,
       overlay: &Analyzer::Imports::ImportOverlay,
@@ -3026,11 +3529,13 @@ export namespace Analyzer {
           continue;
         };
 
-        let key: u32 = sym.raw();
-        let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-        if (!stateRef.importNameIndex.contains(&key)) {
-          stateRef.importNameIndex.insert(key, *defId);
+        let mut path: String = String::create("");
+        if (let Option::SOME(stored) = overlay.qualifiedNames.get(index)) {
+          path = stored.clone();
         }
+
+        let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+        Analyzer::Resolver::appendNameCandidate(&mut stateRef.importNameIndex, &mut stateRef.importNamePaths, *sym, *defId, path);
         index += 1;
       }
     }
@@ -3052,8 +3557,10 @@ export namespace Analyzer {
     ): Analyzer::Resolver::ResolverOutput {
       let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
         diagnostics: DiagnosticBag::init(),
-        globalNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
-        importNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
+        globalNameIndex: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
+        importNameIndex: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
+        globalNamePaths: HashMap::new<u32, Vector<String>>(),
+        importNamePaths: HashMap::new<u32, Vector<String>>(),
         programSyms: Vector::new<Analyzer::SymbolId>(),
         programDefs: Vector::new<Analyzer::DefinitionId>(),
         programQualifiedNames: Vector::new<String>(),
