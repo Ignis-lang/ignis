@@ -944,49 +944,6 @@ export namespace FixtureTests {
     let diff: String = FixtureTests::unifiedDiff(snapshotPath, &expected, actual);
     return `snapshot mismatch: ${snapshotPath.asStr()}\n${diff.toStr()}`;
   }
-
-  /// Creates every snapshot directory the selected fixtures may write into.
-  ///
-  /// Two fixtures in one directory would otherwise race on the same lazily
-  /// created directory when the runner starts them concurrently.
-  function prepareSnapshotDirectories(cases: &Vector<FixtureCase>): void {
-    let mut prepared: Vector<String> = Vector::new<String>();
-    let mut index: u64 = 0;
-
-    while (index < cases.length()) {
-      let Option::SOME(fixture) = cases.get(index) else {
-        break;
-      };
-
-      index += 1;
-
-      let Option::SOME(snapshotDir) = fixture.snapshotPath().parent() else {
-        continue;
-      };
-
-      let snapshotDirText: String = snapshotDir.toString();
-      let mut seen: boolean = false;
-      let mut preparedIndex: u64 = 0;
-
-      while (preparedIndex < prepared.length()) {
-        let Option::SOME(existing) = prepared.get(preparedIndex) else {
-          break;
-        };
-
-        if (existing.equals(&snapshotDirText)) {
-          seen = true;
-          break;
-        }
-
-        preparedIndex += 1;
-      }
-
-      if (!seen) {
-        let _ = Fs::createDirAll(&snapshotDir);
-        prepared.push(snapshotDirText.clone());
-      }
-    }
-  }
 }
 
 function fixtureCorpusPath(relativePath: str): Path::PathBuf {

@@ -3,7 +3,6 @@ import Analyzer from "@compiler::analyzer";
 import Output from "@compiler::output";
 
 import Env from "std::env";
-import Fs from "std::fs";
 import LibC from "std::libc";
 import Memory from "std::memory";
 import Path from "std::path";
@@ -591,10 +590,6 @@ export namespace TestRunner {
     let updateFlag: str = updateSnapshots ? "1" : "0";
     let window: u64 = jobs == 0 ? 1 : jobs;
 
-    if (updateSnapshots) {
-      TestRunner::prepareSnapshotDirectories(cases);
-    }
-
     // Slot `i` holds the child for case `i`. A slot with `pid == -1` records a
     // spawn that never happened, so slot indices stay aligned with plan order.
     let mut children: Vector<Process::Child> = Vector::new<Process::Child>();
@@ -675,47 +670,6 @@ export namespace TestRunner {
     }
 
     return outcomes;
-  }
-
-  /// Create every snapshot directory the selected tests may write into.
-  ///
-  /// `std::test` creates the directory lazily with a check-then-act `mkdir`, so
-  /// two concurrent tests sharing a module directory would otherwise race and
-  /// fail the loser. Creating them up front removes the race without changing
-  /// what the tests themselves do. A failure here is left to the test that
-  /// actually needs the directory to report.
-  function prepareSnapshotDirectories(cases: &Vector<TestCase>): void {
-    let mut prepared: Vector<String> = Vector::new<String>();
-    let mut index: u64 = 0;
-
-    while (index < cases.length()) {
-      let Option::SOME(testCase) = cases.get(index) else {
-        break;
-      };
-
-      let mut seen: boolean = false;
-      let mut preparedIndex: u64 = 0;
-
-      while (preparedIndex < prepared.length()) {
-        let Option::SOME(existing) = prepared.get(preparedIndex) else {
-          break;
-        };
-
-        if (existing.equals(&testCase.snapshotDir)) {
-          seen = true;
-          break;
-        }
-
-        preparedIndex += 1;
-      }
-
-      if (!seen) {
-        let _ = Fs::createDirAll(testCase.snapshotDir.toStr());
-        prepared.push(testCase.snapshotDir.clone());
-      }
-
-      index += 1;
-    }
   }
 
   /// Number of harness processes and `gcc -c` invocations to keep in flight.
