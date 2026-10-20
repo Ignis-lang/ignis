@@ -4,7 +4,7 @@ import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
 
-import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, SourceFile, SourceMap from "@compiler::diagnostics";
 import BuildOverrides, DiscoveryResult, Resolver from "./build/resolver";
 import BuildArtifacts from "./build/artifacts";
 
@@ -31,7 +31,7 @@ import
   validateUtf8From,
 from "./main";
 
-function invalidIndentWidthBag(): DiagnosticBag {
+function invalidIndentWidthBag(sourceMap: &mut SourceMap): DiagnosticBag {
   let paths: FormatterConfigPaths = FormatterConfigPaths {
     projectRoot: Path::PathBuf::create("."),
     ignisToml: Option::NONE,
@@ -46,7 +46,7 @@ function invalidIndentWidthBag(): DiagnosticBag {
     sortImports: Option::NONE,
   };
 
-  let Result::ERROR(bag) = Format::Config::load(&paths, &overrides) else {
+  let Result::ERROR(bag) = Format::Config::load(sourceMap, &paths, &overrides) else {
     Test::fail();
     @unreachable();
   };
@@ -59,7 +59,8 @@ function invalidIndentWidthBag(): DiagnosticBag {
 /// entirely.
 @test
 function fmtConfigErrorMessageAddsTheHostsPrefix(): void {
-  let bag: DiagnosticBag = invalidIndentWidthBag();
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let bag: DiagnosticBag = invalidIndentWidthBag(&mut sourceMap);
   let message: String = fmtConfigErrorMessage(&bag);
 
   Test::assertEq<str>(
@@ -72,7 +73,8 @@ function fmtConfigErrorMessageAddsTheHostsPrefix(): void {
 /// host CLI's per-file config resolution does.
 @test
 function fmtConfigErrorMessageForPathAddsThePathAndThePrefix(): void {
-  let bag: DiagnosticBag = invalidIndentWidthBag();
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let bag: DiagnosticBag = invalidIndentWidthBag(&mut sourceMap);
   let path: Path::PathBuf = Path::PathBuf::create("src/main.ign");
   let message: String = fmtConfigErrorMessageForPath(&path, &bag);
 
@@ -523,18 +525,18 @@ function parseErrorProject(label: str, entryText: str, helperText: str): Path::P
 }
 
 /// What a check of the project at `root` renders, without its styling.
-function parseErrorReport(root: &Path::PathBuf): String {
+function parseErrorReport(sourceMap: &mut SourceMap, root: &Path::PathBuf): String {
   let overrides: BuildOverrides = BuildOverrides::none();
-  let mut discovery: DiscoveryResult = match (Resolver::discover(root, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discover(sourceMap, root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
       return String::new();
     },
   };
-  let file: SourceFile = SourceFile::create("", "");
+  let file: SourceFile = SourceFile::create(sourceMap, "", "");
   let options: CompileOptions = CompileOptions::build(false);
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut discovery, &file, &options);
 
   Test::assert(compiled.errors > 0);
 
@@ -551,12 +553,13 @@ function reportContains(report: &String, needle: str): boolean {
 /// empty source line.
 @test
 function parseErrorInAnImportedModuleNamesItsFileLineAndColumn(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = parseErrorProject(
     "parse-error-imported",
     "import Helper from \"./helper\";\n\nfunction main(): i32 {\n  return Helper::value() as i32;\n}\n",
     "export namespace Helper {\n  function value(): u64 {\n    let from: u64 = 1;\n\n    return from;\n  }\n}\n",
   );
-  let report: String = parseErrorReport(&root);
+  let report: String = parseErrorReport(&mut sourceMap, &root);
 
   Test::assert(reportContains(&report, "src/helper.ign:3:9"));
   Test::assert(reportContains(&report, "let from: u64 = 1;"));
@@ -570,22 +573,23 @@ function parseErrorInAnImportedModuleNamesItsFileLineAndColumn(): void {
 /// followed, so mapping them to the module graph cannot fail.
 @test
 function parseErrorInAnImportingModuleReportsOnlyItsParseErrors(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = parseErrorProject(
     "parse-error-importing",
     "import Helper from \"./helper\";\n\nfunction main(): i32 {\n  return Helper::value() as i32;\n}\n",
     "import other from \"./other\";\n\nexport namespace Helper {\n  function value(): u64 {\n    let from: u64 = other();\n\n    return from;\n  }\n}\n",
   );
   let overrides: BuildOverrides = BuildOverrides::none();
-  let mut discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
       return;
     },
   };
-  let file: SourceFile = SourceFile::create("", "");
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "", "");
   let options: CompileOptions = CompileOptions::build(false);
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(&mut sourceMap, &mut discovery, &file, &options);
   let report: String = stripAnsiEscapes(&compiled.report);
 
   Test::assertEq<u64>(compiled.errors, 2);
@@ -600,22 +604,23 @@ function parseErrorInAnImportingModuleReportsOnlyItsParseErrors(): void {
 /// parses, since nothing past the parse phase runs before that.
 @test
 function parseErrorBesideAMissingImportStaysVisible(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = parseErrorProject(
     "parse-error-missing-import",
     "import Helper from \"./helper\";\n\nfunction main(): i32 {\n  return Helper::value() as i32;\n}\n",
     "import absent from \"./absent\";\n\nexport namespace Helper {\n  function value(): u64 {\n    let from: u64 = absent();\n\n    return from;\n  }\n}\n",
   );
   let overrides: BuildOverrides = BuildOverrides::none();
-  let mut discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
       return;
     },
   };
-  let file: SourceFile = SourceFile::create("", "");
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "", "");
   let options: CompileOptions = CompileOptions::build(false);
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(&mut sourceMap, &mut discovery, &file, &options);
   let report: String = stripAnsiEscapes(&compiled.report);
 
   Test::assertEq<u64>(compiled.errors, 2);
@@ -628,12 +633,13 @@ function parseErrorBesideAMissingImportStaysVisible(): void {
 /// A parse error in the entry module names the entry file, line and column.
 @test
 function parseErrorInTheEntryModuleNamesItsFileLineAndColumn(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = parseErrorProject(
     "parse-error-entry",
     "function main(): i32 {\n  let from: i32 = 1;\n\n  return from;\n}\n",
     "export function unused(): i32 {\n  return 0;\n}\n",
   );
-  let report: String = parseErrorReport(&root);
+  let report: String = parseErrorReport(&mut sourceMap, &root);
 
   Test::assert(reportContains(&report, "src/main.ign:2:7"));
   Test::assert(reportContains(&report, "let from: i32 = 1;"));
@@ -652,7 +658,8 @@ function ownershipErrorInAnImportedModuleNamesItsFileLineAndColumn(): void {
     "import Paths from \"./helper\";\n\nfunction main(): i32 {\n  let resolver: Paths::Resolver = Paths::Resolver { depth: 1 };\n  return resolver.run(true) as i32;\n}\n",
     "export namespace Paths {\n  @implements(Drop)\n  record Token {\n    public value: u64;\n  }\n\n  function consume(token: Token): u64 {\n    return token.value;\n  }\n\n  export record Resolver {\n    public depth: u64;\n\n    public run(&self, flag: boolean): u64 {\n      let trimmed: Token = Token { value: 1 };\n      if (flag) {\n        consume(trimmed);\n      }\n      let mut total: u64 = trimmed.value;\n\n      let path: Token = Token { value: 2 };\n      let mut index: u64 = 0;\n      while (index < self.depth) {\n        match (index) {\n          0 -> {\n            total += consume(path);\n          },\n          _ -> {},\n        };\n        index += 1;\n      }\n\n      return total + path.value;\n    }\n  }\n}\n",
   );
-  let report: String = parseErrorReport(&root);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let report: String = parseErrorReport(&mut sourceMap, &root);
 
   Test::assert(reportContains(&report, "Variable 'trimmed' is moved in one branch but not the other"));
   Test::assert(reportContains(&report, "src/helper.ign:16:7"));

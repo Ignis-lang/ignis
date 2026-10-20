@@ -358,18 +358,16 @@ export namespace Borrowck {
       files: &Vector<SourceFile>,
       workingDirectory: str,
     ): Borrowck::OwnershipReport::ReportPosition {
-      let filePathString: String = span.filePath.toString();
-
-      if (filePathString.length() == 0) {
+      if (!span.hasFile()) {
         return Borrowck::OwnershipReport::syntheticPosition();
       }
 
-      let Option::SOME(file) = Hir::DropScheduleDump::findSourceFile(files, span.filePath) else {
+      let Option::SOME(file) = Hir::DropScheduleDump::findSourceFile(files, span.file) else {
         return Borrowck::OwnershipReport::syntheticPosition();
       };
 
       let location: SourceLocation = file.byteLineCol(span.start);
-      let normalized: String = Hir::DropScheduleDump::normalizePath(span.filePath, workingDirectory);
+      let normalized: String = Hir::DropScheduleDump::normalizePath(file.path.asStr(), workingDirectory);
 
       return Borrowck::OwnershipReport::ReportPosition {
         path: normalized,

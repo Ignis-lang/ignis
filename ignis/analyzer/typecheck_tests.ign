@@ -6,6 +6,7 @@ import
   Severity,
   SourceFile,
   SourceSpan,
+  SourceMap,
 from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
@@ -13,7 +14,7 @@ import Id from "@compiler::ids";
 import ParseOutput, Parser from "@compiler::parser";
 
 function typecheckDummySpan(): SourceSpan {
-  return SourceSpan::new("typecheck_tests.ign", 0, 0);
+  return SourceSpan::detached(0, 0);
 }
 
 function typecheckAddPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
@@ -3854,7 +3855,7 @@ function typecheckRecordInitFieldMismatchUnderSubstitutedExpectedIsSpanAnchoredT
     guard: Option::NONE,
     body: typecheckAddBoolLiteral(&mut module, false),
   });
-  let matchSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 30, 40);
+  let matchSpan: SourceSpan = SourceSpan::detached(30, 40);
   let matchFieldValue: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
     span: matchSpan,
     scrutinee: cExpr,
@@ -3877,7 +3878,7 @@ function typecheckRecordInitFieldMismatchUnderSubstitutedExpectedIsSpanAnchoredT
   let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
   let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
   initFields.push(typecheckRecordInitField("value", matchFieldValue));
-  let recordSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 10, 20);
+  let recordSpan: SourceSpan = SourceSpan::detached(10, 20);
   let initExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
     span: recordSpan,
     path: boxPath,
@@ -3994,7 +3995,7 @@ function typecheckMemberAccessOnBareGenericRecordStillRejectedWithUnchangedDiagn
   let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", bareBoxType);
   let bExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "b");
 
-  let accessSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 40, 45);
+  let accessSpan: SourceSpan = SourceSpan::detached(40, 45);
   let accessExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
     span: accessSpan,
     object: bExpr,
@@ -7655,7 +7656,7 @@ function typecheckRecordInitFieldValueMatchExpressionJoinsAgainstFieldType(): vo
     guard: Option::NONE,
     body: typecheckAddIntLiteral(&mut module, 2),
   });
-  let matchSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 30, 40);
+  let matchSpan: SourceSpan = SourceSpan::detached(30, 40);
   let matchFieldValue: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
     span: matchSpan,
     scrutinee: cExpr,
@@ -7665,7 +7666,7 @@ function typecheckRecordInitFieldValueMatchExpressionJoinsAgainstFieldType(): vo
   let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
   let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
   initFields.push(typecheckRecordInitField("x", matchFieldValue));
-  let recordSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 10, 20);
+  let recordSpan: SourceSpan = SourceSpan::detached(10, 20);
   let initExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
     span: recordSpan,
     path: pointPath,
@@ -11960,7 +11961,8 @@ function typecheckIntLiteralWithoutAnnotationKeepsDefaultType(): void {
 // ===========================================================================
 
 function typecheckParseSource(source: str): ParseOutput {
-  let file: SourceFile = SourceFile::create("typecheck_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "typecheck_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
@@ -11975,12 +11977,13 @@ function typecheckAnalyzePreludeAndModule(
   preludeSource: str,
   mainSource: str,
 ): Analyzer::ModuleAnalysisRecord {
-  let preludeFile: SourceFile = SourceFile::create("prelude.ign", preludeSource);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let preludeFile: SourceFile = SourceFile::create(&mut sourceMap, "prelude.ign", preludeSource);
   let preludeParsed: ParseOutput = Parser::parseFile(&preludeFile);
   Test::assertEq<u64>(preludeParsed.lexDiagnostics.length(), 0);
   Test::assertEq<u64>(preludeParsed.parseDiagnostics.length(), 0);
 
-  let mainFile: SourceFile = SourceFile::create("main.ign", mainSource);
+  let mainFile: SourceFile = SourceFile::create(&mut sourceMap, "main.ign", mainSource);
   let mainParsed: ParseOutput = Parser::parseFile(&mainFile);
   Test::assertEq<u64>(mainParsed.lexDiagnostics.length(), 0);
   Test::assertEq<u64>(mainParsed.parseDiagnostics.length(), 0);

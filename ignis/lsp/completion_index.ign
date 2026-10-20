@@ -15,7 +15,7 @@ import Vector from "std::vector";
 
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
-import SourceFile, SourceSpan from "@compiler::diagnostics";
+import FileId, SourceFile, SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 
 import Doc from "../doc/mod";
@@ -424,7 +424,7 @@ export function buildCompletionIndex(
 
     if (containsIndex(indexed, moduleIndex)) {
       if (let Option::SOME(file) = files.get(moduleIndex)) {
-        index.files.push(buildFileCompletion(&file.text, module, analysisRecord, moduleIndex, &stores));
+        index.files.push(buildFileCompletion(file.id, &file.text, module, analysisRecord, moduleIndex, &stores));
       }
     }
 
@@ -1030,6 +1030,7 @@ function cachedReceiver(
 /// The completion data of the module analyzed as `analysisRecord`, whose
 /// source is `text`.
 function buildFileCompletion(
+  file: FileId,
   text: &String,
   module: &Ast::Module,
   analysisRecord: &Analyzer::ModuleAnalysisRecord,
@@ -1040,15 +1041,15 @@ function buildFileCompletion(
   let mut cache: HashMap<u32, ReceiverType> = HashMap::new<u32, ReceiverType>();
   let mut receivers: Vector<NamedReceiver> = Vector::new<NamedReceiver>();
 
-  collectParameterReceivers(&mut receivers, &mut cache, &path, module, &analysisRecord.output, &module.roots, stores);
-  collectLocalReceivers(&mut receivers, &mut cache, &path, module, &analysisRecord.output, stores);
+  collectParameterReceivers(&mut receivers, &mut cache, file, module, &analysisRecord.output, &module.roots, stores);
+  collectLocalReceivers(&mut receivers, &mut cache, file, module, &analysisRecord.output, stores);
 
   return FileCompletion {
     path: path.clone(),
     module: moduleIndex,
     receivers: inSourceOrder(&receivers),
-    typedSpans: typedSpansOf(&mut cache, &path, module, &analysisRecord.output, stores),
-    imports: importedNames(text, &path, &analysisRecord.imports),
+    typedSpans: typedSpansOf(&mut cache, file, module, &analysisRecord.output, stores),
+    imports: importedNames(text, file, &analysisRecord.imports),
   };
 }
 
@@ -1089,7 +1090,7 @@ function inSourceOrder(receivers: &Vector<NamedReceiver>): Vector<NamedReceiver>
 function collectParameterReceivers(
   receivers: &mut Vector<NamedReceiver>,
   cache: &mut HashMap<u32, ReceiverType>,
-  path: &String,
+  file: FileId,
   module: &Ast::Module,
   analysis: &Analyzer::AnalyzerOutput,
   itemIds: &Vector<Ast::ItemId>,
@@ -1108,24 +1109,24 @@ function collectParameterReceivers(
 
     match (module.items.get(*itemId)) {
       Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
-        if (spanInFile(path, functionItem.span)) {
+        if (spanInFile(file, functionItem.span)) {
           addParameterReceivers(receiversRef, cacheRef, module, analysis, *itemId, &functionItem.parameters, stores);
         }
       },
       Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
-        collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &recordItem.methods, stores);
+        collectParameterReceivers(receiversRef, cacheRef, file, module, analysis, &recordItem.methods, stores);
       },
       Option::SOME(Ast::Item::Node::Enum(enumItem)) -> {
-        collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &enumItem.methods, stores);
+        collectParameterReceivers(receiversRef, cacheRef, file, module, analysis, &enumItem.methods, stores);
       },
       Option::SOME(Ast::Item::Node::Namespace(namespaceItem)) -> {
-        collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &namespaceItem.items, stores);
+        collectParameterReceivers(receiversRef, cacheRef, file, module, analysis, &namespaceItem.items, stores);
       },
       Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
         if (let Option::SOME(innerId) = exportItem.declaration) {
           let mut inner: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
           inner.push(innerId);
-          collectParameterReceivers(receiversRef, cacheRef, path, module, analysis, &inner, stores);
+          collectParameterReceivers(receiversRef, cacheRef, file, module, analysis, &inner, stores);
         }
       },
       _ -> {},
@@ -1191,7 +1192,7 @@ function addParameterReceivers(
 function collectLocalReceivers(
   receivers: &mut Vector<NamedReceiver>,
   cache: &mut HashMap<u32, ReceiverType>,
-  path: &String,
+  file: FileId,
   module: &Ast::Module,
   analysis: &Analyzer::AnalyzerOutput,
   stores: &Stores,
@@ -1222,7 +1223,7 @@ function collectLocalReceivers(
       continue;
     };
 
-    if (!spanInFile(path, binding.span)) {
+    if (!spanInFile(file, binding.span)) {
       continue;
     }
 
@@ -1237,7 +1238,7 @@ function collectLocalReceivers(
 /// Every expression of the module the typechecker typed.
 function typedSpansOf(
   cache: &mut HashMap<u32, ReceiverType>,
-  path: &String,
+  file: FileId,
   module: &Ast::Module,
   analysis: &Analyzer::AnalyzerOutput,
   stores: &Stores,
@@ -1263,7 +1264,7 @@ function typedSpansOf(
 
     let span: SourceSpan = Ast::Serializer::expressionSpan(node);
 
-    if (!spanInFile(path, span)) {
+    if (!spanInFile(file, span)) {
       continue;
     }
 
@@ -1277,7 +1278,7 @@ function typedSpansOf(
 /// what each names.
 function importedNames(
   text: &String,
-  path: &String,
+  file: FileId,
   overlay: &Analyzer::Imports::ImportOverlay
 ): Vector<ImportedDeclaration> {
   let mut names: Vector<ImportedDeclaration> = Vector::new<ImportedDeclaration>();
@@ -1297,7 +1298,7 @@ function importedNames(
 
     position += 1;
 
-    if (implicit || !spanInFile(path, *span) || span.end > text.length() || span.start >= span.end) {
+    if (implicit || !spanInFile(file, *span) || span.end > text.length() || span.start >= span.end) {
       continue;
     }
 

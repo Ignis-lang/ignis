@@ -4,7 +4,7 @@ import Path from "std::path";
 import String from "std::string";
 import Toml, TomlDocument, TomlTable, TomlValue, TomlValueKind from "std::toml";
 
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, SourceMap from "@compiler::diagnostics";
 import FormatConfigDiagnostics from "./diagnostics";
 
 const DEFAULT_INDENT_WIDTH: u64 = 2;
@@ -74,6 +74,7 @@ function cliPath(): Path::PathBuf {
 }
 
 function validateBound(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   key: str,
   value: u64,
@@ -92,26 +93,28 @@ function validateBound(
     message.pushStr("..=");
     message.push(&maxText);
 
-    return Result::ERROR(FormatConfigDiagnostics::invalidValue(path, key, &message));
+    return Result::ERROR(FormatConfigDiagnostics::invalidValue(sourceMap, path, key, &message));
   }
 
   return Result::OK(value);
 }
 
 function tomlValueAsBoolean(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   key: str,
   value: &TomlValue
 ): Result<boolean, DiagnosticBag> {
   if (value.kind() != TomlValueKind::BOOLEAN) {
     let message: String = String::create("expected a boolean");
-    return Result::ERROR(FormatConfigDiagnostics::invalidValue(path, key, &message));
+    return Result::ERROR(FormatConfigDiagnostics::invalidValue(sourceMap, path, key, &message));
   }
 
   return Result::OK(value.asBoolean());
 }
 
 function tomlValueAsBound(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   key: str,
   value: &TomlValue,
@@ -120,17 +123,17 @@ function tomlValueAsBound(
 ): Result<u64, DiagnosticBag> {
   if (value.kind() != TomlValueKind::INTEGER) {
     let message: String = String::create("expected an integer");
-    return Result::ERROR(FormatConfigDiagnostics::invalidValue(path, key, &message));
+    return Result::ERROR(FormatConfigDiagnostics::invalidValue(sourceMap, path, key, &message));
   }
 
   let rawValue: i64 = value.asInteger();
 
   if (rawValue < 0) {
     let message: String = String::create("expected a non-negative integer");
-    return Result::ERROR(FormatConfigDiagnostics::invalidValue(path, key, &message));
+    return Result::ERROR(FormatConfigDiagnostics::invalidValue(sourceMap, path, key, &message));
   }
 
-  return validateBound(path, key, rawValue as u64, minValue, maxValue);
+  return validateBound(sourceMap, path, key, rawValue as u64, minValue, maxValue);
 }
 
 function strEquals(left: str, right: str): boolean {
@@ -142,6 +145,7 @@ function isKnownFormatterKey(key: str): boolean {
 }
 
 function applyTable(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   table: &TomlTable,
   config: &mut FormatterConfig
@@ -156,7 +160,7 @@ function applyTable(
 
     if (!isKnownFormatterKey(entry.key)) {
       let keyText: String = String::create(entry.key);
-      return Result::ERROR(FormatConfigDiagnostics::unknownKey(path, &keyText));
+      return Result::ERROR(FormatConfigDiagnostics::unknownKey(sourceMap, path, &keyText));
     }
 
     index += 1;
@@ -164,22 +168,22 @@ function applyTable(
 
   let indentWidthKey: String = String::create("indent_width");
   if (let Option::SOME(value) = table.valueForKey(&indentWidthKey)) {
-    config.indentWidth = tomlValueAsBound(path, "indent_width", &value, MIN_INDENT_WIDTH, MAX_INDENT_WIDTH)!;
+    config.indentWidth = tomlValueAsBound(sourceMap, path, "indent_width", &value, MIN_INDENT_WIDTH, MAX_INDENT_WIDTH)!;
   }
 
   let lineWidthKey: String = String::create("line_width");
   if (let Option::SOME(value) = table.valueForKey(&lineWidthKey)) {
-    config.lineWidth = tomlValueAsBound(path, "line_width", &value, MIN_LINE_WIDTH, MAX_LINE_WIDTH)!;
+    config.lineWidth = tomlValueAsBound(sourceMap, path, "line_width", &value, MIN_LINE_WIDTH, MAX_LINE_WIDTH)!;
   }
 
   let useTabsKey: String = String::create("use_tabs");
   if (let Option::SOME(value) = table.valueForKey(&useTabsKey)) {
-    config.useTabs = tomlValueAsBoolean(path, "use_tabs", &value)!;
+    config.useTabs = tomlValueAsBoolean(sourceMap, path, "use_tabs", &value)!;
   }
 
   let sortImportsKey: String = String::create("sort_imports");
   if (let Option::SOME(value) = table.valueForKey(&sortImportsKey)) {
-    config.sortImports = tomlValueAsBoolean(path, "sort_imports", &value)!;
+    config.sortImports = tomlValueAsBoolean(sourceMap, path, "sort_imports", &value)!;
   }
 
   return Result::OK(());
@@ -199,12 +203,15 @@ function configIoErrorDisplay(error: &Io::IoError): String {
   return message;
 }
 
-function readToml(path: &Path::PathBuf): Result<TomlDocument, DiagnosticBag> {
+function readToml(
+  sourceMap: &mut SourceMap,
+  path: &Path::PathBuf
+): Result<TomlDocument, DiagnosticBag> {
   let source: String = match (Fs::readToString(path)) {
     Result::OK(value) -> value,
     Result::ERROR(readError) -> {
       let message: String = configIoErrorDisplay(&readError);
-      return Result::ERROR(FormatConfigDiagnostics::io(path, &message));
+      return Result::ERROR(FormatConfigDiagnostics::io(sourceMap, path, &message));
     },
   };
 
@@ -214,21 +221,22 @@ function readToml(path: &Path::PathBuf): Result<TomlDocument, DiagnosticBag> {
   let Result::OK(document) = Toml::parse(&source) else {
     let Result::ERROR(error) = Toml::parse(&source) else {
       let message: String = String::create("could not parse TOML");
-      return Result::ERROR(FormatConfigDiagnostics::parse(path, &message));
+      return Result::ERROR(FormatConfigDiagnostics::parse(sourceMap, path, &message));
     };
 
     let message: String = String::create(error.message);
-    return Result::ERROR(FormatConfigDiagnostics::parse(path, &message));
+    return Result::ERROR(FormatConfigDiagnostics::parse(sourceMap, path, &message));
   };
 
   return Result::OK(document);
 }
 
 function applyIgnisTomlConfig(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   config: &mut FormatterConfig
 ): Result<void, DiagnosticBag> {
-  let document: TomlDocument = readToml(path)!;
+  let document: TomlDocument = readToml(sourceMap, path)!;
 
   let Option::SOME(value) = document.get("formatter") else {
     return Result::OK(());
@@ -236,32 +244,34 @@ function applyIgnisTomlConfig(
 
   let Option::SOME(table) = value.asTable() else {
     let message: String = String::create("expected a table");
-    return Result::ERROR(FormatConfigDiagnostics::invalidValue(path, "formatter", &message));
+    return Result::ERROR(FormatConfigDiagnostics::invalidValue(sourceMap, path, "formatter", &message));
   };
 
-  return applyTable(path, &table, config);
+  return applyTable(sourceMap, path, &table, config);
 }
 
 function applyDedicatedConfig(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   config: &mut FormatterConfig
 ): Result<void, DiagnosticBag> {
-  let document: TomlDocument = readToml(path)!;
+  let document: TomlDocument = readToml(sourceMap, path)!;
   let root: TomlTable = document.root();
 
-  return applyTable(path, &root, config);
+  return applyTable(sourceMap, path, &root, config);
 }
 
 export namespace Format {
   namespace Config {
     function load(
+      sourceMap: &mut SourceMap,
       paths: &FormatterConfigPaths,
       cliOverrides: &FormatterCliOverrides
     ): Result<FormatterConfig, DiagnosticBag> {
       let mut config: FormatterConfig = FormatterConfig::default();
 
       if (let Option::SOME(path) = &paths.ignisToml) {
-        applyIgnisTomlConfig(&path, &mut config)!;
+        applyIgnisTomlConfig(sourceMap, &path, &mut config)!;
       }
 
       let dedicatedPath: Option<&Path::PathBuf> = match (&paths.explicitConfig) {
@@ -273,17 +283,17 @@ export namespace Format {
       };
 
       if (let Option::SOME(path) = dedicatedPath) {
-        applyDedicatedConfig(path, &mut config)!;
+        applyDedicatedConfig(sourceMap, path, &mut config)!;
       }
 
       let cliConfigPath: Path::PathBuf = cliPath();
 
       if (let Option::SOME(indentWidth) = cliOverrides.indentWidth) {
-        config.indentWidth = validateBound(&cliConfigPath, "indent_width", indentWidth, MIN_INDENT_WIDTH, MAX_INDENT_WIDTH)!;
+        config.indentWidth = validateBound(sourceMap, &cliConfigPath, "indent_width", indentWidth, MIN_INDENT_WIDTH, MAX_INDENT_WIDTH)!;
       }
 
       if (let Option::SOME(lineWidth) = cliOverrides.lineWidth) {
-        config.lineWidth = validateBound(&cliConfigPath, "line_width", lineWidth, MIN_LINE_WIDTH, MAX_LINE_WIDTH)!;
+        config.lineWidth = validateBound(sourceMap, &cliConfigPath, "line_width", lineWidth, MIN_LINE_WIDTH, MAX_LINE_WIDTH)!;
       }
 
       if (let Option::SOME(useTabs) = cliOverrides.useTabs) {

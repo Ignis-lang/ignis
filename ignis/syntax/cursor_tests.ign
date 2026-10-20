@@ -2,7 +2,7 @@ import Test from "std::test";
 import Memory from "std::memory";
 import Path from "std::path";
 
-import SourceFile from "@compiler::diagnostics";
+import SourceFile, SourceMap from "@compiler::diagnostics";
 import SourceCursor from "@compiler::syntax";
 
 function assertNextByte(cursor: &mut SourceCursor, expected: u8): void {
@@ -25,7 +25,8 @@ function assertNextChar(cursor: &mut SourceCursor, expected: char): void {
 
 @test
 function sourceCursorMarkResetReplaysTheSameByteRange(): void {
-  let source: SourceFile = SourceFile::create("fixtures/cursor_mark.ign", "token");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/cursor_mark.ign", "token");
   let mut cursor: SourceCursor = SourceCursor::create(&source);
   let start = cursor.mark();
 
@@ -54,15 +55,13 @@ function sourceCursorMarkResetReplaysTheSameByteRange(): void {
 
 @test
 function sourceCursorTreatsRawNulAsDataUntilTheFinalByte(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(3);
   @write<u8>(raw, 'a' as u8);
   @write<u8>(raw + 1, 0);
   @write<u8>(raw + 2, 'b' as u8);
 
-  let source: SourceFile = SourceFile {
-    path: Path::PathBuf::create("fixtures/cursor_nul.ign"),
-    text: String::create(raw, 3 as u64),
-  };
+  let source: SourceFile = SourceFile::fromPath(&mut sourceMap, Path::PathBuf::create("fixtures/cursor_nul.ign"), String::create(raw, 3 as u64));
   let mut cursor: SourceCursor = SourceCursor::create(&source);
 
   Test::assert(!cursor.isAtEnd());
@@ -80,15 +79,13 @@ function sourceCursorTreatsRawNulAsDataUntilTheFinalByte(): void {
 
 @test
 function sourceCursorPeeksAndAdvancesUtf8CharsByScalar(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(3);
   @write<u8>(raw, 195 as u8);
   @write<u8>(raw + 1, 177 as u8);
   @write<u8>(raw + 2, 'a' as u8);
 
-  let source: SourceFile = SourceFile {
-    path: Path::PathBuf::create("fixtures/cursor_utf8.ign"),
-    text: String::create(raw, 3 as u64),
-  };
+  let source: SourceFile = SourceFile::fromPath(&mut sourceMap, Path::PathBuf::create("fixtures/cursor_utf8.ign"), String::create(raw, 3 as u64));
   let mut cursor: SourceCursor = SourceCursor::create(&source);
 
   Test::assertEq<i32>(match (cursor.peekChar()) { Option::SOME(value) -> value as i32, Option::NONE -> 0 }, 241);
@@ -105,15 +102,13 @@ function sourceCursorPeeksAndAdvancesUtf8CharsByScalar(): void {
 
 @test
 function sourceCursorReplacesMalformedUtf8AndAdvancesOneByte(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(3);
   @write<u8>(raw, 255 as u8);
   @write<u8>(raw + 1, 'a' as u8);
   @write<u8>(raw + 2, 128 as u8);
 
-  let source: SourceFile = SourceFile {
-    path: Path::PathBuf::create("fixtures/cursor_malformed_utf8.ign"),
-    text: String::create(raw, 3 as u64),
-  };
+  let source: SourceFile = SourceFile::fromPath(&mut sourceMap, Path::PathBuf::create("fixtures/cursor_malformed_utf8.ign"), String::create(raw, 3 as u64));
   let mut cursor: SourceCursor = SourceCursor::create(&source);
 
   Test::assertEq<i32>(match (cursor.peekChar()) { Option::SOME(value) -> value as i32, Option::NONE -> 0 }, 65533);

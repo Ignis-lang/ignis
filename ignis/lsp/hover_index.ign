@@ -24,7 +24,7 @@ import Vector from "std::vector";
 
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
-import SourceSpan from "@compiler::diagnostics";
+import FileId, SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 
 import Doc from "../doc/mod";
@@ -512,6 +512,8 @@ record ModuleHoverTables {
 /// An index under construction.
 record HoverCollector {
   public path: String;
+  /// The file being indexed, which the spans that point into it name.
+  public file: FileId;
   /// The text being indexed.
   public source: String;
   /// False for a file that is not open: its entries keep their targets only.
@@ -603,6 +605,7 @@ function collectNamespaceDefinitions(
 /// Builds the index of the module analyzed as `analysisRecord`, whose
 /// source is `text`. Without `rendersTexts` the entries show no hover.
 export function buildFileHoverIndex(
+  file: FileId,
   text: &String,
   module: &Ast::Module,
   analysisRecord: &Analyzer::ModuleAnalysisRecord,
@@ -618,6 +621,7 @@ export function buildFileHoverIndex(
 
   let mut collector: HoverCollector = HoverCollector {
     path: analysisRecord.info.pathText.clone(),
+    file: file,
     source: text.clone(),
     rendersTexts: rendersTexts,
     starts: Vector::new<u64>(),
@@ -939,10 +943,10 @@ function addDeclarationName(
   addDefinitionEntry(collector, start, start + name.length(), defId, true, program, defs, types, symbols);
 }
 
-/// True when `span` points into the file being indexed. Trait default
-/// methods are copied into their implementers with the trait's spans.
-export function spanInFile(path: &String, span: SourceSpan): boolean {
-  return path.equals(span.filePath);
+/// True when `span` points into the file being indexed, `file`. Trait
+/// default methods are copied into their implementers with the trait's spans.
+export function spanInFile(file: FileId, span: SourceSpan): boolean {
+  return span.file.equals(&file);
 }
 
 /// Adds the names of the declarations `itemIds` lists, their members, and
@@ -988,7 +992,7 @@ function collectItemHover(
 
   let span: SourceSpan = itemSpanOf(item);
 
-  if (!spanInFile(&collector.path, span)) {
+  if (!spanInFile(collector.file, span)) {
     return;
   }
 
@@ -1224,7 +1228,7 @@ export function patternSpanOf(module: &Ast::Module, pattern: Ast::PatternId): So
     Option::SOME(Ast::Pattern::Node::Path(node)) -> node.span,
     Option::SOME(Ast::Pattern::Node::Tuple(node)) -> node.span,
     Option::SOME(Ast::Pattern::Node::Or(node)) -> node.span,
-    Option::NONE -> SourceSpan::new("", 0, 0),
+    Option::NONE -> SourceSpan::detached(0, 0),
   };
 }
 
@@ -1267,7 +1271,7 @@ function collectImportHovers(
     if (!implicit) {
       if (let Option::SOME(defId) = overlay.defs.get(index)) {
         if (let Option::SOME(span) = overlay.spans.get(index)) {
-          if (spanInFile(&collector.path, *span)) {
+          if (spanInFile(collector.file, *span)) {
             addDefinitionEntry(collector, span.start, span.end, *defId, false, program, defs, types, symbols);
           }
         }
@@ -1295,7 +1299,7 @@ function collectImportPaths(
         let loaded: Option<u64> = modulePathIndex(program, &importItem.source);
 
         if (let Option::SOME(moduleIndex) = loaded) {
-          if (spanInFile(&collectorRef.path, span)) {
+          if (spanInFile(collectorRef.file, span)) {
             pushEntry(collectorRef, span.start, span.end, range, 0, hoverKey(HOVER_KEY_MODULE, moduleIndex as u32), 0);
           }
         }
@@ -1412,7 +1416,7 @@ function collectAsmOutputHovers(
             let resolved: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(bodies, bindingId.raw());
 
             if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(local)) = &resolved) {
-              if (spanInFile(&collectorRef.path, output.span)) {
+              if (spanInFile(collectorRef.file, output.span)) {
                 let start: u64 = findWord(text, output.span.start, output.span.end, &output.name).unwrapOr(output.span.start);
 
                 collectorRef.locals.push(LocalSite {
@@ -1458,7 +1462,7 @@ function collectPatternHovers(
     match (module.patterns.get(Id::fromRaw<Ast::PatternTag>(raw))) {
       Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
         if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(local)) = &resolved) {
-          if (spanInFile(&collectorRef.path, binding.span)) {
+          if (spanInFile(collectorRef.file, binding.span)) {
             let start: u64 = findWord(text, binding.span.start, binding.span.end, &binding.name).unwrapOr(binding.span.start);
 
             collectorRef.locals.push(LocalSite {
@@ -1473,7 +1477,7 @@ function collectPatternHovers(
       },
       Option::SOME(Ast::Pattern::Node::Path(path)) -> {
         if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = &resolved) {
-          if (spanInFile(&collectorRef.path, path.span)) {
+          if (spanInFile(collectorRef.file, path.span)) {
             let end: u64 = path.span.start + writtenPathLength(&path.segments);
             addDefinitionEntry(collectorRef, path.span.start, end, defId, false, program, defs, types, symbols);
           }
@@ -1536,7 +1540,7 @@ function collectExpressionHovers(
         collectRecordInitHovers(collectorRef, tables, module, raw, &recordInit, program, defs, types, symbols);
       },
       Option::SOME(Ast::Expression::Node::Literal(literal)) -> {
-        if (spanInFile(&collectorRef.path, literal.span)) {
+        if (spanInFile(collectorRef.file, literal.span)) {
           if (let Option::SOME(typeId) = tables.exprTypes.get(&raw)) {
             addTypeEntry(collectorRef, literal.span.start, literal.span.end, *typeId, defs, types, symbols);
           }
@@ -1580,7 +1584,7 @@ function collectNameHover(
 ): void {
   let mut collectorRef: &mut HoverCollector = collector;
 
-  if (!spanInFile(&collectorRef.path, span)) {
+  if (!spanInFile(collectorRef.file, span)) {
     return;
   }
 
@@ -1628,7 +1632,7 @@ function collectMemberAccessHover(
   let collectorRef: &mut HoverCollector = collector;
   let span: SourceSpan = access.span;
 
-  if (!spanInFile(&collectorRef.path, span)) {
+  if (!spanInFile(collectorRef.file, span)) {
     return;
   }
 
@@ -1674,7 +1678,7 @@ function collectRecordInitHovers(
 ): void {
   let collectorRef: &mut HoverCollector = collector;
 
-  if (!spanInFile(&collectorRef.path, recordInit.span)) {
+  if (!spanInFile(collectorRef.file, recordInit.span)) {
     return;
   }
 
@@ -1709,7 +1713,7 @@ function collectRecordInitHovers(
 function expressionSpanOf(module: &Ast::Module, id: Ast::ExpressionId): SourceSpan {
   return match (module.expressions.get(id)) {
     Option::SOME(node) -> Ast::Serializer::expressionSpan(node),
-    Option::NONE -> SourceSpan::new("", 0, 0),
+    Option::NONE -> SourceSpan::detached(0, 0),
   };
 }
 

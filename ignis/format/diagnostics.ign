@@ -1,11 +1,10 @@
 import Path from "std::path";
 import String from "std::string";
 
-import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, Severity, SourceMap, SourceSpan from "@compiler::diagnostics";
 
-function formatConfigSpan(path: &Path::PathBuf): SourceSpan {
-  let pathText: String = path.toString();
-  return SourceSpan::new(pathText.toStr(), 0, 0);
+function formatConfigSpan(sourceMap: &mut SourceMap, path: &Path::PathBuf): SourceSpan {
+  return SourceSpan::new(sourceMap.register(path.asStr()), 0, 0);
 }
 
 function singleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
@@ -22,7 +21,7 @@ export namespace FormatConfigDiagnosticCode {
 }
 
 export namespace FormatConfigDiagnostics {
-  function io(path: &Path::PathBuf, message: &String): DiagnosticBag {
+  function io(sourceMap: &mut SourceMap, path: &Path::PathBuf, message: &String): DiagnosticBag {
     let pathText: String = path.toString();
 
     let mut text: String = String::create("failed to read formatter config '");
@@ -34,11 +33,11 @@ export namespace FormatConfigDiagnostics {
       Severity::ERROR,
       FormatConfigDiagnosticCode::IO,
       text.toStr(),
-      formatConfigSpan(path),
+      formatConfigSpan(sourceMap, path),
     ));
   }
 
-  function parse(path: &Path::PathBuf, message: &String): DiagnosticBag {
+  function parse(sourceMap: &mut SourceMap, path: &Path::PathBuf, message: &String): DiagnosticBag {
     let pathText: String = path.toString();
 
     let mut text: String = String::create("failed to parse formatter config '");
@@ -50,11 +49,15 @@ export namespace FormatConfigDiagnostics {
       Severity::ERROR,
       FormatConfigDiagnosticCode::PARSE,
       text.toStr(),
-      formatConfigSpan(path),
+      formatConfigSpan(sourceMap, path),
     ));
   }
 
-  function unknownKey(path: &Path::PathBuf, key: &String): DiagnosticBag {
+  function unknownKey(
+    sourceMap: &mut SourceMap,
+    path: &Path::PathBuf,
+    key: &String
+  ): DiagnosticBag {
     let pathText: String = path.toString();
 
     let mut text: String = String::create("formatter config '");
@@ -67,11 +70,16 @@ export namespace FormatConfigDiagnostics {
       Severity::ERROR,
       FormatConfigDiagnosticCode::UNKNOWN_KEY,
       text.toStr(),
-      formatConfigSpan(path),
+      formatConfigSpan(sourceMap, path),
     ));
   }
 
-  function invalidValue(path: &Path::PathBuf, key: str, message: &String): DiagnosticBag {
+  function invalidValue(
+    sourceMap: &mut SourceMap,
+    path: &Path::PathBuf,
+    key: str,
+    message: &String
+  ): DiagnosticBag {
     let pathText: String = path.toString();
 
     let mut text: String = String::create("formatter config '");
@@ -85,7 +93,7 @@ export namespace FormatConfigDiagnostics {
       Severity::ERROR,
       FormatConfigDiagnosticCode::INVALID_VALUE,
       text.toStr(),
-      formatConfigSpan(path),
+      formatConfigSpan(sourceMap, path),
     ));
   }
 }
