@@ -1,0 +1,32 @@
+// e2e: err
+// The record implements `A::Named`, which shares its name with `B::Named`;
+// it does not satisfy a `B::Named` bound.
+namespace A {
+  trait Named {
+    first(&self): i32;
+  }
+}
+
+namespace B {
+  trait Named {
+    second(&self): i32;
+  }
+}
+
+@implements(A::Named)
+record OnlyFirst {
+  public value: i32;
+
+  first(&self): i32 {
+    return self.value;
+  }
+}
+
+function useSecond<T: B::Named>(value: &T): i32 {
+  return value.second();
+}
+
+function main(): i32 {
+  let onlyFirst: OnlyFirst = OnlyFirst { value: 1 };
+  return useSecond<OnlyFirst>(&onlyFirst);
+}

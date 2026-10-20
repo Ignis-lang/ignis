@@ -5283,6 +5283,94 @@ function parserMaterializesTraitDefaultsForANamespacedTraitPath(): void {
   Test::assertEq<str>(traitMethodName(&module, inheritedId).toStr(), "answer");
 }
 
+/// Scenario: two traits named `Named` in different namespaces each hand their
+/// own default to the types implementing them: by path from the top level, and
+/// by bare name from inside the namespace that declares the trait.
+/// Spec: TRAITS.md "Default Methods"; parity fixture e2e_ok::trait_identity_same_name_in_two_namespaces.
+@test
+function parserMaterializesTheDefaultsOfTheTraitThePathNames(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_same_name.ign",
+    "namespace A { trait Named { firstTag(&self): i32 { return 1; } } } namespace B { trait Named { secondTag(&self): i32 { return 2; } } @implements(Named) record Local { public x: i32; } } @implements(B::Named) record Second { public x: i32; } @implements(A::Named, B::Named) record Both { public x: i32; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 4);
+
+  let secondId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Second"),
+  };
+  let bothId: Ast::ItemId = match (module.roots.get(3)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Both"),
+  };
+
+  Test::assertEq<u64>(recordMethodCount(&module, secondId), 1);
+  Test::assertEq<str>(traitMethodName(&module, recordMethodId(&module, secondId, 0)).toStr(), "secondTag");
+
+  Test::assertEq<u64>(recordMethodCount(&module, bothId), 2);
+  Test::assertEq<str>(traitMethodName(&module, recordMethodId(&module, bothId, 0)).toStr(), "firstTag");
+  Test::assertEq<str>(traitMethodName(&module, recordMethodId(&module, bothId, 1)).toStr(), "secondTag");
+
+  let namespaceB: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing namespace B"),
+  };
+  let localId: Ast::ItemId = namespaceItemId(&module, namespaceB, 1);
+
+  Test::assertEq<u64>(recordMethodCount(&module, localId), 1);
+  Test::assertEq<str>(traitMethodName(&module, recordMethodId(&module, localId, 0)).toStr(), "secondTag");
+}
+
+/// Scenario: a bare `@implements` name is read through the enclosing
+/// namespaces only, so a trait nested in another namespace hands its defaults
+/// to no type that names it bare from outside.
+/// Spec: TRAITS.md "Implementing a Trait"; parity fixture e2e_err::trait_identity_trait_out_of_scope.
+@test
+function parserMaterializesNoDefaultsForATraitOutOfScope(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_out_of_scope.ign",
+    "namespace A { trait Named { firstTag(&self): i32 { return 1; } } } @implements(Named) record Outside { public x: i32; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let outsideId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Outside"),
+  };
+
+  Test::assertEq<u64>(recordMethodCount(&module, outsideId), 0);
+}
+
+/// Reads the item at `index` inside the namespace `id` denotes.
+function namespaceItemId(module: &Ast::Module, id: Ast::ItemId, index: u64): Ast::ItemId {
+  match (expectItem(module, id)) {
+    Ast::Item::Node::Namespace(namespaceItem) -> {
+      match (namespaceItem.items.get(index)) {
+        Option::SOME(value) -> {
+          return *value;
+        },
+        Option::NONE -> {
+          @panic("namespace declares no item at that index");
+        },
+      };
+    },
+    _ -> {
+      @panic("item is not a namespace");
+    },
+  };
+
+  @panic("namespace declares no item at that index");
+}
+
 /// Reads the initializer of the binding pattern `id` denotes.
 function bindingInitializer(module: &Ast::Module, id: Ast::PatternId): Option<Ast::ExpressionId> {
   match (expectPattern(module, id)) {

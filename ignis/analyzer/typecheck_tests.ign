@@ -15021,6 +15021,181 @@ function typecheckTraitBoundReceiverRejectsAMethodTheBoundDoesNotDeclare(): void
   Test::assertEq<boolean>(typecheckCountErrors(&output.diagnostics) > 0, true);
 }
 
+/// Two traits named `Named` in different namespaces, each with a required
+/// method of its own, shared by the trait identity tests below.
+function typecheckSameNamedTraitsSource(rest: str): String {
+  return `namespace A {\n  trait Named {\n    first(&self): i32;\n  }\n}\n\nnamespace B {\n  trait Named {\n    second(&self): i32;\n  }\n}\n\n${rest}`;
+}
+
+/// Scenario: a type parameter bounded by `B::Named` answers the methods of
+/// `B::Named`, not those of the `A::Named` declared first.
+@test
+function typecheckTraitBoundReceiverResolvesTheTraitTheBoundNames(): void {
+  let source: String = typecheckSameNamedTraitsSource("function useSecond<T: B::Named>(value: &T): i32 {\n  return value.second();\n}\n");
+  let parsed: ParseOutput = typecheckParseSource(source.toStr());
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a record implementing `A::Named` does not satisfy a `B::Named`
+/// bound on a declared type, although both traits are named `Named`.
+@test
+function typecheckBoundRejectsATraitOfTheSameNameFromAnotherNamespace(): void {
+  let source: String = typecheckSameNamedTraitsSource("@implements(A::Named)\nrecord OnlyFirst {\n  public value: i32;\n\n  first(&self): i32 {\n    return self.value;\n  }\n}\n\nrecord Holder<T: B::Named> {\n  public value: T;\n}\n\nfunction keep(holder: Holder<OnlyFirst>): i32 {\n  return 0;\n}\n");
+  let parsed: ParseOutput = typecheckParseSource(source.toStr());
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED);
+}
+
+/// Scenario: a record implementing `B::Named` satisfies a `B::Named` bound on
+/// a declared type.
+@test
+function typecheckBoundAcceptsTheTraitTheRecordImplements(): void {
+  let source: String = typecheckSameNamedTraitsSource("@implements(B::Named)\nrecord OnlySecond {\n  public value: i32;\n\n  second(&self): i32 {\n    return self.value;\n  }\n}\n\nrecord Holder<T: B::Named> {\n  public value: T;\n}\n\nfunction keep(holder: Holder<OnlySecond>): i32 {\n  return 0;\n}\n");
+  let parsed: ParseOutput = typecheckParseSource(source.toStr());
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: each trait named in `@implements` is checked for its own
+/// required methods, so a complete `A::Named` does not hide a missing method
+/// of `B::Named`.
+@test
+function typecheckImplementsChecksEachSameNamedTraitApart(): void {
+  let source: String = typecheckSameNamedTraitsSource("@implements(A::Named, B::Named)\nrecord Both {\n  public value: i32;\n\n  first(&self): i32 {\n    return self.value;\n  }\n}\n");
+  let parsed: ParseOutput = typecheckParseSource(source.toStr());
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TRAIT_METHOD_NOT_IMPLEMENTED);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+}
+
+/// Scenario: an `@implements` argument naming no trait is an error at the
+/// attribute, bare or qualified, even with no bound to satisfy.
+@test
+function typecheckImplementsRejectsAnUnknownTrait(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "namespace Shapes {}\n\n@implements(Unknown)\nrecord Square {\n  public side: i32;\n}\n\n@implements(Shapes::Missing)\nrecord Circle {\n  public radius: i32;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::UNKNOWN_IMPLEMENTED_TRAIT);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 2);
+}
+
+/// Scenario: lang traits, `Eq` and `Hash` need no declaration in scope to be
+/// named in `@implements`.
+@test
+function typecheckImplementsAcceptsTraitsThatNeedNoDeclaration(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@implements(Clone, Send, Sync, Eq, Hash)\nrecord Point {\n  public x: i32;\n\n  clone(&self): Point {\n    return Point { x: self.x };\n  }\n\n  equals(&self, other: &Point): boolean {\n    return self.x == other.x;\n  }\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a bound naming no trait, or a declaration that is not a trait, is
+/// an error at the bound even when the generic is never called.
+@test
+function typecheckBoundRejectsANameThatIsNotATraitInScope(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Point {\n  public x: i32;\n}\n\nfunction unknown<T: Unknown>(value: &T): i32 {\n  return 0;\n}\n\nfunction notATrait<T: Point>(value: &T): i32 {\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::UNKNOWN_IMPLEMENTED_TRAIT);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 2);
+}
+
+/// Scenario: a trait declared in a namespace is not in scope by its bare name
+/// outside it, even as the only trait of that name.
+@test
+function typecheckImplementsRejectsATraitOutOfScope(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "namespace A {\n  trait Named {\n    first(&self): i32;\n  }\n}\n\n@implements(Named)\nrecord OnlyFirst {\n  public value: i32;\n\n  first(&self): i32 {\n    return self.value;\n  }\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::UNKNOWN_IMPLEMENTED_TRAIT);
+}
+
+/// Scenario: a type parameter bounded by two traits answers the methods of
+/// the second bound too.
+@test
+function typecheckTraitBoundReceiverSearchesEveryBound(): void {
+  let source: String = typecheckSameNamedTraitsSource("function useBoth<T: A::Named & B::Named>(value: &T): i32 {\n  return value.first() + value.second();\n}\n");
+  let parsed: ParseOutput = typecheckParseSource(source.toStr());
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a method two bounds both declare is ambiguous on the receiver.
+@test
+function typecheckTraitBoundReceiverRejectsAMethodOfTwoBounds(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait First {\n  name(&self): i32;\n}\n\ntrait Second {\n  name(&self): i32;\n}\n\nfunction useBoth<T: First & Second>(value: &T): i32 {\n  return value.name();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::AMBIGUOUS_BOUND_METHOD);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+}
+
 /// Scenario: an unbounded type parameter owns no methods at all, so the call
 /// stays the mismatch it was before bounds were read.
 @test

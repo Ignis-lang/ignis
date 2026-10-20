@@ -139,9 +139,10 @@ export namespace Analyzer {
     public name: Analyzer::SymbolId;
     public owner: Analyzer::DefinitionId;
     public index: u32;
-    /// Every trait named by a `T: Trait` bound, in written order. Held as the
-    /// written path text for the same reason `RecordDef::implementedTraits` is:
-    /// the binder records the bound before trait names resolve.
+    /// Every trait named by a `T: Trait` bound, in written order, by the last
+    /// segment of its path: the binder records the bound before trait names
+    /// resolve. The trait each one resolves to is held by the store
+    /// (`DefinitionStore::traitReferencesOf`).
     public bounds: Vector<String>;
   }
 
@@ -271,9 +272,9 @@ export namespace Analyzer {
     public implementsCopy: boolean;
     /// Set when the record carries `@implements(Drop)`.
     public implementsDrop: boolean;
-    /// Every trait named by an `@implements(...)` attribute, in written order.
-    /// Held as raw attribute text because attribute arguments are not resolved
-    /// to definitions.
+    /// Every trait named by an `@implements(...)` attribute, in written order,
+    /// by the last segment of its path. The trait each one resolves to is held
+    /// by the store (`DefinitionStore::traitReferencesOf`).
     public implementedTraits: Vector<String>;
     /// Set when the record carries `@packed`.
     public packed: boolean;
@@ -314,9 +315,9 @@ export namespace Analyzer {
     public implementsCopy: boolean;
     /// Set when the enum carries `@implements(Drop)`.
     public implementsDrop: boolean;
-    /// Every trait named by an `@implements(...)` attribute, in written order.
-    /// Held as raw attribute text because attribute arguments are not resolved
-    /// to definitions.
+    /// Every trait named by an `@implements(...)` attribute, in written order,
+    /// by the last segment of its path. The trait each one resolves to is held
+    /// by the store (`DefinitionStore::traitReferencesOf`).
     public implementedTraits: Vector<String>;
   }
 
@@ -484,6 +485,9 @@ export namespace Analyzer {
     /// module index (`3std4libc2io` for `std::libc::io`). Set by the driver,
     /// which knows where each module lives.
     moduleSymbolPaths: HashMap<u64, String>;
+    /// How a diagnostic names each module, keyed by module index:
+    /// `std::hash` for a standard library module, its file path otherwise.
+    moduleDisplayNames: HashMap<u64, String>;
     /// The origin of each definition the compiler created, keyed by raw
     /// definition id.
     symbolOrigins: HashMap<u32, Analyzer::SymbolOrigin>;
@@ -497,6 +501,12 @@ export namespace Analyzer {
     /// Raw ids of the thunk and drop functions capture analysis synthesizes
     /// for closures. They are reached only through the closure that owns them.
     closureFunctions: HashMap<u32, boolean>;
+    /// The trait each written trait name resolves to, keyed by raw definition
+    /// id: for a record or enum, one entry per `implementedTraits` name; for a
+    /// type parameter, one per `bounds` name. `NONE` marks a name that names
+    /// no trait, such as a lang trait with no declaration. Filled by the
+    /// resolver, which knows the scope each name is written in.
+    traitReferences: HashMap<u32, Vector<Option<Analyzer::DefinitionId>>>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -511,11 +521,76 @@ export namespace Analyzer {
         byMethodOwner: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
         docs: HashMap::new<u32, String>(),
         moduleSymbolPaths: HashMap::new<u64, String>(),
+        moduleDisplayNames: HashMap::new<u64, String>(),
         symbolOrigins: HashMap::new<u32, Analyzer::SymbolOrigin>(),
         symbolNames: HashMap::new<u32, String>(),
         sendableParams: HashMap::new<u32, boolean>(),
         closureFunctions: HashMap::new<u32, boolean>(),
+        traitReferences: HashMap::new<u32, Vector<Option<Analyzer::DefinitionId>>>(),
       };
+    }
+
+    /// Record the traits the names written on `id` resolve to, replacing any
+    /// recorded before.
+    public setTraitReferences(
+      &mut self,
+      id: Analyzer::DefinitionId,
+      references: Vector<Option<Analyzer::DefinitionId>>,
+    ): void {
+      self.traitReferences.insert(id.raw(), references);
+    }
+
+    /// The traits the names written on `id` resolve to, in written order;
+    /// empty when none were recorded.
+    public traitReferencesOf(
+      &self,
+      id: Analyzer::DefinitionId
+    ): Vector<Option<Analyzer::DefinitionId>> {
+      let raw: u32 = id.raw();
+      let mut copy: Vector<Option<Analyzer::DefinitionId>> = Vector::new<Option<Analyzer::DefinitionId>>();
+
+      if (let Option::SOME(references) = self.traitReferences.get(&raw)) {
+        let mut index: u64 = 0;
+
+        while (index < references.length()) {
+          if (let Option::SOME(reference) = references.get(index)) {
+            copy.push(*reference);
+          }
+
+          index += 1;
+        }
+      }
+
+      return copy;
+    }
+
+    /// Whether a name written on `id` resolves to the trait `traitId`.
+    public refersToTrait(
+      &self,
+      id: Analyzer::DefinitionId,
+      traitId: Analyzer::DefinitionId
+    ): boolean {
+      let raw: u32 = id.raw();
+
+      let Option::SOME(references) = self.traitReferences.get(&raw) else {
+        return false;
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < references.length()) {
+        if (let Option::SOME(entry) = references.get(index)) {
+          if (let Option::SOME(reference) = *entry) {
+            if (reference.raw() == traitId.raw()) {
+              return true;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     /// Record that the parameter `id` was written with `@sendable`.
@@ -545,6 +620,16 @@ export namespace Analyzer {
     /// name.
     public setModuleSymbolPath(&mut self, moduleIndex: u64, encoded: String): void {
       self.moduleSymbolPaths.insert(moduleIndex, encoded);
+    }
+
+    /// Record how diagnostics name module `moduleIndex`.
+    public setModuleDisplayName(&mut self, moduleIndex: u64, name: String): void {
+      self.moduleDisplayNames.insert(moduleIndex, name);
+    }
+
+    /// How diagnostics name module `moduleIndex`, when recorded.
+    public moduleDisplayNameOf(&self, moduleIndex: u64): Option<&String> {
+      return self.moduleDisplayNames.get(&moduleIndex);
     }
 
     /// The encoded symbol segments recorded for module `moduleIndex`.

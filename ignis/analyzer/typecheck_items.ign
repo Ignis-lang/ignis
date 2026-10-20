@@ -111,10 +111,10 @@ export namespace Analyzer {
     /// Every required method (one without a default body) of each user trait
     /// the record or enum names in `@implements` has to be declared on it.
     ///
-    /// `implementedTraits` holds last path segments, so a name is matched
-    /// against every trait declared under it. The declaration is accepted when
-    /// one of those traits is fully implemented; otherwise the methods missing
-    /// from the first one are reported. Lang traits carry their own checks.
+    /// Each name is checked against the trait the resolver resolved it to, so
+    /// two traits sharing a name in different namespaces are checked apart. A
+    /// name that resolved to no trait was already reported, or is a lang trait,
+    /// which carries its own checks.
     function checkImplementedTraitMethods(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -142,6 +142,7 @@ export namespace Analyzer {
         _ -> {},
       };
 
+      let traitIds: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(defId);
       let mut declaredNames: Vector<u32> = Vector::new<u32>();
       let mut declaredIndex: u64 = 0;
 
@@ -163,73 +164,42 @@ export namespace Analyzer {
           continue;
         };
 
+        let Option::SOME(traitId) = Analyzer::TypeBounds::traitAt(&traitIds, traitIndex) else {
+          traitIndex += 1;
+          continue;
+        };
+
         if (Analyzer::Typecheck::isLangTraitName(traitName)) {
           traitIndex += 1;
           continue;
         }
 
-        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
-        let traitSymbol: Analyzer::SymbolId = symbolsRef.intern(traitName.toStr());
-        let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(traitSymbol);
-        let mut firstMissing: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
-        let mut sawTrait: boolean = false;
-        let mut satisfied: boolean = false;
-        let mut candidateIndex: u64 = 0;
+        let mut required: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
 
-        while (candidateIndex < candidates.length() && !satisfied) {
-          let mut required: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-          let mut isTrait: boolean = false;
-
-          if (let Option::SOME(candidate) = candidates.get(candidateIndex)) {
-            if (let Option::SOME(Analyzer::Definition::Trait(traitDef)) = defStore.get(*candidate)) {
-              isTrait = true;
-              required = Analyzer::TypeBounds::copyDefinitionIds(&traitDef.methods);
-            }
-          }
-
-          if (isTrait) {
-            let missing: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::missingTraitMethods(defStore, &required, &declaredNames);
-
-            if (missing.length() == 0) {
-              satisfied = true;
-            } else if (!sawTrait) {
-              let mut missingIndex: u64 = 0;
-
-              while (missingIndex < missing.length()) {
-                if (let Option::SOME(methodName) = missing.get(missingIndex)) {
-                  firstMissing.push(*methodName);
-                }
-
-                missingIndex += 1;
-              }
-            }
-
-            sawTrait = true;
-          }
-
-          candidateIndex += 1;
+        if (let Option::SOME(Analyzer::Definition::Trait(traitDef)) = defStore.get(traitId)) {
+          required = Analyzer::TypeBounds::copyDefinitionIds(&traitDef.methods);
         }
 
-        if (!satisfied) {
-          let mut missingIndex: u64 = 0;
+        let traitText: String = Analyzer::TypeBounds::traitDisplayName(defStore, traitName, Option::SOME(traitId));
+        let missing: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::missingTraitMethods(defStore, &required, &declaredNames);
+        let mut missingIndex: u64 = 0;
 
-          while (missingIndex < firstMissing.length()) {
-            if (let Option::SOME(methodName) = firstMissing.get(missingIndex)) {
-              let methodText: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, *methodName);
-              let message: String = `${kindName} '${typeName.toStr()}' declares @implements(${traitName.toStr()}) but does not define the required method '${methodText.toStr()}'`;
-              let label: String = `add '${methodText.toStr()}' to '${typeName.toStr()}' or give it a default body in '${traitName.toStr()}'`;
+        while (missingIndex < missing.length()) {
+          if (let Option::SOME(methodName) = missing.get(missingIndex)) {
+            let methodText: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, *methodName);
+            let message: String = `${kindName} '${typeName.toStr()}' declares @implements(${traitText.toStr()}) but does not define the required method '${methodText.toStr()}'`;
+            let label: String = `add '${methodText.toStr()}' to '${typeName.toStr()}' or give it a default body in '${traitText.toStr()}'`;
 
-              Analyzer::Typecheck::emitDiagnosticLabeled(
-                state,
-                span,
-                DiagnosticCode::TRAIT_METHOD_NOT_IMPLEMENTED,
-                message.toStr(),
-                label.toStr(),
-              );
-            }
-
-            missingIndex += 1;
+            Analyzer::Typecheck::emitDiagnosticLabeled(
+              state,
+              span,
+              DiagnosticCode::TRAIT_METHOD_NOT_IMPLEMENTED,
+              message.toStr(),
+              label.toStr(),
+            );
           }
+
+          missingIndex += 1;
         }
 
         traitIndex += 1;

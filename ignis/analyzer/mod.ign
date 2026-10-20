@@ -314,6 +314,83 @@ export namespace Analyzer {
   /// Stamp each published declaration's written path onto the definition
   /// store, so phases without the program index (typecheck's local-annotation
   /// resolution) can still pick between same-named declarations by path.
+  /// How a diagnostic names a module: `std::collections::hash_map` for
+  /// `std/collections/hash_map/mod.ign`, and the file's name without `.ign`
+  /// for a project module.
+  function moduleDisplayName(info: &Analyzer::Imports::ModuleInfo): String {
+    let slash: u8 = 47;
+    let mut segments: Vector<String> = Vector::new<String>();
+    let mut start: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index <= info.pathText.length()) {
+      let mut boundary: boolean = index == info.pathText.length();
+
+      if (!boundary) {
+        if (let Option::SOME(byte) = info.pathText.byteAt(index)) {
+          boundary = byte == slash;
+        }
+      }
+
+      if (boundary) {
+        if (index > start) {
+          segments.push(info.pathText.substring(start as i64, (index - start) as i64));
+        }
+
+        start = index + 1;
+      }
+
+      index += 1;
+    }
+
+    if (let Option::SOME(last) = segments.pop()) {
+      let mut stem: String = last.clone();
+
+      if (stem.endsWith(".ign")) {
+        stem = stem.substringBytes(0, stem.length() - 4);
+      }
+
+      if (!stem.equals("mod") || segments.isEmpty()) {
+        segments.push(stem.clone());
+      }
+    }
+
+    let mut first: u64 = 0;
+
+    if (let Analyzer::Imports::ModuleKind::STD = info.kind) {
+      let mut search: u64 = 0;
+
+      while (search < segments.length()) {
+        if (let Option::SOME(segment) = segments.get(search)) {
+          if (segment.equals("std")) {
+            first = search;
+          }
+        }
+
+        search += 1;
+      }
+    } else if (segments.length() > 0) {
+      first = segments.length() - 1;
+    }
+
+    let mut name: String = String::create("");
+    let mut segmentIndex: u64 = first;
+
+    while (segmentIndex < segments.length()) {
+      if (let Option::SOME(segment) = segments.get(segmentIndex)) {
+        if (name.length() > 0) {
+          name.pushStr("::");
+        }
+
+        name.pushStr(segment.toStr());
+      }
+
+      segmentIndex += 1;
+    }
+
+    return name;
+  }
+
   function recordQualifiedNamesInDefStore(
     defStore: &mut Analyzer::DefinitionStore,
     direct: &Analyzer::Imports::DirectDeclarationIndex,
@@ -1615,6 +1692,11 @@ export namespace Analyzer {
       Analyzer::appendBareReExports(&mut direct, module, &directs, infos);
       Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
       Analyzer::recordQualifiedNamesInDefStore(defStore, &direct, bindIndex);
+
+      if (let Option::SOME(info) = infos.get(bindIndex)) {
+        let mut namesRef: &mut Analyzer::DefinitionStore = defStore;
+        namesRef.setModuleDisplayName(bindIndex, Analyzer::moduleDisplayName(info));
+      }
 
       pass1s.push(pass1);
       pass2s.push(pass2);
