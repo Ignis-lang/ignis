@@ -123,6 +123,20 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
+# A project build writes its C under --out-dir, which bootstrap.sh moves to
+# selfhost_emit.c.
+out_dir=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--out-dir" ]]; then
+    out_dir="$arg"
+  fi
+  prev="$arg"
+done
+if [[ -n "$out_dir" ]]; then
+  mkdir -p "$out_dir/user/src"
+  : >"$out_dir/user/src/ignis.c"
+fi
 if [[ -z "$out" ]]; then
   echo "error: no -o output given" >&2
   exit 1
@@ -367,6 +381,48 @@ test_explicit_stage0_runs_in_selfhost_form() {
 
   [[ -x "$root/build/bootstrap/stage1/ignis" ]] && pass "build/bootstrap/stage1/ignis was produced" \
     || fail_test "build/bootstrap/stage1/ignis is missing"
+
+  rm -rf "$root"
+}
+
+# A stage0 that produces a binary but no emitted C under --out-dir: the stage
+# stops with an error naming the missing file, instead of leaving G1 and the
+# seed refresh without selfhost_emit.c.
+test_missing_emitted_c_stops_the_stage() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a stage whose compiler writes no emitted C fails"
+
+  local root
+  root="$(make_sandbox)"
+  cat >"$root/bin/ignis-dev" <<'SCRIPT'
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+printf '#!/usr/bin/env bash\nexit 0\n' >"$out"
+chmod +x "$out"
+exit 0
+SCRIPT
+  chmod +x "$root/bin/ignis-dev"
+  rm -f "$root/build/bootstrap/stage0.json"
+
+  local status=0
+  run_stage1 "$root" "$root/bin/ignis-dev" >"$root/run.log" 2>&1 || status=$?
+
+  [[ "$status" -ne 0 ]] && pass "stage1 exited non-zero (${status})" \
+    || fail_test "expected stage1 to fail, it exited 0, see ${root}/run.log"
+
+  if grep -q 'no emitted C at .*/out/user/src/ignis.c' "$root/run.log"; then
+    pass "the failure names the missing emitted C"
+  else
+    fail_test "the failure does not name the missing emitted C, see ${root}/run.log"
+    sed 's/^/    /' "$root/run.log"
+  fi
 
   rm -rf "$root"
 }
@@ -813,6 +869,7 @@ test_repeated_official_failure_stays_terminal
 test_working_official_builds_stage1
 test_explicit_stage0_runs_in_selfhost_form
 test_explicit_stage0_failure_is_terminal
+test_missing_emitted_c_stops_the_stage
 test_default_stage0_is_the_seed
 test_recorded_official_stage0_is_adopted
 test_no_official_asset_skips

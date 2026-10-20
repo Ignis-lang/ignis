@@ -71,11 +71,12 @@ class CorpusTests(unittest.TestCase):
 
 
 # A fake selfhost: like the real one it prints the phase report the harness
-# reads only under `--verbose`, on stderr. It rejects a source that mentions
+# reads only under `--verbose`, on stderr. It is given the case's project
+# directory and reads the entry under it. It rejects a source that mentions
 # SYNTAX_ERROR or SELFHOST_REJECTS and prints nothing at all (no parse
 # verdict) for one that mentions SELFHOST_CRASH.
 FAKE_SELFHOST = """#!/bin/sh
-case_file="$1"
+case_file="$1/src/main.ign"
 
 case " $* " in
   *" --verbose "*) ;;

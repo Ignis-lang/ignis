@@ -11,9 +11,10 @@
 #           byte with stage2's emitted C         -> build/bootstrap/stage3/ignis
 #
 # Each stage directory holds the C the previous stage emitted
-# (`selfhost_emit.c`), the object file and the linked binary, plus a `log.txt`
-# with the compiler's phase report. `stage3` passing is the fixed-point gate:
-# the compiler built from stage1's output reproduces that output.
+# (`selfhost_emit.c`), the object file (under `out/`) and the linked binary,
+# plus a `log.txt` with the compiler's phase report. `stage3` passing is the
+# fixed-point gate: the compiler built from stage1's output reproduces that
+# output.
 #
 # The promotion gates each write build/bootstrap/gates/<gate>.json with
 # {"gate", "status", "summary", "details"}:
@@ -42,7 +43,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BOOTSTRAP_ROOT="${PROJECT_ROOT}/build/bootstrap"
 GATES_DIR="${BOOTSTRAP_ROOT}/gates"
-ENTRY="${PROJECT_ROOT}/ignis/main.ign"
 # The compiler that builds stage1: $IGNIS_STAGE0 when set, else the stage0
 # build/bootstrap/stage0.json records (official or seed) when its binary is
 # here (adopt_recorded_stage0), else empty, which build_stage1 reads as "build
@@ -144,7 +144,7 @@ Commands:
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
 
-Every stage compiles ${ENTRY#"$PROJECT_ROOT/"} and writes its artifacts under
+Every stage compiles the project at the repository root and writes its artifacts under
 build/bootstrap/<stage>/. A self-compilation takes several minutes per stage.
 
 \`ensure_stage\` (used by stage2, stage3, and every gate that builds a stage
@@ -571,19 +571,31 @@ compile_stage() {
   rm -rf "$dir"
   mkdir -p "$dir"
 
-  info "${stage}: compiling ${ENTRY#"$PROJECT_ROOT/"} with ${compiler}"
+  info "${stage}: compiling the project at ${PROJECT_ROOT} with ${compiler}"
 
-  # The selfhost driver writes `selfhost_emit.c` and `selfhost_emit.o` into the
-  # working directory, so each stage runs inside its own directory. The
-  # measurement wrapper only observes the run; it does not touch the emitted C.
+  # The stage builds the project directory: a `.ign` path is compiled on its
+  # own, without ignis.toml. A project build writes its emitted C and object
+  # under the out dir, so `--out-dir` keeps them inside the stage directory,
+  # and the C is moved to `selfhost_emit.c`, the name G1 and the seed read.
+  # The measurement wrapper only observes the run; it does not touch the
+  # emitted C.
   if ! python3 "${SCRIPT_DIR}/measure_run.py" \
     --cwd "$dir" \
     --out "$dir/measure.json" \
     --label "$stage" \
-    -- "$compiler" "$ENTRY" -o "$dir/ignis" 2>&1 | tee "$dir/log.txt"; then
+    -- "$compiler" "$PROJECT_ROOT" --out-dir "$dir/out" -o "$dir/ignis" 2>&1 | tee "$dir/log.txt"; then
     [[ "$soft" == "soft" ]] && return 1
     fail "${stage}: the compiler reported errors, see ${dir}/log.txt"
   fi
+
+  # G1 and the seed refresh read the emitted C as selfhost_emit.c; a missing
+  # file means the build layout changed and has to stop here, not at G1. It is
+  # never a soft failure: the caller would report it as compiler errors.
+  if [[ ! -f "$dir/out/user/src/ignis.c" ]]; then
+    fail "${stage}: no emitted C at ${dir}/out/user/src/ignis.c, see ${dir}/log.txt"
+  fi
+
+  mv "$dir/out/user/src/ignis.c" "$dir/selfhost_emit.c"
 
   if [[ ! -x "$dir/ignis" ]]; then
     [[ "$soft" == "soft" ]] && return 1
@@ -714,7 +726,7 @@ build_stage1() {
   stage0_bin="$(command -v "$STAGE0" || true)"
   [[ -n "$stage0_bin" ]] || fail "stage0 compiler not found: ${STAGE0} (set IGNIS_STAGE0)"
 
-  info "stage1: compiling ${ENTRY#"$PROJECT_ROOT/"} with stage0 ${stage0_bin}"
+  info "stage1: compiling the project at ${PROJECT_ROOT} with stage0 ${stage0_bin}"
 
   if IGNIS_STD_PATH="${PROJECT_ROOT}/std" compile_stage stage1 "$stage0_bin" soft; then
     return
@@ -969,7 +981,7 @@ run_gate_g3_stage() {
   # directory.
   (cd "$PROJECT_ROOT" && timeout "$GATE_G3_TIMEOUT_SECONDS" \
     env IGNIS_STD_PATH="${PROJECT_ROOT}/std" \
-    "$(stage_bin "$stage")" test "$ENTRY" -o "$(gate_g3_dir "$stage")/ignis-tests") >"$log" 2>&1 || status=$?
+    "$(stage_bin "$stage")" test "$PROJECT_ROOT" -o "$(gate_g3_dir "$stage")/ignis-tests") >"$log" 2>&1 || status=$?
 
   write_gate_g3_status "$stage" "$status"
 

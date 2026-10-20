@@ -46,6 +46,11 @@ ignis build                   # the project around the working directory
 ignis build ./app             # a project somewhere else
 ```
 
+A `.ign` path, absolute or relative, is always built on its own, even inside a project: no
+`ignis.toml` is read, so the file gets the standard library from `--std-path` or `IGNIS_STD_PATH`
+(one of them is required), no aliases, no features and no project build settings. Pass a directory,
+or no path, to build a project. `check` and `test` follow the same rule.
+
 ## check
 
 Same inputs as `build`, stopping after analysis: no code generation and no link step. This is the
