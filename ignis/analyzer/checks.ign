@@ -140,33 +140,17 @@ export namespace Analyzer {
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       exprId: Ast::ExpressionId,
     ): boolean {
-      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
+      let Option::SOME(typeId) = typecheck.exprTypes.lookup(exprId.raw()) else {
+        return false;
+      };
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
 
-      while (index > 0) {
-        index -= 1;
-
-        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
-          continue;
-        };
-
-        if (*nodeId != exprId.raw()) {
-          continue;
-        }
-
-        let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index) else {
-          return false;
-        };
-        let Option::SOME(typeNode) = typeStore.get(*typeId) else {
-          return false;
-        };
-
-        return match (typeNode) {
-          Analyzer::Type::NEVER -> true,
-          _ -> false,
-        };
-      }
-
-      return false;
+      return match (typeNode) {
+        Analyzer::Type::NEVER -> true,
+        _ -> false,
+      };
     }
 
     function stmtSpan(module: &Ast::Module, stmtId: Ast::StatementId): SourceSpan {

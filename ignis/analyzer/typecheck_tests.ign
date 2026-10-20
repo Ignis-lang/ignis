@@ -16203,3 +16203,35 @@ function typecheckSliceMethodWithArgumentsIsAnError(): void {
 
   assertSingleDiagnostic(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS, "Function 'length' expects 0 arguments, got 1");
 }
+
+@test
+function exprTypeMapLookupReturnsTheLatestRecord(): void {
+  let first: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(3);
+  let second: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(7);
+  let other: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(11);
+  let mut map: Analyzer::Typecheck::ExprTypeMap = Analyzer::Typecheck::ExprTypeMap::empty();
+
+  map.insert(5, first);
+  map.insert(2, other);
+  map.insert(5, second);
+
+  let Option::SOME(latest) = map.lookup(5) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u32>(latest.raw(), 7);
+  Test::assertEq<u64>(map.nodeIds.length(), 3);
+}
+
+@test
+function exprTypeMapLookupOfAnUnrecordedIdIsNone(): void {
+  let mut map: Analyzer::Typecheck::ExprTypeMap = Analyzer::Typecheck::ExprTypeMap::empty();
+
+  Test::assert(map.lookup(0).isNone());
+
+  map.insert(4, Id::fromRaw<Analyzer::TypeTag>(1));
+
+  Test::assert(map.lookup(2).isNone());
+  Test::assert(map.lookup(9).isNone());
+}

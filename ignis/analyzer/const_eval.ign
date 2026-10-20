@@ -8,6 +8,7 @@ import
 from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Id from "@compiler::ids";
+import HashSet from "std::collections";
 import Vector from "std::vector";
 
 /// Constant-evaluation phase for the Ignis selfhost compiler.
@@ -923,27 +924,7 @@ export namespace Analyzer {
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       exprId: Ast::ExpressionId,
     ): Option<Analyzer::TypeId> {
-      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
-
-      while (index > 0) {
-        index -= 1;
-
-        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
-          continue;
-        };
-
-        if (*nodeId != exprId.raw()) {
-          continue;
-        }
-
-        if (let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index)) {
-          return Option::SOME(*typeId);
-        }
-
-        return Option::NONE;
-      }
-
-      return Option::NONE;
+      return typecheck.exprTypes.lookup(exprId.raw());
     }
 
     /// The constant a scalar type is when every byte is zero: `0`, `0.0`,
@@ -983,36 +964,20 @@ export namespace Analyzer {
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       exprId: Ast::ExpressionId,
     ): boolean {
-      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
+      let Option::SOME(typeId) = typecheck.exprTypes.lookup(exprId.raw()) else {
+        return false;
+      };
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
 
-      while (index > 0) {
-        index -= 1;
-
-        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
-          continue;
-        };
-
-        if (*nodeId != exprId.raw()) {
-          continue;
-        }
-
-        let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index) else {
-          return false;
-        };
-        let Option::SOME(typeNode) = typeStore.get(*typeId) else {
-          return false;
-        };
-
-        return match (typeNode) {
-          Analyzer::Type::U8
-          | Analyzer::Type::U16
-          | Analyzer::Type::U32
-          | Analyzer::Type::U64 -> true,
-          _ -> false,
-        };
-      }
-
-      return false;
+      return match (typeNode) {
+        Analyzer::Type::U8
+        | Analyzer::Type::U16
+        | Analyzer::Type::U32
+        | Analyzer::Type::U64 -> true,
+        _ -> false,
+      };
     }
 
     /// Value of a `Variable`/`Path` reference to an already-evaluated
@@ -2165,10 +2130,12 @@ export namespace Analyzer {
     function isUnaddressableStorageUse(
       values: &mut Analyzer::ConstEval::ConstValueMap,
       defStore: &mut Analyzer::DefinitionStore,
-      storageDefIds: &Vector<u32>,
+      storageDefIds: &HashSet<u32>,
       defId: Analyzer::DefinitionId,
     ): boolean {
-      if (!Analyzer::ConstEval::containsRaw(storageDefIds, defId.raw())) {
+      let defRaw: u32 = defId.raw();
+
+      if (!storageDefIds.contains(&defRaw)) {
         return false;
       }
 
@@ -2240,33 +2207,12 @@ export namespace Analyzer {
     }
 
     /// The checked type of `exprId`, or NONE when the typechecker recorded
-    /// none. A local walk over the parallel `ExprTypeMap` vectors: importing
-    /// the lowering module's identical lookup would close a module cycle.
+    /// none.
     function lookupCheckedExprType(
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       exprId: Ast::ExpressionId,
     ): Option<Analyzer::TypeId> {
-      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
-
-      while (index > 0) {
-        index -= 1;
-
-        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
-          continue;
-        };
-
-        if (*nodeId != exprId.raw()) {
-          continue;
-        }
-
-        let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index) else {
-          return Option::NONE;
-        };
-
-        return Option::SOME(*typeId);
-      }
-
-      return Option::NONE;
+      return typecheck.exprTypes.lookup(exprId.raw());
     }
 
     /// Whether the checked type of `exprId` is a pointer or a slice. Indexing
@@ -2357,7 +2303,7 @@ export namespace Analyzer {
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
-      storageDefIds: &Vector<u32>,
+      storageDefIds: &HashSet<u32>,
       reference: &Ast::Expression::Reference,
     ): void {
       if (reference.mutable) {
@@ -2410,13 +2356,24 @@ export namespace Analyzer {
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       storageDefIds: &Vector<u32>,
     ): void {
+      let mut storageSet: HashSet<u32> = HashSet::new<u32>();
+      let mut storageIndex: u64 = 0;
+
+      while (storageIndex < storageDefIds.length()) {
+        if (let Option::SOME(raw) = storageDefIds.get(storageIndex)) {
+          storageSet.insert(*raw);
+        }
+
+        storageIndex += 1;
+      }
+
       let mut index: u64 = 0;
 
       while (index < module.expressions.length()) {
         let exprId: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(index as u32);
 
         if (let Option::SOME(Ast::Expression::Node::Reference(reference)) = module.expressions.get(exprId)) {
-          Analyzer::ConstEval::checkReferenceTarget(values, diagnostics, defStore, typeStore, module, resolvedBodies, typecheck, storageDefIds, &reference);
+          Analyzer::ConstEval::checkReferenceTarget(values, diagnostics, defStore, typeStore, module, resolvedBodies, typecheck, &storageSet, &reference);
         }
 
         index += 1;
