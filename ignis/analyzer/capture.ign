@@ -727,9 +727,16 @@ export namespace Capture {
   /// Every closure node, innermost first. An inner closure must have its
   /// captures filled before the enclosing one scans for free variables, so
   /// transitive captures propagate outward.
+  ///
+  /// Only bodies and initializers whose root node id is at least `nodeStart`
+  /// are walked. Nodes are appended, so a root below it was lowered by an
+  /// earlier module, whose pass already gave every closure under it a thunk;
+  /// walking it again finds nothing to list and made each module's pass cost
+  /// as much as the whole program lowered so far.
   function collectClosuresBottomUp(
     hir: &mut Hir::HirStore,
-    origins: &mut Vector<Capture::ClosureSite>
+    origins: &mut Vector<Capture::ClosureSite>,
+    nodeStart: u64,
   ): Vector<Hir::HirId> {
     let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     let mut visited: HashSet<u32> = HashSet::new<u32>();
@@ -738,6 +745,10 @@ export namespace Capture {
 
     while (bodyIndex < hir.functionBodies.length()) {
       if (let Option::SOME(bodyId) = hir.functionBodies.valueAt(bodyIndex)) {
+        if (bodyId.raw() as u64 < nodeStart) {
+          bodyIndex += 1;
+          continue;
+        }
         let before: u64 = result.length();
         Capture::collectClosuresPostorder(hir, bodyId, &mut result, &mut visited);
 
@@ -753,6 +764,10 @@ export namespace Capture {
 
     while (initIndex < hir.variablesInits.length()) {
       if (let Option::SOME(initId) = hir.variablesInits.valueAt(initIndex)) {
+        if (initId.raw() as u64 < nodeStart) {
+          initIndex += 1;
+          continue;
+        }
         let before: u64 = result.length();
         Capture::collectClosuresPostorder(hir, initId, &mut result, &mut visited);
 
@@ -770,6 +785,10 @@ export namespace Capture {
 
     while (constIndex < hir.constantInits.length()) {
       if (let Option::SOME(initId) = hir.constantInits.valueAt(constIndex)) {
+        if (initId.raw() as u64 < nodeStart) {
+          constIndex += 1;
+          continue;
+        }
         let before: u64 = result.length();
         Capture::collectClosuresPostorder(hir, initId, &mut result, &mut visited);
 
@@ -1726,10 +1745,24 @@ export namespace Capture {
     symbols: &mut Analyzer::SymbolTable,
     hir: &mut Hir::HirStore,
   ): DiagnosticBag {
+    return Capture::populateModuleClosureCaptures(defStore, typeStore, symbols, hir, 0);
+  }
+
+  /// `populateClosureCaptures` for the module whose HIR starts at node
+  /// `nodeStart`: only its bodies and initializers are searched for closures.
+  /// Escape analysis still runs over the whole store, since a later module
+  /// can make an earlier module's closure escape through a global binding.
+  function populateModuleClosureCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &mut Hir::HirStore,
+    nodeStart: u64,
+  ): DiagnosticBag {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
 
     let mut closureSites: Vector<Capture::ClosureSite> = Vector::new<Capture::ClosureSite>();
-    let closureIds: Vector<Hir::HirId> = Capture::collectClosuresBottomUp(hir, &mut closureSites);
+    let closureIds: Vector<Hir::HirId> = Capture::collectClosuresBottomUp(hir, &mut closureSites, nodeStart);
     let mut dropSites: Vector<Capture::DropSite> = Vector::new<Capture::DropSite>();
     let mut closureIndex: u64 = 0;
 

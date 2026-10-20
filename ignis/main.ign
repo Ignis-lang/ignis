@@ -1986,11 +1986,12 @@ export function compileDiscovered(
     // which analyzes one module at a time: the counter behind
     // `__closure_thunk_N` restarts with each module, and a thunk's name is
     // part of what gate G7 compares.
-    let moduleCaptureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    let moduleCaptureDiagnostics: DiagnosticBag = Capture::populateModuleClosureCaptures(
       &mut defStore,
       &mut typeStore,
       &mut symbols,
       &mut programHir,
+      moduleNodeStart,
     );
 
     // The module bag owns its diagnostics and frees them when this iteration
@@ -5321,10 +5322,17 @@ function convertDocClosures(
       break;
     };
 
+    let moduleNodeStart: u64 = programHir.nodes.length();
     Lowering::lowerModuleInto(defsRef, typeStore, symbols, module, &analysisRecord.output, &mut programHir);
 
     let firstNewDef: u64 = defsRef.length();
-    let diagnostics: DiagnosticBag = Capture::populateClosureCaptures(defsRef, typeStore, symbols, &mut programHir);
+    let diagnostics: DiagnosticBag = Capture::populateModuleClosureCaptures(
+      defsRef,
+      typeStore,
+      symbols,
+      &mut programHir,
+      moduleNodeStart,
+    );
 
     if (let Option::SOME(moduleFile) = sources.files.get(moduleIndex)) {
       errors += countBySeverity(&diagnostics, Severity::ERROR);
