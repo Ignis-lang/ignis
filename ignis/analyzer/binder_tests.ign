@@ -1,6 +1,12 @@
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticCode, SourceFile, SourceSpan from "@compiler::diagnostics";
+import
+  DiagnosticBag,
+  DiagnosticCode,
+  SourceFile,
+  SourceSpan,
+  SourceMap,
+from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
@@ -8,7 +14,7 @@ import ParseOutput, Parser from "@compiler::parser";
 
 /// Build a zero-byte source span suitable for test diagnostics.
 function dummySpan(): SourceSpan {
-  return SourceSpan::new("binder_test.ign", 0, 0);
+  return SourceSpan::detached(0, 0);
 }
 
 /// Assert that `Analyzer::Binder::findDef(output, rawId)` returns SOME value (i.e., the item was predeclared).
@@ -3436,7 +3442,8 @@ function binderLangWithUnknownArgumentIsReported(): void {
 
 /// Bind `source` through both binder passes and return the merged diagnostics.
 function binderBindSource(source: str): DiagnosticBag {
-  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "binder_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
@@ -3662,7 +3669,8 @@ function binderReadsNoExtensionTargetFromAnotherAttribute(): void {
 
 /// The mutability the binder recorded for the static field named `name`.
 function binderStaticFieldMutability(source: str, name: str): boolean {
-  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "binder_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
@@ -3726,7 +3734,8 @@ function binderMarksStaticMutFieldsMutable(): void {
 /// The alignment the binder recorded for the static field named `name`, `0`
 /// when it asks for none.
 function binderStaticFieldAlignment(source: str, name: str): u64 {
-  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "binder_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
@@ -3870,7 +3879,8 @@ function binderRejectsAlignedOnConstants(): void {
 /// Whether the top-level or namespace-scoped function named `name` bound
 /// from `source` is `Public`. Mirrors `binderStaticFieldMutability`'s shape.
 function binderFunctionIsPublic(source: str, name: str): boolean {
-  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "binder_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
@@ -3964,7 +3974,8 @@ function binderFunctionOwnPublicModifierIsHonored(): void {
 /// only way two same-named functions in different scopes can be told apart
 /// from source text alone.
 function binderFunctionVisibilitiesNamed(source: str, name: str): Vector<boolean> {
-  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "binder_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);

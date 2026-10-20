@@ -4,7 +4,7 @@ import Vector from "std::vector";
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
 import ParseOutput, Parser from "@compiler::parser";
-import SourceFile, DiagnosticBag, Severity from "@compiler::diagnostics";
+import SourceFile, DiagnosticBag, Severity, SourceMap from "@compiler::diagnostics";
 import SymbolNames from "./symbols";
 
 /// The stores of one analyzed program.
@@ -32,7 +32,8 @@ function symbolsCountErrors(bag: &DiagnosticBag): u64 {
 }
 
 function symbolsParse(fileName: str, source: str): Ast::Module {
-  let file: SourceFile = SourceFile::create(fileName, source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, fileName, source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(symbolsCountErrors(&parsed.parseDiagnostics), 0);
@@ -241,7 +242,8 @@ function symbolsAreTheSameInEveryProgram(): void {
 /// the caller keeps its own name.
 @test
 function symbolsNeedAModuleName(): void {
-  let file: SourceFile = SourceFile::create("loose.ign", "function loose(): i32 {\n  return 1;\n}\n");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "loose.ign", "function loose(): i32 {\n  return 1;\n}\n");
   let parsed: ParseOutput = Parser::parseFile(&file);
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();

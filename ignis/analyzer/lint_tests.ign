@@ -6,17 +6,18 @@ import
   Severity,
   SourceFile,
   SourceSpan,
+  SourceMap,
 from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 import ParseOutput, Parser from "@compiler::parser";
 
 function lintDummySpan(): SourceSpan {
-  return SourceSpan::new("lint_tests.ign", 0, 0);
+  return SourceSpan::detached(0, 0);
 }
 
 function lintSpan(start: u64, end: u64): SourceSpan {
-  return SourceSpan::new("lint_tests.ign", start, end);
+  return SourceSpan::detached(start, end);
 }
 
 function lintModuleInfo(index: u64, path: str): Analyzer::Imports::ModuleInfo {
@@ -558,7 +559,8 @@ function lintDeprecatedCallDedupsBySpanStart(): void {
 
 /// Parses `source` and runs the whole analyzer over it.
 function lintAnalyzeSource(source: str): Analyzer::AnalyzerOutput {
-  let file: SourceFile = SourceFile::create("lint_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "lint_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);

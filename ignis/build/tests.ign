@@ -5,7 +5,7 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, SourceFile, SourceMap from "@compiler::diagnostics";
 import ParseOutput, Parser from "@compiler::parser";
 
 import
@@ -80,11 +80,12 @@ function driverOverridesWithTarget(target: str): BuildOverrides {
 /// C backend.
 @test
 function driverDefaultsTargetToC(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverTestRoot("target_default");
   driverWriteTargetProject(&root, "");
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -98,11 +99,12 @@ function driverDefaultsTargetToC(): void {
 /// `target = "qbe"` in `ignis.toml` selects the QBE backend.
 @test
 function driverReadsQbeTargetFromProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverTestRoot("target_toml");
   driverWriteTargetProject(&root, "target = \"qbe\"\n");
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -116,11 +118,12 @@ function driverReadsQbeTargetFromProjectFile(): void {
 /// `--target qbe` on the command line wins over the project file's own value.
 @test
 function driverCommandLineTargetOverridesProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverTestRoot("target_override");
   driverWriteTargetProject(&root, "target = \"c\"\n");
 
   let overrides: BuildOverrides = driverOverridesWithTarget("qbe");
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -146,11 +149,12 @@ function driverF25TestRoot(tag: str): Path::PathBuf {
 /// C, and `ignis init` still emits this value.
 @test
 function driverReadsLegacyIirTargetAsC(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverF25TestRoot("iir");
   driverWriteTargetProject(&root, "target = \"iir\"\n");
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -165,11 +169,12 @@ function driverReadsLegacyIirTargetAsC(): void {
 /// backend, the same way the pre-qbe compilers treated it.
 @test
 function driverReadsLegacyNoneTargetAsC(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverF25TestRoot("none");
   driverWriteTargetProject(&root, "target = \"none\"\n");
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -184,11 +189,12 @@ function driverReadsLegacyNoneTargetAsC(): void {
 /// the pre-qbe behavior that accepted every stored value and built it with C.
 @test
 function driverStoredNonQbeTargetFallsBackToC(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverF25TestRoot("wasm");
   driverWriteTargetProject(&root, "target = \"wasm\"\n");
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let discovery: DiscoveryResult = match (Resolver::discover(&root, &overrides, false)) {
+  let discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -202,11 +208,12 @@ function driverStoredNonQbeTargetFallsBackToC(): void {
 /// An unknown `--target` value from the command line is rejected the same way.
 @test
 function driverRejectsUnknownCommandLineTarget(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverTestRoot("target_cli_bad");
   driverWriteTargetProject(&root, "");
 
   let overrides: BuildOverrides = driverOverridesWithTarget("wasm");
-  let bag: DiagnosticBag = match (Resolver::discover(&root, &overrides, false)) {
+  let bag: DiagnosticBag = match (Resolver::discover(&mut sourceMap, &root, &overrides, false)) {
     Result::OK(_) -> {
       Test::fail();
       return;
@@ -418,7 +425,7 @@ function driverCountDiagnosticsAgainst(output: &ParseOutput, file: &SourceFile):
 
   while (index < output.lexDiagnostics.length()) {
     if (let Option::SOME(diagnostic) = output.lexDiagnostics.get(index)) {
-      Test::assertEq<str>(diagnostic.primarySpan.filePath, file.path.asStr());
+      Test::assertEq<u32>(diagnostic.primarySpan.file.raw(), file.id.raw());
       count += 1;
     }
 
@@ -429,7 +436,7 @@ function driverCountDiagnosticsAgainst(output: &ParseOutput, file: &SourceFile):
 
   while (index < output.parseDiagnostics.length()) {
     if (let Option::SOME(diagnostic) = output.parseDiagnostics.get(index)) {
-      Test::assertEq<str>(diagnostic.primarySpan.filePath, file.path.asStr());
+      Test::assertEq<u32>(diagnostic.primarySpan.file.raw(), file.id.raw());
       count += 1;
     }
 
@@ -444,6 +451,7 @@ function driverCountDiagnosticsAgainst(output: &ParseOutput, file: &SourceFile):
 /// and without parsing any module again.
 @test
 function driverDiscoveryHandsOverEachModuleParsedAgainstItsOwnPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverTestRoot("discovery_parse");
   driverWriteImportProject(
     &root,
@@ -452,7 +460,7 @@ function driverDiscoveryHandsOverEachModuleParsedAgainstItsOwnPath(): void {
   );
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let Result::OK(discovered) = Resolver::discover(&root, &overrides, false) else {
+  let Result::OK(discovered) = Resolver::discover(&mut sourceMap, &root, &overrides, false) else {
     Test::fail();
     return;
   };
@@ -481,7 +489,7 @@ function driverDiscoveryHandsOverEachModuleParsedAgainstItsOwnPath(): void {
       nodePath = pathText;
     }
 
-    let Option::SOME(parsed) = Resolver::takeParsedModule(&mut discovery, nodeIndex, &sources) else {
+    let Option::SOME(parsed) = Resolver::takeParsedModule(&mut sourceMap, &mut discovery, nodeIndex, &sources) else {
       Test::fail();
       return;
     };
@@ -507,6 +515,7 @@ function driverDiscoveryHandsOverEachModuleParsedAgainstItsOwnPath(): void {
 /// counted as such.
 @test
 function driverDiscoveryParsesATakenModuleAgain(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverTestRoot("discovery_reparse");
   driverWriteImportProject(
     &root,
@@ -515,17 +524,17 @@ function driverDiscoveryParsesATakenModuleAgain(): void {
   );
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let Result::OK(discovered) = Resolver::discover(&root, &overrides, false) else {
+  let Result::OK(discovered) = Resolver::discover(&mut sourceMap, &root, &overrides, false) else {
     Test::fail();
     return;
   };
   let mut discovery: DiscoveryResult = discovered;
   let sources: SourceOverrides = SourceOverrides::none();
 
-  let first: Option<DiscoveredModule> = Resolver::takeParsedModule(&mut discovery, 0, &sources);
+  let first: Option<DiscoveredModule> = Resolver::takeParsedModule(&mut sourceMap, &mut discovery, 0, &sources);
   Test::assertEq<u64>(discovery.graph.reparsedModules, 0);
 
-  let second: Option<DiscoveredModule> = Resolver::takeParsedModule(&mut discovery, 0, &sources);
+  let second: Option<DiscoveredModule> = Resolver::takeParsedModule(&mut sourceMap, &mut discovery, 0, &sources);
   Test::assertEq<u64>(discovery.graph.reparsedModules, 1);
 
   let Option::SOME(firstModule) = first else {
@@ -544,6 +553,7 @@ function driverDiscoveryParsesATakenModuleAgain(): void {
 /// A module that resolves but cannot be read still fails discovery.
 @test
 function driverDiscoveryReportsAnUnreadableModule(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = driverTestRoot("discovery_unreadable");
   let srcDir: Path::PathBuf = root.join("src");
   driverWriteImportProject(
@@ -555,7 +565,7 @@ function driverDiscoveryReportsAnUnreadableModule(): void {
   driverEnsureDir(&unreadable);
 
   let overrides: BuildOverrides = BuildOverrides::none();
-  let Result::ERROR(diagnostics) = Resolver::discover(&root, &overrides, false) else {
+  let Result::ERROR(diagnostics) = Resolver::discover(&mut sourceMap, &root, &overrides, false) else {
     Test::fail();
     return;
   };

@@ -2,7 +2,7 @@ import String from "std::string";
 import Test from "std::test";
 
 import Ast from "@compiler::ast";
-import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, SourceFile, SourceMap from "@compiler::diagnostics";
 import Parser from "@compiler::parser";
 
 import FormatterConfig from "./config";
@@ -15,11 +15,12 @@ import Format from "./layout_statements";
 /// The renderer lives in `layout_statements.ign`: expression and statement
 /// layout are mutually recursive, and Ignis rejects module import cycles.
 function formatExpr(expr: str): String {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut sourceText: String = String::create("const __probe__: i32 = ");
   sourceText.pushStr(expr);
   sourceText.pushStr(";");
 
-  let file: SourceFile = SourceFile::create("expr_probe.ign", sourceText.toStr());
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "expr_probe.ign", sourceText.toStr());
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
   Parser::parseInto(&file, &mut module, &mut diagnostics);

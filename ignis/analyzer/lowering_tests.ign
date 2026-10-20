@@ -1,6 +1,6 @@
 import Test from "std::test";
 
-import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
@@ -37,7 +37,8 @@ function loweringCountErrors(bag: &DiagnosticBag): u64 {
 /// the `if let` desugar be covered while the selfhost typechecker still
 /// rejects let conditions outright.
 function loweringRenderChecked(source: str, requireCleanAnalysis: boolean): String {
-  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "lowering_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(loweringCountErrors(&parsed.lexDiagnostics), 0);
@@ -78,7 +79,8 @@ function loweringRender(source: str): String {
 /// order lowering collected them. The HIR printer does not show them, and a
 /// count alone would not tell a `@move` from a `@ref`.
 function loweringRenderCaptureOverrides(source: str): String {
-  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "lowering_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(loweringCountErrors(&parsed.lexDiagnostics), 0);
@@ -295,7 +297,9 @@ function loweringUnaryAndGrouping(): void {
 
 @test
 function loweringSetsEntryPointForMain(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let file: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "lowering_tests.ign",
     "function main(): u32 {\n  return 0;\n}\n",
   );
@@ -704,7 +708,9 @@ function loweringForOfOverSliceHoistsDataAndLength(): void {
 /// body shows up through the locals it declares.
 @test
 function loweringMethodBodiesAreRegistered(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let file: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "lowering_tests.ign",
     "record Counter {\n  public n: u32;\n\n  public read(&self): u32 {\n    let current: u32 = self.n;\n    return current;\n  }\n\n  public static one(): u32 {\n    let unit: u32 = 1;\n    return unit;\n  }\n}\n\nfunction go(): u32 {\n  return 1;\n}\n",
   );
@@ -865,7 +871,8 @@ function loweringRecordOwnedMethod(
 /// Spec: parity fixture e2e_ok::trait_default_method_uses_self.
 @test
 function loweringInheritedTraitDefaultHasABody(): void {
-  let file: SourceFile = SourceFile::create("lowering_tests.ign", loweringTraitDefaultSource());
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "lowering_tests.ign", loweringTraitDefaultSource());
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(loweringCountErrors(&parsed.parseDiagnostics), 0);

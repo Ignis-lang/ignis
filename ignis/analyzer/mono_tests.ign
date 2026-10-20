@@ -1,7 +1,7 @@
 import Test from "std::test";
 import Vector from "std::vector";
 
-import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import Id from "@compiler::ids";
@@ -42,7 +42,8 @@ function monoContains(haystack: &String, needle: str): boolean {
 /// `withCaptures` runs capture analysis first, the order the driver uses:
 /// closures reach monomorphization already carrying an environment layout.
 function monoRenderWith(source: str, withCaptures: boolean): String {
-  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "mono_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
@@ -144,7 +145,8 @@ function monoLeavesAModuleConstantOutOfTheEnvironment(): void {
 /// Analyze `source` and return the store it filled, for tests that inspect
 /// definitions directly rather than the rendered HIR.
 function monoAnalyzeDefinitions(source: str): Analyzer::DefinitionStore {
-  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "mono_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
@@ -299,7 +301,8 @@ record MonoRun {
 /// Analyzes, lowers and monomorphizes `source`, returning the stores the run
 /// filled.
 function monoRunDefinitions(source: str): MonoRun {
-  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "mono_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
@@ -396,7 +399,8 @@ record MonoInputs {
 /// Parses and analyzes `source`, returning the stores and HIR before
 /// monomorphization runs.
 function monoAnalyze(source: str): MonoInputs {
-  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "mono_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
