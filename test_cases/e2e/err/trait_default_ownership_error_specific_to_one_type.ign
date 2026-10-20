@@ -1,0 +1,36 @@
+// e2e: err
+// A trait default that consumes `self` twice is valid for a Copy implementing
+// type and a use after move for a non-Copy one, so it is reported once, for
+// that type.
+trait Shape {
+  take(self): i32;
+
+  twice(self): i32 {
+    let first: i32 = self.take();
+    return first + self.take();
+  }
+}
+
+@implements(Copy, Shape)
+record Plain {
+  public side: i32;
+
+  take(self): i32 {
+    return self.side;
+  }
+}
+
+@implements(Shape)
+record Named {
+  public name: String;
+
+  take(self): i32 {
+    return 1;
+  }
+}
+
+function main(): i32 {
+  let plain: Plain = Plain { side: 2 };
+  let named: Named = Named { name: String::create("a") };
+  return plain.twice() + named.twice();
+}

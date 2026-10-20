@@ -1,0 +1,38 @@
+// e2e: err
+// A trait default inherited by a generic record instantiated twice. Consuming
+// `self` twice is fine for `Tagged<i32>` and a use after move for
+// `Tagged<String>`, so it is reported once, naming that instance; the moved
+// local is an error for both instances and is reported once, without a note.
+import Vector from "std::vector";
+
+trait Holder {
+  take(self): i32;
+
+  twice(self): i32 {
+    let first: i32 = self.take();
+    return first + self.take();
+  }
+
+  moved(&self): i32 {
+    let items: Vector<i32> = Vector::new<i32>();
+    let other: Vector<i32> = items;
+    return (items.length() as i32) + (other.length() as i32);
+  }
+}
+
+@implements(Holder)
+record Tagged<T> {
+  public value: T;
+  public count: i32;
+
+  take(self): i32 {
+    return self.count;
+  }
+}
+
+function main(): i32 {
+  let small: Tagged<i32> = Tagged { value: 1, count: 2 };
+  let named: Tagged<String> = Tagged { value: String::create("a"), count: 3 };
+  let total: i32 = small.moved() + named.moved();
+  return total + small.twice() + named.twice();
+}

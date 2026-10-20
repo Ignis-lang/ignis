@@ -1,0 +1,110 @@
+// e2e: std
+// Two records, a generic record and an enum inherit the same trait defaults,
+// whose bodies read `self`, call another default, bind locals, build a closure
+// and match, or annotate locals with a generic type, cast and build a closure
+// with typed parameters. Each type resolves its own copy of every default body.
+import Io from "std::io";
+
+record Pair<T> {
+  public first: T;
+  public second: T;
+}
+
+trait Shape {
+  area(&self): i32;
+
+  doubled(&self): i32 {
+    return self.area() * 2;
+  }
+
+  quadrupled(&self): i32 {
+    let twice: i32 = self.doubled();
+    let scale = (value: i32): i32 -> value * 2;
+    return scale(twice);
+  }
+
+  sizeClass(&self): i32 {
+    let area: i32 = self.area();
+
+    return match (area) {
+      0 -> 0,
+      1 | 2 | 3 -> 1,
+      _ -> 2,
+    };
+  }
+
+  mixed(&self): i32 {
+    let pair: Pair<i32> = Pair { first: self.area(), second: 1 };
+    let wide: i64 = self.area() as i64;
+    let add = (left: i32, right: i64): i64 -> (left as i64) + right;
+    return add(pair.first + pair.second, wide) as i32;
+  }
+}
+
+@implements(Shape)
+record Square {
+  public side: i32;
+
+  area(&self): i32 {
+    return self.side * self.side;
+  }
+}
+
+@implements(Shape)
+record Rectangle {
+  public width: i32;
+  public height: i32;
+
+  area(&self): i32 {
+    return self.width * self.height;
+  }
+
+  sizeClass(&self): i32 {
+    return 9;
+  }
+}
+
+@implements(Shape)
+record Tagged<T> {
+  public tag: T;
+  public size: i32;
+
+  area(&self): i32 {
+    return self.size;
+  }
+}
+
+@implements(Shape)
+enum Tile {
+  EMPTY,
+  UNIT,
+  BLOCK(i32),
+
+  area(&self): i32 {
+    return match (self) {
+      Tile::EMPTY -> 0,
+      Tile::UNIT -> 1,
+      Tile::BLOCK(size) -> size,
+    };
+  }
+}
+
+function main(): i32 {
+  let square: Square = Square { side: 3 };
+  let rectangle: Rectangle = Rectangle { width: 2, height: 5 };
+  let tagged: Tagged<i32> = Tagged { tag: 7, size: 2 };
+  let empty: Tile = Tile::EMPTY;
+  let block: Tile = Tile::BLOCK(4);
+
+  Io::println(`square ${square.doubled()} ${square.quadrupled()} ${square.sizeClass()} ${square.mixed()}`.toStr());
+  Io::println(
+    `rectangle ${rectangle.doubled()} ${rectangle.quadrupled()} ${rectangle.sizeClass()} ${rectangle.mixed()}`.toStr(),
+  );
+  Io::println(
+    `tagged ${tagged.tag} ${tagged.doubled()} ${tagged.quadrupled()} ${tagged.sizeClass()} ${tagged.mixed()}`.toStr(),
+  );
+  Io::println(`empty ${empty.doubled()} ${empty.quadrupled()} ${empty.sizeClass()} ${empty.mixed()}`.toStr());
+  Io::println(`block ${block.doubled()} ${block.quadrupled()} ${block.sizeClass()} ${block.mixed()}`.toStr());
+
+  return 0;
+}

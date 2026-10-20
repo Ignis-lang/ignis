@@ -2664,8 +2664,14 @@ export namespace Analyzer {
       resolveBoundTraits(state, defStore, symbols, defId, &t.genericParameters);
 
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &t.genericParameters);
+
+      // Inside a trait, `Self` is the abstract implementing type: a parameter
+      // bounded by the trait itself, so a default body sees exactly the
+      // methods the trait declares (`Typecheck::traitBoundOwnerFor`).
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
       let mut tsRef: &mut Analyzer::TypeStore = typeStore;
-      let selfTypeId: Analyzer::TypeId = tsRef.intern(Analyzer::Type::VOID);
+      let selfTypeId: Analyzer::TypeId = tsRef.param(selfSymbol);
       resolveOwnerMethodSignatures(state, defStore, typeStore, symbols, module, pass1, pass2, &t.methods, &scope, selfTypeId);
     }
 

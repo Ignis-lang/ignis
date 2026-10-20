@@ -173,3 +173,57 @@ function copyOnEnumWithPrimitivePayloadIsAccepted(): void {
 
   Test::assertEq<u64>(copyValidationCountCode(&bag, "A0149"), 0);
 }
+
+/// The note text of the first note `bag`'s diagnostic `index` carries.
+function firstNoteText(bag: &DiagnosticBag, index: u64): String {
+  let Option::SOME(diagnostic) = bag.get(index) else {
+    @panic("missing diagnostic");
+  };
+
+  let Option::SOME(note) = diagnostic.notes.get(0) else {
+    return String::create("");
+  };
+
+  return String::create(note.messageText());
+}
+
+/// Scenario: an error in a trait default that every implementing type hits
+/// the same way is reported once, at the trait, without naming a type.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e_err::trait_default_error_inherited_by_two_types.
+@test
+function typecheckReportsAnInheritedDefaultErrorOnce(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "trait Shape { area(&self): i32; flagged(&self): boolean { let flag: boolean = self.area(); return flag; } } @implements(Shape) record Square { public side: i32; area(&self): i32 { return self.side; } } @implements(Shape) record Line { public length: i32; area(&self): i32 { return self.length; } }"
+  );
+
+  Test::assertEq<u64>(bag.length(), 1);
+  Test::assertEq<str>(firstNoteText(&bag, 0).toStr(), "");
+}
+
+/// Scenario: a trait default valid against the trait but not for one
+/// implementing type is reported once, with a note naming that type.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e_err::trait_default_error_specific_to_one_type.
+@test
+function typecheckReportsATypeSpecificDefaultErrorForThatType(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "trait Shape { area(&self): i32; doubled(&self): i32 { let area: i32 = self.area(); return area * 2; } } @implements(Shape) record Square { public side: i32; area(&self): i32 { return self.side; } } @implements(Shape) record Flag { public set: boolean; area(&self): boolean { return self.set; } }"
+  );
+
+  Test::assertEq<u64>(bag.length(), 1);
+  Test::assertEq<str>(
+    firstNoteText(&bag, 0).toStr(),
+    "in default method `doubled` of trait `Shape`, as inherited by `Flag`",
+  );
+}
+
+/// Scenario: a trait default is checked against the trait, whose `Self`
+/// answers only the trait's methods, even when no type implements it.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e_err::trait_default_error_without_implementers.
+@test
+function typecheckChecksADefaultNoTypeInherits(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "trait Shape { area(&self): i32; doubled(&self): i32 { return self.perimeter() * 2; } }"
+  );
+
+  Test::assertEq<u64>(bag.length(), 1);
+}

@@ -5083,8 +5083,8 @@ function traitMethodBodyLength(module: &Ast::Module, id: Ast::ItemId): u64 {
 }
 
 /// Scenario: a trait member may end in `;` (required) or carry a body
-/// (default). The default's body hangs off `defaultMethods`, while `methods`
-/// keeps signatures only.
+/// (default). The default hangs off `defaultMethods`; its twin in `methods`
+/// carries the same body, which the analyzer checks against the trait.
 /// Spec: GRAMMAR.md `<trait>`; parity fixture e2e_ok::trait_default_method.
 @test
 function parserParsesTraitDefaultMethods(): void {
@@ -5127,7 +5127,7 @@ function parserParsesTraitDefaultMethods(): void {
       Test::assertEq<str>(traitMethodName(&module, defaultId).toStr(), "doubled");
 
       Test::assertEq<u64>(traitMethodBodyLength(&module, requiredId), 0);
-      Test::assertEq<u64>(traitMethodBodyLength(&module, signatureId), 0);
+      Test::assertEq<u64>(traitMethodBodyLength(&module, signatureId), 1);
       Test::assertEq<u64>(traitMethodBodyLength(&module, defaultId), 1);
     },
     _ -> @panic("root is not a trait"),
@@ -5254,6 +5254,182 @@ function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
   let overrideId: Ast::ItemId = recordMethodId(&module, betaId, 0);
   Test::assert(overrideId.raw() != inheritedId.raw());
   Test::assertEq<str>(traitMethodName(&module, overrideId).toStr(), "answer");
+}
+
+/// Reads the value of the `return` statement that opens method `id`'s body.
+function methodFirstReturnValue(module: &Ast::Module, id: Ast::ItemId): Ast::ExpressionId {
+  let bodyId: Ast::StatementId = match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> functionItem.body,
+    _ -> @panic("item is not a method"),
+  };
+
+  let firstId: Ast::StatementId = match (expectStatement(module, bodyId)) {
+    Ast::Statement::Node::Block(block) -> match (block.statements.get(0)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> @panic("method body is empty"),
+    },
+    _ -> @panic("method body is not a block"),
+  };
+
+  return match (expectStatement(module, firstId)) {
+    Ast::Statement::Node::Return(returnStatement) -> match (returnStatement.value) {
+      Option::SOME(value) -> value,
+      Option::NONE -> @panic("return has no value"),
+    },
+    _ -> @panic("first statement is not a return"),
+  };
+}
+
+/// Reads the body statement of method `id`.
+function methodBody(module: &Ast::Module, id: Ast::ItemId): Ast::StatementId {
+  return match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> functionItem.body,
+    _ -> @panic("item is not a method"),
+  };
+}
+
+/// Scenario: two types inheriting the same default each get their own copy of
+/// its body, with node ids disjoint from the trait's and from each other, so
+/// each copy resolves `self` against its own type.
+/// Spec: TRAITS.md "Default Methods"; parity fixture e2e_ok::trait_default_self_shared_by_types.
+@test
+function parserMaterializesIndependentDefaultBodiesPerType(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_independent_bodies.ign",
+    "trait Shape { area(&self): i32; doubled(&self): i32 { return self.area() * 2; } } @implements(Shape) record Alpha { public x: i32; area(&self): i32 { return self.x; } } @implements(Shape) record Beta { public y: i32; area(&self): i32 { return self.y; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+  let alphaId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+  let betaId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Beta"),
+  };
+
+  let defaultId: Ast::ItemId = traitDefaultMethodId(&module, traitId, 0);
+  let alphaInherited: Ast::ItemId = recordMethodId(&module, alphaId, 1);
+  let betaInherited: Ast::ItemId = recordMethodId(&module, betaId, 1);
+  Test::assertEq<str>(traitMethodName(&module, alphaInherited).toStr(), "doubled");
+  Test::assertEq<str>(traitMethodName(&module, betaInherited).toStr(), "doubled");
+
+  let defaultBody: u32 = methodBody(&module, defaultId).raw();
+  let alphaBody: u32 = methodBody(&module, alphaInherited).raw();
+  let betaBody: u32 = methodBody(&module, betaInherited).raw();
+  Test::assert(alphaBody != defaultBody);
+  Test::assert(betaBody != defaultBody);
+  Test::assert(alphaBody != betaBody);
+
+  let defaultValue: u32 = methodFirstReturnValue(&module, defaultId).raw();
+  let alphaValue: u32 = methodFirstReturnValue(&module, alphaInherited).raw();
+  let betaValue: u32 = methodFirstReturnValue(&module, betaInherited).raw();
+  Test::assert(alphaValue != defaultValue);
+  Test::assert(betaValue != defaultValue);
+  Test::assert(alphaValue != betaValue);
+}
+
+/// Reads the local statement that opens method `id`'s body.
+function methodFirstLocal(module: &Ast::Module, id: Ast::ItemId): Ast::StatementId {
+  return match (expectStatement(module, methodBody(module, id))) {
+    Ast::Statement::Node::Block(block) -> match (block.statements.get(0)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> @panic("method body is empty"),
+    },
+    _ -> @panic("method body is not a block"),
+  };
+}
+
+/// Reads the binding pattern of the local that opens method `id`'s body.
+function methodFirstLocalPattern(module: &Ast::Module, id: Ast::ItemId): Ast::PatternId {
+  return match (expectStatement(module, methodFirstLocal(module, id))) {
+    Ast::Statement::Node::Variable(variable) -> variable.pattern,
+    Ast::Statement::Node::Let(letStatement) -> letStatement.pattern,
+    _ -> @panic("first statement is not a local"),
+  };
+}
+
+/// Reads the first parameter of the closure that initializes the local
+/// opening method `id`'s body.
+function methodFirstLocalClosureParameter(module: &Ast::Module, id: Ast::ItemId): Ast::PatternId {
+  let value: Option<Ast::ExpressionId> = match (expectStatement(module, methodFirstLocal(module, id))) {
+    Ast::Statement::Node::Variable(variable) -> variable.value,
+    Ast::Statement::Node::Let(letStatement) -> letStatement.value,
+    _ -> @panic("first statement is not a local"),
+  };
+
+  let Option::SOME(closureId) = value else {
+    @panic("local has no initializer");
+  };
+
+  let Option::SOME(closure) = module.expressions.get(closureId) else {
+    @panic("missing closure expression");
+  };
+
+  return match (closure) {
+    Ast::Expression::Node::Lambda(lambda) -> match (lambda.parameters.get(0)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> @panic("closure has no parameter"),
+    },
+    _ -> @panic("initializer is not a closure"),
+  };
+}
+
+/// Scenario: a default whose body declares a local closure with a typed
+/// parameter gives each implementing type its own local and parameter
+/// patterns, so each copy binds them for its own type.
+/// Spec: TRAITS.md "Default Methods"; parity fixture e2e_ok::trait_default_self_shared_by_types.
+@test
+function parserMaterializesIndependentDefaultLocalsPerType(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_independent_locals.ign",
+    "trait Shape { area(&self): i32; scaled(&self): i64 { let scale = (value: i32): i64 -> value as i64 * 2; return scale(self.area()); } } @implements(Shape) record Alpha { public x: i32; area(&self): i32 { return self.x; } } @implements(Shape) record Beta { public y: i32; area(&self): i32 { return self.y; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+  let alphaId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+  let betaId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Beta"),
+  };
+
+  let defaultId: Ast::ItemId = traitDefaultMethodId(&module, traitId, 0);
+  let alphaInherited: Ast::ItemId = recordMethodId(&module, alphaId, 1);
+  let betaInherited: Ast::ItemId = recordMethodId(&module, betaId, 1);
+
+  let defaultLocal: Ast::PatternId = methodFirstLocalPattern(&module, defaultId);
+  let alphaLocal: Ast::PatternId = methodFirstLocalPattern(&module, alphaInherited);
+  let betaLocal: Ast::PatternId = methodFirstLocalPattern(&module, betaInherited);
+  let defaultParameter: Ast::PatternId = methodFirstLocalClosureParameter(&module, defaultId);
+  let alphaParameter: Ast::PatternId = methodFirstLocalClosureParameter(&module, alphaInherited);
+  let betaParameter: Ast::PatternId = methodFirstLocalClosureParameter(&module, betaInherited);
+
+  Test::assert(alphaLocal.raw() != defaultLocal.raw());
+  Test::assert(betaLocal.raw() != defaultLocal.raw());
+  Test::assert(alphaLocal.raw() != betaLocal.raw());
+  Test::assert(alphaParameter.raw() != defaultParameter.raw());
+  Test::assert(betaParameter.raw() != defaultParameter.raw());
+  Test::assert(alphaParameter.raw() != betaParameter.raw());
 }
 
 /// Scenario: a type that names a namespaced trait by its path in `@implements`
