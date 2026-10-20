@@ -1056,6 +1056,21 @@ function resolverResolveFsPath(
   return Result::ERROR(resolverMissingModuleDiagnostic(currentFile, importSource, span));
 }
 
+/// Whether an alias name ends in a byte that cannot continue an import segment,
+/// so the alias name itself marks where the module path begins.
+function resolverAliasEndsInSigil(name: &String): boolean {
+  if (name.length() == 0) {
+    return false;
+  }
+
+  let Option::SOME(last) = name.byteAt(name.length() - 1) else {
+    return false;
+  };
+  let isLetter: boolean = (last >= 97 && last <= 122) || (last >= 65 && last <= 90);
+  let isDigit: boolean = last >= 48 && last <= 57;
+  return !(isLetter || isDigit || last == 95 || last == 58);
+}
+
 function resolverAliasMatch(
   project: &ResolverProject,
   importSource: &String
@@ -1090,11 +1105,18 @@ function resolverAliasMatch(
     };
 
     // Require a "::" boundary after the alias name so that an alias "comp" does not
-    // shadow an import "compiler::foo".  The import source must start with exactly
-    // "<alias.name>::" to qualify as a prefix match.
+    // shadow an import "compiler::foo". An alias ending in a sigil such as "@" is
+    // its own boundary: "@token::token" is the module "token::token" under "@".
     let aliasWithSep: String = alias.name.concat("::");
-    if (importSource.startsWith(aliasWithSep.toStr()) && alias.name.length() > bestMatchLength) {
-      let subPath: String = importSource.substringBytes(aliasWithSep.length(), importSource.length());
+    let mut prefixLength: u64 = 0;
+    if (importSource.startsWith(aliasWithSep.toStr())) {
+      prefixLength = aliasWithSep.length();
+    } else if (resolverAliasEndsInSigil(&alias.name) && importSource.startsWith(alias.name.toStr())) {
+      prefixLength = alias.name.length();
+    }
+
+    if (prefixLength > 0 && prefixLength < importSource.length() && alias.name.length() > bestMatchLength) {
+      let subPath: String = importSource.substringBytes(prefixLength, importSource.length());
       let subPathOpt: Option<String> = Option::SOME(subPath);
       let emptyRemainder: String = String::new();
       bestMatchLength = alias.name.length();
@@ -2562,6 +2584,24 @@ function resolverAliasPrefixDoesNotShadowLongerSegment(): void {
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
   let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverResolvesSigilAliasPrefix(): void {
+  // Alias "@" resolves "@token::token" and "@lexer" under its directory, while the
+  // longer alias "@lib" still wins an exact first-segment match.
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/alias_sigil_prefix");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let actual: String = Resolver::orderSummaryRelativeTo(&discovery, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 

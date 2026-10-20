@@ -5184,12 +5184,17 @@ export namespace Analyzer {
 
       // The store holds every module's declarations, so a plain first-hit scan
       // hands a name the prelude also publishes to the prelude. A declaration
-      // in the module being analyzed shadows it.
-      if (let Option::SOME(ownDefId) = Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, true)) {
+      // in the module being analyzed shadows it, and one the module imports
+      // shadows a same-named one it does not.
+      if (let Option::SOME(ownDefId) = Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, true, false)) {
         return Option::SOME(ownDefId);
       }
 
-      return Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, false);
+      if (let Option::SOME(visibleDefId) = Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, false, true)) {
+        return Option::SOME(visibleDefId);
+      }
+
+      return Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, false, false);
     }
 
     /// The record or enum named `symbol` whose stamped qualified path the written
@@ -5251,11 +5256,13 @@ export namespace Analyzer {
     }
 
     /// First record or enum in the store named `symbol`. When `activeModuleOnly`
-    /// is set, only declarations published by the module being analyzed count.
+    /// is set, only declarations published by the module being analyzed count;
+    /// when `visibleOnly` is set, only declarations that module can name.
     function findNamedTypeDefinition(
       defStore: &mut Analyzer::DefinitionStore,
       symbol: Analyzer::SymbolId,
       activeModuleOnly: boolean,
+      visibleOnly: boolean,
     ): Option<Analyzer::DefinitionId> {
       let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(symbol);
       let mut index: u64 = 0;
@@ -5273,6 +5280,11 @@ export namespace Analyzer {
         };
 
         if (activeModuleOnly && !defStore.defBelongsToActiveModule(defId)) {
+          index += 1;
+          continue;
+        }
+
+        if (visibleOnly && !defStore.defVisibleInActiveModule(defId)) {
           index += 1;
           continue;
         }
@@ -5571,10 +5583,13 @@ export namespace Analyzer {
 
           // The current module's own declaration wins over a same-named one
           // from elsewhere — the two ParsedCondition records must not
-          // cross-wire — so the scan runs module-local first, then global.
+          // cross-wire — so the scan runs module-local first, then over what
+          // the module imports, then global. Without the middle pass a
+          // same-named record from a module imported for another name wins
+          // over the one actually imported.
           let named: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(symbol);
           let mut localPass: u64 = 0;
-          while (localPass < 2) {
+          while (localPass < 3) {
             let mut index: u64 = 0;
             while (index < named.length()) {
               let Option::SOME(candidate) = named.get(index) else {
@@ -5585,6 +5600,11 @@ export namespace Analyzer {
               let defId: Analyzer::DefinitionId = *candidate;
 
               if (localPass == 0 && !defStore.defBelongsToActiveModule(defId)) {
+                index += 1;
+                continue;
+              }
+
+              if (localPass == 1 && !defStore.defVisibleInActiveModule(defId)) {
                 index += 1;
                 continue;
               }

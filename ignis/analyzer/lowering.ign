@@ -4506,9 +4506,59 @@ export namespace Lowering {
       );
     }
 
-    let Analyzer::ResolverBodies::ResolvedRef::Definition(calleeDef) = resolved else {
+    let Analyzer::ResolverBodies::ResolvedRef::Definition(resolvedCalleeDef) = resolved else {
       return Lowering::errorNode(hir, typeStore, pipe.span);
     };
+
+    // The resolver names the first same-name overload; the checker records the
+    // one the arguments select against the right side.
+    let mut calleeDef: Analyzer::DefinitionId = resolvedCalleeDef;
+    let rightCallExprId: Ast::ExpressionId = Analyzer::Typecheck::unwrapGroupedExpr(module, pipe.right);
+    if (let Option::SOME(selectedDef) = Lowering::lookupCallTarget(&output.typecheck, rightCallExprId)) {
+      calleeDef = selectedDef;
+    }
+
+    // `value |> Type::create` calls a static method, which has no receiver,
+    // the same way the direct call `Type::create(value)` does.
+    if (let Option::SOME(methodInfo) = Analyzer::Typecheck::lookupMethodDefInfo(defStore, calleeDef)) {
+      if (!methodInfo.isStatic) {
+        return Lowering::errorNode(hir, typeStore, pipe.span);
+      }
+
+      let staticArgs: Vector<Hir::HirId> = Lowering::lowerPipeArguments(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        hir,
+        pipe,
+        &placement,
+      );
+
+      let staticType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+        Option::SOME(typeId) -> typeId,
+        Option::NONE -> methodInfo.returnType,
+      };
+
+      let staticTypeArgs: Vector<Analyzer::TypeId> = match (Lowering::lookupCallTypeArgs(&output.typecheck, pipe.right)) {
+        Option::SOME(recorded) -> recorded,
+        Option::NONE -> Vector::new<Analyzer::TypeId>(),
+      };
+
+      let mut staticHirRef: &mut Hir::HirStore = hir;
+      return staticHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::MethodCall(Hir::HirMethodCall {
+          receiver: Option::NONE,
+          method: calleeDef,
+          typeArgs: staticTypeArgs,
+          args: staticArgs,
+        }),
+        span: pipe.span,
+        typeId: staticType,
+      });
+    }
 
     let mut calleeIsFunction: boolean = false;
     let mut calleeIsExtern: boolean = false;

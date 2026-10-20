@@ -1,0 +1,44 @@
+// A pipe into a path callee selects among its overloads by the piped value and
+// the written arguments, as the direct call does, and a static method on the
+// right side lowers to the same receiver-less call `Type::method(value)` does.
+import Io from "std::io";
+
+record Meter {
+  public value: i32;
+
+  public static make(value: i32): Meter {
+    return Meter { value: value };
+  }
+
+  public static make(value: i32, scale: i32): Meter {
+    return Meter { value: value * scale };
+  }
+}
+
+function describe(value: i32): i32 {
+  return value + 1;
+}
+
+function describe(value: boolean): i32 {
+  return value ? 100 : 200;
+}
+
+function main(): i32 {
+  42
+    |> String::create
+    |> Io::println;
+  "text"
+    |> String::create
+    |> Io::println;
+
+  let single: Meter = 3 |> Meter::make;
+  let scaled: Meter = 3 |> Meter::make(10);
+  let placed: Meter = 4 |> Meter::make(_, 5);
+
+  let fromNumber: i32 = 1 |> describe;
+  let fromFlag: i32 = true |> describe;
+
+  Io::println(String::create(single.value + scaled.value + placed.value));
+  Io::println(String::create(fromNumber + fromFlag));
+  return 0;
+}
