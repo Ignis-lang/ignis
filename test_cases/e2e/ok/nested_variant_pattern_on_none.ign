@@ -1,0 +1,64 @@
+// A nested refutable pattern inside `Option::SOME(...)` checks the payload only
+// after the tag matched: on `NONE` there is no payload, and a sub-pattern under a
+// reference used to dereference it anyway and crash.
+import Io from "std::io";
+
+record Generic {
+  public name: String;
+}
+
+enum Origin {
+  Plain(u32),
+  Instance(Generic),
+}
+
+enum Holder {
+  Borrowed(&Origin),
+  Empty,
+}
+
+function find(origin: &Origin, present: boolean): Option<&Origin> {
+  if (present) {
+    return Option::SOME(origin);
+  }
+
+  return Option::NONE;
+}
+
+function kindOf(value: Option<&Origin>): i32 {
+  return match (value) {
+    Option::SOME(Origin::Plain(_)) -> 1,
+    Option::SOME(Origin::Instance(_)) -> 2,
+    Option::NONE -> 0,
+  };
+}
+
+function main(): i32 {
+  let instance: Origin = Origin::Instance(Generic { name: String::create("generic") });
+  let plain: Origin = Origin::Plain(3);
+
+  if (let Option::SOME(Origin::Instance(found)) = find(&instance, true)) {
+    Io::println(found.name.toStr());
+  }
+
+  if (let Option::SOME(Origin::Instance(found)) = find(&instance, false)) {
+    Io::println(found.name.toStr());
+  } else {
+    Io::println("none");
+  }
+
+  let held: Option<Holder> = Option::SOME(Holder::Borrowed(&plain));
+  let empty: Option<Holder> = Option::SOME(Holder::Empty);
+
+  if (let Option::SOME(Holder::Borrowed(Origin::Plain(value))) = held) {
+    Io::println(value.toString().toStr());
+  }
+
+  if (let Option::SOME(Holder::Borrowed(Origin::Plain(_))) = empty) {
+    Io::println("unreachable");
+  } else {
+    Io::println("empty holder");
+  }
+
+  return kindOf(find(&plain, true)) * 100 + kindOf(find(&instance, true)) * 10 + kindOf(find(&plain, false)) - 120;
+}
