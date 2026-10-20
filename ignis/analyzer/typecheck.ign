@@ -26,10 +26,7 @@ export namespace Analyzer {
       let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
       let mut state: Analyzer::Typecheck::TypecheckState = Analyzer::Typecheck::TypecheckState {
         diagnostics: DiagnosticBag::init(),
-        exprTypes: Analyzer::Typecheck::ExprTypeMap {
-          nodeIds: Vector::new<u32>(),
-          typeIds: Vector::new<Analyzer::TypeId>(),
-        },
+        exprTypes: Analyzer::Typecheck::ExprTypeMap::empty(),
         callTargets: Analyzer::Typecheck::CallTargetMap {
           nodeIds: Vector::new<u32>(),
           defIds: Vector::new<Analyzer::DefinitionId>(),
@@ -58,6 +55,9 @@ export namespace Analyzer {
         mutatedBindings: Vector::new<u32>(),
         pendingNullSpans: Vector::new<SourceSpan>(),
         pipeValueTypes: Vector::new<Analyzer::TypeId>(),
+        inheritedStarts: Vector::new<u64>(),
+        inheritedEnds: Vector::new<u64>(),
+        inheritedNotes: Vector::new<String>(),
       };
 
       let mut index: u64 = 0;
@@ -83,6 +83,7 @@ export namespace Analyzer {
       }
 
       Analyzer::Typecheck::flushPendingNullDiagnostics(&mut state);
+      Analyzer::Typecheck::settleInheritedDiagnostics(&mut state);
 
       return Analyzer::Typecheck::TypecheckOutput {
         diagnostics: state.diagnostics,

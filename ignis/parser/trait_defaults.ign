@@ -3,6 +3,7 @@ import SourceSpan from "@compiler::diagnostics";
 import Vector from "std::vector";
 
 import _ from "./declarations";
+import _ from "./shared";
 
 /// Copies every trait default method body onto the types that declare the
 /// trait with `@implements` and do not declare the method themselves.
@@ -12,10 +13,10 @@ import _ from "./declarations";
 /// the type, which is what lets binding, resolution, typechecking and lowering
 /// treat an inherited default exactly like a hand-written method.
 ///
-/// Only the method item is copied. Its body statement is shared with the trait
-/// declaration, mirroring the host, so two types inheriting the same body
-/// resolve that body's names once. A body that reads `self` therefore belongs
-/// to a single implementing type.
+/// The copy owns its parameters and every statement, expression and pattern of
+/// its body under fresh ids, so each implementing type resolves and types its
+/// own body: name resolution records each body node once. Type syntax nodes and
+/// nested item declarations stay shared with the trait declaration.
 ///
 /// The parser cannot resolve names, but only a trait declared in this module
 /// has a body it can copy, so each `@implements` path is read against the
@@ -32,11 +33,16 @@ export namespace ParserTraitDefaults {
     public traitPath: String;
     public methodName: String;
     public methodItemId: Ast::ItemId;
+    /// The body-less twin the trait lists among its methods, which the
+    /// analyzer binds as the trait's own method.
+    public signatureItemId: Option<Ast::ItemId>;
   }
 
   /// A default method that still has to be copied onto an implementing type.
   record Pending {
     public ownerItemId: Ast::ItemId;
+    public traitName: String;
+    public methodName: String;
     public methodItemId: Ast::ItemId;
   }
 
@@ -227,6 +233,29 @@ export namespace ParserTraitDefaults {
     return Option::SOME(method.name.clone());
   }
 
+  /// The method in `methods` called `name`, if there is one.
+  function findMethod(
+    module: &mut Ast::Module,
+    methods: &Vector<Ast::ItemId>,
+    name: &String,
+  ): Option<Ast::ItemId> {
+    let mut index: u64 = 0;
+
+    while (index < methods.length()) {
+      if (let Option::SOME(methodId) = methods.get(index)) {
+        if (let Option::SOME(methodName) = ParserTraitDefaults::methodItemName(module, *methodId)) {
+          if (methodName.equals(name.toStr())) {
+            return Option::SOME(*methodId);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
   /// Whether `methods` already declares a method called `name`.
   function declaresMethod(
     module: &mut Ast::Module,
@@ -292,6 +321,7 @@ export namespace ParserTraitDefaults {
 
       let mut traitName: Option<String> = Option::NONE;
       let mut defaultMethods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+      let mut signatures: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
       let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
       let mut nestedNamespace: Option<String> = Option::NONE;
 
@@ -300,6 +330,7 @@ export namespace ParserTraitDefaults {
           Ast::Item::Node::Trait(trait_) -> {
             traitName = Option::SOME(trait_.name.clone());
             defaultMethods = ParserDeclarations::copyItemIds(&trait_.defaultMethods);
+            signatures = ParserDeclarations::copyItemIds(&trait_.methods);
           },
           Ast::Item::Node::Namespace(namespaceItem) -> {
             nested = ParserDeclarations::copyItemIds(&namespaceItem.items);
@@ -330,6 +361,7 @@ export namespace ParserTraitDefaults {
               traitPath: traitPath.clone(),
               methodName: methodName.clone(),
               methodItemId: *methodItemId,
+              signatureItemId: ParserTraitDefaults::findMethod(module, &signatures, &methodName),
             });
           }
 
@@ -387,6 +419,8 @@ export namespace ParserTraitDefaults {
           let mut pendingRef: &mut Vector<ParserTraitDefaults::Pending> = pending;
           pendingRef.push(ParserTraitDefaults::Pending {
             ownerItemId: ownerItemId,
+            traitName: entry.traitPath.clone(),
+            methodName: entry.methodName.clone(),
             methodItemId: entry.methodItemId,
           });
         }
@@ -467,40 +501,887 @@ export namespace ParserTraitDefaults {
     }
   }
 
-  /// Copies a parameter pattern so the materialized method owns its bindings
-  /// instead of sharing them with the trait declaration.
-  function clonePattern(module: &mut Ast::Module, patternId: Ast::PatternId): Ast::PatternId {
-    let mut cloned: Option<Ast::Pattern::Node> = Option::NONE;
+  /// Copies a literal value, cloning its text.
+  function copyLiteralValue(value: &Ast::Expression::LiteralValue): Ast::Expression::LiteralValue {
+    return match (value) {
+      Ast::Expression::LiteralValue::Int(number) -> Ast::Expression::LiteralValue::Int(number),
+      Ast::Expression::LiteralValue::UInt(number) -> Ast::Expression::LiteralValue::UInt(number),
+      Ast::Expression::LiteralValue::Float(number) -> Ast::Expression::LiteralValue::Float(number),
+      Ast::Expression::LiteralValue::Boolean(flag) -> Ast::Expression::LiteralValue::Boolean(flag),
+      Ast::Expression::LiteralValue::Character(character) -> Ast::Expression::LiteralValue::Character(character),
+      Ast::Expression::LiteralValue::String(text) -> Ast::Expression::LiteralValue::String(text.clone()),
+      Ast::Expression::LiteralValue::Atom(text) -> Ast::Expression::LiteralValue::Atom(text.clone()),
+      Ast::Expression::LiteralValue::Null -> Ast::Expression::LiteralValue::Null,
+    };
+  }
 
-    if (let Option::SOME(pattern) = module.patterns.get(patternId)) {
-      match (pattern) {
-        Ast::Pattern::Node::Binding(binding) -> {
-          cloned = Option::SOME(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-            span: binding.span,
-            name: binding.name.clone(),
-            annotation: binding.annotation,
-            initializer: Option::NONE,
-            metadata: Ast::copyMetadata(&binding.metadata),
-          }));
-        },
-        Ast::Pattern::Node::Wildcard(wildcard) -> {
-          cloned = Option::SOME(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
-            span: wildcard.span,
-          }));
-        },
-        _ -> {},
-      };
+  function copyAsmNames(
+    source: &Vector<Ast::Expression::AsmName>
+  ): Vector<Ast::Expression::AsmName> {
+    let mut copied: Vector<Ast::Expression::AsmName> = Vector::new<Ast::Expression::AsmName>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(name) = source.get(index)) {
+        copied.push(Ast::Expression::AsmName { span: name.span, name: name.name.clone() });
+      }
+
+      index += 1;
     }
 
-    let Option::SOME(node) = cloned else {
+    return copied;
+  }
+
+  function copyAsmOutputs(
+    source: &Vector<Ast::Expression::AsmOutput>,
+  ): Vector<Ast::Expression::AsmOutput> {
+    let mut copied: Vector<Ast::Expression::AsmOutput> = Vector::new<Ast::Expression::AsmOutput>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(output) = source.get(index)) {
+        copied.push(Ast::Expression::AsmOutput {
+          span: output.span,
+          name: output.name.clone(),
+          outputType: output.outputType,
+          location: output.location.clone(),
+          locationSpan: output.locationSpan,
+        });
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyAsmInputs(
+    source: &Vector<Ast::Expression::AsmInput>,
+  ): Vector<Ast::Expression::AsmInput> {
+    let mut copied: Vector<Ast::Expression::AsmInput> = Vector::new<Ast::Expression::AsmInput>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(input) = source.get(index)) {
+        copied.push(Ast::Expression::AsmInput {
+          span: input.span,
+          expression: input.expression,
+          mode: input.mode,
+          location: input.location.clone(),
+          locationSpan: input.locationSpan,
+        });
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function cloneAsmInputs(
+    module: &mut Ast::Module,
+    source: &Vector<Ast::Expression::AsmInput>,
+  ): Vector<Ast::Expression::AsmInput> {
+    let mut copied: Vector<Ast::Expression::AsmInput> = Vector::new<Ast::Expression::AsmInput>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(input) = source.get(index)) {
+        copied.push(Ast::Expression::AsmInput {
+          span: input.span,
+          expression: ParserTraitDefaults::cloneExpression(module, input.expression),
+          mode: input.mode,
+          location: input.location.clone(),
+          locationSpan: input.locationSpan,
+        });
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function shallowAsm(asmNode: &Ast::Expression::Asm): Ast::Expression::Asm {
+    return Ast::Expression::Asm {
+      span: asmNode.span,
+      isPure: asmNode.isPure,
+      inputs: ParserTraitDefaults::copyAsmInputs(&asmNode.inputs),
+      outputs: ParserTraitDefaults::copyAsmOutputs(&asmNode.outputs),
+      clobbers: ParserTraitDefaults::copyAsmNames(&asmNode.clobbers),
+      chunks: ParserShared::copyStrings(&asmNode.chunks),
+      holes: ParserTraitDefaults::copyAsmNames(&asmNode.holes),
+      bodySpan: asmNode.bodySpan,
+    };
+  }
+
+  /// Copies an `asm` node, giving its input expressions fresh ids.
+  function cloneAsm(
+    module: &mut Ast::Module,
+    asmNode: &Ast::Expression::Asm
+  ): Ast::Expression::Asm {
+    return Ast::Expression::Asm {
+      span: asmNode.span,
+      isPure: asmNode.isPure,
+      inputs: ParserTraitDefaults::cloneAsmInputs(module, &asmNode.inputs),
+      outputs: ParserTraitDefaults::copyAsmOutputs(&asmNode.outputs),
+      clobbers: ParserTraitDefaults::copyAsmNames(&asmNode.clobbers),
+      chunks: ParserShared::copyStrings(&asmNode.chunks),
+      holes: ParserTraitDefaults::copyAsmNames(&asmNode.holes),
+      bodySpan: asmNode.bodySpan,
+    };
+  }
+
+  function cloneExpressionList(
+    module: &mut Ast::Module,
+    source: &Vector<Ast::ExpressionId>,
+  ): Vector<Ast::ExpressionId> {
+    let mut cloned: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(expressionId) = source.get(index)) {
+        cloned.push(ParserTraitDefaults::cloneExpression(module, *expressionId));
+      }
+
+      index += 1;
+    }
+
+    return cloned;
+  }
+
+  function cloneOptionalExpression(
+    module: &mut Ast::Module,
+    source: Option<Ast::ExpressionId>,
+  ): Option<Ast::ExpressionId> {
+    let Option::SOME(expressionId) = source else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(ParserTraitDefaults::cloneExpression(module, expressionId));
+  }
+
+  function cloneStatementList(
+    module: &mut Ast::Module,
+    source: &Vector<Ast::StatementId>,
+  ): Vector<Ast::StatementId> {
+    let mut cloned: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(statementId) = source.get(index)) {
+        cloned.push(ParserTraitDefaults::cloneStatement(module, *statementId));
+      }
+
+      index += 1;
+    }
+
+    return cloned;
+  }
+
+  function cloneOptionalStatement(
+    module: &mut Ast::Module,
+    source: Option<Ast::StatementId>,
+  ): Option<Ast::StatementId> {
+    let Option::SOME(statementId) = source else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(ParserTraitDefaults::cloneStatement(module, statementId));
+  }
+
+  function clonePatternList(
+    module: &mut Ast::Module,
+    source: &Vector<Ast::PatternId>,
+  ): Vector<Ast::PatternId> {
+    let mut cloned: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(patternId) = source.get(index)) {
+        cloned.push(ParserTraitDefaults::clonePattern(module, *patternId));
+      }
+
+      index += 1;
+    }
+
+    return cloned;
+  }
+
+  /// Copies a pattern subtree under fresh ids. Type annotations stay shared:
+  /// the analyzer resolves a type syntax node the same way wherever it is used,
+  /// as the materialized method's signature already relies on.
+  function clonePattern(module: &mut Ast::Module, patternId: Ast::PatternId): Ast::PatternId {
+    let mut shallow: Option<Ast::Pattern::Node> = Option::NONE;
+
+    if (let Option::SOME(pattern) = module.patterns.get(patternId)) {
+      shallow = Option::SOME(match (pattern) {
+        Ast::Pattern::Node::Wildcard(wildcard) -> Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+          span: wildcard.span,
+        }),
+        Ast::Pattern::Node::Binding(binding) -> Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+          span: binding.span,
+          name: binding.name.clone(),
+          annotation: binding.annotation,
+          initializer: binding.initializer,
+          metadata: Ast::copyMetadata(&binding.metadata),
+        }),
+        Ast::Pattern::Node::Literal(literal) -> Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+          span: literal.span,
+          expression: literal.expression,
+        }),
+        Ast::Pattern::Node::Path(path) -> Ast::Pattern::Node::Path(Ast::Pattern::Path {
+          span: path.span,
+          segments: ParserShared::copyStrings(&path.segments),
+          arguments: ParserShared::copyPatternIds(&path.arguments),
+        }),
+        Ast::Pattern::Node::Tuple(tuple) -> Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+          span: tuple.span,
+          elements: ParserShared::copyPatternIds(&tuple.elements),
+        }),
+        Ast::Pattern::Node::Or(orPattern) -> Ast::Pattern::Node::Or(Ast::Pattern::Or {
+          span: orPattern.span,
+          alternatives: ParserShared::copyPatternIds(&orPattern.alternatives),
+        }),
+      });
+    }
+
+    let Option::SOME(node) = shallow else {
       return patternId;
     };
 
+    let nodeRef: &Ast::Pattern::Node = &node;
+    let cloned: Ast::Pattern::Node = match (nodeRef) {
+      Ast::Pattern::Node::Wildcard(wildcard) -> Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+        span: wildcard.span,
+      }),
+      Ast::Pattern::Node::Binding(binding) -> Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+        span: binding.span,
+        name: binding.name.clone(),
+        annotation: binding.annotation,
+        initializer: ParserTraitDefaults::cloneOptionalExpression(module, binding.initializer),
+        metadata: Ast::copyMetadata(&binding.metadata),
+      }),
+      Ast::Pattern::Node::Literal(literal) -> Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+        span: literal.span,
+        expression: ParserTraitDefaults::cloneExpression(module, literal.expression),
+      }),
+      Ast::Pattern::Node::Path(path) -> Ast::Pattern::Node::Path(Ast::Pattern::Path {
+        span: path.span,
+        segments: ParserShared::copyStrings(&path.segments),
+        arguments: ParserTraitDefaults::clonePatternList(module, &path.arguments),
+      }),
+      Ast::Pattern::Node::Tuple(tuple) -> Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+        span: tuple.span,
+        elements: ParserTraitDefaults::clonePatternList(module, &tuple.elements),
+      }),
+      Ast::Pattern::Node::Or(orPattern) -> Ast::Pattern::Node::Or(Ast::Pattern::Or {
+        span: orPattern.span,
+        alternatives: ParserTraitDefaults::clonePatternList(module, &orPattern.alternatives),
+      }),
+    };
+
     let mut moduleRef: &mut Ast::Module = module;
-    return moduleRef.addPattern(node);
+    return moduleRef.addPattern(cloned);
   }
 
-  /// Copies a trait default method item, keeping its body statement.
+  function copyMatchArms(
+    source: &Vector<Ast::Expression::MatchArm>
+  ): Vector<Ast::Expression::MatchArm> {
+    let mut copied: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(arm) = source.get(index)) {
+        copied.push(Ast::Expression::MatchArm { pattern: arm.pattern, guard: arm.guard, body: arm.body });
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyRecordInitFields(
+    source: &Vector<Ast::Expression::RecordInitField>,
+  ): Vector<Ast::Expression::RecordInitField> {
+    let mut copied: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(field) = source.get(index)) {
+        copied.push(Ast::Expression::RecordInitField { name: field.name.clone(), value: field.value });
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  /// Copies one expression node, keeping its child ids.
+  function shallowExpression(expression: &Ast::Expression::Node): Ast::Expression::Node {
+    return match (expression) {
+      Ast::Expression::Node::Assignment(node) -> Ast::Expression::Node::Assignment(Ast::Expression::Assignment {
+        span: node.span,
+        target: node.target,
+        value: node.value,
+        operator: node.operator,
+      }),
+      Ast::Expression::Node::Ternary(node) -> Ast::Expression::Node::Ternary(Ast::Expression::Ternary {
+        span: node.span,
+        condition: node.condition,
+        thenBranch: node.thenBranch,
+        elseBranch: node.elseBranch,
+      }),
+      Ast::Expression::Node::Cast(node) -> Ast::Expression::Node::Cast(Ast::Expression::Cast {
+        span: node.span,
+        expression: node.expression,
+        targetType: node.targetType,
+      }),
+      Ast::Expression::Node::Literal(node) -> Ast::Expression::Node::Literal(Ast::Expression::Literal {
+        span: node.span,
+        value: ParserTraitDefaults::copyLiteralValue(&node.value),
+      }),
+      Ast::Expression::Node::Path(node) -> Ast::Expression::Node::Path(Ast::Expression::Path {
+        span: node.span,
+        segments: ParserShared::copyStrings(&node.segments),
+      }),
+      Ast::Expression::Node::Call(node) -> Ast::Expression::Node::Call(Ast::Expression::Call {
+        span: node.span,
+        callee: node.callee,
+        typeArguments: ParserShared::copyTypeIds(&node.typeArguments),
+        arguments: ParserTraitDefaults::copyExpressionIds(&node.arguments),
+      }),
+      Ast::Expression::Node::Binary(node) -> Ast::Expression::Node::Binary(Ast::Expression::Binary {
+        span: node.span,
+        operator: node.operator,
+        left: node.left,
+        right: node.right,
+      }),
+      Ast::Expression::Node::Dereference(node) -> Ast::Expression::Node::Dereference(Ast::Expression::Dereference {
+        span: node.span,
+        operand: node.operand,
+      }),
+      Ast::Expression::Node::Grouped(node) -> Ast::Expression::Node::Grouped(Ast::Expression::Grouped {
+        span: node.span,
+        expression: node.expression,
+      }),
+      Ast::Expression::Node::Tuple(node) -> Ast::Expression::Node::Tuple(Ast::Expression::Tuple {
+        span: node.span,
+        elements: ParserTraitDefaults::copyExpressionIds(&node.elements),
+      }),
+      Ast::Expression::Node::Unit(node) -> Ast::Expression::Node::Unit(Ast::Expression::Unit { span: node.span }),
+      Ast::Expression::Node::LetCondition(node) -> Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
+        span: node.span,
+        pattern: node.pattern,
+        value: node.value,
+      }),
+      Ast::Expression::Node::Reference(node) -> Ast::Expression::Node::Reference(Ast::Expression::Reference {
+        span: node.span,
+        mutable: node.mutable,
+        target: node.target,
+      }),
+      Ast::Expression::Node::Unary(node) -> Ast::Expression::Node::Unary(Ast::Expression::Unary {
+        span: node.span,
+        operator: node.operator,
+        operand: node.operand,
+      }),
+      Ast::Expression::Node::Block(node) -> Ast::Expression::Node::Block(Ast::Expression::Block {
+        span: node.span,
+        statements: ParserShared::copyStatementIds(&node.statements),
+        tail: node.tail,
+      }),
+      Ast::Expression::Node::If(node) -> Ast::Expression::Node::If(Ast::Expression::If {
+        span: node.span,
+        condition: node.condition,
+        thenBranch: node.thenBranch,
+        elseBranch: node.elseBranch,
+      }),
+      Ast::Expression::Node::Match(node) -> Ast::Expression::Node::Match(Ast::Expression::Match {
+        span: node.span,
+        scrutinee: node.scrutinee,
+        arms: ParserTraitDefaults::copyMatchArms(&node.arms),
+      }),
+      Ast::Expression::Node::Variable(node) -> Ast::Expression::Node::Variable(Ast::Expression::Variable {
+        span: node.span,
+        name: node.name.clone(),
+      }),
+      Ast::Expression::Node::Vector(node) -> Ast::Expression::Node::Vector(Ast::Expression::VectorLiteral {
+        span: node.span,
+        elements: ParserTraitDefaults::copyExpressionIds(&node.elements),
+      }),
+      Ast::Expression::Node::VectorAccess(node) -> Ast::Expression::Node::VectorAccess(Ast::Expression::VectorAccess {
+        span: node.span,
+        vector: node.vector,
+        index: node.index,
+      }),
+      Ast::Expression::Node::PostfixIncrement(node) -> Ast::Expression::Node::PostfixIncrement(Ast::Expression::PostfixIncrement {
+        span: node.span,
+        operand: node.operand,
+      }),
+      Ast::Expression::Node::PostfixDecrement(node) -> Ast::Expression::Node::PostfixDecrement(Ast::Expression::PostfixDecrement {
+        span: node.span,
+        operand: node.operand,
+      }),
+      Ast::Expression::Node::MemberAccess(node) -> Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
+        span: node.span,
+        object: node.object,
+        operator: node.operator,
+        member: node.member.clone(),
+      }),
+      Ast::Expression::Node::RecordInit(node) -> Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
+        span: node.span,
+        path: node.path,
+        typeArguments: ParserShared::copyTypeIds(&node.typeArguments),
+        fields: ParserTraitDefaults::copyRecordInitFields(&node.fields),
+      }),
+      Ast::Expression::Node::BuiltinCall(node) -> Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
+        span: node.span,
+        name: node.name.clone(),
+        typeArguments: ParserShared::copyTypeIds(&node.typeArguments),
+        arguments: ParserTraitDefaults::copyExpressionIds(&node.arguments),
+      }),
+      Ast::Expression::Node::Lambda(node) -> Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+        span: node.span,
+        parameters: ParserShared::copyPatternIds(&node.parameters),
+        returnType: node.returnType,
+        body: node.body,
+      }),
+      Ast::Expression::Node::CaptureOverride(node) -> Ast::Expression::Node::CaptureOverride(Ast::Expression::CaptureOverride {
+        span: node.span,
+        kind: node.kind,
+        expression: node.expression,
+      }),
+      Ast::Expression::Node::Pipe(node) -> Ast::Expression::Node::Pipe(Ast::Expression::Pipe {
+        span: node.span,
+        left: node.left,
+        right: node.right,
+      }),
+      Ast::Expression::Node::PipePlaceholder(node) -> Ast::Expression::Node::PipePlaceholder(Ast::Expression::PipePlaceholder {
+        span: node.span,
+      }),
+      Ast::Expression::Node::Try(node) -> Ast::Expression::Node::Try(Ast::Expression::Try {
+        span: node.span,
+        expression: node.expression,
+      }),
+      Ast::Expression::Node::Range(node) -> Ast::Expression::Node::Range(Ast::Expression::Range {
+        span: node.span,
+        start: node.start,
+        end: node.end,
+        inclusive: node.inclusive,
+      }),
+      Ast::Expression::Node::Asm(node) -> Ast::Expression::Node::Asm(ParserTraitDefaults::shallowAsm(&node)),
+    };
+  }
+
+  /// Rebuilds a shallow expression copy with every child copied under fresh ids.
+  function rebuildExpression(
+    module: &mut Ast::Module,
+    expression: &Ast::Expression::Node,
+  ): Ast::Expression::Node {
+    return match (expression) {
+      Ast::Expression::Node::Assignment(node) -> Ast::Expression::Node::Assignment(Ast::Expression::Assignment {
+        span: node.span,
+        target: ParserTraitDefaults::cloneExpression(module, node.target),
+        value: ParserTraitDefaults::cloneExpression(module, node.value),
+        operator: node.operator,
+      }),
+      Ast::Expression::Node::Ternary(node) -> Ast::Expression::Node::Ternary(Ast::Expression::Ternary {
+        span: node.span,
+        condition: ParserTraitDefaults::cloneExpression(module, node.condition),
+        thenBranch: ParserTraitDefaults::cloneExpression(module, node.thenBranch),
+        elseBranch: ParserTraitDefaults::cloneExpression(module, node.elseBranch),
+      }),
+      Ast::Expression::Node::Cast(node) -> Ast::Expression::Node::Cast(Ast::Expression::Cast {
+        span: node.span,
+        expression: ParserTraitDefaults::cloneExpression(module, node.expression),
+        targetType: node.targetType,
+      }),
+      Ast::Expression::Node::Call(node) -> Ast::Expression::Node::Call(Ast::Expression::Call {
+        span: node.span,
+        callee: ParserTraitDefaults::cloneExpression(module, node.callee),
+        typeArguments: ParserShared::copyTypeIds(&node.typeArguments),
+        arguments: ParserTraitDefaults::cloneExpressionList(module, &node.arguments),
+      }),
+      Ast::Expression::Node::Binary(node) -> Ast::Expression::Node::Binary(Ast::Expression::Binary {
+        span: node.span,
+        operator: node.operator,
+        left: ParserTraitDefaults::cloneExpression(module, node.left),
+        right: ParserTraitDefaults::cloneExpression(module, node.right),
+      }),
+      Ast::Expression::Node::Dereference(node) -> Ast::Expression::Node::Dereference(Ast::Expression::Dereference {
+        span: node.span,
+        operand: ParserTraitDefaults::cloneExpression(module, node.operand),
+      }),
+      Ast::Expression::Node::Grouped(node) -> Ast::Expression::Node::Grouped(Ast::Expression::Grouped {
+        span: node.span,
+        expression: ParserTraitDefaults::cloneExpression(module, node.expression),
+      }),
+      Ast::Expression::Node::Tuple(node) -> Ast::Expression::Node::Tuple(Ast::Expression::Tuple {
+        span: node.span,
+        elements: ParserTraitDefaults::cloneExpressionList(module, &node.elements),
+      }),
+      Ast::Expression::Node::LetCondition(node) -> Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
+        span: node.span,
+        pattern: ParserTraitDefaults::clonePattern(module, node.pattern),
+        value: ParserTraitDefaults::cloneExpression(module, node.value),
+      }),
+      Ast::Expression::Node::Reference(node) -> Ast::Expression::Node::Reference(Ast::Expression::Reference {
+        span: node.span,
+        mutable: node.mutable,
+        target: ParserTraitDefaults::cloneExpression(module, node.target),
+      }),
+      Ast::Expression::Node::Unary(node) -> Ast::Expression::Node::Unary(Ast::Expression::Unary {
+        span: node.span,
+        operator: node.operator,
+        operand: ParserTraitDefaults::cloneExpression(module, node.operand),
+      }),
+      Ast::Expression::Node::Block(node) -> Ast::Expression::Node::Block(Ast::Expression::Block {
+        span: node.span,
+        statements: ParserTraitDefaults::cloneStatementList(module, &node.statements),
+        tail: ParserTraitDefaults::cloneOptionalExpression(module, node.tail),
+      }),
+      Ast::Expression::Node::If(node) -> Ast::Expression::Node::If(Ast::Expression::If {
+        span: node.span,
+        condition: ParserTraitDefaults::cloneExpression(module, node.condition),
+        thenBranch: ParserTraitDefaults::cloneStatement(module, node.thenBranch),
+        elseBranch: ParserTraitDefaults::cloneOptionalStatement(module, node.elseBranch),
+      }),
+      Ast::Expression::Node::Match(node) -> Ast::Expression::Node::Match(Ast::Expression::Match {
+        span: node.span,
+        scrutinee: ParserTraitDefaults::cloneExpression(module, node.scrutinee),
+        arms: ParserTraitDefaults::cloneMatchArms(module, &node.arms),
+      }),
+      Ast::Expression::Node::Vector(node) -> Ast::Expression::Node::Vector(Ast::Expression::VectorLiteral {
+        span: node.span,
+        elements: ParserTraitDefaults::cloneExpressionList(module, &node.elements),
+      }),
+      Ast::Expression::Node::VectorAccess(node) -> Ast::Expression::Node::VectorAccess(Ast::Expression::VectorAccess {
+        span: node.span,
+        vector: ParserTraitDefaults::cloneExpression(module, node.vector),
+        index: ParserTraitDefaults::cloneExpression(module, node.index),
+      }),
+      Ast::Expression::Node::PostfixIncrement(node) -> Ast::Expression::Node::PostfixIncrement(Ast::Expression::PostfixIncrement {
+        span: node.span,
+        operand: ParserTraitDefaults::cloneExpression(module, node.operand),
+      }),
+      Ast::Expression::Node::PostfixDecrement(node) -> Ast::Expression::Node::PostfixDecrement(Ast::Expression::PostfixDecrement {
+        span: node.span,
+        operand: ParserTraitDefaults::cloneExpression(module, node.operand),
+      }),
+      Ast::Expression::Node::MemberAccess(node) -> Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
+        span: node.span,
+        object: ParserTraitDefaults::cloneExpression(module, node.object),
+        operator: node.operator,
+        member: node.member.clone(),
+      }),
+      Ast::Expression::Node::RecordInit(node) -> Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
+        span: node.span,
+        path: ParserTraitDefaults::cloneExpression(module, node.path),
+        typeArguments: ParserShared::copyTypeIds(&node.typeArguments),
+        fields: ParserTraitDefaults::cloneRecordInitFields(module, &node.fields),
+      }),
+      Ast::Expression::Node::BuiltinCall(node) -> Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
+        span: node.span,
+        name: node.name.clone(),
+        typeArguments: ParserShared::copyTypeIds(&node.typeArguments),
+        arguments: ParserTraitDefaults::cloneExpressionList(module, &node.arguments),
+      }),
+      Ast::Expression::Node::Lambda(node) -> Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+        span: node.span,
+        parameters: ParserTraitDefaults::clonePatternList(module, &node.parameters),
+        returnType: node.returnType,
+        body: ParserTraitDefaults::cloneStatement(module, node.body),
+      }),
+      Ast::Expression::Node::CaptureOverride(node) -> Ast::Expression::Node::CaptureOverride(Ast::Expression::CaptureOverride {
+        span: node.span,
+        kind: node.kind,
+        expression: ParserTraitDefaults::cloneExpression(module, node.expression),
+      }),
+      Ast::Expression::Node::Pipe(node) -> Ast::Expression::Node::Pipe(Ast::Expression::Pipe {
+        span: node.span,
+        left: ParserTraitDefaults::cloneExpression(module, node.left),
+        right: ParserTraitDefaults::cloneExpression(module, node.right),
+      }),
+      Ast::Expression::Node::Try(node) -> Ast::Expression::Node::Try(Ast::Expression::Try {
+        span: node.span,
+        expression: ParserTraitDefaults::cloneExpression(module, node.expression),
+      }),
+      Ast::Expression::Node::Range(node) -> Ast::Expression::Node::Range(Ast::Expression::Range {
+        span: node.span,
+        start: ParserTraitDefaults::cloneOptionalExpression(module, node.start),
+        end: ParserTraitDefaults::cloneOptionalExpression(module, node.end),
+        inclusive: node.inclusive,
+      }),
+      Ast::Expression::Node::Asm(node) -> Ast::Expression::Node::Asm(ParserTraitDefaults::cloneAsm(module, &node)),
+      _ -> ParserTraitDefaults::shallowExpression(expression),
+    };
+  }
+
+  /// Copies an expression subtree under fresh ids.
+  function cloneExpression(
+    module: &mut Ast::Module,
+    expressionId: Ast::ExpressionId
+  ): Ast::ExpressionId {
+    let mut shallow: Option<Ast::Expression::Node> = Option::NONE;
+
+    if (let Option::SOME(expression) = module.expressions.get(expressionId)) {
+      shallow = Option::SOME(ParserTraitDefaults::shallowExpression(expression));
+    }
+
+    let Option::SOME(node) = shallow else {
+      return expressionId;
+    };
+
+    let nodeRef: &Ast::Expression::Node = &node;
+    let cloned: Ast::Expression::Node = ParserTraitDefaults::rebuildExpression(module, nodeRef);
+    let mut moduleRef: &mut Ast::Module = module;
+    return moduleRef.addExpression(cloned);
+  }
+
+  function cloneMatchArms(
+    module: &mut Ast::Module,
+    source: &Vector<Ast::Expression::MatchArm>,
+  ): Vector<Ast::Expression::MatchArm> {
+    let mut cloned: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(arm) = source.get(index)) {
+        cloned.push(Ast::Expression::MatchArm {
+          pattern: ParserTraitDefaults::clonePattern(module, arm.pattern),
+          guard: ParserTraitDefaults::cloneOptionalExpression(module, arm.guard),
+          body: ParserTraitDefaults::cloneExpression(module, arm.body),
+        });
+      }
+
+      index += 1;
+    }
+
+    return cloned;
+  }
+
+  function cloneRecordInitFields(
+    module: &mut Ast::Module,
+    source: &Vector<Ast::Expression::RecordInitField>,
+  ): Vector<Ast::Expression::RecordInitField> {
+    let mut cloned: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(field) = source.get(index)) {
+        cloned.push(Ast::Expression::RecordInitField {
+          name: field.name.clone(),
+          value: ParserTraitDefaults::cloneExpression(module, field.value),
+        });
+      }
+
+      index += 1;
+    }
+
+    return cloned;
+  }
+
+  function copyExpressionIds(source: &Vector<Ast::ExpressionId>): Vector<Ast::ExpressionId> {
+    let mut copied: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(expressionId) = source.get(index)) {
+        copied.push(*expressionId);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  /// Copies one statement node, keeping its child ids.
+  function shallowStatement(statement: &Ast::Statement::Node): Ast::Statement::Node {
+    return match (statement) {
+      Ast::Statement::Node::Variable(node) -> Ast::Statement::Node::Variable(Ast::Statement::Variable {
+        span: node.span,
+        mutable: node.mutable,
+        pattern: node.pattern,
+        annotation: node.annotation,
+        value: node.value,
+      }),
+      Ast::Statement::Node::Let(node) -> Ast::Statement::Node::Let(Ast::Statement::Let {
+        span: node.span,
+        pattern: node.pattern,
+        annotation: node.annotation,
+        value: node.value,
+      }),
+      Ast::Statement::Node::LetElse(node) -> Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
+        span: node.span,
+        mutable: node.mutable,
+        pattern: node.pattern,
+        annotation: node.annotation,
+        value: node.value,
+        elseBranch: node.elseBranch,
+      }),
+      Ast::Statement::Node::Expression(node) -> Ast::Statement::Node::Expression(Ast::Statement::Expression {
+        span: node.span,
+        expression: node.expression,
+      }),
+      Ast::Statement::Node::Block(node) -> Ast::Statement::Node::Block(Ast::Statement::Block {
+        span: node.span,
+        statements: ParserShared::copyStatementIds(&node.statements),
+        tail: node.tail,
+      }),
+      Ast::Statement::Node::If(node) -> Ast::Statement::Node::If(Ast::Statement::If {
+        span: node.span,
+        condition: node.condition,
+        thenBranch: node.thenBranch,
+        elseBranch: node.elseBranch,
+      }),
+      Ast::Statement::Node::While(node) -> Ast::Statement::Node::While(Ast::Statement::While {
+        span: node.span,
+        condition: node.condition,
+        body: node.body,
+      }),
+      Ast::Statement::Node::For(node) -> Ast::Statement::Node::For(Ast::Statement::For {
+        span: node.span,
+        initializer: node.initializer,
+        condition: node.condition,
+        update: node.update,
+        body: node.body,
+      }),
+      Ast::Statement::Node::ForOf(node) -> Ast::Statement::Node::ForOf(Ast::Statement::ForOf {
+        span: node.span,
+        pattern: node.pattern,
+        iterable: node.iterable,
+        body: node.body,
+      }),
+      Ast::Statement::Node::Return(node) -> Ast::Statement::Node::Return(Ast::Statement::Return {
+        span: node.span,
+        value: node.value,
+      }),
+      Ast::Statement::Node::Break(node) -> Ast::Statement::Node::Break(Ast::Statement::Break {
+        span: node.span,
+        value: node.value,
+      }),
+      Ast::Statement::Node::Continue(node) -> Ast::Statement::Node::Continue(Ast::Statement::Continue {
+        span: node.span,
+      }),
+      Ast::Statement::Node::Defer(node) -> Ast::Statement::Node::Defer(Ast::Statement::Defer {
+        span: node.span,
+        statement: node.statement,
+      }),
+      Ast::Statement::Node::Item(node) -> Ast::Statement::Node::Item(Ast::Statement::Item {
+        span: node.span,
+        item: node.item,
+      }),
+      Ast::Statement::Node::Comment(node) -> Ast::Statement::Node::Comment(Ast::Statement::Comment {
+        span: node.span,
+        text: node.text.clone(),
+      }),
+      Ast::Statement::Node::Asm(node) -> Ast::Statement::Node::Asm(ParserTraitDefaults::shallowAsm(&node)),
+    };
+  }
+
+  /// Rebuilds a shallow statement copy with every child copied under fresh
+  /// ids. A nested item declaration stays shared: items are not body nodes.
+  function rebuildStatement(
+    module: &mut Ast::Module,
+    statement: &Ast::Statement::Node,
+  ): Ast::Statement::Node {
+    return match (statement) {
+      Ast::Statement::Node::Variable(node) -> Ast::Statement::Node::Variable(Ast::Statement::Variable {
+        span: node.span,
+        mutable: node.mutable,
+        pattern: ParserTraitDefaults::clonePattern(module, node.pattern),
+        annotation: node.annotation,
+        value: ParserTraitDefaults::cloneOptionalExpression(module, node.value),
+      }),
+      Ast::Statement::Node::Let(node) -> Ast::Statement::Node::Let(Ast::Statement::Let {
+        span: node.span,
+        pattern: ParserTraitDefaults::clonePattern(module, node.pattern),
+        annotation: node.annotation,
+        value: ParserTraitDefaults::cloneOptionalExpression(module, node.value),
+      }),
+      Ast::Statement::Node::LetElse(node) -> Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
+        span: node.span,
+        mutable: node.mutable,
+        pattern: ParserTraitDefaults::clonePattern(module, node.pattern),
+        annotation: node.annotation,
+        value: ParserTraitDefaults::cloneExpression(module, node.value),
+        elseBranch: ParserTraitDefaults::cloneStatement(module, node.elseBranch),
+      }),
+      Ast::Statement::Node::Expression(node) -> Ast::Statement::Node::Expression(Ast::Statement::Expression {
+        span: node.span,
+        expression: ParserTraitDefaults::cloneExpression(module, node.expression),
+      }),
+      Ast::Statement::Node::Block(node) -> Ast::Statement::Node::Block(Ast::Statement::Block {
+        span: node.span,
+        statements: ParserTraitDefaults::cloneStatementList(module, &node.statements),
+        tail: ParserTraitDefaults::cloneOptionalExpression(module, node.tail),
+      }),
+      Ast::Statement::Node::If(node) -> Ast::Statement::Node::If(Ast::Statement::If {
+        span: node.span,
+        condition: ParserTraitDefaults::cloneExpression(module, node.condition),
+        thenBranch: ParserTraitDefaults::cloneStatement(module, node.thenBranch),
+        elseBranch: ParserTraitDefaults::cloneOptionalStatement(module, node.elseBranch),
+      }),
+      Ast::Statement::Node::While(node) -> Ast::Statement::Node::While(Ast::Statement::While {
+        span: node.span,
+        condition: ParserTraitDefaults::cloneExpression(module, node.condition),
+        body: ParserTraitDefaults::cloneStatement(module, node.body),
+      }),
+      Ast::Statement::Node::For(node) -> Ast::Statement::Node::For(Ast::Statement::For {
+        span: node.span,
+        initializer: ParserTraitDefaults::cloneOptionalStatement(module, node.initializer),
+        condition: ParserTraitDefaults::cloneOptionalExpression(module, node.condition),
+        update: ParserTraitDefaults::cloneOptionalExpression(module, node.update),
+        body: ParserTraitDefaults::cloneStatement(module, node.body),
+      }),
+      Ast::Statement::Node::ForOf(node) -> Ast::Statement::Node::ForOf(Ast::Statement::ForOf {
+        span: node.span,
+        pattern: ParserTraitDefaults::clonePattern(module, node.pattern),
+        iterable: ParserTraitDefaults::cloneExpression(module, node.iterable),
+        body: ParserTraitDefaults::cloneStatement(module, node.body),
+      }),
+      Ast::Statement::Node::Return(node) -> Ast::Statement::Node::Return(Ast::Statement::Return {
+        span: node.span,
+        value: ParserTraitDefaults::cloneOptionalExpression(module, node.value),
+      }),
+      Ast::Statement::Node::Break(node) -> Ast::Statement::Node::Break(Ast::Statement::Break {
+        span: node.span,
+        value: ParserTraitDefaults::cloneOptionalExpression(module, node.value),
+      }),
+      Ast::Statement::Node::Defer(node) -> Ast::Statement::Node::Defer(Ast::Statement::Defer {
+        span: node.span,
+        statement: ParserTraitDefaults::cloneStatement(module, node.statement),
+      }),
+      Ast::Statement::Node::Asm(node) -> Ast::Statement::Node::Asm(ParserTraitDefaults::cloneAsm(module, &node)),
+      _ -> ParserTraitDefaults::shallowStatement(statement),
+    };
+  }
+
+  /// Copies a statement subtree under fresh ids.
+  function cloneStatement(
+    module: &mut Ast::Module,
+    statementId: Ast::StatementId
+  ): Ast::StatementId {
+    let mut shallow: Option<Ast::Statement::Node> = Option::NONE;
+
+    if (let Option::SOME(statement) = module.statements.get(statementId)) {
+      shallow = Option::SOME(ParserTraitDefaults::shallowStatement(statement));
+    }
+
+    let Option::SOME(node) = shallow else {
+      return statementId;
+    };
+
+    let nodeRef: &Ast::Statement::Node = &node;
+    let cloned: Ast::Statement::Node = ParserTraitDefaults::rebuildStatement(module, nodeRef);
+    let mut moduleRef: &mut Ast::Module = module;
+    return moduleRef.addStatement(cloned);
+  }
+
+  /// Copies a trait default method item and its whole body under fresh ids.
   function cloneMethodItem(
     module: &mut Ast::Module,
     methodItemId: Ast::ItemId,
@@ -546,6 +1427,7 @@ export namespace ParserTraitDefaults {
       index += 1;
     }
 
+    let clonedBody: Ast::StatementId = ParserTraitDefaults::cloneStatement(module, methodBody);
     let mut moduleRef: &mut Ast::Module = module;
 
     return Option::SOME(moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
@@ -554,9 +1436,54 @@ export namespace ParserTraitDefaults {
       genericParameters: genericParameters,
       parameters: clonedParameters,
       returnType: returnType,
-      body: methodBody,
+      body: clonedBody,
       metadata: metadata,
     })));
+  }
+
+  /// The declared name of a record or enum item.
+  function typeItemName(module: &mut Ast::Module, itemId: Ast::ItemId): String {
+    return match (module.items.get(itemId)) {
+      Option::SOME(Ast::Item::Node::Record(record_)) -> record_.name.clone(),
+      Option::SOME(Ast::Item::Node::Enum(enum_)) -> enum_.name.clone(),
+      _ -> String::create(""),
+    };
+  }
+
+  /// Moves a default's body onto the body-less twin the trait lists among its
+  /// methods, so the analyzer checks the default once against the trait.
+  /// Every implementing type inherits a fresh copy, so the trait's own
+  /// declaration is the only owner of these node ids.
+  function giveSignatureTheDefaultBody(
+    module: &mut Ast::Module,
+    signatureItemId: Ast::ItemId,
+    defaultItemId: Ast::ItemId,
+  ): void {
+    let mut body: Option<Ast::StatementId> = Option::NONE;
+
+    if (let Option::SOME(Ast::Item::Node::Function(method)) = module.items.get(defaultItemId)) {
+      body = Option::SOME(method.body);
+    }
+
+    let Option::SOME(defaultBody) = body else {
+      return;
+    };
+
+    let Option::SOME(item) = module.items.getMut(signatureItemId) else {
+      return;
+    };
+
+    if (let Ast::Item::Node::Function(signature) = item) {
+      *item = Ast::Item::Node::Function(Ast::Item::Function {
+        span: signature.span,
+        name: signature.name.clone(),
+        genericParameters: Ast::copyGenericParams(&signature.genericParameters),
+        parameters: ParserDeclarations::copyPatternIds(&signature.parameters),
+        returnType: signature.returnType,
+        body: defaultBody,
+        metadata: Ast::copyMetadata(&signature.metadata),
+      });
+    }
   }
 
   /// Appends a materialized method to the type that inherits it.
@@ -612,6 +1539,18 @@ export namespace ParserTraitDefaults {
       return;
     }
 
+    let mut entryIndex: u64 = 0;
+
+    while (entryIndex < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(entryIndex)) {
+        if (let Option::SOME(signatureItemId) = entry.signatureItemId) {
+          ParserTraitDefaults::giveSignatureTheDefaultBody(module, signatureItemId, entry.methodItemId);
+        }
+      }
+
+      entryIndex += 1;
+    }
+
     let mut pending: Vector<ParserTraitDefaults::Pending> = Vector::new<ParserTraitDefaults::Pending>();
     ParserTraitDefaults::collectPending(module, &roots, &topLevel, &entries, &mut pending);
 
@@ -625,9 +1564,15 @@ export namespace ParserTraitDefaults {
 
       let ownerItemId: Ast::ItemId = entry.ownerItemId;
       let methodItemId: Ast::ItemId = entry.methodItemId;
-
       if (let Option::SOME(clonedId) = ParserTraitDefaults::cloneMethodItem(module, methodItemId)) {
         ParserTraitDefaults::attachMethod(module, ownerItemId, clonedId);
+        let typeName: String = ParserTraitDefaults::typeItemName(module, ownerItemId);
+        let mut moduleRef: &mut Ast::Module = module;
+        moduleRef.setInheritedMethod(clonedId, Ast::InheritedMethod {
+          traitName: entry.traitName.clone(),
+          typeName: typeName,
+          methodName: entry.methodName.clone(),
+        });
       }
 
       index += 1;

@@ -2,7 +2,7 @@ import Fs from "std::fs";
 import Io from "std::io";
 import Test from "std::test";
 
-import Diagnostic, DiagnosticBag, SourceFile, SourceSpan from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, SourceFile, SourceSpan, SourceMap from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import CompileFlags, ParseOutput, Parser from "@compiler::parser";
 
@@ -50,7 +50,9 @@ function expectItem(module: &Ast::Module, id: Ast::ItemId): &Ast::Item::Node {
 
 @test
 function parserParsesTypeAliasAndFunctionFoundation(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_foundation.ign",
     "type Handler = (i32, Vec<Vec<str>>) -> Result<i32, Error>; function main(value: &mut Vec<Vec<str>>): Handler {}"
   );
@@ -108,14 +110,16 @@ function parserParsesTypeAliasAndFunctionFoundation(): void {
 
 @test
 function parserPreservesGenericBoundsOnItemsAndSerializer(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_generic_bounds.ign",
     "trait Hash { hash(&self): i32; } record Box<T: Hash> { value: T; } function hashValue<T: Hash>(value: T): i32 { return 0; }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   Test::assertEq<u64>(module.roots.length(), 3);
@@ -179,7 +183,9 @@ function parserPreservesGenericBoundsOnItemsAndSerializer(): void {
 
 @test
 function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_record_types.ign",
     "record Buffer { bytes: u8[4]; view: u8[]; handler: (i32, Vec<Vec<str>>) -> Result<Vec<str>, Error>; }"
   );
@@ -269,7 +275,9 @@ function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
 
 @test
 function parserRejectsUnsupportedUnionTypeSyntaxWithTargetedDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_union_type_unsupported.ign",
     "type Either = Left | Right; function recovered(): void {}"
   );
@@ -303,7 +311,9 @@ function parserRejectsUnsupportedUnionTypeSyntaxWithTargetedDiagnostic(): void {
 
 @test
 function parserRejectsUnsupportedIntersectionTypeSyntaxWithTargetedDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_intersection_type_unsupported.ign",
     "type Both = Left & Right; function recovered(): void {}"
   );
@@ -341,7 +351,9 @@ function parserRejectsUnsupportedIntersectionTypeSyntaxWithTargetedDiagnostic():
 /// the end of the type, never does.
 @test
 function parserKeepsABitwiseOperatorAfterACastTypeOutOfTheType(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_cast_type_followed_by_bitwise_operator.ign",
     "function recovered(): i32 { return value as i32 & 1 | 2 ^ 3 >> 4; }"
   );
@@ -368,7 +380,9 @@ function parserKeepsABitwiseOperatorAfterACastTypeOutOfTheType(): void {
 /// primitive, so neither may this parser: `value as i32 < 9` is a comparison.
 @test
 function parserKeepsAComparisonAfterACastTypeOutOfTheType(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_cast_type_followed_by_comparison.ign",
     "function recovered(): boolean { return value as i32 < 9 || value as i32 >= 2; }"
   );
@@ -394,7 +408,9 @@ function parserKeepsAComparisonAfterACastTypeOutOfTheType(): void {
 /// and narrowing it any further would stop `value as Option<i32>` from parsing.
 @test
 function parserStillReadsTypeArgumentsAfterAnIdentifierCastType(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_cast_type_with_type_arguments.ign",
     "function recovered(): void { let held = value as Option<i32>; }"
   );
@@ -408,7 +424,9 @@ function parserStillReadsTypeArgumentsAfterAnIdentifierCastType(): void {
 
 @test
 function parserRejectsTupleTypeSyntaxWithTargetedDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_tuple_type_unsupported.ign",
     "function f(): (i32, i32) { return 0; } function recovered(): void {}"
   );
@@ -429,7 +447,9 @@ function parserRejectsTupleTypeSyntaxWithTargetedDiagnostic(): void {
 
 @test
 function parserRejectsTupleTypeSyntaxAsParameterWithTargetedDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_tuple_type_param_unsupported.ign",
     "function f(x: (i32, i32)): void { return; } function recovered(): void {}"
   );
@@ -450,7 +470,9 @@ function parserRejectsTupleTypeSyntaxAsParameterWithTargetedDiagnostic(): void {
 
 @test
 function parserRecoversToNextTopLevelItemAfterMalformedTypeAlias(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_recovery.ign",
     "type Broken = ; function recovered(): i32 {}"
   );
@@ -479,7 +501,9 @@ function parserRecoversToNextTopLevelItemAfterMalformedTypeAlias(): void {
 
 @test
 function parserParsesRealFileShapeWithImportAndReturnLiteral(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_real_file.ign",
     "import _ from \"@compiler::ast::tests\"; function main(): i32 { return 0; }"
   );
@@ -499,7 +523,7 @@ function parserParsesRealFileShapeWithImportAndReturnLiteral(): void {
     Option::SOME(Ast::Item::Node::Import(importItem)) -> {
       Test::assertEq<u64>(importItem.items.length(), 1);
       Test::assertEq<str>(importItem.source.toStr(), "@compiler::ast::tests");
-      Test::assertEq<str>(importItem.sourceSpan.filePath, "fixtures/parser_real_file.ign");
+      Test::assertEq<str>(sourceMap.path(importItem.sourceSpan.file), "fixtures/parser_real_file.ign");
 
       match (importItem.items.get(0)) {
         Option::SOME(binding) -> {
@@ -581,7 +605,9 @@ function parserParsesRealFileShapeWithImportAndReturnLiteral(): void {
 
 @test
 function parserParsesImportListWithTrailingCommaBeforeFrom(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_import_trailing_comma.ign",
     "import Foo,\n  Bar,\nfrom \"std::io\";\nfunction main(): void {}"
   );
@@ -623,8 +649,9 @@ function parserParsesImportListWithTrailingCommaBeforeFrom(): void {
 
 @test
 function parserParsesRealIgnisMainFileWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let sourceText: String = readFixture("ignis/main.ign");
-  let source: SourceFile = SourceFile::create("ignis/main.ign", sourceText.toStr());
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "ignis/main.ign", sourceText.toStr());
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
@@ -635,7 +662,9 @@ function parserParsesRealIgnisMainFileWithoutDiagnostics(): void {
 
 @test
 function parserParsesBareReturnStatementInsideBlock(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_return_void.ign",
     "function main(): void { return; }"
   );
@@ -681,7 +710,9 @@ function parserParsesBareReturnStatementInsideBlock(): void {
 
 @test
 function parserParsesReturnCallExpressionInsideBlock(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_return_call.ign",
     "function main(): i32 { return foo(); }"
   );
@@ -753,14 +784,16 @@ function parserParsesReturnCallExpressionInsideBlock(): void {
 
 @test
 function parserParsesSimplePathExpressionStatementInsideBlock(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_path_statement.ign",
     "function main(): void { foo; }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   Test::assertEq<u64>(module.roots.length(), 1);
@@ -776,14 +809,16 @@ function parserParsesSimplePathExpressionStatementInsideBlock(): void {
 
 @test
 function parserRecoversInsideBlockToLaterReturnStatement(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_block_recovery.ign",
     "function main(): i32 { foo return 7; }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 1);
   Test::assertEq<u64>(module.roots.length(), 1);
@@ -799,7 +834,9 @@ function parserRecoversInsideBlockToLaterReturnStatement(): void {
 
 @test
 function parserParsesGroupedAndBinaryPrecedenceExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_grouped_binary.ign",
     "function main(): void { (1 + 2) * 3; 1 + 2 * 3 == 7; }"
   );
@@ -886,7 +923,9 @@ function parserParsesGroupedAndBinaryPrecedenceExpressions(): void {
 
 @test
 function parserParsesUtf8CharLiterals(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "std/char/tests.ign",
     readFixture("std/char/tests.ign").toStr()
   );
@@ -905,7 +944,9 @@ function parserParsesUtf8CharLiterals(): void {
 
 @test
 function parserParsesBackspaceAndFormFeedCharEscapes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_char_escapes.ign",
     "function main(): void { '\\b'; '\\f'; }"
   );
@@ -973,7 +1014,9 @@ function parserParsesBackspaceAndFormFeedCharEscapes(): void {
 
 @test
 function parserParsesUnaryCallAndMemberExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_unary_member.ign",
     "function main(): void { -1; !flag; foo.bar(1, 2); }"
   );
@@ -1057,7 +1100,9 @@ function parserParsesUnaryCallAndMemberExpressions(): void {
 
 @test
 function parserParsesPrefixNegationAtPrefixPrecedence(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_prefix_negation.ign",
     "function main(): void { -a as i32; -a * b; }"
   );
@@ -1129,7 +1174,9 @@ function parserParsesPrefixNegationAtPrefixPrecedence(): void {
 
 @test
 function parserParsesLetIfWhileBreakAndContinueStatements(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_control_flow.ign",
     "function main(): void { let value: i32 = 1; let mut counter = 2; if (value) { while (counter) { break; } } else { continue; } }"
   );
@@ -1249,7 +1296,9 @@ function parserParsesLetIfWhileBreakAndContinueStatements(): void {
 
 @test
 function parserParsesIfLetTupleLiteralAndWildcardPatterns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_if_let_patterns.ign",
     "function main(): void { if (let (0, value, _) = pair) {} }"
   );
@@ -1330,7 +1379,9 @@ function parserParsesIfLetTupleLiteralAndWildcardPatterns(): void {
 
 @test
 function parserParsesWhileLetPathPatterns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_while_let_patterns.ign",
     "function main(): void { while (let Some(item) = stream) { break; } }"
   );
@@ -1394,7 +1445,9 @@ function parserParsesWhileLetPathPatterns(): void {
 
 @test
 function parserParsesLetElsePathPatterns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_let_else_patterns.ign",
     "function main(): void { let Some(result) = input else { return; }; }"
   );
@@ -1448,7 +1501,9 @@ function parserParsesLetElsePathPatterns(): void {
 
 @test
 function parserParsesIfLetOrPatterns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_if_let_or_pattern.ign",
     "function main(): void { if (let 0 | 1 = value) {} }"
   );
@@ -1518,7 +1573,9 @@ function parserParsesIfLetOrPatterns(): void {
 
 @test
 function parserParsesBuiltinCallsAndIndexExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_builtin_index.ign",
     "function main(): void { @read<u8>(buffer[1 + 2]); }"
   );
@@ -1596,7 +1653,9 @@ function parserParsesBuiltinCallsAndIndexExpressions(): void {
 
 @test
 function parserParsesWhileLetQualifiedOrPathPatterns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_while_let_or_paths.ign",
     "function main(): void { while (let Some(left) | None = stream) { break; } }"
   );
@@ -1644,7 +1703,9 @@ function parserParsesWhileLetQualifiedOrPathPatterns(): void {
 
 @test
 function parserParsesBuiltinCallWithoutTypeArgumentsAndChainedIndexExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_builtin_index_chain.ign",
     "function main(): void { @panic(\"boom\"); matrix[1][2]; }"
   );
@@ -1712,7 +1773,9 @@ function parserParsesBuiltinCallWithoutTypeArgumentsAndChainedIndexExpressions()
 
 @test
 function parserParsesRecordInitAndVectorLiteralExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_record_init_vector.ign",
     "function main(): void { Point { x: 1, y: 2 }; [1, 2, 3]; }"
   );
@@ -1782,7 +1845,9 @@ function parserParsesRecordInitAndVectorLiteralExpressions(): void {
 
 @test
 function parserParsesMatchExpressionBasics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_match_basic.ign",
     "function main(): void { match (value) { 0 -> 1, _ -> 2, }; }"
   );
@@ -1851,7 +1916,9 @@ function parserParsesMatchExpressionBasics(): void {
 
 @test
 function parserParsesMatchExpressionPathPatternsWithDestructure(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_match_path_pattern.ign",
     "function main(): void { match (value) { Option::SOME(item) -> item, Option::NONE -> fallback }; }"
   );
@@ -1904,7 +1971,9 @@ function parserParsesMatchExpressionPathPatternsWithDestructure(): void {
 
 @test
 function parserRetainsStructuredPatternSurface(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_pattern_surface.ign",
     "function inspect(@trace(input) value: Packet): void { match (packet) { Option::SOME((0 | 1, _, item)) -> value, _ -> value, }; }"
   );
@@ -2076,7 +2145,7 @@ function parserRetainsStructuredPatternSurface(): void {
     _ -> @panic("expected structured pattern function item"),
   };
 
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
   let expectedRenderedNeedle3: String = String::create("Binding span=fixtures/parser_pattern_surface.ign:");
   if (!rendered.contains(&expectedRenderedNeedle3)) {
     @panic("expected serializer to render structured binding pattern line");
@@ -2115,7 +2184,9 @@ function parserRetainsStructuredPatternSurface(): void {
 
 @test
 function parserParsesMatchExpressionGuards(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_match_guard.ign",
     "function main(): void { match (rawErrno) { k if k == errno -> fallback, _ -> other, }; }"
   );
@@ -2183,7 +2254,9 @@ function parserParsesMatchExpressionGuards(): void {
 
 @test
 function parserParsesLambdaExpressionBodies(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_lambda_basic.ign",
     "function main(): void { let square = (x: i32): i32 -> x * x; let tick = (): void -> { counter = counter + 1; return; }; }"
   );
@@ -2296,7 +2369,9 @@ function parserParsesLambdaExpressionBodies(): void {
 
 @test
 function parserParsesCaptureOverrideExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_capture_overrides.ign",
     "function main(): void { let val: i32 = 42; let moved = (): i32 -> @move val; let borrowed = (): i32 -> @ref val; let borrowedMut = (): i32 -> @refMut val; }"
   );
@@ -2343,7 +2418,9 @@ function parserParsesCaptureOverrideExpressions(): void {
 
 @test
 function parserParsesConsumingSelfReceiver(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_consuming_self_receiver.ign",
     "record Holder { name: String; intoName(self): String { return self.name; } read(&self): void { return; } }"
   );
@@ -2419,7 +2496,9 @@ function assertSelfReceiverIsByValue(
 
 @test
 function parserParsesTraitDeclarationsAndExportedTraits(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_trait_declarations.ign",
     "trait Hash { hash(&self, hasher: &mut Hasher): void; } export trait Eq { equals(&self, other: &Self): boolean; }"
   );
@@ -2524,7 +2603,9 @@ function parserParsesTraitDeclarationsAndExportedTraits(): void {
 
 @test
 function parserParsesReExportDeclarations(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_reexport.ign",
     "export HashMap, Hash from \"./hash_map\"; export Eq from \"std::hash\";"
   );
@@ -2563,7 +2644,7 @@ function parserParsesReExportDeclarations(): void {
         Option::NONE -> @panic("missing re-export path"),
       }, "./hash_map");
       Test::assertEq<str>(match (exportItem.sourceSpan) {
-        Option::SOME(span) -> span.filePath,
+        Option::SOME(span) -> sourceMap.path(span.file),
         Option::NONE -> @panic("missing re-export from span"),
       }, "fixtures/parser_reexport.ign");
     },
@@ -2573,14 +2654,16 @@ function parserParsesReExportDeclarations(): void {
 
 @test
 function parserPreservesImportAndExportStructureInAstAndSerializer(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_import_export_shape.ign",
     "import Foo, _ from \"std::io\"; export Bar from \"./bar\";"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   Test::assertEq<u64>(module.roots.length(), 2);
@@ -2617,7 +2700,9 @@ function parserPreservesImportAndExportStructureInAstAndSerializer(): void {
 
 @test
 function parserRecoversToNextTopLevelItemAfterMalformedTraitDeclaration(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_trait_recovery.ign",
     "trait Broken { equals(&self): ; } function recovered(): void {}"
   );
@@ -2646,7 +2731,9 @@ function parserRecoversToNextTopLevelItemAfterMalformedTraitDeclaration(): void 
 
 @test
 function parserRecoversAfterMalformedArgumentAndVectorLists(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_malformed_lists.ign",
     "function first(): i32 { foo(1, ; return 7; } function second(): i32 { [1, ; return 8; }"
   );
@@ -2709,7 +2796,9 @@ function parserRecoversAfterMalformedArgumentAndVectorLists(): void {
 
 @test
 function parserParsesAttributedRecordConstExternAndEnumDeclarations(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_declaration_surface.ign",
     "@packed record Packet { value: i32; } const MAX_SIZE: i32 = 7; extern libc { @externName(\"puts\") function puts(message: str): i32; const EOF: i32; } enum Option { Some, None, }"
   );
@@ -2834,7 +2923,9 @@ function parserParsesAttributedRecordConstExternAndEnumDeclarations(): void {
 
 @test
 function parserParsesEnumMethods(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_enum_methods.ign",
     "enum TokenType { Plus, Minus, public static getKeywordFromString(): i32 { return 0; } }"
   );
@@ -2885,7 +2976,9 @@ function parserParsesEnumMethods(): void {
 
 @test
 function parserParsesEnumInstanceMethodAfterVariants(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_enum_instance_methods.ign",
     "enum Status { OK, ERROR, equals(&self, other: &Status): boolean { return true; } }"
   );
@@ -2968,7 +3061,9 @@ function parserParsesEnumInstanceMethodAfterVariants(): void {
 
 @test
 function parserParsesPipeExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_pipe_expression.ign",
     "function printPart(label: str, value: i32): void { value.toString() |> String::create(label).concat |> Io::println; }"
   );
@@ -3026,7 +3121,9 @@ function parserParsesPipeExpressions(): void {
 
 @test
 function parserParsesExportedNameWithoutFromClause(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_export_name.ign",
     "export Layout;"
   );
@@ -3064,7 +3161,9 @@ function parserParsesExportedNameWithoutFromClause(): void {
 
 @test
 function parserParsesGenericEnumMethodsWithReceiverAttributes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_generic_enum_methods.ign",
     "enum Option<S> { SOME(S), NONE, public map<U>(&self, @noescape f: (S) -> U): Option<U> { return Option::NONE; } }"
   );
@@ -3087,7 +3186,9 @@ function parserParsesGenericEnumMethodsWithReceiverAttributes(): void {
 
 @test
 function parserParsesForOfStatements(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_for_of.ign",
     "function main(): void { for (let value: &i32 of values) { break; } }"
   );
@@ -3148,14 +3249,16 @@ function parserParsesForOfStatements(): void {
 
 @test
 function parserRetainsStructuredMetadataOnDeclarations(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_metadata_surface.ign",
     "@packed(\"c\", level) public record Packet { @column(id) public value: i32; @builder(init) public static init(@trace(input) value: i32): Packet { return value; } } export inline function add(@trace(left) a: i32, @trace(right) b: i32): i32 { return a + b; }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   Test::assertEq<u64>(module.roots.length(), 2);
@@ -3190,7 +3293,7 @@ function parserRetainsStructuredMetadataOnDeclarations(): void {
       Test::assertEq<str>(attribute.name.toStr(), "packed");
       Test::assertEq<str>(firstArgument.toStr(), "\"c\"");
       Test::assertEq<str>(secondArgument.toStr(), "level");
-      Test::assertEq<str>(attribute.span.filePath, "fixtures/parser_metadata_surface.ign");
+      Test::assertEq<str>(sourceMap.path(attribute.span.file), "fixtures/parser_metadata_surface.ign");
       Test::assert(attribute.span.end > attribute.span.start);
       Test::assertEq<u64>(recordItem.fields.length(), 1);
       Test::assertEq<u64>(recordItem.methods.length(), 1);
@@ -3223,7 +3326,7 @@ function parserRetainsStructuredMetadataOnDeclarations(): void {
             Option::SOME(value) -> value.toStr(),
             Option::NONE -> @panic("missing field attribute argument"),
           }, "id");
-          Test::assertEq<str>(fieldAttribute.span.filePath, "fixtures/parser_metadata_surface.ign");
+          Test::assertEq<str>(sourceMap.path(fieldAttribute.span.file), "fixtures/parser_metadata_surface.ign");
 
           match (modifier) {
             Ast::Modifier::Public -> {},
@@ -3268,7 +3371,7 @@ function parserRetainsStructuredMetadataOnDeclarations(): void {
                 Option::SOME(value) -> value.toStr(),
                 Option::NONE -> @panic("missing method parameter attribute argument"),
               }, "input");
-              Test::assertEq<str>(parameterAttribute.span.filePath, "fixtures/parser_metadata_surface.ign");
+              Test::assertEq<str>(sourceMap.path(parameterAttribute.span.file), "fixtures/parser_metadata_surface.ign");
             },
             _ -> @panic("expected binding method parameter"),
           };
@@ -3339,7 +3442,9 @@ function parserRetainsStructuredMetadataOnDeclarations(): void {
 
 @test
 function parserParsesRecordFieldsAndMethodsWithModifiers(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_record_members.ign",
     "record Tracker { public marker: i32; drop(&mut self): void { return; } public static init(value: i32): Tracker { return Tracker { marker: value }; } }"
   );
@@ -3388,7 +3493,9 @@ function parserParsesRecordFieldsAndMethodsWithModifiers(): void {
 
 @test
 function parserParsesFullStatementSurfaceInsideExpressionBlocks(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_expression_block_surface.ign",
     "function main(): void { let action = (): i32 -> { let mut value: i32 = 0; if (true) { value = 1; } while (false) { continue; } return value; }; let selected = match (1) { 1 -> { let answer: i32 = 2; answer }, _ -> 0 }; }"
   );
@@ -3473,7 +3580,9 @@ function parserParsesFullStatementSurfaceInsideExpressionBlocks(): void {
 
 @test
 function parserParsesSelfKeywordMemberAccessInsideRecordMethods(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_record_self_access.ign",
     "record Tracker { counter: *mut i32; marker: i32; drop(&mut self): void { *self.counter = *self.counter * 10 + self.marker; } }"
   );
@@ -3531,42 +3640,49 @@ function parserParsesSelfKeywordMemberAccessInsideRecordMethods(): void {
 
 @test
 function parserParsesRealFilesWithMetadataAndRecordMethods(): void {
-  assertRealFileParsesWithoutDiagnostics("example/add.ign");
-  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
-  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "example/add.ign");
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "std/vector/tests.ign");
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "ignis/ast/tests.ign");
 }
 
 @test
 function parserParsesStdVectorTestsFileWithoutDiagnostics(): void {
-  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "std/vector/tests.ign");
 }
 
 @test
 function parserParsesIgnisAstTestsFileWithoutDiagnostics(): void {
-  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "ignis/ast/tests.ign");
 }
 
 @test
 function parserParsesStdFsDirFileWithoutDiagnostics(): void {
-  assertRealFileParsesWithoutDiagnostics("std/fs/dir.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "std/fs/dir.ign");
 }
 
 @test
 function parserParsesExampleThenAstFilesWithoutDiagnostics(): void {
-  assertRealFileParsesWithoutDiagnostics("example/add.ign");
-  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "example/add.ign");
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "ignis/ast/tests.ign");
 }
 
 @test
 function parserParsesStdVectorThenAstFilesWithoutDiagnostics(): void {
-  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
-  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "std/vector/tests.ign");
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "ignis/ast/tests.ign");
 }
 
 @test
 function parserParsesExampleThenStdVectorFilesWithoutDiagnostics(): void {
-  assertRealFileParsesWithoutDiagnostics("example/add.ign");
-  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "example/add.ign");
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "std/vector/tests.ign");
 }
 
 /// Real-file coverage for template literals, which every other fixture in this
@@ -3576,8 +3692,9 @@ function parserParsesExampleThenStdVectorFilesWithoutDiagnostics(): void {
 /// block-expression pattern gaps this test now guards.
 @test
 function parserParsesRealFilesUsingTemplateLiterals(): void {
-  assertRealFileParsesWithoutDiagnostics("std/terminal/tests.ign");
-  assertRealFileParsesWithoutDiagnostics("ignis/analyzer/typecheck_state.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "std/terminal/tests.ign");
+  assertRealFileParsesWithoutDiagnostics(&mut sourceMap, "ignis/analyzer/typecheck_state.ign");
 }
 
 /// Scenario: a `let ... else` whose pattern destructures, written inside a
@@ -3586,7 +3703,9 @@ function parserParsesRealFilesUsingTemplateLiterals(): void {
 /// Spec: GRAMMAR.md `<let-else>` inside a block expression.
 @test
 function parserParsesDestructuringLetElseInsideMatchArm(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_let_else_in_arm.ign",
     "function f(): void { match (t) { A::B(c) -> { let Option::SOME(x) = g() else { return; }; }, }; }"
   );
@@ -3602,7 +3721,9 @@ function parserParsesDestructuringLetElseInsideMatchArm(): void {
 /// Spec: GRAMMAR.md `<let-condition>` inside a block expression.
 @test
 function parserParsesDestructuringIfLetInsideMatchArm(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_if_let_in_arm.ign",
     "function f(): void { match (t) { A::B(c) -> { if (let Option::SOME(x) = g()) { return; } }, }; }"
   );
@@ -3625,16 +3746,17 @@ function parserParsesDestructuringIfLetInsideMatchArm(): void {
 /// fails instead of passing silently.
 @test
 function parserParsesTheWholeSelfhostCorpus(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut parsedFiles: u64 = 0;
 
-  parseCorpusDirectory("ignis", &mut parsedFiles);
-  parseCorpusDirectory("std", &mut parsedFiles);
+  parseCorpusDirectory(&mut sourceMap, "ignis", &mut parsedFiles);
+  parseCorpusDirectory(&mut sourceMap, "std", &mut parsedFiles);
 
   Test::assert(parsedFiles > 150);
 }
 
 /// Parse every `.ign` file in `path` and, recursively, in its subdirectories.
-function parseCorpusDirectory(path: str, parsedFiles: &mut u64): void {
+function parseCorpusDirectory(sourceMap: &mut SourceMap, path: str, parsedFiles: &mut u64): void {
   let mut entries: Fs::ReadDir = match (Fs::ReadDir::open(path)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> @panic("corpus directory could not be opened"),
@@ -3660,7 +3782,7 @@ function parseCorpusDirectory(path: str, parsedFiles: &mut u64): void {
     let entryPath: String = entry.path.toString();
 
     if (entry.isDir()) {
-      parseCorpusDirectory(entryPath.toStr(), parsedFiles);
+      parseCorpusDirectory(sourceMap, entryPath.toStr(), parsedFiles);
       continue;
     }
 
@@ -3672,7 +3794,7 @@ function parseCorpusDirectory(path: str, parsedFiles: &mut u64): void {
       continue;
     }
 
-    parseCorpusFile(entryPath.toStr());
+    parseCorpusFile(sourceMap, entryPath.toStr());
 
     let mut counter: &mut u64 = parsedFiles;
     *counter += 1;
@@ -3682,9 +3804,9 @@ function parseCorpusDirectory(path: str, parsedFiles: &mut u64): void {
 }
 
 /// Parse one corpus file and fail with its path when the parser reports anything.
-function parseCorpusFile(path: str): void {
+function parseCorpusFile(sourceMap: &mut SourceMap, path: str): void {
   let sourceText: String = readFixture(path);
-  let source: SourceFile = SourceFile::create(path, sourceText.toStr());
+  let source: SourceFile = SourceFile::create(sourceMap, path, sourceText.toStr());
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
@@ -3695,9 +3817,9 @@ function parseCorpusFile(path: str): void {
   }
 }
 
-function assertRealFileParsesWithoutDiagnostics(path: str): void {
+function assertRealFileParsesWithoutDiagnostics(sourceMap: &mut SourceMap, path: str): void {
   let sourceText: String = readFixture(path);
-  let source: SourceFile = SourceFile::create(path, sourceText.toStr());
+  let source: SourceFile = SourceFile::create(sourceMap, path, sourceText.toStr());
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
@@ -3790,7 +3912,9 @@ function assertCaptureOverrideKind(
 
 @test
 function parserRecoversToNextTopLevelItemAfterMalformedConstDeclaration(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_const_recovery.ign",
     "const BROKEN: = 1; function recovered(): void {}"
   );
@@ -3814,7 +3938,9 @@ function parserRecoversToNextTopLevelItemAfterMalformedConstDeclaration(): void 
 
 @test
 function parserParsesExportedNamespaceDeclaration(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_export_namespace.ign",
     "export namespace Parser { function main(): void {} }"
   );
@@ -3851,7 +3977,9 @@ function parserParsesExportedNamespaceDeclaration(): void {
 
 @test
 function parserParsesGenericCallAndRecordInitTypeArguments(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_generic_call_record_init.ign",
     "function main(): void { make<Vec<i32>>(values); Box<Vec<i32>> { value: values }; left < right; }"
   );
@@ -4072,8 +4200,8 @@ function assertTemplateDesugarSpans(
   };
 }
 
-function parseTemplateBody(sourceText: str): String {
-  let source: SourceFile = SourceFile::create("fixtures/parser_template.ign", sourceText);
+function parseTemplateBody(sourceMap: &mut SourceMap, sourceText: str): String {
+  let source: SourceFile = SourceFile::create(sourceMap, "fixtures/parser_template.ign", sourceText);
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
@@ -4085,14 +4213,16 @@ function parseTemplateBody(sourceText: str): String {
 
 @test
 function parserDesugarsTemplateWithoutInterpolation(): void {
-  let rendered: String = parseTemplateBody("function main(): void { `hello`; }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let rendered: String = parseTemplateBody(&mut sourceMap, "function main(): void { `hello`; }");
 
   Test::assertEq<str>(rendered.toStr(), "String::create(\"hello\")");
 }
 
 @test
 function parserDesugarsTemplateWithInterpolations(): void {
-  let rendered: String = parseTemplateBody("function main(): void { `a${x}b${y}c`; }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let rendered: String = parseTemplateBody(&mut sourceMap, "function main(): void { `a${x}b${y}c`; }");
 
   Test::assertEq<str>(rendered.toStr(), "String::create(\"a\").concat(&x).concat(\"b\").concat(&y).concat(\"c\")");
 }
@@ -4102,7 +4232,8 @@ function parserDesugarsTemplateWithInterpolations(): void {
 /// each slot's `concat` must span only that slot.
 @test
 function parserTemplateDesugarSpansMatchTheHost(): void {
-  let source: SourceFile = SourceFile::create("fixtures/parser_template_spans.ign", "function main(): void { `a${x}b${y}c`; }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_template_spans.ign", "function main(): void { `a${x}b${y}c`; }");
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
@@ -4112,7 +4243,7 @@ function parserTemplateDesugarSpansMatchTheHost(): void {
   let chainId: Ast::ExpressionId = singleExpressionBodyId(&module);
 
   // The literal spans the backtick-delimited text `a${x}b${y}c` exactly.
-  let wholeSpan: SourceSpan = SourceSpan::new("fixtures/parser_template_spans.ign", 24, 37);
+  let wholeSpan: SourceSpan = SourceSpan::new(sourceMap.register("fixtures/parser_template_spans.ign"), 24, 37);
   Test::assertEq<SourceSpan>(expressionSpanOf(&module, chainId), wholeSpan);
 
   assertTemplateDesugarSpans(&module, chainId, wholeSpan);
@@ -4120,14 +4251,16 @@ function parserTemplateDesugarSpansMatchTheHost(): void {
 
 @test
 function parserSkipsEmptyTemplateChunks(): void {
-  let rendered: String = parseTemplateBody("function main(): void { `${x}${y}`; }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let rendered: String = parseTemplateBody(&mut sourceMap, "function main(): void { `${x}${y}`; }");
 
   Test::assertEq<str>(rendered.toStr(), "String::create(\"\").concat(&x).concat(&y)");
 }
 
 @test
 function parserBorrowsTemplatePlacesAndMovesTemporaries(): void {
-  let rendered: String = parseTemplateBody("function main(): void { `${a}${b.c}${d()}`; }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let rendered: String = parseTemplateBody(&mut sourceMap, "function main(): void { `${a}${b.c}${d()}`; }");
 
   Test::assertEq<str>(rendered.toStr(), "String::create(\"\").concat(&a).concat(&b.c).concat(d())");
 }
@@ -4138,7 +4271,9 @@ function parserBorrowsTemplatePlacesAndMovesTemporaries(): void {
 /// Spec: GRAMMAR.md `<for>`; parity fixture golden_ok::for_loop.
 @test
 function parserParsesCStyleForStatements(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_for_c_style.ign",
     "function main(): void { for (let i = 0; i < 10; i = i + 1) { break; } }"
   );
@@ -4226,7 +4361,9 @@ function configFlagLiteralValue(module: &Ast::Module, statementId: Ast::Statemen
 /// describe a release build on a glibc x86_64 Linux host.
 @test
 function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_config_flag.ign",
     "function main(): void { let a: boolean = @configFlag(@platform(\"Linux\")); let b: boolean = @configFlag(@debug()); let c: boolean = @configFlag(!@release()); let d: boolean = @configFlag(@feature(\"nonexistent\") || @arch(\"x86_64\")); let e: boolean = @configFlag(@target(\"x86_64-unknown-linux-gnu\") && @abi(\"gnu\")); }"
   );
@@ -4278,8 +4415,8 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
 
 /// The name of the single item a source parsed to, for the annotation-form
 /// `@configFlag` tests below.
-function parseSingleItemName(path: str, source: str): String {
-  let file: SourceFile = SourceFile::create(path, source);
+function parseSingleItemName(sourceMap: &mut SourceMap, path: str, source: str): String {
+  let file: SourceFile = SourceFile::create(sourceMap, path, source);
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&file, &mut module, &mut diagnostics);
@@ -4308,31 +4445,37 @@ function parseSingleItemName(path: str, source: str): String {
 /// stands in with describe a release build on a glibc x86_64 Linux host.
 @test
 function parserSelectsConfigFlagHalfAtItemPosition(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let negatedFalse: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_negated.ign",
     "@configFlag(!@platform(\"linux\")) function dropped(): void {} @configFlag(@platform(\"linux\")) function kept(): void {}"
   );
   Test::assertEq<str>(negatedFalse.toStr(), "kept");
 
   let negatedTrue: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_negated_true.ign",
     "@configFlag(!@platform(\"windows\")) function kept(): void {} @configFlag(@platform(\"windows\")) function dropped(): void {}"
   );
   Test::assertEq<str>(negatedTrue.toStr(), "kept");
 
   let negatedConjunction: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_negated_and.ign",
     "@configFlag(!(@platform(\"linux\") && @arch(\"x86_64\"))) function dropped(): void {} @configFlag(@platform(\"linux\") && @arch(\"x86_64\")) function kept(): void {}"
   );
   Test::assertEq<str>(negatedConjunction.toStr(), "kept");
 
   let negatedDisjunction: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_negated_or.ign",
     "@configFlag(!(@platform(\"windows\") || @platform(\"macos\"))) function kept(): void {} @configFlag(@platform(\"windows\") || @platform(\"macos\")) function dropped(): void {}"
   );
   Test::assertEq<str>(negatedDisjunction.toStr(), "kept");
 
   let doubleNegation: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_double_negation.ign",
     "@configFlag(!!@platform(\"linux\")) function kept(): void {} @configFlag(!@platform(\"linux\")) function dropped(): void {}"
   );
@@ -4343,19 +4486,23 @@ function parserSelectsConfigFlagHalfAtItemPosition(): void {
 /// the braces inside that body never reach the AST.
 @test
 function parserSkipsTheWholeGatedDeclaration(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let attributed: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_attributed.ign",
     "@configFlag(!@platform(\"linux\")) @externName(\"dropped\") function dropped(): void { if (true) { return; } } @configFlag(@platform(\"linux\")) function kept(): void {}"
   );
   Test::assertEq<str>(attributed.toStr(), "kept");
 
   let externBlock: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_extern.ign",
     "@configFlag(!@platform(\"linux\")) extern __dropped { function absent(): i32; } @configFlag(@platform(\"linux\")) function kept(): void {}"
   );
   Test::assertEq<str>(externBlock.toStr(), "kept");
 
   let alias: String = parseSingleItemName(
+    &mut sourceMap,
     "fixtures/parser_config_flag_alias.ign",
     "@configFlag(!@platform(\"linux\")) type Dropped = u64; @configFlag(@platform(\"linux\")) function kept(): void {}"
   );
@@ -4365,7 +4512,9 @@ function parserSkipsTheWholeGatedDeclaration(): void {
 /// A namespace member and a block statement are gated the same way an item is.
 @test
 function parserSelectsConfigFlagHalfInsideNamespaceAndBlock(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let namespaceSource: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_config_flag_namespace.ign",
     "namespace Gated { @configFlag(!@platform(\"linux\")) const VALUE: u64 = 2; @configFlag(@platform(\"linux\")) const VALUE: u64 = 1; }"
   );
@@ -4386,6 +4535,7 @@ function parserSelectsConfigFlagHalfInsideNamespaceAndBlock(): void {
   };
 
   let blockSource: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_config_flag_block.ign",
     "function main(): void { @configFlag(!@platform(\"linux\")) let value: u64 = 2; @configFlag(@platform(\"linux\")) let value: u64 = 1; }"
   );
@@ -4415,7 +4565,9 @@ function parserSelectsConfigFlagHalfInsideNamespaceAndBlock(): void {
 /// written, with the code and wording the reference compiler uses.
 @test
 function parserRejectsMalformedConfigFlagPredicate(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_config_flag_malformed.ign",
     "@configFlag(!) function gated(): void {}"
   );
@@ -4437,7 +4589,9 @@ function parserRejectsMalformedConfigFlagPredicate(): void {
 /// An unknown predicate inside a negation is named rather than folded.
 @test
 function parserRejectsUnknownConfigFlagPredicate(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_config_flag_unknown_predicate.ign",
     "@configFlag(!@bogus(\"x\")) function gated(): void {}"
   );
@@ -4460,7 +4614,9 @@ function parserRejectsUnknownConfigFlagPredicate(): void {
 /// take the directive's place and the discarded branch never reaches the AST.
 @test
 function parserSelectsCompileIfBranchAtItemPosition(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_compile_if.ign",
     "@if(@release()) { function enabled(): void {} } @else { function disabled(): void {} }"
   );
@@ -4486,7 +4642,9 @@ function parserSelectsCompileIfBranchAtItemPosition(): void {
 /// the condition is false, so only the else branch reaches the AST.
 @test
 function parserSelectsCompileIfElseBranchAtItemPosition(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_compile_ifelse.ign",
     "@ifelse(@debug()) { function debugOnly(): void {} } @else { function releaseOnly(): void {} }"
   );
@@ -4524,8 +4682,13 @@ function selectedBranchFunctionName(module: &Ast::Module): String {
 
 /// Parses `text` with `flags` and returns the name of the function the
 /// selected branch left behind.
-function parseSelectedBranchName(path: str, text: str, flags: &CompileFlags): String {
-  let source: SourceFile = SourceFile::create(path, text);
+function parseSelectedBranchName(
+  sourceMap: &mut SourceMap,
+  path: str,
+  text: str,
+  flags: &CompileFlags
+): String {
+  let source: SourceFile = SourceFile::create(sourceMap, path, text);
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseIntoWithFlags(&source, &mut module, &mut diagnostics, flags);
@@ -4540,16 +4703,17 @@ function parseSelectedBranchName(path: str, text: str, flags: &CompileFlags): St
 /// the same source selects the opposite branch under the opposite build.
 @test
 function parserSelectsCompileBranchFromDebugFlag(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: str = "@ifelse(@release()) { function releaseOnly(): void {} } @else { function debugOnly(): void {} }";
   let noFeatures: Vector<String> = Vector::new<String>();
   let triple: String = CompileFlags::defaultTargetTriple();
 
   let debugFlags: CompileFlags = CompileFlags::create(&triple, true, &noFeatures, &noFeatures);
-  let underDebug: String = parseSelectedBranchName("fixtures/parser_flags_debug.ign", source, &debugFlags);
+  let underDebug: String = parseSelectedBranchName(&mut sourceMap, "fixtures/parser_flags_debug.ign", source, &debugFlags);
   Test::assertEq<str>(underDebug.toStr(), "debugOnly");
 
   let releaseFlags: CompileFlags = CompileFlags::create(&triple, false, &noFeatures, &noFeatures);
-  let underRelease: String = parseSelectedBranchName("fixtures/parser_flags_release.ign", source, &releaseFlags);
+  let underRelease: String = parseSelectedBranchName(&mut sourceMap, "fixtures/parser_flags_release.ign", source, &releaseFlags);
   Test::assertEq<str>(underRelease.toStr(), "releaseOnly");
 }
 
@@ -4557,17 +4721,18 @@ function parserSelectsCompileBranchFromDebugFlag(): void {
 /// names, and folds the argument's case before it does.
 @test
 function parserSelectsCompileBranchFromPlatformFlag(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: str = "@ifelse(@platform(\"Linux\")) { function onLinux(): void {} } @else { function elsewhere(): void {} }";
   let noFeatures: Vector<String> = Vector::new<String>();
 
   let linuxTriple: String = String::create("x86_64-unknown-linux-gnu");
   let linuxFlags: CompileFlags = CompileFlags::create(&linuxTriple, true, &noFeatures, &noFeatures);
-  let onLinux: String = parseSelectedBranchName("fixtures/parser_flags_linux.ign", source, &linuxFlags);
+  let onLinux: String = parseSelectedBranchName(&mut sourceMap, "fixtures/parser_flags_linux.ign", source, &linuxFlags);
   Test::assertEq<str>(onLinux.toStr(), "onLinux");
 
   let macosTriple: String = String::create("aarch64-apple-darwin");
   let macosFlags: CompileFlags = CompileFlags::create(&macosTriple, true, &noFeatures, &noFeatures);
-  let onMacos: String = parseSelectedBranchName("fixtures/parser_flags_macos.ign", source, &macosFlags);
+  let onMacos: String = parseSelectedBranchName(&mut sourceMap, "fixtures/parser_flags_macos.ign", source, &macosFlags);
   Test::assertEq<str>(onMacos.toStr(), "elsewhere");
 }
 
@@ -4594,25 +4759,28 @@ function parserReadsTargetComponentsFromTriple(): void {
 /// feature catalog makes every name known, so an unknown one is false.
 @test
 function parserSelectsCompileBranchFromFeatureFlag(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: str = "@ifelse(@feature(\"simd\")) { function withSimd(): void {} } @else { function withoutSimd(): void {} }";
   let triple: String = CompileFlags::defaultTargetTriple();
 
   let noFeatures: Vector<String> = Vector::new<String>();
   let disabledFlags: CompileFlags = CompileFlags::create(&triple, true, &noFeatures, &noFeatures);
-  let withoutSimd: String = parseSelectedBranchName("fixtures/parser_flags_no_simd.ign", source, &disabledFlags);
+  let withoutSimd: String = parseSelectedBranchName(&mut sourceMap, "fixtures/parser_flags_no_simd.ign", source, &disabledFlags);
   Test::assertEq<str>(withoutSimd.toStr(), "withoutSimd");
 
   let mut enabled: Vector<String> = Vector::new<String>();
   enabled.push(String::create("simd"));
   let enabledFlags: CompileFlags = CompileFlags::create(&triple, true, &enabled, &noFeatures);
-  let withSimd: String = parseSelectedBranchName("fixtures/parser_flags_simd.ign", source, &enabledFlags);
+  let withSimd: String = parseSelectedBranchName(&mut sourceMap, "fixtures/parser_flags_simd.ign", source, &enabledFlags);
   Test::assertEq<str>(withSimd.toStr(), "withSimd");
 }
 
 /// A project that declares a feature catalog rejects a name outside it.
 @test
 function parserRejectsFeatureOutsideDeclaredCatalog(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_flags_unknown_feature.ign",
     "function main(): void { @configFlag(@feature(\"missing\")); }"
   );
@@ -4633,7 +4801,9 @@ function parserRejectsFeatureOutsideDeclaredCatalog(): void {
 /// written body is a parse error at the `{` that opens it.
 @test
 function parserRejectsExternFunctionWithBody(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_extern_with_body.ign",
     "extern C { function foo(): void { return; } }"
   );
@@ -4665,7 +4835,9 @@ function parserRejectsExternFunctionWithBody(): void {
 /// the C struct the extern block describes.
 @test
 function parserParsesRecordInsideExternBlock(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_extern_record.ign",
     "extern Device { @packed record Port { public control: u8; public status: u32; } function reset(port: *mut Port): void; }"
   );
@@ -4705,7 +4877,9 @@ function parserParsesRecordInsideExternBlock(): void {
 /// names the members it does accept.
 @test
 function parserRejectsEnumInsideExternBlock(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_extern_enum.ign",
     "extern Device { enum Mode { READ, WRITE, } }"
   );
@@ -4733,7 +4907,9 @@ function parserRejectsEnumInsideExternBlock(): void {
 /// where a method may leave it out.
 @test
 function parserRejectsFunctionWithoutReturnType(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_missing_return_type.ign",
     "function foo() { }"
   );
@@ -4759,7 +4935,9 @@ function parserRejectsFunctionWithoutReturnType(): void {
 /// Spec: GRAMMAR.md `<postfix>`; parity fixture e2e_ok::for_loop.
 @test
 function parserParsesPostfixStepOperators(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_postfix_step.ign",
     "function main(): void { for (let i = 0; i < 10; i++) { break; } for (let j = 10; j > 0; j--) { break; } }"
   );
@@ -4851,7 +5029,9 @@ function inlineModifierName(module: &Ast::Module, rootIndex: u64): String {
 /// Spec: GRAMMAR.md `<inline-mode>`; parity fixture e2e_ok::inline_always.
 @test
 function parserParsesInlineModes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_inline_modes.ign",
     "inline(always) function a(): void {} inline(never) function b(): void {} inline function c(): void {}"
   );
@@ -4872,7 +5052,9 @@ function parserParsesInlineModes(): void {
 /// Spec: GRAMMAR.md `<enum>`; parity fixture e2e_ok::enum_drop_custom.
 @test
 function parserParsesEnumMethodAfterUndelimitedVariant(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_enum_undelimited_variant.ign",
     "enum Resource { Active(i32), Idle drop(&mut self): void { return; } }"
   );
@@ -4915,7 +5097,9 @@ function parserParsesEnumMethodAfterUndelimitedVariant(): void {
 /// Spec: GRAMMAR.md `<let-condition>`; parity fixture e2e_ok::if_let_multi_chain.
 @test
 function parserParsesChainedLetConditions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_let_condition_chain.ign",
     "function main(): void { if (let Maybe::Some(x) = first() && let Maybe::Some(y) = second(x) && y > 3) { return; } }"
   );
@@ -4987,7 +5171,9 @@ function atomLiteralName(module: &Ast::Module, id: Ast::ExpressionId): String {
 /// Spec: GRAMMAR.md `<atom>`; parity fixture e2e_ok::atom_literal.
 @test
 function parserParsesAtomLiterals(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_atom_literal.ign",
     "function main(): i32 { let a: atom = :foo; return match (a) { :foo -> 1, _ -> 0, }; }"
   );
@@ -5083,12 +5269,14 @@ function traitMethodBodyLength(module: &Ast::Module, id: Ast::ItemId): u64 {
 }
 
 /// Scenario: a trait member may end in `;` (required) or carry a body
-/// (default). The default's body hangs off `defaultMethods`, while `methods`
-/// keeps signatures only.
+/// (default). The default hangs off `defaultMethods`; its twin in `methods`
+/// carries the same body, which the analyzer checks against the trait.
 /// Spec: GRAMMAR.md `<trait>`; parity fixture e2e_ok::trait_default_method.
 @test
 function parserParsesTraitDefaultMethods(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_trait_default_method.ign",
     "trait HasValue { getValue(&self): i32; doubled(&self): i32 { return self.getValue() * 2; } }"
   );
@@ -5127,7 +5315,7 @@ function parserParsesTraitDefaultMethods(): void {
       Test::assertEq<str>(traitMethodName(&module, defaultId).toStr(), "doubled");
 
       Test::assertEq<u64>(traitMethodBodyLength(&module, requiredId), 0);
-      Test::assertEq<u64>(traitMethodBodyLength(&module, signatureId), 0);
+      Test::assertEq<u64>(traitMethodBodyLength(&module, signatureId), 1);
       Test::assertEq<u64>(traitMethodBodyLength(&module, defaultId), 1);
     },
     _ -> @panic("root is not a trait"),
@@ -5212,7 +5400,9 @@ function traitDefaultMethodId(module: &Ast::Module, id: Ast::ItemId, index: u64)
 /// Spec: GRAMMAR.md `<trait>`; parity fixture e2e_ok::trait_two_records_same_default.
 @test
 function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_trait_default_materialization.ign",
     "trait Answerable { answer(&self): i32 { return 42; } } @implements(Answerable) record Alpha { public x: i32; } @implements(Answerable) record Beta { public y: i32; answer(&self): i32 { return self.y; } }"
   );
@@ -5256,12 +5446,194 @@ function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
   Test::assertEq<str>(traitMethodName(&module, overrideId).toStr(), "answer");
 }
 
+/// Reads the value of the `return` statement that opens method `id`'s body.
+function methodFirstReturnValue(module: &Ast::Module, id: Ast::ItemId): Ast::ExpressionId {
+  let bodyId: Ast::StatementId = match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> functionItem.body,
+    _ -> @panic("item is not a method"),
+  };
+
+  let firstId: Ast::StatementId = match (expectStatement(module, bodyId)) {
+    Ast::Statement::Node::Block(block) -> match (block.statements.get(0)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> @panic("method body is empty"),
+    },
+    _ -> @panic("method body is not a block"),
+  };
+
+  return match (expectStatement(module, firstId)) {
+    Ast::Statement::Node::Return(returnStatement) -> match (returnStatement.value) {
+      Option::SOME(value) -> value,
+      Option::NONE -> @panic("return has no value"),
+    },
+    _ -> @panic("first statement is not a return"),
+  };
+}
+
+/// Reads the body statement of method `id`.
+function methodBody(module: &Ast::Module, id: Ast::ItemId): Ast::StatementId {
+  return match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> functionItem.body,
+    _ -> @panic("item is not a method"),
+  };
+}
+
+/// Scenario: two types inheriting the same default each get their own copy of
+/// its body, with node ids disjoint from the trait's and from each other, so
+/// each copy resolves `self` against its own type.
+/// Spec: TRAITS.md "Default Methods"; parity fixture e2e_ok::trait_default_self_shared_by_types.
+@test
+function parserMaterializesIndependentDefaultBodiesPerType(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_trait_default_independent_bodies.ign",
+    "trait Shape { area(&self): i32; doubled(&self): i32 { return self.area() * 2; } } @implements(Shape) record Alpha { public x: i32; area(&self): i32 { return self.x; } } @implements(Shape) record Beta { public y: i32; area(&self): i32 { return self.y; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+  let alphaId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+  let betaId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Beta"),
+  };
+
+  let defaultId: Ast::ItemId = traitDefaultMethodId(&module, traitId, 0);
+  let alphaInherited: Ast::ItemId = recordMethodId(&module, alphaId, 1);
+  let betaInherited: Ast::ItemId = recordMethodId(&module, betaId, 1);
+  Test::assertEq<str>(traitMethodName(&module, alphaInherited).toStr(), "doubled");
+  Test::assertEq<str>(traitMethodName(&module, betaInherited).toStr(), "doubled");
+
+  let defaultBody: u32 = methodBody(&module, defaultId).raw();
+  let alphaBody: u32 = methodBody(&module, alphaInherited).raw();
+  let betaBody: u32 = methodBody(&module, betaInherited).raw();
+  Test::assert(alphaBody != defaultBody);
+  Test::assert(betaBody != defaultBody);
+  Test::assert(alphaBody != betaBody);
+
+  let defaultValue: u32 = methodFirstReturnValue(&module, defaultId).raw();
+  let alphaValue: u32 = methodFirstReturnValue(&module, alphaInherited).raw();
+  let betaValue: u32 = methodFirstReturnValue(&module, betaInherited).raw();
+  Test::assert(alphaValue != defaultValue);
+  Test::assert(betaValue != defaultValue);
+  Test::assert(alphaValue != betaValue);
+}
+
+/// Reads the local statement that opens method `id`'s body.
+function methodFirstLocal(module: &Ast::Module, id: Ast::ItemId): Ast::StatementId {
+  return match (expectStatement(module, methodBody(module, id))) {
+    Ast::Statement::Node::Block(block) -> match (block.statements.get(0)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> @panic("method body is empty"),
+    },
+    _ -> @panic("method body is not a block"),
+  };
+}
+
+/// Reads the binding pattern of the local that opens method `id`'s body.
+function methodFirstLocalPattern(module: &Ast::Module, id: Ast::ItemId): Ast::PatternId {
+  return match (expectStatement(module, methodFirstLocal(module, id))) {
+    Ast::Statement::Node::Variable(variable) -> variable.pattern,
+    Ast::Statement::Node::Let(letStatement) -> letStatement.pattern,
+    _ -> @panic("first statement is not a local"),
+  };
+}
+
+/// Reads the first parameter of the closure that initializes the local
+/// opening method `id`'s body.
+function methodFirstLocalClosureParameter(module: &Ast::Module, id: Ast::ItemId): Ast::PatternId {
+  let value: Option<Ast::ExpressionId> = match (expectStatement(module, methodFirstLocal(module, id))) {
+    Ast::Statement::Node::Variable(variable) -> variable.value,
+    Ast::Statement::Node::Let(letStatement) -> letStatement.value,
+    _ -> @panic("first statement is not a local"),
+  };
+
+  let Option::SOME(closureId) = value else {
+    @panic("local has no initializer");
+  };
+
+  let Option::SOME(closure) = module.expressions.get(closureId) else {
+    @panic("missing closure expression");
+  };
+
+  return match (closure) {
+    Ast::Expression::Node::Lambda(lambda) -> match (lambda.parameters.get(0)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> @panic("closure has no parameter"),
+    },
+    _ -> @panic("initializer is not a closure"),
+  };
+}
+
+/// Scenario: a default whose body declares a local closure with a typed
+/// parameter gives each implementing type its own local and parameter
+/// patterns, so each copy binds them for its own type.
+/// Spec: TRAITS.md "Default Methods"; parity fixture e2e_ok::trait_default_self_shared_by_types.
+@test
+function parserMaterializesIndependentDefaultLocalsPerType(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_trait_default_independent_locals.ign",
+    "trait Shape { area(&self): i32; scaled(&self): i64 { let scale = (value: i32): i64 -> value as i64 * 2; return scale(self.area()); } } @implements(Shape) record Alpha { public x: i32; area(&self): i32 { return self.x; } } @implements(Shape) record Beta { public y: i32; area(&self): i32 { return self.y; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+  let alphaId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+  let betaId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Beta"),
+  };
+
+  let defaultId: Ast::ItemId = traitDefaultMethodId(&module, traitId, 0);
+  let alphaInherited: Ast::ItemId = recordMethodId(&module, alphaId, 1);
+  let betaInherited: Ast::ItemId = recordMethodId(&module, betaId, 1);
+
+  let defaultLocal: Ast::PatternId = methodFirstLocalPattern(&module, defaultId);
+  let alphaLocal: Ast::PatternId = methodFirstLocalPattern(&module, alphaInherited);
+  let betaLocal: Ast::PatternId = methodFirstLocalPattern(&module, betaInherited);
+  let defaultParameter: Ast::PatternId = methodFirstLocalClosureParameter(&module, defaultId);
+  let alphaParameter: Ast::PatternId = methodFirstLocalClosureParameter(&module, alphaInherited);
+  let betaParameter: Ast::PatternId = methodFirstLocalClosureParameter(&module, betaInherited);
+
+  Test::assert(alphaLocal.raw() != defaultLocal.raw());
+  Test::assert(betaLocal.raw() != defaultLocal.raw());
+  Test::assert(alphaLocal.raw() != betaLocal.raw());
+  Test::assert(alphaParameter.raw() != defaultParameter.raw());
+  Test::assert(betaParameter.raw() != defaultParameter.raw());
+  Test::assert(alphaParameter.raw() != betaParameter.raw());
+}
+
 /// Scenario: a type that names a namespaced trait by its path in `@implements`
 /// inherits the trait's default methods, as it does with the bare name.
 /// Spec: TRAITS.md "Trait Bounds"; parity fixture e2e_ok::implements_namespaced_trait_default_method.
 @test
 function parserMaterializesTraitDefaultsForANamespacedTraitPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_trait_default_namespaced_path.ign",
     "namespace Shapes { trait Answerable { answer(&self): i32 { return 42; } } } @implements(Shapes::Answerable) record Alpha { public x: i32; }"
   );
@@ -5289,7 +5661,9 @@ function parserMaterializesTraitDefaultsForANamespacedTraitPath(): void {
 /// Spec: TRAITS.md "Default Methods"; parity fixture e2e_ok::trait_identity_same_name_in_two_namespaces.
 @test
 function parserMaterializesTheDefaultsOfTheTraitThePathNames(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_trait_default_same_name.ign",
     "namespace A { trait Named { firstTag(&self): i32 { return 1; } } } namespace B { trait Named { secondTag(&self): i32 { return 2; } } @implements(Named) record Local { public x: i32; } } @implements(B::Named) record Second { public x: i32; } @implements(A::Named, B::Named) record Both { public x: i32; }"
   );
@@ -5333,7 +5707,9 @@ function parserMaterializesTheDefaultsOfTheTraitThePathNames(): void {
 /// Spec: TRAITS.md "Implementing a Trait"; parity fixture e2e_err::namespace_member_trait_default_bare_outside.
 @test
 function parserMaterializesDefaultsForATraitOutOfScope(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_trait_default_out_of_scope.ign",
     "namespace A { trait Named { firstTag(&self): i32 { return 1; } } } @implements(Named) record Outside { public x: i32; }"
   );
@@ -5399,7 +5775,9 @@ function bindingName(module: &Ast::Module, id: Ast::PatternId): String {
 /// Spec: parity fixture e2e_ok::record_static_field.
 @test
 function parserParsesRecordStaticFields(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_record_static_field.ign",
     "record Config { public limit: i32; static MAX_SIZE: i32 = 1024; }"
   );
@@ -5472,7 +5850,9 @@ function bindingModifiers(module: &Ast::Module, id: Ast::PatternId): String {
 /// Spec: parity fixture e2e_ok::record_static_mut_field.
 @test
 function parserParsesStaticMutRecordField(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_record_static_mut_field.ign",
     "record Counter { static mut TOTAL: i32 = 0; static SEED: i32 = 7; }"
   );
@@ -5516,7 +5896,9 @@ function parserParsesStaticMutRecordField(): void {
 /// Spec: parity fixture e2e_ok::static_mut_field_borrow.
 @test
 function parserParsesStaticMutEnumField(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_enum_static_mut_field.ign",
     "enum Slot { A, static mut PICKED: i32 = 3; }"
   );
@@ -5552,7 +5934,9 @@ function parserParsesStaticMutEnumField(): void {
 /// Spec: parity fixture e2e_err::static_mut_on_method.
 @test
 function parserRejectsStaticMutOnMethod(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_static_mut_on_method.ign",
     "record Counter { static mut reset(): void {} }"
   );
@@ -5566,7 +5950,9 @@ function parserRejectsStaticMutOnMethod(): void {
 /// Scenario: a bare `mut` is not a member modifier on its own.
 @test
 function parserRejectsMutWithoutStaticOnField(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_mut_without_static_field.ign",
     "record Counter { mut total: i32; }"
   );
@@ -5583,7 +5969,9 @@ function parserRejectsMutWithoutStaticOnField(): void {
 /// Spec: parity fixture e2e_ok::enum_static_field.
 @test
 function parserParsesEnumStaticFields(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_enum_static_field.ign",
     "enum Priority { Low, High, DEFAULT_LEVEL: i32 = 1; }"
   );
@@ -5614,8 +6002,8 @@ function parserParsesEnumStaticFields(): void {
   };
 }
 
-function parseSourceDiagnostics(path: str, text: str): DiagnosticBag {
-  let source: SourceFile = SourceFile::create(path, text);
+function parseSourceDiagnostics(sourceMap: &mut SourceMap, path: str, text: str): DiagnosticBag {
+  let source: SourceFile = SourceFile::create(sourceMap, path, text);
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
@@ -5640,7 +6028,9 @@ function assertDiagnosticAt(
 /// The reference parser reports a `static` variant and keeps the variant.
 @test
 function parserRejectsStaticEnumVariant(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    &mut sourceMap,
     "fixtures/parser_static_enum_variant.ign",
     "enum Color {\n  static RED,\n  GREEN,\n}"
   );
@@ -5651,7 +6041,9 @@ function parserRejectsStaticEnumVariant(): void {
 
 @test
 function parserAcceptsEnumVariantsWithoutStatic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    &mut sourceMap,
     "fixtures/parser_plain_enum_variant.ign",
     "enum Color {\n  RED,\n  GREEN(i32),\n}"
   );
@@ -5663,7 +6055,9 @@ function parserAcceptsEnumVariantsWithoutStatic(): void {
 /// only the lexer's bag is compared.
 @test
 function parserRejectsIntegerLiteralOutOfRange(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
     "fixtures/parser_integer_out_of_range.ign",
     "function main(): void {\n  let value: u64 = 999999999999999999999999999999;\n}"
   );
@@ -5680,7 +6074,9 @@ function parserRejectsIntegerLiteralOutOfRange(): void {
 
 @test
 function parserAcceptsMaxU64IntegerLiteral(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    &mut sourceMap,
     "fixtures/parser_integer_max_u64.ign",
     "function main(): void {\n  let value: u64 = 18446744073709551615;\n}"
   );
@@ -5692,7 +6088,9 @@ function parserAcceptsMaxU64IntegerLiteral(): void {
 /// follows the comma is then reported where it expected `from`.
 @test
 function parserRejectsDiscardImportWithOtherNames(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    &mut sourceMap,
     "fixtures/parser_discard_import_not_sole.ign",
     "import _, Io from \"std::io\";"
   );
@@ -5709,10 +6107,12 @@ function parserRejectsDiscardImportWithOtherNames(): void {
 
 @test
 function parserAcceptsSoleDiscardImport(): void {
-  let plain: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_discard_import.ign", "import _ from \"std::io\";");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let plain: DiagnosticBag = parseSourceDiagnostics(&mut sourceMap, "fixtures/parser_discard_import.ign", "import _ from \"std::io\";");
   Test::assertEq<u64>(plain.length(), 0);
 
   let trailingComma: DiagnosticBag = parseSourceDiagnostics(
+    &mut sourceMap,
     "fixtures/parser_discard_import_trailing_comma.ign",
     "import _, from \"std::io\";"
   );
@@ -5721,7 +6121,9 @@ function parserAcceptsSoleDiscardImport(): void {
 
 @test
 function parserRejectsDiscardExportFrom(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let diagnostics: DiagnosticBag = parseSourceDiagnostics(
+    &mut sourceMap,
     "fixtures/parser_discard_export_from.ign",
     "export _ from \"./lib\";"
   );
@@ -5737,7 +6139,8 @@ function parserRejectsDiscardExportFrom(): void {
 
 @test
 function parserAcceptsNamedExportFrom(): void {
-  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_named_export_from.ign", "export Foo from \"./lib\";");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(&mut sourceMap, "fixtures/parser_named_export_from.ign", "export Foo from \"./lib\";");
 
   Test::assertEq<u64>(diagnostics.length(), 0);
 }
@@ -5762,10 +6165,11 @@ function assertRenderedContains(rendered: &String, needle: str): void {
 
 @test
 function parserParsesAsmExpressionWithOneOutput(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_expression.ign", "function read(port: u16): u8 { return asm (port in dx) -> (value: u8 in al) { in {value}, {port} }; }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_expression.ign", "function read(port: u16): u8 { return asm (port in dx) -> (value: u8 in al) { in {value}, {port} }; }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "Return span=");
@@ -5776,10 +6180,11 @@ function parserParsesAsmExpressionWithOneOutput(): void {
 
 @test
 function parserParsesAsmStatementWithPureClobbersAndTrailingCommas(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_statement.ign", "function main(): void { asm pure (a in rax, b inout rbx,) -> (low: u32 in eax, high: u32 in edx,) clobber(memory, flags,) { rdtsc } let x: u32 = low; }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_statement.ign", "function main(): void { asm pure (a in rax, b inout rbx,) -> (low: u32 in eax, high: u32 in edx,) clobber(memory, flags,) { rdtsc } let x: u32 = low; }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "statement#0 Asm span=");
@@ -5791,10 +6196,11 @@ function parserParsesAsmStatementWithPureClobbersAndTrailingCommas(): void {
 
 @test
 function parserParsesAsmStatementWithoutOperands(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_empty.ign", "function main(): void { asm () { cli } }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_empty.ign", "function main(): void { asm () { cli } }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "pure=false inputs=[] outputs=[] clobbers=[] chunks=[\" cli \"] holes=[]");
@@ -5802,10 +6208,11 @@ function parserParsesAsmStatementWithoutOperands(): void {
 
 @test
 function parserParsesAsmStatementInsideALambdaBody(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_lambda.ign", "function main(): void { let halt = (): void -> { asm () { hlt } }; }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_lambda.ign", "function main(): void { let halt = (): void -> { asm () { hlt } }; }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "Asm span=");
@@ -5814,8 +6221,9 @@ function parserParsesAsmStatementInsideALambdaBody(): void {
 
 @test
 function parserRejectsANonIdentifierAsmHole(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_bad_hole.ign", "function main(): void { asm () { mov {1}, eax } }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_bad_hole.ign", "function main(): void { asm () { mov {1}, eax } }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
 
   Test::assertEq<u64>(diagnostics.length(), 1);
@@ -5824,8 +6232,9 @@ function parserRejectsANonIdentifierAsmHole(): void {
 
 @test
 function parserRejectsAnAsmInputWithoutIn(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_missing_in.ign", "function main(port: u16): void { asm (port dx) { nop } }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_missing_in.ign", "function main(port: u16): void { asm (port dx) { nop } }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
 
   Test::assert(diagnostics.length() >= 1);
@@ -5834,8 +6243,9 @@ function parserRejectsAnAsmInputWithoutIn(): void {
 
 @test
 function parserRejectsAnAsmOutputWithoutIn(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_output_missing_in.ign", "function main(): void { asm () -> (value: u8 al) { nop } }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_output_missing_in.ign", "function main(): void { asm () -> (value: u8 al) { nop } }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
 
   Test::assert(diagnostics.length() >= 1);
@@ -5844,26 +6254,33 @@ function parserRejectsAnAsmOutputWithoutIn(): void {
 
 @test
 function parserRejectsAnAsmWithoutABody(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create("fixtures/parser_asm_no_body.ign", "function main(): void { asm (); }");
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_asm_no_body.ign", "function main(): void { asm (); }");
   let diagnostics: DiagnosticBag = parseAsmSource(&source, &mut module);
 
   Test::assert(diagnostics.length() >= 1);
   assertDiagnosticAt(&diagnostics, 0, "I0001", "Expected LeftBrace");
 }
 
-function renderParsedSource(path: str, text: str, diagnostics: &mut DiagnosticBag): String {
+function renderParsedSource(
+  sourceMap: &mut SourceMap,
+  path: str,
+  text: str,
+  diagnostics: &mut DiagnosticBag
+): String {
   let mut module: Ast::Module = Ast::Module::init();
-  let source: SourceFile = SourceFile::create(path, text);
+  let source: SourceFile = SourceFile::create(sourceMap, path, text);
   Parser::parseInto(&source, &mut module, diagnostics);
 
-  return Ast::Serializer::render(&module);
+  return Ast::Serializer::render(&*sourceMap, &module);
 }
 
 @test
 function parserParsesAnExclusiveRange(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut diagnostics = DiagnosticBag::init();
-  let rendered: String = renderParsedSource("fixtures/parser_range_exclusive.ign", "const R: i32 = 0..10;", &mut diagnostics);
+  let rendered: String = renderParsedSource(&mut sourceMap, "fixtures/parser_range_exclusive.ign", "const R: i32 = 0..10;", &mut diagnostics);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "Range span=fixtures/parser_range_exclusive.ign:15-20 start=expression#0 end=expression#1 inclusive=false");
@@ -5871,8 +6288,9 @@ function parserParsesAnExclusiveRange(): void {
 
 @test
 function parserParsesAnInclusiveRange(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut diagnostics = DiagnosticBag::init();
-  let rendered: String = renderParsedSource("fixtures/parser_range_inclusive.ign", "const R: i32 = 0..=10;", &mut diagnostics);
+  let rendered: String = renderParsedSource(&mut sourceMap, "fixtures/parser_range_inclusive.ign", "const R: i32 = 0..=10;", &mut diagnostics);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "Range span=fixtures/parser_range_inclusive.ign:15-21 start=expression#0 end=expression#1 inclusive=true");
@@ -5880,8 +6298,9 @@ function parserParsesAnInclusiveRange(): void {
 
 @test
 function parserRangeBindsLooserThanArithmeticAndTighterThanPipe(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut diagnostics = DiagnosticBag::init();
-  let rendered: String = renderParsedSource("fixtures/parser_range_precedence.ign", "const R: i32 = a + 1..b * 2 || c;", &mut diagnostics);
+  let rendered: String = renderParsedSource(&mut sourceMap, "fixtures/parser_range_precedence.ign", "const R: i32 = a + 1..b * 2 || c;", &mut diagnostics);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "Range span=");
@@ -5891,8 +6310,9 @@ function parserRangeBindsLooserThanArithmeticAndTighterThanPipe(): void {
 
 @test
 function parserRangeSitsInsideAForOfHeader(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut diagnostics = DiagnosticBag::init();
-  let rendered: String = renderParsedSource("fixtures/parser_range_for_of.ign", "function main(n: i32): void { for (let i of 0..n) {} }", &mut diagnostics);
+  let rendered: String = renderParsedSource(&mut sourceMap, "fixtures/parser_range_for_of.ign", "function main(n: i32): void { for (let i of 0..n) {} }", &mut diagnostics);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   assertRenderedContains(&rendered, "Range span=");
@@ -5900,7 +6320,8 @@ function parserRangeSitsInsideAForOfHeader(): void {
 
 @test
 function parserRejectsAChainedRange(): void {
-  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_chained.ign", "const R: i32 = 0..5..10;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(&mut sourceMap, "fixtures/parser_range_chained.ign", "const R: i32 = 0..5..10;");
 
   Test::assertEq<u64>(diagnostics.length(), 1);
   assertDiagnosticAt(&diagnostics, 0, "I0002", "Ranges cannot be chained");
@@ -5908,7 +6329,8 @@ function parserRejectsAChainedRange(): void {
 
 @test
 function parserRejectsAnOpenEndedRangeWithoutAnUpperBound(): void {
-  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_open_end.ign", "const R: i32 = 3..;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(&mut sourceMap, "fixtures/parser_range_open_end.ign", "const R: i32 = 3..;");
 
   Test::assertEq<u64>(diagnostics.length(), 1);
   assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");
@@ -5916,7 +6338,8 @@ function parserRejectsAnOpenEndedRangeWithoutAnUpperBound(): void {
 
 @test
 function parserRejectsAnOpenEndedRangeWithoutALowerBound(): void {
-  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_open_start.ign", "const R: i32 = ..3;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(&mut sourceMap, "fixtures/parser_range_open_start.ign", "const R: i32 = ..3;");
 
   Test::assertEq<u64>(diagnostics.length(), 1);
   assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");
@@ -5924,7 +6347,8 @@ function parserRejectsAnOpenEndedRangeWithoutALowerBound(): void {
 
 @test
 function parserRejectsAnOpenEndedInclusiveRange(): void {
-  let diagnostics: DiagnosticBag = parseSourceDiagnostics("fixtures/parser_range_open_inclusive.ign", "function main(): void { for (let i of 0..=) {} }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let diagnostics: DiagnosticBag = parseSourceDiagnostics(&mut sourceMap, "fixtures/parser_range_open_inclusive.ign", "function main(): void { for (let i of 0..=) {} }");
 
   Test::assertEq<u64>(diagnostics.length(), 1);
   assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");

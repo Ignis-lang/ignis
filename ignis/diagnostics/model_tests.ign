@@ -1,5 +1,4 @@
 import Test from "std::test";
-
 import
   Diagnostic,
   DiagnosticBag,
@@ -9,6 +8,7 @@ import
   LabelKind,
   NoteKind,
   Severity,
+  SourceMap,
   SourceSpan,
 from "@compiler::diagnostics";
 
@@ -41,14 +41,15 @@ function diagnosticEnumsParseFixtureText(): void {
 
 @test
 function diagnosticBagPreservesInsertionOrderAndStructuredFields(): void {
-  let firstSpan: SourceSpan = SourceSpan::new("input.ign", 4, 7);
-  let secondSpan: SourceSpan = SourceSpan::new("input.ign", 12, 12);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let firstSpan: SourceSpan = SourceSpan::new(sourceMap.register("input.ign"), 4, 7);
+  let secondSpan: SourceSpan = SourceSpan::new(sourceMap.register("input.ign"), 12, 12);
 
-  let mut first: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::EXPECTED_TOKEN, "expected expression", SourceSpan::new("input.ign", 4, 7));
+  let mut first: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::EXPECTED_TOKEN, "expected expression", SourceSpan::new(sourceMap.register("input.ign"), 4, 7));
   first.addLabel(LabelKind::PRIMARY, firstSpan, "expression expected");
   first.addNote("parser stopped here");
 
-  let mut second: Diagnostic = Diagnostic::new(Severity::WARNING, DiagnosticCode::UNEXPECTED_TOKEN, "unused value", SourceSpan::new("input.ign", 12, 12));
+  let mut second: Diagnostic = Diagnostic::new(Severity::WARNING, DiagnosticCode::UNEXPECTED_TOKEN, "unused value", SourceSpan::new(sourceMap.register("input.ign"), 12, 12));
   second.addLabel(LabelKind::PRIMARY, secondSpan, "value is ignored");
   second.setHelp("remove the statement");
 
@@ -71,7 +72,7 @@ function diagnosticBagPreservesInsertionOrderAndStructuredFields(): void {
   Test::assertEq<Severity>(firstDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(firstDiagnostic.code, "I0001");
   Test::assertEq<str>(firstDiagnostic.messageText(), "expected expression");
-  Test::assertEq<str>(firstDiagnostic.primarySpan.filePath, "input.ign");
+  Test::assertEq<str>(sourceMap.path(firstDiagnostic.primarySpan.file), "input.ign");
 
   let firstLabel: &DiagnosticLabel = match (firstDiagnostic.labels.get(0)) {
     Option::SOME(value) -> value,
@@ -95,10 +96,11 @@ function diagnosticBagPreservesInsertionOrderAndStructuredFields(): void {
 
 @test
 function diagnosticTracksPrimarySecondaryLabelsAndOptionalHelp(): void {
-  let declarationSpan: SourceSpan = SourceSpan::new("module.ign", 2, 5);
-  let useSpan: SourceSpan = SourceSpan::new("module.ign", 16, 20);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let declarationSpan: SourceSpan = SourceSpan::new(sourceMap.register("module.ign"), 2, 5);
+  let useSpan: SourceSpan = SourceSpan::new(sourceMap.register("module.ign"), 16, 20);
 
-  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("module.ign", 16, 20));
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new(sourceMap.register("module.ign"), 16, 20));
 
   diagnostic.addLabel(LabelKind::PRIMARY, useSpan, "used here");
   diagnostic.addLabel(LabelKind::SECONDARY, declarationSpan, "declared here");

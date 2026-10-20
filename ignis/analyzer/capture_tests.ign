@@ -1,6 +1,6 @@
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -30,7 +30,8 @@ function captureCountErrors(bag: &DiagnosticBag): u64 {
 /// Run `source` through parse, analysis, HIR lowering and capture analysis,
 /// and return what capture analysis reported.
 function captureDiagnosticsFor(source: str): DiagnosticBag {
-  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "capture_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
@@ -128,7 +129,8 @@ function captureAcceptsRefCaptureThroughANoescapeParameter(): void {
 /// then answer whether the `let` binding named `bindingName` owns the closure
 /// environment its initializer produces, as `Hir::bindingOwnsClosureEnv` decides.
 function captureLetOwnsClosureEnv(source: str, bindingName: str): boolean {
-  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "capture_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
@@ -237,7 +239,8 @@ function captureBindingDoesNotOwnClosureMixedWithAnExistingBinding(): void {
 /// Run `source` through parse, analysis, HIR lowering and capture analysis,
 /// and count the closure literals whose environment escapes to the heap.
 function captureEscapingClosureCount(source: str): u64 {
-  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "capture_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
@@ -425,4 +428,112 @@ function captureRejectsRefCaptureInAClosureHeldByAClosureBodyEscapingClosure(): 
     DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
     "closure escapes its scope while capturing `y` by reference",
   );
+}
+
+/// Analyze and lower `source` as one more module into the shared stores, then
+/// run the per-module capture pass over what it added. Returns the first node
+/// id the module lowered.
+function captureAddModule(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  symbols: &mut Analyzer::SymbolTable,
+  hir: &mut Hir::HirStore,
+  fileName: str,
+  source: str,
+): u64 {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, fileName, source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(captureCountErrors(&parsed.parseDiagnostics), 0);
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(defStore, typeStore, symbols, &parsed.module);
+  Test::assertEq<u64>(captureCountErrors(&output.diagnostics), 0);
+
+  let nodeStart: u64 = hir.nodes.length();
+  Lowering::lowerModuleInto(defStore, typeStore, symbols, &parsed.module, &output, hir);
+
+  let captureBag: DiagnosticBag = Capture::populateModuleClosureCaptures(defStore, typeStore, symbols, hir, nodeStart);
+  Test::assertEq<u64>(captureCountErrors(&captureBag), 0);
+
+  return nodeStart;
+}
+
+/// The thunk names of the closure nodes `nodeStart..nodeEnd`, in node order.
+function captureThunkNamesIn(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  hir: &Hir::HirStore,
+  nodeStart: u64,
+  nodeEnd: u64,
+): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+  let mut nodeIndex: u64 = nodeStart;
+
+  while (nodeIndex < nodeEnd) {
+    if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+      if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+        let mut name: String = String::create("<none>");
+
+        if (let Option::SOME(thunkDef) = closureNode.thunkDef) {
+          if (let Option::SOME(definition) = defStore.get(thunkDef)) {
+            if (let Option::SOME(resolved) = symbols.resolve(definition.name())) {
+              name = String::create(resolved);
+            }
+          }
+        }
+
+        names.push(name);
+      }
+    }
+
+    nodeIndex += 1;
+  }
+
+  return names;
+}
+
+@test
+function moduleCapturePassNumbersOnlyItsOwnClosures(): void {
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut hir: Hir::HirStore = Hir::HirStore::init();
+
+  let firstStart: u64 = captureAddModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut hir,
+    "first.ign",
+    "function first(): i32 {\n  let f = (): i32 -> 1;\n  return f();\n}\n",
+  );
+  let secondStart: u64 = captureAddModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut hir,
+    "second.ign",
+    "function second(): i32 {\n  let g = (): i32 -> 2;\n  let h = (): i32 -> 3;\n  return g() + h();\n}\n",
+  );
+
+  let firstNames: Vector<String> = captureThunkNamesIn(&defStore, &symbols, &hir, firstStart, secondStart);
+  let secondNames: Vector<String> = captureThunkNamesIn(&defStore, &symbols, &hir, secondStart, hir.nodes.length());
+
+  // The first module's closure keeps the thunk its own pass gave it, and the
+  // second module's numbering restarts at zero.
+  Test::assertEq<u64>(firstNames.length(), 1);
+  Test::assertEq<u64>(secondNames.length(), 2);
+
+  if (let Option::SOME(name) = firstNames.get(0)) {
+    Test::assertEq<str>(name.toStr(), "__closure_thunk_0");
+  }
+
+  if (let Option::SOME(name) = secondNames.get(0)) {
+    Test::assertEq<str>(name.toStr(), "__closure_thunk_0");
+  }
+
+  if (let Option::SOME(name) = secondNames.get(1)) {
+    Test::assertEq<str>(name.toStr(), "__closure_thunk_1");
+  }
 }

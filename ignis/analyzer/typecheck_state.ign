@@ -15,9 +15,51 @@ export namespace Analyzer {
     /// The most elements an array range or a constant `@splat` may expand to.
     const ARRAY_EXPANSION_LIMIT: u64 = 65536;
 
+    /// Checked types by expression raw id, in recording order. An
+    /// expression may be recorded more than once; the latest record wins.
     record ExprTypeMap {
       public nodeIds: Vector<u32>;
       public typeIds: Vector<Analyzer::TypeId>;
+      /// Indexed by expression raw id: the position of its latest record
+      /// plus one, or zero when it has none.
+      latestPositions: Vector<u64>;
+
+      public static empty(): ExprTypeMap {
+        return ExprTypeMap {
+          nodeIds: Vector::new<u32>(),
+          typeIds: Vector::new<Analyzer::TypeId>(),
+          latestPositions: Vector::new<u64>(),
+        };
+      }
+
+      public insert(&mut self, nodeId: u32, typeId: Analyzer::TypeId): void {
+        let slot: u64 = nodeId as u64;
+
+        while (self.latestPositions.length() <= slot) {
+          self.latestPositions.push(0);
+        }
+
+        self.nodeIds.push(nodeId);
+        self.typeIds.push(typeId);
+        self.latestPositions.set(slot, self.nodeIds.length());
+      }
+
+      /// The type of the latest record for `nodeId`, or NONE when it has none.
+      public lookup(&self, nodeId: u32): Option<Analyzer::TypeId> {
+        let Option::SOME(position) = self.latestPositions.get(nodeId as u64) else {
+          return Option::NONE;
+        };
+
+        if (*position == 0) {
+          return Option::NONE;
+        }
+
+        let Option::SOME(typeId) = self.typeIds.get(*position - 1) else {
+          return Option::NONE;
+        };
+
+        return Option::SOME(*typeId);
+      }
     }
 
     /// Side map from a call expression's raw id to the overload the
@@ -141,6 +183,12 @@ export namespace Analyzer {
       /// the pipe enclosing it. A stack rather than a single slot because a pipe's right
       /// side may itself contain a pipe.
       public pipeValueTypes: Vector<Analyzer::TypeId>;
+      /// The diagnostics each inherited trait default produced, as
+      /// `[start, end)` ranges of `diagnostics`, with the note naming the type
+      /// that inherits it (`settleInheritedDiagnostics`).
+      public inheritedStarts: Vector<u64>;
+      public inheritedEnds: Vector<u64>;
+      public inheritedNotes: Vector<String>;
     }
 
     record AliasResolutionResult {
@@ -1017,8 +1065,7 @@ export namespace Analyzer {
       typeId: Analyzer::TypeId,
     ): void {
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
-      stateRef.exprTypes.nodeIds.push(exprId.raw());
-      stateRef.exprTypes.typeIds.push(typeId);
+      stateRef.exprTypes.insert(exprId.raw(), typeId);
     }
 
     function recordCallTarget(
@@ -1056,25 +1103,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       exprId: Ast::ExpressionId,
     ): Option<Analyzer::TypeId> {
-      let mut index: u64 = state.exprTypes.nodeIds.length();
-
-      while (index > 0) {
-        index -= 1;
-
-        let Option::SOME(nodeId) = state.exprTypes.nodeIds.get(index) else {
-          continue;
-        };
-
-        if (*nodeId == exprId.raw()) {
-          let Option::SOME(typeId) = state.exprTypes.typeIds.get(index) else {
-            return Option::NONE;
-          };
-
-          return Option::SOME(*typeId);
-        }
-      }
-
-      return Option::NONE;
+      return state.exprTypes.lookup(exprId.raw());
     }
 
     function pushScope(state: &mut Analyzer::Typecheck::TypecheckState): void {
@@ -3593,7 +3622,9 @@ export namespace Analyzer {
         // trait that declares it, and monomorphization re-dispatches the call
         // to the concrete implementation once the parameter is substituted.
         Analyzer::Type::Param(symbol) -> {
-          let boundTraits: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::traitBoundsFor(defStore, enclosing, symbol);
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+          let boundTraits: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::traitBoundsFor(defStore, enclosing, symbol, selfSymbol);
 
           let Option::SOME(traitDefId) = boundTraits.get(0) else {
             Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PATTERN_TYPE_MISMATCH, nonOwnerMessage);
@@ -3715,6 +3746,7 @@ export namespace Analyzer {
       defStore: &mut Analyzer::DefinitionStore,
       enclosing: Analyzer::DefinitionId,
       symbol: Analyzer::SymbolId,
+      selfSymbol: Analyzer::SymbolId,
     ): Vector<Analyzer::DefinitionId> {
       let scoped: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
       let mut boundTraits: Vector<Option<Analyzer::DefinitionId>> = Vector::new<Option<Analyzer::DefinitionId>>();
@@ -3738,6 +3770,16 @@ export namespace Analyzer {
       }
 
       let mut traits: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      // Inside a trait's own method, `Self` has no written bound: the trait that
+      // owns the method answers its methods.
+      if (boundTraits.length() == 0) {
+        if (let Option::SOME(traitDefId) = Analyzer::Typecheck::traitOwningSelf(defStore, enclosing, symbol, selfSymbol)) {
+          traits.push(traitDefId);
+          return traits;
+        }
+      }
+
       let mut boundIndex: u64 = 0;
 
       while (boundIndex < boundTraits.length()) {
@@ -3839,6 +3881,33 @@ export namespace Analyzer {
       );
 
       return true;
+    }
+
+    /// The trait whose method `enclosing` is, when `symbol` is that trait's
+    /// `Self`: a trait's own methods see `Self` as a parameter bounded by the
+    /// trait, which is how a default body is checked once for every
+    /// implementing type.
+    function traitOwningSelf(
+      defStore: &mut Analyzer::DefinitionStore,
+      enclosing: Analyzer::DefinitionId,
+      symbol: Analyzer::SymbolId,
+      selfSymbol: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      if (symbol.raw() != selfSymbol.raw()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(enclosing) else {
+        return Option::NONE;
+      };
+
+      let ownerDefId: Analyzer::DefinitionId = method.owner;
+
+      if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(ownerDefId)) {
+        return Option::SOME(ownerDefId);
+      }
+
+      return Option::NONE;
     }
 
     function copyStringVector(source: &Vector<String>): Vector<String> {

@@ -1,7 +1,7 @@
 import Vector from "std::vector";
 import Test from "std::test";
 
-import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -39,7 +39,8 @@ function dropScheduleDumpCountErrors(bag: &DiagnosticBag): u64 {
 /// drop schedules exactly as `--dump-drop-schedule` would for a single file
 /// named `test.ign`.
 function dumpDropSchedule(source: str): String {
-  let file: SourceFile = SourceFile::create("test.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "test.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(dropScheduleDumpCountErrors(&parsed.lexDiagnostics), 0);
@@ -85,7 +86,7 @@ function dumpDropSchedule(source: str): String {
   Test::assertEq<u64>(dropScheduleDumpCountErrors(&checked.diagnostics), 0);
 
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
-  files.push(SourceFile::create("test.ign", source));
+  files.push(SourceFile::create(&mut sourceMap, "test.ign", source));
 
   return Hir::DropScheduleDump::render(&hir, &defStore, &symbols, &checked.dropSchedules, &files, "");
 }

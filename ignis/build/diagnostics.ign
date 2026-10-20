@@ -1,11 +1,22 @@
 import Path from "std::path";
 import String from "std::string";
 
-import Diagnostic, DiagnosticBag, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
+import
+  Diagnostic,
+  DiagnosticBag,
+  LabelKind,
+  Severity,
+  SourceMap,
+  SourceSpan,
+from "@compiler::diagnostics";
 
-function manifestPathSpan(path: &Path::PathBuf, start: u64, end: u64): SourceSpan {
-  let pathText: String = path.toString();
-  return SourceSpan::new(pathText.toStr(), start, end);
+function manifestPathSpan(
+  sourceMap: &mut SourceMap,
+  path: &Path::PathBuf,
+  start: u64,
+  end: u64
+): SourceSpan {
+  return SourceSpan::new(sourceMap.register(path.asStr()), start, end);
 }
 
 function buildDiagSingleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
@@ -23,6 +34,7 @@ export namespace BuildDiagnosticCode {
 
 export namespace BuildDiagnostics {
   function stdManifestMissing(
+    sourceMap: &mut SourceMap,
     configPath: &Path::PathBuf,
     stdRoot: Option<Path::PathBuf>
   ): DiagnosticBag {
@@ -30,7 +42,7 @@ export namespace BuildDiagnostics {
       Severity::ERROR,
       BuildDiagnosticCode::MISSING_STD_MANIFEST,
       "std is enabled but std/manifest.toml could not be resolved",
-      manifestPathSpan(configPath, 0, 0),
+      manifestPathSpan(sourceMap, configPath, 0, 0),
     );
     diagnostic.setHelp("set 'ignis.std_path' to a std tree that contains manifest.toml");
 
@@ -47,6 +59,7 @@ export namespace BuildDiagnostics {
   /// for why, and for the wording this mirrors byte-for-byte with the host's
   /// `ignis_driver::project::unknown_keys`.
   function unknownKey(
+    sourceMap: &mut SourceMap,
     path: &Path::PathBuf,
     tableLabel: str,
     key: str,
@@ -63,11 +76,12 @@ export namespace BuildDiagnostics {
       Severity::WARNING,
       BuildDiagnosticCode::UNKNOWN_KEY,
       message.toStr(),
-      manifestPathSpan(path, start, end),
+      manifestPathSpan(sourceMap, path, start, end),
     );
   }
 
   function malformedStdManifest(
+    sourceMap: &mut SourceMap,
     path: &Path::PathBuf,
     message: str,
     start: u64,
@@ -77,7 +91,7 @@ export namespace BuildDiagnostics {
       Severity::ERROR,
       BuildDiagnosticCode::MALFORMED_STD_MANIFEST,
       message,
-      manifestPathSpan(path, start, end),
+      manifestPathSpan(sourceMap, path, start, end),
     );
 
     diagnostic.setHelp("fix the TOML syntax before loading the std manifest");
@@ -86,6 +100,7 @@ export namespace BuildDiagnostics {
   }
 
   function invalidStdManifestFieldType(
+    sourceMap: &mut SourceMap,
     path: &Path::PathBuf,
     fieldPath: str,
     expected: str,
@@ -96,10 +111,10 @@ export namespace BuildDiagnostics {
       Severity::ERROR,
       BuildDiagnosticCode::INVALID_STD_MANIFEST_FIELD_TYPE,
       String::create("std manifest field '").concat(fieldPath).concat("' must be ").concat(expected).toStr(),
-      manifestPathSpan(path, start, end),
+      manifestPathSpan(sourceMap, path, start, end),
     );
 
-    diagnostic.addLabel(LabelKind::PRIMARY, manifestPathSpan(path, start, end), "unexpected TOML value kind");
+    diagnostic.addLabel(LabelKind::PRIMARY, manifestPathSpan(sourceMap, path, start, end), "unexpected TOML value kind");
 
     return buildDiagSingleDiagnostic(diagnostic);
   }

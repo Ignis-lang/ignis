@@ -14,7 +14,7 @@ import
   ConfigDiagnosticCode,
   ResolvedProject,
 from "@compiler::config";
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, SourceMap from "@compiler::diagnostics";
 
 function fixturePath(relativePath: str): Path::PathBuf {
   match (Env::currentDir()) {
@@ -99,9 +99,10 @@ function assertEndsWith(value: &String, suffix: str): void {
 
 @test
 function projectLoaderFindsNearestRootAndReadsCurrentWorkspaceConfig(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("ignis/parser");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> {
       assertSomeString(project.packageNameText(), "ignis");
       assertSomeString(project.packageVersionText(), "0.1.0");
@@ -138,9 +139,10 @@ function projectLoaderFindsNearestRootAndReadsCurrentWorkspaceConfig(): void {
 
 @test
 function projectLoaderSupportsFixtureAliasExtraction(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/project_mode/nested/deeper");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> {
       assertSomeString(project.packageNameText(), "fixture-project");
       assertSomeString(project.packageVersionText(), "0.2.0");
@@ -164,20 +166,23 @@ function projectLoaderSupportsFixtureAliasExtraction(): void {
 
 @test
 function projectLoaderReportsMalformedToml(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/malformed_toml/ignis.toml");
-  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::MALFORMED_TOML);
+  expectSingleDiagnosticCode(Config::loadProjectFile(&mut sourceMap, &configPath), ConfigDiagnosticCode::MALFORMED_TOML);
 }
 
 @test
 function projectLoaderReportsInvalidFieldTypes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/invalid_types/ignis.toml");
-  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
+  expectSingleDiagnosticCode(Config::loadProjectFile(&mut sourceMap, &configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
 }
 
 @test
 function projectLoaderReportsMissingEntryPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/missing_entry/ignis.toml");
-  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::PATH_NOT_FOUND);
+  expectSingleDiagnosticCode(Config::loadProjectFile(&mut sourceMap, &configPath), ConfigDiagnosticCode::PATH_NOT_FOUND);
 }
 
 /// Regression guard for a known defect, found while building gate G7.
@@ -205,6 +210,7 @@ function projectLoaderReportsMissingEntryPath(): void {
 /// instead of failing a suite that ran somewhere unexpected.
 @test
 function projectLoaderIgnoresANamedSourceFileIsAKnownDefect(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let namedFile: Path::PathBuf = fixturePath("test_cases/e2e/ok/drop_basic.ign");
 
   if (!Fs::exists(namedFile.asStr())) {
@@ -219,7 +225,7 @@ function projectLoaderIgnoresANamedSourceFileIsAKnownDefect(): void {
   let configText: String = configPath.toString();
   assertEndsWith(&configText, "/ignis.toml");
 
-  match (Config::loadProject(&namedFile)) {
+  match (Config::loadProject(&mut sourceMap, &namedFile)) {
     Result::OK(project) -> {
       // The defect: the project's own entry wins over the file that was named.
       let entryText: String = project.entryText();
@@ -234,6 +240,7 @@ function projectLoaderIgnoresANamedSourceFileIsAKnownDefect(): void {
 /// shared byte-for-byte with the host's `ignis_driver::project::unknown_keys`.
 @test
 function unknownProjectKeyWarnsWithSuggestion(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[ignis]\nstd_pth = \"../std\"\n"
   );
@@ -246,7 +253,7 @@ function unknownProjectKeyWarnsWithSuggestion(): void {
   };
 
   let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&mut sourceMap, &document, &configPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -264,6 +271,7 @@ function unknownProjectKeyWarnsWithSuggestion(): void {
 /// A key with no known key within edit distance 2 warns without a suggestion.
 @test
 function unknownProjectKeyWarnsWithoutSuggestionWhenNothingIsClose(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\ntotally_unrelated_garbage = 1\n"
   );
@@ -276,7 +284,7 @@ function unknownProjectKeyWarnsWithoutSuggestionWhenNothingIsClose(): void {
   };
 
   let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&mut sourceMap, &document, &configPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -290,6 +298,7 @@ function unknownProjectKeyWarnsWithoutSuggestionWhenNothingIsClose(): void {
 /// An unrecognized top-level table warns too, labeled "top-level".
 @test
 function unknownTopLevelTableWarns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[buld]\nopt_level = 2\n");
   let document: TomlDocument = match (Toml::parse(&source)) {
     Result::OK(value) -> value,
@@ -300,7 +309,7 @@ function unknownTopLevelTableWarns(): void {
   };
 
   let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&mut sourceMap, &document, &configPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -315,6 +324,7 @@ function unknownTopLevelTableWarns(): void {
 /// `aliases` (a free-form map) is never checked.
 @test
 function everyKnownProjectKeyStaysSilent(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "[package]\nname = \"t\"\nversion = \"0.1.0\"\nauthors = [\"me\"]\ndescription = \"d\"\nkeywords = [\"k\"]\nlicense = \"MIT\"\nrepository = \"https://example.com\"\n\n[ignis]\nstd = true\nstd_path = \"../std\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 2\ndebug = true\ntarget = \"c\"\ntarget_triple = \"x86_64-unknown-linux-gnu\"\nknown_features = [\"a\"]\ndefault_features = [\"a\"]\ncc = \"gcc\"\nlinker = \"mold\"\ncflags = [\"-Wall\"]\nemit = [\"c\"]\n\n[test]\nfixtures = [\"fixtures\"]\n\n[aliases]\nmylib = \"libs/mylib\"\n"
   );
@@ -327,7 +337,7 @@ function everyKnownProjectKeyStaysSilent(): void {
   };
 
   let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&mut sourceMap, &document, &configPath);
 
   Test::assertEq<u64>(warnings.length(), 0);
 }
@@ -340,6 +350,7 @@ function everyKnownProjectKeyStaysSilent(): void {
 /// `build`'s own. Warnings must be sorted by position after the full walk.
 @test
 function unknownProjectKeyWarningsSortByPositionAcrossAReopenedTable(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nzebra_unknown = 1\n\n[package.extra]\nx = 1\n"
   );
@@ -352,7 +363,7 @@ function unknownProjectKeyWarningsSortByPositionAcrossAReopenedTable(): void {
   };
 
   let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&mut sourceMap, &document, &configPath);
 
   Test::assertEq<u64>(warnings.length(), 2);
 
@@ -373,9 +384,10 @@ function unknownProjectKeyWarningsSortByPositionAcrossAReopenedTable(): void {
 /// root and its manifest resolve from that path.
 @test
 function projectLoaderResolvesAFreestandingUserStdPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/freestanding/user_std");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> {
       Test::assert(!project.stdEnabled);
 
@@ -399,9 +411,10 @@ function projectLoaderResolvesAFreestandingUserStdPath(): void {
 /// standard library is never consulted.
 @test
 function projectLoaderLeavesTheFreestandingStdRootUnsetWithoutAStdPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/freestanding/no_std");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> {
       Test::assert(!project.stdEnabled);
       Test::assert(project.stdRootText().isNone());
@@ -415,16 +428,17 @@ function projectLoaderLeavesTheFreestandingStdRootUnsetWithoutAStdPath(): void {
 /// selection to the default rule.
 @test
 function projectLoaderReadsBuildLinker(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/linker_project");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> assertSomeString(project.linkerText(), "bfd"),
     Result::ERROR(_) -> Test::fail(),
   };
 
   let withoutLinker: Path::PathBuf = fixturePath("test_cases/selfhost/build/build_profile");
 
-  match (Config::loadProject(&withoutLinker)) {
+  match (Config::loadProject(&mut sourceMap, &withoutLinker)) {
     Result::OK(project) -> Test::assert(project.linkerText().isNone()),
     Result::ERROR(_) -> Test::fail(),
   };
@@ -433,6 +447,7 @@ function projectLoaderReadsBuildLinker(): void {
 /// `linker` is a known `[build]` key: it raises no unknown-key warning.
 @test
 function buildLinkerIsAKnownProjectKey(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nlinker = \"lld\"\n"
   );
@@ -445,7 +460,7 @@ function buildLinkerIsAKnownProjectKey(): void {
   };
 
   let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&mut sourceMap, &document, &configPath);
 
   Test::assertEq<u64>(warnings.length(), 0);
 }
@@ -454,16 +469,17 @@ function buildLinkerIsAKnownProjectKey(): void {
 /// std in its own unit.
 @test
 function projectLoaderReadsBuildStdArchive(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/std_archive");
 
-  match (Config::loadProject(&start)) {
+  match (Config::loadProject(&mut sourceMap, &start)) {
     Result::OK(project) -> Test::assert(project.stdArchive),
     Result::ERROR(_) -> Test::fail(),
   };
 
   let without: Path::PathBuf = fixturePath("test_cases/selfhost/build/build_profile");
 
-  match (Config::loadProject(&without)) {
+  match (Config::loadProject(&mut sourceMap, &without)) {
     Result::OK(project) -> Test::assert(!project.stdArchive),
     Result::ERROR(_) -> Test::fail(),
   };
@@ -472,6 +488,7 @@ function projectLoaderReadsBuildStdArchive(): void {
 /// `std_archive` is a known `[build]` key: it raises no unknown-key warning.
 @test
 function buildStdArchiveIsAKnownProjectKey(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nstd_archive = true\n"
   );
@@ -484,7 +501,7 @@ function buildStdArchiveIsAKnownProjectKey(): void {
   };
 
   let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&mut sourceMap, &document, &configPath);
 
   Test::assertEq<u64>(warnings.length(), 0);
 }

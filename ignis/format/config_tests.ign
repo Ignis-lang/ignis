@@ -5,7 +5,7 @@ import String from "std::string";
 import Test from "std::test";
 import Time from "std::time";
 
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, SourceMap from "@compiler::diagnostics";
 
 import Format, FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./config";
 import FormatConfigDiagnosticCode from "./diagnostics";
@@ -78,6 +78,7 @@ function expectSingleDiagnosticCode(
 
 @test
 function formatConfigLoadsBoundedDefaultsWithoutProjectFiles(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = uniqueTempDir("defaults");
 
   let paths: FormatterConfigPaths = FormatterConfigPaths {
@@ -88,7 +89,7 @@ function formatConfigLoadsBoundedDefaultsWithoutProjectFiles(): void {
   };
 
   let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
-  let Result::OK(config) = Format::Config::load(&paths, &defaultOverrides) else {
+  let Result::OK(config) = Format::Config::load(&mut sourceMap, &paths, &defaultOverrides) else {
     Test::fail();
     return;
   };
@@ -101,6 +102,7 @@ function formatConfigLoadsBoundedDefaultsWithoutProjectFiles(): void {
 
 @test
 function formatConfigResolvesBridgeFileAndCliPrecedence(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = uniqueTempDir("precedence");
   writeFile(
     &root,
@@ -123,7 +125,7 @@ function formatConfigResolvesBridgeFileAndCliPrecedence(): void {
     sortImports: Option::NONE,
   };
 
-  let Result::OK(config) = Format::Config::load(&paths, &overrides) else {
+  let Result::OK(config) = Format::Config::load(&mut sourceMap, &paths, &overrides) else {
     Test::fail();
     return;
   };
@@ -136,6 +138,7 @@ function formatConfigResolvesBridgeFileAndCliPrecedence(): void {
 
 @test
 function formatConfigDedicatedConfigCanEnableTabsWithoutCliOverride(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = uniqueTempDir("tabs-dedicated");
   writeFile(&root, "ignisfmt.toml", "indent_width = 4\nuse_tabs = true\n");
 
@@ -147,7 +150,7 @@ function formatConfigDedicatedConfigCanEnableTabsWithoutCliOverride(): void {
   };
 
   let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
-  let Result::OK(config) = Format::Config::load(&paths, &defaultOverrides) else {
+  let Result::OK(config) = Format::Config::load(&mut sourceMap, &paths, &defaultOverrides) else {
     Test::fail();
     return;
   };
@@ -160,6 +163,7 @@ function formatConfigDedicatedConfigCanEnableTabsWithoutCliOverride(): void {
 
 @test
 function formatConfigRejectsUnknownFormatterKeysInDedicatedConfig(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = uniqueTempDir("unknown-keys");
   writeFile(&root, "ignisfmt.toml", "indent_width = 2\ntrailing_commas = true\n");
 
@@ -171,7 +175,7 @@ function formatConfigRejectsUnknownFormatterKeysInDedicatedConfig(): void {
   };
 
   let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
-  let result: Result<FormatterConfig, DiagnosticBag> = Format::Config::load(&paths, &defaultOverrides);
+  let result: Result<FormatterConfig, DiagnosticBag> = Format::Config::load(&mut sourceMap, &paths, &defaultOverrides);
   expectSingleDiagnosticCode(result, FormatConfigDiagnosticCode::UNKNOWN_KEY);
 }
 
@@ -183,6 +187,7 @@ function formatConfigSortImportsDefaultsToFalse(): void {
 
 @test
 function formatConfigSortImportsIsAcceptedInDedicatedConfig(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let root: Path::PathBuf = uniqueTempDir("sort-imports-config");
   writeFile(&root, "ignisfmt.toml", "sort_imports = true\n");
 
@@ -194,7 +199,7 @@ function formatConfigSortImportsIsAcceptedInDedicatedConfig(): void {
   };
 
   let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
-  let Result::OK(config) = Format::Config::load(&paths, &defaultOverrides) else {
+  let Result::OK(config) = Format::Config::load(&mut sourceMap, &paths, &defaultOverrides) else {
     Test::fail();
     return;
   };

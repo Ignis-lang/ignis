@@ -10,6 +10,7 @@ import
   DiagnosticBag,
   DiagnosticFixtureParser,
   SourceFile,
+  SourceMap,
 from "@compiler::diagnostics";
 import CompileFlags, ParseOutput, Parser from "@compiler::parser";
 
@@ -95,7 +96,11 @@ function featureNamesIn(sourceText: &String): Vector<String> {
 /// rather than asserted: the same text is parsed again with every feature it
 /// names enabled, and a module that then produces roots was fully gated, not
 /// empty. That is the zero-cost guarantee working, not a parser failure.
-function isFullyFeatureGatedModule(path: str, sourceText: &String): boolean {
+function isFullyFeatureGatedModule(
+  sourceMap: &mut SourceMap,
+  path: str,
+  sourceText: &String
+): boolean {
   let names: Vector<String> = featureNamesIn(sourceText);
 
   if (names.length() == 0) {
@@ -105,14 +110,14 @@ function isFullyFeatureGatedModule(path: str, sourceText: &String): boolean {
   let mut flags: CompileFlags = CompileFlags::hostDefault();
   flags.features = names;
 
-  let source: SourceFile = SourceFile::create(path, sourceText.toStr());
+  let source: SourceFile = SourceFile::create(sourceMap, path, sourceText.toStr());
   let output: ParseOutput = Parser::parseFileWithFlags(&source, &flags);
 
   return output.module.roots.length() > 0;
 }
 
-function parseText(path: str, sourceText: str): ParseResult {
-  let source: SourceFile = SourceFile::create(path, sourceText);
+function parseText(sourceMap: &mut SourceMap, path: str, sourceText: str): ParseResult {
+  let source: SourceFile = SourceFile::create(sourceMap, path, sourceText);
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
@@ -123,9 +128,9 @@ function parseText(path: str, sourceText: str): ParseResult {
   };
 }
 
-function parseFixture(path: str): ParseResult {
+function parseFixture(sourceMap: &mut SourceMap, path: str): ParseResult {
   let text: String = readCorpusFixture(path);
-  return parseText(path, text.toStr());
+  return parseText(sourceMap, path, text.toStr());
 }
 
 function isIgnFile(path: &String): boolean {
@@ -239,7 +244,10 @@ function formatterMirrorCorpusPaths(): Vector<String> {
   return paths;
 }
 
-function renderStructuredDiagnostics(diagnostics: &DiagnosticBag): String {
+function renderStructuredDiagnostics(
+  sourceMap: &mut SourceMap,
+  diagnostics: &DiagnosticBag
+): String {
   let mut rendered: String = String::new();
   let mut diagnosticIndex: u64 = 0;
 
@@ -257,7 +265,7 @@ function renderStructuredDiagnostics(diagnostics: &DiagnosticBag): String {
     rendered.pushStr(diagnostic.messageText());
     rendered.pushStr("\n");
     rendered.pushStr("  at ");
-    rendered.pushStr(diagnostic.primarySpan.filePath);
+    rendered.pushStr(sourceMap.path(diagnostic.primarySpan.file));
     rendered.pushStr(":");
     rendered.pushStr(String::create(diagnostic.primarySpan.start).toStr());
     rendered.pushStr("-");
@@ -276,7 +284,7 @@ function renderStructuredDiagnostics(diagnostics: &DiagnosticBag): String {
       rendered.pushStr("): ");
       rendered.pushStr(label.messageText());
       rendered.pushStr(" at ");
-      rendered.pushStr(label.span.filePath);
+      rendered.pushStr(sourceMap.path(label.span.file));
       rendered.pushStr(":");
       rendered.pushStr(String::create(label.span.start).toStr());
       rendered.pushStr("-");
@@ -316,20 +324,20 @@ function renderStructuredDiagnostics(diagnostics: &DiagnosticBag): String {
   return rendered;
 }
 
-function assertParsesWithoutDiagnostics(path: str): void {
+function assertParsesWithoutDiagnostics(sourceMap: &mut SourceMap, path: str): void {
   let sourceText: String = readCorpusFixture(path);
-  let result: ParseResult = parseText(path, sourceText.toStr());
+  let result: ParseResult = parseText(sourceMap, path, sourceText.toStr());
 
   if (result.diagnostics.length() != 0) {
     let mut message: String = String::create("expected parser corpus file to parse without diagnostics: ");
     message.pushStr(path);
     message.pushStr("\n");
-    message.pushStr(renderStructuredDiagnostics(&result.diagnostics).toStr());
+    message.pushStr(renderStructuredDiagnostics(sourceMap, &result.diagnostics).toStr());
     Io::eprintln(message);
     Test::fail();
   }
 
-  if (result.module.roots.length() == 0 && !isFullyFeatureGatedModule(path, &sourceText)) {
+  if (result.module.roots.length() == 0 && !isFullyFeatureGatedModule(sourceMap, path, &sourceText)) {
     let mut message: String = String::create("expected parser corpus file to produce roots: ");
     message.pushStr(path);
     Io::eprintln(message);
@@ -337,8 +345,8 @@ function assertParsesWithoutDiagnostics(path: str): void {
   }
 }
 
-function assertParsesWithoutDiagnosticsAndIsNotSkipped(path: str): void {
-  assertParsesWithoutDiagnostics(path);
+function assertParsesWithoutDiagnosticsAndIsNotSkipped(sourceMap: &mut SourceMap, path: str): void {
+  assertParsesWithoutDiagnostics(sourceMap, path);
 
   let ownedPath: String = String::create(path);
 
@@ -355,7 +363,10 @@ function assertParsesWithoutDiagnosticsAndIsNotSkipped(path: str): void {
   };
 }
 
-function assertCorpusParsesWithoutDiagnostics(paths: &Vector<String>): void {
+function assertCorpusParsesWithoutDiagnostics(
+  sourceMap: &mut SourceMap,
+  paths: &Vector<String>
+): void {
   let mut index: u64 = 0;
 
   while (index < paths.length()) {
@@ -366,37 +377,37 @@ function assertCorpusParsesWithoutDiagnostics(paths: &Vector<String>): void {
 
     match (skipReasonForPath(path)) {
       Option::SOME(_) -> {},
-      Option::NONE -> assertParsesWithoutDiagnostics(path.toStr()),
+      Option::NONE -> assertParsesWithoutDiagnostics(sourceMap, path.toStr()),
     };
 
     index += 1;
   }
 }
 
-function renderParserFixtureAst(rootPath: str): String {
+function renderParserFixtureAst(sourceMap: &mut SourceMap, rootPath: str): String {
   let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture(rootPath);
   let sourceText: String = match (fixture.input) {
     Option::SOME(value) -> value,
     Option::NONE -> @panic("missing parser AST fixture input"),
   };
-  let result: ParseResult = parseText(String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
+  let result: ParseResult = parseText(sourceMap, String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
-  return Ast::Serializer::render(&result.module);
+  return Ast::Serializer::render(&*sourceMap, &result.module);
 }
 
-function renderParserFixtureDiagnostics(rootPath: str): String {
+function renderParserFixtureDiagnostics(sourceMap: &mut SourceMap, rootPath: str): String {
   let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture(rootPath);
   let sourceText: String = match (fixture.input) {
     Option::SOME(value) -> value,
     Option::NONE -> @panic("missing parser diagnostic fixture input"),
   };
-  let result: ParseResult = parseText(String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
+  let result: ParseResult = parseText(sourceMap, String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
 
-  return renderStructuredDiagnostics(&result.diagnostics);
+  return renderStructuredDiagnostics(sourceMap, &result.diagnostics);
 }
 
-function assertParserDiagnosticsFixtureMatches(rootPath: str): void {
+function assertParserDiagnosticsFixtureMatches(sourceMap: &mut SourceMap, rootPath: str): void {
   let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture(rootPath);
   let sourceText: String = match (fixture.input) {
     Option::SOME(value) -> value,
@@ -406,8 +417,8 @@ function assertParserDiagnosticsFixtureMatches(rootPath: str): void {
     Option::SOME(value) -> value,
     Option::NONE -> @panic("missing parser compatibility diagnostics fixture"),
   };
-  let expectedDiagnostics = DiagnosticFixtureParser::parse(expectedDiagnosticsText.toStr());
-  let result: ParseResult = parseText(String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
+  let expectedDiagnostics = DiagnosticFixtureParser::parse(expectedDiagnosticsText.toStr(), sourceMap);
+  let result: ParseResult = parseText(sourceMap, String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
 
   if (!DiagnosticFixtureParser::compare(&expectedDiagnostics, &result.diagnostics)) {
     let mut message: String = String::create("parser compatibility mismatch for ");
@@ -415,13 +426,16 @@ function assertParserDiagnosticsFixtureMatches(rootPath: str): void {
     message.pushStr("\nexpected:\n");
     message.pushStr(expectedDiagnosticsText.toStr());
     message.pushStr("\nactual:\n");
-    message.pushStr(renderStructuredDiagnostics(&result.diagnostics).toStr());
+    message.pushStr(renderStructuredDiagnostics(sourceMap, &result.diagnostics).toStr());
     Io::eprintln(message);
     Test::fail();
   }
 }
 
-function assertDiagnosticFixtureCorpusMatches(rootPaths: &Vector<String>): void {
+function assertDiagnosticFixtureCorpusMatches(
+  sourceMap: &mut SourceMap,
+  rootPaths: &Vector<String>
+): void {
   let mut index: u64 = 0;
 
   while (index < rootPaths.length()) {
@@ -430,7 +444,7 @@ function assertDiagnosticFixtureCorpusMatches(rootPaths: &Vector<String>): void 
       continue;
     };
 
-    assertParserDiagnosticsFixtureMatches(rootPath.toStr());
+    assertParserDiagnosticsFixtureMatches(sourceMap, rootPath.toStr());
     index += 1;
   }
 }
@@ -505,135 +519,157 @@ function assertTextContains(text: &String, needle: str): void {
 
 @test
 function parserCorpusParsesSupportedStdSubsetWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = supportedStdSubset();
   Test::assertEq<u64>(paths.length(), 2);
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserCorpusRemovesStaleStdReexportSkips(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/collections/mod.ign");
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/format/mod.ign");
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/libc/mod.ign");
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/serializer/mod.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/collections/mod.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/format/mod.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/libc/mod.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/serializer/mod.ign");
 }
 
 @test
 function parserCorpusRemovesStaleHexLiteralSkipFromStdHash(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/hash/mod.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/hash/mod.ign");
 }
 
 @test
 function parserCorpusRemovesStaleUtf8CharSkip(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/string/tests.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/string/tests.ign");
 }
 
 @test
 function parserCorpusRemovesTomlModuleSkip(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/toml/mod.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/toml/mod.ign");
 }
 
 @test
 function parserCorpusRemovesIoErrorSkip(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/io/error.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "std/io/error.ign");
 }
 
 @test
 function parserCorpusRemovesStaleEnumMethodSkip(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("example/ignis/src/token/token.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "example/ignis/src/token/token.ign");
 }
 
 @test
 function parserCorpusRemovesStaleForOfSkips(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/for_of/fixed_copy_by_value.ign");
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/for_of/fixed_by_ref.ign");
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/for_of/not_a_vector.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "test_cases/analyzer/for_of/fixed_copy_by_value.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "test_cases/analyzer/for_of/fixed_by_ref.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "test_cases/analyzer/for_of/not_a_vector.ign");
 }
 
 @test
 function parserCorpusRemovesStaleGenericTypeParamConstructorSkip(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/generics/errors/type_param_with_args.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "test_cases/analyzer/generics/errors/type_param_with_args.ign");
 }
 
 @test
 function parserCorpusParsesSupportedExampleSubsetWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = supportedExampleSubset();
   Test::assertEq<u64>(paths.length(), 3);
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserCorpusRemovesAllocatorExampleSkip(): void {
-  assertParsesWithoutDiagnosticsAndIsNotSkipped("example/allocator/src/main.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParsesWithoutDiagnosticsAndIsNotSkipped(&mut sourceMap, "example/allocator/src/main.ign");
 }
 
 @test
 function parserCorpusParsesSupportedAnalyzerSubsetWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = supportedAnalyzerSubset();
   Test::assertEq<u64>(paths.length(), 4);
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserCorpusParsesSupportedFormatterMirrorSubsetWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = supportedFormatterMirrorSubset();
   Test::assertEq<u64>(paths.length(), 1);
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserCorpusParsesAnalyzerCorpusWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = collectIgnFiles("test_cases/analyzer");
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserCorpusParsesStdCorpusWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = collectIgnFiles("std");
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserCorpusParsesExampleCorpusWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = collectIgnFiles("example");
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserCorpusParsesFormatterMirrorCorpusWithoutDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let paths: Vector<String> = formatterMirrorCorpusPaths();
-  assertCorpusParsesWithoutDiagnostics(&paths);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &paths);
 }
 
 @test
 function parserSpanFilePathsSurviveTheParseHelper(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let result: ParseResult = parseText(
+    &mut sourceMap,
     "fixtures/parser_span_retention.ign",
     "record Packet { public value: i32; }\nfunction main(): void {}\n"
   );
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
 
-  let rendered: String = Ast::Serializer::render(&result.module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &result.module);
   assertTextContains(&rendered, "Record span=fixtures/parser_span_retention.ign:");
   assertTextContains(&rendered, "Function span=fixtures/parser_span_retention.ign:");
 }
 
 @test
 function parserAstSnapshotForSelfhostFixture(): void {
-  let rendered: String = renderParserFixtureAst("test_cases/selfhost/parser/ast_core");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let rendered: String = renderParserFixtureAst(&mut sourceMap, "test_cases/selfhost/parser/ast_core");
   Test::assertSnapshot("parser-ast-core", rendered.toStr());
 }
 
 @test
 function parserDiagnosticSnapshotForRecoveryFixture(): void {
-  let rendered: String = renderParserFixtureDiagnostics("test_cases/selfhost/parser/diagnostic_recovery");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let rendered: String = renderParserFixtureDiagnostics(&mut sourceMap, "test_cases/selfhost/parser/diagnostic_recovery");
   Test::assertSnapshot("parser-diagnostic-recovery", rendered.toStr());
 }
 
 @test
 function parserDiagnosticCompatibilityHarnessMatchesFixture(): void {
-  assertParserDiagnosticsFixtureMatches("test_cases/selfhost/parser/diagnostic_recovery");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  assertParserDiagnosticsFixtureMatches(&mut sourceMap, "test_cases/selfhost/parser/diagnostic_recovery");
 }
 
 @test
@@ -652,19 +688,21 @@ function parserCompletenessMatrixExistsAndTracksCurrentCorpusGates(): void {
 
 @test
 function parserMalformedFixtureCorpusMatchesDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoots: Vector<String> = collectDiagnosticFixtureRoots("test_cases/selfhost/parser/malformed");
   Test::assertEq<u64>(fixtureRoots.length(), 2);
-  assertDiagnosticFixtureCorpusMatches(&fixtureRoots);
+  assertDiagnosticFixtureCorpusMatches(&mut sourceMap, &fixtureRoots);
 }
 
 @test
 function parserTestCasesCorpusIsExercised(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let validPaths: Vector<String> = collectIgnFiles("test_cases/parser/valid");
   let diagnosticRoots: Vector<String> = collectDiagnosticFixtureRoots("test_cases/parser/diagnostic");
 
   Test::assertEq<u64>(validPaths.length(), 4);
   Test::assertEq<u64>(diagnosticRoots.length(), 1);
 
-  assertCorpusParsesWithoutDiagnostics(&validPaths);
-  assertDiagnosticFixtureCorpusMatches(&diagnosticRoots);
+  assertCorpusParsesWithoutDiagnostics(&mut sourceMap, &validPaths);
+  assertDiagnosticFixtureCorpusMatches(&mut sourceMap, &diagnosticRoots);
 }

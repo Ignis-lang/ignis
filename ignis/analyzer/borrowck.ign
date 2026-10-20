@@ -1239,7 +1239,7 @@ export namespace Borrowck {
     /// `isLoop` marks the loop marker scope that `break` and `continue`
     /// unwind to.
     public pushScope(&mut self, blockRaw: u32, hasBlock: boolean, isLoop: boolean): void {
-      self.pushScopeEnding(blockRaw, hasBlock, isLoop, SourceSpan::new("", 0, 0));
+      self.pushScopeEnding(blockRaw, hasBlock, isLoop, SourceSpan::detached(0, 0));
     }
 
     /// `pushScope` with the span the scope closes at, which only the callers
@@ -1434,7 +1434,7 @@ export namespace Borrowck {
     /// before popping.
     public popScopeReleasing(&mut self): void {
       let closingDepth: u64 = self.ownedStarts.length();
-      let mut closingSpan: SourceSpan = SourceSpan::new("", 0, 0);
+      let mut closingSpan: SourceSpan = SourceSpan::detached(0, 0);
 
       if (let Option::SOME(endSpan) = self.scopeEndSpans.pop()) {
         closingSpan = endSpan;
@@ -7310,13 +7310,13 @@ export namespace Borrowck {
   /// which is what a scope-end event is attributed to.
   function closingSpanOf(hir: &Hir::HirStore, nodeId: Hir::HirId): SourceSpan {
     let Option::SOME(node) = hir.get(nodeId) else {
-      return SourceSpan::new("", 0, 0);
+      return SourceSpan::detached(0, 0);
     };
 
     let span: SourceSpan = node.span;
 
     if (span.end > span.start) {
-      return SourceSpan::new(span.filePath, span.end - 1, span.end);
+      return SourceSpan::new(span.file, span.end - 1, span.end);
     }
 
     return span;
@@ -9214,6 +9214,198 @@ export namespace Borrowck {
   /// `checkModule` with the ownership report turned on. Kept separate so the
   /// ordinary entry point stays a four-argument call and so the walk pays
   /// nothing for a report nobody asked for.
+  /// The diagnostics each checked copy of a trait default produced, as
+  /// `[start, end)` ranges of the module's bag. `keys` names the default
+  /// itself, so the copies of one default can be counted.
+  record InheritedRanges {
+    public starts: Vector<u64>;
+    public ends: Vector<u64>;
+    public notes: Vector<String>;
+    public keys: Vector<String>;
+  }
+
+  function recordInheritedRange(
+    ranges: &mut Borrowck::InheritedRanges,
+    start: u64,
+    end: u64,
+    note: &String,
+  ): void {
+    let marker: String = String::create("`, as inherited by");
+    let key: String = match (note.indexOf(&marker)) {
+      Option::SOME(position) -> note.substringBytes(0, position),
+      Option::NONE -> note.clone(),
+    };
+
+    let mut rangesRef: &mut Borrowck::InheritedRanges = ranges;
+    rangesRef.starts.push(start);
+    rangesRef.ends.push(end);
+    rangesRef.notes.push(note.clone());
+    rangesRef.keys.push(key);
+  }
+
+  /// `note` with the inheriting type written as the instance a monomorphized
+  /// `itemId` belongs to, `Tagged<String>` rather than `Tagged`: two instances
+  /// of one generic type are separate copies of the default.
+  function noteNamingInstance(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    itemId: Analyzer::DefinitionId,
+    note: &String,
+  ): String {
+    let arguments: Vector<Analyzer::TypeId> = defStore.instanceOwnerArguments(itemId);
+
+    if (arguments.length() == 0 || !note.endsWith("`")) {
+      return note.clone();
+    }
+
+    let mut named: String = note.substringBytes(0, note.length() - 1);
+    named.pushStr("<");
+    let mut index: u64 = 0;
+
+    while (index < arguments.length()) {
+      if (let Option::SOME(argument) = arguments.get(index)) {
+        if (index > 0) {
+          named.pushStr(", ");
+        }
+
+        let argumentName: String = typeStore.nameOfResolved(*argument, &*defStore, &*symbols);
+        named.push(&argumentName);
+      }
+
+      index += 1;
+    }
+
+    named.pushStr(">`");
+    return named;
+  }
+
+  /// The inherited range holding diagnostic `index`, if any.
+  function inheritedRangeOf(ranges: &Borrowck::InheritedRanges, index: u64): Option<u64> {
+    let mut rangeIndex: u64 = 0;
+
+    while (rangeIndex < ranges.starts.length()) {
+      if (let Option::SOME(start) = ranges.starts.get(rangeIndex)) {
+        if (let Option::SOME(end) = ranges.ends.get(rangeIndex)) {
+          if (index >= *start && index < *end) {
+            return Option::SOME(rangeIndex);
+          }
+        }
+      }
+
+      rangeIndex += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function sameReport(left: &Diagnostic, right: &Diagnostic): boolean {
+    return left.code.equals(right.code) && left.primarySpan.file.raw() == right.primarySpan.file.raw() && left.primarySpan.start == right.primarySpan.start && left.primarySpan.end == right.primarySpan.end && left.message.equals(right.messageText());
+  }
+
+  /// Whether the copy in `rangeIndex` produced a diagnostic that reports
+  /// the same thing as `diagnostic`.
+  function rangeReports(
+    diagnostics: &DiagnosticBag,
+    ranges: &Borrowck::InheritedRanges,
+    rangeIndex: u64,
+    diagnostic: &Diagnostic,
+  ): boolean {
+    let Option::SOME(start) = ranges.starts.get(rangeIndex) else {
+      return false;
+    };
+    let Option::SOME(end) = ranges.ends.get(rangeIndex) else {
+      return false;
+    };
+    let mut index: u64 = *start;
+
+    while (index < *end) {
+      if (let Option::SOME(other) = diagnostics.get(index)) {
+        if (Borrowck::sameReport(other, diagnostic)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Settles what the copies of trait defaults reported.
+  ///
+  /// The trait's own default body is never lowered, so only the copies on
+  /// implementing types reach this check, and they keep the trait's spans. A
+  /// diagnostic every copy of a default produces does not depend on the type:
+  /// it is kept once, as the trait's report. One only some copies produce is
+  /// kept for each of them, with a note naming the type.
+  function settleInheritedDiagnostics(
+    diagnostics: &DiagnosticBag,
+    ranges: &Borrowck::InheritedRanges,
+  ): DiagnosticBag {
+    let mut settled: DiagnosticBag = DiagnosticBag::init();
+    let mut index: u64 = 0;
+
+    while (index < diagnostics.length()) {
+      let Option::SOME(diagnostic) = diagnostics.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(rangeIndex) = Borrowck::inheritedRangeOf(ranges, index) else {
+        settled.push(Analyzer::copyDiagnostic(diagnostic));
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(key) = ranges.keys.get(rangeIndex) else {
+        index += 1;
+        continue;
+      };
+
+      let mut copies: u64 = 0;
+      let mut reporting: u64 = 0;
+      let mut firstReporting: u64 = rangeIndex;
+      let mut otherIndex: u64 = 0;
+
+      while (otherIndex < ranges.keys.length()) {
+        if (let Option::SOME(otherKey) = ranges.keys.get(otherIndex)) {
+          if (otherKey.equals(key.toStr())) {
+            copies += 1;
+
+            if (Borrowck::rangeReports(diagnostics, ranges, otherIndex, diagnostic)) {
+              if (reporting == 0) {
+                firstReporting = otherIndex;
+              }
+
+              reporting += 1;
+            }
+          }
+        }
+
+        otherIndex += 1;
+      }
+
+      if (reporting == copies) {
+        if (firstReporting == rangeIndex) {
+          settled.push(Analyzer::copyDiagnostic(diagnostic));
+        }
+      } else {
+        let mut kept: Diagnostic = Analyzer::copyDiagnostic(diagnostic);
+
+        if (let Option::SOME(note) = ranges.notes.get(rangeIndex)) {
+          kept.addNote(note.toStr());
+        }
+
+        settled.push(kept);
+      }
+
+      index += 1;
+    }
+
+    return settled;
+  }
+
   function checkModuleReporting(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -9245,6 +9437,12 @@ export namespace Borrowck {
     let envsCapturedByEscapingClosures: Vector<u32> = Borrowck::collectEnvsCapturedByEscapingClosures(hir);
     let bindingsAssignedClosureEnv: Vector<u32> = Borrowck::collectBindingsAssignedClosureEnv(defStore, typeStore, hir);
     let thunkCaptures: Borrowck::ThunkCaptures = Borrowck::collectThunkCaptures(defStore, typeStore, hir);
+    let mut inherited: Borrowck::InheritedRanges = Borrowck::InheritedRanges {
+      starts: Vector::new<u64>(),
+      ends: Vector::new<u64>(),
+      notes: Vector::new<String>(),
+      keys: Vector::new<String>(),
+    };
     let mut index: u64 = 0;
 
     while (index < hir.items.length()) {
@@ -9266,6 +9464,7 @@ export namespace Borrowck {
       };
 
       let environmentCaptures: Vector<u32> = Borrowck::environmentCapturesOf(&thunkCaptures, *itemId);
+      let start: u64 = diagnostics.length();
 
       Borrowck::checkFunction(
         defStore,
@@ -9285,11 +9484,18 @@ export namespace Borrowck {
         &mut reportEvents,
       );
 
+      if (let Option::SOME(note) = defStore.inheritedNoteOf(*itemId)) {
+        let instanceNote: String = Borrowck::noteNamingInstance(defStore, typeStore, symbols, *itemId, &note);
+        Borrowck::recordInheritedRange(&mut inherited, start, diagnostics.length(), &instanceNote);
+      }
+
       index += 1;
     }
 
+    let settled: DiagnosticBag = Borrowck::settleInheritedDiagnostics(&diagnostics, &inherited);
+
     return Borrowck::BorrowckOutput {
-      diagnostics: diagnostics,
+      diagnostics: settled,
       dropSchedules: schedules,
       ownershipEvents: reportEvents,
     };

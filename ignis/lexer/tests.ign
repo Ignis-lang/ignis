@@ -3,7 +3,13 @@ import Memory from "std::memory";
 import Path from "std::path";
 import Test from "std::test";
 
-import Diagnostic, DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticRenderer,
+  SourceFile,
+  SourceMap,
+from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
 import Keyword, LiteralKind, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
 
@@ -14,30 +20,24 @@ function readFixture(path: str): String {
   };
 }
 
-function lexText(path: str, sourceText: str): LexResult {
-  let source: SourceFile = SourceFile::create(path, sourceText);
+function lexText(sourceMap: &mut SourceMap, path: str, sourceText: str): LexResult {
+  let source: SourceFile = SourceFile::create(sourceMap, path, sourceText);
   return Lexer::lex(&source);
 }
 
-function lexFixture(path: str): LexResult {
+function lexFixture(sourceMap: &mut SourceMap, path: str): LexResult {
   let text: String = readFixture(path);
-  return lexText(path, text.toStr());
+  return lexText(sourceMap, path, text.toStr());
 }
 
-function lexBytes(path: str, raw: *mut u8, len: u64): LexResult {
-  let source: SourceFile = SourceFile {
-    path: Path::PathBuf::create(path),
-    text: String::create(raw, len),
-  };
+function lexBytes(sourceMap: &mut SourceMap, path: str, raw: *mut u8, len: u64): LexResult {
+  let source: SourceFile = SourceFile::fromPath(sourceMap, Path::PathBuf::create(path), String::create(raw, len));
 
   return Lexer::lex(&source);
 }
 
-function lexOwnedText(path: str, sourceText: String): LexResult {
-  let source: SourceFile = SourceFile {
-    path: Path::PathBuf::create(path),
-    text: sourceText,
-  };
+function lexOwnedText(sourceMap: &mut SourceMap, path: str, sourceText: String): LexResult {
+  let source: SourceFile = SourceFile::fromPath(sourceMap, Path::PathBuf::create(path), sourceText);
 
   return Lexer::lex(&source);
 }
@@ -146,8 +146,8 @@ function renderDiagnostics(diagnostics: DiagnosticBag, source: &SourceFile): Str
   return rendered;
 }
 
-function renderTokensAndDiagnostics(path: str, sourceText: str): String {
-  let source: SourceFile = SourceFile::create(path, sourceText);
+function renderTokensAndDiagnostics(sourceMap: &mut SourceMap, path: str, sourceText: str): String {
+  let source: SourceFile = SourceFile::create(sourceMap, path, sourceText);
   let result: LexResult = Lexer::lex(&source);
   let mut rendered: String = String::new();
   rendered.pushStr(renderTokens(result.tokens).toStr());
@@ -156,7 +156,7 @@ function renderTokensAndDiagnostics(path: str, sourceText: str): String {
   return rendered;
 }
 
-function lexUnicodeIdentifierSource(): LexResult {
+function lexUnicodeIdentifierSource(sourceMap: &mut SourceMap): LexResult {
   let raw: *mut u8 = Memory::allocateVector<u8>(17);
   @write<u8>(raw, 'l' as u8);
   @write<u8>(raw + 1, 'e' as u8);
@@ -176,17 +176,16 @@ function lexUnicodeIdentifierSource(): LexResult {
   @write<u8>(raw + 15, 187 as u8);
   @write<u8>(raw + 16, ';' as u8);
 
-  let source: SourceFile = SourceFile {
-    path: Path::PathBuf::create("fixtures/unicode_identifiers.ign"),
-    text: String::create(raw, 17 as u64),
-  };
+  let source: SourceFile = SourceFile::fromPath(sourceMap, Path::PathBuf::create("fixtures/unicode_identifiers.ign"), String::create(raw, 17 as u64));
 
   return Lexer::lex(&source);
 }
 
 @test
 function lexerLexesCoreOperatorAndPunctuationFamilies(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let result: LexResult = lexText(
+    &mut sourceMap,
     "fixtures/operators.ign",
     "() {} [] , . .. ... ..= ; @ + ++ += - -- -= -> * *= / /= % %= ! != = == < <= << <<= > >= >> >>= | || |= |> & && &= ^ ^= ~ ~= # ? : ::"
   );
@@ -252,7 +251,8 @@ function lexerLexesCoreOperatorAndPunctuationFamilies(): void {
 
 @test
 function lexerLexesKeywordsIdentifiersCommentsAndDirectiveMarkersFromFixture(): void {
-  let result: LexResult = lexFixture("test_cases/selfhost/lexer/core.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexFixture(&mut sourceMap, "test_cases/selfhost/lexer/core.ign");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -304,7 +304,8 @@ function lexerLexesKeywordsIdentifiersCommentsAndDirectiveMarkersFromFixture(): 
 
 @test
 function lexerCoreFixtureMatchesSnapshot(): void {
-  let result: LexResult = lexFixture("test_cases/selfhost/lexer/core.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexFixture(&mut sourceMap, "test_cases/selfhost/lexer/core.ign");
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
   Test::assertSnapshot("lexer-core-tokens", renderTokens(result.tokens).toStr());
@@ -312,7 +313,8 @@ function lexerCoreFixtureMatchesSnapshot(): void {
 
 @test
 function lexerAllowsUtf8InsideCommentsWithoutDiagnostics(): void {
-  let result: LexResult = lexFixture("test_cases/selfhost/lexer/utf8_comments.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexFixture(&mut sourceMap, "test_cases/selfhost/lexer/utf8_comments.ign");
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
   Test::assertSnapshot("utf8-comments", renderTokens(result.tokens).toStr());
@@ -320,7 +322,8 @@ function lexerAllowsUtf8InsideCommentsWithoutDiagnostics(): void {
 
 @test
 function lexerTreatsUtf8IdentifierStartAsIdentifierAndKeepsLaterSpansStable(): void {
-  let result: LexResult = lexFixture("test_cases/selfhost/lexer/utf8_identifier.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexFixture(&mut sourceMap, "test_cases/selfhost/lexer/utf8_identifier.ign");
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
   Test::assertSnapshot("utf8-identifier", renderTokens(result.tokens).toStr());
@@ -328,6 +331,7 @@ function lexerTreatsUtf8IdentifierStartAsIdentifierAndKeepsLaterSpansStable(): v
 
 @test
 function lexerRecoversRawNulInsideStringWithoutSpuriousUnterminatedDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(25);
   @write<u8>(raw, 'l' as u8);
   @write<u8>(raw + 1, 'e' as u8);
@@ -355,7 +359,7 @@ function lexerRecoversRawNulInsideStringWithoutSpuriousUnterminatedDiagnostic():
   @write<u8>(raw + 23, '1' as u8);
   @write<u8>(raw + 24, ';' as u8);
 
-  let result: LexResult = lexBytes("fixtures/raw_nul_string.ign", raw, 25 as u64);
+  let result: LexResult = lexBytes(&mut sourceMap, "fixtures/raw_nul_string.ign", raw, 25 as u64);
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
@@ -378,6 +382,7 @@ function lexerRecoversRawNulInsideStringWithoutSpuriousUnterminatedDiagnostic():
 
 @test
 function lexerReportsRawNulAfterBackslashInsideStringWithoutUnterminatedNoise(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(26);
   @write<u8>(raw, 'l' as u8);
   @write<u8>(raw + 1, 'e' as u8);
@@ -406,7 +411,7 @@ function lexerReportsRawNulAfterBackslashInsideStringWithoutUnterminatedNoise():
   @write<u8>(raw + 24, '1' as u8);
   @write<u8>(raw + 25, ';' as u8);
 
-  let result: LexResult = lexBytes("fixtures/raw_nul_escaped_string.ign", raw, 26 as u64);
+  let result: LexResult = lexBytes(&mut sourceMap, "fixtures/raw_nul_escaped_string.ign", raw, 26 as u64);
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
@@ -429,7 +434,8 @@ function lexerReportsRawNulAfterBackslashInsideStringWithoutUnterminatedNoise():
 
 @test
 function lexerClosesBlockCommentsAfterExtraAsteriskRuns(): void {
-  let result: LexResult = lexText("fixtures/block_comment_close.ign", "/* **/let after = 1;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/block_comment_close.ign", "/* **/let after = 1;");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -443,7 +449,8 @@ function lexerClosesBlockCommentsAfterExtraAsteriskRuns(): void {
 
 @test
 function lexerTreatsFullWidthDigitsAsInvalidTokensInsteadOfNumericLiterals(): void {
-  let result: LexResult = lexText("fixtures/full_width_digits.ign", "let value = １２;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/full_width_digits.ign", "let value = １２;");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 2);
@@ -457,7 +464,8 @@ function lexerTreatsFullWidthDigitsAsInvalidTokensInsteadOfNumericLiterals(): vo
 
 @test
 function lexerRejectsUnicodeEscapesThatExceedScalarDigitWidth(): void {
-  let result: LexResult = lexText("fixtures/unicode_escape_overflow.ign", "let bad = '\\u{123456789}'; let after = 1;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/unicode_escape_overflow.ign", "let bad = '\\u{123456789}'; let after = 1;");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
@@ -482,7 +490,8 @@ function lexerRejectsUnicodeEscapesThatExceedScalarDigitWidth(): void {
 /// does too.
 @test
 function lexerRejectsUnknownStringAndTemplateEscapes(): void {
-  let result: LexResult = lexText("fixtures/unknown_escape.ign", "let a = \"ab\\x08\"; let b = `c\\qd`; let after = 1;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/unknown_escape.ign", "let a = \"ab\\x08\"; let b = `c\\qd`; let after = 1;");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 2);
@@ -511,7 +520,9 @@ function lexerRejectsUnknownStringAndTemplateEscapes(): void {
 /// and a char literal, `\u{...}` included.
 @test
 function lexerAcceptsEveryDefinedEscape(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let result: LexResult = lexText(
+    &mut sourceMap,
     "fixtures/known_escapes.ign",
     "let a = \"\\a\\b\\f\\n\\r\\t\\v\\0\\\\\\'\\\"\\u{e9}\"; let b = `\\a\\v\\`\\$\\u{20AC}`; let c = '\\a'; let d = '\\v';",
   );
@@ -521,6 +532,7 @@ function lexerAcceptsEveryDefinedEscape(): void {
 
 @test
 function lexerReportsRawNulInsideCharsAndCommentsWhileRecovering(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(37);
   @write<u8>(raw, 'l' as u8);
   @write<u8>(raw + 1, 'e' as u8);
@@ -560,7 +572,7 @@ function lexerReportsRawNulInsideCharsAndCommentsWhileRecovering(): void {
   @write<u8>(raw + 35, '1' as u8);
   @write<u8>(raw + 36, ';' as u8);
 
-  let result: LexResult = lexBytes("fixtures/raw_nul_comment_and_char.ign", raw, 37 as u64);
+  let result: LexResult = lexBytes(&mut sourceMap, "fixtures/raw_nul_comment_and_char.ign", raw, 37 as u64);
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 3);
@@ -579,6 +591,7 @@ function lexerReportsRawNulInsideCharsAndCommentsWhileRecovering(): void {
 
 @test
 function lexerReportsRawNulAfterBackslashInsideCharAndRecovers(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(28);
   @write<u8>(raw, 'l' as u8);
   @write<u8>(raw + 1, 'e' as u8);
@@ -609,7 +622,7 @@ function lexerReportsRawNulAfterBackslashInsideCharAndRecovers(): void {
   @write<u8>(raw + 26, '1' as u8);
   @write<u8>(raw + 27, ';' as u8);
 
-  let result: LexResult = lexBytes("fixtures/raw_nul_escaped_char.ign", raw, 28 as u64);
+  let result: LexResult = lexBytes(&mut sourceMap, "fixtures/raw_nul_escaped_char.ign", raw, 28 as u64);
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
@@ -632,6 +645,7 @@ function lexerReportsRawNulAfterBackslashInsideCharAndRecovers(): void {
 
 @test
 function lexerBadTokenLexemePreservesInteriorNulBytes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let raw: *mut u8 = Memory::allocateVector<u8>(13);
   @write<u8>(raw, 'l' as u8);
   @write<u8>(raw + 1, 'e' as u8);
@@ -647,7 +661,7 @@ function lexerBadTokenLexemePreservesInteriorNulBytes(): void {
   @write<u8>(raw + 11, 'b' as u8);
   @write<u8>(raw + 12, '"' as u8);
 
-  let result: LexResult = lexBytes("fixtures/raw_nul_bad_token.ign", raw, 13 as u64);
+  let result: LexResult = lexBytes(&mut sourceMap, "fixtures/raw_nul_bad_token.ign", raw, 13 as u64);
   let mut tokens: TokenStream = result.tokens;
   let keyword: Token = tokens.bump();
   let identifier: Token = tokens.bump();
@@ -672,7 +686,8 @@ function lexerBadTokenLexemePreservesInteriorNulBytes(): void {
 
 @test
 function lexerLexesLiteralFamiliesIncludingUtf8Chars(): void {
-  let result: LexResult = lexFixture("test_cases/selfhost/lexer/literals.ign");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexFixture(&mut sourceMap, "test_cases/selfhost/lexer/literals.ign");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -729,15 +744,17 @@ function lexerLexesLiteralFamiliesIncludingUtf8Chars(): void {
 
 @test
 function lexerRecoversAfterMalformedLiteralsAndSnapshotsDiagnostics(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixturePath: str = "test_cases/selfhost/lexer/malformed_literals.ign";
   let sourceText: String = readFixture(fixturePath);
 
-  Test::assertSnapshot("malformed-literals", renderTokensAndDiagnostics(fixturePath, sourceText.toStr()).toStr());
+  Test::assertSnapshot("malformed-literals", renderTokensAndDiagnostics(&mut sourceMap, fixturePath, sourceText.toStr()).toStr());
 }
 
 @test
 function lexerLexesUnicodeIdentifiersWithByteStableSpans(): void {
-  let result: LexResult = lexUnicodeIdentifierSource();
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexUnicodeIdentifierSource(&mut sourceMap);
   let mut tokens: TokenStream = result.tokens;
 
   let keyword: Token = tokens.bump();
@@ -763,7 +780,8 @@ function lexerLexesUnicodeIdentifiersWithByteStableSpans(): void {
 
 @test
 function lexerSnapshotsUnicodeIdentifiers(): void {
-  let result: LexResult = lexUnicodeIdentifierSource();
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexUnicodeIdentifierSource(&mut sourceMap);
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
   Test::assertSnapshot("unicode-identifiers", renderTokens(result.tokens).toStr());
@@ -771,7 +789,8 @@ function lexerSnapshotsUnicodeIdentifiers(): void {
 
 @test
 function lexerLexesTemplateLiteralWithoutInterpolation(): void {
-  let result: LexResult = lexText("fixtures/template.ign", "`hello`");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/template.ign", "`hello`");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -780,7 +799,8 @@ function lexerLexesTemplateLiteralWithoutInterpolation(): void {
 
 @test
 function lexerLexesTemplateLiteralChunks(): void {
-  let result: LexResult = lexText("fixtures/template.ign", "`a${x}b${y}c`");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/template.ign", "`a${x}b${y}c`");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -793,7 +813,8 @@ function lexerLexesTemplateLiteralChunks(): void {
 
 @test
 function lexerKeepsBlocksInsideTemplateInterpolationSeparate(): void {
-  let result: LexResult = lexText("fixtures/template.ign", "`${P { x: 1 }}`");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/template.ign", "`${P { x: 1 }}`");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -809,7 +830,8 @@ function lexerKeepsBlocksInsideTemplateInterpolationSeparate(): void {
 
 @test
 function lexerLexesNestedTemplateLiterals(): void {
-  let result: LexResult = lexText("fixtures/template.ign", "`a${`b${c}d`}e`");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/template.ign", "`a${`b${c}d`}e`");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -822,7 +844,8 @@ function lexerLexesNestedTemplateLiterals(): void {
 
 @test
 function lexerKeepsStringsInsideTemplateInterpolationSeparate(): void {
-  let result: LexResult = lexText("fixtures/template.ign", "`a${f(\"}\")}b`");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/template.ign", "`a${f(\"}\")}b`");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -836,7 +859,8 @@ function lexerKeepsStringsInsideTemplateInterpolationSeparate(): void {
 
 @test
 function lexerReportsUnterminatedTemplateLiteral(): void {
-  let result: LexResult = lexText("fixtures/template.ign", "`abc");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/template.ign", "`abc");
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
 }
@@ -858,7 +882,8 @@ function firstDiagnosticMessage(result: &LexResult): str {
 /// The reference lexer names the literal without its `_` separators.
 @test
 function lexerRejectsDecimalIntegerLiteralsWiderThanU64(): void {
-  let result: LexResult = lexText("fixtures/integer_out_of_range.ign", "let value = 18_446_744_073_709_551_616;");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/integer_out_of_range.ign", "let value = 18_446_744_073_709_551_616;");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
@@ -878,7 +903,9 @@ function lexerRejectsDecimalIntegerLiteralsWiderThanU64(): void {
 /// are not range-checked by the reference lexer at all.
 @test
 function lexerAcceptsIntegerLiteralsUpToU64Max(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let result: LexResult = lexText(
+    &mut sourceMap,
     "fixtures/integer_in_range.ign",
     "18446744073709551615 000018446744073709551615 0xFFFFFFFFFFFFFFFFFFFF 1.5",
   );
@@ -905,7 +932,8 @@ function assertLiteralToken(tokens: &mut TokenStream, kind: LiteralKind, lexeme:
 
 @test
 function lexerLexesAsmBodyWithoutHoles(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm () { cli }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm () { cli }");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -918,7 +946,8 @@ function lexerLexesAsmBodyWithoutHoles(): void {
 
 @test
 function lexerLexesAsmBodyChunksAroundHoles(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm (port in dx) -> (value: u8 in al) { in {value}, {port} }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm (port in dx) -> (value: u8 in al) { in {value}, {port} }");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -946,7 +975,8 @@ function lexerLexesAsmBodyChunksAroundHoles(): void {
 
 @test
 function lexerKeepsDoubledBracesInsideAsmChunks(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm () { a {{b}} {c} }}d }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm () { a {{b}} {c} }}d }");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -963,7 +993,8 @@ function lexerKeepsDoubledBracesInsideAsmChunks(): void {
 /// a hole nor close the body.
 @test
 function lexerKeepsCommentsInsideAsmChunks(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm () {\n  nop // } {\n  /* { */ hlt\n}\nx");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm () {\n  nop // } {\n  /* { */ hlt\n}\nx");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -979,7 +1010,8 @@ function lexerKeepsCommentsInsideAsmChunks(): void {
 /// `{` at parenthesis depth zero opens the body.
 @test
 function lexerLexesBracesInsideAsmHeaderAsPunctuation(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm (P { x: 1 }.x in rax) { nop }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm (P { x: 1 }.x in rax) { nop }");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -1003,7 +1035,8 @@ function lexerLexesBracesInsideAsmHeaderAsPunctuation(): void {
 /// body text would be an escaped brace inside the body.
 @test
 function lexerLexesAsmInsideTemplateInterpolation(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "`a${asm () -> (v: u8 in al) { mov {v}, 1 } }b`");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "`a${asm () -> (v: u8 in al) { mov {v}, 1 } }b`");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -1030,7 +1063,8 @@ function lexerLexesAsmInsideTemplateInterpolation(): void {
 /// block again.
 @test
 function lexerDropsAsmHeaderAtSemicolon(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm; { x }");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm; { x }");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -1046,7 +1080,8 @@ function lexerDropsAsmHeaderAtSemicolon(): void {
 /// still closes that block.
 @test
 function lexerDropsAsmHeaderAtEnclosingRightBrace(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "`${asm}{x}`");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "`${asm}{x}`");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -1058,7 +1093,8 @@ function lexerDropsAsmHeaderAtEnclosingRightBrace(): void {
 
 @test
 function lexerReportsUnterminatedAsmBody(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm () { nop");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm () { nop");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
@@ -1077,7 +1113,8 @@ function lexerReportsUnterminatedAsmBody(): void {
 /// `}}` escape.
 @test
 function asmQuotedCommentsLexerKeepsQuotedCommentsInChunks(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm () { mov eax, \"// }}\" }\nx");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm () { mov eax, \"// }}\" }\nx");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -1088,7 +1125,7 @@ function asmQuotedCommentsLexerKeepsQuotedCommentsInChunks(): void {
   Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
   Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
 
-  let blocked: LexResult = lexText("fixtures/asm.ign", "asm () { mov eax, \"/* }}\" }\nx");
+  let blocked: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm () { mov eax, \"/* }}\" }\nx");
   let mut blockedTokens: TokenStream = blocked.tokens;
 
   Test::assertEq<u64>(blocked.diagnostics.length(), 0);
@@ -1105,7 +1142,8 @@ function asmQuotedCommentsLexerKeepsQuotedCommentsInChunks(): void {
 /// a hole after the backslash.
 @test
 function asmQuotedCommentsLexerTracksEscapes(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm () { mov eax, \"a\\\"b\\\\c//x\" }\nx");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm () { mov eax, \"a\\\"b\\\\c//x\" }\nx");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);
@@ -1116,7 +1154,7 @@ function asmQuotedCommentsLexerTracksEscapes(): void {
   Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
   Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
 
-  let holed: LexResult = lexText("fixtures/asm.ign", "asm (v: u8 in al) { out \"\\{v}\" }\nx");
+  let holed: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm (v: u8 in al) { out \"\\{v}\" }\nx");
   let mut holedTokens: TokenStream = holed.tokens;
 
   Test::assertEq<u64>(holed.diagnostics.length(), 0);
@@ -1140,7 +1178,8 @@ function asmQuotedCommentsLexerTracksEscapes(): void {
 /// a literal brace in one is the `}}` escape.
 @test
 function asmQuotedCommentsLexerCarriesStateAcrossHoles(): void {
-  let result: LexResult = lexText("fixtures/asm.ign", "asm (v: u8 in al) { out \"{v} // }}\", {v} }\nx");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let result: LexResult = lexText(&mut sourceMap, "fixtures/asm.ign", "asm (v: u8 in al) { out \"{v} // }}\", {v} }\nx");
   let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 0);

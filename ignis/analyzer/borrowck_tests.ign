@@ -1,6 +1,16 @@
 import Test from "std::test";
+import Vector from "std::vector";
 
-import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticCode,
+  Severity,
+  SourceFile,
+  SourceMap,
+  SourceSpan,
+  noFile,
+from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -57,7 +67,8 @@ function borrowckCountCode(bag: &DiagnosticBag, code: str): u64 {
 /// pipeline accepts and the reported diagnostics are the borrow checker's
 /// alone.
 function borrowckDiagnostics(source: str): DiagnosticBag {
-  let file: SourceFile = SourceFile::create("borrowck_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "borrowck_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(borrowckCountErrors(&parsed.lexDiagnostics), 0);
@@ -715,7 +726,8 @@ function borrowckAccumulatingSchedules(source: str): String {
 }
 
 function borrowckRenderedSchedules(source: str, accumulating: boolean): String {
-  let file: SourceFile = SourceFile::create("borrowck_tests.ign", source);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "borrowck_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
   Test::assertEq<u64>(borrowckCountErrors(&parsed.lexDiagnostics), 0);
@@ -1443,4 +1455,79 @@ function borrowckAcceptsAssignmentOfBorrowedCopyBinding(): void {
   );
 
   Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// One copy of a trait default, as `settleInheritedDiagnostics` sees it:
+/// the diagnostics it produced, each a use after move at `start`.
+function pushInheritedCopy(
+  bag: &mut DiagnosticBag,
+  ranges: &mut Borrowck::InheritedRanges,
+  starts: &Vector<u64>,
+  note: str,
+): void {
+  let first: u64 = bag.length();
+  let mut index: u64 = 0;
+
+  while (index < starts.length()) {
+    if (let Option::SOME(start) = starts.get(index)) {
+      bag.push(
+        Diagnostic::new(Severity::ERROR, DiagnosticCode::USE_AFTER_MOVE, "Use of moved value 'x'", SourceSpan::new(noFile(), *start, *start + 1)),
+      );
+    }
+
+    index += 1;
+  }
+
+  let noteText: String = String::create(note);
+  Borrowck::recordInheritedRange(ranges, first, bag.length(), &noteText);
+}
+
+/// The number of diagnostics in `bag` whose last note is `note`.
+function countWithNote(bag: &DiagnosticBag, note: str): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      if (diagnostic.notes.length() > 0) {
+        if (let Option::SOME(last) = diagnostic.notes.get(diagnostic.notes.length() - 1)) {
+          if (last.message.equals(note)) {
+            count += 1;
+          }
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Scenario: what every copy of a default reports is kept once without a
+/// note; what only one copy reports is kept for that copy, naming it.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e_err::trait_default_ownership_error_specific_to_one_instance.
+@test
+function borrowckSettlesInheritedDefaultDiagnostics(): void {
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  let mut ranges: Borrowck::InheritedRanges = Borrowck::InheritedRanges {
+    starts: Vector::new<u64>(),
+    ends: Vector::new<u64>(),
+    notes: Vector::new<String>(),
+    keys: Vector::new<String>(),
+  };
+  let mut shared: Vector<u64> = Vector::new<u64>();
+  shared.push(10);
+  let mut both: Vector<u64> = Vector::new<u64>();
+  both.push(10);
+  both.push(20);
+
+  pushInheritedCopy(&mut bag, &mut ranges, &shared, "in default method `twice` of trait `Holder`, as inherited by `Tagged<i32>`");
+  pushInheritedCopy(&mut bag, &mut ranges, &both, "in default method `twice` of trait `Holder`, as inherited by `Tagged<String>`");
+
+  let settled: DiagnosticBag = Borrowck::settleInheritedDiagnostics(&bag, &ranges);
+
+  Test::assertEq<u64>(settled.length(), 2);
+  Test::assertEq<u64>(countWithNote(&settled, "in default method `twice` of trait `Holder`, as inherited by `Tagged<String>`"), 1);
+  Test::assertEq<u64>(countWithNote(&settled, "in default method `twice` of trait `Holder`, as inherited by `Tagged<i32>`"), 0);
 }

@@ -1,52 +1,52 @@
 import Test from "std::test";
 import Vector from "std::vector";
 
-import SourceSpan from "@compiler::diagnostics";
+import SourceSpan, SourceMap from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 
 function astText(value: str): String {
   return value.toString();
 }
 
-function buildSnapshotModule(rootName: String): Ast::Module {
+function buildSnapshotModule(sourceMap: &mut SourceMap, rootName: String): Ast::Module {
   let mut module: Ast::Module = Ast::Module::init();
 
   let literalExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 32, 34),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 32, 34),
     value: Ast::Expression::LiteralValue::Int(42),
   }));
 
   let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 15, 20),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 15, 20),
     name: astText("value"),
     annotation: Option::NONE,
     initializer: Option::NONE,
     metadata: Ast::emptyMetadata(),
   }));
   module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 45, 46),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 45, 46),
   }));
 
   let letStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 0, 14),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 0, 14),
     pattern: bindingPattern,
     annotation: Option::NONE,
     value: Option::SOME(literalExpression),
   }));
   module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 25, 31),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 25, 31),
     value: Option::SOME(literalExpression),
   }));
 
   module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 47, 66),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 47, 66),
     name: astText("Helpers"),
     items: Vector::new<Ast::ItemId>(),
     metadata: Ast::emptyMetadata(),
   }));
 
   module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 67, 98),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 67, 98),
     name: rootName,
     genericParameters: Vector::new<Ast::GenericParam>(),
     parameters: Vector::new<Ast::PatternId>(),
@@ -55,22 +55,22 @@ function buildSnapshotModule(rootName: String): Ast::Module {
     metadata: Ast::emptyMetadata(),
   }));
   module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 99, 130),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 99, 130),
     name: astText("Utility"),
     items: Vector::new<Ast::ItemId>(),
     metadata: Ast::emptyMetadata(),
   }));
 
   module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 131, 138),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 131, 138),
     elements: Vector::new<Ast::PatternId>(),
   }));
   module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 139, 148),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 139, 148),
     expression: literalExpression,
   }));
   module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
-    span: SourceSpan::new("fixtures/ast_snapshot.ign", 173, 184),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_snapshot.ign"), 173, 184),
     alternatives: Vector::new<Ast::PatternId>(),
   }));
 
@@ -86,29 +86,30 @@ function expectedStructuredLiteralAndBinaryText(): str {
 
 @test
 function astSerializerRendersGenericParametersAndBounds(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
   let mut bounds: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
   let mut boundSegments: Vector<String> = Vector::new<String>();
   let mut genericParameters: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
   let body: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
-    span: SourceSpan::new("fixtures/ast_generics.ign", 35, 37),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_generics.ign"), 35, 37),
     statements: Vector::new<Ast::StatementId>(),
     tail: Option::NONE,
   }));
 
   boundSegments.push(astText("Hash"));
   bounds.push(Ast::GenericBound {
-    span: SourceSpan::new("fixtures/ast_generics.ign", 18, 22),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_generics.ign"), 18, 22),
     segments: boundSegments,
   });
   genericParameters.push(Ast::GenericParam {
-    span: SourceSpan::new("fixtures/ast_generics.ign", 15, 22),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_generics.ign"), 15, 22),
     name: astText("T"),
     bounds: bounds,
   });
 
   module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
-    span: SourceSpan::new("fixtures/ast_generics.ign", 0, 37),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_generics.ign"), 0, 37),
     name: astText("identity"),
     genericParameters: genericParameters,
     parameters: Vector::new<Ast::PatternId>(),
@@ -117,7 +118,7 @@ function astSerializerRendersGenericParametersAndBounds(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
   let expectedGenerics: String = String::create("generics=[\"T\":[[\"Hash\"]]]");
 
   if (!rendered.contains(&expectedGenerics)) {
@@ -127,6 +128,7 @@ function astSerializerRendersGenericParametersAndBounds(): void {
 
 @test
 function astSerializerRendersMetadataAndRecordMethods(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
   let mut fieldModifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
   let mut itemAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
@@ -149,28 +151,28 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
   methodAttributeArguments.push(astText("init"));
   parameterAttributeArguments.push(astText("input"));
   itemAttributes.push(Ast::Attribute {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 18),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 0, 18),
     name: astText("packed"),
     arguments: itemAttributeArguments,
   });
   methodAttributes.push(Ast::Attribute {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 47, 59),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 47, 59),
     name: astText("builder"),
     arguments: methodAttributeArguments,
   });
   parameterAttributes.push(Ast::Attribute {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 80, 92),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 80, 92),
     name: astText("trace"),
     arguments: parameterAttributeArguments,
   });
   fieldTypeSegments.push(astText("i32"));
 
   let fieldType: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 34, 37),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 34, 37),
     segments: fieldTypeSegments,
   }));
   let fieldPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 25, 37),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 25, 37),
     name: astText("value"),
     annotation: Option::SOME(fieldType),
     initializer: Option::NONE,
@@ -180,7 +182,7 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
     },
   }));
   let methodParameter: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 93, 103),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 93, 103),
     name: astText("value"),
     annotation: Option::SOME(fieldType),
     initializer: Option::NONE,
@@ -190,13 +192,13 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
     },
   }));
   let methodBody: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 117, 119),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 117, 119),
     statements: Vector::new<Ast::StatementId>(),
     tail: Option::NONE,
   }));
   methodParameters.push(methodParameter);
   let methodItem: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 47, 119),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 47, 119),
     name: astText("init"),
     genericParameters: Vector::new<Ast::GenericParam>(),
     parameters: methodParameters,
@@ -211,7 +213,7 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
   recordMethods.push(methodItem);
   recordFields.push(fieldPattern);
   module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 119),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_metadata.ign"), 0, 119),
     name: astText("Packet"),
     genericParameters: Vector::new<Ast::GenericParam>(),
     fields: recordFields,
@@ -222,7 +224,7 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
     },
   }));
 
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
   let expectedItemMetadata: String = String::create("metadata=attrs[@packed(\"c\", level)@fixtures/ast_metadata.ign:0-18] modifiers[]");
   let expectedMethods: String = String::create("methods=[item#0]");
   let expectedMethodMetadata: String = String::create("metadata=attrs[@builder(init)@fixtures/ast_metadata.ign:47-59] modifiers[public, static]");
@@ -251,47 +253,48 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
 }
 @test
 function astSerializerRendersImportAndExportStructure(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
   let mut importItems: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   let mut exportItems: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
 
   importItems.push(Ast::ImportBinding {
-    span: SourceSpan::new("fixtures/ast_import_export.ign", 7, 10),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_import_export.ign"), 7, 10),
     kind: Ast::ImportBindingKind::Named,
     name: Option::SOME(astText("Foo")),
     alias: Option::NONE,
   });
   importItems.push(Ast::ImportBinding {
-    span: SourceSpan::new("fixtures/ast_import_export.ign", 12, 13),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_import_export.ign"), 12, 13),
     kind: Ast::ImportBindingKind::Discard,
     name: Option::NONE,
     alias: Option::NONE,
   });
   exportItems.push(Ast::ImportBinding {
-    span: SourceSpan::new("fixtures/ast_import_export.ign", 45, 48),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_import_export.ign"), 45, 48),
     kind: Ast::ImportBindingKind::Named,
     name: Option::SOME(astText("Bar")),
     alias: Option::NONE,
   });
 
   module.addRootItem(Ast::Item::Node::Import(Ast::Item::Import {
-    span: SourceSpan::new("fixtures/ast_import_export.ign", 0, 31),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_import_export.ign"), 0, 31),
     items: importItems,
     source: astText("std::io"),
     writtenSource: astText("std::io"),
-    sourceSpan: SourceSpan::new("fixtures/ast_import_export.ign", 18, 27),
+    sourceSpan: SourceSpan::new(sourceMap.register("fixtures/ast_import_export.ign"), 18, 27),
     metadata: Ast::emptyMetadata(),
   }));
   module.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
-    span: SourceSpan::new("fixtures/ast_import_export.ign", 32, 60),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_import_export.ign"), 32, 60),
     declaration: Option::NONE,
     items: exportItems,
     source: Option::SOME(astText("./bar")),
-    sourceSpan: Option::SOME(SourceSpan::new("fixtures/ast_import_export.ign", 49, 56)),
+    sourceSpan: Option::SOME(SourceSpan::new(sourceMap.register("fixtures/ast_import_export.ign"), 49, 56)),
     metadata: Ast::emptyMetadata(),
   }));
 
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   let expectedRenderedNeedle1: String = String::create("Import span=fixtures/ast_import_export.ign:0-31 items=[Named(\"Foo\")@fixtures/ast_import_export.ign:7-10, Discard@fixtures/ast_import_export.ign:12-13] from=\"std::io\" sourceSpan=fixtures/ast_import_export.ign:18-27");
   Test::assert(rendered.contains(&expectedRenderedNeedle1));
@@ -301,26 +304,27 @@ function astSerializerRendersImportAndExportStructure(): void {
 
 @test
 function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
   let mut returnTypeSegments: Vector<String> = Vector::new<String>();
   let mut functionParameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   let expression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
-    span: SourceSpan::new("fixtures/ast.ign", 0, 2),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast.ign"), 0, 2),
     value: Ast::Expression::LiteralValue::Int(42),
   }));
   let statement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
-    span: SourceSpan::new("fixtures/ast.ign", 3, 11),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast.ign"), 3, 11),
     value: Option::SOME(expression),
   }));
 
   returnTypeSegments.push(String::create("i32"));
 
   let returnType: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
-    span: SourceSpan::new("fixtures/ast.ign", 12, 15),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast.ign"), 12, 15),
     segments: returnTypeSegments,
   }));
   let pattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-    span: SourceSpan::new("fixtures/ast.ign", 16, 21),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast.ign"), 16, 21),
     name: astText("value"),
     annotation: Option::SOME(returnType),
     initializer: Option::NONE,
@@ -330,7 +334,7 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
   functionParameters.push(pattern);
 
   let firstRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
-    span: SourceSpan::new("fixtures/ast.ign", 22, 40),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast.ign"), 22, 40),
     name: astText("main"),
     genericParameters: Vector::new<Ast::GenericParam>(),
     parameters: functionParameters,
@@ -339,7 +343,7 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
     metadata: Ast::emptyMetadata(),
   }));
   let secondRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
-    span: SourceSpan::new("fixtures/ast.ign", 41, 64),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast.ign"), 41, 64),
     name: astText("Support"),
     items: Vector::new<Ast::ItemId>(),
     metadata: Ast::emptyMetadata(),
@@ -372,30 +376,32 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
 
 @test
 function astSerializerRendersStructuredLiteralValuesAndBinaryOperators(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
   let left: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
-    span: SourceSpan::new("fixtures/ast_literals.ign", 0, 2),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_literals.ign"), 0, 2),
     value: Ast::Expression::LiteralValue::Int(42),
   }));
   let right: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
-    span: SourceSpan::new("fixtures/ast_literals.ign", 3, 7),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_literals.ign"), 3, 7),
     value: Ast::Expression::LiteralValue::Boolean(true),
   }));
 
   module.addExpression(Ast::Expression::Node::Binary(Ast::Expression::Binary {
-    span: SourceSpan::new("fixtures/ast_literals.ign", 0, 7),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_literals.ign"), 0, 7),
     operator: Ast::Expression::BinaryOperator::Add,
     left: left,
     right: right,
   }));
 
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertEq<str>(rendered.toStr(), expectedStructuredLiteralAndBinaryText());
 }
 
 @test
 function astSerializerRendersStructuredPatterns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
   let mut bindingAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
   let mut bindingAttributeArguments: Vector<String> = Vector::new<String>();
@@ -406,25 +412,25 @@ function astSerializerRendersStructuredPatterns(): void {
   let mut pathArguments: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   let mut orAlternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   let literalExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 46, 47),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 46, 47),
     value: Ast::Expression::LiteralValue::Int(0),
   }));
 
   bindingAttributeArguments.push(astText("input"));
   bindingAttributes.push(Ast::Attribute {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 0, 13),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 0, 13),
     name: astText("trace"),
     arguments: bindingAttributeArguments,
   });
   bindingModifiers.push(Ast::Modifier::Public);
   annotationSegments.push(astText("Packet"));
   let annotationType: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 22, 28),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 22, 28),
     segments: annotationSegments,
   }));
 
   let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 14, 28),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 14, 28),
     name: astText("value"),
     annotation: Option::SOME(annotationType),
     initializer: Option::NONE,
@@ -434,17 +440,17 @@ function astSerializerRendersStructuredPatterns(): void {
     },
   }));
   let literalPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 46, 47),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 46, 47),
     expression: literalExpression,
   }));
   let wildcardPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 49, 50),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 49, 50),
   }));
 
   tupleElements.push(literalPattern);
   tupleElements.push(wildcardPattern);
   let tuplePattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 45, 51),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 45, 51),
     elements: tupleElements,
   }));
 
@@ -453,7 +459,7 @@ function astSerializerRendersStructuredPatterns(): void {
   pathArguments.push(tuplePattern);
   pathArguments.push(bindingPattern);
   let pathPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 30, 58),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 30, 58),
     segments: pathSegments,
     arguments: pathArguments,
   }));
@@ -461,11 +467,11 @@ function astSerializerRendersStructuredPatterns(): void {
   orAlternatives.push(pathPattern);
   orAlternatives.push(bindingPattern);
   module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
-    span: SourceSpan::new("fixtures/ast_patterns.ign", 30, 66),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_patterns.ign"), 30, 66),
     alternatives: orAlternatives,
   }));
 
-  let rendered: String = Ast::Serializer::render(&module);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
   let expectedBinding: String = String::create("Binding span=fixtures/ast_patterns.ign:14-28 name=\"value\" annotation=type#0 metadata=attrs[@trace(input)@fixtures/ast_patterns.ign:0-13] modifiers[public]");
   let expectedLiteral: String = String::create("Literal span=fixtures/ast_patterns.ign:46-47 expression=expression#0");
   let expectedWildcard: String = String::create("Wildcard span=fixtures/ast_patterns.ign:49-50");
@@ -500,31 +506,32 @@ function astSerializerRendersStructuredPatterns(): void {
 
 @test
 function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut module: Ast::Module = Ast::Module::init();
   let mut importItems: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   let mut vectorElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
   let mut blockStatements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
 
   importItems.push(Ast::ImportBinding {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 188, 189),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 188, 189),
     kind: Ast::ImportBindingKind::Discard,
     name: Option::NONE,
     alias: Option::NONE,
   });
 
   let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 0, 5),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 0, 5),
     name: astText("value"),
     annotation: Option::NONE,
     initializer: Option::NONE,
     metadata: Ast::emptyMetadata(),
   }));
   let variableExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 6, 11),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 6, 11),
     name: astText("value"),
   }));
   let fallbackExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 12, 22),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 12, 22),
     value: Ast::Expression::LiteralValue::String(String::create("fallback")),
   }));
 
@@ -532,35 +539,35 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
   vectorElements.push(fallbackExpression);
 
   let vectorExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Vector(Ast::Expression::VectorLiteral {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 23, 40),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 23, 40),
     elements: vectorElements,
   }));
   let memberAccessExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 41, 53),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 41, 53),
     object: variableExpression,
     operator: Ast::Expression::AccessOperator::Dot,
     member: astText("length"),
   }));
   let assignmentExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Assignment(Ast::Expression::Assignment {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 54, 70),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 54, 70),
     target: memberAccessExpression,
     value: vectorExpression,
     operator: Ast::Expression::AssignmentOperator::Assign,
   }));
 
   let breakStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Break(Ast::Statement::Break {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 71, 76),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 71, 76),
     value: Option::SOME(fallbackExpression),
   }));
   let variableStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Variable(Ast::Statement::Variable {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 77, 99),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 77, 99),
     mutable: true,
     pattern: bindingPattern,
     annotation: Option::NONE,
     value: Option::SOME(vectorExpression),
   }));
   let letElseStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 100, 134),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 100, 134),
     mutable: false,
     pattern: bindingPattern,
     annotation: Option::NONE,
@@ -572,20 +579,20 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
   blockStatements.push(letElseStatement);
 
   let blockStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 135, 180),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 135, 180),
     statements: blockStatements,
     tail: Option::SOME(assignmentExpression),
   }));
   let importItem: Ast::ItemId = module.addItem(Ast::Item::Node::Import(Ast::Item::Import {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 181, 194),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 181, 194),
     items: importItems,
     source: astText("std::io"),
     writtenSource: astText("std::io"),
-    sourceSpan: SourceSpan::new("fixtures/ast_parity.ign", 190, 198),
+    sourceSpan: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 190, 198),
     metadata: Ast::emptyMetadata(),
   }));
   let itemStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Item(Ast::Statement::Item {
-    span: SourceSpan::new("fixtures/ast_parity.ign", 181, 194),
+    span: SourceSpan::new(sourceMap.register("fixtures/ast_parity.ign"), 181, 194),
     item: importItem,
   }));
 
@@ -649,18 +656,20 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
 
 @test
 function astSerializerSnapshotIsDeterministicAndStable(): void {
-  let module: Ast::Module = buildSnapshotModule(astText("main"));
-  let snapshot: String = Ast::Serializer::render(&module);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let module: Ast::Module = buildSnapshotModule(&mut sourceMap, astText("main"));
+  let snapshot: String = Ast::Serializer::render(&sourceMap, &module);
 
   Test::assertSnapshot("ast-serializer-stable-module", snapshot.toStr());
 }
 
 @test
 function astSerializerRendersEquivalentModulesIdentically(): void {
-  let leftModule: Ast::Module = buildSnapshotModule(astText("main"));
-  let rightModule: Ast::Module = buildSnapshotModule(astText("main"));
-  let left: String = Ast::Serializer::render(&leftModule);
-  let right: String = Ast::Serializer::render(&rightModule);
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let leftModule: Ast::Module = buildSnapshotModule(&mut sourceMap, astText("main"));
+  let rightModule: Ast::Module = buildSnapshotModule(&mut sourceMap, astText("main"));
+  let left: String = Ast::Serializer::render(&sourceMap, &leftModule);
+  let right: String = Ast::Serializer::render(&sourceMap, &rightModule);
   let expected: str = expectedSnapshotText();
 
   Test::assertEq<str>(left.toStr(), right.toStr());

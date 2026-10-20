@@ -9,7 +9,7 @@ import Text from "std::text";
 import Vector from "std::vector";
 
 import Config from "@compiler::config";
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, SourceMap from "@compiler::diagnostics";
 
 import Format from "../format/api";
 import _ from "../format/config";
@@ -31,7 +31,10 @@ export function textEditJson(start: Text::Position, end: Text::Position, newText
 /// search from the file's directory finds, or that directory on its own, with
 /// its `ignis.toml` and `ignisfmt.toml` and no command-line overrides. The
 /// editor's `FormattingOptions` play no part.
-export function formatterConfigForFile(path: &Path::PathBuf): Result<FormatterConfig, DiagnosticBag> {
+export function formatterConfigForFile(
+  sourceMap: &mut SourceMap,
+  path: &Path::PathBuf
+): Result<FormatterConfig, DiagnosticBag> {
   let parentDir: Path::PathBuf = match (path.parent()) {
     Option::SOME(value) -> value,
     Option::NONE -> Path::PathBuf::create("."),
@@ -66,7 +69,7 @@ export function formatterConfigForFile(path: &Path::PathBuf): Result<FormatterCo
   };
 
   let overrides: FormatterCliOverrides = FormatterCliOverrides::default();
-  return Format::Config::load(&paths, &overrides);
+  return Format::Config::load(sourceMap, &paths, &overrides);
 }
 
 /// The edits that format `text` with `config`, as the host builds them
@@ -98,7 +101,8 @@ export function documentFormattingEdits(
   text: &String,
   path: &Path::PathBuf
 ): Result<Vector<JsonValue>, String> {
-  let config: FormatterConfig = match (formatterConfigForFile(path)) {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let config: FormatterConfig = match (formatterConfigForFile(&mut sourceMap, path)) {
     Result::OK(value) -> value,
     Result::ERROR(bag) -> {
       return Result::ERROR(formatterConfigErrorText(&bag));

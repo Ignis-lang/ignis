@@ -12,7 +12,7 @@
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
 import Config, checkUnknownProjectKeys from "@compiler::config";
-import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, FileId, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
 import ParseOutput, Parser from "@compiler::parser";
 
 import Path from "std::path";
@@ -141,18 +141,13 @@ function countErrors(bag: &DiagnosticBag): u64 {
   return count;
 }
 
-/// The index of the file whose path is `spanPath`, or `fallback`.
-function fileIndexForSpan(files: &Vector<SourceFile>, spanPath: str, fallback: u64): u64 {
-  let wanted: String = String::create(spanPath);
+/// The index of the file `spanFile` names, or `fallback`.
+function fileIndexForSpan(files: &Vector<SourceFile>, spanFile: FileId, fallback: u64): u64 {
   let mut index: u64 = 0;
 
   while (index < files.length()) {
-    if (let Option::SOME(file) = files.get(index)) {
-      let candidate: String = file.path.toString();
-
-      if (candidate.equals(&wanted)) {
-        return index;
-      }
+    if (let Option::SOME(file) = files.get(index) && file.id.equals(&spanFile)) {
+      return index;
     }
 
     index += 1;
@@ -175,7 +170,7 @@ function collectBag(
   while (index < bag.length()) {
     if (let Option::SOME(diagnostic) = bag.get(index)) {
       pendingRef.push(PendingDiagnostic {
-        fileIndex: fileIndexForSpan(files, diagnostic.primarySpan.filePath, fallback),
+        fileIndex: fileIndexForSpan(files, diagnostic.primarySpan.file, fallback),
         start: diagnostic.primarySpan.start,
         end: diagnostic.primarySpan.end,
         severity: lspSeverity(diagnostic.severity),
@@ -287,6 +282,7 @@ function convertPending(
 /// Returns an error message when the modules no longer match what discovery
 /// saw, which means a file changed on disk in between.
 function parseDiscoveredModules(
+  sourceMap: &mut SourceMap,
   discovery: &mut DiscoveryResult,
   sources: &SourceOverrides,
 ): Result<ParsedProgram, String> {
@@ -321,7 +317,7 @@ function parseDiscoveredModules(
       nodeKind = node.kind;
     }
 
-    let Option::SOME(parsed) = Resolver::takeParsedModule(discovery, nodeIndex, sources) else {
+    let Option::SOME(parsed) = Resolver::takeParsedModule(sourceMap, discovery, nodeIndex, sources) else {
       return Result::ERROR(`cannot read source file: ${nodePath.toString().toStr()}`);
     };
 
@@ -483,6 +479,7 @@ function collectIfDiscoveryFailure(
 /// a file on disk that does not parse), discovery's diagnostics are reported
 /// at the start of the start file.
 function discoveryFailureDiagnostics(
+  sourceMap: &mut SourceMap,
   failure: &DiagnosticBag,
   startPath: &Path::PathBuf,
   key: &String,
@@ -495,7 +492,7 @@ function discoveryFailureDiagnostics(
 
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
   let mut pending: Vector<PendingDiagnostic> = Vector::new<PendingDiagnostic>();
-  files.push(SourceFile { path: startPath.clone(), text: startText });
+  files.push(SourceFile::fromPath(sourceMap, startPath.clone(), startText));
 
   // A project file is not Ignis source: parsing it would only add noise, so
   // discovery's diagnostics go to its start.
@@ -527,7 +524,7 @@ function discoveryFailureDiagnostics(
     };
 
     let fileIndex: u64 = files.length();
-    files.push(SourceFile { path: path, text: text });
+    files.push(SourceFile::fromPath(sourceMap, path, text));
     located = collectIfDiscoveryFailure(&files, fileIndex, failure, false, &mut pending);
   }
 
@@ -580,15 +577,19 @@ export function analyzeDocuments(
   stdPath: &Option<String>,
   sources: &SourceOverrides,
 ): LspAnalysis {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let mut cache: ParseCache = ParseCache::empty();
-  return analyzeDocumentsCached(startPath, key, stdPath, sources, &mut cache);
+  return analyzeDocumentsCached(&mut sourceMap, startPath, key, stdPath, sources, &mut cache);
 }
 
 /// Analyzes like `analyzeDocuments`, reusing the parse `cache` holds of every
 /// module whose text and compile flags did not change. Afterwards `cache`
 /// holds the parses of exactly the modules this analysis read, so a file it no
-/// longer reaches drops out.
+/// longer reaches drops out. `sourceMap` registers the paths the spans of
+/// the parses name, so it has to be the map every earlier analysis that
+/// filled `cache` used.
 export function analyzeDocumentsCached(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   key: &String,
   stdPath: &Option<String>,
@@ -602,19 +603,19 @@ export function analyzeDocumentsCached(
     overrides.stdPath = Option::SOME(value.clone());
   }
 
-  let mut discovery: DiscoveryResult = match (Resolver::discoverCached(startPath, &overrides, false, cache)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverCached(sourceMap, startPath, &overrides, false, cache)) {
     Result::OK(value) -> value,
     Result::ERROR(failure) -> {
-      let mut diagnostics: Vector<FileDiagnostics> = discoveryFailureDiagnostics(&failure, startPath, key, sources);
-      appendProjectFileWarnings(startPath, sources, &mut diagnostics);
+      let mut diagnostics: Vector<FileDiagnostics> = discoveryFailureDiagnostics(sourceMap, &failure, startPath, key, sources);
+      appendProjectFileWarnings(sourceMap, startPath, sources, &mut diagnostics);
 
       return LspAnalysis { diagnostics: diagnostics, navigation: Option::NONE, reusedModules: 0 };
     },
   };
 
-  let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(&mut discovery, startPath, sources, cache);
-  appendProjectFileWarnings(startPath, sources, &mut analysis.diagnostics);
-  appendStdManifestWarnings(&discovery.stdRoot, &mut analysis.diagnostics);
+  let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(sourceMap, &mut discovery, startPath, sources, cache);
+  appendProjectFileWarnings(sourceMap, startPath, sources, &mut analysis.diagnostics);
+  appendStdManifestWarnings(sourceMap, &discovery.stdRoot, &mut analysis.diagnostics);
 
   return analysis;
 }
@@ -627,6 +628,7 @@ export function analyzeDocumentsCached(
 /// manifest is read from disk: editing it does not start an analysis, so an
 /// open buffer of it would only be read when some Ignis file changes.
 function appendStdManifestWarnings(
+  sourceMap: &mut SourceMap,
   stdRoot: &Path::PathBuf,
   files: &mut Vector<FileDiagnostics>
 ): void {
@@ -636,7 +638,7 @@ function appendStdManifestWarnings(
     return;
   };
 
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&manifestText, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(sourceMap, &manifestText, &manifestPath);
   appendTextDiagnostics(&warnings, &manifestPath, &manifestText, files);
 }
 
@@ -646,6 +648,7 @@ function appendStdManifestWarnings(
 /// reports them on the project file itself. A project file that does not
 /// parse has no warnings here: discovery already reports it as an error.
 function appendProjectFileWarnings(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
   files: &mut Vector<FileDiagnostics>,
@@ -662,7 +665,7 @@ function appendProjectFileWarnings(
     return;
   };
 
-  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &projectFile);
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(sourceMap, &document, &projectFile);
   appendTextDiagnostics(&warnings, &projectFile, &text, files);
 }
 
@@ -721,26 +724,29 @@ function appendTextDiagnostics(
 /// Parses and analyzes the modules `discovery` found, reading `sources`
 /// instead of the disk, and returns the diagnostics of every file that has
 /// any. When the modules no longer match what discovery saw, the result is
-/// one error on `startPath` that says why.
+/// one error on `startPath` that says why. `sourceMap` is the map discovery
+/// registered its paths in.
 export function analyzeDiscovered(
+  sourceMap: &mut SourceMap,
   discovery: &mut DiscoveryResult,
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
 ): Vector<FileDiagnostics> {
   let mut cache: ParseCache = ParseCache::empty();
-  return analyzeDiscoveredDocuments(discovery, startPath, sources, &mut cache).diagnostics;
+  return analyzeDiscoveredDocuments(sourceMap, discovery, startPath, sources, &mut cache).diagnostics;
 }
 
 /// Analyzes the modules `discovery` found and moves their parses into
 /// `cache`, with the import sources they were written with.
 function analyzeDiscoveredDocuments(
+  sourceMap: &mut SourceMap,
   discovery: &mut DiscoveryResult,
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
   cache: &mut ParseCache,
 ): LspAnalysis {
   let reusedModules: u64 = discovery.graph.reusedModules;
-  let mut program: ParsedProgram = match (parseDiscoveredModules(discovery, sources)) {
+  let mut program: ParsedProgram = match (parseDiscoveredModules(sourceMap, discovery, sources)) {
     Result::OK(value) -> value,
     Result::ERROR(message) -> {
       return LspAnalysis {

@@ -9,6 +9,26 @@ import _ from "./statements";
 import _ from "./types";
 
 export namespace Ast {
+  /// Where a method materialized from a trait default comes from.
+  record InheritedMethod {
+    public traitName: String;
+    public typeName: String;
+    public methodName: String;
+  }
+
+  /// The note that names where an inherited method comes from, attached to
+  /// a diagnostic only that type's copy of the default produces.
+  function inheritedMethodNote(inherited: &Ast::InheritedMethod): String {
+    let mut note: String = String::create("in default method `");
+    note.push(&inherited.methodName);
+    note.pushStr("` of trait `");
+    note.push(&inherited.traitName);
+    note.pushStr("`, as inherited by `");
+    note.push(&inherited.typeName);
+    note.pushStr("`");
+    return note;
+  }
+
   record Module {
     public roots: Vector<Ast::ItemId>;
     public items: Ast::Store<Ast::ItemTag, Ast::Item::Node>;
@@ -31,6 +51,9 @@ export namespace Ast {
     /// `//!` text right after a namespace's opening brace, keyed by the
     /// namespace's raw item id.
     public namespaceInnerDocs: HashMap<u32, String>;
+    /// Methods copied from a trait default onto an implementing type, keyed by
+    /// the copy's raw item id.
+    public inheritedMethods: HashMap<u32, Ast::InheritedMethod>;
 
     public static init(): Module {
       return Module {
@@ -45,6 +68,7 @@ export namespace Ast {
         patternDocs: HashMap::new<u32, String>(),
         variantAttributeLists: HashMap::new<u32, Vector<Ast::Attribute>>(),
         namespaceInnerDocs: HashMap::new<u32, String>(),
+        inheritedMethods: HashMap::new<u32, Ast::InheritedMethod>(),
       };
     }
 
@@ -96,6 +120,15 @@ export namespace Ast {
       if (let Option::SOME(text) = doc) {
         self.namespaceInnerDocs.insert(id.raw(), text.clone());
       }
+    }
+
+    public setInheritedMethod(&mut self, id: Ast::ItemId, inherited: Ast::InheritedMethod): void {
+      self.inheritedMethods.insert(id.raw(), inherited);
+    }
+
+    public inheritedMethod(&self, id: Ast::ItemId): Option<&Ast::InheritedMethod> {
+      let raw: u32 = id.raw();
+      return self.inheritedMethods.get(&raw);
     }
 
     public itemDoc(&self, id: Ast::ItemId): Option<&String> {

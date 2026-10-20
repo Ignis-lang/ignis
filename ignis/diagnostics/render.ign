@@ -115,11 +115,21 @@ function pointsIntoAnotherFile(
   source: &SourceFile,
   files: &Vector<SourceFile>
 ): boolean {
-  if (span.filePath.equals(source.path.asStr())) {
+  if (span.file.equals(&source.id)) {
     return false;
   }
 
-  return fileIndexOf(files, span.filePath).isSome();
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    if (let Option::SOME(file) = files.get(index) && span.file.equals(&file.id)) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
 }
 
 /// The annotations of `diagnostic`, primary span first, then every label in
@@ -191,7 +201,7 @@ function collectLabelsIn(diagnostic: &Diagnostic, file: &SourceFile): Vector<Ann
   let mut labelIndex: u64 = 0;
 
   while (labelIndex < diagnostic.labels.length()) {
-    if (let Option::SOME(label) = diagnostic.labels.get(labelIndex) && label.span.filePath.equals(file.path.asStr())) {
+    if (let Option::SOME(label) = diagnostic.labels.get(labelIndex) && label.span.file.equals(&file.id)) {
       let labelSpan: SourceSpan = label.span;
 
       annotations.push(annotationFor(file, &labelSpan, label.kind == LabelKind::PRIMARY, label.messageText()));
@@ -208,7 +218,7 @@ function firstLabelStartIn(diagnostic: &Diagnostic, file: &SourceFile): u64 {
   let mut labelIndex: u64 = 0;
 
   while (labelIndex < diagnostic.labels.length()) {
-    if (let Option::SOME(label) = diagnostic.labels.get(labelIndex) && label.span.filePath.equals(file.path.asStr())) {
+    if (let Option::SOME(label) = diagnostic.labels.get(labelIndex) && label.span.file.equals(&file.id)) {
       return label.span.start;
     }
 

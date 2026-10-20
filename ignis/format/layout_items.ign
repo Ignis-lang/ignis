@@ -2,7 +2,7 @@ import String from "std::string";
 import Vector from "std::vector";
 
 import Ast from "@compiler::ast";
-import DiagnosticBag, SourceFile, SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag, SourceFile, SourceMap, SourceSpan from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
 import CompileFlags, Parser from "@compiler::parser";
 import Keyword, Punctuation, TokenKind, TokenStream from "@compiler::syntax";
@@ -163,7 +163,7 @@ export namespace Format {
       return traitItem.span;
     }
 
-    return SourceSpan::new("", 0, 0);
+    return SourceSpan::detached(0, 0);
   }
 
   function itemMetadataOf(node: &Ast::Item::Node): Ast::Metadata {
@@ -212,7 +212,7 @@ export namespace Format {
 
   function itemSpan(module: &Ast::Module, itemId: Ast::ItemId): SourceSpan {
     let Option::SOME(node) = module.items.get(itemId) else {
-      return SourceSpan::new("", 0, 0);
+      return SourceSpan::detached(0, 0);
     };
 
     return Format::nodeSpanOf(node);
@@ -273,7 +273,7 @@ export namespace Format {
   }
 
   function itemOwnedSpan(module: &Ast::Module, itemId: Ast::ItemId): SourceSpan {
-    return SourceSpan::new("", Format::itemEffectiveStart(module, itemId), Format::itemTrueEnd(module, itemId));
+    return SourceSpan::detached(Format::itemEffectiveStart(module, itemId), Format::itemTrueEnd(module, itemId));
   }
 
   function isImportNode(module: &Ast::Module, itemId: Ast::ItemId): boolean {
@@ -1364,7 +1364,7 @@ export namespace Format {
       start = Format::firstAttributeStart(attributes, start);
     }
 
-    return SourceSpan::new(span.filePath, start, span.end);
+    return SourceSpan::new(span.file, start, span.end);
   }
 
   /// The earlier of `start` and the start of the first of `attributes`.
@@ -1389,7 +1389,7 @@ export namespace Format {
   /// like `bodyMemberPatternSpan`.
   function bodyMemberMethodSpan(module: &Ast::Module, methodId: Ast::ItemId): SourceSpan {
     let span: SourceSpan = Format::itemSpan(module, methodId);
-    return SourceSpan::new(span.filePath, Format::itemEffectiveStart(module, methodId), span.end);
+    return SourceSpan::new(span.file, Format::itemEffectiveStart(module, methodId), span.end);
   }
 
   /// Merges a body's patterns and methods back into the order they were
@@ -2243,7 +2243,8 @@ export namespace Format {
     source: &String,
     config: &FormatterConfig
   ): Result<String, FormatError> {
-    let file: SourceFile = SourceFile::create("formatter_chunk.ign", source.toStr());
+    let mut sourceMap: SourceMap = SourceMap::new();
+    let file: SourceFile = SourceFile::create(&mut sourceMap, "formatter_chunk.ign", source.toStr());
     let lexResult: LexResult = Lexer::lex(&file);
 
     if (lexResult.diagnostics.length() > 0) {

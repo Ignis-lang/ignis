@@ -38,6 +38,7 @@ import
 from "./protocol";
 import LspServer, LspStep, publishDiagnosticsParams from "./server";
 import filePathFromUri, uriFromFilePath from "./uri";
+import SourceMap from "@compiler::diagnostics";
 
 /// A server whose replies land in a pipe the test reads back.
 record LspTestHarness {
@@ -656,6 +657,7 @@ function analysisPlacesTheParseErrorOfAnImportingModule(): void {
 /// after discovery is still analyzed, and no module is parsed twice.
 @test
 function analysisUsesTheDiscoveredTextOfAModuleThatVanishedAfterDiscovery(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let directory: Path::PathBuf = lspTestDirectory("vanished");
   let helper: Path::PathBuf = lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
   let path: Path::PathBuf = lspTestWrite(
@@ -667,7 +669,7 @@ function analysisUsesTheDiscoveredTextOfAModuleThatVanishedAfterDiscovery(): voi
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.stdPath = lspTestStdPath();
 
-  let Result::OK(discovered) = Resolver::discover(&path, &overrides, false) else {
+  let Result::OK(discovered) = Resolver::discover(&mut sourceMap, &path, &overrides, false) else {
     Test::fail();
     return;
   };
@@ -678,7 +680,7 @@ function analysisUsesTheDiscoveredTextOfAModuleThatVanishedAfterDiscovery(): voi
     return;
   }
 
-  let files: Vector<FileDiagnostics> = analyzeDiscovered(&mut discovery, &path, &sources);
+  let files: Vector<FileDiagnostics> = analyzeDiscovered(&mut sourceMap, &mut discovery, &path, &sources);
 
   Test::assertEq<u64>(files.length(), 0);
   Test::assertEq<u64>(discovery.graph.reparsedModules, 0);
@@ -688,6 +690,7 @@ function analysisUsesTheDiscoveredTextOfAModuleThatVanishedAfterDiscovery(): voi
 /// reports what the first one did.
 @test
 function analysisReusesTheParseOfEveryUnchangedModule(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let directory: Path::PathBuf = lspTestDirectory("cache_reuse");
   lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
   let path: Path::PathBuf = lspTestWrite(
@@ -700,14 +703,14 @@ function analysisReusesTheParseOfEveryUnchangedModule(): void {
   let stdPath: Option<String> = lspTestStdPath();
   let mut cache: ParseCache = ParseCache::empty();
 
-  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let first: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let cachedModules: u64 = cache.length();
   let firstDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&first.diagnostics, &path);
 
   Test::assertEq<u64>(first.reusedModules, 0);
   Test::assertEq<boolean>(cachedModules > 2, true);
 
-  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let second: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let secondDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&second.diagnostics, &path);
 
   Test::assertEq<u64>(second.reusedModules, cachedModules);
@@ -724,6 +727,7 @@ function analysisReusesTheParseOfEveryUnchangedModule(): void {
 /// reported, and the other modules still come from the cache.
 @test
 function analysisParsesAnEditedBufferAgain(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let directory: Path::PathBuf = lspTestDirectory("cache_edit");
   lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
   let path: Path::PathBuf = lspTestWrite(
@@ -736,7 +740,7 @@ function analysisParsesAnEditedBufferAgain(): void {
   let mut cache: ParseCache = ParseCache::empty();
   let mut sources: SourceOverrides = SourceOverrides::none();
 
-  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let first: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let cachedModules: u64 = cache.length();
 
   Test::assertEq<u64>(first.diagnostics.length(), 0);
@@ -744,7 +748,7 @@ function analysisParsesAnEditedBufferAgain(): void {
   let edited: String = String::create("import value from \"./helper\";\n\nfunction main(): i32 {\n  let x: i32 = (;\n  return value();\n}\n");
   sources.set(&path, &edited);
 
-  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let second: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&second.diagnostics, &path);
 
   Test::assertEq<u64>(second.reusedModules, cachedModules - 1);
@@ -757,6 +761,7 @@ function analysisParsesAnEditedBufferAgain(): void {
 /// only on the one that parsed it.
 @test
 function analysisReportsTheParseErrorOfACachedModuleAgain(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let directory: Path::PathBuf = lspTestDirectory("cache_parse_error");
   let path: Path::PathBuf = lspTestWrite(&directory, "main.ign", "function main(): i32 {\n  let x: i32 = (;\n  return 0;\n}\n");
   let sources: SourceOverrides = SourceOverrides::none();
@@ -764,9 +769,9 @@ function analysisReportsTheParseErrorOfACachedModuleAgain(): void {
   let stdPath: Option<String> = lspTestStdPath();
   let mut cache: ParseCache = ParseCache::empty();
 
-  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let first: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let firstDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&first.diagnostics, &path);
-  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let second: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let secondDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&second.diagnostics, &path);
 
   Test::assertEq<u64>(second.reusedModules, cache.length());
@@ -780,6 +785,7 @@ function analysisReportsTheParseErrorOfACachedModuleAgain(): void {
 /// it, and the parses discovery made before it failed are kept.
 @test
 function analysisResolvesACachedImportToANewFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let directory: Path::PathBuf = lspTestDirectory("cache_new_file");
   let path: Path::PathBuf = lspTestWrite(
     &directory,
@@ -791,7 +797,7 @@ function analysisResolvesACachedImportToANewFile(): void {
   let stdPath: Option<String> = lspTestStdPath();
   let mut cache: ParseCache = ParseCache::empty();
 
-  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let first: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let cachedModules: u64 = cache.length();
   let missing: LspDiagnostic = lspTestOnlyDiagnostic(&first.diagnostics, &path);
 
@@ -800,7 +806,7 @@ function analysisResolvesACachedImportToANewFile(): void {
 
   lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
 
-  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let second: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
 
   Test::assertEq<u64>(second.diagnostics.length(), 0);
   Test::assertEq<u64>(second.reusedModules, cachedModules);
@@ -812,6 +818,7 @@ function analysisResolvesACachedImportToANewFile(): void {
 /// imports it anymore, drops out of the cache.
 @test
 function analysisDropsADeletedModuleFromTheCache(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let directory: Path::PathBuf = lspTestDirectory("cache_deleted");
   let helper: Path::PathBuf = lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
   let path: Path::PathBuf = lspTestWrite(
@@ -824,7 +831,7 @@ function analysisDropsADeletedModuleFromTheCache(): void {
   let mut cache: ParseCache = ParseCache::empty();
   let mut sources: SourceOverrides = SourceOverrides::none();
 
-  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let first: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
   let cachedModules: u64 = cache.length();
 
   Test::assertEq<u64>(first.diagnostics.length(), 0);
@@ -837,7 +844,7 @@ function analysisDropsADeletedModuleFromTheCache(): void {
   let standalone: String = String::create("function main(): i32 {\n  return 0;\n}\n");
   sources.set(&path, &standalone);
 
-  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let second: LspAnalysis = analyzeDocumentsCached(&mut sourceMap, &path, &key, &stdPath, &sources, &mut cache);
 
   Test::assertEq<u64>(second.diagnostics.length(), 0);
   Test::assertEq<u64>(second.reusedModules, cachedModules - 2);

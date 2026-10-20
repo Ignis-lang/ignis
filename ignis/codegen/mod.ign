@@ -51,7 +51,7 @@ export namespace CodegenC {
     public panicHandler: Option<Analyzer::DefinitionId>;
     public allocHandler: Option<Analyzer::DefinitionId>;
     public freeHandler: Option<Analyzer::DefinitionId>;
-    /// The program's sources, which a panic's line is read from.
+    /// The program's sources, which a panic's file and line are read from.
     public sources: Vector<SourceFile>;
     /// The project root a panic's file is named relative to, empty when unknown.
     public projectRoot: String;
@@ -1575,9 +1575,16 @@ export namespace CodegenC {
 
     let handlerName: String = CodegenC::mangledName(defStore, symbols, handler);
     let escapedMessage: String = CodegenC::escapeStringLiteral(message);
-    let filePath: String = CodegenC::panicFilePath(&hooks.projectRoot, &hooks.stdRoot, site.filePath);
+    let mut sitePath: str = "";
+    let mut line: u32 = 0;
+
+    if (let Option::SOME(file) = CodegenC::sourceOf(&hooks.sources, site)) {
+      sitePath = file.path.asStr();
+      line = file.lineIndexAt(site.start) + 1;
+    }
+
+    let filePath: String = CodegenC::panicFilePath(&hooks.projectRoot, &hooks.stdRoot, sitePath);
     let escapedFile: String = CodegenC::escapeStringLiteral(&filePath);
-    let line: u32 = CodegenC::sourceLine(&hooks.sources, site);
 
     return `${handlerName.toStr()}("${escapedMessage.toStr()}", "${escapedFile.toStr()}", ${line}); __builtin_unreachable();`;
   }
@@ -1633,23 +1640,19 @@ export namespace CodegenC {
     return Option::SOME(path.substringBytes(start, path.length()));
   }
 
-  /// The 1-based line `site` starts on, 0 when no source holds its file.
-  function sourceLine(sources: &Vector<SourceFile>, site: SourceSpan): u32 {
+  /// The source that holds the file of `site`, if any.
+  function sourceOf(sources: &Vector<SourceFile>, site: SourceSpan): Option<&SourceFile> {
     let mut index: u64 = 0;
 
     while (index < sources.length()) {
-      if (let Option::SOME(file) = sources.get(index)) {
-        let path: String = file.path.toString();
-
-        if (path.equals(site.filePath)) {
-          return file.lineIndexAt(site.start) + 1;
-        }
+      if (let Option::SOME(file) = sources.get(index) && file.id.equals(&site.file)) {
+        return Option::SOME(file);
       }
 
       index += 1;
     }
 
-    return 0;
+    return Option::NONE;
   }
 
   /// The user-written `drop` method of a nominal, if it declares one.

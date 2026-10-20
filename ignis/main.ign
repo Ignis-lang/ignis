@@ -17,6 +17,7 @@ import
   LabelKind,
   Severity,
   SourceFile,
+  SourceMap,
   SourceSpan,
 from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
@@ -219,12 +220,11 @@ function renderProgramBag(
     }
 
     let mut current: String = DiagnosticRenderer::renderAcross(diagnostic, entry, files, useAnsi);
-    let spanPath: String = String::create(diagnostic.primarySpan.filePath);
     let mut fileIndex: u64 = 0;
 
     while (fileIndex < files.length()) {
       if (let Option::SOME(candidate) = files.get(fileIndex)) {
-        if (spanPath.equals(candidate.path.asStr())) {
+        if (diagnostic.primarySpan.file.equals(&candidate.id)) {
           current = DiagnosticRenderer::renderAcross(diagnostic, candidate, files, useAnsi);
           break;
         }
@@ -1603,6 +1603,7 @@ function stdArchiveDefinitions(
 /// wrapper out of the emitted unit, because the test harness owns `main` in
 /// that build.
 export function compileDiscovered(
+  sourceMap: &mut SourceMap,
   discovery: &mut DiscoveryResult,
   file: &SourceFile,
   options: &CompileOptions,
@@ -1659,7 +1660,7 @@ export function compileDiscovered(
     }
 
     let modulePath: String = nodePath.toString();
-    let Option::SOME(parsed) = Resolver::takeParsedModule(discovery, nodeIndex, &diskSources) else {
+    let Option::SOME(parsed) = Resolver::takeParsedModule(sourceMap, discovery, nodeIndex, &diskSources) else {
       Output::message(`error: cannot read source file: ${modulePath.toStr()}`);
       return failedCompilation(1, 0);
     };
@@ -1986,11 +1987,12 @@ export function compileDiscovered(
     // which analyzes one module at a time: the counter behind
     // `__closure_thunk_N` restarts with each module, and a thunk's name is
     // part of what gate G7 compares.
-    let moduleCaptureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    let moduleCaptureDiagnostics: DiagnosticBag = Capture::populateModuleClosureCaptures(
       &mut defStore,
       &mut typeStore,
       &mut symbols,
       &mut programHir,
+      moduleNodeStart,
     );
 
     // The module bag owns its diagnostics and frees them when this iteration
@@ -2476,14 +2478,14 @@ function cloneOptionalText(value: &Option<String>): Option<String> {
 ///
 /// Every module's diagnostics carry their own path, so this is the entry the
 /// renderer falls back to when it needs source text.
-function entrySourceFile(path: &Path::PathBuf): SourceFile {
+function entrySourceFile(sourceMap: &mut SourceMap, path: &Path::PathBuf): SourceFile {
   let text: String = match (Fs::readToString(path)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> String::new(),
   };
   let pathText: String = path.toString();
 
-  return SourceFile::create(pathText.toStr(), text.toStr());
+  return SourceFile::create(sourceMap, pathText.toStr(), text.toStr());
 }
 
 /// Create the directory a path lives in, so a toolchain step can write into it.
@@ -2529,6 +2531,7 @@ function progressPath(path: &String, rootPrefix: &String): String {
 /// Discover the module graph a command runs against, reporting what failed
 /// and returning its counts on failure.
 function discoverReporting(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   options: &CliOptions,
   includeTests: boolean,
@@ -2537,10 +2540,10 @@ function discoverReporting(
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
 
-  return match (Resolver::discover(startPath, &overrides, includeTests)) {
+  return match (Resolver::discover(sourceMap, startPath, &overrides, includeTests)) {
     Result::OK(value) -> Result::OK(value),
     Result::ERROR(diagnostics) -> {
-      let file: SourceFile = entrySourceFile(startPath);
+      let file: SourceFile = entrySourceFile(sourceMap, startPath);
       Result::ERROR(reportDiscoveryFailure(&diagnostics, &file, options.verbose))
     },
   };
@@ -2548,11 +2551,12 @@ function discoverReporting(
 
 /// Discover the module graph a command runs against, reporting what failed.
 function discoverFor(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   options: &CliOptions,
   includeTests: boolean,
 ): Option<DiscoveryResult> {
-  return match (discoverReporting(startPath, options, includeTests)) {
+  return match (discoverReporting(sourceMap, startPath, options, includeTests)) {
     Result::OK(value) -> Option::SOME(value),
     Result::ERROR(_) -> Option::NONE,
   };
@@ -2643,6 +2647,7 @@ function printCompileOutcome(
 /// Returns 0 on success and 1 on any error (I/O, lex, parse, analyze, ownership
 /// or linking).
 function runCompile(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   options: &CliOptions,
   checkOnly: boolean,
@@ -2654,7 +2659,7 @@ function runCompile(
   printStatus(String::create(banner), verbose);
   printStatus(`  source: ${startPath.asStr()}`, verbose);
 
-  let mut discovery: DiscoveryResult = match (discoverReporting(startPath, options, false)) {
+  let mut discovery: DiscoveryResult = match (discoverReporting(sourceMap, startPath, options, false)) {
     Result::OK(value) -> value,
     Result::ERROR(tally) -> {
       printFailure(checkOnly ? "Check" : "Build", tally.errors, tally.warnings);
@@ -2664,7 +2669,7 @@ function runCompile(
 
   Output::message(buildHeaderLine(checkOnly ? "Checking" : "Building", &discovery));
 
-  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &discovery.entry);
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   profile.freestanding = !discovery.stdEnabled;
 
@@ -2705,7 +2710,7 @@ function runCompile(
   // The archive has to be current before the cache can relink against it,
   // and it is the C backend's whichever backend the program's unit uses.
   if (!checkOnly && profile.stdArchive && !objectOnly && discovery.bin) {
-    let Option::SOME(archivePath) = ensureStdArchive(startPath, options, &discovery.outDir) else {
+    let Option::SOME(archivePath) = ensureStdArchive(sourceMap, startPath, options, &discovery.outDir) else {
       printFailure("Build", 1, 0);
       return 1;
     };
@@ -2760,7 +2765,7 @@ function runCompile(
   compileOptions.verbose = options.verbose;
   compileOptions.freestanding = profile.freestanding;
   compileOptions.stdArchive = profile.stdArchive;
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
   let mut emitted: boolean = false;
 
@@ -2968,6 +2973,7 @@ function joinDiagnosticMessages(messages: &Vector<String>): String {
 /// The discovery diagnostics reach the caller as ordinary error texts, because
 /// a fixture that names a module it cannot reach fails on those.
 function discoverFixtureGraph(
+  sourceMap: &mut SourceMap,
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   options: &CliOptions,
@@ -2975,7 +2981,7 @@ function discoverFixtureGraph(
 ): Option<DiscoveryResult> {
   let overrides: BuildOverrides = buildOverridesFrom(options);
 
-  match (Resolver::discoverFixture(&fixture.path, projectStart, &overrides)) {
+  match (Resolver::discoverFixture(sourceMap, &fixture.path, projectStart, &overrides)) {
     Result::OK(value) -> {
       return Option::SOME(value);
     },
@@ -2999,6 +3005,7 @@ function discoverFixtureGraph(
 /// decides the outcome and stdout/stderr are never compared against the
 /// baseline, mirroring the host's `run_program_fixture`.
 function runProgramFixture(
+  sourceMap: &mut SourceMap,
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   discovery: &DiscoveryResult,
@@ -3020,15 +3027,15 @@ function runProgramFixture(
   }
 
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
-  let Option::SOME(discoveredFixture) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+  let Option::SOME(discoveredFixture) = discoverFixtureGraph(sourceMap, fixture, projectStart, options, &mut discoveryErrors) else {
     let reported: String = joinDiagnosticMessages(&discoveryErrors);
     return `compilation failed\n${reported.toStr()}`;
   };
   let mut fixtureDiscovery: DiscoveryResult = discoveredFixture;
 
-  let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &fixtureDiscovery.entry);
   let compileOptions: CompileOptions = fixtureCompileOptions(true, false);
-  let compiled: CompiledProgram = compileDiscovered(&mut fixtureDiscovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut fixtureDiscovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     let body: String = joinDiagnosticMessages(&compiled.errorMessages);
@@ -3078,7 +3085,7 @@ function runProgramFixture(
   let noPrebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut inlineAsmUnits: Vector<boolean> = Vector::new<boolean>();
   inlineAsmUnits.push(compiled.usesInlineAsm);
-  let quietFile: SourceFile = SourceFile::create("", "");
+  let quietFile: SourceFile = SourceFile::create(sourceMap, "", "");
 
   // A fixture's toolchain failure belongs to its own report block, so the
   // steps run quietly.
@@ -3146,13 +3153,14 @@ function runProgramFixture(
 /// on the failure alone, without reading or writing the baseline, so a
 /// skipped fixture's snapshot is never touched.
 function runDiagnosticsFixture(
+  sourceMap: &mut SourceMap,
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   options: &CliOptions,
   compareBaseline: boolean,
 ): String {
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
-  let Option::SOME(discoveredFixture) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+  let Option::SOME(discoveredFixture) = discoverFixtureGraph(sourceMap, fixture, projectStart, options, &mut discoveryErrors) else {
     if (!compareBaseline) {
       return String::new();
     }
@@ -3164,9 +3172,9 @@ function runDiagnosticsFixture(
   };
   let mut fixtureDiscovery: DiscoveryResult = discoveredFixture;
 
-  let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &fixtureDiscovery.entry);
   let compileOptions: CompileOptions = fixtureCompileOptions(false, false);
-  let compiled: CompiledProgram = compileDiscovered(&mut fixtureDiscovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut fixtureDiscovery, &file, &compileOptions);
 
   if (compiled.errorMessages.length() == 0) {
     return String::create("expected the fixture to fail compilation, but it compiled cleanly");
@@ -3187,21 +3195,22 @@ function runDiagnosticsFixture(
 ///
 /// See `runDiagnosticsFixture` for what `compareBaseline` skips.
 function runWarningsFixture(
+  sourceMap: &mut SourceMap,
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   options: &CliOptions,
   compareBaseline: boolean,
 ): String {
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
-  let Option::SOME(discoveredFixture) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+  let Option::SOME(discoveredFixture) = discoverFixtureGraph(sourceMap, fixture, projectStart, options, &mut discoveryErrors) else {
     let reported: String = joinDiagnosticMessages(&discoveryErrors);
     return `expected the fixture to compile cleanly, but it reported errors:\n${reported.toStr()}`;
   };
   let mut fixtureDiscovery: DiscoveryResult = discoveredFixture;
 
-  let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &fixtureDiscovery.entry);
   let compileOptions: CompileOptions = fixtureCompileOptions(false, true);
-  let compiled: CompiledProgram = compileDiscovered(&mut fixtureDiscovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut fixtureDiscovery, &file, &compileOptions);
 
   if (compiled.errorMessages.length() > 0) {
     let reported: String = joinDiagnosticMessages(&compiled.errorMessages);
@@ -3261,6 +3270,7 @@ function fixtureOutcome(
 /// header or not: the fixture's mode was never established, so there is no
 /// contract to judge it against.
 function runFixture(
+  sourceMap: &mut SourceMap,
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   discovery: &DiscoveryResult,
@@ -3275,9 +3285,9 @@ function runFixture(
   let compareBaseline: boolean = fixture.skipReason.length() == 0;
 
   let failure: String = match (fixture.mode.kind) {
-    FixtureKind::DIAGNOSTICS -> runDiagnosticsFixture(fixture, projectStart, options, compareBaseline),
-    FixtureKind::WARNINGS -> runWarningsFixture(fixture, projectStart, options, compareBaseline),
-    FixtureKind::PROGRAM -> runProgramFixture(fixture, projectStart, discovery, options, timeoutSeconds, compareBaseline, linkerFlags),
+    FixtureKind::DIAGNOSTICS -> runDiagnosticsFixture(sourceMap, fixture, projectStart, options, compareBaseline),
+    FixtureKind::WARNINGS -> runWarningsFixture(sourceMap, fixture, projectStart, options, compareBaseline),
+    FixtureKind::PROGRAM -> runProgramFixture(sourceMap, fixture, projectStart, discovery, options, timeoutSeconds, compareBaseline, linkerFlags),
   };
 
   if (!compareBaseline) {
@@ -3313,15 +3323,16 @@ function mainSampleFixtureNamed(name: str): FixtureCase {
 /// path in `run_single_fixture`.
 @test
 function programBagRendersEachDiagnosticAgainstItsOwnModule(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let entryText: str = "function main(): i32 {\n  return 0;\n}\n";
-  let entry: SourceFile = SourceFile::create("entry.ign", entryText);
+  let entry: SourceFile = SourceFile::create(&mut sourceMap, "entry.ign", entryText);
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
-  files.push(SourceFile::create("entry.ign", entryText));
-  files.push(SourceFile::create("helper.ign", "let a: i32 = 1;\nlet b: i32 = 2;\n"));
+  files.push(SourceFile::create(&mut sourceMap, "entry.ign", entryText));
+  files.push(SourceFile::create(&mut sourceMap, "helper.ign", "let a: i32 = 1;\nlet b: i32 = 2;\n"));
 
   let mut bag: DiagnosticBag = DiagnosticBag::init();
-  bag.push(Diagnostic::new(Severity::ERROR, "O0003", "in helper", SourceSpan::new("helper.ign", 20, 21)));
-  bag.push(Diagnostic::new(Severity::ERROR, "O0003", "elsewhere", SourceSpan::new("missing.ign", 2, 3)));
+  bag.push(Diagnostic::new(Severity::ERROR, "O0003", "in helper", SourceSpan::new(sourceMap.register("helper.ign"), 20, 21)));
+  bag.push(Diagnostic::new(Severity::ERROR, "O0003", "elsewhere", SourceSpan::new(sourceMap.register("missing.ign"), 2, 3)));
 
   let rendered: String = renderProgramBag(&bag, &files, &entry, false);
 
@@ -3334,14 +3345,15 @@ function programBagRendersEachDiagnosticAgainstItsOwnModule(): void {
 
 @test
 function programBagRendersALabelAgainstItsOwnModule(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let entryText: str = "function main(): i32 {\n  return 0;\n}\n";
-  let entry: SourceFile = SourceFile::create("entry.ign", entryText);
+  let entry: SourceFile = SourceFile::create(&mut sourceMap, "entry.ign", entryText);
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
-  files.push(SourceFile::create("entry.ign", entryText));
-  files.push(SourceFile::create("helper.ign", "let a: i32 = 1;\nlet b: i32 = 2;\n"));
+  files.push(SourceFile::create(&mut sourceMap, "entry.ign", entryText));
+  files.push(SourceFile::create(&mut sourceMap, "helper.ign", "let a: i32 = 1;\nlet b: i32 = 2;\n"));
 
-  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "O0003", "in entry", SourceSpan::new("entry.ign", 25, 31));
-  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new("helper.ign", 20, 21), "declared here");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, "O0003", "in entry", SourceSpan::new(sourceMap.register("entry.ign"), 25, 31));
+  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new(sourceMap.register("helper.ign"), 20, 21), "declared here");
   let mut bag: DiagnosticBag = DiagnosticBag::init();
   bag.push(diagnostic);
 
@@ -3524,7 +3536,11 @@ export function prepareTestBinaryDirectory(binaryPath: &String): boolean {
 /// process, reporting the way the host `ignis test` runner does.
 ///
 /// Returns 0 when every selected test exits 0, and 1 on any failure.
-function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
+function runProjectTests(
+  sourceMap: &mut SourceMap,
+  startPath: &Path::PathBuf,
+  options: &CliOptions
+): i32 {
   let partition: TestPartition = match (&options.partition) {
     Option::SOME(spec) -> TestPartition::create(spec.index, spec.count),
     Option::NONE -> TestPartition::none(),
@@ -3533,17 +3549,17 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   Output::message(`Testing ${TestRunner::runHeader(startPath, &partition).toStr()}\n`);
 
-  let Option::SOME(discovered) = discoverFor(startPath, options, true) else {
+  let Option::SOME(discovered) = discoverFor(sourceMap, startPath, options, true) else {
     return 1;
   };
   let mut discovery: DiscoveryResult = discovered;
 
-  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &discovery.entry);
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   resolveLinkerSelection(&mut profile);
   let mut compileOptions: CompileOptions = testCompileOptions();
   compileOptions.verbose = options.verbose;
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut discovery, &file, &compileOptions);
 
   if (compiled.source.length() == 0) {
     Output::message(String::create("error: test setup failed"));
@@ -3583,10 +3599,6 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     plannedFixtureIndex += 1;
   }
 
-  if (options.updateSnapshots) {
-    FixtureTests::prepareSnapshotDirectories(&selectedFixtures);
-  }
-
   let binaryPathText: String = testBinaryPath(&discovery.outDir, &discovery.name, &options.outputPath);
 
   let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected, &binaryPathText) else {
@@ -3615,7 +3627,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
       break;
     };
 
-    outcomes.push(runFixture(fixture, startPath, &discovery, options, timeoutSeconds, &profile.linkerFlags));
+    outcomes.push(runFixture(sourceMap, fixture, startPath, &discovery, options, timeoutSeconds, &profile.linkerFlags));
     Output::advanceOuter(&fixture.name);
     fixtureIndex += 1;
   }
@@ -3636,17 +3648,17 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 /// Returns 0 when every selected test exits 0, and 1 on any failure,
 /// including an empty manifest, a `@test` in a shipping std module, or a
 /// discovery or analysis error.
-function runStdTests(options: &CliOptions): i32 {
+function runStdTests(sourceMap: &mut SourceMap, options: &CliOptions): i32 {
   let Result::OK(currentDir) = Env::currentDir() else {
     Output::message(String::create("error: the current directory could not be read"));
     return 1;
   };
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let mut discovery: DiscoveryResult = match (Resolver::discoverStdTests(&currentDir, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStdTests(sourceMap, &currentDir, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
-      let startFile: SourceFile = entrySourceFile(&currentDir);
+      let startFile: SourceFile = entrySourceFile(sourceMap, &currentDir);
       reportDiscoveryFailure(&diagnostics, &startFile, options.verbose);
       Output::message(String::create("error: test setup failed"));
       return 1;
@@ -3655,12 +3667,12 @@ function runStdTests(options: &CliOptions): i32 {
 
   Output::message(`Testing std ${discovery.stdRoot.asStr()}\n`);
 
-  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &discovery.entry);
   let mut profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   resolveLinkerSelection(&mut profile);
   let mut compileOptions: CompileOptions = stdTestCompileOptions(&discovery.stdRoot);
   compileOptions.verbose = options.verbose;
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut discovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     Output::message(String::create("error: test setup failed"));
@@ -3784,7 +3796,10 @@ function buildFmtCliOverrides(options: &CliOptions): FormatterCliOverrides {
 
 /// Resolves the formatter config for a stdin-json batch: a flat lookup under
 /// the current directory, with no upward search for `ignis.toml`.
-function resolveFmtConfigForStdin(options: &CliOptions): Result<FormatterConfig, DiagnosticBag> {
+function resolveFmtConfigForStdin(
+  sourceMap: &mut SourceMap,
+  options: &CliOptions
+): Result<FormatterConfig, DiagnosticBag> {
   let cwd: Path::PathBuf = match (Env::currentDir()) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> Path::PathBuf::create("."),
@@ -3817,12 +3832,13 @@ function resolveFmtConfigForStdin(options: &CliOptions): Result<FormatterConfig,
 
   let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
 
-  return Format::Config::load(&paths, &overrides);
+  return Format::Config::load(sourceMap, &paths, &overrides);
 }
 
 /// Resolves the formatter config for a whole project, rooted at the project
 /// directory `Config::loadProjectFile` already discovered.
 function resolveFmtConfigForProject(
+  sourceMap: &mut SourceMap,
   project: &ResolvedProject,
   options: &CliOptions
 ): Result<FormatterConfig, DiagnosticBag> {
@@ -3857,12 +3873,13 @@ function resolveFmtConfigForProject(
 
   let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
 
-  return Format::Config::load(&paths, &overrides);
+  return Format::Config::load(sourceMap, &paths, &overrides);
 }
 
 /// Resolves the formatter config for one explicit file: the project the
 /// upward search from its directory finds, or that directory on its own.
 function resolveFmtConfigForFile(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   options: &CliOptions
 ): Result<FormatterConfig, DiagnosticBag> {
@@ -3906,7 +3923,7 @@ function resolveFmtConfigForFile(
 
   let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
 
-  return Format::Config::load(&paths, &overrides);
+  return Format::Config::load(sourceMap, &paths, &overrides);
 }
 
 /// Resolves what a `fmt` run applies to, printing the same messages the host
@@ -3914,7 +3931,7 @@ function resolveFmtConfigForFile(
 ///
 /// Priority: `--project <dir>`, then explicit files, then the project
 /// containing the current directory.
-function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
+function resolveFmtInput(sourceMap: &mut SourceMap, options: &CliOptions): Option<FmtInput> {
   if (let Option::SOME(projectDir) = &options.fmtProject) {
     let root: Path::PathBuf = Path::PathBuf::fromString(&projectDir);
     let configPath: Path::PathBuf = root.join("ignis.toml");
@@ -3924,7 +3941,7 @@ function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
       return Option::NONE;
     }
 
-    return match (Config::loadProjectFile(&configPath)) {
+    return match (Config::loadProjectFile(sourceMap, &configPath)) {
       Result::OK(project) -> Option::SOME(FmtInput::Project(project)),
       Result::ERROR(bag) -> {
         printFmtConfigError(&bag);
@@ -3966,7 +3983,7 @@ function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
   };
 
   return match (Config::findProjectFile(&cwd)) {
-    Option::SOME(configPath) -> match (Config::loadProjectFile(&configPath)) {
+    Option::SOME(configPath) -> match (Config::loadProjectFile(sourceMap, &configPath)) {
       Result::OK(project) -> Option::SOME(FmtInput::Project(project)),
       Result::ERROR(bag) -> {
         printFmtConfigError(&bag);
@@ -4173,6 +4190,7 @@ function collectProjectIgnFiles(sourceDir: &Path::PathBuf): Option<Vector<Path::
 /// Formats the explicit files a `fmt` run named, resolving each file's own
 /// formatter config the way the host CLI does.
 function runFmtExplicitFiles(
+  sourceMap: &mut SourceMap,
   paths: &Vector<Path::PathBuf>,
   options: &CliOptions,
   readOnly: boolean,
@@ -4187,7 +4205,7 @@ function runFmtExplicitFiles(
       continue;
     };
 
-    let formatterConfig: FormatterConfig = match (resolveFmtConfigForFile(path, options)) {
+    let formatterConfig: FormatterConfig = match (resolveFmtConfigForFile(sourceMap, path, options)) {
       Result::OK(value) -> value,
       Result::ERROR(bag) -> {
         printFmtConfigErrorForPath(path, &bag);
@@ -4238,12 +4256,13 @@ function runFmtExplicitFiles(
 /// Formats every `.ign` file a project's source directory holds, resolving
 /// the project's formatter config once up front.
 function runFmtProject(
+  sourceMap: &mut SourceMap,
   project: &ResolvedProject,
   options: &CliOptions,
   readOnly: boolean,
   emitDiff: boolean
 ): i32 {
-  let formatterConfig: FormatterConfig = match (resolveFmtConfigForProject(project, options)) {
+  let formatterConfig: FormatterConfig = match (resolveFmtConfigForProject(sourceMap, project, options)) {
     Result::OK(value) -> value,
     Result::ERROR(bag) -> {
       printFmtConfigError(&bag);
@@ -4647,8 +4666,8 @@ export function fmtStdinJsonValidateAndProcessLine(
 /// growing buffer, so an invalid byte only ever fails the line that carries
 /// it, after every earlier complete line has already been formatted and
 /// printed.
-function runFmtStdinJson(options: &CliOptions): i32 {
-  let formatterConfig: FormatterConfig = match (resolveFmtConfigForStdin(options)) {
+function runFmtStdinJson(sourceMap: &mut SourceMap, options: &CliOptions): i32 {
+  let formatterConfig: FormatterConfig = match (resolveFmtConfigForStdin(sourceMap, options)) {
     Result::OK(value) -> value,
     Result::ERROR(bag) -> {
       printFmtConfigError(&bag);
@@ -4737,20 +4756,20 @@ function runFmtStdinJson(options: &CliOptions): i32 {
 
 /// `ignis fmt`: formats the files, project, or stdin batch the command line
 /// named, mirroring the host CLI's flags and messages.
-function runFmt(options: &CliOptions): i32 {
+function runFmt(sourceMap: &mut SourceMap, options: &CliOptions): i32 {
   if (options.fmtStdinJson) {
-    return runFmtStdinJson(options);
+    return runFmtStdinJson(sourceMap, options);
   }
 
   let readOnly: boolean = options.fmtCheck || options.fmtEmitDiff;
 
-  let Option::SOME(input) = resolveFmtInput(options) else {
+  let Option::SOME(input) = resolveFmtInput(sourceMap, options) else {
     return 1;
   };
 
   return match (input) {
-    FmtInput::ExplicitFiles(paths) -> runFmtExplicitFiles(&paths, options, readOnly, options.fmtEmitDiff),
-    FmtInput::Project(project) -> runFmtProject(&project, options, readOnly, options.fmtEmitDiff),
+    FmtInput::ExplicitFiles(paths) -> runFmtExplicitFiles(sourceMap, &paths, options, readOnly, options.fmtEmitDiff),
+    FmtInput::Project(project) -> runFmtProject(sourceMap, &project, options, readOnly, options.fmtEmitDiff),
   };
 }
 
@@ -4802,16 +4821,20 @@ function resolveTarget(options: &CliOptions): Option<CommandTarget> {
 /// given external linkage. The host driver archives one object per std module
 /// and writes an umbrella `ignis_std.h` beside the archive; this build writes
 /// no header, because nothing in this pipeline emits one yet.
-function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): i32 {
+function buildStandardLibrary(
+  sourceMap: &mut SourceMap,
+  startPath: &Path::PathBuf,
+  options: &CliOptions
+): i32 {
   let started: Option<Time::MonotonicInstant> = startBuildClock();
   let verbose: boolean = options.verbose;
   printStatus(String::create("ignis selfhost build-std"), verbose);
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(sourceMap, startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
-      let startFile: SourceFile = entrySourceFile(startPath);
+      let startFile: SourceFile = entrySourceFile(sourceMap, startPath);
       let tally: BuildTally = reportDiscoveryFailure(&diagnostics, &startFile, verbose);
       printFailure("Build", tally.errors, tally.warnings);
       return 1;
@@ -4821,10 +4844,10 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   Output::message(`Building std (${discovery.stdRoot.asStr()})`);
   printStatus(`  std: ${discovery.stdRoot.asStr()}`, verbose);
 
-  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   let base: Path::PathBuf = stdArtifactBase(&discovery.outDir, &options.outDir, &options.outputPath);
-  let outcome: StdArchiveOutcome = produceStdArchive(&mut discovery, &file, &profile, &base, options);
+  let outcome: StdArchiveOutcome = produceStdArchive(sourceMap, &mut discovery, &file, &profile, &base, options);
 
   if (outcome.errors > 0) {
     printFailure("Build", outcome.errors, outcome.warnings);
@@ -4851,6 +4874,7 @@ record StdArchiveOutcome {
 /// linked by units this build never sees. Prints the phase lines and any
 /// diagnostics, but no closing line: the caller owns that.
 function produceStdArchive(
+  sourceMap: &mut SourceMap,
   discovery: &mut DiscoveryResult,
   file: &SourceFile,
   profile: &BuildProfile,
@@ -4907,7 +4931,7 @@ function produceStdArchive(
 
   let mut compileOptions: CompileOptions = stdCompileOptions();
   compileOptions.verbose = verbose;
-  let compiled: CompiledProgram = compileDiscovered(discovery, file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, discovery, file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     printStatus(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`, verbose);
@@ -5000,15 +5024,16 @@ function produceStdArchive(
 /// C backend under the program's output directory. Returns the archive path,
 /// or `NONE` once the failure has been reported.
 function ensureStdArchive(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   options: &CliOptions,
   outDir: &Path::PathBuf,
 ): Option<Path::PathBuf> {
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(sourceMap, startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
-      let startFile: SourceFile = entrySourceFile(startPath);
+      let startFile: SourceFile = entrySourceFile(sourceMap, startPath);
       let _tally: BuildTally = reportDiscoveryFailure(&diagnostics, &startFile, options.verbose);
       return Option::NONE;
     },
@@ -5016,9 +5041,9 @@ function ensureStdArchive(
 
   printStatus(`  std archive: ${discovery.stdRoot.asStr()}`, options.verbose);
 
-  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let outcome: StdArchiveOutcome = produceStdArchive(&mut discovery, &file, &profile, outDir, options);
+  let outcome: StdArchiveOutcome = produceStdArchive(sourceMap, &mut discovery, &file, &profile, outDir, options);
 
   if (outcome.errors > 0) {
     return Option::NONE;
@@ -5108,7 +5133,10 @@ record DocSources {
 
 /// Parse every discovered module, rendering lexer and parser diagnostics to
 /// stderr. `NONE` when any of them is an error.
-function parseDocSources(docDiscovery: &mut DocDiscovery): Option<DocSources> {
+function parseDocSources(
+  sourceMap: &mut SourceMap,
+  docDiscovery: &mut DocDiscovery
+): Option<DocSources> {
   let mut sources: DocSources = DocSources {
     modules: Vector::new<Ast::Module>(),
     files: Vector::new<SourceFile>(),
@@ -5140,7 +5168,7 @@ function parseDocSources(docDiscovery: &mut DocDiscovery): Option<DocSources> {
     }
 
     let modulePath: String = nodePath.toString();
-    let Option::SOME(parsed) = Resolver::takeParsedModule(&mut docDiscovery.discovery, nodeIndex, &diskSources) else {
+    let Option::SOME(parsed) = Resolver::takeParsedModule(sourceMap, &mut docDiscovery.discovery, nodeIndex, &diskSources) else {
       Output::message(`error: cannot read source file: ${modulePath.toStr()}`);
       return Option::NONE;
     };
@@ -5191,22 +5219,22 @@ function parseDocSources(docDiscovery: &mut DocDiscovery): Option<DocSources> {
 /// Analysis stops before ownership checking, as the host's does: closure
 /// conversion still runs, because the functions it creates are part of the
 /// package.
-function runDoc(options: &CliOptions): i32 {
+function runDoc(sourceMap: &mut SourceMap, options: &CliOptions): i32 {
   let Option::SOME(target) = resolveDocTarget(options) else {
     return 1;
   };
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let mut docDiscovery: DocDiscovery = match (Resolver::discoverDoc(&target.start, &overrides, target.projectMode)) {
+  let mut docDiscovery: DocDiscovery = match (Resolver::discoverDoc(sourceMap, &target.start, &overrides, target.projectMode)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
-      let file: SourceFile = entrySourceFile(&target.start);
+      let file: SourceFile = entrySourceFile(sourceMap, &target.start);
       renderBagToStderr(&diagnostics, &file);
       return 1;
     },
   };
 
-  let Option::SOME(sources) = parseDocSources(&mut docDiscovery) else {
+  let Option::SOME(sources) = parseDocSources(sourceMap, &mut docDiscovery) else {
     return 1;
   };
 
@@ -5321,10 +5349,17 @@ function convertDocClosures(
       break;
     };
 
+    let moduleNodeStart: u64 = programHir.nodes.length();
     Lowering::lowerModuleInto(defsRef, typeStore, symbols, module, &analysisRecord.output, &mut programHir);
 
     let firstNewDef: u64 = defsRef.length();
-    let diagnostics: DiagnosticBag = Capture::populateClosureCaptures(defsRef, typeStore, symbols, &mut programHir);
+    let diagnostics: DiagnosticBag = Capture::populateModuleClosureCaptures(
+      defsRef,
+      typeStore,
+      symbols,
+      &mut programHir,
+      moduleNodeStart,
+    );
 
     if (let Option::SOME(moduleFile) = sources.files.get(moduleIndex)) {
       errors += countBySeverity(&diagnostics, Severity::ERROR);
@@ -5363,16 +5398,20 @@ function convertDocClosures(
 /// the variable.
 ///
 /// Returns 0 when the library checks cleanly and 1 on any failure.
-function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): i32 {
+function checkStandardLibrary(
+  sourceMap: &mut SourceMap,
+  startPath: &Path::PathBuf,
+  options: &CliOptions
+): i32 {
   let started: Option<Time::MonotonicInstant> = startBuildClock();
   let verbose: boolean = options.verbose;
   printStatus(String::create("ignis selfhost check-std"), verbose);
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
-  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverStd(sourceMap, startPath, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
-      let startFile: SourceFile = entrySourceFile(startPath);
+      let startFile: SourceFile = entrySourceFile(sourceMap, startPath);
       let tally: BuildTally = reportDiscoveryFailure(&diagnostics, &startFile, verbose);
       printFailure("Check", tally.errors, tally.warnings);
       return 1;
@@ -5382,10 +5421,10 @@ function checkStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
   Output::message(`Checking std (${discovery.stdRoot.asStr()})`);
   printStatus(`  std: ${discovery.stdRoot.asStr()}`, verbose);
 
-  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &discovery.entry);
   let mut compileOptions: CompileOptions = stdCompileOptions();
   compileOptions.verbose = verbose;
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &compileOptions);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut discovery, &file, &compileOptions);
 
   if (compiled.errors == 0 && compiled.source.length() == 0) {
     Output::message(String::create("error: code generation produced no C for the standard library"));
@@ -5463,12 +5502,13 @@ function checkStdRepositoryStd(): Path::PathBuf {
 /// `-o` / `--output-dir` receives the emitted translation unit.
 @test
 function checkStdWritesTheLibraryIntoTheOutputDirectory(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let scratch: Path::PathBuf = checkStdScratchDir("output");
   let outDir: Path::PathBuf = scratch.join("out");
   let stdRoot: Path::PathBuf = checkStdRepositoryStd();
   let options: CliOptions = checkStdOptions(&stdRoot, Option::SOME(outDir.toString()));
 
-  Test::assertEq<i32>(checkStandardLibrary(&scratch, &options), 0);
+  Test::assertEq<i32>(checkStandardLibrary(&mut sourceMap, &scratch, &options), 0);
   Test::assertEq<boolean>(Fs::exists(outDir.join("ignis_std.c").asStr()), true);
 
   let _removed = Fs::removeDirAll(&scratch);
@@ -5478,6 +5518,7 @@ function checkStdWritesTheLibraryIntoTheOutputDirectory(): void {
 /// directory, like the host's default output directory.
 @test
 function checkStdWritesTheLibraryIntoBuildByDefault(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let stdRoot: Path::PathBuf = checkStdRepositoryStd();
   let scratch: Path::PathBuf = checkStdScratchDir("default");
 
@@ -5485,7 +5526,7 @@ function checkStdWritesTheLibraryIntoBuildByDefault(): void {
 
   let options: CliOptions = checkStdOptions(&stdRoot, Option::NONE);
 
-  Test::assertEq<i32>(checkStandardLibrary(&scratch, &options), 0);
+  Test::assertEq<i32>(checkStandardLibrary(&mut sourceMap, &scratch, &options), 0);
   Test::assertEq<boolean>(Fs::exists(scratch.join("build").join("ignis_std.c").asStr()), true);
 
   let _removed = Fs::removeDirAll(&scratch);
@@ -5495,12 +5536,13 @@ function checkStdWritesTheLibraryIntoBuildByDefault(): void {
 /// nothing.
 @test
 function checkStdFailsOnAMissingStandardLibrary(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let scratch: Path::PathBuf = checkStdScratchDir("missing");
   let outDir: Path::PathBuf = scratch.join("out");
   let missingStd: Path::PathBuf = scratch.join("no-std");
   let options: CliOptions = checkStdOptions(&missingStd, Option::SOME(outDir.toString()));
 
-  Test::assertEq<i32>(checkStandardLibrary(&scratch, &options), 1);
+  Test::assertEq<i32>(checkStandardLibrary(&mut sourceMap, &scratch, &options), 1);
   Test::assertEq<boolean>(Fs::exists(outDir.join("ignis_std.c").asStr()), false);
 
   let _removed = Fs::removeDirAll(&scratch);
@@ -5511,6 +5553,7 @@ function checkStdFailsOnAMissingStandardLibrary(): void {
 /// is never linked.
 @test
 function buildWritesAFreestandingObjectForAStdlessLibrary(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5522,7 +5565,7 @@ function buildWritesAFreestandingObjectForAStdlessLibrary(): void {
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("freestanding-no-std");
   let noOutput: Option<String> = Option::NONE;
@@ -5549,6 +5592,7 @@ function buildWritesAFreestandingObjectForAStdlessLibrary(): void {
 /// instead of libc.
 @test
 function buildRoutesAFreestandingObjectThroughItsRuntimeHandlers(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5560,7 +5604,7 @@ function buildRoutesAFreestandingObjectThroughItsRuntimeHandlers(): void {
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("freestanding-handlers");
   let noOutput: Option<String> = Option::NONE;
@@ -5587,6 +5631,7 @@ function buildRoutesAFreestandingObjectThroughItsRuntimeHandlers(): void {
 /// object never carries the absolute path of the machine that built it.
 @test
 function buildPassesTheProjectRelativePanicFileToTheRuntimeHandler(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5598,7 +5643,7 @@ function buildPassesTheProjectRelativePanicFileToTheRuntimeHandler(): void {
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("freestanding-handlers");
   let noOutput: Option<String> = Option::NONE;
@@ -5631,6 +5676,7 @@ function freestandingClosureHarnessSource(): String {
 /// instead of hiding until an LSan-equipped consumer runs the object.
 @test
 function igniosRegressionBuildRunsAFreestandingCrossModuleClosureWithBalancedAllocations(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5642,7 +5688,7 @@ function igniosRegressionBuildRunsAFreestandingCrossModuleClosureWithBalancedAll
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("freestanding-closure-cross-module");
   let noOutput: Option<String> = Option::NONE;
@@ -5696,6 +5742,7 @@ function igniosRegressionBuildRunsAFreestandingCrossModuleClosureWithBalancedAll
 /// directory and answers whether the build succeeded and the C compiler wrote
 /// the object of the package named `packageName`.
 function freestandingFixtureBuildsObject(
+  sourceMap: &mut SourceMap,
   relativeRoot: str,
   packageName: str,
   scratchLabel: str
@@ -5711,7 +5758,7 @@ function freestandingFixtureBuildsObject(
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  let status: i32 = runCompile(&projectRoot, &options, false, true);
+  let status: i32 = runCompile(sourceMap, &projectRoot, &options, false, true);
 
   let name: String = String::create(packageName);
   let noOutput: Option<String> = Option::NONE;
@@ -5728,21 +5775,24 @@ function freestandingFixtureBuildsObject(
 /// `<string.h>` to declare `memcpy`.
 @test
 function buildCompilesTheEmittersMemoryCopiesInAFreestandingObject(): void {
-  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/memory_intrinsics", "freestanding-memory-intrinsics", "freestanding-memory"));
+  let mut sourceMap: SourceMap = SourceMap::new();
+  Test::assert(freestandingFixtureBuildsObject(&mut sourceMap, "test_cases/freestanding/memory_intrinsics", "freestanding-memory-intrinsics", "freestanding-memory"));
 }
 
 /// A freestanding unit declares the extern constants it reads, since no
 /// header does it for them.
 @test
 function buildDeclaresExternConstantsInAFreestandingObject(): void {
-  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/extern_const", "freestanding-extern-const", "freestanding-extern-const"));
+  let mut sourceMap: SourceMap = SourceMap::new();
+  Test::assert(freestandingFixtureBuildsObject(&mut sourceMap, "test_cases/freestanding/extern_const", "freestanding-extern-const", "freestanding-extern-const"));
 }
 
 /// A statement call to a `never` function and a named `void` function passed
 /// as a function value compile in a freestanding unit.
 @test
 function buildCompilesNeverCallsAndVoidFunctionValuesInAFreestandingObject(): void {
-  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/call_shapes", "freestanding-call-shapes", "freestanding-call-shapes"));
+  let mut sourceMap: SourceMap = SourceMap::new();
+  Test::assert(freestandingFixtureBuildsObject(&mut sourceMap, "test_cases/freestanding/call_shapes", "freestanding-call-shapes", "freestanding-call-shapes"));
 }
 
 /// A counted loop over a range, a range passed as a value and a static table
@@ -5750,7 +5800,8 @@ function buildCompilesNeverCallsAndVoidFunctionValuesInAFreestandingObject(): vo
 /// standard library behind them.
 @test
 function buildCompilesRangesInAFreestandingObject(): void {
-  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/ranges", "freestanding-ranges", "freestanding-ranges"));
+  let mut sourceMap: SourceMap = SourceMap::new();
+  Test::assert(freestandingFixtureBuildsObject(&mut sourceMap, "test_cases/freestanding/ranges", "freestanding-ranges", "freestanding-ranges"));
 }
 
 /// A zero-initialized static, `@zeroed` in a static initializer and `@zeroed`
@@ -5758,7 +5809,8 @@ function buildCompilesRangesInAFreestandingObject(): void {
 /// `<string.h>` to declare `memset`.
 @test
 function buildCompilesZeroInitializedStorageInAFreestandingObject(): void {
-  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/zero_splat", "freestanding-zero-splat", "freestanding-zero-splat"));
+  let mut sourceMap: SourceMap = SourceMap::new();
+  Test::assert(freestandingFixtureBuildsObject(&mut sourceMap, "test_cases/freestanding/zero_splat", "freestanding-zero-splat", "freestanding-zero-splat"));
 }
 
 /// An `@aligned(N)` static in a freestanding unit is a C global with the
@@ -5766,6 +5818,7 @@ function buildCompilesZeroInitializedStorageInAFreestandingObject(): void {
 /// alignment stays in `.bss` at a page boundary.
 @test
 function buildAlignsFreestandingStaticsWithoutAnInitializer(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5777,7 +5830,7 @@ function buildAlignsFreestandingStaticsWithoutAnInitializer(): void {
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("freestanding-aligned-statics");
   let noOutput: Option<String> = Option::NONE;
@@ -5803,7 +5856,8 @@ function buildAlignsFreestandingStaticsWithoutAnInitializer(): void {
 /// fill is the memset builtin or a counted loop, never a libc call.
 @test
 function buildCompilesSplatInAFreestandingObject(): void {
-  Test::assert(freestandingFixtureBuildsObject("test_cases/freestanding/splat", "freestanding-splat", "freestanding-splat"));
+  let mut sourceMap: SourceMap = SourceMap::new();
+  Test::assert(freestandingFixtureBuildsObject(&mut sourceMap, "test_cases/freestanding/splat", "freestanding-splat", "freestanding-splat"));
 }
 
 /// A volatile read of a pointer slot that nothing in the unit writes stays a
@@ -5812,6 +5866,7 @@ function buildCompilesSplatInAFreestandingObject(): void {
 /// would be gone from it.
 @test
 function buildKeepsAVolatileReadOfAnUnwrittenPointerSlotAtO2(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5823,7 +5878,7 @@ function buildKeepsAVolatileReadOfAnUnwrittenPointerSlotAtO2(): void {
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("freestanding-volatile-pointer-slot");
   let noOutput: Option<String> = Option::NONE;
@@ -5932,6 +5987,7 @@ function stdArchiveBinaryRuns(
 /// non-generic std function, the archive defines it, and the binary runs.
 @test
 function stdArchiveBuildLinksStdFromTheArchive(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5944,7 +6000,7 @@ function stdArchiveBuildLinksStdFromTheArchive(): void {
   options.outDir = Option::SOME(scratch.toString());
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("std-archive");
   let noOutput: Option<String> = Option::NONE;
@@ -5974,6 +6030,7 @@ function stdArchiveBuildLinksStdFromTheArchive(): void {
 /// still built with the C backend.
 @test
 function stdArchiveFlagLinksAQbeUnitAgainstTheCArchive(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -5987,7 +6044,7 @@ function stdArchiveFlagLinksAQbeUnitAgainstTheCArchive(): void {
   options.force = true;
   options.stdArchive = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("std-archive-qbe");
   let noOutput: Option<String> = Option::NONE;
@@ -6010,6 +6067,7 @@ function stdArchiveFlagLinksAQbeUnitAgainstTheCArchive(): void {
 /// its own unit and builds no archive.
 @test
 function buildWithoutStdArchiveEmbedsStd(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return;
@@ -6023,7 +6081,7 @@ function buildWithoutStdArchiveEmbedsStd(): void {
   options.target = Option::SOME(String::create("c"));
   options.force = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 0);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 0);
 
   let name: String = String::create("std-archive-qbe");
   let noOutput: Option<String> = Option::NONE;
@@ -6045,6 +6103,7 @@ function buildWithoutStdArchiveEmbedsStd(): void {
 /// the message the driver prints, and nothing is built.
 @test
 function stdArchiveIsRejectedForAFreestandingBuild(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let Option::SOME(message) = stdArchiveModeError(true, true) else {
     Test::fail();
     return;
@@ -6066,7 +6125,7 @@ function stdArchiveIsRejectedForAFreestandingBuild(): void {
   options.force = true;
   options.stdArchive = true;
 
-  Test::assertEq<i32>(runCompile(&projectRoot, &options, false, true), 1);
+  Test::assertEq<i32>(runCompile(&mut sourceMap, &projectRoot, &options, false, true), 1);
 
   let name: String = String::create("freestanding-no-std");
   let noOutput: Option<String> = Option::NONE;
@@ -6080,14 +6139,14 @@ function stdArchiveIsRejectedForAFreestandingBuild(): void {
 
 /// The error messages a freestanding fixture project reports when it is
 /// compiled quietly, up to and including C emission.
-function freestandingFixtureErrors(relativeRoot: str): Vector<String> {
+function freestandingFixtureErrors(sourceMap: &mut SourceMap, relativeRoot: str): Vector<String> {
   let Result::OK(workingDirectory) = Env::currentDir() else {
     Test::fail();
     return Vector::new<String>();
   };
 
   let projectRoot: Path::PathBuf = workingDirectory.join(relativeRoot);
-  let mut discovery: DiscoveryResult = match (Resolver::discoverProject(&projectRoot)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverProject(sourceMap, &projectRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -6095,12 +6154,12 @@ function freestandingFixtureErrors(relativeRoot: str): Vector<String> {
     },
   };
 
-  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let file: SourceFile = entrySourceFile(sourceMap, &discovery.entry);
   let mut options: CompileOptions = CompileOptions::build(true);
   options.quiet = true;
   options.freestanding = true;
 
-  let compiled: CompiledProgram = compileDiscovered(&mut discovery, &file, &options);
+  let compiled: CompiledProgram = compileDiscovered(sourceMap, &mut discovery, &file, &options);
 
   return compiled.errorMessages;
 }
@@ -6126,7 +6185,8 @@ function freestandingErrorsContain(messages: &Vector<String>, expected: str): bo
 /// without a `@panicHandler` function.
 @test
 function freestandingRuntimeHandlerIsRequiredByAPanic(): void {
-  let messages: Vector<String> = freestandingFixtureErrors("test_cases/freestanding/missing_panic_handler");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let messages: Vector<String> = freestandingFixtureErrors(&mut sourceMap, "test_cases/freestanding/missing_panic_handler");
 
   Test::assertEq<u64>(messages.length(), 1);
   Test::assert(freestandingErrorsContain(&messages, "freestanding build can panic but declares no '@panicHandler' function"));
@@ -6136,7 +6196,8 @@ function freestandingRuntimeHandlerIsRequiredByAPanic(): void {
 /// which only the allocation handlers can provide.
 @test
 function freestandingRuntimeHandlersAreRequiredByAnEscapingClosure(): void {
-  let messages: Vector<String> = freestandingFixtureErrors("test_cases/freestanding/missing_allocator");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let messages: Vector<String> = freestandingFixtureErrors(&mut sourceMap, "test_cases/freestanding/missing_allocator");
 
   Test::assertEq<u64>(messages.length(), 1);
   Test::assert(freestandingErrorsContain(&messages, "escaping closure needs a heap environment, but no '@allocHandler' and '@freeHandler' functions are declared"));
@@ -6146,7 +6207,8 @@ function freestandingRuntimeHandlersAreRequiredByAnEscapingClosure(): void {
 /// allocation handler without its release counterpart are each an error.
 @test
 function freestandingRuntimeHandlersRejectDuplicatesSignaturesAndHalfAllocators(): void {
-  let messages: Vector<String> = freestandingFixtureErrors("test_cases/freestanding/invalid_handlers");
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let messages: Vector<String> = freestandingFixtureErrors(&mut sourceMap, "test_cases/freestanding/invalid_handlers");
 
   Test::assertEq<u64>(messages.length(), 3);
   Test::assert(freestandingErrorsContain(&messages, "'@panicHandler' is already declared on another function"));
@@ -6158,6 +6220,7 @@ function freestandingRuntimeHandlersRejectDuplicatesSignaturesAndHalfAllocators(
 /// or linking an executable, like a program that fails analysis.
 @test
 function buildFailsWithoutAnExecutableOnAnOwnershipError(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let stdRoot: Path::PathBuf = checkStdRepositoryStd();
   let Result::OK(repositoryRoot) = Env::currentDir() else {
     Test::fail();
@@ -6181,7 +6244,7 @@ function buildFailsWithoutAnExecutableOnAnOwnershipError(): void {
   options.stdPath = Option::SOME(stdRoot.toString());
   options.outputPath = Option::SOME(executablePath.toString());
 
-  let status: i32 = runCompile(&sourcePath, &options, false, false);
+  let status: i32 = runCompile(&mut sourceMap, &sourcePath, &options, false, false);
   let emittedSource: boolean = Fs::exists(scratch.join("selfhost_emit.c").asStr());
   let linkedExecutable: boolean = Fs::exists(executablePath.asStr());
 
@@ -6194,21 +6257,21 @@ function buildFailsWithoutAnExecutableOnAnOwnershipError(): void {
 }
 
 /// Check the standard library up to C codegen without archiving it.
-function runCheckStd(options: &CliOptions): i32 {
+function runCheckStd(sourceMap: &mut SourceMap, options: &CliOptions): i32 {
   let Option::SOME(target) = resolveTarget(options) else {
     return 1;
   };
 
-  return checkStandardLibrary(&target.path, options);
+  return checkStandardLibrary(sourceMap, &target.path, options);
 }
 
 /// Build the standard library into the archive a project links against.
-function runBuildStd(options: &CliOptions): i32 {
+function runBuildStd(sourceMap: &mut SourceMap, options: &CliOptions): i32 {
   let Option::SOME(target) = resolveTarget(options) else {
     return 1;
   };
 
-  return buildStandardLibrary(&target.path, options);
+  return buildStandardLibrary(sourceMap, &target.path, options);
 }
 
 /// CLI entry point.
@@ -6231,6 +6294,7 @@ function runBuildStd(options: &CliOptions): i32 {
 /// Exits 2 on a command line this compiler does not answer, 1 on a failed
 /// command and 0 otherwise.
 function main(): i32 {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let args: Vector<String> = Process::args();
 
   let options: CliOptions = match (parseArguments(&args)) {
@@ -6245,14 +6309,14 @@ function main(): i32 {
     Output::configureProgress(options.progress);
   }
 
-  let status: i32 = runCommand(&options);
+  let status: i32 = runCommand(&mut sourceMap, &options);
 
   Output::endProgress();
   return status;
 }
 
 /// Run the command `options` selects and return the process exit code.
-function runCommand(options: &CliOptions): i32 {
+function runCommand(sourceMap: &mut SourceMap, options: &CliOptions): i32 {
   if (let CliCommand::HELP = options.command) {
     Output::data(helpText());
     return 0;
@@ -6264,15 +6328,15 @@ function runCommand(options: &CliOptions): i32 {
   }
 
   if (let CliCommand::BUILD_STD = options.command) {
-    return runBuildStd(options);
+    return runBuildStd(sourceMap, options);
   }
 
   if (let CliCommand::CHECK_STD = options.command) {
-    return runCheckStd(options);
+    return runCheckStd(sourceMap, options);
   }
 
   if (let CliCommand::FMT = options.command) {
-    return runFmt(options);
+    return runFmt(sourceMap, options);
   }
 
   if (let CliCommand::LSP = options.command) {
@@ -6280,7 +6344,7 @@ function runCommand(options: &CliOptions): i32 {
   }
 
   if (let CliCommand::DOC = options.command) {
-    return runDoc(options);
+    return runDoc(sourceMap, options);
   }
 
   if (let CliCommand::INIT = options.command) {
@@ -6288,7 +6352,7 @@ function runCommand(options: &CliOptions): i32 {
   }
 
   if (let CliCommand::TEST_STD = options.command) {
-    return runStdTests(options);
+    return runStdTests(sourceMap, options);
   }
 
   let Option::SOME(target) = resolveTarget(options) else {
@@ -6296,7 +6360,7 @@ function runCommand(options: &CliOptions): i32 {
   };
 
   if (let CliCommand::TEST = options.command) {
-    return runProjectTests(&target.path, options);
+    return runProjectTests(sourceMap, &target.path, options);
   }
 
   let checkOnly: boolean = match (options.command) {
@@ -6304,5 +6368,5 @@ function runCommand(options: &CliOptions): i32 {
     _ -> false,
   };
 
-  return runCompile(&target.path, options, checkOnly, target.projectMode);
+  return runCompile(sourceMap, &target.path, options, checkOnly, target.projectMode);
 }

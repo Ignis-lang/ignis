@@ -507,6 +507,9 @@ export namespace Analyzer {
     /// no trait, such as a lang trait with no declaration. Filled by the
     /// resolver, which knows the scope each name is written in.
     traitReferences: HashMap<u32, Vector<Option<Analyzer::DefinitionId>>>;
+    /// For each method copied from a trait default onto an implementing type,
+    /// keyed by raw definition id, the note that names where it comes from.
+    inheritedNotes: HashMap<u32, String>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -527,6 +530,7 @@ export namespace Analyzer {
         sendableParams: HashMap::new<u32, boolean>(),
         closureFunctions: HashMap::new<u32, boolean>(),
         traitReferences: HashMap::new<u32, Vector<Option<Analyzer::DefinitionId>>>(),
+        inheritedNotes: HashMap::new<u32, String>(),
       };
     }
 
@@ -668,6 +672,57 @@ export namespace Analyzer {
     public symbolOriginOf(&self, id: Analyzer::DefinitionId): Option<&Analyzer::SymbolOrigin> {
       let raw: u32 = id.raw();
       return self.symbolOrigins.get(&raw);
+    }
+
+    /// Record that method `id` is a trait default copied onto an
+    /// implementing type, with the note naming the trait and the type.
+    public setInheritedNote(&mut self, id: Analyzer::DefinitionId, note: String): void {
+      self.inheritedNotes.insert(id.raw(), note);
+    }
+
+    /// The inherited-default note of `id`, or of the generic method a
+    /// monomorphized `id` instantiates.
+    public inheritedNoteOf(&self, id: Analyzer::DefinitionId): Option<String> {
+      let ownRaw: u32 = id.raw();
+      let mut raw: u32 = ownRaw;
+
+      if (let Option::SOME(origin) = self.symbolOrigins.get(&raw)) {
+        if (let Analyzer::SymbolOrigin::Instance(instance) = origin) {
+          raw = instance.generic.raw();
+        }
+      }
+
+      if (self.inheritedNotes.get(&ownRaw).isSome()) {
+        raw = ownRaw;
+      }
+
+      return match (self.inheritedNotes.get(&raw)) {
+        Option::SOME(note) -> Option::SOME(note.clone()),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    /// The type arguments of the owner a monomorphized method `id` belongs
+    /// to, empty when `id` is not such an instance.
+    public instanceOwnerArguments(&self, id: Analyzer::DefinitionId): Vector<Analyzer::TypeId> {
+      let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let raw: u32 = id.raw();
+
+      if (let Option::SOME(origin) = self.symbolOrigins.get(&raw)) {
+        if (let Analyzer::SymbolOrigin::Instance(instance) = origin) {
+          let mut index: u64 = 0;
+
+          while (index < instance.ownerArgs.length()) {
+            if (let Option::SOME(argument) = instance.ownerArgs.get(index)) {
+              arguments.push(*argument);
+            }
+
+            index += 1;
+          }
+        }
+      }
+
+      return arguments;
     }
 
     /// Record the documentation of `id`, replacing any recorded before.

@@ -1008,6 +1008,141 @@ export namespace Analyzer {
     }
   }
 
+  /// The spans of every trait declared in `module`.
+  function traitSpans(module: &Ast::Module): Vector<SourceSpan> {
+    let mut spans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+    let mut raw: u32 = 0;
+
+    while ((raw as u64) < module.items.length()) {
+      if (let Option::SOME(Ast::Item::Node::Trait(trait_)) = module.items.get(Id::fromRaw<Ast::ItemTag>(raw))) {
+        spans.push(trait_.span);
+      }
+
+      raw += 1;
+    }
+
+    return spans;
+  }
+
+  function spanWithin(inner: &SourceSpan, outer: &SourceSpan): boolean {
+    return inner.file.raw() == outer.file.raw() && inner.start >= outer.start && inner.end <= outer.end;
+  }
+
+  function sameSpan(left: &SourceSpan, right: &SourceSpan): boolean {
+    return left.file.raw() == right.file.raw() && left.start == right.start && left.end == right.end;
+  }
+
+  /// Whether two diagnostics say the same thing at the same place.
+  function sameDiagnostic(left: &Diagnostic, right: &Diagnostic): boolean {
+    if (!left.code.equals(right.code) || !Analyzer::sameSpan(&left.primarySpan, &right.primarySpan)) {
+      return false;
+    }
+
+    if (!left.message.equals(right.messageText())) {
+      return false;
+    }
+
+    if (left.labels.length() != right.labels.length() || left.notes.length() != right.notes.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.labels.length()) {
+      let Option::SOME(leftLabel) = left.labels.get(index) else {
+        return false;
+      };
+      let Option::SOME(rightLabel) = right.labels.get(index) else {
+        return false;
+      };
+
+      if (!Analyzer::sameSpan(&leftLabel.span, &rightLabel.span) || !leftLabel.message.equals(rightLabel.messageText())) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < left.notes.length()) {
+      let Option::SOME(leftNote) = left.notes.get(index) else {
+        return false;
+      };
+      let Option::SOME(rightNote) = right.notes.get(index) else {
+        return false;
+      };
+
+      if (!leftNote.message.equals(rightNote.messageText())) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// Appends `source` to `target`, dropping a diagnostic inside a trait
+  /// declaration that repeats one already kept.
+  ///
+  /// A trait default is checked once against the trait and again as a copy on
+  /// every type that inherits it. The copies keep the trait's spans, so an
+  /// error that does not depend on the implementing type would otherwise be
+  /// reported once per type. One the typecheck finds only for some types
+  /// carries a note naming the type, so it is not a repeat.
+  function appendCollapsingInheritedRepeats(
+    target: &mut DiagnosticBag,
+    source: &DiagnosticBag,
+    module: &Ast::Module,
+  ): void {
+    let spans: Vector<SourceSpan> = Analyzer::traitSpans(module);
+    let mut targetRef: &mut DiagnosticBag = target;
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(diagnostic) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut insideTrait: boolean = false;
+      let mut spanIndex: u64 = 0;
+
+      while (spanIndex < spans.length()) {
+        if (let Option::SOME(span) = spans.get(spanIndex)) {
+          if (Analyzer::spanWithin(&diagnostic.primarySpan, span)) {
+            insideTrait = true;
+          }
+        }
+
+        spanIndex += 1;
+      }
+
+      let mut repeated: boolean = false;
+
+      if (insideTrait) {
+        let mut keptIndex: u64 = 0;
+
+        while (keptIndex < targetRef.length()) {
+          if (let Option::SOME(kept) = targetRef.get(keptIndex)) {
+            if (Analyzer::sameDiagnostic(kept, diagnostic)) {
+              repeated = true;
+            }
+          }
+
+          keptIndex += 1;
+        }
+      }
+
+      if (!repeated) {
+        targetRef.push(Analyzer::copyDiagnostic(diagnostic));
+      }
+
+      index += 1;
+    }
+  }
+
   /// Whether `rawId` names an item another module can refer to.
   ///
   /// A root, the declaration an `export` wraps, or anything declared inside a
@@ -1161,7 +1296,7 @@ export namespace Analyzer {
   function itemSpanOrEmpty(module: &Ast::Module, rawId: u32): SourceSpan {
     let itemId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(rawId);
     let Option::SOME(item) = module.items.get(itemId) else {
-      return SourceSpan::new("", 0, 0);
+      return SourceSpan::detached(0, 0);
     };
 
     return match (item) {
@@ -1484,12 +1619,12 @@ export namespace Analyzer {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
     Analyzer::appendDiagnostics(&mut diagnostics, &pass1.diagnostics);
     Analyzer::appendDiagnostics(&mut diagnostics, &pass2.diagnostics);
-    Analyzer::appendDiagnostics(&mut diagnostics, &resolvedTypes.diagnostics);
-    Analyzer::appendDiagnostics(&mut diagnostics, &resolvedBodies.diagnostics);
-    Analyzer::appendDiagnostics(&mut diagnostics, &typecheck.diagnostics);
-    Analyzer::appendDiagnostics(&mut diagnostics, &constValues.diagnostics);
-    Analyzer::appendDiagnostics(&mut diagnostics, &checks.diagnostics);
-    Analyzer::appendDiagnostics(&mut diagnostics, &lints.diagnostics);
+    Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &resolvedTypes.diagnostics, module);
+    Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &resolvedBodies.diagnostics, module);
+    Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &typecheck.diagnostics, module);
+    Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &constValues.diagnostics, module);
+    Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &checks.diagnostics, module);
+    Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &lints.diagnostics, module);
 
     return Analyzer::AnalyzerOutput {
       pass1: pass1,
@@ -1961,12 +2096,12 @@ export namespace Analyzer {
       Analyzer::appendDiagnostics(&mut diagnostics, &pass1.diagnostics);
       Analyzer::appendDiagnostics(&mut diagnostics, &pass2.diagnostics);
       Analyzer::appendDiagnostics(&mut diagnostics, &importDiagnostics);
-      Analyzer::appendDiagnostics(&mut diagnostics, &resolvedTypes.diagnostics);
-      Analyzer::appendDiagnostics(&mut diagnostics, &resolvedBodies.diagnostics);
-      Analyzer::appendDiagnostics(&mut diagnostics, &typecheck.diagnostics);
-      Analyzer::appendDiagnostics(&mut diagnostics, &constValues.diagnostics);
-      Analyzer::appendDiagnostics(&mut diagnostics, &checks.diagnostics);
-      Analyzer::appendDiagnostics(&mut diagnostics, &lints.diagnostics);
+      Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &resolvedTypes.diagnostics, module);
+      Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &resolvedBodies.diagnostics, module);
+      Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &typecheck.diagnostics, module);
+      Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &constValues.diagnostics, module);
+      Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &checks.diagnostics, module);
+      Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &lints.diagnostics, module);
 
       let output: Analyzer::AnalyzerOutput = Analyzer::AnalyzerOutput {
         pass1: pass1,
