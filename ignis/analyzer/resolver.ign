@@ -765,6 +765,22 @@ export namespace Analyzer {
       return out;
     }
 
+    /// Copies a `Vector<String>`, cloning each element.
+    function copyStringVector(source: &Vector<String>): Vector<String> {
+      let mut out: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        if (let Option::SOME(entry) = source.get(index)) {
+          out.push(entry.clone());
+        }
+
+        index += 1;
+      }
+
+      return out;
+    }
+
     /// Copies a `Vector<TypeId>` element-by-element, for the same reason
     /// `copyDefinitionIdVector` exists.
     function copyTypeIdVector(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
@@ -1331,6 +1347,30 @@ export namespace Analyzer {
       sym: Analyzer::SymbolId,
       name: str,
     ): Option<Analyzer::DefinitionId> {
+      return namespaceScopedLookup(state, defStore, sym, name, false);
+    }
+
+    /// `namespaceScopedTypeLookup` for a trait name: only trait declarations
+    /// answer.
+    function namespaceScopedTraitLookup(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      sym: Analyzer::SymbolId,
+      name: str,
+    ): Option<Analyzer::DefinitionId> {
+      return namespaceScopedLookup(state, defStore, sym, name, true);
+    }
+
+    /// The declaration a bare name written inside the entered namespaces
+    /// refers to, innermost namespace first: a trait when `wantTrait` is set,
+    /// otherwise a type that is not a trait.
+    function namespaceScopedLookup(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      sym: Analyzer::SymbolId,
+      name: str,
+      wantTrait: boolean,
+    ): Option<Analyzer::DefinitionId> {
       let mut depth: u64 = state.namespaceChain.length();
 
       while (depth > 0) {
@@ -1371,7 +1411,13 @@ export namespace Analyzer {
               continue;
             };
 
-            if (isTypeNameDef(defStore, *defId) && !isTraitDef(defStore, *defId)) {
+            let isTrait: boolean = isTraitDef(defStore, *defId);
+
+            if (wantTrait && isTrait) {
+              return Option::SOME(*defId);
+            }
+
+            if (!wantTrait && isTypeNameDef(defStore, *defId) && !isTrait) {
               return Option::SOME(*defId);
             }
           }
@@ -1830,6 +1876,318 @@ export namespace Analyzer {
       return tsRef.recordType(ownerDefId);
     }
 
+    /// Whether `name` is a language trait, which `@implements` and bounds
+    /// accept without a declaration in scope: the lang traits, and `Eq` and
+    /// `Hash`, which the compiler recognizes by name for primitives and
+    /// canonical equality.
+    function isUndeclaredTraitName(name: &String): boolean {
+      return name.equals("Drop") || name.equals("Clone") || name.equals("Copy") || name.equals("Send") || name.equals("Sync") || name.equals("Eq") || name.equals("Hash");
+    }
+
+    /// The label of an unknown-trait diagnostic: what the written path names
+    /// instead, when it names a declaration that is not a trait, and whether a
+    /// trait of that name exists out of scope.
+    function unknownTraitLabel(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      written: &String,
+      span: SourceSpan,
+    ): String {
+      let Option::SOME(name) = segments.get(segments.length() - 1) else {
+        return `no trait named '${written.toStr()}' is in scope`;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+      let mut named: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (segments.length() > 1) {
+        let path: Ast::Type::Path = Ast::Type::Path {
+          span: span,
+          segments: Analyzer::Resolver::copyStringVector(segments),
+        };
+        named = programLookupForPath(state, sym, &path);
+      } else {
+        named = namespaceScopedTypeLookup(state, defStore, sym, name.toStr());
+
+        if (named.isNone()) {
+          named = globalLookup(state, sym);
+        }
+
+        if (named.isNone()) {
+          named = importLookup(state, sym);
+        }
+      }
+
+      if (let Option::SOME(defId) = named) {
+        if (!isTraitDef(defStore, defId)) {
+          return `'${written.toStr()}' is not a trait`;
+        }
+      }
+
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(sym);
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        if (let Option::SOME(candidate) = candidates.get(index)) {
+          if (isTraitDef(defStore, *candidate)) {
+            return `no trait named '${written.toStr()}' is in scope; import it or write its path`;
+          }
+        }
+
+        index += 1;
+      }
+
+      return `no trait named '${written.toStr()}' is in scope`;
+    }
+
+    /// Whether `defId` is published at the top level of its module, outside
+    /// any namespace. A definition with no recorded path is taken as top-level.
+    function isTopLevelDeclaration(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): boolean {
+      let Option::SOME(qualified) = defStore.qualifiedNameOf(defId) else {
+        return true;
+      };
+
+      let separator: String = String::create("::");
+      return qualified.indexOf(&separator).isNone();
+    }
+
+    /// The trait a written trait path names, read the way a type path is: a
+    /// qualified path through the program-wide index, a bare name through the
+    /// entered namespaces, the module's declarations and its imports. A trait
+    /// that is not in scope answers nothing, even when it is the only trait of
+    /// that name in the program.
+    function lookupTraitPath(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      span: SourceSpan,
+    ): Option<Analyzer::DefinitionId> {
+      if (segments.length() == 0) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(name) = segments.get(segments.length() - 1) else {
+        return Option::NONE;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+
+      if (segments.length() > 1) {
+        let path: Ast::Type::Path = Ast::Type::Path {
+          span: span,
+          segments: Analyzer::Resolver::copyStringVector(segments),
+        };
+
+        if (let Option::SOME(defId) = programLookupForPath(state, sym, &path)) {
+          if (isTraitDef(defStore, defId)) {
+            return Option::SOME(defId);
+          }
+        }
+
+        return Option::NONE;
+      }
+
+      if (let Option::SOME(scoped) = namespaceScopedTraitLookup(state, defStore, sym, name.toStr())) {
+        return Option::SOME(scoped);
+      }
+
+      // The flat index keys on the bare name alone, so it also holds traits
+      // declared inside a namespace; only a top-level trait is in scope here.
+      if (let Option::SOME(defId) = globalLookup(state, sym)) {
+        if (isTraitDef(defStore, defId) && isTopLevelDeclaration(defStore, defId)) {
+          return Option::SOME(defId);
+        }
+      }
+
+      if (let Option::SOME(defId) = importLookup(state, sym)) {
+        if (isTraitDef(defStore, defId)) {
+          return Option::SOME(defId);
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    /// The trimmed `::`-separated segments of a trait path written as an
+    /// attribute argument.
+    function traitArgumentSegments(argument: &String): Vector<String> {
+      let raw: Vector<String> = Analyzer::Binder::typePathSegments(argument);
+      let mut segments: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < raw.length()) {
+        if (let Option::SOME(segment) = raw.get(index)) {
+          let trimmed: String = segment.trimAsciiWhitespace();
+
+          if (trimmed.length() > 0) {
+            segments.push(trimmed.clone());
+          }
+        }
+
+        index += 1;
+      }
+
+      return segments;
+    }
+
+    /// Resolves each trait the record or enum `defId` names in `@implements`,
+    /// in the order `RecordDef::implementedTraits` lists them, and records
+    /// the result on the definition store.
+    ///
+    /// A name that resolves to no trait is A0142, unless it is a language trait
+    /// (`isUndeclaredTraitName`).
+    function resolveImplementedTraits(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+      metadata: &Ast::Metadata,
+    ): void {
+      let mut references: Vector<Option<Analyzer::DefinitionId>> = Vector::new<Option<Analyzer::DefinitionId>>();
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!attribute.name.equals("implements")) {
+          index += 1;
+          continue;
+        }
+
+        let mut argumentIndex: u64 = 0;
+
+        while (argumentIndex < attribute.arguments.length()) {
+          let Option::SOME(argument) = attribute.arguments.get(argumentIndex) else {
+            argumentIndex += 1;
+            continue;
+          };
+
+          let segments: Vector<String> = traitArgumentSegments(argument);
+          let traitId: Option<Analyzer::DefinitionId> = lookupTraitPath(state, defStore, symbols, &segments, attribute.span);
+          let unresolved: boolean = traitId.isNone();
+          references.push(traitId);
+
+          if (unresolved) {
+            let written: String = argument.trimAsciiWhitespace();
+
+            if (!(segments.length() == 1 && isUndeclaredTraitName(&written))) {
+              let message: String = `Unknown trait '${written.toStr()}' in @implements`;
+              let label: String = unknownTraitLabel(state, defStore, symbols, &segments, &written, attribute.span);
+              emitTypeDiagnosticLabeled(state, attribute.span, DiagnosticCode::UNKNOWN_IMPLEMENTED_TRAIT, message.toStr(), label.toStr());
+            }
+          }
+
+          argumentIndex += 1;
+        }
+
+        index += 1;
+      }
+
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      defsRef.setTraitReferences(defId, references);
+    }
+
+    /// The type parameters `defId` declares, when it is a declaration that
+    /// takes any.
+    function declaredTypeParamIds(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      return match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Record(record_)) -> Analyzer::Resolver::copyDefinitionIdVector(&record_.typeParams),
+        Option::SOME(Analyzer::Definition::Enum(enum_)) -> Analyzer::Resolver::copyDefinitionIdVector(&enum_.typeParams),
+        Option::SOME(Analyzer::Definition::Function(function_)) -> Analyzer::Resolver::copyDefinitionIdVector(&function_.typeParams),
+        Option::SOME(Analyzer::Definition::Method(method)) -> Analyzer::Resolver::copyDefinitionIdVector(&method.typeParams),
+        Option::SOME(Analyzer::Definition::Trait(trait_)) -> Analyzer::Resolver::copyDefinitionIdVector(&trait_.typeParams),
+        Option::SOME(Analyzer::Definition::TypeAlias(alias)) -> Analyzer::Resolver::copyDefinitionIdVector(&alias.typeParams),
+        _ -> Vector::new<Analyzer::DefinitionId>(),
+      };
+    }
+
+    /// Resolves the bounds of every type parameter `defId` declares, in the
+    /// order `TypeParamDef::bounds` lists them, and records the result on the
+    /// definition store. A bound naming no trait is A0142, unless it is a
+    /// language trait, which is recorded as `NONE` and matched by name.
+    function resolveBoundTraits(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+      generics: &Vector<Ast::GenericParam>,
+    ): void {
+      let typeParamIds: Vector<Analyzer::DefinitionId> = declaredTypeParamIds(defStore, defId);
+      let mut index: u64 = 0;
+
+      while (index < typeParamIds.length()) {
+        let Option::SOME(typeParamId) = typeParamIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut position: u64 = 0;
+        let mut found: boolean = false;
+
+        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*typeParamId)) {
+          position = typeParam.index as u64;
+          found = true;
+        }
+
+        let Option::SOME(generic) = generics.get(position) else {
+          index += 1;
+          continue;
+        };
+
+        if (!found) {
+          index += 1;
+          continue;
+        }
+
+        let mut references: Vector<Option<Analyzer::DefinitionId>> = Vector::new<Option<Analyzer::DefinitionId>>();
+        let mut boundIndex: u64 = 0;
+
+        while (boundIndex < generic.bounds.length()) {
+          if (let Option::SOME(bound) = generic.bounds.get(boundIndex)) {
+            if (bound.segments.length() > 0) {
+              let traitId: Option<Analyzer::DefinitionId> = lookupTraitPath(state, defStore, symbols, &bound.segments, bound.span);
+              let unresolved: boolean = traitId.isNone();
+              references.push(traitId);
+
+              if (unresolved) {
+                let boundPath: Ast::Type::Path = Ast::Type::Path {
+                  span: bound.span,
+                  segments: Analyzer::Resolver::copyStringVector(&bound.segments),
+                };
+                let written: String = qualifiedPathText(&boundPath);
+
+                if (!(bound.segments.length() == 1 && isUndeclaredTraitName(&written))) {
+                  let message: String = `Unknown trait '${written.toStr()}' in the bound of '${generic.name.toStr()}'`;
+                  let label: String = unknownTraitLabel(state, defStore, symbols, &bound.segments, &written, bound.span);
+                  emitTypeDiagnosticLabeled(state, bound.span, DiagnosticCode::UNKNOWN_IMPLEMENTED_TRAIT, message.toStr(), label.toStr());
+                }
+              }
+            }
+          }
+
+          boundIndex += 1;
+        }
+
+        let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+        defsRef.setTraitReferences(*typeParamId, references);
+        index += 1;
+      }
+    }
+
     /// Resolve parameter and return-type annotations for owner-local methods.
     ///
     /// Walks `methodItemIds` (AST function items) positionally against each
@@ -1872,6 +2230,8 @@ export namespace Analyzer {
 
         match (item) {
           Ast::Item::Node::Function(fn_) -> {
+            resolveBoundTraits(state, defStore, symbols, methodDefId, &fn_.genericParameters);
+
             // Method's own type params (innermost) then owner scope, then Self.
             let mut scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(
               typeStore,
@@ -1992,6 +2352,9 @@ export namespace Analyzer {
         return;
       };
 
+      resolveImplementedTraits(state, defStore, symbols, defId, &e.metadata);
+      resolveBoundTraits(state, defStore, symbols, defId, &e.genericParameters);
+
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &e.genericParameters);
       let variantDefIds: Vector<Analyzer::DefinitionId> = extractEnumVariants(defStore, defId);
       let staticDefIds: Vector<Analyzer::DefinitionId> = extractEnumStaticFields(defStore, defId);
@@ -2085,6 +2448,9 @@ export namespace Analyzer {
         return;
       };
 
+      resolveImplementedTraits(state, defStore, symbols, defId, &r.metadata);
+      resolveBoundTraits(state, defStore, symbols, defId, &r.genericParameters);
+
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &r.genericParameters);
       let fieldDefIds: Vector<Analyzer::DefinitionId> = extractRecordFields(defStore, defId);
       let staticDefIds: Vector<Analyzer::DefinitionId> = extractRecordStaticFields(defStore, defId);
@@ -2152,6 +2518,8 @@ export namespace Analyzer {
         return;
       };
 
+      resolveBoundTraits(state, defStore, symbols, defId, &f.genericParameters);
+
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &f.genericParameters);
       let paramDefIds: Vector<Analyzer::DefinitionId> = extractFunctionParams(defStore, defId);
 
@@ -2218,6 +2586,8 @@ export namespace Analyzer {
       let Option::SOME(defId) = defIdOpt else {
         return;
       };
+
+      resolveBoundTraits(state, defStore, symbols, defId, &a.genericParameters);
 
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &a.genericParameters);
       let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, a.value);
@@ -2287,9 +2657,11 @@ export namespace Analyzer {
       t: &Ast::Item::Trait,
     ): void {
       let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
-      let Option::SOME(_defId) = defIdOpt else {
+      let Option::SOME(defId) = defIdOpt else {
         return;
       };
+
+      resolveBoundTraits(state, defStore, symbols, defId, &t.genericParameters);
 
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &t.genericParameters);
       let mut tsRef: &mut Analyzer::TypeStore = typeStore;

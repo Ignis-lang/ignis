@@ -129,12 +129,22 @@ export namespace Analyzer {
           bounds = Analyzer::TypeBounds::copyStrings(&typeParam.bounds);
         }
 
+        let boundTraits: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(*paramDefId);
         let mut boundIndex: u64 = 0;
 
         while (boundIndex < bounds.length()) {
           if (let Option::SOME(bound) = bounds.get(boundIndex)) {
-            if (!Analyzer::TypeBounds::satisfies(defStore, typeStore, symbols, enclosing, *typeArg, bound, acceptFunctions)) {
-              Analyzer::TypeBounds::reportUnsatisfied(defStore, typeStore, symbols, generic, paramName, bound.toStr(), *typeArg, span, diagnostics);
+            let boundTrait: Option<Analyzer::DefinitionId> = Analyzer::TypeBounds::traitAt(&boundTraits, boundIndex);
+
+            if (!Analyzer::TypeBounds::satisfies(defStore, typeStore, symbols, enclosing, *typeArg, bound, boundTrait, acceptFunctions)) {
+              let boundText: String = Analyzer::TypeBounds::traitDisplayName(defStore, bound, boundTrait);
+              let mut writtenText: String = bound.clone();
+
+              if (let Option::SOME(traitId) = boundTrait) {
+                writtenText = Analyzer::TypeBounds::publishedPath(defStore, bound, traitId);
+              }
+
+              Analyzer::TypeBounds::reportUnsatisfied(defStore, typeStore, symbols, generic, paramName, boundText.toStr(), writtenText.toStr(), *typeArg, span, diagnostics);
             }
           }
 
@@ -145,8 +155,97 @@ export namespace Analyzer {
       }
     }
 
+    /// The trait the name at `index` resolved to, `NONE` when it named no
+    /// trait or was never resolved.
+    function traitAt(
+      references: &Vector<Option<Analyzer::DefinitionId>>,
+      index: u64,
+    ): Option<Analyzer::DefinitionId> {
+      return match (references.get(index)) {
+        Option::SOME(reference) -> *reference,
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    /// How a diagnostic names a trait: the path it is published under in its
+    /// module, prefixed with the module's path when another trait of the
+    /// program is published under the same path, as the `Hash` traits of
+    /// `std::hash` and `std::collections` are. `name` when the trait is
+    /// unresolved or has no recorded path.
+    function traitDisplayName(
+      defStore: &mut Analyzer::DefinitionStore,
+      name: &String,
+      traitId: Option<Analyzer::DefinitionId>,
+    ): String {
+      let Option::SOME(resolved) = traitId else {
+        return name.clone();
+      };
+
+      let qualified: String = Analyzer::TypeBounds::publishedPath(defStore, name, resolved);
+      let mut traitSymbol: Option<Analyzer::SymbolId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(resolved)) {
+        traitSymbol = Option::SOME(trait_.name);
+      }
+
+      let Option::SOME(symbol) = traitSymbol else {
+        return qualified;
+      };
+
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(symbol);
+      let mut shared: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        if (let Option::SOME(candidate) = candidates.get(index)) {
+          if (candidate.raw() != resolved.raw()) {
+            if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(*candidate)) {
+              let other: String = Analyzer::TypeBounds::publishedPath(defStore, name, *candidate);
+
+              if (other.equals(qualified.toStr())) {
+                shared = true;
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      if (!shared) {
+        return qualified;
+      }
+
+      let Option::SOME(moduleIndex) = defStore.defModuleOf(resolved) else {
+        return qualified;
+      };
+
+      let Option::SOME(moduleName) = defStore.moduleDisplayNameOf(moduleIndex) else {
+        return qualified;
+      };
+
+      return `${moduleName.toStr()}::${qualified.toStr()}`;
+    }
+
+    /// The path `traitId` is published under in its module, or `name`.
+    function publishedPath(
+      defStore: &mut Analyzer::DefinitionStore,
+      name: &String,
+      traitId: Analyzer::DefinitionId,
+    ): String {
+      if (let Option::SOME(qualified) = defStore.qualifiedNameOf(traitId)) {
+        if (qualified.length() > 0) {
+          return qualified.clone();
+        }
+      }
+
+      return name.clone();
+    }
+
     /// Whether `typeArg`, seen from inside `enclosing`, satisfies the bound
-    /// named `bound`.
+    /// named `bound`. A bound that resolved to a trait, `boundTrait`, is met
+    /// only by a declaration naming that same trait; an unresolved bound, such
+    /// as a lang trait, is matched by name.
     function satisfies(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -154,6 +253,7 @@ export namespace Analyzer {
       enclosing: Analyzer::DefinitionId,
       typeArg: Analyzer::TypeId,
       bound: &String,
+      boundTrait: Option<Analyzer::DefinitionId>,
       acceptFunctions: boolean,
     ): boolean {
       let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeArg);
@@ -223,24 +323,26 @@ export namespace Analyzer {
       }
 
       if (let Option::SOME(symbol) = paramSymbol) {
-        return Analyzer::TypeBounds::typeParamDeclares(defStore, enclosing, symbol, bound.toStr());
+        return Analyzer::TypeBounds::typeParamDeclares(defStore, enclosing, symbol, bound.toStr(), boundTrait);
       }
 
       if (let Option::SOME(definition) = nominal) {
-        return Analyzer::TypeBounds::declaresImplements(defStore, definition, bound.toStr());
+        return Analyzer::TypeBounds::declaresImplements(defStore, definition, bound.toStr(), boundTrait);
       }
 
       return false;
     }
 
     /// Whether the type parameter named `symbol` in scope at `enclosing`
-    /// declares `bound`. A parameter that is not in scope cannot be judged
+    /// declares `bound`: the trait `boundTrait` when it resolved, otherwise a
+    /// bound of that name. A parameter that is not in scope cannot be judged
     /// here and is accepted rather than reported against the wrong declaration.
     function typeParamDeclares(
       defStore: &mut Analyzer::DefinitionStore,
       enclosing: Analyzer::DefinitionId,
       symbol: Analyzer::SymbolId,
       bound: str,
+      boundTrait: Option<Analyzer::DefinitionId>,
     ): boolean {
       let scoped: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
       let mut index: u64 = 0;
@@ -249,6 +351,15 @@ export namespace Analyzer {
         if (let Option::SOME(paramDefId) = scoped.get(index)) {
           if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
             if (typeParam.name.raw() == symbol.raw()) {
+              if (let Option::SOME(traitId) = boundTrait) {
+                if (defStore.refersToTrait(*paramDefId, traitId)) {
+                  return true;
+                }
+
+                let references: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(*paramDefId);
+                return Analyzer::TypeBounds::containsUnresolvedName(&typeParam.bounds, &references, bound);
+              }
+
               return Analyzer::TypeBounds::containsName(&typeParam.bounds, bound);
             }
           }
@@ -260,12 +371,28 @@ export namespace Analyzer {
       return true;
     }
 
-    /// Whether the record or enum lists `bound` in its `@implements`.
+    /// Whether the record or enum lists `bound` in its `@implements`: the
+    /// trait `boundTrait` when it resolved, otherwise a trait of that name.
     function declaresImplements(
       defStore: &mut Analyzer::DefinitionStore,
       definition: Analyzer::DefinitionId,
       bound: str,
+      boundTrait: Option<Analyzer::DefinitionId>,
     ): boolean {
+      if (let Option::SOME(traitId) = boundTrait) {
+        if (defStore.refersToTrait(definition, traitId)) {
+          return true;
+        }
+
+        let references: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(definition);
+
+        return match (defStore.get(definition)) {
+          Option::SOME(Analyzer::Definition::Record(record_)) -> Analyzer::TypeBounds::containsUnresolvedName(&record_.implementedTraits, &references, bound),
+          Option::SOME(Analyzer::Definition::Enum(enum_)) -> Analyzer::TypeBounds::containsUnresolvedName(&enum_.implementedTraits, &references, bound),
+          _ -> false,
+        };
+      }
+
       return match (defStore.get(definition)) {
         Option::SOME(Analyzer::Definition::Record(record_)) -> Analyzer::TypeBounds::containsName(&record_.implementedTraits, bound),
         Option::SOME(Analyzer::Definition::Enum(enum_)) -> Analyzer::TypeBounds::containsName(&enum_.implementedTraits, bound),
@@ -292,6 +419,7 @@ export namespace Analyzer {
       generic: Analyzer::DefinitionId,
       paramName: Option<Analyzer::SymbolId>,
       bound: str,
+      written: str,
       typeArg: Analyzer::TypeId,
       span: SourceSpan,
       diagnostics: &mut DiagnosticBag,
@@ -329,7 +457,11 @@ export namespace Analyzer {
           },
           Analyzer::Type::Record(_) | Analyzer::Type::Enum(_) | Analyzer::Type::Instance(_) -> {
             if (!threadSafety) {
-              label = `declare \`@implements(${bound})\` on '${typeName.toStr()}'`;
+              label = `declare \`@implements(${written})\` on '${typeName.toStr()}'`;
+
+              if (!boundText.equals(written)) {
+                label = `declare \`@implements(${written})\` on '${typeName.toStr()}', with '${bound}' in scope`;
+              }
             }
           },
           _ -> {},
@@ -341,6 +473,29 @@ export namespace Analyzer {
 
       let mut bag: &mut DiagnosticBag = diagnostics;
       bag.push(diagnostic);
+    }
+
+    /// Whether `names` holds the language trait `name` at a position whose
+    /// trait did not resolve. A language trait named without a declaration in
+    /// scope keeps matching by name even a bound that did resolve.
+    function containsUnresolvedName(
+      names: &Vector<String>,
+      references: &Vector<Option<Analyzer::DefinitionId>>,
+      name: str,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < names.length()) {
+        if (let Option::SOME(entry) = names.get(index)) {
+          if (entry.equals(name) && Analyzer::Resolver::isUndeclaredTraitName(entry) && Analyzer::TypeBounds::traitAt(references, index).isNone()) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     function containsName(names: &Vector<String>, name: str): boolean {

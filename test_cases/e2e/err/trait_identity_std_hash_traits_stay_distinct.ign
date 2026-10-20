@@ -1,0 +1,26 @@
+// e2e: err
+// `std::hash` and `std::collections` each declare a trait named `Hash`. A key
+// implementing `std::hash::Hash` does not satisfy the `K: Hash` bound of
+// `HashMap`, which names the collections trait.
+import Eq, HashMap from "std::collections";
+import Hash, Hasher from "std::hash";
+
+@implements(Hash, Eq)
+record Key {
+  public id: i32;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeI32(self.id);
+  }
+
+  equals(&self, other: &Key): boolean {
+    return self.id == other.id;
+  }
+}
+
+function main(): i32 {
+  let mut map: HashMap<Key, i32> = HashMap::new<Key, i32>();
+  let _previous: Option<i32> = map.insert(Key { id: 1 }, 10);
+  return 0;
+}

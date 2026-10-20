@@ -1,0 +1,105 @@
+// Two traits named `Named` in different namespaces stay apart: each record
+// satisfies the bound of the trait it implements, receives that trait's
+// default methods and is checked against that trait's required methods.
+// The defaults do not read `self`, so several types can inherit each one.
+namespace A {
+  trait Named {
+    first(&self): i32;
+
+    firstTag(&self): i32 {
+      return 100;
+    }
+  }
+}
+
+namespace B {
+  trait Named {
+    second(&self): i32;
+
+    secondTag(&self): i32 {
+      return 200;
+    }
+  }
+
+  // The bare name inside `B` is `B::Named`.
+  @implements(Named)
+  record Local {
+    public value: i32;
+
+    second(&self): i32 {
+      return self.value;
+    }
+  }
+}
+
+@implements(A::Named)
+record OnlyFirst {
+  public value: i32;
+
+  first(&self): i32 {
+    return self.value;
+  }
+}
+
+@implements(B::Named)
+record OnlySecond {
+  public value: i32;
+
+  second(&self): i32 {
+    return self.value;
+  }
+}
+
+@implements(A::Named, B::Named)
+record Both {
+  public value: i32;
+
+  first(&self): i32 {
+    return self.value;
+  }
+
+  second(&self): i32 {
+    return self.value * 2;
+  }
+}
+
+function useFirst<T: A::Named>(value: &T): i32 {
+  return value.first() + value.firstTag();
+}
+
+function useSecond<T: B::Named>(value: &T): i32 {
+  return value.second() + value.secondTag();
+}
+
+function main(): i32 {
+  let onlyFirst: OnlyFirst = OnlyFirst { value: 1 };
+  let onlySecond: OnlySecond = OnlySecond { value: 2 };
+  let both: Both = Both { value: 3 };
+  let local: B::Local = B::Local { value: 4 };
+
+  if (useFirst<OnlyFirst>(&onlyFirst) != 101) {
+    return 1;
+  }
+
+  if (useSecond<OnlySecond>(&onlySecond) != 202) {
+    return 2;
+  }
+
+  if (useFirst<Both>(&both) != 103) {
+    return 3;
+  }
+
+  if (useSecond<Both>(&both) != 206) {
+    return 4;
+  }
+
+  if (useSecond<B::Local>(&local) != 204) {
+    return 5;
+  }
+
+  if (onlyFirst.firstTag() + onlySecond.secondTag() != 300) {
+    return 6;
+  }
+
+  return 0;
+}

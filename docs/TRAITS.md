@@ -160,6 +160,15 @@ record Person {
 
 You can implement multiple traits either by repeating the attribute or by passing multiple names in one `@implements(...)`.
 
+Each name resolves to a trait the way a type name resolves to a type: a qualified path such as
+`Shapes::Measured` names the trait declared under that path, and a bare name is looked up in the
+enclosing namespaces (innermost first), then among the module's declarations and its imports. A
+trait has to be in scope like any type: a trait declared in another namespace or module is not
+found by its bare name, even when it is the only trait of that name. A name that resolves to no
+trait, or to a declaration that is not a trait, is an error (A0142). The language traits are the
+exception: the lang traits (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) and `Eq` and `Hash` need no
+declaration in scope and are recognized by name.
+
 ### Default Methods
 
 If a record does not define a method that has a default body in the trait, the compiler uses that default body for the record.
@@ -193,7 +202,8 @@ When a record method implements a trait method, the signature must match exactly
 - Return type
 
 If a required trait method is missing, compilation fails (A0140), whether the trait is named bare or
-by its path. A method with a default body in the trait is not required.
+by its path. A method with a default body in the trait is not required. Each named trait is checked
+on its own, so a complete `A::Named` does not excuse a missing method of `B::Named`.
 
 ### `Send` and `Sync`
 
@@ -282,9 +292,15 @@ a function, a method, a record or an enum:
 
 - A record or enum satisfies a bound by naming the trait in `@implements`. Having methods with the
   right names is not enough. A trait declared in a namespace can be named by its path
-  (`@implements(Shapes::Measured)`) or, where it is in scope, by its bare name. Both the
-  `@implements` argument and the bound are matched by their last path segment, so two traits with
-  the same name in different namespaces are not told apart.
+  (`@implements(Shapes::Measured)`) or, where it is in scope, by its bare name. The `@implements`
+  argument and the bound both resolve to a trait declaration and are compared as declarations, so
+  two traits with the same name in different namespaces or modules stay apart: a type implementing
+  `A::Named` does not satisfy `T: B::Named`, and one implementing `std::hash::Hash` does not
+  satisfy the `K: Hash` bound of `HashMap`, which names the `Hash` of `std::collections`. A name
+  that resolves to no trait is matched by name; only a language trait can, since any other
+  unresolved bound is an error (A0142), whether or not the generic is used.
+- A type parameter answers the methods of every trait it is bounded by, including their default
+  methods. A method declared by more than one of its bounds is ambiguous (A0262).
 - A type parameter satisfies a bound only when it declares the same bound itself.
 - `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
   by every Copy type, since primitives have no declaration to write `@implements` on.
@@ -292,7 +308,10 @@ a function, a method, a record or an enum:
   `@implements(Sync)` declaration. A closure bound to a `Send` or `Sync` parameter is judged by
   what it captures (A0252); any other function value is rejected (A0253).
 
-A type argument that misses a bound is an error (A0247). Declared types are checked too, even
+A type argument that misses a bound is an error (A0247). The diagnostic names the trait by the
+path it is declared under, prefixed with its module (`std::hash::Hash`,
+`std::collections::hash_map::Hash`) when another trait is declared under the same path in another
+module. Declared types are checked too, even
 when no expression has them: record and static field types, enum payload types, and the parameter
 and return types of every function and method, called or not. A generic record or enum's own
 type parameter used there satisfies a bound only when it declares the bound itself.
@@ -587,7 +606,7 @@ record or enum it reports, which overrides the module level for that declaration
 | A0139 | Cannot call extension method on temporary | Error |
 | A0140 | Record or enum names a trait in `@implements` but does not declare one of its required methods | Error |
 | A0141 | Method signature does not match trait definition | Error |
-| A0142 | Unknown trait in `@implements(...)` | Error |
+| A0142 | Unknown trait in `@implements(...)` or a generic bound | Error |
 | A0143 | Traits cannot be declared in `extern` blocks | Error |
 | A0144 | Trait method must have `&self` or `&mut self` | Error |
 | A0145 | Fields are not allowed in trait declarations | Error |
@@ -599,3 +618,4 @@ record or enum it reports, which overrides the module level for that declaration
 | A0253 | Function value bound to a `Send` / `Sync` parameter whose captures cannot be known | Error |
 | A0254 | `@implements(Send)` / `@implements(Sync)` on a type whose structure does not support it (`thread_safety` lint) | Warning |
 | A0255 | `@sendable` on a parameter that is not of function type | Error |
+| A0262 | Method called on a type parameter is declared by more than one of its bounds | Error |

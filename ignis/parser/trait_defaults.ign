@@ -16,10 +16,20 @@ import _ from "./declarations";
 /// declaration, mirroring the host, so two types inheriting the same body
 /// resolve that body's names once. A body that reads `self` therefore belongs
 /// to a single implementing type.
+///
+/// The parser cannot resolve names, but only a trait declared in this module
+/// has a body it can copy, so each `@implements` path is read against the
+/// traits of the module the way the resolver reads it: a bare name through the
+/// namespaces the type is written in, innermost first, out to the top level; a
+/// qualified path as the declaration whose path is it or ends with it.
+/// Two traits sharing a name in different namespaces therefore hand their
+/// defaults only to the types that implement each of them. A path that matches
+/// no trait of the module copies nothing, and the analyzer reports it.
 export namespace ParserTraitDefaults {
   /// One default method a trait declares with a body.
   record Entry {
-    public traitName: String;
+    /// The trait's path inside the module, such as `Shapes::Measured`.
+    public traitPath: String;
     public methodName: String;
     public methodItemId: Ast::ItemId;
   }
@@ -30,30 +40,133 @@ export namespace ParserTraitDefaults {
     public methodItemId: Ast::ItemId;
   }
 
-  /// The last `::`-separated segment of an `@implements` argument, trimmed.
-  /// The analyzer keeps the same segment, so `@implements(Ns::Trait)` and
-  /// `@implements(Trait)` both match a trait declared as `Trait`.
-  function lastPathSegment(text: &String): String {
+  /// The trimmed `::`-separated segments of an `@implements` argument,
+  /// joined back with `::`, so `Ns :: Trait` reads as `Ns::Trait`.
+  function normalizedPath(text: &String): String {
     let colon: u8 = 58;
+    let mut path: String = String::create("");
     let mut start: u64 = 0;
     let mut index: u64 = 0;
 
-    while (index < text.length()) {
-      if (let Option::SOME(byte) = text.byteAt(index)) {
+    while (index <= text.length()) {
+      let mut boundary: boolean = index == text.length();
+
+      if (!boundary) {
+        if (let Option::SOME(byte) = text.byteAt(index)) {
+          boundary = byte == colon;
+        }
+      }
+
+      if (boundary) {
+        let segment: String = text.substring(start as i64, (index - start) as i64);
+        let trimmed: String = segment.trimAsciiWhitespace();
+
+        if (trimmed.length() > 0) {
+          if (path.length() > 0) {
+            path.pushStr("::");
+          }
+
+          path.pushStr(trimmed.toStr());
+        }
+
+        start = index + 1;
+      }
+
+      index += 1;
+    }
+
+    return path;
+  }
+
+  /// `namespaces[0..depth]` and `name` joined with `::`.
+  function joinPath(namespaces: &Vector<String>, depth: u64, name: &String): String {
+    let mut path: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < depth) {
+      if (let Option::SOME(segment) = namespaces.get(index)) {
+        path.pushStr(segment.toStr());
+        path.pushStr("::");
+      }
+
+      index += 1;
+    }
+
+    path.pushStr(name.toStr());
+    return path;
+  }
+
+  /// Whether `path` is `written` or ends with `::written`.
+  function pathMatches(path: &String, written: &String): boolean {
+    if (path.equals(written.toStr())) {
+      return true;
+    }
+
+    let suffix: String = `::${written.toStr()}`;
+    return path.endsWith(suffix.toStr());
+  }
+
+  /// The path of the module trait the `@implements` argument `written` names,
+  /// read from inside `namespaces`, when a trait of the module has defaults
+  /// and answers.
+  function resolveTraitPath(
+    written: &String,
+    namespaces: &Vector<String>,
+    entries: &Vector<ParserTraitDefaults::Entry>,
+  ): Option<String> {
+    let colon: u8 = 58;
+    let mut qualified: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < written.length()) {
+      if (let Option::SOME(byte) = written.byteAt(index)) {
         if (byte == colon) {
-          start = index + 1;
+          qualified = true;
         }
       }
 
       index += 1;
     }
 
-    let segment: String = text.substring(start as i64, (text.length() - start) as i64);
-    return segment.trimAsciiWhitespace();
+    if (!qualified) {
+      let mut depth: u64 = namespaces.length() + 1;
+
+      while (depth > 0) {
+        depth -= 1;
+        let candidate: String = ParserTraitDefaults::joinPath(namespaces, depth, written);
+        let mut entryIndex: u64 = 0;
+
+        while (entryIndex < entries.length()) {
+          if (let Option::SOME(entry) = entries.get(entryIndex)) {
+            if (entry.traitPath.equals(candidate.toStr())) {
+              return Option::SOME(candidate);
+            }
+          }
+
+          entryIndex += 1;
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    let mut entryIndex: u64 = 0;
+
+    while (entryIndex < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(entryIndex)) {
+        if (ParserTraitDefaults::pathMatches(&entry.traitPath, written)) {
+          return Option::SOME(entry.traitPath.clone());
+        }
+      }
+
+      entryIndex += 1;
+    }
+
+    return Option::NONE;
   }
 
-  /// Every trait named by an `@implements(...)` attribute, in written order,
-  /// each reduced to its last path segment.
+  /// Every trait path written in an `@implements(...)` attribute, in written
+  /// order.
   function implementedTraitNames(metadata: &Ast::Metadata): Vector<String> {
     let mut names: Vector<String> = Vector::new<String>();
     let mut index: u64 = 0;
@@ -73,7 +186,7 @@ export namespace ParserTraitDefaults {
 
       while (argumentIndex < attribute.arguments.length()) {
         if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
-          names.push(ParserTraitDefaults::lastPathSegment(argument));
+          names.push(ParserTraitDefaults::normalizedPath(argument));
         }
 
         argumentIndex += 1;
@@ -124,11 +237,33 @@ export namespace ParserTraitDefaults {
     return false;
   }
 
-  /// Collects every trait default in `itemIds`, descending through namespaces
-  /// and exported declarations.
+  /// `namespaces` with `entered` appended, or a copy of `namespaces` when the
+  /// nested items are not inside a new namespace.
+  function innerNamespaces(namespaces: &Vector<String>, entered: &Option<String>): Vector<String> {
+    let mut inner: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < namespaces.length()) {
+      if (let Option::SOME(segment) = namespaces.get(index)) {
+        inner.push(segment.clone());
+      }
+
+      index += 1;
+    }
+
+    if (let Option::SOME(name) = entered) {
+      inner.push(name.clone());
+    }
+
+    return inner;
+  }
+
+  /// Collects every trait default in `itemIds`, written inside `namespaces`,
+  /// descending through namespaces and exported declarations.
   function collectEntries(
     module: &mut Ast::Module,
     itemIds: &Vector<Ast::ItemId>,
+    namespaces: &Vector<String>,
     entries: &mut Vector<ParserTraitDefaults::Entry>,
   ): void {
     let mut index: u64 = 0;
@@ -142,6 +277,7 @@ export namespace ParserTraitDefaults {
       let mut traitName: Option<String> = Option::NONE;
       let mut defaultMethods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
       let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+      let mut nestedNamespace: Option<String> = Option::NONE;
 
       if (let Option::SOME(item) = module.items.get(*itemId)) {
         match (item) {
@@ -151,6 +287,7 @@ export namespace ParserTraitDefaults {
           },
           Ast::Item::Node::Namespace(namespaceItem) -> {
             nested = ParserDeclarations::copyItemIds(&namespaceItem.items);
+            nestedNamespace = Option::SOME(namespaceItem.name.clone());
           },
           Ast::Item::Node::Export(exportItem) -> {
             if (let Option::SOME(innerItemId) = exportItem.declaration) {
@@ -162,6 +299,7 @@ export namespace ParserTraitDefaults {
       }
 
       if (let Option::SOME(name) = traitName) {
+        let traitPath: String = ParserTraitDefaults::joinPath(namespaces, namespaces.length(), &name);
         let mut methodIndex: u64 = 0;
 
         while (methodIndex < defaultMethods.length()) {
@@ -173,7 +311,7 @@ export namespace ParserTraitDefaults {
           if (let Option::SOME(methodName) = ParserTraitDefaults::methodItemName(module, *methodItemId)) {
             let mut entriesRef: &mut Vector<ParserTraitDefaults::Entry> = entries;
             entriesRef.push(ParserTraitDefaults::Entry {
-              traitName: name.clone(),
+              traitPath: traitPath.clone(),
               methodName: methodName.clone(),
               methodItemId: *methodItemId,
             });
@@ -184,17 +322,20 @@ export namespace ParserTraitDefaults {
       }
 
       if (nested.length() > 0) {
-        ParserTraitDefaults::collectEntries(module, &nested, entries);
+        let inner: Vector<String> = ParserTraitDefaults::innerNamespaces(namespaces, &nestedNamespace);
+        ParserTraitDefaults::collectEntries(module, &nested, &inner, entries);
       }
 
       index += 1;
     }
   }
 
-  /// Records the defaults an implementing type inherits but does not declare.
+  /// Records the defaults an implementing type, written inside `namespaces`,
+  /// inherits but does not declare.
   function collectPendingForType(
     module: &mut Ast::Module,
     ownerItemId: Ast::ItemId,
+    namespaces: &Vector<String>,
     implemented: &Vector<String>,
     methods: &Vector<Ast::ItemId>,
     entries: &Vector<ParserTraitDefaults::Entry>,
@@ -203,7 +344,12 @@ export namespace ParserTraitDefaults {
     let mut implementedIndex: u64 = 0;
 
     while (implementedIndex < implemented.length()) {
-      let Option::SOME(traitName) = implemented.get(implementedIndex) else {
+      let Option::SOME(written) = implemented.get(implementedIndex) else {
+        implementedIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(traitPath) = ParserTraitDefaults::resolveTraitPath(written, namespaces, entries) else {
         implementedIndex += 1;
         continue;
       };
@@ -216,7 +362,7 @@ export namespace ParserTraitDefaults {
           continue;
         };
 
-        if (!entry.traitName.equals(traitName.toStr())) {
+        if (!entry.traitPath.equals(traitPath.toStr())) {
           entryIndex += 1;
           continue;
         }
@@ -236,10 +382,12 @@ export namespace ParserTraitDefaults {
     }
   }
 
-  /// Walks `itemIds` looking for records and enums that inherit a default.
+  /// Walks `itemIds`, written inside `namespaces`, looking for records and
+  /// enums that inherit a default.
   function collectPending(
     module: &mut Ast::Module,
     itemIds: &Vector<Ast::ItemId>,
+    namespaces: &Vector<String>,
     entries: &Vector<ParserTraitDefaults::Entry>,
     pending: &mut Vector<ParserTraitDefaults::Pending>,
   ): void {
@@ -255,6 +403,7 @@ export namespace ParserTraitDefaults {
       let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
       let mut isType: boolean = false;
       let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+      let mut nestedNamespace: Option<String> = Option::NONE;
 
       if (let Option::SOME(item) = module.items.get(*itemId)) {
         match (item) {
@@ -270,6 +419,7 @@ export namespace ParserTraitDefaults {
           },
           Ast::Item::Node::Namespace(namespaceItem) -> {
             nested = ParserDeclarations::copyItemIds(&namespaceItem.items);
+            nestedNamespace = Option::SOME(namespaceItem.name.clone());
           },
           Ast::Item::Node::Export(exportItem) -> {
             if (let Option::SOME(innerItemId) = exportItem.declaration) {
@@ -284,6 +434,7 @@ export namespace ParserTraitDefaults {
         ParserTraitDefaults::collectPendingForType(
           module,
           *itemId,
+          namespaces,
           &implemented,
           &methods,
           entries,
@@ -292,7 +443,8 @@ export namespace ParserTraitDefaults {
       }
 
       if (nested.length() > 0) {
-        ParserTraitDefaults::collectPending(module, &nested, entries, pending);
+        let inner: Vector<String> = ParserTraitDefaults::innerNamespaces(namespaces, &nestedNamespace);
+        ParserTraitDefaults::collectPending(module, &nested, &inner, entries, pending);
       }
 
       index += 1;
@@ -437,14 +589,15 @@ export namespace ParserTraitDefaults {
     let roots: Vector<Ast::ItemId> = ParserDeclarations::copyItemIds(&module.roots);
     let mut entries: Vector<ParserTraitDefaults::Entry> = Vector::new<ParserTraitDefaults::Entry>();
 
-    ParserTraitDefaults::collectEntries(module, &roots, &mut entries);
+    let topLevel: Vector<String> = Vector::new<String>();
+    ParserTraitDefaults::collectEntries(module, &roots, &topLevel, &mut entries);
 
     if (entries.length() == 0) {
       return;
     }
 
     let mut pending: Vector<ParserTraitDefaults::Pending> = Vector::new<ParserTraitDefaults::Pending>();
-    ParserTraitDefaults::collectPending(module, &roots, &entries, &mut pending);
+    ParserTraitDefaults::collectPending(module, &roots, &topLevel, &entries, &mut pending);
 
     let mut index: u64 = 0;
 

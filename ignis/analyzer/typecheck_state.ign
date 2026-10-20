@@ -3588,24 +3588,44 @@ export namespace Analyzer {
             },
           };
         },
-        // A bounded type parameter answers the methods its bounds declare. The
-        // trait stands in as the owner here; monomorphization re-dispatches the
-        // call to the concrete implementation once the parameter is substituted.
+        // A bounded type parameter answers the methods every bound declares.
+        // The first trait stands in as the owner here; each method keeps the
+        // trait that declares it, and monomorphization re-dispatches the call
+        // to the concrete implementation once the parameter is substituted.
         Analyzer::Type::Param(symbol) -> {
-          let Option::SOME(traitDefId) = Analyzer::Typecheck::traitBoundOwnerFor(defStore, symbols, enclosing, symbol) else {
+          let boundTraits: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::traitBoundsFor(defStore, enclosing, symbol);
+
+          let Option::SOME(traitDefId) = boundTraits.get(0) else {
             Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PATTERN_TYPE_MISMATCH, nonOwnerMessage);
             return Option::NONE;
           };
 
-          let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(traitDefId) else {
-            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PATTERN_TYPE_MISMATCH, nonOwnerMessage);
-            return Option::NONE;
-          };
+          let ownerDefId: Analyzer::DefinitionId = *traitDefId;
+          let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut traitIndex: u64 = 0;
+
+          while (traitIndex < boundTraits.length()) {
+            if (let Option::SOME(boundTrait) = boundTraits.get(traitIndex)) {
+              if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(*boundTrait)) {
+                let mut methodIndex: u64 = 0;
+
+                while (methodIndex < trait_.methods.length()) {
+                  if (let Option::SOME(methodId) = trait_.methods.get(methodIndex)) {
+                    methods.push(*methodId);
+                  }
+
+                  methodIndex += 1;
+                }
+              }
+            }
+
+            traitIndex += 1;
+          }
 
           return Option::SOME(Analyzer::Typecheck::RequiredMethodOwner {
-            defId: traitDefId,
+            defId: ownerDefId,
             typeId: resolvedType.typeId,
-            instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&trait_.methods),
+            instanceMethods: methods,
             staticMethods: Vector::new<Analyzer::DefinitionId>(),
             typeParamSymbols: Vector::new<Analyzer::SymbolId>(),
             typeArguments: Vector::new<Analyzer::TypeId>(),
@@ -3680,24 +3700,24 @@ export namespace Analyzer {
       return scoped;
     }
 
-    /// The first trait the type parameter named `symbol` is bounded by, as seen
-    /// from `enclosing` — the callable whose body is being checked.
+    /// Every trait the type parameter named `symbol` is bounded by, in written
+    /// order, as seen from `enclosing` — the callable whose body is being
+    /// checked.
     ///
     /// Only the parameters in scope can answer: two generic declarations may both
     /// name a parameter `T` and bound it by different traits, so a store-wide
     /// search by name would let one declaration's bound decide another's method
-    /// lookup. Bounds themselves are held as written names, so the bound is still
-    /// matched by name against the trait declarations in the store. A parameter
+    /// lookup. Each bound answers with the trait the resolver resolved it to, so
+    /// two traits sharing a name in different namespaces stay apart. A parameter
     /// with no bound, or a bound naming something that is not a trait, has no
     /// owner to answer methods.
-    function traitBoundOwnerFor(
+    function traitBoundsFor(
       defStore: &mut Analyzer::DefinitionStore,
-      symbols: &mut Analyzer::SymbolTable,
       enclosing: Analyzer::DefinitionId,
       symbol: Analyzer::SymbolId,
-    ): Option<Analyzer::DefinitionId> {
+    ): Vector<Analyzer::DefinitionId> {
       let scoped: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
-      let mut boundNames: Vector<String> = Vector::new<String>();
+      let mut boundTraits: Vector<Option<Analyzer::DefinitionId>> = Vector::new<Option<Analyzer::DefinitionId>>();
       let mut index: u64 = 0;
 
       while (index < scoped.length()) {
@@ -3708,7 +3728,7 @@ export namespace Analyzer {
 
         if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
           if (typeParam.name.raw() == symbol.raw()) {
-            boundNames = Analyzer::Typecheck::copyStringVector(&typeParam.bounds);
+            boundTraits = defStore.traitReferencesOf(*paramDefId);
             index = scoped.length();
             continue;
           }
@@ -3717,38 +3737,108 @@ export namespace Analyzer {
         index += 1;
       }
 
+      let mut traits: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut boundIndex: u64 = 0;
 
-      while (boundIndex < boundNames.length()) {
-        let Option::SOME(boundName) = boundNames.get(boundIndex) else {
-          boundIndex += 1;
-          continue;
-        };
-
-        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
-        let boundSymbol: Analyzer::SymbolId = symbolsRef.intern(boundName.toStr());
-        let traitCandidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(boundSymbol);
-        let mut traitIndex: u64 = 0;
-
-        while (traitIndex < traitCandidates.length()) {
-          let Option::SOME(traitCandidate) = traitCandidates.get(traitIndex) else {
-            traitIndex += 1;
-            continue;
-          };
-
-          let candidateId: Analyzer::DefinitionId = *traitCandidate;
-
-          if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(candidateId)) {
-            return Option::SOME(candidateId);
+      while (boundIndex < boundTraits.length()) {
+        if (let Option::SOME(entry) = boundTraits.get(boundIndex)) {
+          if (let Option::SOME(traitId) = *entry) {
+            if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(traitId)) {
+              traits.push(traitId);
+            }
           }
-
-          traitIndex += 1;
         }
 
         boundIndex += 1;
       }
 
-      return Option::NONE;
+      return traits;
+    }
+
+    /// Reports A0262 when the methods named `name` that `candidates` holds are
+    /// declared by more than one of the traits bounding the receiver, which
+    /// leaves the call without a single meaning. Overloads declared by one
+    /// trait are left to overload selection.
+    function rejectMethodInSeveralBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      owner: &Analyzer::Typecheck::RequiredMethodOwner,
+      candidates: &Vector<Analyzer::DefinitionId>,
+      name: str,
+      span: SourceSpan,
+    ): boolean {
+      let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(owner.defId) else {
+        return false;
+      };
+
+      let mut traits: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        if (let Option::SOME(candidate) = candidates.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(*candidate)) {
+            let mut seen: boolean = false;
+            let mut traitIndex: u64 = 0;
+
+            while (traitIndex < traits.length()) {
+              if (let Option::SOME(existing) = traits.get(traitIndex)) {
+                if (existing.raw() == method.owner.raw()) {
+                  seen = true;
+                }
+              }
+
+              traitIndex += 1;
+            }
+
+            if (!seen) {
+              traits.push(method.owner);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      if (traits.length() < 2) {
+        return false;
+      }
+
+      let mut names: String = String::create("");
+      let mut traitIndex: u64 = 0;
+
+      while (traitIndex < traits.length()) {
+        if (let Option::SOME(traitId) = traits.get(traitIndex)) {
+          let mut written: String = String::create("?");
+
+          if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(*traitId)) {
+            written = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, trait_.name);
+          }
+
+          let display: String = Analyzer::TypeBounds::traitDisplayName(defStore, &written, Option::SOME(*traitId));
+
+          if (traitIndex > 0) {
+            names.pushStr(traitIndex + 1 == traits.length() ? " and " : ", ");
+          }
+
+          names.pushStr("'");
+          names.pushStr(display.toStr());
+          names.pushStr("'");
+        }
+
+        traitIndex += 1;
+      }
+
+      let message: String = `method '${name}' is declared by more than one bound: ${names.toStr()}`;
+      Analyzer::Typecheck::emitDiagnosticLabeled(
+        state,
+        span,
+        DiagnosticCode::AMBIGUOUS_BOUND_METHOD,
+        message.toStr(),
+        "the receiver's bounds declare this method more than once",
+      );
+
+      return true;
     }
 
     function copyStringVector(source: &Vector<String>): Vector<String> {

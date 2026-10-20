@@ -1,0 +1,44 @@
+// A type parameter bounded by two traits answers the methods of both, the
+// required ones and the defaults, whichever bound declares them.
+namespace A {
+  trait First {
+    first(&self): i32;
+  }
+}
+
+namespace B {
+  trait Second {
+    second(&self): i32;
+
+    secondTag(&self): i32 {
+      return 200;
+    }
+  }
+}
+
+@implements(A::First, B::Second)
+record Both {
+  public value: i32;
+
+  first(&self): i32 {
+    return self.value;
+  }
+
+  second(&self): i32 {
+    return self.value * 2;
+  }
+}
+
+function useBoth<T: A::First & B::Second>(value: &T): i32 {
+  return value.first() + value.second() + value.secondTag();
+}
+
+function main(): i32 {
+  let both: Both = Both { value: 3 };
+
+  if (useBoth<Both>(&both) != 209) {
+    return 1;
+  }
+
+  return 0;
+}
