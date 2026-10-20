@@ -18,6 +18,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # lets the upward search for ignis.toml reach the compiler's own project file,
 # which then governs the build instead of the example.
 cd "$repo_root"
+# Examples are checked against this repository's standard library, not
+# whatever IGNIS_STD_PATH the environment happens to carry.
+export IGNIS_STD_PATH="$repo_root/std"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
