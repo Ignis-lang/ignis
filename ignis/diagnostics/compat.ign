@@ -10,7 +10,7 @@ import
   NoteKind,
   Severity,
 from "./model";
-import SourceSpan from "./source";
+import SourceMap, SourceSpan from "./source";
 
 function indexOfSpanSeparator(text: &String, start: u64): i64 {
   let mut index: u64 = start;
@@ -63,13 +63,14 @@ function parseHeaderLine(text: &String, storage: &mut Vector<String>): Diagnosti
   let code: str = storeString(storage, text.substringBytes(closeBracket + 2, colonIndex));
   let message: str = storeString(storage, text.substringBytes(colonIndex + 2, text.length()));
 
-  return Diagnostic::new(severity, code, message, SourceSpan::new("", 0, 0));
+  return Diagnostic::new(severity, code, message, SourceSpan::detached(0, 0));
 }
 
 function parseLabelLine(
   diagnostic: &mut Diagnostic,
   text: &String,
-  storage: &mut Vector<String>
+  storage: &mut Vector<String>,
+  sourceMap: &mut SourceMap
 ): void {
   let Option::SOME(closeParen) = text.indexOfCharFrom(')', 6) else {
     @panic("invalid label line");
@@ -84,7 +85,7 @@ function parseLabelLine(
   let kind: LabelKind = LabelKind::parse(&kindText);
   let message: str = storeString(storage, text.substringBytes(closeParen + 3, atIndex as u64));
   let spanText: String = text.substringBytes((atIndex + 4) as u64, text.length());
-  let span: SourceSpan = SourceSpan::parse(&spanText, storage);
+  let span: SourceSpan = SourceSpan::parse(&spanText, sourceMap);
   let mut currentDiagnostic: &mut Diagnostic = diagnostic;
 
   currentDiagnostic.addLabel(kind, span, message);
@@ -239,7 +240,9 @@ export namespace DiagnosticFixtureParser {
     };
   }
 
-  function parse(text: str): ParsedDiagnostics {
+  /// Parses the diagnostics `text` lists, registering the paths of their
+  /// spans in `sourceMap`.
+  function parse(text: str, sourceMap: &mut SourceMap): ParsedDiagnostics {
     let lines: Vector<String> = String::create(text).lines();
     let mut backing: Vector<String> = Vector::new<String>();
     let mut bag: DiagnosticBag = DiagnosticBag::init();
@@ -278,7 +281,7 @@ export namespace DiagnosticFixtureParser {
           @panic("missing active diagnostic");
         };
 
-        active.setPrimarySpan(SourceSpan::parse(&spanText, &mut backing));
+        active.setPrimarySpan(SourceSpan::parse(&spanText, sourceMap));
         index += 1;
         continue;
       }
@@ -293,7 +296,7 @@ export namespace DiagnosticFixtureParser {
           Option::NONE -> @panic("missing active diagnostic"),
         };
 
-        parseLabelLine(active, &trimmed, &mut backing);
+        parseLabelLine(active, &trimmed, &mut backing, sourceMap);
         index += 1;
         continue;
       }

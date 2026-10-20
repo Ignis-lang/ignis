@@ -4,6 +4,7 @@ import
   LabelKind,
   Severity,
   SourceFile,
+  SourceMap,
   SourceSpan,
 from "@compiler::diagnostics";
 import CompileFlags, ParseOutput, Parser from "@compiler::parser";
@@ -261,9 +262,13 @@ function resolverClonePathStack(stack: &mut Vector<Path::PathBuf>): Vector<Path:
   return copy;
 }
 
-function resolverPathSpan(path: &Path::PathBuf, start: u64, end: u64): SourceSpan {
-  let pathText: String = path.toString();
-  return SourceSpan::new(pathText.toStr(), start, end);
+function resolverPathSpan(
+  sourceMap: &mut SourceMap,
+  path: &Path::PathBuf,
+  start: u64,
+  end: u64
+): SourceSpan {
+  return SourceSpan::new(sourceMap.register(path.asStr()), start, end);
 }
 
 function resolverSingleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
@@ -272,12 +277,17 @@ function resolverSingleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
   return bag;
 }
 
-function resolverSimpleDiagnostic(path: &Path::PathBuf, code: str, message: str): DiagnosticBag {
+function resolverSimpleDiagnostic(
+  sourceMap: &mut SourceMap,
+  path: &Path::PathBuf,
+  code: str,
+  message: str
+): DiagnosticBag {
   let diagnostic: Diagnostic = Diagnostic::new(
     Severity::ERROR,
     code,
     message,
-    resolverPathSpan(path, 0, 0),
+    resolverPathSpan(sourceMap, path, 0, 0),
   );
   return resolverSingleDiagnostic(diagnostic);
 }
@@ -382,15 +392,16 @@ function resolverFindProjectFile(startPath: &Path::PathBuf): Option<Path::PathBu
 }
 
 function resolverCanonicalPath(
+  sourceMap: &mut SourceMap,
   path: &Path::PathBuf,
   message: str
 ): Result<Path::PathBuf, DiagnosticBag> {
   if (!Fs::exists(path.asStr())) {
-    return Result::ERROR(resolverSimpleDiagnostic(path, MISSING_MODULE, message));
+    return Result::ERROR(resolverSimpleDiagnostic(sourceMap, path, MISSING_MODULE, message));
   }
 
   let Result::OK(canonical) = Fs::canonicalize(path) else {
-    return Result::ERROR(resolverSimpleDiagnostic(path, MISSING_MODULE, message));
+    return Result::ERROR(resolverSimpleDiagnostic(sourceMap, path, MISSING_MODULE, message));
   };
 
   return Result::OK(canonical);
@@ -440,19 +451,20 @@ function resolverEmitsC(emit: &Vector<String>): boolean {
 /// `--std-path` wins over what the project file resolved, which is what the
 /// host driver does with the same flag.
 function resolverStdRoot(
+  sourceMap: &mut SourceMap,
   configPath: &Path::PathBuf,
   declared: &Option<Path::PathBuf>,
   overrides: &BuildOverrides,
 ): Result<Path::PathBuf, DiagnosticBag> {
   if (let Option::SOME(stdPath) = &overrides.stdPath) {
     let candidate: Path::PathBuf = Path::PathBuf::fromString(&stdPath).normalize();
-    return resolverCanonicalPath(&candidate, "std root could not be resolved");
+    return resolverCanonicalPath(sourceMap, &candidate, "std root could not be resolved");
   }
 
   return match (declared) {
     Option::SOME(path) -> Result::OK(path.clone()),
     Option::NONE -> Result::ERROR(
-      resolverSimpleDiagnostic(configPath, MISSING_MODULE, "std root could not be resolved"),
+      resolverSimpleDiagnostic(sourceMap, configPath, MISSING_MODULE, "std root could not be resolved"),
     ),
   };
 }
@@ -465,12 +477,13 @@ function resolverStdRoot(
 /// `std_path` names (`IGNIS_STD_PATH` names the official std and is never
 /// read); with neither, the root is empty and the build has no std at all.
 function resolverProjectStdRoot(
+  sourceMap: &mut SourceMap,
   configPath: &Path::PathBuf,
   resolved: &ResolvedProject,
   overrides: &BuildOverrides,
 ): Result<Path::PathBuf, DiagnosticBag> {
   if (resolved.stdEnabled || overrides.stdPath.isSome()) {
-    return resolverStdRoot(configPath, &resolved.stdRoot, overrides);
+    return resolverStdRoot(sourceMap, configPath, &resolved.stdRoot, overrides);
   }
 
   return match (&resolved.stdRoot) {
@@ -501,9 +514,12 @@ function resolverCloneHeaders(headers: &Vector<StdManifestHeader>): Vector<StdMa
 ///
 /// A project with no std root has neither, so it gets a manifest that
 /// declares nothing instead of reading one from disk.
-function resolverLoadManifest(project: &ResolverProject): Result<StdManifest, DiagnosticBag> {
+function resolverLoadManifest(
+  sourceMap: &mut SourceMap,
+  project: &ResolverProject
+): Result<StdManifest, DiagnosticBag> {
   if (!project.stdRoot.isEmpty()) {
-    return Manifest::loadFile(&project.stdManifestPath);
+    return Manifest::loadFile(sourceMap, &project.stdManifestPath);
   }
 
   return Result::OK(StdManifest {
@@ -534,6 +550,7 @@ function resolverTargetTriple(declared: &Option<String>, overrides: &BuildOverri
 /// Unknown values are config errors, so a typo can never silently pick a
 /// different backend than the one the sources were written for.
 function resolverTargetBackend(
+  sourceMap: &mut SourceMap,
   configPath: &Path::PathBuf,
   declared: &String,
   overrides: &BuildOverrides,
@@ -549,7 +566,7 @@ function resolverTargetBackend(
 
   let supported: String = Backends::supportedNames();
   let message: String = `unknown build target '${selected.toStr()}' (supported: ${supported.toStr()})`;
-  return Result::ERROR(resolverSimpleDiagnostic(configPath, INVALID_BUILD_PROFILE, message.toStr()));
+  return Result::ERROR(resolverSimpleDiagnostic(sourceMap, configPath, INVALID_BUILD_PROFILE, message.toStr()));
 }
 
 /// The name a project build gives the binary it links.
@@ -589,38 +606,40 @@ function resolverStemOf(fileName: &String): String {
 /// project file's own value; with neither set, the project file's defaults
 /// apply.
 function resolverLoadProject(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   overrides: &BuildOverrides,
 ): Result<ResolverProject, DiagnosticBag> {
   let Option::SOME(configPath) = Config::findProjectFile(startPath) else {
-    return Result::ERROR(resolverSimpleDiagnostic(startPath, MISSING_MODULE, "ignis.toml could not be found"));
+    return Result::ERROR(resolverSimpleDiagnostic(sourceMap, startPath, MISSING_MODULE, "ignis.toml could not be found"));
   };
 
-  let resolved: ResolvedProject = Config::loadProjectFile(&configPath)!;
+  let resolved: ResolvedProject = Config::loadProjectFile(sourceMap, &configPath)!;
 
   let Option::SOME(root) = &resolved.root else {
-    return Result::ERROR(resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "project root could not be resolved"));
+    return Result::ERROR(resolverSimpleDiagnostic(sourceMap, &configPath, MISSING_MODULE, "project root could not be resolved"));
   };
   let Option::SOME(sourceRoot) = &resolved.sourceDir else {
     return Result::ERROR(
-      resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "source directory could not be resolved"),
+      resolverSimpleDiagnostic(sourceMap, &configPath, MISSING_MODULE, "source directory could not be resolved"),
     );
   };
 
   if (resolved.optLevel > MAX_OPT_LEVEL) {
     return Result::ERROR(resolverSimpleDiagnostic(
+      sourceMap,
       &configPath,
       INVALID_BUILD_PROFILE,
       "build.opt_level must be an integer between 0 and 3",
     ));
   }
 
-  let stdRoot: Path::PathBuf = resolverProjectStdRoot(&configPath, &resolved, overrides)!;
+  let stdRoot: Path::PathBuf = resolverProjectStdRoot(sourceMap, &configPath, &resolved, overrides)!;
   let mut stdManifestPath: Path::PathBuf = Path::PathBuf::new();
 
   if (!stdRoot.isEmpty()) {
     let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
-    stdManifestPath = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+    stdManifestPath = resolverCanonicalPath(sourceMap, &manifestCandidate, "std manifest could not be resolved")!;
   }
 
   let mut features: Vector<String> = Vector::new<String>();
@@ -633,7 +652,7 @@ function resolverLoadProject(
   // Before backend selection existed, every stored target built with C;
   // init still emits legacy targets. CLI overrides retain strict validation.
   let declaredBackend: String = String::create(Backends::fromName(resolved.target.toStr()).isSome() ? resolved.target.toStr() : "c");
-  let target: String = resolverTargetBackend(&configPath, &declaredBackend, overrides)!;
+  let target: String = resolverTargetBackend(sourceMap, &configPath, &declaredBackend, overrides)!;
 
   let mut outDir: Path::PathBuf = match (&resolved.outDir) {
     Option::SOME(path) -> path.clone(),
@@ -686,6 +705,7 @@ function resolverLoadProject(
 /// `--std-path` wins over `IGNIS_STD_PATH`, which is the order the host driver
 /// resolves the same two inputs in.
 function resolverEnvironmentStdRoot(
+  sourceMap: &mut SourceMap,
   reportPath: &Path::PathBuf,
   overrides: &BuildOverrides,
 ): Result<Path::PathBuf, DiagnosticBag> {
@@ -704,6 +724,7 @@ function resolverEnvironmentStdRoot(
 
   let Option::SOME(stdPath) = stdPathText else {
     return Result::ERROR(resolverSimpleDiagnostic(
+      sourceMap,
       reportPath,
       MISSING_MODULE,
       "std_path not set. Use --std-path or set IGNIS_STD_PATH env var",
@@ -711,7 +732,7 @@ function resolverEnvironmentStdRoot(
   };
 
   let stdCandidate: Path::PathBuf = Path::PathBuf::fromString(&stdPath).normalize();
-  return resolverCanonicalPath(&stdCandidate, "std root could not be resolved");
+  return resolverCanonicalPath(sourceMap, &stdCandidate, "std root could not be resolved");
 }
 
 /// Builds the project a single source file is compiled under when no
@@ -721,17 +742,18 @@ function resolverEnvironmentStdRoot(
 /// driver resolves it in single-file mode, and the entry's own directory is the
 /// source root. No aliases exist, because only a project file declares them.
 function resolverSingleFileProject(
+  sourceMap: &mut SourceMap,
   entryPath: &Path::PathBuf,
   overrides: &BuildOverrides,
 ): Result<ResolverProject, DiagnosticBag> {
-  let entry: Path::PathBuf = resolverCanonicalPath(entryPath, "entry file could not be resolved")!;
+  let entry: Path::PathBuf = resolverCanonicalPath(sourceMap, entryPath, "entry file could not be resolved")!;
   let Option::SOME(sourceRoot) = entry.parent() else {
-    return Result::ERROR(resolverSimpleDiagnostic(&entry, MISSING_MODULE, "source directory could not be resolved"));
+    return Result::ERROR(resolverSimpleDiagnostic(sourceMap, &entry, MISSING_MODULE, "source directory could not be resolved"));
   };
 
-  let stdRoot: Path::PathBuf = resolverEnvironmentStdRoot(&entry, overrides)!;
+  let stdRoot: Path::PathBuf = resolverEnvironmentStdRoot(sourceMap, &entry, overrides)!;
   let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
-  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(sourceMap, &manifestCandidate, "std manifest could not be resolved")!;
 
   let mut features: Vector<String> = Vector::new<String>();
   resolverPushMissingStrings(&mut features, &overrides.features);
@@ -759,7 +781,7 @@ function resolverSingleFileProject(
   };
 
   let declaredC: String = String::create("c");
-  let target: String = resolverTargetBackend(&entry, &declaredC, overrides)!;
+  let target: String = resolverTargetBackend(sourceMap, &entry, &declaredC, overrides)!;
 
   return Result::OK(ResolverProject {
     root: sourceRoot.clone(),
@@ -792,12 +814,13 @@ function resolverSingleFileProject(
 /// Only the std root matters here: nothing else is compiled, so the entry and
 /// the source root are the directory the command ran against.
 function resolverStdOnlyProject(
+  sourceMap: &mut SourceMap,
   startPath: &Path::PathBuf,
   overrides: &BuildOverrides,
 ): Result<ResolverProject, DiagnosticBag> {
-  let stdRoot: Path::PathBuf = resolverEnvironmentStdRoot(startPath, overrides)!;
+  let stdRoot: Path::PathBuf = resolverEnvironmentStdRoot(sourceMap, startPath, overrides)!;
   let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
-  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(sourceMap, &manifestCandidate, "std manifest could not be resolved")!;
 
   let mut features: Vector<String> = Vector::new<String>();
   resolverPushMissingStrings(&mut features, &overrides.features);
@@ -888,14 +911,17 @@ function resolverAmbiguousImportDiagnostic(
   return resolverSingleDiagnostic(diagnostic);
 }
 
-function resolverCycleDiagnostic(cycle: &Vector<Path::PathBuf>): DiagnosticBag {
+function resolverCycleDiagnostic(
+  sourceMap: &mut SourceMap,
+  cycle: &Vector<Path::PathBuf>
+): DiagnosticBag {
   let Option::SOME(firstPath) = cycle.get(0) else {
     let fallback: Path::PathBuf = Path::PathBuf::create("<cycle>");
     let diagnostic: Diagnostic = Diagnostic::new(
       Severity::ERROR,
       CYCLIC_IMPORT,
       "cyclic module import detected",
-      resolverPathSpan(&fallback, 0, 0),
+      resolverPathSpan(sourceMap, &fallback, 0, 0),
     );
     return resolverSingleDiagnostic(diagnostic);
   };
@@ -904,7 +930,7 @@ function resolverCycleDiagnostic(cycle: &Vector<Path::PathBuf>): DiagnosticBag {
     Severity::ERROR,
     CYCLIC_IMPORT,
     "cyclic module import detected",
-    resolverPathSpan(firstPath, 0, 0),
+    resolverPathSpan(sourceMap, firstPath, 0, 0),
   );
 
   let cycleText: String = resolverCycleText(cycle);
@@ -1003,9 +1029,12 @@ function resolverPathWithIgnExtension(basePath: &Path::PathBuf): Path::PathBuf {
   return Path::PathBuf::fromString(&pathText).normalize();
 }
 
-function resolverCanonicalizeExisting(path: &Path::PathBuf): Result<Path::PathBuf, DiagnosticBag> {
+function resolverCanonicalizeExisting(
+  sourceMap: &mut SourceMap,
+  path: &Path::PathBuf
+): Result<Path::PathBuf, DiagnosticBag> {
   let Result::OK(canonical) = Fs::canonicalize(path) else {
-    let span: SourceSpan = resolverPathSpan(path, 0, 0);
+    let span: SourceSpan = resolverPathSpan(sourceMap, path, 0, 0);
     let mut diagnostic: Diagnostic = Diagnostic::new(
       Severity::ERROR,
       MISSING_MODULE,
@@ -1020,6 +1049,7 @@ function resolverCanonicalizeExisting(path: &Path::PathBuf): Result<Path::PathBu
 }
 
 function resolverResolveFsPath(
+  sourceMap: &mut SourceMap,
   currentFile: &Path::PathBuf,
   importSource: &String,
   span: SourceSpan,
@@ -1031,7 +1061,7 @@ function resolverResolveFsPath(
         return Result::ERROR(resolverMissingModuleDiagnostic(currentFile, importSource, span));
       }
 
-      return resolverCanonicalizeExisting(basePath);
+      return resolverCanonicalizeExisting(sourceMap, basePath);
     },
     Option::NONE -> {},
   };
@@ -1046,11 +1076,11 @@ function resolverResolveFsPath(
   }
 
   if (hasFileCandidate) {
-    return resolverCanonicalizeExisting(&fileCandidate);
+    return resolverCanonicalizeExisting(sourceMap, &fileCandidate);
   }
 
   if (hasModCandidate) {
-    return resolverCanonicalizeExisting(&modCandidate);
+    return resolverCanonicalizeExisting(sourceMap, &modCandidate);
   }
 
   return Result::ERROR(resolverMissingModuleDiagnostic(currentFile, importSource, span));
@@ -1196,6 +1226,7 @@ function resolverModuleKindForPath(
 }
 
 function resolverResolveImport(
+  sourceMap: &mut SourceMap,
   project: &ResolverProject,
   manifest: &StdManifest,
   currentFile: &Path::PathBuf,
@@ -1221,7 +1252,7 @@ function resolverResolveImport(
       },
     };
 
-    let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    let resolved: Path::PathBuf = resolverResolveFsPath(sourceMap, currentFile, importSource, span, &candidateBase)!;
     let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
     return Result::OK(ResolvedImportTarget {
       path: resolved,
@@ -1235,7 +1266,7 @@ function resolverResolveImport(
       candidateBase = aliasMatch.basePath.join(aliasMatch.remainder.toStr()).normalize();
     }
 
-    let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    let resolved: Path::PathBuf = resolverResolveFsPath(sourceMap, currentFile, importSource, span, &candidateBase)!;
     let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
     return Result::OK(ResolvedImportTarget {
       path: resolved,
@@ -1249,7 +1280,7 @@ function resolverResolveImport(
     };
 
     let candidateBase: Path::PathBuf = parent.join(importSource.toStr()).normalize();
-    let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    let resolved: Path::PathBuf = resolverResolveFsPath(sourceMap, currentFile, importSource, span, &candidateBase)!;
     let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
     return Result::OK(ResolvedImportTarget {
       path: resolved,
@@ -1260,7 +1291,7 @@ function resolverResolveImport(
   let projectRoot: Path::PathBuf = project.root.clone();
 
   let candidateBase: Path::PathBuf = projectRoot.join(importSource.toStr()).normalize();
-  let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+  let resolved: Path::PathBuf = resolverResolveFsPath(sourceMap, currentFile, importSource, span, &candidateBase)!;
   let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
   return Result::OK(ResolvedImportTarget {
     path: resolved,
@@ -1274,6 +1305,7 @@ function resolverResolveImport(
 /// A parse `graph.parseCache` holds for the same text and flags is reused
 /// instead of parsing the module again.
 function resolverExtractImports(
+  sourceMap: &mut SourceMap,
   graph: &mut BuildGraph,
   nodeIndex: u64,
   path: &Path::PathBuf,
@@ -1285,7 +1317,7 @@ function resolverExtractImports(
       Severity::ERROR,
       MISSING_MODULE,
       "module source could not be read",
-      resolverPathSpan(path, 0, 0),
+      resolverPathSpan(sourceMap, path, 0, 0),
     )));
   };
 
@@ -1300,10 +1332,7 @@ function resolverExtractImports(
     let _parsedText: String = sourceText;
     graph.reusedModules += 1;
   } else {
-    let sourceFile: SourceFile = SourceFile {
-      path: path.clone(),
-      text: sourceText,
-    };
+    let sourceFile: SourceFile = SourceFile::fromPath(sourceMap, path.clone(), sourceText);
 
     // Parse diagnostics do not stop discovery, which does not report them: the
     // driver would render them against the entry instead of this module. The
@@ -1315,7 +1344,7 @@ function resolverExtractImports(
   }
 
   let Option::SOME(parsed) = cached else {
-    return Result::ERROR(resolverSimpleDiagnostic(path, MISSING_MODULE, "module source could not be parsed"));
+    return Result::ERROR(resolverSimpleDiagnostic(sourceMap, path, MISSING_MODULE, "module source could not be parsed"));
   };
   let mut imports: Vector<ParsedImport> = Vector::new<ParsedImport>();
   let mut hasParseDiagnostics: boolean = false;
@@ -1346,7 +1375,7 @@ function resolverExtractImports(
             Option::SOME(source) -> {
               let spanValue: SourceSpan = match (exportItem.sourceSpan) {
                 Option::SOME(value) -> value,
-                Option::NONE -> resolverPathSpan(path, 0, 0),
+                Option::NONE -> resolverPathSpan(sourceMap, path, 0, 0),
               };
 
               imports.push(ParsedImport {
@@ -1375,6 +1404,7 @@ function resolverExtractImports(
 }
 
 function resolverDiscoverModule(
+  sourceMap: &mut SourceMap,
   project: &ResolverProject,
   manifest: &StdManifest,
   graph: &mut BuildGraph,
@@ -1399,7 +1429,7 @@ function resolverDiscoverModule(
   let mut stackRef: &mut Vector<Path::PathBuf> = stack;
   stackRef.push(currentPath.clone());
 
-  let extracted: ExtractedImports = resolverExtractImports(graph, currentIndex, currentPath, &project.flags, &project.sources)!;
+  let extracted: ExtractedImports = resolverExtractImports(sourceMap, graph, currentIndex, currentPath, &project.flags, &project.sources)!;
   let mut importIndex: u64 = 0;
 
   while (importIndex < extracted.imports.length()) {
@@ -1407,7 +1437,7 @@ function resolverDiscoverModule(
       break;
     };
 
-    let resolution: Result<ResolvedImportTarget, DiagnosticBag> = resolverResolveImport(project, manifest, currentPath, &importItem.source, importItem.span);
+    let resolution: Result<ResolvedImportTarget, DiagnosticBag> = resolverResolveImport(sourceMap, project, manifest, currentPath, &importItem.source, importItem.span);
 
     // A module that does not parse stops the build at the parse phase, which
     // reports why. An import it cannot resolve is left for the build after
@@ -1421,10 +1451,10 @@ function resolverDiscoverModule(
     if (resolverPathInStack(stack, &target.path)) {
       let mut cycle: Vector<Path::PathBuf> = resolverClonePathStack(stack);
       cycle.push(target.path.clone());
-      return Result::ERROR(resolverCycleDiagnostic(&cycle));
+      return Result::ERROR(resolverCycleDiagnostic(sourceMap, &cycle));
     }
 
-    let targetIndex: u64 = resolverDiscoverModule(project, manifest, graph, &target.path, target.kind, stack)!;
+    let targetIndex: u64 = resolverDiscoverModule(sourceMap, project, manifest, graph, &target.path, target.kind, stack)!;
     ModuleGraph::addEdge(graph, currentIndex, targetIndex, &importItem.source, importItem.span);
     importIndex += 1;
   }
@@ -1474,6 +1504,7 @@ function resolverIsProjectTestFileName(fileName: &String): boolean {
 }
 
 function resolverCollectProjectTestSources(
+  sourceMap: &mut SourceMap,
   sourceRoot: &Path::PathBuf,
   entryPath: &Path::PathBuf,
 ): Result<Vector<Path::PathBuf>, DiagnosticBag> {
@@ -1481,7 +1512,7 @@ function resolverCollectProjectTestSources(
   let entries: Vector<String> = match (Fs::collectWalk(sourceRootText.toStr())) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
-      return Result::ERROR(resolverSimpleDiagnostic(sourceRoot, MISSING_MODULE, "project test sources could not be discovered"));
+      return Result::ERROR(resolverSimpleDiagnostic(sourceMap, sourceRoot, MISSING_MODULE, "project test sources could not be discovered"));
     },
   };
 
@@ -1521,13 +1552,14 @@ function resolverCollectProjectTestSources(
 }
 
 function resolverDiscoverProjectRoots(
+  sourceMap: &mut SourceMap,
   project: &ResolverProject,
   manifest: &StdManifest,
   includeTestSources: boolean,
 ): Result<DiscoveryResult, DiagnosticBag> {
   let mut graph: BuildGraph = BuildGraph::init();
   let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-  resolverDiscoverProjectRootsInto(project, manifest, includeTestSources, &mut graph, &mut preludePaths)!;
+  resolverDiscoverProjectRootsInto(sourceMap, project, manifest, includeTestSources, &mut graph, &mut preludePaths)!;
 
   return Result::OK(resolverProjectDiscoveryResult(project, manifest, graph, preludePaths));
 }
@@ -1536,6 +1568,7 @@ function resolverDiscoverProjectRoots(
 /// modules into `preludePaths`. On failure `graph` keeps what was discovered
 /// up to it.
 function resolverDiscoverProjectRootsInto(
+  sourceMap: &mut SourceMap,
   project: &ResolverProject,
   manifest: &StdManifest,
   includeTestSources: boolean,
@@ -1561,16 +1594,16 @@ function resolverDiscoverProjectRootsInto(
     }
 
     let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
+    resolverDiscoverModule(sourceMap, project, manifest, graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
     preludeRef.push(candidateBase.clone());
     preludeIndex += 1;
   }
 
-  let rootIndex: u64 = resolverDiscoverModule(project, manifest, graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
+  let rootIndex: u64 = resolverDiscoverModule(sourceMap, project, manifest, graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
   ModuleGraph::setRoot(graph, rootIndex);
 
   if (includeTestSources) {
-    let testSources: Vector<Path::PathBuf> = resolverCollectProjectTestSources(&project.sourceRoot, &project.entry)!;
+    let testSources: Vector<Path::PathBuf> = resolverCollectProjectTestSources(sourceMap, &project.sourceRoot, &project.entry)!;
     let mut testIndex: u64 = 0;
 
     while (testIndex < testSources.length()) {
@@ -1579,7 +1612,7 @@ function resolverDiscoverProjectRootsInto(
       };
 
       let mut testStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-      resolverDiscoverModule(project, manifest, graph, testSource, BuildModuleKind::PROJECT, &mut testStack)!;
+      resolverDiscoverModule(sourceMap, project, manifest, graph, testSource, BuildModuleKind::PROJECT, &mut testStack)!;
       testIndex += 1;
     }
   }
@@ -1673,6 +1706,7 @@ function resolverIsCompileOnly(manifest: &StdManifest, name: &String): boolean {
 /// Each manifest module is a root of its own: nothing outside the std imports
 /// them here, and every one of them has to be compiled.
 function resolverDiscoverStdRoots(
+  sourceMap: &mut SourceMap,
   project: &ResolverProject,
   manifest: &StdManifest,
 ): Result<DiscoveryResult, DiagnosticBag> {
@@ -1692,7 +1726,7 @@ function resolverDiscoverStdRoots(
     }
 
     let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
+    resolverDiscoverModule(sourceMap, project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
     preludePaths.push(candidateBase.clone());
     preludeIndex += 1;
   }
@@ -1711,7 +1745,7 @@ function resolverDiscoverStdRoots(
 
     let candidateBase: Path::PathBuf = project.stdRoot.join(module.path.toStr()).normalize();
     let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut stack)!;
+    resolverDiscoverModule(sourceMap, project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut stack)!;
     moduleIndex += 1;
   }
 
@@ -1796,16 +1830,17 @@ function resolverStdTestCompanions(
 /// manifest module. Companions classify as `PROJECT`, so they are the only
 /// modules whose `@test` functions a run collects.
 function resolverDiscoverStdTestRoots(
+  sourceMap: &mut SourceMap,
   project: &ResolverProject,
   manifest: &StdManifest,
 ): Result<DiscoveryResult, DiagnosticBag> {
   if (manifest.modules.length() == 0) {
     let manifestText: String = project.stdManifestPath.toString();
     let message: String = `No modules found in std manifest at '${manifestText.toStr()}'`;
-    return Result::ERROR(resolverSimpleDiagnostic(&project.stdManifestPath, MISSING_MODULE, message.toStr()));
+    return Result::ERROR(resolverSimpleDiagnostic(sourceMap, &project.stdManifestPath, MISSING_MODULE, message.toStr()));
   }
 
-  let mut discovery: DiscoveryResult = resolverDiscoverStdRoots(project, manifest)!;
+  let mut discovery: DiscoveryResult = resolverDiscoverStdRoots(sourceMap, project, manifest)!;
   let companions: Vector<Path::PathBuf> = resolverStdTestCompanions(project, manifest);
   let mut companionIndex: u64 = 0;
 
@@ -1815,7 +1850,7 @@ function resolverDiscoverStdTestRoots(
     };
 
     let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut discovery.graph, companion, BuildModuleKind::PROJECT, &mut stack)!;
+    resolverDiscoverModule(sourceMap, project, manifest, &mut discovery.graph, companion, BuildModuleKind::PROJECT, &mut stack)!;
     companionIndex += 1;
   }
 
@@ -1937,6 +1972,7 @@ function resolverDocModuleName(
 /// Compile-only std modules are included, unlike a std build: documentation
 /// describes them even though nothing links them.
 function resolverDiscoverDocRoots(
+  sourceMap: &mut SourceMap,
   project: &ResolverProject,
   manifest: &StdManifest,
 ): Result<DocDiscovery, DiagnosticBag> {
@@ -1956,7 +1992,7 @@ function resolverDiscoverDocRoots(
     }
 
     let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
+    resolverDiscoverModule(sourceMap, project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
     preludePaths.push(candidateBase.clone());
     preludeIndex += 1;
   }
@@ -1970,7 +2006,7 @@ function resolverDiscoverDocRoots(
       if (let Option::SOME(module) = manifest.modules.get(moduleIndex)) {
         let candidateBase: Path::PathBuf = project.stdRoot.join(module.path.toStr()).normalize();
         let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-        resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut stack)!;
+        resolverDiscoverModule(sourceMap, project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut stack)!;
       }
 
       moduleIndex += 1;
@@ -1984,7 +2020,7 @@ function resolverDiscoverDocRoots(
   }
 
   let mut entryStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-  let rootIndex: u64 = resolverDiscoverModule(project, manifest, &mut graph, &project.entry, entryKind, &mut entryStack)!;
+  let rootIndex: u64 = resolverDiscoverModule(sourceMap, project, manifest, &mut graph, &project.entry, entryKind, &mut entryStack)!;
   ModuleGraph::setRoot(&mut graph, rootIndex);
 
   let mut moduleNames: Vector<String> = Vector::new<String>();
@@ -2041,32 +2077,40 @@ export namespace Resolver {
   /// Discovers with the compile-time configuration of the machine this
   /// compiler runs on. A build uses the `WithOptions` entry points, whose
   /// configuration the project file and the command line decide.
-  function discoverProject(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
+  function discoverProject(
+    sourceMap: &mut SourceMap,
+    startPath: &Path::PathBuf
+  ): Result<DiscoveryResult, DiagnosticBag> {
     let features: Vector<String> = Vector::new<String>();
-    return Resolver::discoverProjectWithOptions(startPath, Option::NONE, &features);
+    return Resolver::discoverProjectWithOptions(sourceMap, startPath, Option::NONE, &features);
   }
 
-  function discoverProjectTests(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
+  function discoverProjectTests(
+    sourceMap: &mut SourceMap,
+    startPath: &Path::PathBuf
+  ): Result<DiscoveryResult, DiagnosticBag> {
     let features: Vector<String> = Vector::new<String>();
-    return Resolver::discoverProjectTestsWithOptions(startPath, Option::NONE, &features);
+    return Resolver::discoverProjectTestsWithOptions(sourceMap, startPath, Option::NONE, &features);
   }
 
   function discoverProjectWithOptions(
+    sourceMap: &mut SourceMap,
     startPath: &Path::PathBuf,
     debug: Option<boolean>,
     features: &Vector<String>,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let overrides: BuildOverrides = BuildOverrides::withOptions(debug, features);
-    return Resolver::discover(startPath, &overrides, false);
+    return Resolver::discover(sourceMap, startPath, &overrides, false);
   }
 
   function discoverProjectTestsWithOptions(
+    sourceMap: &mut SourceMap,
     startPath: &Path::PathBuf,
     debug: Option<boolean>,
     features: &Vector<String>,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let overrides: BuildOverrides = BuildOverrides::withOptions(debug, features);
-    return Resolver::discover(startPath, &overrides, true);
+    return Resolver::discover(sourceMap, startPath, &overrides, true);
   }
 
   /// Discovers the module graph a build compiles, starting from a project
@@ -2076,17 +2120,18 @@ export namespace Resolver {
   /// `includeTests` adds the project's test modules to the graph, which is what
   /// a test run needs and a build must not have.
   function discover(
+    sourceMap: &mut SourceMap,
     startPath: &Path::PathBuf,
     overrides: &BuildOverrides,
     includeTests: boolean,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let project: ResolverProject = match (Config::findProjectFile(startPath)) {
-      Option::SOME(_) -> resolverLoadProject(startPath, overrides)!,
-      Option::NONE -> resolverSingleFileProject(startPath, overrides)!,
+      Option::SOME(_) -> resolverLoadProject(sourceMap, startPath, overrides)!,
+      Option::NONE -> resolverSingleFileProject(sourceMap, startPath, overrides)!,
     };
-    let manifest: StdManifest = resolverLoadManifest(&project)!;
+    let manifest: StdManifest = resolverLoadManifest(sourceMap, &project)!;
 
-    return resolverDiscoverProjectRoots(&project, &manifest, includeTests);
+    return resolverDiscoverProjectRoots(sourceMap, &project, &manifest, includeTests);
   }
 
   /// Discovers like `discover`, reusing the parses `cache` holds for modules
@@ -2095,16 +2140,17 @@ export namespace Resolver {
   /// back to `cache`; on success, the rest of `cache` is dropped and the
   /// caller gives the parses it took back with `ParseCache::insert`.
   function discoverCached(
+    sourceMap: &mut SourceMap,
     startPath: &Path::PathBuf,
     overrides: &BuildOverrides,
     includeTests: boolean,
     cache: &mut ParseCache,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let project: ResolverProject = match (Config::findProjectFile(startPath)) {
-      Option::SOME(_) -> resolverLoadProject(startPath, overrides)!,
-      Option::NONE -> resolverSingleFileProject(startPath, overrides)!,
+      Option::SOME(_) -> resolverLoadProject(sourceMap, startPath, overrides)!,
+      Option::NONE -> resolverSingleFileProject(sourceMap, startPath, overrides)!,
     };
-    let manifest: StdManifest = resolverLoadManifest(&project)!;
+    let manifest: StdManifest = resolverLoadManifest(sourceMap, &project)!;
     let flagsKey: String = compileFlagsKey(&project.flags);
     let mut graph: BuildGraph = BuildGraph::init();
     let mut cacheRef: &mut ParseCache = cache;
@@ -2114,7 +2160,7 @@ export namespace Resolver {
     }
 
     let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    let discovered: Result<u64, DiagnosticBag> = resolverDiscoverProjectRootsInto(&project, &manifest, includeTests, &mut graph, &mut preludePaths);
+    let discovered: Result<u64, DiagnosticBag> = resolverDiscoverProjectRootsInto(sourceMap, &project, &manifest, includeTests, &mut graph, &mut preludePaths);
 
     match (discovered) {
       Result::OK(_) -> {},
@@ -2137,16 +2183,17 @@ export namespace Resolver {
   /// source root are replaced. A fixture no project file governs falls back to
   /// the single-file settings.
   function discoverFixture(
+    sourceMap: &mut SourceMap,
     fixturePath: &Path::PathBuf,
     projectStart: &Path::PathBuf,
     overrides: &BuildOverrides,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let mut project: ResolverProject = match (Config::findProjectFile(projectStart)) {
-      Option::SOME(_) -> resolverLoadProject(projectStart, overrides)!,
-      Option::NONE -> resolverSingleFileProject(fixturePath, overrides)!,
+      Option::SOME(_) -> resolverLoadProject(sourceMap, projectStart, overrides)!,
+      Option::NONE -> resolverSingleFileProject(sourceMap, fixturePath, overrides)!,
     };
 
-    let entry: Path::PathBuf = resolverCanonicalPath(fixturePath, "fixture file could not be resolved")!;
+    let entry: Path::PathBuf = resolverCanonicalPath(sourceMap, fixturePath, "fixture file could not be resolved")!;
 
     if (let Option::SOME(parent) = entry.parent()) {
       project.sourceRoot = parent.clone();
@@ -2154,9 +2201,9 @@ export namespace Resolver {
 
     project.entry = entry.clone();
 
-    let manifest: StdManifest = resolverLoadManifest(&project)!;
+    let manifest: StdManifest = resolverLoadManifest(sourceMap, &project)!;
 
-    return resolverDiscoverProjectRoots(&project, &manifest, false);
+    return resolverDiscoverProjectRoots(sourceMap, &project, &manifest, false);
   }
 
   /// Discovers the standard library's own module graph, which is what
@@ -2164,31 +2211,33 @@ export namespace Resolver {
   /// one governs `startPath`, and from `--std-path` or `IGNIS_STD_PATH`
   /// otherwise.
   function discoverStd(
+    sourceMap: &mut SourceMap,
     startPath: &Path::PathBuf,
     overrides: &BuildOverrides,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let project: ResolverProject = match (Config::findProjectFile(startPath)) {
-      Option::SOME(_) -> resolverLoadProject(startPath, overrides)!,
-      Option::NONE -> resolverStdOnlyProject(startPath, overrides)!,
+      Option::SOME(_) -> resolverLoadProject(sourceMap, startPath, overrides)!,
+      Option::NONE -> resolverStdOnlyProject(sourceMap, startPath, overrides)!,
     };
     let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
-    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+    let manifest: StdManifest = Manifest::loadFile(sourceMap, &manifestPath)!;
 
-    return resolverDiscoverStdRoots(&project, &manifest);
+    return resolverDiscoverStdRoots(sourceMap, &project, &manifest);
   }
 
   /// Discovers the graph `ignis test-std` compiles. The std root comes only
   /// from `--std-path` or `IGNIS_STD_PATH`: like the host, a std test run
   /// never reads a project file, even when one governs `startPath`.
   function discoverStdTests(
+    sourceMap: &mut SourceMap,
     startPath: &Path::PathBuf,
     overrides: &BuildOverrides,
   ): Result<DiscoveryResult, DiagnosticBag> {
-    let project: ResolverProject = resolverStdOnlyProject(startPath, overrides)!;
+    let project: ResolverProject = resolverStdOnlyProject(sourceMap, startPath, overrides)!;
     let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
-    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+    let manifest: StdManifest = Manifest::loadFile(sourceMap, &manifestPath)!;
 
-    return resolverDiscoverStdTestRoots(&project, &manifest);
+    return resolverDiscoverStdTestRoots(sourceMap, &project, &manifest);
   }
 
   /// Discovers the graph `ignis doc` documents.
@@ -2197,19 +2246,20 @@ export namespace Resolver {
   /// `startPath` is documented as a single file, even when a project file
   /// governs it, which is how the host's `ignis doc <file>` resolves it.
   function discoverDoc(
+    sourceMap: &mut SourceMap,
     startPath: &Path::PathBuf,
     overrides: &BuildOverrides,
     projectMode: boolean,
   ): Result<DocDiscovery, DiagnosticBag> {
     if (projectMode) {
-      let project: ResolverProject = resolverLoadProject(startPath, overrides)!;
-      let manifest: StdManifest = resolverLoadManifest(&project)!;
-      return resolverDiscoverDocRoots(&project, &manifest);
+      let project: ResolverProject = resolverLoadProject(sourceMap, startPath, overrides)!;
+      let manifest: StdManifest = resolverLoadManifest(sourceMap, &project)!;
+      return resolverDiscoverDocRoots(sourceMap, &project, &manifest);
     }
 
-    let project: ResolverProject = resolverSingleFileProject(startPath, overrides)!;
-    let manifest: StdManifest = Manifest::loadFile(&project.stdManifestPath)!;
-    return resolverDiscoverDocRoots(&project, &manifest);
+    let project: ResolverProject = resolverSingleFileProject(sourceMap, startPath, overrides)!;
+    let manifest: StdManifest = Manifest::loadFile(sourceMap, &project.stdManifestPath)!;
+    return resolverDiscoverDocRoots(sourceMap, &project, &manifest);
   }
 
   /// Hands over discovery's parse of node `nodeIndex`. When it was already
@@ -2217,6 +2267,7 @@ export namespace Resolver {
   /// flags discovery used, and `graph.reparsedModules` counts it. `NONE` when
   /// the node does not exist or its source cannot be read.
   function takeParsedModule(
+    sourceMap: &mut SourceMap,
     discovery: &mut DiscoveryResult,
     nodeIndex: u64,
     sources: &SourceOverrides,
@@ -2232,7 +2283,7 @@ export namespace Resolver {
       return Option::NONE;
     };
 
-    let file: SourceFile = SourceFile { path: node.path.clone(), text: sourceText };
+    let file: SourceFile = SourceFile::fromPath(sourceMap, node.path.clone(), sourceText);
     let output: ParseOutput = Parser::parseFileWithFlags(&file, &discovery.flags);
     discovery.graph.reparsedModules += 1;
 
@@ -2264,8 +2315,8 @@ export namespace Resolver {
     return summary;
   }
 
-  function firstDiagnosticSummary(startPath: &Path::PathBuf): String {
-    let Result::ERROR(bag) = Resolver::discoverProject(startPath) else {
+  function firstDiagnosticSummary(sourceMap: &mut SourceMap, startPath: &Path::PathBuf): String {
+    let Result::ERROR(bag) = Resolver::discoverProject(sourceMap, startPath) else {
       Test::fail();
       return String::new();
     };
@@ -2304,8 +2355,9 @@ function resolverKindAtRelativePath(
 /// `CompileFlags.debug` when the command line supplies no override.
 @test
 function resolverReadsDebugTrueFromProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/debug_flag_enabled");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2320,8 +2372,9 @@ function resolverReadsDebugTrueFromProjectFile(): void {
 /// toolchain is invoked with.
 @test
 function resolverReadsOptLevelFromProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/build_profile");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2336,8 +2389,9 @@ function resolverReadsOptLevelFromProjectFile(): void {
 /// is invoked with on top of the profile's own.
 @test
 function resolverReadsCflagsFromProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/build_profile");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2364,8 +2418,9 @@ function resolverReadsCflagsFromProjectFile(): void {
 /// array: the project file is parsed as TOML, not scanned line by line.
 @test
 function resolverReadsMultilineCflagsFromProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/multiline_cflags");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2397,11 +2452,12 @@ function resolverReadsMultilineCflagsFromProjectFile(): void {
 /// the project file is looked up by walking the directories above it.
 @test
 function resolverDiscoversTheProjectFromASubdirectory(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
   let sourceDir: Path::PathBuf = fixtureRoot.join("src");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&sourceDir)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &sourceDir)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2416,8 +2472,9 @@ function resolverDiscoversTheProjectFromASubdirectory(): void {
 /// build, which lays its artifacts out from them.
 @test
 function resolverReadsBuildOutputFieldsFromProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/build_profile");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2439,8 +2496,9 @@ function resolverReadsBuildOutputFieldsFromProjectFile(): void {
 /// the profile flags.
 @test
 function resolverDefaultsCflagsToEmptyWithoutProjectSetting(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2455,8 +2513,9 @@ function resolverDefaultsCflagsToEmptyWithoutProjectSetting(): void {
 /// toolchain is still told explicitly.
 @test
 function resolverDefaultsOptLevelToZeroWithoutProjectSetting(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2471,18 +2530,20 @@ function resolverDefaultsOptLevelToZeroWithoutProjectSetting(): void {
 /// instead of silently falling back to an unoptimized build.
 @test
 function resolverReportsInvalidOptLevel(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/invalid_opt_level");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&mut sourceMap, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 
 /// A project file without `[build] debug` resolves to `debug = false`.
 @test
 function resolverDefaultsDebugToFalseWithoutProjectSetting(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/debug_flag_default");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2495,10 +2556,11 @@ function resolverDefaultsDebugToFalseWithoutProjectSetting(): void {
 
 @test
 function resolverDiscoversAcyclicFixtureInDependencyOrder(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2511,10 +2573,11 @@ function resolverDiscoversAcyclicFixtureInDependencyOrder(): void {
 
 @test
 function resolverDiscoversProjectTestFilesOnlyInTestMode(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/test_discovery");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2527,10 +2590,11 @@ function resolverDiscoversProjectTestFilesOnlyInTestMode(): void {
 
 @test
 function resolverDiscoversProjectTestFilesInDependencyOrder(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/test_discovery");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_test_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let discovery: DiscoveryResult = match (Resolver::discoverProjectTests(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProjectTests(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2543,10 +2607,11 @@ function resolverDiscoversProjectTestFilesInDependencyOrder(): void {
 
 @test
 function resolverDiscoversAliasRelativeStdFixtureInDependencyOrder(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/alias_relative_std");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2559,42 +2624,48 @@ function resolverDiscoversAliasRelativeStdFixtureInDependencyOrder(): void {
 
 @test
 function resolverReportsMissingModuleDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/missing");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&mut sourceMap, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 
 @test
 function resolverReportsAmbiguousImportDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/ambiguous");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&mut sourceMap, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 
 @test
 function resolverAliasPrefixDoesNotShadowLongerSegment(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+
   // Alias "comp" must NOT resolve the import "compiler::types": "compiler" starts
   // with "comp" but is a distinct segment — no "::" boundary follows "comp" in
   // "compiler::types", so the alias must not match.
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/alias_boundary");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&mut sourceMap, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 
 @test
 function resolverResolvesSigilAliasPrefix(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+
   // Alias "@" resolves "@token::token" and "@lexer" under its directory, while the
   // longer alias "@lib" still wins an exact first-segment match.
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/alias_sigil_prefix");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2607,12 +2678,14 @@ function resolverResolvesSigilAliasPrefix(): void {
 
 @test
 function resolverDiscoversAcyclicDiamondInDependencyOrder(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+
   // Diamond: main imports B and C; both B and C import D.
   // D must appear exactly once in topo order, before B and C.
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/diamond");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2625,10 +2698,11 @@ function resolverDiscoversAcyclicDiamondInDependencyOrder(): void {
 
 @test
 function resolverReportsCycleDiagnostic(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/cycle");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&mut sourceMap, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 
@@ -2639,8 +2713,9 @@ function resolverReportsCycleDiagnostic(): void {
 /// import syntax reached it. A project module stays `PROJECT`. See #237.
 @test
 function resolverAssignsStdKindToModulesUnderTheStdRootRegardlessOfImportSyntax(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2671,11 +2746,12 @@ function resolverAssignsStdKindToModulesUnderTheStdRootRegardlessOfImportSyntax(
 /// even though the project file declares no `std_path` of its own.
 @test
 function resolverAssignsStdKindUnderAStdPathOverride(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind_override");
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.stdPath = Option::SOME(fixtureRoot.join("std").toString());
 
-  let discovery: DiscoveryResult = match (Resolver::discover(&fixtureRoot, &overrides, false)) {
+  let discovery: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &fixtureRoot, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2696,8 +2772,9 @@ function resolverAssignsStdKindUnderAStdPathOverride(): void {
 /// `std/core/mod.ign`'s own relative import of `./tests`.
 @test
 function resolverKeepsATestsIgnCompanionAsProjectEvenUnderTheStdRoot(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2764,11 +2841,12 @@ function resolverProjectModulesRelativeTo(
 /// rather than manifest order.
 @test
 function resolverDiscoversStdTestCompanionsInSortedModuleOrder(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_tests");
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.stdPath = Option::SOME(fixtureRoot.join("std").toString());
 
-  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&fixtureRoot, &overrides)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&mut sourceMap, &fixtureRoot, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2792,12 +2870,13 @@ function resolverDiscoversStdTestCompanionsInSortedModuleOrder(): void {
 /// governing the start directory is never consulted.
 @test
 function resolverStdTestDiscoveryIgnoresTheGoverningProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let projectRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind");
   let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_tests/std");
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.stdPath = Option::SOME(stdRoot.toString());
 
-  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&projectRoot, &overrides)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverStdTests(&mut sourceMap, &projectRoot, &overrides)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2813,12 +2892,13 @@ function resolverStdTestDiscoveryIgnoresTheGoverningProjectFile(): void {
 /// host's wording.
 @test
 function resolverRejectsAStdTestRunOverAnEmptyManifest(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_tests_empty");
   let stdRoot: Path::PathBuf = fixtureRoot.join("std");
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.stdPath = Option::SOME(stdRoot.toString());
 
-  let Result::ERROR(bag) = Resolver::discoverStdTests(&fixtureRoot, &overrides) else {
+  let Result::ERROR(bag) = Resolver::discoverStdTests(&mut sourceMap, &fixtureRoot, &overrides) else {
     Test::fail();
     return;
   };
@@ -2832,8 +2912,9 @@ function resolverRejectsAStdTestRunOverAnEmptyManifest(): void {
 /// every module the project's own.
 @test
 function resolverFreestandingProjectLoadsNoPreludeWithoutAStdPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2858,8 +2939,9 @@ function resolverFreestandingProjectLoadsNoPreludeWithoutAStdPath(): void {
 /// missing module rather than a lookup under some unrelated directory.
 @test
 function resolverFreestandingProjectRejectsAStdImportWithoutAStdPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std_import");
-  let Result::ERROR(bag) = Resolver::discoverProject(&fixtureRoot) else {
+  let Result::ERROR(bag) = Resolver::discoverProject(&mut sourceMap, &fixtureRoot) else {
     Test::fail();
     return;
   };
@@ -2875,8 +2957,9 @@ function resolverFreestandingProjectRejectsAStdImportWithoutAStdPath(): void {
 /// `manifest.toml` `[auto_load]` list is the prelude, and its modules are `STD`.
 @test
 function resolverFreestandingProjectLoadsThePreludeFromTheUserStdManifest(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/user_std");
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2905,13 +2988,14 @@ function resolverFreestandingProjectLoadsThePreludeFromTheUserStdManifest(): voi
 
 /// Discovers a freestanding fixture with `--std-path` set to `stdRoot`.
 function resolverDiscoverFreestandingWithStdPath(
+  sourceMap: &mut SourceMap,
   fixtureRoot: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
 ): Result<DiscoveryResult, DiagnosticBag> {
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.stdPath = Option::SOME(stdRoot.toString());
 
-  return Resolver::discover(fixtureRoot, &overrides, false);
+  return Resolver::discover(sourceMap, fixtureRoot, &overrides, false);
 }
 
 /// Asserts that a freestanding discovery reads its std from the
@@ -2933,10 +3017,11 @@ function resolverAssertOverrideStd(discovery: &DiscoveryResult, stdRoot: &Path::
 /// `std_path`, and that std's own `[auto_load]` list is the prelude.
 @test
 function resolverFreestandingStdPathOverrideSuppliesAUserStd(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
   let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
 
-  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot)) {
+  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&mut sourceMap, &fixtureRoot, &stdRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2951,10 +3036,11 @@ function resolverFreestandingStdPathOverrideSuppliesAUserStd(): void {
 /// precedence a hosted build applies.
 @test
 function resolverFreestandingStdPathOverrideWinsOverTheProjectStdPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/user_std");
   let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
 
-  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot)) {
+  let discovery: DiscoveryResult = match (resolverDiscoverFreestandingWithStdPath(&mut sourceMap, &fixtureRoot, &stdRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -2969,10 +3055,11 @@ function resolverFreestandingStdPathOverrideWinsOverTheProjectStdPath(): void {
 /// directory without one is a missing module, not an empty std.
 @test
 function resolverFreestandingStdPathOverrideRequiresAManifest(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
   let stdRoot: Path::PathBuf = fixtureRoot.join("src");
 
-  let Result::ERROR(bag) = resolverDiscoverFreestandingWithStdPath(&fixtureRoot, &stdRoot) else {
+  let Result::ERROR(bag) = resolverDiscoverFreestandingWithStdPath(&mut sourceMap, &fixtureRoot, &stdRoot) else {
     Test::fail();
     return;
   };
@@ -2984,11 +3071,12 @@ function resolverFreestandingStdPathOverrideRequiresAManifest(): void {
 /// it and still builds with no standard library.
 @test
 function resolverFreestandingProjectIgnoresIgnisStdPath(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/no_std");
   let stdRoot: Path::PathBuf = resolverFixturePath("test_cases/freestanding/override_std");
   Env::set("IGNIS_STD_PATH", stdRoot.asStr());
 
-  let result: Result<DiscoveryResult, DiagnosticBag> = Resolver::discoverProject(&fixtureRoot);
+  let result: Result<DiscoveryResult, DiagnosticBag> = Resolver::discoverProject(&mut sourceMap, &fixtureRoot);
   Env::unset("IGNIS_STD_PATH");
 
   let discovery: DiscoveryResult = match (result) {
@@ -3006,8 +3094,9 @@ function resolverFreestandingProjectIgnoresIgnisStdPath(): void {
 /// `[build] linker` reaches discovery, and `--linker` wins over it.
 @test
 function resolverLinkerOverrideWinsOverProjectFile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/linker_project");
-  let declared: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+  let declared: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -3019,7 +3108,7 @@ function resolverLinkerOverrideWinsOverProjectFile(): void {
 
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.linker = Option::SOME(String::create("lld"));
-  let overridden: DiscoveryResult = match (Resolver::discover(&fixtureRoot, &overrides, false)) {
+  let overridden: DiscoveryResult = match (Resolver::discover(&mut sourceMap, &fixtureRoot, &overrides, false)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -3030,7 +3119,7 @@ function resolverLinkerOverrideWinsOverProjectFile(): void {
   Test::assertEq<str>(resolverOptionText(&overridden.linker).toStr(), "lld");
 
   let unset: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/build_profile");
-  let withoutLinker: DiscoveryResult = match (Resolver::discoverProject(&unset)) {
+  let withoutLinker: DiscoveryResult = match (Resolver::discoverProject(&mut sourceMap, &unset)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -3052,9 +3141,10 @@ function resolverOptionText(value: &Option<String>): String {
 /// like every empty `[build]` string rather than read as the default.
 @test
 function resolverReportsEmptyLinker(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/empty_linker");
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
-  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&mut sourceMap, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }

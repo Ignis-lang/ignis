@@ -1,7 +1,7 @@
 import Vector from "std::vector";
 
 import Id from "@compiler::ids";
-import SourceFile, SourceLocation, SourceSpan from "@compiler::diagnostics";
+import FileId, SourceFile, SourceLocation, SourceSpan from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 
 import _ from "./ids";
@@ -32,7 +32,7 @@ import _ from "./pattern";
 /// `byte_line_col`. `<path>` is normalized relative to the working
 /// directory and stripped of a leading `./`, exactly like the host. A span
 /// whose file path is empty (the selfhost's synthetic-span convention,
-/// `SourceSpan::new("", 0, 0)`) renders as `<synthetic>:0:0`.
+/// `SourceSpan::detached(0, 0)`) renders as `<synthetic>:0:0`.
 ///
 /// # Ordering
 ///
@@ -285,16 +285,13 @@ export namespace Hir {
       return storedValue.toStr();
     }
 
-    function findSourceFile(files: &Vector<SourceFile>, path: str): Option<&SourceFile> {
+    /// The file of `files` that `id` names.
+    function findSourceFile(files: &Vector<SourceFile>, id: FileId): Option<&SourceFile> {
       let mut index: u64 = 0;
 
       while (index < files.length()) {
-        if (let Option::SOME(file) = files.get(index)) {
-          let filePath: String = file.path.toString();
-
-          if (filePath.equals(path)) {
-            return Option::SOME(file);
-          }
+        if (let Option::SOME(file) = files.get(index) && file.id.equals(&id)) {
+          return Option::SOME(file);
         }
 
         index += 1;
@@ -308,7 +305,7 @@ export namespace Hir {
     }
 
     /// Resolves a span to a rendered position, or `<synthetic>:0:0` when the
-    /// span carries no real file (an empty `filePath`, the selfhost's
+    /// span carries no real file (`noFile()`, the selfhost's
     /// synthetic-span convention) or when no source file was found for it.
     function resolvePosition(
       span: &SourceSpan,
@@ -316,18 +313,16 @@ export namespace Hir {
       workingDirectory: str,
       storage: &mut Vector<String>,
     ): Hir::DropScheduleDump::RenderedPosition {
-      let filePathString: String = span.filePath.toString();
-
-      if (filePathString.length() == 0) {
+      if (!span.hasFile()) {
         return Hir::DropScheduleDump::syntheticPosition();
       }
 
-      let Option::SOME(file) = Hir::DropScheduleDump::findSourceFile(files, span.filePath) else {
+      let Option::SOME(file) = Hir::DropScheduleDump::findSourceFile(files, span.file) else {
         return Hir::DropScheduleDump::syntheticPosition();
       };
 
       let location: SourceLocation = file.byteLineCol(span.start);
-      let normalized: String = Hir::DropScheduleDump::normalizePath(span.filePath, workingDirectory);
+      let normalized: String = Hir::DropScheduleDump::normalizePath(file.path.asStr(), workingDirectory);
       let internedPath: str = Hir::DropScheduleDump::internPath(storage, normalized);
 
       return Hir::DropScheduleDump::RenderedPosition {
@@ -345,7 +340,7 @@ export namespace Hir {
       workingDirectory: str,
       storage: &mut Vector<String>,
     ): Hir::DropScheduleDump::RenderedPosition {
-      let endSpan: SourceSpan = SourceSpan::new(span.filePath, span.end, span.end);
+      let endSpan: SourceSpan = SourceSpan::new(span.file, span.end, span.end);
 
       return Hir::DropScheduleDump::resolvePosition(&endSpan, files, workingDirectory, storage);
     }
@@ -502,7 +497,7 @@ export namespace Hir {
 
     function spanOf(hir: &Hir::HirStore, id: Hir::HirId): SourceSpan {
       let Option::SOME(node) = hir.get(id) else {
-        return SourceSpan::new("", 0, 0);
+        return SourceSpan::detached(0, 0);
       };
 
       return node.span;
@@ -1160,7 +1155,7 @@ export namespace Hir {
       member: &Vector<boolean>,
     ): Hir::DropScheduleDump::ExitSiteResult {
       let mut found: boolean = false;
-      let mut span: SourceSpan = SourceSpan::new("", 0, 0);
+      let mut span: SourceSpan = SourceSpan::detached(0, 0);
       let mut reasonRank: u32 = 0;
       let mut reasonText: str = "";
 

@@ -18,7 +18,7 @@ import Vector from "std::vector";
 
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
-import SourceSpan from "@compiler::diagnostics";
+import FileId, SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 
 import Doc from "../doc/mod";
@@ -77,12 +77,14 @@ record InlayTables {
 /// What collecting the hints of one module reads.
 record InlayScope {
   public path: String;
+  public file: FileId;
   public text: String;
 }
 
 /// Collects the hints of the module analyzed as `analysisRecord`, whose
 /// source is `text`.
 export function buildFileInlayHints(
+  file: FileId,
   text: &String,
   module: &Ast::Module,
   analysisRecord: &Analyzer::ModuleAnalysisRecord,
@@ -92,7 +94,7 @@ export function buildFileInlayHints(
 ): FileInlayHints {
   let analysis: &Analyzer::AnalyzerOutput = &analysisRecord.output;
   let tables: InlayTables = inlayTables(analysis);
-  let scope: InlayScope = InlayScope { path: analysisRecord.info.pathText.clone(), text: text.clone() };
+  let scope: InlayScope = InlayScope { path: analysisRecord.info.pathText.clone(), file: file, text: text.clone() };
   let mut hints: Vector<InlayHint> = Vector::new<InlayHint>();
 
   collectExpressionHints(&mut hints, &scope, &tables, module, analysis, defs, types, symbols);
@@ -166,12 +168,12 @@ function collectExpressionHints(
   while ((raw as u64) < module.expressions.length()) {
     match (module.expressions.get(Id::fromRaw<Ast::ExpressionTag>(raw))) {
       Option::SOME(Ast::Expression::Node::Call(call)) -> {
-        if (spanInFile(&scope.path, call.span)) {
+        if (spanInFile(scope.file, call.span)) {
           collectParameterHints(hintsRef, tables, module, analysis, raw, &call, defs, types, symbols);
         }
       },
       Option::SOME(Ast::Expression::Node::Match(matchExpression)) -> {
-        if (spanInFile(&scope.path, matchExpression.span)) {
+        if (spanInFile(scope.file, matchExpression.span)) {
           collectScrutineeHint(hintsRef, tables, module, matchExpression.scrutinee, defs, types, symbols);
         }
       },
@@ -432,7 +434,7 @@ function collectBindingHint(
     return;
   };
 
-  if (!spanInFile(&scope.path, binding.span)) {
+  if (!spanInFile(scope.file, binding.span)) {
     return;
   }
 

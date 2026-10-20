@@ -6,7 +6,13 @@ import Test from "std::test";
 import Vector from "std::vector";
 
 import configSuggestKey from "@compiler::config";
-import Diagnostic, DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticRenderer,
+  SourceFile,
+  SourceMap,
+from "@compiler::diagnostics";
 import Output from "@compiler::output";
 
 import BuildDiagnosticCode, BuildDiagnostics from "./diagnostics";
@@ -86,6 +92,7 @@ function buildManifestNormalizeKey(value: &String): String {
 }
 
 function buildManifestParseString(
+  sourceMap: &mut SourceMap,
   manifestPath: &Path::PathBuf,
   fieldPath: str,
   valueText: &String,
@@ -94,25 +101,26 @@ function buildManifestParseString(
 ): Result<String, DiagnosticBag> {
   let trimmed: String = valueText.trimAsciiWhitespace();
   if (!trimmed.startsWith("\"") || trimmed.length() < 2) {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "a string", start, end));
   }
 
   let Option::SOME(last) = trimmed.charAt(trimmed.length() - 1) else {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "a string", start, end));
   };
   if (last != '"') {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "a string", start, end));
   }
 
   let value: String = trimmed.substringBytes(1, trimmed.length() - 1);
   if (value.length() == 0) {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a non-empty string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "a non-empty string", start, end));
   }
 
   return Result::OK(value);
 }
 
 function buildManifestParseStringArray(
+  sourceMap: &mut SourceMap,
   manifestPath: &Path::PathBuf,
   fieldPath: str,
   valueText: &String,
@@ -121,18 +129,18 @@ function buildManifestParseStringArray(
 ): Result<Vector<String>, DiagnosticBag> {
   let trimmed: String = valueText.trimAsciiWhitespace();
   if (trimmed.length() < 2) {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "an array of strings", start, end));
   }
 
   let Option::SOME(first) = trimmed.charAt(0) else {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "an array of strings", start, end));
   };
   let Option::SOME(last) = trimmed.charAt(trimmed.length() - 1) else {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "an array of strings", start, end));
   };
 
   if (first != '[' || last != ']') {
-    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(sourceMap, manifestPath, fieldPath, "an array of strings", start, end));
   }
 
   let inner: String = trimmed.substringBytes(1, trimmed.length() - 1).trimAsciiWhitespace();
@@ -146,7 +154,7 @@ function buildManifestParseStringArray(
         Option::NONE -> inner.length(),
       };
       let part: String = inner.substringBytes(cursor, commaIndex).trimAsciiWhitespace();
-      let item: String = buildManifestParseString(manifestPath, fieldPath, &part, start, end)!;
+      let item: String = buildManifestParseString(sourceMap, manifestPath, fieldPath, &part, start, end)!;
       result.push(item);
 
       if (commaIndex == inner.length()) {
@@ -383,6 +391,7 @@ function buildManifestBagHasMessage(bag: &mut DiagnosticBag, message: &String): 
 /// inside `[linking.<module>]`, matching the host's schema, which also stops
 /// recursing at the first unknown segment past that point.
 function buildManifestCheckSectionName(
+  sourceMap: &mut SourceMap,
   section: &String,
   line: &String,
   lineStart: u64,
@@ -401,6 +410,7 @@ function buildManifestCheckSectionName(
     let suggestion: Option<String> = configSuggestKey(rootSegment.toStr(), &topLevelKnown);
     let offsets: ManifestOffsets = buildManifestOffsetsOf(line, lineStart, rootSegment);
     let diagnostic: Diagnostic = BuildDiagnostics::unknownKey(
+      sourceMap,
       configPath,
       "top-level",
       rootSegment.toStr(),
@@ -444,6 +454,7 @@ function buildManifestCheckSectionName(
     let suggestion: Option<String> = configSuggestKey(fieldSegment.toStr(), &fieldsKnown);
     let offsets: ManifestOffsets = buildManifestOffsetsOf(line, lineStart, fieldSegment);
     let diagnostic: Diagnostic = BuildDiagnostics::unknownKey(
+      sourceMap,
       configPath,
       tableLabel.toStr(),
       fieldSegment.toStr(),
@@ -493,6 +504,7 @@ function buildManifestCheckSectionName(
   let suggestion: Option<String> = configSuggestKey(subSegment.toStr(), &known);
   let offsets: ManifestOffsets = buildManifestOffsetsOf(line, lineStart, subSegment);
   let diagnostic: Diagnostic = BuildDiagnostics::unknownKey(
+    sourceMap,
     configPath,
     rootSegment.toStr(),
     subSegment.toStr(),
@@ -519,6 +531,7 @@ function buildManifestCheckSectionName(
 /// `buildManifestCheckSectionName`, matching the host, which never validates
 /// content nested under an already-unknown key.
 function buildManifestCheckAssignmentKey(
+  sourceMap: &mut SourceMap,
   currentSection: &String,
   assignment: &ManifestAssignment,
   line: &String,
@@ -538,6 +551,7 @@ function buildManifestCheckAssignmentKey(
 
     let suggestion: Option<String> = configSuggestKey(assignment.key.toStr(), &known);
     outRef.push(BuildDiagnostics::unknownKey(
+      sourceMap,
       configPath,
       "top-level",
       assignment.key.toStr(),
@@ -567,6 +581,7 @@ function buildManifestCheckAssignmentKey(
 
     let suggestion: Option<String> = configSuggestKey(assignment.key.toStr(), &known);
     outRef.push(BuildDiagnostics::unknownKey(
+      sourceMap,
       configPath,
       currentSection.toStr(),
       assignment.key.toStr(),
@@ -594,6 +609,7 @@ function buildManifestCheckAssignmentKey(
   let sectionLabel: String = currentSection.clone();
   let suggestion: Option<String> = configSuggestKey(assignment.key.toStr(), &known);
   outRef.push(BuildDiagnostics::unknownKey(
+    sourceMap,
     configPath,
     sectionLabel.toStr(),
     assignment.key.toStr(),
@@ -606,7 +622,11 @@ function buildManifestCheckAssignmentKey(
 /// Warns for every key or table `source` (the raw text of `std/manifest.toml`)
 /// does not recognize. Pure and side-effect free, kept separate from
 /// `Manifest::loadFile` so it can be tested directly.
-export function checkUnknownManifestKeys(source: &String, manifestPath: &Path::PathBuf): DiagnosticBag {
+export function checkUnknownManifestKeys(
+  sourceMap: &mut SourceMap,
+  source: &String,
+  manifestPath: &Path::PathBuf
+): DiagnosticBag {
   let mut warnings: DiagnosticBag = DiagnosticBag::init();
   let lines: Vector<String> = source.lines();
   let mut currentSection: String = String::new();
@@ -628,7 +648,7 @@ export function checkUnknownManifestKeys(source: &String, manifestPath: &Path::P
 
     if (let Option::SOME(sectionName) = buildManifestSectionName(&trimmed)) {
       currentSection = sectionName.clone();
-      buildManifestCheckSectionName(&currentSection, line, lineStart, manifestPath, &mut warnings);
+      buildManifestCheckSectionName(sourceMap, &currentSection, line, lineStart, manifestPath, &mut warnings);
       lineOffset += line.length() + 1;
       index += 1;
       continue;
@@ -640,7 +660,7 @@ export function checkUnknownManifestKeys(source: &String, manifestPath: &Path::P
       continue;
     };
 
-    buildManifestCheckAssignmentKey(&currentSection, &assignment, line, lineStart, manifestPath, &mut warnings);
+    buildManifestCheckAssignmentKey(sourceMap, &currentSection, &assignment, line, lineStart, manifestPath, &mut warnings);
 
     lineOffset += line.length() + 1;
     index += 1;
@@ -652,6 +672,7 @@ export function checkUnknownManifestKeys(source: &String, manifestPath: &Path::P
 /// Renders `warnings` through the normal diagnostics renderer and prints
 /// them to stderr. Never fails the load.
 function buildManifestReportUnknownKeyWarnings(
+  sourceMap: &mut SourceMap,
   warnings: &DiagnosticBag,
   manifestPath: &Path::PathBuf,
   source: &String
@@ -661,7 +682,7 @@ function buildManifestReportUnknownKeyWarnings(
   }
 
   let pathText: String = manifestPath.toString();
-  let sourceFile: SourceFile = SourceFile::create(pathText.toStr(), source.toStr());
+  let sourceFile: SourceFile = SourceFile::create(sourceMap, pathText.toStr(), source.toStr());
   let rendered: String = DiagnosticRenderer::renderBag(warnings, &sourceFile, DiagnosticRenderer::stderrUsesColor());
   Output::message(rendered);
 }
@@ -695,6 +716,7 @@ function buildManifestFlushLinkingHeaders(
 /// does, so its continuation lines are joined up to the closing `]`, dropping
 /// comment lines and one trailing comma.
 export function parseManifestHeaders(
+  sourceMap: &mut SourceMap,
   source: &String,
   manifestPath: &Path::PathBuf
 ): Result<Vector<StdManifestHeader>, DiagnosticBag> {
@@ -737,7 +759,7 @@ export function parseManifestHeaders(
     };
 
     if (assignment.key.equals("header")) {
-      let name: String = buildManifestParseString(manifestPath, "linking.header", &assignment.value, lineStart, lineEnd)!;
+      let name: String = buildManifestParseString(sourceMap, manifestPath, "linking.header", &assignment.value, lineStart, lineEnd)!;
       sectionNames.push(name);
     } else if (assignment.key.equals("headers")) {
       let mut valueText: String = assignment.value.clone();
@@ -763,7 +785,7 @@ export function parseManifestHeaders(
         valueText = valueText.substringBytes(0, valueText.length() - 2).concat("]");
       }
 
-      let names: Vector<String> = buildManifestParseStringArray(manifestPath, "linking.headers", &valueText, lineStart, valueEnd)!;
+      let names: Vector<String> = buildManifestParseStringArray(sourceMap, manifestPath, "linking.headers", &valueText, lineStart, valueEnd)!;
       let mut nameIndex: u64 = 0;
 
       while (nameIndex < names.length()) {
@@ -783,13 +805,16 @@ export function parseManifestHeaders(
 }
 
 export namespace Manifest {
-  function loadFile(manifestPath: &Path::PathBuf): Result<StdManifest, DiagnosticBag> {
+  function loadFile(
+    sourceMap: &mut SourceMap,
+    manifestPath: &Path::PathBuf
+  ): Result<StdManifest, DiagnosticBag> {
     if (!Fs::exists(manifestPath.asStr())) {
-      return Result::ERROR(BuildDiagnostics::stdManifestMissing(manifestPath, Option::NONE));
+      return Result::ERROR(BuildDiagnostics::stdManifestMissing(sourceMap, manifestPath, Option::NONE));
     }
 
     let Result::OK(source) = Fs::readToString(manifestPath) else {
-      return Result::ERROR(BuildDiagnostics::stdManifestMissing(manifestPath, Option::NONE));
+      return Result::ERROR(BuildDiagnostics::stdManifestMissing(sourceMap, manifestPath, Option::NONE));
     };
 
     let lines: Vector<String> = source.lines();
@@ -800,8 +825,8 @@ export namespace Manifest {
     let mut modules: Vector<StdManifestModule> = Vector::new<StdManifestModule>();
     let mut autoLoadModules: Vector<String> = Vector::new<String>();
     let mut compileOnlyModules: Vector<String> = Vector::new<String>();
-    let unknownKeyWarnings: DiagnosticBag = checkUnknownManifestKeys(&source, manifestPath);
-    let headers: Vector<StdManifestHeader> = parseManifestHeaders(&source, manifestPath)!;
+    let unknownKeyWarnings: DiagnosticBag = checkUnknownManifestKeys(sourceMap, &source, manifestPath);
+    let headers: Vector<StdManifestHeader> = parseManifestHeaders(sourceMap, &source, manifestPath)!;
 
     let mut index: u64 = 0;
     while (index < lines.length()) {
@@ -833,14 +858,14 @@ export namespace Manifest {
 
       if (currentSection.equals("toolchain")) {
         if (assignment.key.equals("include_dirs")) {
-          includeDirs = buildManifestParseStringArray(manifestPath, "toolchain.include_dirs", &assignment.value, lineStart, lineEnd)!;
+          includeDirs = buildManifestParseStringArray(sourceMap, manifestPath, "toolchain.include_dirs", &assignment.value, lineStart, lineEnd)!;
         }
       }
 
       if (currentSection.equals("modules")) {
         let moduleName: String = buildManifestNormalizeKey(&assignment.key);
         let fieldPath: String = String::create("modules.").concat(&moduleName);
-        let modulePath: String = buildManifestParseString(manifestPath, fieldPath.toStr(), &assignment.value, lineStart, lineEnd)!;
+        let modulePath: String = buildManifestParseString(sourceMap, manifestPath, fieldPath.toStr(), &assignment.value, lineStart, lineEnd)!;
         modules.push(StdManifestModule {
           name: moduleName,
           path: modulePath,
@@ -848,11 +873,11 @@ export namespace Manifest {
       }
 
       if (currentSection.equals("auto_load") && assignment.key.equals("modules")) {
-        autoLoadModules = buildManifestParseStringArray(manifestPath, "auto_load.modules", &assignment.value, lineStart, lineEnd)!;
+        autoLoadModules = buildManifestParseStringArray(sourceMap, manifestPath, "auto_load.modules", &assignment.value, lineStart, lineEnd)!;
       }
 
       if (currentSection.equals("compile_only") && assignment.key.equals("modules")) {
-        compileOnlyModules = buildManifestParseStringArray(manifestPath, "compile_only.modules", &assignment.value, lineStart, lineEnd)!;
+        compileOnlyModules = buildManifestParseStringArray(sourceMap, manifestPath, "compile_only.modules", &assignment.value, lineStart, lineEnd)!;
       }
 
       lineOffset += line.length() + 1;
@@ -863,7 +888,7 @@ export namespace Manifest {
       includeDirs.push(String::create("."));
     }
 
-    buildManifestReportUnknownKeyWarnings(&unknownKeyWarnings, manifestPath, &source);
+    buildManifestReportUnknownKeyWarnings(sourceMap, &unknownKeyWarnings, manifestPath, &source);
 
     return Result::OK(StdManifest {
       path: manifestPath.clone(),
@@ -917,9 +942,10 @@ function buildManifestAssertSomeString(value: Option<String>, expected: str): vo
 
 @test
 function manifestLoaderReadsFixtureManifestData(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let manifestPath: Path::PathBuf = buildManifestFixturePath("test_cases/selfhost/build/config_project/std/manifest.toml");
 
-  match (Manifest::loadFile(&manifestPath)) {
+  match (Manifest::loadFile(&mut sourceMap, &manifestPath)) {
     Result::OK(manifest) -> {
       Test::assertEq<u64>(manifest.includeDirCount(), 2);
       buildManifestAssertSomeString(manifest.includeDirText(0), ".");
@@ -938,8 +964,9 @@ function manifestLoaderReadsFixtureManifestData(): void {
 
 @test
 function manifestLoaderReportsInvalidFieldTypes(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let manifestPath: Path::PathBuf = buildManifestFixturePath("test_cases/selfhost/build/manifest_invalid/manifest.toml");
-  buildManifestExpectSingleDiagnosticCode(Manifest::loadFile(&manifestPath), BuildDiagnosticCode::INVALID_STD_MANIFEST_FIELD_TYPE);
+  buildManifestExpectSingleDiagnosticCode(Manifest::loadFile(&mut sourceMap, &manifestPath), BuildDiagnosticCode::INVALID_STD_MANIFEST_FIELD_TYPE);
 }
 
 /// IGN-239: a key `std/manifest.toml` does not recognize warns with a table
@@ -948,9 +975,10 @@ function manifestLoaderReportsInvalidFieldTypes(): void {
 /// `ignis_driver::project::unknown_keys`.
 @test
 function unknownManifestKeyWarnsWithSuggestion(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[toolchain]\ninclude_dirz = [\".\"]\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -968,9 +996,10 @@ function unknownManifestKeyWarnsWithSuggestion(): void {
 /// An unrecognized top-level table warns, labeled "top-level".
 @test
 function unknownManifestTopLevelTableWarns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[toolchan]\ninclude_dirs = [\".\"]\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -985,9 +1014,10 @@ function unknownManifestTopLevelTableWarns(): void {
 /// manifest's implicit root table and must warn, not be silently skipped.
 @test
 function unknownManifestRootKeyWarns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("runtime_stray = \"x\"\n\n[toolchain]\ninclude_dirs = [\".\"]\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -1003,9 +1033,10 @@ function unknownManifestRootKeyWarns(): void {
 /// otherwise consume `[linking.*]` content.
 @test
 function unknownManifestLinkingKeyWarnsWithSuggestion(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[linking.io]\nheader = \"runtime/io.h\"\nobjct = \"runtime/libio.o\"\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -1022,11 +1053,12 @@ function unknownManifestLinkingKeyWarnsWithSuggestion(): void {
 /// every known key, stays silent.
 @test
 function knownManifestSectionsAndLinkingSubtablesStaySilent(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "[toolchain]\ninclude_dirs = [\".\"]\n\n[modules]\nio = \"io/mod.ign\"\nanything_at_all = \"x/mod.ign\"\n\n[linking.io]\nheader = \"runtime/io.h\"\nobject = \"runtime/libio.o\"\n\n[auto_load]\nmodules = [\"string\"]\n\n[compile_only]\nmodules = [\"compile\"]\n"
   );
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 0);
 }
@@ -1037,11 +1069,12 @@ function knownManifestSectionsAndLinkingSubtablesStaySilent(): void {
 /// pins that behavior against regression).
 @test
 function unknownManifestKeysWarnInFileOrder(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create(
     "zzz_root_stray = \"x\"\n\n[toolchain]\ninclude_dirz = [\".\"]\n\n[linking.io]\nobjct = \"runtime/libio.o\"\n"
   );
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 3);
 
@@ -1069,9 +1102,10 @@ function unknownManifestKeysWarnInFileOrder(): void {
 /// holding a nested table `sub`, never the literal string `toolchan.sub`.
 @test
 function unknownManifestDottedSectionReportsRootSegment(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[toolchan.sub]\nopt = 1\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -1089,9 +1123,10 @@ function unknownManifestDottedSectionReportsRootSegment(): void {
 /// sub-segment check the `linking` branch already applied.
 @test
 function unknownManifestToolchainSubSegmentWarns(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[toolchain.sub]\nopt = 1\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -1108,9 +1143,10 @@ function unknownManifestToolchainSubSegmentWarns(): void {
 /// root once per header line that mentions it.
 @test
 function unknownManifestRepeatedDottedRootWarnsOnce(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[toolchan.a]\nx = 1\n\n[toolchan.b]\ny = 1\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -1127,9 +1163,10 @@ function unknownManifestRepeatedDottedRootWarnsOnce(): void {
 /// the module name itself is never separately flagged.
 @test
 function unknownManifestNestedLinkingSectionWarnsOnExtraSegment(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let source: String = String::create("[linking.io.extra]\nweird = 1\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&mut sourceMap, &source, &manifestPath);
 
   Test::assertEq<u64>(warnings.length(), 1);
   let Option::SOME(diagnostic) = warnings.get(0) else {
@@ -1140,10 +1177,10 @@ function unknownManifestNestedLinkingSectionWarnsOnExtraSegment(): void {
   Test::assertEq<str>(diagnostic.messageText(), "unknown key 'extra' in [linking.io]");
 }
 
-function buildManifestExpectHeaders(source: str, expected: str): void {
+function buildManifestExpectHeaders(sourceMap: &mut SourceMap, source: str, expected: str): void {
   let text: String = String::create(source);
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let Result::OK(headers) = parseManifestHeaders(&text, &manifestPath) else {
+  let Result::OK(headers) = parseManifestHeaders(sourceMap, &text, &manifestPath) else {
     Test::fail();
     return;
   };
@@ -1168,7 +1205,9 @@ function buildManifestExpectHeaders(source: str, expected: str): void {
 
 @test
 function manifestHeadersReadsHeaderAndHeadersInFileOrder(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   buildManifestExpectHeaders(
+    &mut sourceMap,
     "[linking.net]\nheaders = [\"sys/socket.h\", \"poll.h\"]\n\n[linking.math]\nheader = \"math.h\"\n",
     "<sys/socket.h> <poll.h> <math.h> ",
   );
@@ -1176,7 +1215,9 @@ function manifestHeadersReadsHeaderAndHeadersInFileOrder(): void {
 
 @test
 function manifestHeadersJoinsAMultiLineArray(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   buildManifestExpectHeaders(
+    &mut sourceMap,
     "[linking.libc]\nheaders = [\n  \"stdlib.h\",\n  # a comment\n  \"poll.h\",\n]\n",
     "<stdlib.h> <poll.h> ",
   );
@@ -1184,7 +1225,9 @@ function manifestHeadersJoinsAMultiLineArray(): void {
 
 @test
 function manifestHeadersAppliesHeaderQuotedToItsSection(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   buildManifestExpectHeaders(
+    &mut sourceMap,
     "[linking.rt]\nheader = \"runtime/rt.h\"\nheader_quoted = true\n\n[linking.math]\nheader = \"math.h\"\nheader_quoted = false\n",
     "\"runtime/rt.h\" <math.h> ",
   );
@@ -1192,7 +1235,9 @@ function manifestHeadersAppliesHeaderQuotedToItsSection(): void {
 
 @test
 function manifestHeadersIgnoresOtherSections(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   buildManifestExpectHeaders(
+    &mut sourceMap,
     "[toolchain]\ninclude_dirs = [\".\"]\n\n[modules]\nheader = \"header/mod.ign\"\n\n[linking.libc.header]\nheader = \"nested.h\"\n",
     "",
   );
@@ -1200,9 +1245,10 @@ function manifestHeadersIgnoresOtherSections(): void {
 
 @test
 function manifestHeadersRejectsANonStringHeader(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let text: String = String::create("[linking.net]\nheader = 3\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
-  let Result::ERROR(bag) = parseManifestHeaders(&text, &manifestPath) else {
+  let Result::ERROR(bag) = parseManifestHeaders(&mut sourceMap, &text, &manifestPath) else {
     Test::fail();
     return;
   };
@@ -1218,8 +1264,9 @@ function manifestHeadersRejectsANonStringHeader(): void {
 
 @test
 function manifestLoaderKeepsTheStdLinkingHeaders(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let manifestPath: Path::PathBuf = buildManifestFixturePath("std/manifest.toml");
-  let Result::OK(manifest) = Manifest::loadFile(&manifestPath) else {
+  let Result::OK(manifest) = Manifest::loadFile(&mut sourceMap, &manifestPath) else {
     Test::fail();
     return;
   };

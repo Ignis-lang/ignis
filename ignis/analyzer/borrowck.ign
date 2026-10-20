@@ -1239,7 +1239,7 @@ export namespace Borrowck {
     /// `isLoop` marks the loop marker scope that `break` and `continue`
     /// unwind to.
     public pushScope(&mut self, blockRaw: u32, hasBlock: boolean, isLoop: boolean): void {
-      self.pushScopeEnding(blockRaw, hasBlock, isLoop, SourceSpan::new("", 0, 0));
+      self.pushScopeEnding(blockRaw, hasBlock, isLoop, SourceSpan::detached(0, 0));
     }
 
     /// `pushScope` with the span the scope closes at, which only the callers
@@ -1434,7 +1434,7 @@ export namespace Borrowck {
     /// before popping.
     public popScopeReleasing(&mut self): void {
       let closingDepth: u64 = self.ownedStarts.length();
-      let mut closingSpan: SourceSpan = SourceSpan::new("", 0, 0);
+      let mut closingSpan: SourceSpan = SourceSpan::detached(0, 0);
 
       if (let Option::SOME(endSpan) = self.scopeEndSpans.pop()) {
         closingSpan = endSpan;
@@ -7310,13 +7310,13 @@ export namespace Borrowck {
   /// which is what a scope-end event is attributed to.
   function closingSpanOf(hir: &Hir::HirStore, nodeId: Hir::HirId): SourceSpan {
     let Option::SOME(node) = hir.get(nodeId) else {
-      return SourceSpan::new("", 0, 0);
+      return SourceSpan::detached(0, 0);
     };
 
     let span: SourceSpan = node.span;
 
     if (span.end > span.start) {
-      return SourceSpan::new(span.filePath, span.end - 1, span.end);
+      return SourceSpan::new(span.file, span.end - 1, span.end);
     }
 
     return span;
@@ -9300,7 +9300,7 @@ export namespace Borrowck {
   }
 
   function sameReport(left: &Diagnostic, right: &Diagnostic): boolean {
-    return left.code.equals(right.code) && left.primarySpan.filePath.equals(right.primarySpan.filePath) && left.primarySpan.start == right.primarySpan.start && left.primarySpan.end == right.primarySpan.end && left.message.equals(right.messageText());
+    return left.code.equals(right.code) && left.primarySpan.file.raw() == right.primarySpan.file.raw() && left.primarySpan.start == right.primarySpan.start && left.primarySpan.end == right.primarySpan.end && left.message.equals(right.messageText());
   }
 
   /// Whether the copy in `rangeIndex` produced a diagnostic that reports

@@ -1,4 +1,4 @@
-import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, Severity, SourceMap, SourceSpan from "@compiler::diagnostics";
 
 import Env from "std::env";
 import Fs from "std::fs";
@@ -24,6 +24,12 @@ from "./fingerprint";
 import BuildLayout from "./layout";
 import CCompiler from "./c_compiler";
 import Manifest, StdManifest from "./manifest";
+
+/// The span of a diagnostic about the build configuration, which names no
+/// source file of its own.
+function pipelineBuildConfigSpan(sourceMap: &mut SourceMap): SourceSpan {
+  return SourceSpan::new(sourceMap.register("<build-config>"), 0, 0);
+}
 
 /// Diagnostic codes for pipeline-level failures.
 export namespace PipelineDiagnosticCode {
@@ -182,6 +188,7 @@ export namespace BuildPipeline {
   /// This is the established Ignis pattern for partial field consumption; callers
   /// that need the config after this call must clone it before passing it here.
   function buildStd(
+    sourceMap: &mut SourceMap,
     config: BuildConfig,
     layout: &BuildLayout,
   ): Result<StdBuildResult, DiagnosticBag> {
@@ -193,7 +200,7 @@ export namespace BuildPipeline {
     let manifest: StdManifest = match (config.stdManifest) {
       Option::SOME(m) -> m,
       Option::NONE -> {
-        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let span: SourceSpan = pipelineBuildConfigSpan(sourceMap);
         let diag: Diagnostic = Diagnostic::new(
           Severity::ERROR,
           PipelineDiagnosticCode::STD_BUILD_FAILED,
@@ -253,7 +260,7 @@ export namespace BuildPipeline {
     match (Fs::createDirAll(&stdObjDir)) {
       Result::OK(_) -> {},
       Result::ERROR(_) -> {
-        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let span: SourceSpan = pipelineBuildConfigSpan(sourceMap);
         let diag: Diagnostic = Diagnostic::new(
           Severity::ERROR,
           PipelineDiagnosticCode::STD_BUILD_FAILED,
@@ -269,7 +276,7 @@ export namespace BuildPipeline {
     match (Fs::createDirAll(&stdLibDir)) {
       Result::OK(_) -> {},
       Result::ERROR(_) -> {
-        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let span: SourceSpan = pipelineBuildConfigSpan(sourceMap);
         let diag: Diagnostic = Diagnostic::new(
           Severity::ERROR,
           PipelineDiagnosticCode::STD_BUILD_FAILED,
@@ -285,7 +292,7 @@ export namespace BuildPipeline {
     match (Fs::createDirAll(&stdIncludeDir)) {
       Result::OK(_) -> {},
       Result::ERROR(_) -> {
-        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let span: SourceSpan = pipelineBuildConfigSpan(sourceMap);
         let diag: Diagnostic = Diagnostic::new(
           Severity::ERROR,
           PipelineDiagnosticCode::STD_BUILD_FAILED,
@@ -355,7 +362,7 @@ export namespace BuildPipeline {
     match (Fs::writeString(&headerPath, &headerContent)) {
       Result::OK(_) -> {},
       Result::ERROR(_) -> {
-        let span: SourceSpan = SourceSpan::new("", 0, 0);
+        let span: SourceSpan = SourceSpan::detached(0, 0);
         let diag: Diagnostic = Diagnostic::new(
           Severity::ERROR,
           PipelineDiagnosticCode::STD_HEADER_WRITE_FAILED,
@@ -394,7 +401,7 @@ export namespace BuildPipeline {
       return Result::OK(true);
     }
 
-    let span: SourceSpan = SourceSpan::new("", 0, 0);
+    let span: SourceSpan = SourceSpan::detached(0, 0);
     let diag: Diagnostic = Diagnostic::new(
       Severity::ERROR,
       PipelineDiagnosticCode::USER_LINK_BLOCKED,
@@ -519,7 +526,8 @@ function pipelineWriteMinimalManifest(dir: &Path::PathBuf, modName: str, modPath
 /// Build a minimal `BuildConfig` for testing, backed by a fake manifest at
 /// `manifestPath`.
 function pipelineBuildTestConfig(manifestPath: &Path::PathBuf): BuildConfig {
-  let manifest: StdManifest = match (Manifest::loadFile(manifestPath)) {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let manifest: StdManifest = match (Manifest::loadFile(&mut sourceMap, manifestPath)) {
     Result::OK(m) -> m,
     Result::ERROR(_) -> {
       Test::fail();
@@ -560,6 +568,7 @@ function pipelineBuildTestConfig(manifestPath: &Path::PathBuf): BuildConfig {
 
 @test
 function pipelineBuildStdSuccessEmitsHeaderAndArchive(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let layout: BuildLayout = pipelineTestLayout("success_v2");
 
   // Set up the std src directory and write a minimal manifest.
@@ -590,7 +599,7 @@ function pipelineBuildStdSuccessEmitsHeaderAndArchive(): void {
   let config: BuildConfig = pipelineBuildTestConfig(&manifestPath);
 
   // Run buildStd (config is moved in).
-  let result: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config, &layout);
+  let result: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(&mut sourceMap, config, &layout);
 
   let mut buildOk: boolean = false;
   if (let Result::OK(stdResult) = result) {
@@ -651,6 +660,7 @@ function pipelineBuildStdFailureBlocksUserLink(): void {
 
 @test
 function pipelineBuildStdCacheHitSkipsRecompile(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let layout: BuildLayout = pipelineTestLayout("cache_hit");
 
   // Set up the std src directory and write a minimal manifest.
@@ -681,7 +691,7 @@ function pipelineBuildStdCacheHitSkipsRecompile(): void {
 
   // First build — must succeed and produce artifacts.
   let config1: BuildConfig = pipelineBuildTestConfig(&manifestPath);
-  let result1: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config1, &layout);
+  let result1: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(&mut sourceMap, config1, &layout);
   let mut firstOk: boolean = false;
   if (let Result::OK(r) = result1) {
     firstOk = r.succeeded;
@@ -707,7 +717,7 @@ function pipelineBuildStdCacheHitSkipsRecompile(): void {
 
   // Second build — same config, same sources — must be a cache hit.
   let config2: BuildConfig = pipelineBuildTestConfig(&manifestPath);
-  let result2: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config2, &layout);
+  let result2: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(&mut sourceMap, config2, &layout);
   let mut secondOk: boolean = false;
   if (let Result::OK(r) = result2) {
     secondOk = r.succeeded;
@@ -746,6 +756,7 @@ function pipelineStampHasFeature(layout: &BuildLayout, marker: str): boolean {
 
 @test
 function pipelineBuildStdFeatureChangeForcesRecompileThenCaches(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
   let layout: BuildLayout = pipelineTestLayout("feature_change");
 
   // Set up the std src directory and write a minimal manifest.
@@ -776,7 +787,7 @@ function pipelineBuildStdFeatureChangeForcesRecompileThenCaches(): void {
 
   // First build — no features enabled.
   let config1: BuildConfig = pipelineBuildTestConfig(&manifestPath);
-  let result1: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config1, &layout);
+  let result1: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(&mut sourceMap, config1, &layout);
   let mut firstOk: boolean = false;
   if (let Result::OK(r) = result1) {
     firstOk = r.succeeded;
@@ -791,7 +802,7 @@ function pipelineBuildStdFeatureChangeForcesRecompileThenCaches(): void {
   let mut allocTraceFeature: Vector<String> = Vector::new<String>();
   allocTraceFeature.push(String::create("alloc-trace"));
   config2.features = allocTraceFeature;
-  let result2: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config2, &layout);
+  let result2: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(&mut sourceMap, config2, &layout);
   let mut secondOk: boolean = false;
   if (let Result::OK(r) = result2) {
     secondOk = r.succeeded;
@@ -817,7 +828,7 @@ function pipelineBuildStdFeatureChangeForcesRecompileThenCaches(): void {
   let mut allocTraceFeatureAgain: Vector<String> = Vector::new<String>();
   allocTraceFeatureAgain.push(String::create("alloc-trace"));
   config3.features = allocTraceFeatureAgain;
-  let result3: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config3, &layout);
+  let result3: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(&mut sourceMap, config3, &layout);
   let mut thirdOk: boolean = false;
   if (let Result::OK(r) = result3) {
     thirdOk = r.succeeded;

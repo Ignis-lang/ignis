@@ -20,6 +20,7 @@ import Text from "std::text";
 import Vector from "std::vector";
 
 import Output from "@compiler::output";
+import SourceMap from "@compiler::diagnostics";
 import ParseCache from "../build/module_graph";
 import SourceOverrides from "../build/sources";
 
@@ -421,6 +422,9 @@ export record LspServer {
   navigations: Vector<NavigationSet>;
   /// The parse cache of each analysis.
   parseCaches: Vector<ParseCacheSet>;
+  /// The paths every analysis registered, which the spans of the cached
+  /// parses name.
+  sourceMap: SourceMap;
   /// `--std-path`, applied to every analysis.
   stdPath: Option<String>;
 
@@ -438,6 +442,7 @@ export record LspServer {
       published: Vector::new<PublishedSet>(),
       navigations: Vector::new<NavigationSet>(),
       parseCaches: Vector::new<ParseCacheSet>(),
+      sourceMap: SourceMap::new(),
       stdPath: stdPath,
     };
   }
@@ -845,7 +850,7 @@ export record LspServer {
       };
 
       let mut cache: ParseCache = self.takeParseCache(key);
-      let analysis: LspAnalysis = analyzeDocumentsCached(start, key, &self.stdPath, &sources, &mut cache);
+      let analysis: LspAnalysis = analyzeDocumentsCached(&mut self.sourceMap, start, key, &self.stdPath, &sources, &mut cache);
       self.parseCaches.push(ParseCacheSet { key: key.clone(), cache: cache });
       self.publish(key, &analysis.diagnostics);
       self.keepNavigation(key, analysis.navigation);
