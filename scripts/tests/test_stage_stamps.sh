@@ -74,6 +74,20 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
+# A project build writes its C under --out-dir, which bootstrap.sh moves to
+# selfhost_emit.c.
+out_dir=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--out-dir" ]]; then
+    out_dir="$arg"
+  fi
+  prev="$arg"
+done
+if [[ -n "$out_dir" ]]; then
+  mkdir -p "$out_dir/user/src"
+  : >"$out_dir/user/src/ignis.c"
+fi
 
 if [[ -z "$out" ]]; then
   echo "fake compiler: no -o given" >&2
@@ -84,11 +98,10 @@ mkdir -p "$(dirname "$out")"
 cp "$0" "$out"
 chmod +x "$out"
 echo "# build-marker: $$-${RANDOM}-$(date +%s%N 2>/dev/null || echo 0)" >>"$out"
-# Every real stage emits selfhost_emit.c next to its binary; build_stage3's
-# G1 comparison reads it unconditionally, so stage3 needs one too, even from
-# a fake compiler. Empty and identical every time is fine — G1 is not what
-# these tests are checking.
-touch "$(dirname "$out")/selfhost_emit.c"
+# build_stage3's G1 comparison reads selfhost_emit.c unconditionally, so the
+# emitted C written under --out-dir above has to exist even from a fake
+# compiler. Empty and identical every time is fine: G1 is not what these
+# tests are checking.
 EOF
   chmod +x "$path"
 }
@@ -310,6 +323,20 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
+# A project build writes its C under --out-dir, which bootstrap.sh moves to
+# selfhost_emit.c.
+out_dir=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--out-dir" ]]; then
+    out_dir="$arg"
+  fi
+  prev="$arg"
+done
+if [[ -n "$out_dir" ]]; then
+  mkdir -p "$out_dir/user/src"
+  : >"$out_dir/user/src/ignis.c"
+fi
 
 [[ -n "$out" ]] || exit 1
 mkdir -p "$(dirname "$out")"
@@ -504,6 +531,20 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
+# A project build writes its C under --out-dir, which bootstrap.sh moves to
+# selfhost_emit.c.
+out_dir=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--out-dir" ]]; then
+    out_dir="$arg"
+  fi
+  prev="$arg"
+done
+if [[ -n "$out_dir" ]]; then
+  mkdir -p "$out_dir/user/src"
+  : >"$out_dir/user/src/ignis.c"
+fi
 [[ -n "$out" ]] || exit 1
 mkdir -p "$(dirname "$out")"
 cp "$0" "$out"

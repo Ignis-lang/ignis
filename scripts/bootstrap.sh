@@ -588,9 +588,14 @@ compile_stage() {
     fail "${stage}: the compiler reported errors, see ${dir}/log.txt"
   fi
 
-  if [[ -f "$dir/out/user/src/ignis.c" ]]; then
-    mv "$dir/out/user/src/ignis.c" "$dir/selfhost_emit.c"
+  # G1 and the seed refresh read the emitted C as selfhost_emit.c; a missing
+  # file means the build layout changed and has to stop here, not at G1. It is
+  # never a soft failure: the caller would report it as compiler errors.
+  if [[ ! -f "$dir/out/user/src/ignis.c" ]]; then
+    fail "${stage}: no emitted C at ${dir}/out/user/src/ignis.c, see ${dir}/log.txt"
   fi
+
+  mv "$dir/out/user/src/ignis.c" "$dir/selfhost_emit.c"
 
   if [[ ! -x "$dir/ignis" ]]; then
     [[ "$soft" == "soft" ]] && return 1
