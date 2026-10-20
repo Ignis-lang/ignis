@@ -2909,6 +2909,32 @@ export namespace Analyzer {
         argIndex += 1;
       }
 
+      return Analyzer::Typecheck::selectStaticOverloadByTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        candidates,
+        &argTypes,
+        span,
+        memberName,
+      );
+    }
+
+    /// Pick one static method or free function among same-name candidates for
+    /// arguments already typed. The cost rules and diagnostics are those of
+    /// `selectStaticMethodOverload`; a pipe comes here directly, since its first
+    /// argument is the piped value, typed before the right side is looked at.
+    function selectStaticOverloadByTypes(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      candidates: &Vector<Analyzer::DefinitionId>,
+      argTypes: &Vector<Analyzer::TypeId>,
+      span: SourceSpan,
+      memberName: str,
+    ): Option<Analyzer::DefinitionId> {
       let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut bestCost: u64 = 0;
       let mut candidateIndex: u64 = 0;
@@ -2937,7 +2963,7 @@ export namespace Analyzer {
           span,
           *candidateDefId,
           &paramTypes,
-          &argTypes,
+          argTypes,
         );
 
         if (let Option::SOME(cost) = costOpt) {
@@ -2954,7 +2980,7 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
         let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
         let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
@@ -2962,7 +2988,7 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
         let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
         let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
@@ -2974,6 +3000,75 @@ export namespace Analyzer {
       };
 
       return Option::SOME(*winner);
+    }
+
+    /// The overload a pipe's path callee names, given the piped value and the
+    /// arguments written at the call site. `resolvedDefId` itself when it has no
+    /// same-name siblings; `NONE` once no overload or several match, which is
+    /// reported here.
+    function selectPipeOverload(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      span: SourceSpan,
+      callExprId: Ast::ExpressionId,
+      resolvedDefId: Analyzer::DefinitionId,
+      extraArgs: &Vector<Ast::ExpressionId>,
+      leftType: Analyzer::TypeId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut candidates: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::staticOverloadCandidates(defStore, symbols, resolvedDefId);
+      let mut calleeNameOpt: Option<str> = Analyzer::Typecheck::methodDefName(defStore, symbols, resolvedDefId);
+
+      if (candidates.length() <= 1) {
+        candidates = Analyzer::Typecheck::freeFunctionOverloadCandidates(defStore, resolvedDefId);
+        calleeNameOpt = Analyzer::Typecheck::functionDefName(defStore, symbols, resolvedDefId);
+      }
+
+      if (candidates.length() <= 1) {
+        return Option::SOME(resolvedDefId);
+      }
+
+      let calleeName: str = match (calleeNameOpt) {
+        Option::SOME(name) -> name,
+        Option::NONE -> "function",
+      };
+
+      let mut argTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      argTypes.push(leftType);
+      let mut argIndex: u64 = 0;
+
+      while (argIndex < extraArgs.length()) {
+        let Option::SOME(argExprId) = extraArgs.get(argIndex) else {
+          argIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(argType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId) else {
+          return Option::NONE;
+        };
+
+        argTypes.push(argType);
+        argIndex += 1;
+      }
+
+      let Option::SOME(selected) = Analyzer::Typecheck::selectStaticOverloadByTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        &candidates,
+        &argTypes,
+        span,
+        calleeName,
+      ) else {
+        return Option::NONE;
+      };
+
+      Analyzer::Typecheck::recordCallTarget(state, callExprId, selected);
+      return Option::SOME(selected);
     }
 
     /// Pick one method among same-name candidates by arity and argument types,
@@ -4394,11 +4489,12 @@ export namespace Analyzer {
       let symbol: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
 
       // Module-local first, for the same reason the annotation reader scans
-      // that way: a record of this name declared here outranks one elsewhere.
+      // that way: a record of this name declared here outranks one imported,
+      // which outranks one elsewhere.
       let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(symbol);
       let mut localPass: u64 = 0;
 
-      while (localPass < 2) {
+      while (localPass < 3) {
         let mut index: u64 = 0;
 
         while (index < candidates.length()) {
@@ -4410,6 +4506,11 @@ export namespace Analyzer {
           let defId: Analyzer::DefinitionId = *candidate;
 
           if (localPass == 0 && !defStore.defBelongsToActiveModule(defId)) {
+            index += 1;
+            continue;
+          }
+
+          if (localPass == 1 && !defStore.defVisibleInActiveModule(defId)) {
             index += 1;
             continue;
           }
@@ -9570,7 +9671,27 @@ export namespace Analyzer {
       };
 
       match (resolved) {
-        Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
+        Analyzer::ResolverBodies::ResolvedRef::Definition(resolvedDefId) -> {
+          // The resolver stops at the first same-name static or function, as it does
+          // for a direct call, so the piped value and the written arguments pick
+          // among the overloads here. Lowering reads the choice back as the right
+          // side's call target.
+          let Option::SOME(defId) = Analyzer::Typecheck::selectPipeOverload(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            span,
+            callExprId,
+            resolvedDefId,
+            extraArgs,
+            leftType,
+          ) else {
+            return Option::NONE;
+          };
+
           // A path naming a method reaches here as `Type::method`, and only a static one
           // ever does: `resolvePathTail` turns an instance method into `Unresolved` after
           // reporting that it requires a receiver (resolver_bodies.ign, `InstanceMethod`

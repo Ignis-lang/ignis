@@ -228,6 +228,7 @@ With this configuration, `import Foo from "mylib::utils"` resolves to `libs/myli
 - The `"std"` key is reserved and cannot be used in `[aliases]`.
 - Alias paths must point to existing directories.
 - Only the first segment of the import path is matched (e.g., `"mylib"` in `"mylib::sub::mod"`).
+- An alias whose name ends in a character that cannot appear in a segment, such as `"@" = "./src"`, also matches as a plain prefix: `"@token::token"` resolves to `src/token/token.ign`. A longer alias that matches the whole first segment (`"@lib"` for `"@lib::util"`) takes precedence.
 - Single-file builds do not support user aliases (only the implicit `std` alias is available).
 
 ## Binary vs Library Projects
