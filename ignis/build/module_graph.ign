@@ -3,7 +3,7 @@ import String from "std::string";
 import Vector from "std::vector";
 
 import SourceFile, SourceSpan from "@compiler::diagnostics";
-import ParseOutput from "@compiler::parser";
+import CompileFlags, ParseOutput from "@compiler::parser";
 
 function moduleGraphPathEquals(left: &Path::PathBuf, right: &Path::PathBuf): boolean {
   let leftText: String = left.toString();
@@ -50,6 +50,119 @@ export record DiscoveredModule {
   public output: ParseOutput;
 }
 
+/// A text that identifies `flags`: two parses of the same text agree when
+/// their flags have the same key.
+export function compileFlagsKey(flags: &CompileFlags): String {
+  let mut key: String = `${flags.os.toStr()}|${flags.arch.toStr()}|${flags.abi.toStr()}|${flags.targetTriple.toStr()}|`;
+
+  if (flags.debug) {
+    key.pushStr("debug");
+  }
+
+  key.pushStr("|");
+  appendKeyNames(&mut key, &flags.features);
+  key.pushStr("|");
+  appendKeyNames(&mut key, &flags.knownFeatures);
+  return key;
+}
+
+function appendKeyNames(key: &mut String, names: &Vector<String>): void {
+  let mut keyRef: &mut String = key;
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    if (let Option::SOME(name) = names.get(index)) {
+      keyRef.pushStr(name.toStr());
+      keyRef.pushStr(",");
+    }
+
+    index += 1;
+  }
+}
+
+/// One cached parse: the module at `pathText`, parsed with the flags whose key
+/// is `flagsKey`. `parsed` holds at most one entry, empty once taken.
+export record ParseCacheEntry {
+  public pathText: String;
+  public flagsKey: String;
+  public parsed: Vector<DiscoveredModule>;
+}
+
+/// Parses kept between discoveries, so that a module whose text and flags did
+/// not change is not lexed and parsed again. Every cached module is in the
+/// state the parser left it: its import sources are the written ones.
+export record ParseCache {
+  public entries: Vector<ParseCacheEntry>;
+
+  public static empty(): ParseCache {
+    return ParseCache { entries: Vector::new<ParseCacheEntry>() };
+  }
+
+  /// The number of modules the cache holds.
+  public length(&self): u64 {
+    let mut count: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < self.entries.length()) {
+      if (let Option::SOME(entry) = self.entries.get(index)) {
+        count += entry.parsed.length();
+      }
+
+      index += 1;
+    }
+
+    return count;
+  }
+
+  /// Keeps `parsed`, parsed with the flags whose key is `flagsKey`.
+  public insert(&mut self, parsed: DiscoveredModule, flagsKey: &String): void {
+    let mut slot: Vector<DiscoveredModule> = Vector::new<DiscoveredModule>();
+    let pathText: String = parsed.file.path.toString();
+    slot.push(parsed);
+    self.entries.push(ParseCacheEntry { pathText: pathText, flagsKey: flagsKey.clone(), parsed: slot });
+  }
+
+  /// Hands over the parse of `path` when it was parsed from `text` with the
+  /// flags whose key is `flagsKey`, and `NONE` otherwise.
+  public take(
+    &mut self,
+    path: &Path::PathBuf,
+    text: &String,
+    flagsKey: &String
+  ): Option<DiscoveredModule> {
+    let pathText: String = path.toString();
+    let mut index: u64 = 0;
+
+    while (index < self.entries.length()) {
+      let Option::SOME(entry) = self.entries.getMut(index) else {
+        break;
+      };
+
+      index += 1;
+
+      if (!entry.pathText.equals(&pathText) || entry.parsed.isEmpty()) {
+        continue;
+      }
+
+      if (!entry.flagsKey.equals(flagsKey)) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(cached) = entry.parsed.get(0) else {
+        return Option::NONE;
+      };
+
+      if (!cached.file.text.equals(text)) {
+        return Option::NONE;
+      }
+
+      return entry.parsed.pop();
+    }
+
+    return Option::NONE;
+  }
+}
+
 export record BuildGraphNode {
   public path: Path::PathBuf;
   public kind: BuildModuleKind;
@@ -66,12 +179,18 @@ export record BuildGraph {
   /// How many modules a consumer had to read and parse again because their
   /// parse had already been taken.
   public reparsedModules: u64;
+  /// Parses discovery may reuse instead of parsing a module, and how many it
+  /// reused. Empty unless the caller handed discovery a cache.
+  public parseCache: ParseCache;
+  public reusedModules: u64;
 
   public static init(): BuildGraph {
     return BuildGraph {
       nodes: Vector::new<BuildGraphNode>(),
       rootIndex: Option::NONE,
       reparsedModules: 0,
+      parseCache: ParseCache::empty(),
+      reusedModules: 0,
     };
   }
 

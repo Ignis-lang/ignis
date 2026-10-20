@@ -17,7 +17,14 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import BuildGraph, BuildModuleKind, DiscoveredModule, ModuleGraph from "./module_graph";
+import
+  BuildGraph,
+  BuildModuleKind,
+  DiscoveredModule,
+  ModuleGraph,
+  ParseCache,
+  compileFlagsKey,
+from "./module_graph";
 import Manifest, StdManifest, StdManifestHeader, StdManifestModule from "./manifest";
 import Backends from "./backend";
 import SourceOverrides from "./sources";
@@ -1241,6 +1248,9 @@ function resolverResolveImport(
 
 /// Reads and parses the module at `path`, stores the parse on `graph`'s node
 /// `nodeIndex` for the build to take, and returns the imports it recovered.
+///
+/// A parse `graph.parseCache` holds for the same text and flags is reused
+/// instead of parsing the module again.
 function resolverExtractImports(
   graph: &mut BuildGraph,
   nodeIndex: u64,
@@ -1257,61 +1267,84 @@ function resolverExtractImports(
     )));
   };
 
-  let sourceFile: SourceFile = SourceFile {
-    path: path.clone(),
-    text: sourceText,
-  };
+  let mut cached: Option<DiscoveredModule> = Option::NONE;
 
-  // Parse diagnostics do not stop discovery, which does not report them: the
-  // driver would render them against the entry instead of this module. The
-  // parse is kept on the module's node with its `sourceFile`, which its spans
-  // borrow, and the parse phase takes both and reports the diagnostics against
-  // the module's own file before anything is analyzed.
-  let output: ParseOutput = Parser::parseFileWithFlags(&sourceFile, flags);
-
-  let mut imports: Vector<ParsedImport> = Vector::new<ParsedImport>();
-  let mut rootIndex: u64 = 0;
-
-  while (rootIndex < output.module.roots.length()) {
-    let Option::SOME(itemId) = output.module.roots.get(rootIndex) else {
-      break;
-    };
-    let Option::SOME(item) = output.module.items.get(*itemId) else {
-      rootIndex += 1;
-      continue;
-    };
-
-    match (item) {
-      Ast::Item::Node::Import(importItem) -> {
-        imports.push(ParsedImport {
-          source: importItem.source.clone(),
-          span: importItem.sourceSpan,
-        });
-      },
-      Ast::Item::Node::Export(exportItem) -> {
-        match (&exportItem.source) {
-          Option::SOME(source) -> {
-            let spanValue: SourceSpan = match (exportItem.sourceSpan) {
-              Option::SOME(value) -> value,
-              Option::NONE -> resolverPathSpan(path, 0, 0),
-            };
-
-            imports.push(ParsedImport {
-              source: source.clone(),
-              span: spanValue,
-            });
-          },
-          Option::NONE -> {},
-        };
-      },
-      _ -> {},
-    };
-
-    rootIndex += 1;
+  if (graph.parseCache.entries.length() > 0) {
+    let flagsKey: String = compileFlagsKey(flags);
+    cached = graph.parseCache.take(path, &sourceText, &flagsKey);
   }
 
-  let hasParseDiagnostics: boolean = !output.lexDiagnostics.isEmpty() || !output.parseDiagnostics.isEmpty();
-  ModuleGraph::setParsed(graph, nodeIndex, DiscoveredModule { file: sourceFile, output: output });
+  if (cached.isSome()) {
+    let _parsedText: String = sourceText;
+    graph.reusedModules += 1;
+  } else {
+    let sourceFile: SourceFile = SourceFile {
+      path: path.clone(),
+      text: sourceText,
+    };
+
+    // Parse diagnostics do not stop discovery, which does not report them: the
+    // driver would render them against the entry instead of this module. The
+    // parse is kept on the module's node with its `sourceFile`, which its spans
+    // borrow, and the parse phase takes both and reports the diagnostics
+    // against the module's own file before anything is analyzed.
+    let output: ParseOutput = Parser::parseFileWithFlags(&sourceFile, flags);
+    cached = Option::SOME(DiscoveredModule { file: sourceFile, output: output });
+  }
+
+  let Option::SOME(parsed) = cached else {
+    return Result::ERROR(resolverSimpleDiagnostic(path, MISSING_MODULE, "module source could not be parsed"));
+  };
+  let mut imports: Vector<ParsedImport> = Vector::new<ParsedImport>();
+  let mut hasParseDiagnostics: boolean = false;
+
+  // Scoped, so that no borrow of `parsed` is held when it moves to the graph.
+  {
+    let output: &ParseOutput = &parsed.output;
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < output.module.roots.length()) {
+      let Option::SOME(itemId) = output.module.roots.get(rootIndex) else {
+        break;
+      };
+      let Option::SOME(item) = output.module.items.get(*itemId) else {
+        rootIndex += 1;
+        continue;
+      };
+
+      match (item) {
+        Ast::Item::Node::Import(importItem) -> {
+          imports.push(ParsedImport {
+            source: importItem.source.clone(),
+            span: importItem.sourceSpan,
+          });
+        },
+        Ast::Item::Node::Export(exportItem) -> {
+          match (&exportItem.source) {
+            Option::SOME(source) -> {
+              let spanValue: SourceSpan = match (exportItem.sourceSpan) {
+                Option::SOME(value) -> value,
+                Option::NONE -> resolverPathSpan(path, 0, 0),
+              };
+
+              imports.push(ParsedImport {
+                source: source.clone(),
+                span: spanValue,
+              });
+            },
+            Option::NONE -> {},
+          };
+        },
+        _ -> {},
+      };
+
+      rootIndex += 1;
+    }
+
+    hasParseDiagnostics = !output.lexDiagnostics.isEmpty() || !output.parseDiagnostics.isEmpty();
+  }
+
+  ModuleGraph::setParsed(graph, nodeIndex, parsed);
 
   return Result::OK(ExtractedImports {
     imports: imports,
@@ -1471,11 +1504,27 @@ function resolverDiscoverProjectRoots(
   includeTestSources: boolean,
 ): Result<DiscoveryResult, DiagnosticBag> {
   let mut graph: BuildGraph = BuildGraph::init();
+  let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  resolverDiscoverProjectRootsInto(project, manifest, includeTestSources, &mut graph, &mut preludePaths)!;
+
+  return Result::OK(resolverProjectDiscoveryResult(project, manifest, graph, preludePaths));
+}
+
+/// Discovers the project's modules into `graph` and its auto-loaded std
+/// modules into `preludePaths`. On failure `graph` keeps what was discovered
+/// up to it.
+function resolverDiscoverProjectRootsInto(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+  includeTestSources: boolean,
+  graph: &mut BuildGraph,
+  preludePaths: &mut Vector<Path::PathBuf>,
+): Result<u64, DiagnosticBag> {
   let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut preludeRef: &mut Vector<Path::PathBuf> = preludePaths;
 
   // The auto-loaded modules are roots of their own: nothing imports them, and
   // every other module needs their declarations in scope.
-  let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut preludeIndex: u64 = 0;
 
   while (preludeIndex < manifest.autoLoadCount()) {
@@ -1490,13 +1539,13 @@ function resolverDiscoverProjectRoots(
     }
 
     let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
-    preludePaths.push(candidateBase.clone());
+    resolverDiscoverModule(project, manifest, graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
+    preludeRef.push(candidateBase.clone());
     preludeIndex += 1;
   }
 
-  let rootIndex: u64 = resolverDiscoverModule(project, manifest, &mut graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
-  ModuleGraph::setRoot(&mut graph, rootIndex);
+  let rootIndex: u64 = resolverDiscoverModule(project, manifest, graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
+  ModuleGraph::setRoot(graph, rootIndex);
 
   if (includeTestSources) {
     let testSources: Vector<Path::PathBuf> = resolverCollectProjectTestSources(&project.sourceRoot, &project.entry)!;
@@ -1508,17 +1557,27 @@ function resolverDiscoverProjectRoots(
       };
 
       let mut testStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-      resolverDiscoverModule(project, manifest, &mut graph, testSource, BuildModuleKind::PROJECT, &mut testStack)!;
+      resolverDiscoverModule(project, manifest, graph, testSource, BuildModuleKind::PROJECT, &mut testStack)!;
       testIndex += 1;
     }
   }
 
+  return Result::OK(rootIndex);
+}
+
+/// The result of discovering `project` into `graph`.
+function resolverProjectDiscoveryResult(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+  graph: BuildGraph,
+  preludePaths: Vector<Path::PathBuf>,
+): DiscoveryResult {
   // Every node is ordered, not only what the entry reaches: the prelude roots
   // are reachable from nothing and still have to be analyzed, and before the
   // modules that rely on them.
   let order: Vector<u64> = ModuleGraph::allModulesTopologicalOrder(&graph);
 
-  return Result::OK(DiscoveryResult {
+  return DiscoveryResult {
     graph: graph,
     order: order,
     preludePaths: preludePaths,
@@ -1540,7 +1599,30 @@ function resolverDiscoverProjectRoots(
     stdEnabled: project.stdEnabled,
     testFixtures: resolverClonePaths(&project.testFixtures),
     linkHeaders: resolverCloneHeaders(&manifest.headers),
-  });
+  };
+}
+
+/// Moves every parse `graph` holds, taken by discovery or still cached, into
+/// `cache`.
+function resolverReturnParses(
+  graph: &mut BuildGraph,
+  cache: &mut ParseCache,
+  flagsKey: &String
+): void {
+  let mut cacheRef: &mut ParseCache = cache;
+  let mut nodeIndex: u64 = 0;
+
+  while (nodeIndex < graph.nodes.length()) {
+    if (let Option::SOME(parsed) = ModuleGraph::takeParsed(graph, nodeIndex)) {
+      cacheRef.insert(parsed, flagsKey);
+    }
+
+    nodeIndex += 1;
+  }
+
+  while (let Option::SOME(entry) = graph.parseCache.entries.pop()) {
+    cacheRef.entries.push(entry);
+  }
 }
 
 /// True when the manifest declares `name` as compile-only, which means the
@@ -1983,6 +2065,45 @@ export namespace Resolver {
     let manifest: StdManifest = resolverLoadManifest(&project)!;
 
     return resolverDiscoverProjectRoots(&project, &manifest, includeTests);
+  }
+
+  /// Discovers like `discover`, reusing the parses `cache` holds for modules
+  /// whose text and flags did not change, and moving every parse discovery
+  /// does not hand over out of `cache`. When discovery fails, the parses go
+  /// back to `cache`; on success, the rest of `cache` is dropped and the
+  /// caller gives the parses it took back with `ParseCache::insert`.
+  function discoverCached(
+    startPath: &Path::PathBuf,
+    overrides: &BuildOverrides,
+    includeTests: boolean,
+    cache: &mut ParseCache,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = match (Config::findProjectFile(startPath)) {
+      Option::SOME(_) -> resolverLoadProject(startPath, overrides)!,
+      Option::NONE -> resolverSingleFileProject(startPath, overrides)!,
+    };
+    let manifest: StdManifest = resolverLoadManifest(&project)!;
+    let flagsKey: String = compileFlagsKey(&project.flags);
+    let mut graph: BuildGraph = BuildGraph::init();
+    let mut cacheRef: &mut ParseCache = cache;
+
+    while (let Option::SOME(entry) = cacheRef.entries.pop()) {
+      graph.parseCache.entries.push(entry);
+    }
+
+    let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let discovered: Result<u64, DiagnosticBag> = resolverDiscoverProjectRootsInto(&project, &manifest, includeTests, &mut graph, &mut preludePaths);
+
+    match (discovered) {
+      Result::OK(_) -> {},
+      Result::ERROR(failure) -> {
+        resolverReturnParses(&mut graph, cacheRef, &flagsKey);
+        return Result::ERROR(failure);
+      },
+    };
+
+    graph.parseCache.entries.clear();
+    return Result::OK(resolverProjectDiscoveryResult(&project, &manifest, graph, preludePaths));
   }
 
   /// Discovers the module graph a program fixture compiles as: the fixture on

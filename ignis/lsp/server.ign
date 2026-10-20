@@ -20,6 +20,7 @@ import Text from "std::text";
 import Vector from "std::vector";
 
 import Output from "@compiler::output";
+import ParseCache from "../build/module_graph";
 import SourceOverrides from "../build/sources";
 
 import
@@ -27,7 +28,7 @@ import
   LspAnalysis,
   LspDiagnostic,
   analysisKeyOf,
-  analyzeDocuments,
+  analyzeDocumentsCached,
   isProjectFilePath,
 from "./analysis";
 import codeActionsFor from "./code_actions";
@@ -98,6 +99,16 @@ record PublishedSet {
 record NavigationSet {
   public key: String;
   public index: NavigationIndex;
+}
+
+/// The parses the last run of analysis `key` read, reused by its next run.
+record ParseCacheSet {
+  public key: String;
+  public cache: ParseCache;
+}
+
+function cacheOfSet(set: ParseCacheSet): ParseCache {
+  return set.cache;
 }
 
 /// The document and position a request names.
@@ -408,6 +419,8 @@ export record LspServer {
   /// the analyzer: an edit that breaks parsing keeps the previous one, as the
   /// host keeps its last good analysis (crates/ignis_lsp/src/state.rs:59).
   navigations: Vector<NavigationSet>;
+  /// The parse cache of each analysis.
+  parseCaches: Vector<ParseCacheSet>;
   /// `--std-path`, applied to every analysis.
   stdPath: Option<String>;
 
@@ -424,6 +437,7 @@ export record LspServer {
       dirty: Vector::new<Path::PathBuf>(),
       published: Vector::new<PublishedSet>(),
       navigations: Vector::new<NavigationSet>(),
+      parseCaches: Vector::new<ParseCacheSet>(),
       stdPath: stdPath,
     };
   }
@@ -830,7 +844,9 @@ export record LspServer {
         break;
       };
 
-      let analysis: LspAnalysis = analyzeDocuments(start, key, &self.stdPath, &sources);
+      let mut cache: ParseCache = self.takeParseCache(key);
+      let analysis: LspAnalysis = analyzeDocumentsCached(start, key, &self.stdPath, &sources, &mut cache);
+      self.parseCaches.push(ParseCacheSet { key: key.clone(), cache: cache });
       self.publish(key, &analysis.diagnostics);
       self.keepNavigation(key, analysis.navigation);
       keyIndex += 1;
@@ -914,6 +930,23 @@ export record LspServer {
 
     self.forgetNavigation(key);
     self.navigations.push(NavigationSet { key: key.clone(), index: index });
+  }
+
+  /// Hands over the parse cache of the analysis `key`, empty when it has none.
+  takeParseCache(&mut self, key: &String): ParseCache {
+    let mut kept: Vector<ParseCacheSet> = Vector::new<ParseCacheSet>();
+    let mut found: ParseCache = ParseCache::empty();
+
+    while (let Option::SOME(set) = self.parseCaches.pop()) {
+      if (set.key.equals(key)) {
+        found = cacheOfSet(set);
+      } else {
+        kept.push(set);
+      }
+    }
+
+    self.parseCaches = kept;
+    return found;
   }
 
   /// Drops the navigation data of the analysis `key`, if any.
