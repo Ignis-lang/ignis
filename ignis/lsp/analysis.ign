@@ -21,9 +21,14 @@ import Text from "std::text";
 import Toml from "std::toml";
 import Vector from "std::vector";
 
-import analyzerModuleKind, mapImportSourcesToDiscoveryTargets from "../build/import_targets";
+import
+  analyzerModuleKind,
+  exportSourcesOf,
+  mapImportSourcesToDiscoveryTargets,
+  restoreWrittenImportSources,
+from "../build/import_targets";
 import checkUnknownManifestKeys from "../build/manifest";
-import BuildModuleKind from "../build/module_graph";
+import BuildModuleKind, DiscoveredModule, ParseCache, compileFlagsKey from "../build/module_graph";
 import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
@@ -53,6 +58,9 @@ export record LspAnalysis {
   /// failed: the server then keeps answering from the last analysis that
   /// did.
   public navigation: Option<NavigationIndex>;
+  /// How many modules discovery took from the parse cache instead of parsing
+  /// them.
+  public reusedModules: u64;
 }
 
 /// The code of the diagnostic that reports an analysis stopped between
@@ -72,9 +80,15 @@ record PendingDiagnostic {
 
 /// The modules of one analysis, parsed. `files` owns the texts every span
 /// points into, so it has to outlive the diagnostics taken from them.
+/// `lexDiagnostics`, `parseDiagnostics` and `exportSources` run parallel to
+/// `modules`, so that each parse can go back to the parse cache as the parser
+/// left it.
 record ParsedProgram {
   public files: Vector<SourceFile>;
   public modules: Vector<Ast::Module>;
+  public lexDiagnostics: Vector<DiagnosticBag>;
+  public parseDiagnostics: Vector<DiagnosticBag>;
+  public exportSources: Vector<Vector<String>>;
   public infos: Vector<Analyzer::Imports::ModuleInfo>;
   public pending: Vector<PendingDiagnostic>;
   public frontendErrors: u64;
@@ -279,6 +293,9 @@ function parseDiscoveredModules(
   let mut program: ParsedProgram = ParsedProgram {
     files: Vector::new<SourceFile>(),
     modules: Vector::new<Ast::Module>(),
+    lexDiagnostics: Vector::new<DiagnosticBag>(),
+    parseDiagnostics: Vector::new<DiagnosticBag>(),
+    exportSources: Vector::new<Vector<String>>(),
     infos: Vector::new<Analyzer::Imports::ModuleInfo>(),
     pending: Vector::new<PendingDiagnostic>(),
     frontendErrors: 0,
@@ -318,12 +335,15 @@ function parseDiscoveredModules(
     collectBag(&output.parseDiagnostics, &program.files, fileIndex, &mut program.pending);
 
     let moduleParses: boolean = output.lexDiagnostics.isEmpty() && output.parseDiagnostics.isEmpty();
+    program.exportSources.push(exportSourcesOf(&output.module));
 
     if (moduleParses && !mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, nodeIndex)) {
       return Result::ERROR(`import mapping is incomplete for ${nodePath.toString().toStr()}`);
     }
 
     program.modules.push(output.module);
+    program.lexDiagnostics.push(output.lexDiagnostics);
+    program.parseDiagnostics.push(output.parseDiagnostics);
     program.infos.push(Analyzer::Imports::ModuleInfo {
       index: nodeIndex,
       pathText: nodePath.toString(),
@@ -560,6 +580,21 @@ export function analyzeDocuments(
   stdPath: &Option<String>,
   sources: &SourceOverrides,
 ): LspAnalysis {
+  let mut cache: ParseCache = ParseCache::empty();
+  return analyzeDocumentsCached(startPath, key, stdPath, sources, &mut cache);
+}
+
+/// Analyzes like `analyzeDocuments`, reusing the parse `cache` holds of every
+/// module whose text and compile flags did not change. Afterwards `cache`
+/// holds the parses of exactly the modules this analysis read, so a file it no
+/// longer reaches drops out.
+export function analyzeDocumentsCached(
+  startPath: &Path::PathBuf,
+  key: &String,
+  stdPath: &Option<String>,
+  sources: &SourceOverrides,
+  cache: &mut ParseCache,
+): LspAnalysis {
   let mut overrides: BuildOverrides = BuildOverrides::none();
   overrides.sources = sources.clone();
 
@@ -567,17 +602,17 @@ export function analyzeDocuments(
     overrides.stdPath = Option::SOME(value.clone());
   }
 
-  let mut discovery: DiscoveryResult = match (Resolver::discover(startPath, &overrides, false)) {
+  let mut discovery: DiscoveryResult = match (Resolver::discoverCached(startPath, &overrides, false, cache)) {
     Result::OK(value) -> value,
     Result::ERROR(failure) -> {
       let mut diagnostics: Vector<FileDiagnostics> = discoveryFailureDiagnostics(&failure, startPath, key, sources);
       appendProjectFileWarnings(startPath, sources, &mut diagnostics);
 
-      return LspAnalysis { diagnostics: diagnostics, navigation: Option::NONE };
+      return LspAnalysis { diagnostics: diagnostics, navigation: Option::NONE, reusedModules: 0 };
     },
   };
 
-  let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(&mut discovery, startPath, sources);
+  let mut analysis: LspAnalysis = analyzeDiscoveredDocuments(&mut discovery, startPath, sources, cache);
   appendProjectFileWarnings(startPath, sources, &mut analysis.diagnostics);
   appendStdManifestWarnings(&discovery.stdRoot, &mut analysis.diagnostics);
 
@@ -692,19 +727,26 @@ export function analyzeDiscovered(
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
 ): Vector<FileDiagnostics> {
-  return analyzeDiscoveredDocuments(discovery, startPath, sources).diagnostics;
+  let mut cache: ParseCache = ParseCache::empty();
+  return analyzeDiscoveredDocuments(discovery, startPath, sources, &mut cache).diagnostics;
 }
+
+/// Analyzes the modules `discovery` found and moves their parses into
+/// `cache`, with the import sources they were written with.
 function analyzeDiscoveredDocuments(
   discovery: &mut DiscoveryResult,
   startPath: &Path::PathBuf,
   sources: &SourceOverrides,
+  cache: &mut ParseCache,
 ): LspAnalysis {
+  let reusedModules: u64 = discovery.graph.reusedModules;
   let mut program: ParsedProgram = match (parseDiscoveredModules(discovery, sources)) {
     Result::OK(value) -> value,
     Result::ERROR(message) -> {
       return LspAnalysis {
         diagnostics: analysisStoppedDiagnostics(startPath, &message),
         navigation: Option::NONE,
+        reusedModules: reusedModules,
       };
     },
   };
@@ -715,8 +757,50 @@ function analyzeDiscoveredDocuments(
     navigation = Option::SOME(analyzeParsedModules(&*discovery, &mut program, sources));
   }
 
+  let diagnostics: Vector<FileDiagnostics> = convertPending(&program.pending, &program.files);
+  let flagsKey: String = compileFlagsKey(&discovery.flags);
+  returnParsesToCache(program, cache, &flagsKey);
+
   return LspAnalysis {
-    diagnostics: convertPending(&program.pending, &program.files),
+    diagnostics: diagnostics,
     navigation: navigation,
+    reusedModules: reusedModules,
   };
+}
+
+/// Moves every parse of `program` into `cache`, each module's import sources
+/// restored to the written ones. Nothing the analysis returns borrows from
+/// `program`: its diagnostics and navigation data own their texts.
+function returnParsesToCache(
+  program: ParsedProgram,
+  cache: &mut ParseCache,
+  flagsKey: &String
+): void {
+  let mut cacheRef: &mut ParseCache = cache;
+  let mut parsedProgram: ParsedProgram = program;
+
+  while (let Option::SOME(file) = parsedProgram.files.pop()) {
+    let Option::SOME(analyzedModule) = parsedProgram.modules.pop() else {
+      return;
+    };
+    let Option::SOME(lexDiagnostics) = parsedProgram.lexDiagnostics.pop() else {
+      return;
+    };
+    let Option::SOME(parseDiagnostics) = parsedProgram.parseDiagnostics.pop() else {
+      return;
+    };
+    let Option::SOME(exportSources) = parsedProgram.exportSources.pop() else {
+      return;
+    };
+
+    let mut module: Ast::Module = analyzedModule;
+    restoreWrittenImportSources(&mut module, &exportSources);
+    cacheRef.insert(
+      DiscoveredModule {
+        file: file,
+        output: ParseOutput { module: module, lexDiagnostics: lexDiagnostics, parseDiagnostics: parseDiagnostics },
+      },
+      flagsKey,
+    );
+  }
 }

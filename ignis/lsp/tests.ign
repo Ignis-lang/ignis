@@ -10,14 +10,17 @@ import Test from "std::test";
 import Text from "std::text";
 import Vector from "std::vector";
 
+import ParseCache from "../build/module_graph";
 import BuildOverrides, DiscoveryResult, Resolver from "../build/resolver";
 import SourceOverrides from "../build/sources";
 
 import
   FileDiagnostics,
+  LspAnalysis,
   LspDiagnostic,
   analysisKeyOf,
   analyzeDiscovered,
+  analyzeDocumentsCached,
   analyzeForDiagnostics,
 from "./analysis";
 import DocumentStore from "./documents";
@@ -679,6 +682,166 @@ function analysisUsesTheDiscoveredTextOfAModuleThatVanishedAfterDiscovery(): voi
 
   Test::assertEq<u64>(files.length(), 0);
   Test::assertEq<u64>(discovery.graph.reparsedModules, 0);
+}
+
+/// A second analysis takes every unchanged module from the parse cache and
+/// reports what the first one did.
+@test
+function analysisReusesTheParseOfEveryUnchangedModule(): void {
+  let directory: Path::PathBuf = lspTestDirectory("cache_reuse");
+  lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  let unused: i32 = value();\n  return 0;\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+  let mut cache: ParseCache = ParseCache::empty();
+
+  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let cachedModules: u64 = cache.length();
+  let firstDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&first.diagnostics, &path);
+
+  Test::assertEq<u64>(first.reusedModules, 0);
+  Test::assertEq<boolean>(cachedModules > 2, true);
+
+  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let secondDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&second.diagnostics, &path);
+
+  Test::assertEq<u64>(second.reusedModules, cachedModules);
+  Test::assertEq<u64>(cache.length(), cachedModules);
+  Test::assertEq<boolean>(second.navigation.isSome(), true);
+  Test::assertEq<str>(secondDiagnostic.code.toStr(), firstDiagnostic.code.toStr());
+  Test::assertEq<str>(secondDiagnostic.message.toStr(), firstDiagnostic.message.toStr());
+  Test::assertEq<u64>(secondDiagnostic.start.line, firstDiagnostic.start.line);
+  Test::assertEq<u64>(secondDiagnostic.start.character, firstDiagnostic.start.character);
+  Test::assertEq<u64>(secondDiagnostic.end.character, firstDiagnostic.end.character);
+}
+
+/// An edited open buffer is parsed again, and only it: its new parse error is
+/// reported, and the other modules still come from the cache.
+@test
+function analysisParsesAnEditedBufferAgain(): void {
+  let directory: Path::PathBuf = lspTestDirectory("cache_edit");
+  lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+  let mut cache: ParseCache = ParseCache::empty();
+  let mut sources: SourceOverrides = SourceOverrides::none();
+
+  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let cachedModules: u64 = cache.length();
+
+  Test::assertEq<u64>(first.diagnostics.length(), 0);
+
+  let edited: String = String::create("import value from \"./helper\";\n\nfunction main(): i32 {\n  let x: i32 = (;\n  return value();\n}\n");
+  sources.set(&path, &edited);
+
+  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let diagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&second.diagnostics, &path);
+
+  Test::assertEq<u64>(second.reusedModules, cachedModules - 1);
+  Test::assertEq<str>(diagnostic.code.toStr(), "I0004");
+  Test::assertEq<u64>(diagnostic.start.line, 3);
+  Test::assertEq<u64>(cache.length(), cachedModules);
+}
+
+/// The parse errors of a cached module are reported on every analysis, not
+/// only on the one that parsed it.
+@test
+function analysisReportsTheParseErrorOfACachedModuleAgain(): void {
+  let directory: Path::PathBuf = lspTestDirectory("cache_parse_error");
+  let path: Path::PathBuf = lspTestWrite(&directory, "main.ign", "function main(): i32 {\n  let x: i32 = (;\n  return 0;\n}\n");
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+  let mut cache: ParseCache = ParseCache::empty();
+
+  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let firstDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&first.diagnostics, &path);
+  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let secondDiagnostic: LspDiagnostic = lspTestOnlyDiagnostic(&second.diagnostics, &path);
+
+  Test::assertEq<u64>(second.reusedModules, cache.length());
+  Test::assertEq<str>(firstDiagnostic.code.toStr(), "I0004");
+  Test::assertEq<str>(secondDiagnostic.code.toStr(), "I0004");
+  Test::assertEq<u64>(secondDiagnostic.start.line, firstDiagnostic.start.line);
+  Test::assertEq<u64>(secondDiagnostic.start.character, firstDiagnostic.start.character);
+}
+
+/// A cached module whose import did not resolve picks up the file created for
+/// it, and the parses discovery made before it failed are kept.
+@test
+function analysisResolvesACachedImportToANewFile(): void {
+  let directory: Path::PathBuf = lspTestDirectory("cache_new_file");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let sources: SourceOverrides = SourceOverrides::none();
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+  let mut cache: ParseCache = ParseCache::empty();
+
+  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let cachedModules: u64 = cache.length();
+  let missing: LspDiagnostic = lspTestOnlyDiagnostic(&first.diagnostics, &path);
+
+  Test::assertEq<str>(missing.code.toStr(), "B2001");
+  Test::assertEq<boolean>(cachedModules > 0, true);
+
+  lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+
+  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+
+  Test::assertEq<u64>(second.diagnostics.length(), 0);
+  Test::assertEq<u64>(second.reusedModules, cachedModules);
+  Test::assertEq<u64>(cache.length(), cachedModules + 1);
+  Test::assertEq<boolean>(second.navigation.isSome(), true);
+}
+
+/// A module the analysis no longer reads, because it was deleted and nothing
+/// imports it anymore, drops out of the cache.
+@test
+function analysisDropsADeletedModuleFromTheCache(): void {
+  let directory: Path::PathBuf = lspTestDirectory("cache_deleted");
+  let helper: Path::PathBuf = lspTestWrite(&directory, "helper.ign", "export function value(): i32 {\n  return 1;\n}\n");
+  let path: Path::PathBuf = lspTestWrite(
+    &directory,
+    "main.ign",
+    "import value from \"./helper\";\n\nfunction main(): i32 {\n  return value();\n}\n",
+  );
+  let key: String = analysisKeyOf(&path);
+  let stdPath: Option<String> = lspTestStdPath();
+  let mut cache: ParseCache = ParseCache::empty();
+  let mut sources: SourceOverrides = SourceOverrides::none();
+
+  let first: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+  let cachedModules: u64 = cache.length();
+
+  Test::assertEq<u64>(first.diagnostics.length(), 0);
+
+  if (let Result::ERROR(_) = Fs::removeFile(&helper)) {
+    Test::fail();
+    return;
+  }
+
+  let standalone: String = String::create("function main(): i32 {\n  return 0;\n}\n");
+  sources.set(&path, &standalone);
+
+  let second: LspAnalysis = analyzeDocumentsCached(&path, &key, &stdPath, &sources, &mut cache);
+
+  Test::assertEq<u64>(second.diagnostics.length(), 0);
+  Test::assertEq<u64>(second.reusedModules, cachedModules - 2);
+  Test::assertEq<u64>(cache.length(), cachedModules - 1);
 }
 
 /// A `didOpen` notification body for `path` holding `text`, which must

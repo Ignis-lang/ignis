@@ -1,6 +1,9 @@
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 
+import String from "std::string";
+import Vector from "std::vector";
+
 import BuildGraph, BuildModuleKind from "./module_graph";
 
 /// The analyzer's module kind for a module discovery classified as `kind`.
@@ -119,4 +122,89 @@ export function mapImportSourcesToDiscoveryTargets(
   }
 
   return true;
+}
+
+/// The source every `export ... from` in `module` names, in root order, which
+/// `restoreWrittenImportSources` puts back after the module was mapped.
+export function exportSourcesOf(module: &Ast::Module): Vector<String> {
+  let mut sources: Vector<String> = Vector::new<String>();
+  let mut rootIndex: u64 = 0;
+
+  while (rootIndex < module.roots.length()) {
+    let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+      break;
+    };
+
+    rootIndex += 1;
+
+    let Option::SOME(item) = module.items.get(*rootId) else {
+      continue;
+    };
+
+    if (let Ast::Item::Node::Export(exportItem) = item) {
+      if (let Option::SOME(source) = &exportItem.source) {
+        sources.push(source.clone());
+      }
+    }
+  }
+
+  return sources;
+}
+
+/// Undoes `mapImportSourcesToDiscoveryTargets`: every import source becomes
+/// the written one again, and every `export ... from` source the one
+/// `exportSources` (from `exportSourcesOf` before mapping) holds for it, so
+/// that `module` can be mapped again against another discovery.
+export function restoreWrittenImportSources(
+  module: &mut Ast::Module,
+  exportSources: &Vector<String>
+): void {
+  let mut exportIndex: u64 = 0;
+  let mut rootIndex: u64 = 0;
+
+  while (rootIndex < module.roots.length()) {
+    let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+      break;
+    };
+
+    rootIndex += 1;
+
+    let Option::SOME(item) = module.items.getMut(*rootId) else {
+      continue;
+    };
+
+    if (let Ast::Item::Node::Export(exportItem) = item) {
+      if (exportItem.source.isNone()) {
+        continue;
+      }
+
+      let Option::SOME(written) = exportSources.get(exportIndex) else {
+        continue;
+      };
+
+      exportIndex += 1;
+      *item = Ast::Item::Node::Export(Ast::Item::Export {
+        span: exportItem.span,
+        declaration: exportItem.declaration,
+        items: Ast::copyImportBindings(&exportItem.items),
+        source: Option::SOME(written.clone()),
+        sourceSpan: exportItem.sourceSpan,
+        metadata: Ast::copyMetadata(&exportItem.metadata),
+      });
+      continue;
+    }
+
+    let Ast::Item::Node::Import(importItem) = item else {
+      continue;
+    };
+
+    *item = Ast::Item::Node::Import(Ast::Item::Import {
+      span: importItem.span,
+      items: Ast::copyImportBindings(&importItem.items),
+      source: importItem.writtenSource.clone(),
+      writtenSource: importItem.writtenSource.clone(),
+      sourceSpan: importItem.sourceSpan,
+      metadata: Ast::copyMetadata(&importItem.metadata),
+    });
+  }
 }
