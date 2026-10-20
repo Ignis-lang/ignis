@@ -153,6 +153,22 @@ export namespace ParserTraitDefaults {
         }
       }
 
+      // A trait the enclosing namespaces do not reach by this name is an
+      // analysis error (A0263) with the path to write. Its defaults are still
+      // materialized, so the error is not followed by missing methods.
+      let suffix: String = `::${written.toStr()}`;
+      let mut fallbackIndex: u64 = 0;
+
+      while (fallbackIndex < entries.length()) {
+        if (let Option::SOME(entry) = entries.get(fallbackIndex)) {
+          if (entry.traitPath.endsWith(suffix.toStr())) {
+            return Option::SOME(entry.traitPath.clone());
+          }
+        }
+
+        fallbackIndex += 1;
+      }
+
       return Option::NONE;
     }
 

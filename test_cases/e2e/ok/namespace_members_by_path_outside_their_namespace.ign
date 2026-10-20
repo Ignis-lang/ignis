@@ -1,0 +1,62 @@
+// Outside its namespace or extern block, every member is reached by its path:
+// records, enums, aliases, constants, functions, traits, nested namespaces and
+// extern functions.
+namespace Geometry {
+  const UNIT: i32 = 10;
+
+  type Length = i32;
+
+  enum Shape {
+    CIRCLE,
+    SQUARE,
+  }
+
+  trait Sized {
+    side(&self): i32;
+  }
+
+  record Point {
+    public x: i32;
+  }
+
+  function area(side: i32): i32 {
+    return side * side;
+  }
+
+  namespace Inner {
+    function twice(value: i32): i32 {
+      return value * 2;
+    }
+  }
+}
+
+extern Sys {
+  function abs(value: i32): i32;
+}
+
+@implements(Geometry::Sized)
+record Square {
+  public length: i32;
+
+  side(&self): i32 {
+    return self.length;
+  }
+}
+
+function measure<T: Geometry::Sized>(value: &T): i32 {
+  return value.side();
+}
+
+function main(): i32 {
+  let point: Geometry::Point = Geometry::Point { x: 3 };
+  let size: Geometry::Length = Geometry::UNIT;
+  let shape: Geometry::Shape = Geometry::Shape::SQUARE;
+  let square: Square = Square { length: 2 };
+
+  let weight: i32 = match (shape) {
+    Geometry::Shape::CIRCLE -> 1,
+    Geometry::Shape::SQUARE -> 2,
+  };
+
+  return Geometry::area(point.x) + size + weight + measure<Square>(&square) + Geometry::Inner::twice(Sys::abs(-4)) - 31;
+}

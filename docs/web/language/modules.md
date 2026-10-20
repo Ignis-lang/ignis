@@ -20,6 +20,34 @@ function main(): i32 {
 }
 ```
 
+Inside the namespace, and inside namespaces nested in it, members are reached by their bare names.
+Outside, a member is reached only by its path; nothing brings a namespace's members into scope by
+their bare names. That holds for records, enums, type aliases, traits, constants, functions and
+nested namespaces, wherever the name is written: expressions, patterns, type annotations, bounds
+and `@implements(...)`. A path has to start at a name reachable from where it is written, so a
+nested `Outer::Inner` is written `Inner::f` only inside `Outer`.
+
+```ignis
+namespace Geometry {
+    record Point {
+        public x: i32;
+    }
+
+    function origin(): Point {
+        return Point { x: 0 };
+    }
+}
+
+function main(): i32 {
+    let point: Geometry::Point = Geometry::origin();
+    return point.x;
+}
+```
+
+Writing `Point` in `main` is an error (A0263): `'Point' is declared in namespace 'Geometry'; write
+'Geometry::Point'`. Importing a namespace from another module brings its members the same way,
+still reached by their path.
+
 ## Imports and exports
 
 ```ignis
@@ -90,6 +118,9 @@ extern __errno {
     const EACCES: i32;
 }
 ```
+
+Outside the block, its members are reached by their path, like a namespace's: `libc::puts`,
+`__errno::ENOENT`. A bare `puts` is an error (A0263).
 
 By default an extern function borrows what you pass it. Mark a parameter `@takes` when the C side
 takes ownership — see [ownership](/docs/language/ownership).

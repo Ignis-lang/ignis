@@ -507,6 +507,25 @@ function main(): i32 {
 }
 ```
 
+Inside a namespace, and inside any namespace nested in it, a member is reached by its bare name. Outside, it is reached only by its path: there is no construct that brings a namespace's members into scope by their bare names. The rule covers every kind of member (records, enums, type aliases, traits, constants, functions and nested namespaces) and every position a name is written in: expressions, record literals, patterns, type annotations, casts, type arguments, bounds and `@implements(...)`. A path written outside has to start at a name reachable from where it is written, so `Inner::f` for `namespace Outer { namespace Inner { ... } }` is only valid inside `Outer`; outside it is `Outer::Inner::f`.
+
+Importing a namespace from another module brings its members, still reached by their path (`import Geometry from "./geometry"`, then `Geometry::Point`).
+
+A bare name that only names a member of a namespace it is written outside of is an error (A0263):
+
+```ignis
+namespace Geometry {
+    record Point {
+        public x: i32;
+    }
+}
+
+function main(): i32 {
+    let point: Point = Point { x: 3 };  // A0263: 'Point' is declared in namespace 'Geometry'; write 'Geometry::Point'
+    return point.x;
+}
+```
+
 ### 4.10 Imports, Exports, Extern
 
 ```ignis
@@ -536,6 +555,8 @@ extern __errno {
     const EACCES: i32;
 }
 ```
+
+The members of an extern block follow the namespace rule: outside the block they are reached only by its path (`libc::puts`, `__errno::ENOENT`), and a bare `puts` is an error (A0263).
 
 #### Function Pointers in Extern Functions
 
