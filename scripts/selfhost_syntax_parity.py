@@ -342,7 +342,7 @@ def selfhost_verdict(
 ) -> Verdict:
   try:
     completed = subprocess.run(
-      [str(compiler), str(case_file), "-o", str(case_dir / "case_bin"), "--verbose"],
+      [str(compiler), str(case_dir), "-o", str(case_dir / "case_bin"), "--verbose"],
       cwd=case_dir,
       capture_output=True,
       text=True,

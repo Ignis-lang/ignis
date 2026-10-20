@@ -250,9 +250,9 @@ def run_dump(
   ]
 
   if case.project_root is None:
-    # The path must stay relative to the working directory: given an absolute
-    # path while a project root is in scope, the selfhost compiler ignores the
-    # argument and compiles the project instead.
+    # The path stays relative to the working directory because the dump
+    # prints each function's location as the path it was given, and the
+    # baselines record repository-relative paths.
     command.append(relative_to(case.path, repository_root))
 
   try:

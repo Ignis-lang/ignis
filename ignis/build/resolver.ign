@@ -2089,6 +2089,22 @@ export namespace Resolver {
     return resolverDiscoverProjectRoots(&project, &manifest, includeTests);
   }
 
+  /// Discovers the module graph of the source file `entryPath` on its own.
+  ///
+  /// No project file is read, even when one governs the file: the standard
+  /// library comes from `--std-path` or `IGNIS_STD_PATH`, and the build gets
+  /// no aliases, features or C profile from a project.
+  function discoverFile(
+    entryPath: &Path::PathBuf,
+    overrides: &BuildOverrides,
+    includeTests: boolean,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = resolverSingleFileProject(entryPath, overrides)!;
+    let manifest: StdManifest = resolverLoadManifest(&project)!;
+
+    return resolverDiscoverProjectRoots(&project, &manifest, includeTests);
+  }
+
   /// Discovers like `discover`, reusing the parses `cache` holds for modules
   /// whose text and flags did not change, and moving every parse discovery
   /// does not hand over out of `cache`. When discovery fails, the parses go

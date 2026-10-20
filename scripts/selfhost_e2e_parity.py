@@ -380,7 +380,7 @@ def compile_case(
   """Compile a materialised case, or return None when the compiler times out."""
   try:
     return subprocess.run(
-      [str(compiler), str(case_dir / "src" / "main.ign"), "-o", str(binary_path)],
+      [str(compiler), str(case_dir), "-o", str(binary_path)],
       cwd=case_dir,
       capture_output=True,
       text=True,

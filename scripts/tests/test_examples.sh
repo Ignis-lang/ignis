@@ -14,15 +14,13 @@ fi
 
 compiler="$(realpath "$1")"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# Single files are named relative to the repository root: an absolute path
-# lets the upward search for ignis.toml reach the compiler's own project file,
-# which then governs the build instead of the example.
-cd "$repo_root"
 # Examples are checked against this repository's standard library, not
 # whatever IGNIS_STD_PATH the environment happens to carry.
 export IGNIS_STD_PATH="$repo_root/std"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
+# A single-file build writes its emitted C into the working directory.
+cd "$scratch"
 
 # The exit code a program returns on purpose. Every other program exits 0.
 expected_exit() {
@@ -55,7 +53,18 @@ run_program() {
   echo "ok   $name (exit $status)"
 }
 
-for source in example/*.ign; do
+# An absolute path to a file inside this repository is checked on its own:
+# the repository's ignis.toml does not turn it into a check of the compiler.
+log="$scratch/single-file.log"
+if ! timeout 30 "$compiler" check --progress plain "$repo_root/example/add.ign" > "$log" 2>&1; then
+  fail "single-file: check of an absolute path" "$log"
+elif ! grep -q "^Checking add ($repo_root/example/add.ign)" "$log"; then
+  fail "single-file: the header names the project, not the file" "$log"
+else
+  echo "ok   single-file (absolute path)"
+fi
+
+for source in "$repo_root"/example/*.ign; do
   name="$(basename "$source" .ign)"
   log="$scratch/$name.log"
 
@@ -77,7 +86,7 @@ for source in example/*.ign; do
   run_program "$name" "$scratch/$name" "$scratch/$name.run.log"
 done
 
-for manifest in example/*/ignis.toml; do
+for manifest in "$repo_root"/example/*/ignis.toml; do
   project="$(dirname "$manifest")"
   name="$(basename "$project")"
   log="$scratch/project-$name.log"

@@ -2531,6 +2531,7 @@ function progressPath(path: &String, rootPrefix: &String): String {
 /// and returning its counts on failure.
 function discoverReporting(
   startPath: &Path::PathBuf,
+  projectMode: boolean,
   options: &CliOptions,
   includeTests: boolean,
 ): Result<DiscoveryResult, BuildTally> {
@@ -2538,7 +2539,7 @@ function discoverReporting(
 
   let overrides: BuildOverrides = buildOverridesFrom(options);
 
-  return match (Resolver::discover(startPath, &overrides, includeTests)) {
+  return match (discoverAt(startPath, projectMode, &overrides, includeTests)) {
     Result::OK(value) -> Result::OK(value),
     Result::ERROR(diagnostics) -> {
       let file: SourceFile = entrySourceFile(startPath);
@@ -2550,10 +2551,11 @@ function discoverReporting(
 /// Discover the module graph a command runs against, reporting what failed.
 function discoverFor(
   startPath: &Path::PathBuf,
+  projectMode: boolean,
   options: &CliOptions,
   includeTests: boolean,
 ): Option<DiscoveryResult> {
-  return match (discoverReporting(startPath, options, includeTests)) {
+  return match (discoverReporting(startPath, projectMode, options, includeTests)) {
     Result::OK(value) -> Option::SOME(value),
     Result::ERROR(_) -> Option::NONE,
   };
@@ -2634,12 +2636,13 @@ function printCompileOutcome(
   }
 }
 
-/// Compile the project `startPath` belongs to.
+/// Compile the project that governs `startPath`, or the file `startPath` alone.
 ///
 /// `checkOnly` stops after the last phase that can reject the program, which is
 /// what `ignis check` reports on: nothing is emitted and nothing is linked.
-/// `projectMode` writes the artifacts under `[build] out_dir` instead of the
-/// working directory.
+/// `projectMode` compiles the governing project and writes the artifacts under
+/// `[build] out_dir`; otherwise the file is compiled on its own and the
+/// artifacts go to the working directory.
 ///
 /// Returns 0 on success and 1 on any error (I/O, lex, parse, analyze, ownership
 /// or linking).
@@ -2655,7 +2658,7 @@ function runCompile(
   printStatus(String::create(banner), verbose);
   printStatus(`  source: ${startPath.asStr()}`, verbose);
 
-  let mut discovery: DiscoveryResult = match (discoverReporting(startPath, options, false)) {
+  let mut discovery: DiscoveryResult = match (discoverReporting(startPath, projectMode, options, false)) {
     Result::OK(value) -> value,
     Result::ERROR(tally) -> {
       printFailure(checkOnly ? "Check" : "Build", tally.errors, tally.warnings);
@@ -3525,7 +3528,11 @@ export function prepareTestBinaryDirectory(binaryPath: &String): boolean {
 /// process, reporting the way the host `ignis test` runner does.
 ///
 /// Returns 0 when every selected test exits 0, and 1 on any failure.
-function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
+function runProjectTests(
+  startPath: &Path::PathBuf,
+  projectMode: boolean,
+  options: &CliOptions
+): i32 {
   let partition: TestPartition = match (&options.partition) {
     Option::SOME(spec) -> TestPartition::create(spec.index, spec.count),
     Option::NONE -> TestPartition::none(),
@@ -3534,7 +3541,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   Output::message(`Testing ${TestRunner::runHeader(startPath, &partition).toStr()}\n`);
 
-  let Option::SOME(discovered) = discoverFor(startPath, options, true) else {
+  let Option::SOME(discovered) = discoverFor(startPath, projectMode, options, true) else {
     return 1;
   };
   let mut discovery: DiscoveryResult = discovered;
@@ -4753,7 +4760,7 @@ function runFmt(options: &CliOptions): i32 {
 
 /// Where a command runs: a project directory, a source file, or the current
 /// directory when the command line named neither.
-record CommandTarget {
+export record CommandTarget {
   public path: Path::PathBuf;
   /// True when the target is a directory, which is what selects the project
   /// artifact layout over the single-file one.
@@ -4762,11 +4769,12 @@ record CommandTarget {
 
 /// Resolve what a command runs against.
 ///
-/// A named source file keeps the single-file behaviour the bootstrap ladder
-/// depends on: the project that contains it still governs the build, and the
-/// artifacts stay in the working directory. A directory, or no path at all,
-/// selects project mode.
-function resolveTarget(options: &CliOptions): Option<CommandTarget> {
+/// A named source file is compiled on its own, whether the path is absolute,
+/// relative or climbs through `..`: no ignis.toml is read, even one that
+/// governs the file, and the artifacts stay in the working directory. A
+/// directory selects the project that governs it, and no path at all the
+/// project that governs the current directory.
+export function resolveTarget(options: &CliOptions): Option<CommandTarget> {
   let Option::SOME(pathText) = &options.path else {
     let Result::OK(currentDir) = Env::currentDir() else {
       Output::message(String::create("error: the current directory could not be read"));
@@ -4790,6 +4798,30 @@ function resolveTarget(options: &CliOptions): Option<CommandTarget> {
     path: path.clone(),
     projectMode: !metadata.isFile(),
   });
+}
+
+/// Discover the module graph `target` names.
+export function discoverTarget(
+  target: &CommandTarget,
+  overrides: &BuildOverrides,
+  includeTests: boolean,
+): Result<DiscoveryResult, DiagnosticBag> {
+  return discoverAt(&target.path, target.projectMode, overrides, includeTests);
+}
+
+/// Discover the project that governs `startPath`, or the file `startPath`
+/// alone when `projectMode` is false.
+function discoverAt(
+  startPath: &Path::PathBuf,
+  projectMode: boolean,
+  overrides: &BuildOverrides,
+  includeTests: boolean,
+): Result<DiscoveryResult, DiagnosticBag> {
+  if (projectMode) {
+    return Resolver::discover(startPath, overrides, includeTests);
+  }
+
+  return Resolver::discoverFile(startPath, overrides, includeTests);
 }
 
 /// Compile the standard library into the archive a project links against.
@@ -6217,13 +6249,14 @@ function runBuildStd(options: &CliOptions): i32 {
 
 /// CLI entry point.
 ///
-/// `ignis build [PATH]`, `ignis check [PATH]`, `ignis build-std`,
-/// `ignis check-std` and `ignis test [PATH]` run against the project that contains `PATH`, which
-/// defaults to the current directory. `ignis test-std [FILTER]` runs the
-/// standard library's own tests and reads no project file. The bare form `ignis <entry.ign>` is the
-/// build the bootstrap ladder and the parity harness call, and stays a build of
-/// the project that contains that file. `ignis init NAME` creates a new
-/// project and reads no project file either.
+/// `ignis build [PATH]`, `ignis check [PATH]` and `ignis test [PATH]` run
+/// against the project that governs `PATH` when it is a directory, which
+/// defaults to the current directory, and against that file alone when it is a
+/// `.ign` file. `ignis build-std` and `ignis check-std` run against the project
+/// that governs `PATH`. `ignis test-std [FILTER]` runs the standard library's
+/// own tests and reads no project file. The bare form `ignis <PATH>` is
+/// `ignis build <PATH>`. `ignis init NAME` creates a new project and reads no
+/// project file either.
 ///
 /// `-o` names the binary a build or a test run links; `--out-dir` overrides
 /// `[build] out_dir`. `-O` / `--opt-level`, `--debug` / `--no-debug`, `--cc`,
@@ -6300,7 +6333,7 @@ function runCommand(options: &CliOptions): i32 {
   };
 
   if (let CliCommand::TEST = options.command) {
-    return runProjectTests(&target.path, options);
+    return runProjectTests(&target.path, target.projectMode, options);
   }
 
   let checkOnly: boolean = match (options.command) {

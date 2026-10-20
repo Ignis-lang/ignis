@@ -1,22 +1,27 @@
+import Env from "std::env";
 import Fs from "std::fs";
 import Path from "std::path";
 import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
+import Vector from "std::vector";
 
 import DiagnosticBag, SourceFile from "@compiler::diagnostics";
 import BuildOverrides, DiscoveryResult, Resolver from "./build/resolver";
 import BuildArtifacts from "./build/artifacts";
+import parseArguments from "./cli";
 
 import Format from "./format/api";
 import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./format/config";
 import
+  CommandTarget,
   CompileOptions,
   CompileOutcome,
   CompiledProgram,
   compileDiscovered,
   comparePathComponents,
   compileOutcome,
+  discoverTarget,
   fmtConfigErrorMessage,
   fmtConfigErrorMessageForPath,
   fmtStdinJsonValidateAndProcessLine,
@@ -25,6 +30,7 @@ import
   formatSuccessLine,
   prepareTestBinaryDirectory,
   replayedReport,
+  resolveTarget,
   statusLine,
   stripAnsiEscapes,
   testBinaryPath,
@@ -663,4 +669,109 @@ function ownershipErrorInAnImportedModuleNamesItsFileLineAndColumn(): void {
   Test::assert(!reportContains(&report, "src/main.ign"));
 
   let _removed = Fs::removeDirAll(&root);
+}
+
+/// The project fixture the target-resolution tests name files inside of.
+const TARGET_PROJECT: str = "test_cases/selfhost/build/build_profile";
+
+/// The target `ignis check [path]` resolves, from the repository root.
+function checkTarget(path: Option<str>): CommandTarget {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+  arguments.push(String::create("check"));
+
+  if (let Option::SOME(text) = path) {
+    arguments.push(String::create(text));
+  }
+
+  let Result::OK(options) = parseArguments(&arguments) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let Option::SOME(target) = resolveTarget(&options) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return target;
+}
+
+/// The module graph `target` discovers against this repository's std.
+function discoverCheckTarget(target: &CommandTarget): DiscoveryResult {
+  let Result::OK(root) = Env::currentDir() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = Option::SOME(root.join("std").toString());
+
+  let Result::OK(discovery) = discoverTarget(target, &overrides, false) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return discovery;
+}
+
+/// Asserts that `path` names a single-file build of the fixture's entry,
+/// which ignores the ignis.toml above it.
+function assertSingleFileTarget(path: &String): void {
+  let target: CommandTarget = checkTarget(Option::SOME(path.toStr()));
+  Test::assertEq<boolean>(target.projectMode, false);
+
+  let discovery: DiscoveryResult = discoverCheckTarget(&target);
+  Test::assertEq<boolean>(discovery.hasProjectFile, false);
+  Test::assertEq<str>(discovery.name.toStr(), "main");
+}
+
+/// An absolute path to a file inside a project is a single-file build.
+@test
+function absoluteFileInsideAProjectIsASingleFileBuild(): void {
+  let Result::OK(root) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let path: String = root.join(TARGET_PROJECT).join("src/main.ign").toString();
+  assertSingleFileTarget(&path);
+}
+
+/// A relative path to a file inside a project is a single-file build.
+@test
+function relativeFileInsideAProjectIsASingleFileBuild(): void {
+  let path: String = `${TARGET_PROJECT}/src/main.ign`;
+  assertSingleFileTarget(&path);
+}
+
+/// A relative path that climbs back through `..` is still a single-file build.
+@test
+function fileThroughParentSegmentIsASingleFileBuild(): void {
+  let path: String = `${TARGET_PROJECT}/src/../src/main.ign`;
+  assertSingleFileTarget(&path);
+}
+
+/// A directory is a build of the project its ignis.toml declares.
+@test
+function directoryIsAProjectBuild(): void {
+  let target: CommandTarget = checkTarget(Option::SOME(TARGET_PROJECT));
+  Test::assertEq<boolean>(target.projectMode, true);
+
+  let discovery: DiscoveryResult = discoverCheckTarget(&target);
+  Test::assertEq<boolean>(discovery.hasProjectFile, true);
+  Test::assertEq<str>(discovery.name.toStr(), "resolver-build-profile");
+}
+
+/// No path is a project build of the current directory.
+@test
+function noPathIsAProjectBuildOfTheCurrentDirectory(): void {
+  let Result::OK(root) = Env::currentDir() else {
+    Test::fail();
+    return;
+  };
+
+  let target: CommandTarget = checkTarget(Option::NONE);
+  Test::assertEq<boolean>(target.projectMode, true);
+  Test::assertEq<str>(target.path.asStr(), root.asStr());
 }

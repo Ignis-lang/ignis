@@ -96,6 +96,15 @@ Compile source code in one of two modes:
 
 - Single file mode: `ignis build path/to/file.ign`
 - Project mode: `ignis build` (auto-detects `ignis.toml` upward from current directory)
+  or `ignis build path/to/dir` (auto-detects `ignis.toml` upward from that directory)
+
+A `.ign` argument always selects single file mode, whether the path is
+absolute, relative or goes through `..`, even when an `ignis.toml` governs the
+file. That `ignis.toml` is not read: the file gets the standard library from
+`--std-path` or `IGNIS_STD_PATH` (one of them is required), no
+`[aliases]`, no `[features]` and none of the project's `[build]` settings, and
+its artifacts go to the working directory. To build a project, pass its
+directory or no path. The same rule applies to `ignis check` and `ignis test`.
 
 Examples:
 

@@ -284,10 +284,11 @@ download_release() {
   tar -xzf "$tar_path" -C "$tmp_dir/pkg"
 }
 
-# Compile the compiler sources (ignis/main.ign) with $2 into $3/ignis, the
-# way scripts/bootstrap.sh builds a stage. The selfhost driver writes its
-# emitted C and object file into the working directory, so each stage runs in
-# its own directory.
+# Compile the compiler project ($1) with $2 into $3/ignis, the way
+# scripts/bootstrap.sh builds a stage. The project directory is passed rather
+# than ignis/main.ign, which would be compiled on its own without ignis.toml,
+# and `--out-dir` keeps the emitted C and object file inside the stage
+# directory.
 compile_compiler_stage() {
   local repo_dir="$1"
   local compiler="$2"
@@ -297,7 +298,7 @@ compile_compiler_stage() {
 
   if ! (
     cd "$stage_dir"
-    IGNIS_STD_PATH="$repo_dir/std" "$compiler" "$repo_dir/ignis/main.ign" -o "$stage_dir/ignis" >"$stage_dir/log.txt" 2>&1
+    IGNIS_STD_PATH="$repo_dir/std" "$compiler" "$repo_dir" --out-dir "$stage_dir/out" -o "$stage_dir/ignis" >"$stage_dir/log.txt" 2>&1
   ) || [[ ! -x "$stage_dir/ignis" ]]; then
     error "Compiling the compiler sources with $compiler failed:"
     tail -n 20 "$stage_dir/log.txt" >&2
