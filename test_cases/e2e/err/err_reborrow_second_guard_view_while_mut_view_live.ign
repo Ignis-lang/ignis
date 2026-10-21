@@ -1,0 +1,20 @@
+// e2e: err
+// A second `guard.get()` while `store` is live would hand out two `&mut`
+// views of the same value.
+import Mutex, MutexGuard from "std::sync";
+
+record Store {
+  public count: i32;
+}
+
+function main(): i32 {
+  let shared: Mutex<Store> = Mutex::new<Store>(Store { count: 0 });
+  let mut guard: MutexGuard<Store> = shared.lock();
+  let store: &mut Store = guard.get();
+  let other: &mut Store = guard.get();
+
+  store.count = 1;
+  other.count = 2;
+
+  return store.count;
+}
