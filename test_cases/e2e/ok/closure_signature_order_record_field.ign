@@ -1,0 +1,32 @@
+// A record holds closures by value, and its closure types are used in its
+// methods before any closure value of those types is built: the record's
+// definition needs both closure structs complete, and the outer struct's call
+// pointer takes the inner one by value.
+type Step = (i32) -> i32;
+type Wrapper = (i32, Step) -> i32;
+
+record Pipeline {
+  wrapper: Wrapper;
+  step: Step;
+
+  public replaceWrapper(&mut self, wrapper: Wrapper): void {
+    self.wrapper = wrapper;
+  }
+
+  public run(&self, value: i32): i32 {
+    return (self.wrapper)(value, (inner: i32): i32 -> (self.step)(inner));
+  }
+}
+
+function wrap(value: i32, step: Step): i32 {
+  return step(value) + 2;
+}
+
+function main(): i32 {
+  let pipeline: Pipeline = Pipeline {
+    wrapper: wrap,
+    step: (value: i32): i32 -> value * 2,
+  };
+
+  return pipeline.run(20);
+}

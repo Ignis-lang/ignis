@@ -1,0 +1,60 @@
+// e2e: skip helper module of e2e::trait_default_cross_module: alone it has no main and cannot link; it runs through the entry fixture
+//
+// The defaults name a private helper and a record of this module, and the
+// importer declares its own `scaleOf`, `Unit` and `Count`: a copied default
+// still binds
+// to the declarations of this module.
+function scaleOf(value: i32): i32 {
+  return value * 2;
+}
+
+export record Unit {
+  public value: i32;
+}
+
+export type Count = i32;
+
+export trait Measured {
+  area(&self): i32;
+
+  doubled(&self): i32 {
+    return scaleOf(self.area());
+  }
+
+  quadrupled(&self): i32 {
+    let twice: i32 = self.doubled();
+    return twice * 2;
+  }
+
+  inUnits(&self): Unit {
+    return Unit { value: self.area() + 1 };
+  }
+
+  counted(&self): Count {
+    let count: Count = self.area();
+    return count;
+  }
+}
+
+export namespace Shapes {
+  function twice(value: i32): i32 {
+    return value + value;
+  }
+
+  record Edge {
+    public length: i32;
+  }
+
+  trait Sized {
+    width(&self): i32;
+
+    perimeter(&self): i32 {
+      return Shapes::twice(self.width()) + twice(self.width());
+    }
+
+    edge(&self): Edge {
+      let edge: Edge = Edge { length: twice(self.width()) };
+      return edge;
+    }
+  }
+}

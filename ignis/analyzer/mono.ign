@@ -2468,16 +2468,24 @@ export namespace Mono {
               receiverType = receiverNode.typeId;
             }
 
+            ownerInstance = Mono::receiverInstance(defStore, typeStore, state, receiverType);
+
             // A call through a trait bound names the trait's declaration. The
             // substituted receiver is concrete, so the call goes to that type's
-            // own implementation of the same method.
-            if (let Option::SOME(nominalDef) = Mono::receiverNominalDef(defStore, typeStore, receiverType)) {
+            // own implementation of the same method. For an instance of a
+            // generic type that is the generic declaration's method, which the
+            // owner's arguments then instantiate below.
+            let mut implementer: Option<Analyzer::DefinitionId> = Mono::receiverNominalDef(defStore, typeStore, receiverType);
+
+            if (let Option::SOME(instance) = &ownerInstance) {
+              implementer = Option::SOME(instance.definition);
+            }
+
+            if (let Option::SOME(nominalDef) = implementer) {
               if (let Option::SOME(implementation) = Mono::traitImplementationMethod(defStore, nominalDef, method)) {
                 method = implementation;
               }
             }
-
-            ownerInstance = Mono::receiverInstance(defStore, typeStore, state, receiverType);
           }
 
           let mut ownerDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
@@ -2492,6 +2500,10 @@ export namespace Mono {
           };
 
           let concreteArgsOpt: Option<Vector<Analyzer::TypeId>> = Mono::concreteTypeArgs(defStore, typeStore, symbols, state, subst, &methodNode.typeArgs);
+
+          // The method a bound call was redirected to above, which is what a
+          // generic owner instantiates, not the trait's declaration.
+          let calledMethod: Analyzer::DefinitionId = method;
 
           if (let Option::SOME(concreteArgs) = concreteArgsOpt) {
             let mut ownerArgsConcrete: boolean = true;
@@ -2508,14 +2520,14 @@ export namespace Mono {
 
             if (ownerDefOpt.isSome() && ownerArgsConcrete) {
               method = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
-                primaryDef: methodNode.method,
+                primaryDef: calledMethod,
                 ownerDef: ownerDefOpt,
                 ownerArgs: Mono::copyTypeIds(&ownerArgsVec),
                 methodArgs: Mono::copyTypeIds(&concreteArgs),
               });
               rewritten = true;
             } else if (ownerDefOpt.isNone() && concreteArgs.length() > 0) {
-              let methodKey: Mono::InstanceKey = Mono::keyForCallee(defStore, methodNode.method, &concreteArgs);
+              let methodKey: Mono::InstanceKey = Mono::keyForCallee(defStore, calledMethod, &concreteArgs);
 
               method = Mono::ensureInstantiated(defStore, typeStore, symbols, state, methodKey);
               rewritten = true;
