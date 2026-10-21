@@ -2214,8 +2214,8 @@ export namespace Capture {
   }
 
   /// Whether the operand of a `ToRawFunction` is provably free of captures: a
-  /// function named directly, a closure literal that captures nothing, or the
-  /// drop glue of a type.
+  /// function or static method named directly, a closure literal that
+  /// captures nothing, or the drop glue of a type.
   function rawOperandIsCaptureFree(
     defStore: &mut Analyzer::DefinitionStore,
     hir: &Hir::HirStore,
@@ -2227,11 +2227,11 @@ export namespace Capture {
 
     match (&operand.kind) {
       Hir::HirKind::Variable(defId) -> {
-        if (let Option::SOME(Analyzer::Definition::Function(_)) = defStore.get(defId)) {
-          return true;
-        }
-
-        return false;
+        return match (defStore.get(defId)) {
+          Option::SOME(Analyzer::Definition::Function(_)) -> true,
+          Option::SOME(Analyzer::Definition::Method(_)) -> true,
+          _ -> false,
+        };
       },
       Hir::HirKind::Closure(closureNode) -> {
         return closureNode.captures.isEmpty() && closureNode.thunkDef.isSome();
@@ -2247,6 +2247,36 @@ export namespace Capture {
     return false;
   }
 
+  /// The name of the first value the closure literal `operandId` captures;
+  /// `NONE` when the operand is no closure literal or captures nothing.
+  function firstCapturedName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    operandId: Hir::HirId,
+  ): Option<String> {
+    let Option::SOME(operand) = hir.get(operandId) else {
+      return Option::NONE;
+    };
+
+    let Hir::HirKind::Closure(closureNode) = &operand.kind else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(capture) = closureNode.captures.get(0) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(definition) = defStore.get(capture.sourceDef) else {
+      return Option::SOME(String::create("?"));
+    };
+
+    return match (symbols.resolve(definition.name())) {
+      Option::SOME(name) -> Option::SOME(String::create(name)),
+      Option::NONE -> Option::SOME(String::create("?")),
+    };
+  }
+
   /// Report every function value converted to a C function pointer that is
   /// not provably capture-free, or whose signature takes or returns a
   /// function value.
@@ -2258,6 +2288,7 @@ export namespace Capture {
   function reportNonCaptureFreeRawFunctions(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     hir: &Hir::HirStore,
   ): DiagnosticBag {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
@@ -2279,6 +2310,14 @@ export namespace Capture {
 
       if (!Capture::rawSignatureIsPlain(defStore, typeStore, node.typeId)) {
         message = Option::SOME("a C function pointer cannot take or return a function value");
+      } else if (let Option::SOME(capturedName) = Capture::firstCapturedName(defStore, symbols, hir, operandId)) {
+        let text: String = `a closure taken as a function pointer cannot capture '${capturedName.toStr()}'`;
+        let label: String = `'${capturedName.toStr()}' is captured here, and a function pointer has no environment to hold it`;
+        let mut captureDiagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::FUNCTION_POINTER_CAPTURES, text.toStr(), span);
+        captureDiagnostic.addLabel(LabelKind::PRIMARY, span, label.toStr());
+
+        let mut captureBag: &mut DiagnosticBag = &mut diagnostics;
+        captureBag.push(captureDiagnostic);
       } else if (!Capture::rawOperandIsCaptureFree(defStore, hir, operandId)) {
         message = Option::SOME("a C function pointer needs a named function or a closure that captures nothing");
       }

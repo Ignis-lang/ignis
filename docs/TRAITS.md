@@ -212,18 +212,23 @@ The compiler answers them from a type's structure:
 
 | Type | `Send` | `Sync` |
 |------|--------|--------|
-| Integer and float primitives, `boolean`, `char`, `str`, `void`, `never`, atoms, ranges, raw C function pointers | yes | yes |
+| Integer and float primitives, `boolean`, `char`, `str`, `void`, `never`, atoms, ranges, function pointers `fn(A) -> R` | yes | yes |
 | `*T`, `*mut T` | no | no |
 | `&T`, slices `T[]` | when `T` is `Sync` | when `T` is `Sync` |
 | `&mut T` | when `T` is `Send` | when `T` is `Sync` |
 | Fixed arrays, tuples | when every element is | when every element is |
 | Records, enums, generic instances | declared, or every field / payload is | declared, or every field / payload is |
-| Function values | no; only a call argument is judged, at the call (below) | no; only a call argument is judged, at the call (below) |
+| Closure values `(A) -> R` | no; only a call argument is judged, at the call (below) | no; only a call argument is judged, at the call (below) |
 | Type parameters | when the parameter declares the bound | when the parameter declares the bound |
 
-A function type does not record what a closure captured, so a function-typed argument bound to a
+A function pointer type `fn(A) -> R` has no environment, so it is always both, everywhere: as a
+field, a type argument, a `@sendable` argument or a value moved into another thread. A record whose
+fields are function pointers is Send and Sync from its structure, with no declaration. See
+[function pointers](web/language/closures.md#function-pointers).
+
+A closure type does not record what a closure captured, so a closure-typed argument bound to a
 `Send` or `Sync` type parameter, or passed to a `@sendable` parameter, is judged where it is
-passed, once captures are known. Anywhere else, such as a field of `Holder<() -> i32>`, a function
+passed, once captures are known. Anywhere else, such as a field of `Holder<() -> i32>`, a closure
 type is neither `Send` nor `Sync`.
 
 - a closure literal: every capture moved in by value has to be `Send` (`Sync` for a `Sync` bound),

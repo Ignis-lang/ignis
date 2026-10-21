@@ -6395,3 +6395,88 @@ function parserRejectsStaticWithoutStrInATypePosition(): void {
   Parser::parseInto(&source, &mut module, &mut diagnostics);
   Test::assert(diagnostics.length() > 0);
 }
+
+@test
+function parserParsesFunctionPointerTypeInAlias(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_function_pointer_type.ign",
+    "type Handler = fn(&i32, i32) -> fn() -> void;"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing type alias root"),
+  };
+
+  let aliasValue: Ast::TypeId = match (module.items.get(itemId)) {
+    Option::SOME(Ast::Item::Node::TypeAlias(alias)) -> alias.value,
+    _ -> @panic("expected type alias root"),
+  };
+
+  match (expectType(&module, aliasValue)) {
+    Ast::Type::Node::Function(functionType) -> {
+      Test::assertEq<boolean>(functionType.pointer, true);
+      Test::assertEq<u64>(functionType.parameters.length(), 2);
+      Test::assertEq<u64>(functionType.span.start, 15);
+
+      match (expectType(&module, functionType.returnType)) {
+        Ast::Type::Node::Function(returnType) -> {
+          Test::assertEq<boolean>(returnType.pointer, true);
+          Test::assertEq<u64>(returnType.parameters.length(), 0);
+        },
+        _ -> @panic("expected function pointer return type"),
+      };
+    },
+    _ -> @panic("expected function pointer type"),
+  };
+}
+
+@test
+function parserKeepsClosureTypeApartFromFunctionPointerType(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_closure_type.ign",
+    "type Callback = (i32) -> i32;"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing type alias root"),
+  };
+
+  let aliasValue: Ast::TypeId = match (module.items.get(itemId)) {
+    Option::SOME(Ast::Item::Node::TypeAlias(alias)) -> alias.value,
+    _ -> @panic("expected type alias root"),
+  };
+
+  match (expectType(&module, aliasValue)) {
+    Ast::Type::Node::Function(functionType) -> Test::assertEq<boolean>(functionType.pointer, false),
+    _ -> @panic("expected closure type"),
+  };
+}
+
+@test
+function parserKeepsFnAsAnOrdinaryName(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_fn_name.ign",
+    "function fn(value: i32): i32 { return value; } function main(): void { let result: i32 = fn(1); }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+}

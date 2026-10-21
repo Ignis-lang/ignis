@@ -2032,6 +2032,16 @@ export namespace CodegenQbe {
           context.reserve(node.dest.raw(), slot);
         }
 
+        // A function pointer read back as a closure gets the closure's slot
+        // the same way.
+        if (let Lir::Instr::RawToClosure(node) = instruction) {
+          let closureSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.closureType);
+          let closureSlot: String = CodegenQbe::freshTemp(emitter);
+
+          emitter.out.pushStr(`    ${closureSlot.toStr()} =l alloc16 ${closureSize}\n`.toStr());
+          context.reserve(node.dest.raw(), closureSlot);
+        }
+
         if (let Lir::Instr::MakeClosure(node) = instruction) {
           let closureSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.closureType);
           let closureSlot: String = CodegenQbe::freshTemp(emitter);

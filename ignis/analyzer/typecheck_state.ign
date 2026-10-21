@@ -1658,9 +1658,10 @@ export namespace Analyzer {
     ///
     /// Raw pointers are neither: what they point to is not tracked. A shared
     /// reference, or a slice, is either one only when its referent is Sync,
-    /// since every holder reads the same value. A function value is neither,
+    /// since every holder reads the same value. A closure value is neither,
     /// because its type does not say what it captured; callers judge closure
-    /// arguments by their captures instead. A record or enum that declares the
+    /// arguments by their captures instead. A function pointer (`fn(A) -> R`)
+    /// is both: it has no environment. A record or enum that declares the
     /// trait in `@implements` is taken at its word, provided every type
     /// argument of an instance has the trait too; any other is judged by its
     /// fields or payloads, with an instance's type arguments substituted in. A
@@ -5873,6 +5874,10 @@ export namespace Analyzer {
           };
 
           let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+          if (functionType.pointer) {
+            return Option::SOME(typeStoreRef.rawFunctionType(params, resolvedReturn));
+          }
 
           return Option::SOME(typeStoreRef.intern(Analyzer::Type::Function(Analyzer::FunctionType {
             params: params,

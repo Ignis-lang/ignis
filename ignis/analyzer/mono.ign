@@ -418,10 +418,10 @@ export namespace Mono {
           parts = Mono::copyTypeIds(&signature.params);
           inner = signature.returnType;
         },
-        // Never a type argument, since the typechecker never produces one;
-        // spelled like the function type it lowers so mangling stays total.
+        // A function pointer type argument (`Vector<fn(i32) -> i32>`) has to
+        // mangle apart from the closure type of the same signature.
         Analyzer::Type::RawFunction(signature) -> {
-          kind = 6;
+          kind = 12;
           parts = Mono::copyTypeIds(&signature.params);
           inner = signature.returnType;
         },
@@ -489,6 +489,13 @@ export namespace Mono {
 
     if (kind == 6) {
       return String::create("fn_")
+        .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &parts, "_").toStr())
+        .concat("_")
+        .concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
+    }
+
+    if (kind == 12) {
+      return String::create("fnptr_")
         .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &parts, "_").toStr())
         .concat("_")
         .concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());

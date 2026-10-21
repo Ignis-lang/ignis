@@ -5731,16 +5731,19 @@ export namespace CodegenC {
   }
 
   /// One `ignis_fn_<id>` typedef per C function pointer signature, in type id
-  /// order. Every `RawFunction` in the store gets one: lowering creates them
-  /// only at extern boundaries, and a typedef nothing names costs nothing.
-  /// Parameter types may be records that are only forward-declared so far,
-  /// which a declarator accepts.
+  /// order. Every `RawFunction` in the store gets one: source `fn(A) -> R`
+  /// types and extern boundaries create them, and a typedef nothing names
+  /// costs nothing. Parameter types may be records that are only
+  /// forward-declared so far, which a declarator accepts. `withClosures`
+  /// selects the signatures that take or return a closure, which have to
+  /// follow the closure structs; the others come first.
   function emitRawFunctionTypedefs(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     closures: &CodegenC::ClosureTables,
+    withClosures: boolean,
   ): void {
     let mut emitted: u64 = 0;
     let mut rawId: u64 = 0;
@@ -5759,6 +5762,24 @@ export namespace CodegenC {
         rawId += 1;
         continue;
       };
+
+      let mut takesClosure: boolean = CodegenC::isFunctionType(typeStore, resultType);
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < params.length()) {
+        if (let Option::SOME(paramType) = params.get(paramIndex)) {
+          if (CodegenC::isFunctionType(typeStore, *paramType)) {
+            takesClosure = true;
+          }
+        }
+
+        paramIndex += 1;
+      }
+
+      if (takesClosure != withClosures) {
+        rawId += 1;
+        continue;
+      }
 
       if (emitted == 0) {
         let mut headerRef: &mut String = output;
@@ -6623,16 +6644,6 @@ export namespace CodegenC {
 
     CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures, true);
 
-    // Closure signature structs are emitted before record/enum definitions: a
-    // closure struct only needs its `call`/`drop_fn` field types (function
-    // pointers) and its `env` field (`u8*`), so a forward-declared record
-    // referenced there is enough. A record can embed a closure-typed field by
-    // value (e.g. a field declared `(i32) -> i32`), which needs the closure
-    // struct to be a *complete* type by the time the record's own definition
-    // is emitted — the reverse order left that field incomplete.
-    CodegenC::emitArrayReturnTypes(defStore, typeStore, symbols, &mut source, closures, true);
-    CodegenC::emitClosureSignatureStructs(defStore, typeStore, symbols, &mut source, closures);
-
     CodegenC::internRecordFieldStorageTypes(defStore, typeStore, &typeDefs);
 
     // A hosted unit leaves extern functions to the headers it includes.
@@ -6643,9 +6654,23 @@ export namespace CodegenC {
       CodegenC::internExternPrototypeTypes(defStore, typeStore, &externPrototypes);
     }
 
-    // After the closure structs: a C function pointer may take a closure by
-    // value, which a declarator can name only once the struct is declared.
-    CodegenC::emitRawFunctionTypedefs(defStore, typeStore, symbols, &mut source, closures);
+    // Before the closure structs: a closure signature may take or return a
+    // function pointer (`fn(A) -> R`), which its `call` declarator names by
+    // typedef. The records a typedef names are forward-declared above, which a
+    // declarator accepts. The few signatures that take or return a closure
+    // follow the closure structs instead.
+    CodegenC::emitRawFunctionTypedefs(defStore, typeStore, symbols, &mut source, closures, false);
+
+    // Closure signature structs are emitted before record/enum definitions: a
+    // closure struct only needs its `call`/`drop_fn` field types (function
+    // pointers) and its `env` field (`u8*`), so a forward-declared record
+    // referenced there is enough. A record can embed a closure-typed field by
+    // value (e.g. a field declared `(i32) -> i32`), which needs the closure
+    // struct to be a *complete* type by the time the record's own definition
+    // is emitted — the reverse order left that field incomplete.
+    CodegenC::emitArrayReturnTypes(defStore, typeStore, symbols, &mut source, closures, true);
+    CodegenC::emitClosureSignatureStructs(defStore, typeStore, symbols, &mut source, closures);
+    CodegenC::emitRawFunctionTypedefs(defStore, typeStore, symbols, &mut source, closures, true);
 
     CodegenC::emitRangeTypes(defStore, typeStore, symbols, &mut source, closures);
     CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures, false);

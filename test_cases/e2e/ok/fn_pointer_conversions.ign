@@ -1,0 +1,77 @@
+// A `fn` value converts to the closure type of the same signature, a
+// capture-free closure literal and a static method convert to `fn`, and a
+// `fn` value is called directly, through a field and through a reference.
+type Unary = fn(i32) -> i32;
+
+record Holder {
+  public operation: Unary;
+}
+
+record Math {
+  static negate(value: i32): i32 {
+    return -value;
+  }
+}
+
+function double(value: i32): i32 {
+  return value * 2;
+}
+
+function applyClosure(operation: (i32) -> i32, value: i32): i32 {
+  return operation(value);
+}
+
+function applyPointer(operation: fn(i32) -> i32, value: i32): i32 {
+  return operation(value);
+}
+
+function pick(useDouble: boolean): fn(i32) -> i32 {
+  if (useDouble) {
+    return double;
+  }
+
+  return Math::negate;
+}
+
+function main(): i32 {
+  let literal: fn(i32) -> i32 = (value: i32): i32 -> value + 100;
+  let copied: fn(i32) -> i32 = literal;
+  let method: Unary = Math::negate;
+  let holder: Holder = Holder { operation: double };
+  let reference: &fn(i32) -> i32 = &copied;
+  let noArguments: fn() -> void = (): void -> {
+    return;
+  };
+
+  noArguments();
+
+  if (literal(1) != 101) {
+    return 1;
+  }
+
+  if (applyClosure(copied, 2) != 102) {
+    return 2;
+  }
+
+  if (applyPointer(method, 3) != -3) {
+    return 3;
+  }
+
+  if ((holder.operation)(4) != 8 || holder.operation(5) != 10) {
+    return 4;
+  }
+
+  if ((*reference)(6) != 106) {
+    return 5;
+  }
+
+  if (pick(true)(7) != 14 || pick(false)(7) != -7) {
+    return 6;
+  }
+
+  if (applyPointer((value: i32): i32 -> value * value, 9) != 81) {
+    return 7;
+  }
+
+  return 0;
+}

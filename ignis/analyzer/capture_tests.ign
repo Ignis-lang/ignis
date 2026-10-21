@@ -537,3 +537,139 @@ function moduleCapturePassNumbersOnlyItsOwnClosures(): void {
     Test::assertEq<str>(name.toStr(), "__closure_thunk_1");
   }
 }
+
+/// Run `source` through parse and analysis and return what analysis reported.
+function fnPointerAnalysisDiagnostics(source: str): DiagnosticBag {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "fn_pointer_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(captureCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  return output.diagnostics;
+}
+
+/// Run `source` through parse, analysis, HIR lowering and capture analysis,
+/// and return what the function pointer check reported.
+function fnPointerCaptureDiagnostics(source: str): DiagnosticBag {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "fn_pointer_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(captureCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let _ = Capture::populateClosureCaptures(&mut defStore, &mut typeStore, &mut symbols, &mut hir);
+
+  return Capture::reportNonCaptureFreeRawFunctions(&mut defStore, &mut typeStore, &mut symbols, &hir);
+}
+
+/// Scenario: named functions, a static method and capture-free closure
+/// literals become `fn` values, and a `fn` value is called and passed where
+/// the closure type of its signature is expected.
+@test
+function fnPointerAcceptsCaptureFreeSourcesAndConvertsToClosures(): void {
+  let source: str = "record Math {\n  static negate(value: i32): i32 {\n    return -value;\n  }\n}\n\nfunction double(value: i32): i32 {\n  return value * 2;\n}\n\nfunction apply(operation: (i32) -> i32, value: i32): i32 {\n  return operation(value);\n}\n\nfunction main(): i32 {\n  let named: fn(i32) -> i32 = double;\n  let method: fn(i32) -> i32 = Math::negate;\n  let literal: fn(i32) -> i32 = (value: i32): i32 -> value + 1;\n  let copied: fn(i32) -> i32 = literal;\n  return named(1) + method(2) + apply(copied, 3);\n}\n";
+
+  let analysis: DiagnosticBag = fnPointerAnalysisDiagnostics(source);
+  let capture: DiagnosticBag = fnPointerCaptureDiagnostics(source);
+
+  Test::assertEq<u64>(captureCountErrors(&analysis), 0);
+  Test::assertEq<u64>(captureCountErrors(&capture), 0);
+}
+
+/// Scenario: a closure-typed variable does not show what it captured, so it
+/// does not convert to a `fn` type.
+@test
+function fnPointerRejectsAClosureTypedValue(): void {
+  let bag: DiagnosticBag = fnPointerAnalysisDiagnostics(
+    "function main(): i32 {\n  let closure: (i32) -> i32 = (value: i32): i32 -> value;\n  let pointer: fn(i32) -> i32 = closure;\n  return pointer(1);\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::FUNCTION_POINTER_FROM_CLOSURE_VALUE,
+    "a closure value cannot be used as 'fn(i32) -> i32': its type does not show what it captured",
+  );
+}
+
+/// Scenario: a closure literal that captures a local has an environment a
+/// function pointer cannot hold, and the diagnostic names the capture.
+@test
+function fnPointerRejectsACapturingClosureLiteral(): void {
+  let bag: DiagnosticBag = fnPointerCaptureDiagnostics(
+    "function main(): i32 {\n  let offset: i32 = 3;\n  let shifted: fn(i32) -> i32 = (value: i32): i32 -> value + offset;\n  return shifted(1);\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::FUNCTION_POINTER_CAPTURES,
+    "a closure taken as a function pointer cannot capture 'offset'",
+  );
+}
+
+/// Scenario: a function pointer type is Send and Sync, and so is a record
+/// whose fields are function pointers; the closure type is neither.
+@test
+function fnPointerTypesAreSendAndSync(): void {
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let i32Type: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let mut pointerParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  pointerParams.push(i32Type);
+  let mut closureParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  closureParams.push(i32Type);
+  let pointerType: Analyzer::TypeId = typeStore.rawFunctionType(pointerParams, i32Type);
+  let closureType: Analyzer::TypeId = typeStore.functionType(closureParams, i32Type);
+  let scope: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut visited: Vector<u32> = Vector::new<u32>();
+
+  Test::assertEq<boolean>(Analyzer::Typecheck::isThreadSafeType(&mut defStore, &mut typeStore, pointerType, false, &scope, &mut visited), true);
+  Test::assertEq<boolean>(Analyzer::Typecheck::isThreadSafeType(&mut defStore, &mut typeStore, pointerType, true, &scope, &mut visited), true);
+  Test::assertEq<boolean>(Analyzer::Typecheck::isCopyType(&mut defStore, &mut typeStore, pointerType), true);
+  Test::assertEq<boolean>(Analyzer::Typecheck::isThreadSafeType(&mut defStore, &mut typeStore, closureType, false, &scope, &mut visited), false);
+  Test::assertEq<str>(typeStore.nameOf(pointerType).toStr(), "fn(i32) -> i32");
+  Test::assertEq<str>(typeStore.nameOf(closureType).toStr(), "(i32) -> i32");
+}
+
+/// Scenario: a record holding `fn` fields satisfies a `Send & Sync` bound
+/// structurally, while one holding a closure field does not.
+@test
+function fnPointerRecordFieldsSatisfySendAndSyncBounds(): void {
+  let accepted: DiagnosticBag = fnPointerAnalysisDiagnostics(
+    "record Handlers {\n  public run: fn(i32) -> i32;\n}\n\nrecord Shared<T: Send & Sync> {\n  public value: T;\n}\n\nfunction double(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  let shared: Shared<Handlers> = Shared { value: Handlers { run: double } };\n  return (shared.value.run)(1);\n}\n",
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&accepted), 0);
+}

@@ -156,3 +156,54 @@ function spawn(@sendable task: () -> i32): i32 {
 
 Non-escaping closures keep their environment on the stack. Escaping ones get a heap-allocated
 environment and a drop function, which is the cost you are agreeing to when you let one escape.
+
+## Function pointers
+
+`fn(A, B) -> R` is a function value with no environment, next to the closure type `(A, B) -> R`. It
+is written anywhere a type is: parameters, results, locals, fields, type arguments and aliases.
+
+```ignis
+record Math {
+    static negate(value: i32): i32 {
+        return -value;
+    }
+}
+
+function double(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): i32 {
+    let mut handlers: Vector<fn(i32) -> i32> = Vector::new<fn(i32) -> i32>();
+
+    handlers.push(double);
+    handlers.push(Math::negate);
+    handlers.push((value: i32): i32 -> value + 1);
+
+    let mut total: i32 = 0;
+    let mut index: u64 = 0;
+
+    while (index < handlers.length()) {
+        if (let Option::SOME(handler) = handlers.get(index)) {
+            total += (*handler)(10);
+        }
+
+        index += 1;
+    }
+
+    return total;
+}
+```
+
+A non-generic function, a static method of a non-generic type named by its path, a closure literal
+that captures nothing and another `fn` value are the values a `fn` type takes. A closure literal
+that captures something is rejected and the error names the capture (A0264). A closure-typed value
+is rejected too (A0265): its type does not show what it captured.
+
+A `fn` value converts on its own to the closure type of the same signature, so it goes anywhere a
+closure does. It is Copy, and it is always `Send` and `Sync`: there is no environment to own or
+share. A record whose fields are function pointers can be shared between threads through an `Arc`
+without declaring anything. Function pointers cannot be compared with `==`.
+
+`fn` is not a keyword. It means a function pointer only in a type, right before `(`, so it stays
+usable as a name.
