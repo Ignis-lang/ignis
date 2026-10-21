@@ -25,6 +25,7 @@ import
   analyzerModuleKind,
   exportSourcesOf,
   mapImportSourcesToDiscoveryTargets,
+  copyTraitDefaultsAcrossModules,
   restoreWrittenImportSources,
 from "../build/import_targets";
 import checkUnknownManifestKeys from "../build/manifest";
@@ -372,6 +373,8 @@ function analyzeParsedModules(
 
     preludeIndex += 1;
   }
+
+  copyTraitDefaultsAcrossModules(&mut program.modules, &program.infos, &preludePaths);
 
   let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
     &mut defStore,
@@ -798,6 +801,12 @@ function returnParsesToCache(
     let Option::SOME(exportSources) = parsedProgram.exportSources.pop() else {
       return;
     };
+
+    // A parse that holds copies of another module's trait defaults is not
+    // what its own text alone parses to, so the next analysis parses it again.
+    if (analyzedModule.crossModuleSources.length() > 0) {
+      continue;
+    }
 
     let mut module: Ast::Module = analyzedModule;
     restoreWrittenImportSources(&mut module, &exportSources);

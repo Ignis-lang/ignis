@@ -1,0 +1,644 @@
+import Ast from "@compiler::ast";
+import Vector from "std::vector";
+
+import _ from "./declarations";
+import _ from "./trait_defaults";
+
+/// Copies trait default methods onto types that implement a trait declared in
+/// another module.
+///
+/// A module's own parse copies the defaults of its own traits
+/// (`ParserTraitDefaults::materialize`). A trait in another module has a body
+/// only that module's parse holds, so this pass runs once every module of the
+/// program is parsed and its imports point at the modules they resolve to,
+/// before binding, which needs the copies to be methods of their types.
+///
+/// An `@implements` path that names no trait of its own module is followed
+/// the way the analyzer follows a name: through the imports that bind its
+/// first segment, the modules they republish, and the prelude. The copy is
+/// made in the arenas of the implementing type's module under fresh ids; the
+/// trait's module is only read. It records where the trait lives, so the
+/// analyzer reads the names in the copy in the trait's module and namespaces.
+export namespace ParserCrossModuleDefaults {
+  /// One default to copy onto a type of another module.
+  record PlannedCopy {
+    public targetModule: u64;
+    public ownerItemId: Ast::ItemId;
+    public sourceModule: u64;
+    public methodItemId: Ast::ItemId;
+    public traitPath: String;
+    public methodName: String;
+  }
+
+  /// A type that names traits in `@implements`, with what it declares.
+  record Implementer {
+    public ownerItemId: Ast::ItemId;
+    public implemented: Vector<String>;
+    public namespaces: Vector<String>;
+  }
+
+  /// The paths of every trait `itemIds` declare, written inside `namespaces`,
+  /// descending through namespaces and exported declarations.
+  function collectTraitPaths(
+    module: &Ast::Module,
+    itemIds: &Vector<Ast::ItemId>,
+    namespaces: &Vector<String>,
+    paths: &mut Vector<String>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      let Option::SOME(itemId) = itemIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+      let mut nestedNamespace: Option<String> = Option::NONE;
+
+      if (let Option::SOME(item) = module.items.get(*itemId)) {
+        match (item) {
+          Ast::Item::Node::Trait(trait_) -> {
+            let mut pathsRef: &mut Vector<String> = paths;
+            pathsRef.push(ParserTraitDefaults::joinPath(namespaces, namespaces.length(), &trait_.name));
+          },
+          Ast::Item::Node::Namespace(namespaceItem) -> {
+            nested = ParserDeclarations::copyItemIds(&namespaceItem.items);
+            nestedNamespace = Option::SOME(namespaceItem.name.clone());
+          },
+          Ast::Item::Node::Export(exportItem) -> {
+            if (let Option::SOME(innerItemId) = exportItem.declaration) {
+              nested.push(innerItemId);
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      if (nested.length() > 0) {
+        let inner: Vector<String> = ParserTraitDefaults::innerNamespaces(namespaces, &nestedNamespace);
+        ParserCrossModuleDefaults::collectTraitPaths(module, &nested, &inner, paths);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The paths of every trait `module` declares.
+  function traitPathsOf(module: &Ast::Module): Vector<String> {
+    let mut paths: Vector<String> = Vector::new<String>();
+    let topLevel: Vector<String> = Vector::new<String>();
+    ParserCrossModuleDefaults::collectTraitPaths(module, &module.roots, &topLevel, &mut paths);
+    return paths;
+  }
+
+  /// Whether `written`, read from inside `namespaces`, names one of `paths`:
+  /// a bare name through the namespaces innermost first, a qualified path as
+  /// the path that is it or ends with it.
+  function namesLocalTrait(
+    written: &String,
+    namespaces: &Vector<String>,
+    paths: &Vector<String>
+  ): boolean {
+    let mut depth: u64 = namespaces.length() + 1;
+
+    while (depth > 0) {
+      depth -= 1;
+      let candidate: String = ParserTraitDefaults::joinPath(namespaces, depth, written);
+      let mut index: u64 = 0;
+
+      while (index < paths.length()) {
+        if (let Option::SOME(path) = paths.get(index)) {
+          if (path.equals(candidate.toStr())) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < paths.length()) {
+      if (let Option::SOME(path) = paths.get(index)) {
+        if (ParserTraitDefaults::pathMatches(path, written)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// The first `::` segment of `path`.
+  function firstSegment(path: &String): String {
+    let colon: u8 = 58;
+    let mut index: u64 = 0;
+
+    while (index < path.length()) {
+      if (let Option::SOME(byte) = path.byteAt(index)) {
+        if (byte == colon) {
+          return path.substring(0, index as i64);
+        }
+      }
+
+      index += 1;
+    }
+
+    return path.clone();
+  }
+
+  function moduleIndexOf(paths: &Vector<String>, path: &String): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < paths.length()) {
+      if (let Option::SOME(candidate) = paths.get(index)) {
+        if (candidate.equals(path.toStr())) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function contains(values: &Vector<u64>, wanted: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(value) = values.get(index)) {
+        if (*value == wanted) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Whether a binding list brings `name` into scope: it lists `name`, or it
+  /// is `_`, which brings every export.
+  function bindingsReach(bindings: &Vector<Ast::ImportBinding>, name: &String): boolean {
+    let mut index: u64 = 0;
+
+    while (index < bindings.length()) {
+      if (let Option::SOME(binding) = bindings.get(index)) {
+        match (binding.kind) {
+          Ast::ImportBindingKind::Discard -> {
+            return true;
+          },
+          Ast::ImportBindingKind::Named -> {
+            if (let Option::SOME(bound) = &binding.name) {
+              if (bound.equals(name.toStr())) {
+                return true;
+              }
+            }
+          },
+        };
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// The modules the imports and republishing exports of `module` reach for
+  /// `name`, in written order.
+  function sourcesReaching(
+    module: &Ast::Module,
+    moduleSources: &Vector<String>,
+    name: &String
+  ): Vector<u64> {
+    let mut reached: Vector<u64> = Vector::new<u64>();
+    let mut index: u64 = 0;
+
+    while (index < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut source: Option<String> = Option::NONE;
+
+      if (let Option::SOME(item) = module.items.get(*rootId)) {
+        match (item) {
+          Ast::Item::Node::Import(importItem) -> {
+            if (ParserCrossModuleDefaults::bindingsReach(&importItem.items, name)) {
+              source = Option::SOME(importItem.source.clone());
+            }
+          },
+          Ast::Item::Node::Export(exportItem) -> {
+            if (let Option::SOME(exportSource) = &exportItem.source) {
+              if (ParserCrossModuleDefaults::bindingsReach(&exportItem.items, name)) {
+                source = Option::SOME(exportSource.clone());
+              }
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(sourcePath) = source) {
+        if (let Option::SOME(moduleIndex) = ParserCrossModuleDefaults::moduleIndexOf(moduleSources, &sourcePath)) {
+          reached.push(moduleIndex);
+        }
+      }
+
+      index += 1;
+    }
+
+    return reached;
+  }
+
+  /// The module that declares the trait `path` names, searched from the
+  /// imports of `moduleIndex` through every module they reach.
+  function findThroughImports(
+    modules: &Vector<Ast::Module>,
+    moduleSources: &Vector<String>,
+    traitPaths: &Vector<Vector<String>>,
+    moduleIndex: u64,
+    path: &String,
+    visited: &mut Vector<u64>,
+  ): Option<u64> {
+    let Option::SOME(module) = modules.get(moduleIndex) else {
+      return Option::NONE;
+    };
+
+    let head: String = ParserCrossModuleDefaults::firstSegment(path);
+    let reached: Vector<u64> = ParserCrossModuleDefaults::sourcesReaching(module, moduleSources, &head);
+    let mut index: u64 = 0;
+
+    while (index < reached.length()) {
+      let Option::SOME(target) = reached.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Option::SOME(found) = ParserCrossModuleDefaults::findExported(
+        modules,
+        moduleSources,
+        traitPaths,
+        *target,
+        path,
+        visited,
+      )) {
+        return Option::SOME(found);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The module that declares the trait `path` names, when `moduleIndex`
+  /// declares it or republishes it from a module that does.
+  function findExported(
+    modules: &Vector<Ast::Module>,
+    moduleSources: &Vector<String>,
+    traitPaths: &Vector<Vector<String>>,
+    moduleIndex: u64,
+    path: &String,
+    visited: &mut Vector<u64>,
+  ): Option<u64> {
+    if (ParserCrossModuleDefaults::contains(&*visited, moduleIndex)) {
+      return Option::NONE;
+    }
+
+    let mut visitedRef: &mut Vector<u64> = visited;
+    visitedRef.push(moduleIndex);
+
+    if (let Option::SOME(declared) = traitPaths.get(moduleIndex)) {
+      let mut index: u64 = 0;
+
+      while (index < declared.length()) {
+        if (let Option::SOME(candidate) = declared.get(index)) {
+          if (candidate.equals(path.toStr())) {
+            return Option::SOME(moduleIndex);
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    return ParserCrossModuleDefaults::findThroughImports(modules, moduleSources, traitPaths, moduleIndex, path, visitedRef);
+  }
+
+  /// Collects the records and enums of `itemIds`, written inside
+  /// `namespaces`, that name a trait in `@implements`.
+  function collectImplementers(
+    module: &Ast::Module,
+    itemIds: &Vector<Ast::ItemId>,
+    namespaces: &Vector<String>,
+    implementers: &mut Vector<ParserCrossModuleDefaults::Implementer>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      let Option::SOME(itemId) = itemIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut implemented: Vector<String> = Vector::new<String>();
+      let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+      let mut nestedNamespace: Option<String> = Option::NONE;
+
+      if (let Option::SOME(item) = module.items.get(*itemId)) {
+        match (item) {
+          Ast::Item::Node::Record(record_) -> {
+            implemented = ParserTraitDefaults::implementedTraitNames(&record_.metadata);
+          },
+          Ast::Item::Node::Enum(enum_) -> {
+            implemented = ParserTraitDefaults::implementedTraitNames(&enum_.metadata);
+          },
+          Ast::Item::Node::Namespace(namespaceItem) -> {
+            nested = ParserDeclarations::copyItemIds(&namespaceItem.items);
+            nestedNamespace = Option::SOME(namespaceItem.name.clone());
+          },
+          Ast::Item::Node::Export(exportItem) -> {
+            if (let Option::SOME(innerItemId) = exportItem.declaration) {
+              nested.push(innerItemId);
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      if (implemented.length() > 0) {
+        let noNamespace: Option<String> = Option::NONE;
+        let mut implementersRef: &mut Vector<ParserCrossModuleDefaults::Implementer> = implementers;
+        implementersRef.push(ParserCrossModuleDefaults::Implementer {
+          ownerItemId: *itemId,
+          implemented: ParserTraitDefaults::innerNamespaces(&implemented, &noNamespace),
+          namespaces: ParserTraitDefaults::innerNamespaces(namespaces, &noNamespace),
+        });
+      }
+
+      if (nested.length() > 0) {
+        let inner: Vector<String> = ParserTraitDefaults::innerNamespaces(namespaces, &nestedNamespace);
+        ParserCrossModuleDefaults::collectImplementers(module, &nested, &inner, implementers);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The methods a record or enum item declares.
+  function methodsOf(module: &Ast::Module, itemId: Ast::ItemId): Vector<Ast::ItemId> {
+    let Option::SOME(item) = module.items.get(itemId) else {
+      return Vector::new<Ast::ItemId>();
+    };
+
+    return match (item) {
+      Ast::Item::Node::Record(record_) -> ParserDeclarations::copyItemIds(&record_.methods),
+      Ast::Item::Node::Enum(enum_) -> ParserDeclarations::copyItemIds(&enum_.methods),
+      _ -> Vector::new<Ast::ItemId>(),
+    };
+  }
+
+  /// Whether `copies` already gives the type `ownerItemId` of module
+  /// `targetModule` a method called `methodName`.
+  function plansMethod(
+    copies: &Vector<ParserCrossModuleDefaults::PlannedCopy>,
+    targetModule: u64,
+    ownerItemId: Ast::ItemId,
+    methodName: &String,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < copies.length()) {
+      if (let Option::SOME(planned) = copies.get(index)) {
+        if (planned.targetModule == targetModule && planned.ownerItemId.raw() == ownerItemId.raw() && planned.methodName.equals(methodName.toStr())) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Plans the copies module `targetModule` needs.
+  function planModule(
+    modules: &Vector<Ast::Module>,
+    moduleSources: &Vector<String>,
+    preludeIndices: &Vector<u64>,
+    traitPaths: &Vector<Vector<String>>,
+    targetModule: u64,
+    copies: &mut Vector<ParserCrossModuleDefaults::PlannedCopy>,
+  ): void {
+    let Option::SOME(module) = modules.get(targetModule) else {
+      return;
+    };
+    let Option::SOME(localPaths) = traitPaths.get(targetModule) else {
+      return;
+    };
+
+    let mut implementers: Vector<ParserCrossModuleDefaults::Implementer> = Vector::new<ParserCrossModuleDefaults::Implementer>();
+    let topLevel: Vector<String> = Vector::new<String>();
+    ParserCrossModuleDefaults::collectImplementers(module, &module.roots, &topLevel, &mut implementers);
+
+    let mut implementerIndex: u64 = 0;
+
+    while (implementerIndex < implementers.length()) {
+      let Option::SOME(implementer) = implementers.get(implementerIndex) else {
+        implementerIndex += 1;
+        continue;
+      };
+
+      let methods: Vector<Ast::ItemId> = ParserCrossModuleDefaults::methodsOf(module, implementer.ownerItemId);
+      let mut writtenIndex: u64 = 0;
+
+      while (writtenIndex < implementer.implemented.length()) {
+        let Option::SOME(written) = implementer.implemented.get(writtenIndex) else {
+          writtenIndex += 1;
+          continue;
+        };
+
+        if (ParserCrossModuleDefaults::namesLocalTrait(written, &implementer.namespaces, localPaths)) {
+          writtenIndex += 1;
+          continue;
+        }
+
+        let mut visited: Vector<u64> = Vector::new<u64>();
+        visited.push(targetModule);
+        let mut found: Option<u64> = ParserCrossModuleDefaults::findThroughImports(
+          modules,
+          moduleSources,
+          traitPaths,
+          targetModule,
+          written,
+          &mut visited,
+        );
+        let mut preludeIndex: u64 = 0;
+
+        while (found.isNone() && preludeIndex < preludeIndices.length()) {
+          if (let Option::SOME(preludeModule) = preludeIndices.get(preludeIndex)) {
+            found = ParserCrossModuleDefaults::findExported(modules, moduleSources, traitPaths, *preludeModule, written, &mut visited);
+          }
+
+          preludeIndex += 1;
+        }
+
+        let Option::SOME(sourceModule) = found else {
+          writtenIndex += 1;
+          continue;
+        };
+        let Option::SOME(declaring) = modules.get(sourceModule) else {
+          writtenIndex += 1;
+          continue;
+        };
+
+        let mut entries: Vector<ParserTraitDefaults::Entry> = Vector::new<ParserTraitDefaults::Entry>();
+        ParserTraitDefaults::collectEntries(declaring, &declaring.roots, &topLevel, &mut entries);
+        let mut entryIndex: u64 = 0;
+
+        while (entryIndex < entries.length()) {
+          let Option::SOME(entry) = entries.get(entryIndex) else {
+            entryIndex += 1;
+            continue;
+          };
+
+          if (entry.traitPath.equals(written.toStr()) && !ParserTraitDefaults::declaresMethod(module, &methods, &entry.methodName) && !ParserCrossModuleDefaults::plansMethod(&*copies, targetModule, implementer.ownerItemId, &entry.methodName)) {
+            let mut copiesRef: &mut Vector<ParserCrossModuleDefaults::PlannedCopy> = copies;
+            copiesRef.push(ParserCrossModuleDefaults::PlannedCopy {
+              targetModule: targetModule,
+              ownerItemId: implementer.ownerItemId,
+              sourceModule: sourceModule,
+              methodItemId: entry.methodItemId,
+              traitPath: entry.traitPath.clone(),
+              methodName: entry.methodName.clone(),
+            });
+          }
+
+          entryIndex += 1;
+        }
+
+        writtenIndex += 1;
+      }
+
+      implementerIndex += 1;
+    }
+  }
+
+  /// Copies every default a type inherits from a trait of another module.
+  /// `moduleSources[i]` is the resolved path of `modules[i]`, the path an
+  /// import's `source` holds once the driver mapped it; `preludePaths` are
+  /// the modules every module sees without an import.
+  function materialize(
+    modules: &mut Vector<Ast::Module>,
+    moduleSources: &Vector<String>,
+    preludePaths: &Vector<String>,
+  ): void {
+    let mut traitPaths: Vector<Vector<String>> = Vector::new<Vector<String>>();
+    let mut preludeIndices: Vector<u64> = Vector::new<u64>();
+    let mut moduleIndex: u64 = 0;
+
+    while (moduleIndex < modules.length()) {
+      if (let Option::SOME(module) = modules.get(moduleIndex)) {
+        traitPaths.push(ParserCrossModuleDefaults::traitPathsOf(module));
+      }
+
+      moduleIndex += 1;
+    }
+
+    let mut preludeIndex: u64 = 0;
+
+    while (preludeIndex < preludePaths.length()) {
+      if (let Option::SOME(preludePath) = preludePaths.get(preludeIndex)) {
+        if (let Option::SOME(found) = ParserCrossModuleDefaults::moduleIndexOf(moduleSources, preludePath)) {
+          preludeIndices.push(found);
+        }
+      }
+
+      preludeIndex += 1;
+    }
+
+    let mut copies: Vector<ParserCrossModuleDefaults::PlannedCopy> = Vector::new<ParserCrossModuleDefaults::PlannedCopy>();
+    moduleIndex = 0;
+
+    while (moduleIndex < modules.length()) {
+      ParserCrossModuleDefaults::planModule(&*modules, moduleSources, &preludeIndices, &traitPaths, moduleIndex, &mut copies);
+      moduleIndex += 1;
+    }
+
+    // Each default is first copied out of its trait's module into a scratch
+    // module of its own, so no module is read while another one of the same
+    // list is appended to.
+    let mut scratches: Vector<Ast::Module> = Vector::new<Ast::Module>();
+    let mut scratchItems: Vector<Option<Ast::ItemId>> = Vector::new<Option<Ast::ItemId>>();
+    let mut copyIndex: u64 = 0;
+
+    while (copyIndex < copies.length()) {
+      let mut scratch: Ast::Module = Ast::Module::init();
+      let mut scratchItem: Option<Ast::ItemId> = Option::NONE;
+
+      if (let Option::SOME(planned) = copies.get(copyIndex)) {
+        if (let Option::SOME(declaring) = modules.get(planned.sourceModule)) {
+          if (let Option::SOME(itemId) = ParserTraitDefaults::cloneMethodItem(declaring, &mut scratch, planned.methodItemId)) {
+            scratchItem = Option::SOME(itemId);
+          }
+        }
+      }
+
+      scratches.push(scratch);
+      scratchItems.push(scratchItem);
+      copyIndex += 1;
+    }
+
+    copyIndex = 0;
+
+    while (copyIndex < copies.length()) {
+      let Option::SOME(planned) = copies.get(copyIndex) else {
+        copyIndex += 1;
+        continue;
+      };
+      let Option::SOME(scratch) = scratches.get(copyIndex) else {
+        copyIndex += 1;
+        continue;
+      };
+      let Option::SOME(scratchItemSlot) = scratchItems.get(copyIndex) else {
+        copyIndex += 1;
+        continue;
+      };
+      let Option::SOME(scratchItem) = *scratchItemSlot else {
+        copyIndex += 1;
+        continue;
+      };
+      let Option::SOME(sourcePath) = moduleSources.get(planned.sourceModule) else {
+        copyIndex += 1;
+        continue;
+      };
+      let Option::SOME(target) = modules.getMut(planned.targetModule) else {
+        copyIndex += 1;
+        continue;
+      };
+
+      if (let Option::SOME(clonedId) = ParserTraitDefaults::cloneMethodItem(scratch, target, scratchItem)) {
+        ParserTraitDefaults::attachMethod(target, planned.ownerItemId, clonedId);
+        let typeName: String = ParserTraitDefaults::typeItemName(&*target, planned.ownerItemId);
+        let mut targetRef: &mut Ast::Module = target;
+        targetRef.setInheritedMethod(clonedId, Ast::InheritedMethod {
+          traitName: planned.traitPath.clone(),
+          typeName: typeName,
+          methodName: planned.methodName.clone(),
+          sourceModule: Option::SOME(sourcePath.clone()),
+          traitNamespaces: ParserTraitDefaults::namespacesOf(&planned.traitPath),
+        });
+      }
+
+      copyIndex += 1;
+    }
+  }
+}

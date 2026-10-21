@@ -461,6 +461,11 @@ export namespace Analyzer {
     /// module, where nothing can come from elsewhere.
     visibleDefs: HashMap<u32, boolean>;
     visibleDefsPublished: boolean;
+    /// Each module's resolved path and the set published for it as
+    /// `visibleDefs`, keyed by module index, so the copy of a trait default
+    /// another module declares can be checked with that module's names.
+    modulePaths: HashMap<u64, String>;
+    visibleDefsByModule: HashMap<u64, Vector<Analyzer::DefinitionId>>;
     /// Definition ids grouped by the raw symbol of the name they declare,
     /// ascending. Every lookup by name used to walk the whole store; the
     /// bucket holds the same candidates in the same order.
@@ -519,6 +524,8 @@ export namespace Analyzer {
         activeModule: 0,
         visibleDefs: HashMap::new<u32, boolean>(),
         visibleDefsPublished: false,
+        modulePaths: HashMap::new<u64, String>(),
+        visibleDefsByModule: HashMap::new<u64, Vector<Analyzer::DefinitionId>>(),
         bySymbol: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
         byPathSuffix: HashMap::new<u64, Vector<Analyzer::DefinitionId>>(),
         byMethodOwner: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
@@ -887,6 +894,23 @@ export namespace Analyzer {
 
     /// Replace the set of declarations the module being analyzed can name.
     public setActiveModuleVisibleDefs(&mut self, defs: &Vector<Analyzer::DefinitionId>): void {
+      self.publishVisibleDefs(defs);
+
+      let mut kept: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < defs.length()) {
+        if (let Option::SOME(defId) = defs.get(index)) {
+          kept.push(*defId);
+        }
+
+        index += 1;
+      }
+
+      self.visibleDefsByModule.insert(self.activeModule, kept);
+    }
+
+    publishVisibleDefs(&mut self, defs: &Vector<Analyzer::DefinitionId>): void {
       self.visibleDefs = HashMap::new<u32, boolean>();
       self.visibleDefsPublished = true;
 
@@ -898,6 +922,64 @@ export namespace Analyzer {
 
         index += 1;
       }
+    }
+
+    /// Record the resolved path of module `moduleIndex`.
+    public setModulePath(&mut self, moduleIndex: u64, path: String): void {
+      self.modulePaths.insert(moduleIndex, path);
+    }
+
+    /// Makes the module at `path` the one whose names are read, as it was
+    /// when that module was analyzed, and returns the module that was active
+    /// for `leaveModuleScope`. `NONE`, changing nothing, when no analyzed
+    /// module has that path.
+    public enterModuleScope(&mut self, path: &String): Option<u64> {
+      let mut found: Option<u64> = Option::NONE;
+      let mut cursor: Option<u64> = self.modulePaths.firstEntryCursor();
+
+      while (let Option::SOME(position) = cursor) {
+        if (self.modulePaths.entryValue(position).equals(path.toStr())) {
+          found = Option::SOME(*self.modulePaths.entryKey(position));
+        }
+
+        cursor = self.modulePaths.nextEntryCursor(position);
+      }
+
+      let Option::SOME(moduleIndex) = found else {
+        return Option::NONE;
+      };
+
+      if (!self.visibleDefsByModule.contains(&moduleIndex)) {
+        return Option::NONE;
+      }
+
+      let previous: u64 = self.activeModule;
+      self.switchModuleScope(moduleIndex);
+      return Option::SOME(previous);
+    }
+
+    /// Undoes `enterModuleScope`.
+    public leaveModuleScope(&mut self, previous: u64): void {
+      self.switchModuleScope(previous);
+    }
+
+    switchModuleScope(&mut self, moduleIndex: u64): void {
+      let mut defs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(stored) = self.visibleDefsByModule.get(&moduleIndex)) {
+        let mut index: u64 = 0;
+
+        while (index < stored.length()) {
+          if (let Option::SOME(defId) = stored.get(index)) {
+            defs.push(*defId);
+          }
+
+          index += 1;
+        }
+      }
+
+      self.activeModule = moduleIndex;
+      self.publishVisibleDefs(&defs);
     }
 
     /// Whether `id` is nameable from the module currently being analyzed.
