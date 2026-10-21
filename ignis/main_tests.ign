@@ -636,6 +636,27 @@ function parseErrorBesideAMissingImportStaysVisible(): void {
   let _removed = Fs::removeDirAll(&root);
 }
 
+/// An error in the copy of a trait default another module declares, which
+/// only the inheriting type hits, names the trait's file and line, shows the
+/// trait's line, and names the type in its note.
+@test
+function crossModuleDefaultErrorNamesTheTraitsFileAndLine(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let root: Path::PathBuf = parseErrorProject(
+    "cross-module-default-error",
+    "import Shape from \"./helper\";\n\n@implements(Shape)\nrecord Flag {\n  public set: boolean;\n\n  area(&self): boolean {\n    return self.set;\n  }\n}\n\nfunction main(): i32 {\n  let flag: Flag = Flag { set: true };\n  return flag.doubled();\n}\n",
+    "export trait Shape {\n  area(&self): i32;\n\n  doubled(&self): i32 {\n    let area: i32 = self.area();\n    return area * 2;\n  }\n}\n",
+  );
+  let report: String = parseErrorReport(&mut sourceMap, &root);
+
+  Test::assert(reportContains(&report, "src/helper.ign:5:"));
+  Test::assert(reportContains(&report, "let area: i32 = self.area();"));
+  Test::assert(reportContains(&report, "as inherited by `Flag`"));
+  Test::assert(!reportContains(&report, "src/main.ign:5:"));
+
+  let _removed = Fs::removeDirAll(&root);
+}
+
 /// A parse error in the entry module names the entry file, line and column.
 @test
 function parseErrorInTheEntryModuleNamesItsFileLineAndColumn(): void {

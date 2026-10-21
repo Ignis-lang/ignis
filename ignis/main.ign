@@ -50,7 +50,11 @@ import LirVerify from "./lir/verify";
 import CliCommand, CliOptions, IGNIS_VERSION, helpText, parseArguments, versionText from "./cli";
 import runInit from "./init";
 import LspServer from "./lsp/server";
-import analyzerModuleKind, mapImportSourcesToDiscoveryTargets from "./build/import_targets";
+import
+  analyzerModuleKind,
+  mapImportSourcesToDiscoveryTargets,
+  copyTraitDefaultsAcrossModules,
+from "./build/import_targets";
 import Doc from "./doc/mod";
 import BuildLayout from "./build/layout";
 import
@@ -1748,6 +1752,7 @@ export function compileDiscovered(
   }
 
   Output::beginPhase("analyze", 0);
+  copyTraitDefaultsAcrossModules(&mut modules, &infos, &preludePaths);
 
   let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
     &mut defStore,
@@ -1781,7 +1786,7 @@ export function compileDiscovered(
       collectDiagnosticMessages(&analysisRecord.output.diagnostics, Severity::ERROR, false, &mut errorMessages);
       collectDiagnosticMessages(&analysisRecord.output.diagnostics, Severity::WARNING, false, &mut warningMessages);
     } else {
-      renderBagCollecting(&analysisRecord.output.diagnostics, moduleFile, &mut report);
+      renderProgramBagCollecting(&analysisRecord.output.diagnostics, &files, moduleFile, &mut report);
     }
 
     recordIndex += 1;
@@ -1841,6 +1846,7 @@ export function compileDiscovered(
     );
     stopped.errorMessages = errorMessages;
     stopped.warningMessages = warningMessages;
+    stopped.report = report;
     return stopped;
   }
 
@@ -5239,6 +5245,19 @@ function parseDocSources(
   if (errors > 0) {
     return Option::NONE;
   }
+
+  let mut preludePaths: Vector<String> = Vector::new<String>();
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < docDiscovery.discovery.preludePaths.length()) {
+    if (let Option::SOME(preludePath) = docDiscovery.discovery.preludePaths.get(preludeIndex)) {
+      preludePaths.push(preludePath.toString());
+    }
+
+    preludeIndex += 1;
+  }
+
+  copyTraitDefaultsAcrossModules(&mut sources.modules, &sources.infos, &preludePaths);
 
   return Option::SOME(sources);
 }
