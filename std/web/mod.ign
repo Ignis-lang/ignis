@@ -12,14 +12,32 @@
 //! |---------------------|---------------------------------------------------------------------|
 //! | `Web::Router`       | `new()`, `use`, `get`, `post`, `put`, `patch`, `delete`, `any`, `route`, `dispatch`; implements `Http::Handler` |
 //! | `Web::App`          | Trait: `build(&self): Web::Router`, called once per server thread   |
-//! | `Web::serve`        | Binds an address and serves an app on `ServerConfig.threads` threads |
-//! | `Web::serveListener` | Serves an app on a listener already bound                          |
+//! | `Web::listen`       | Parses `"127.0.0.1:8080"` and serves an app with the default configuration |
+//! | `Web::listenOn`     | Serves an app from a host and a port                                |
+//! | `Web::listenWith`   | Serves an app from an address and a `Web::Config`                   |
+//! | `Web::parseAddress` | Parses `"<host>:<port>"`; `":8080"` and `"*:8080"` are every interface |
+//! | `Web::Config`       | `threads`; `new()`, `toServerConfig()`                              |
+//! | `Web::ListenError`  | A failed start; `message()` renders what was expected or the bind failure |
+//! | `Web::serve`        | The layer below: binds a `SocketAddress` and serves an app on `ServerConfig.threads` threads |
+//! | `Web::serveListener` | The layer below: serves an app on a listener already bound         |
 //! | `Web::Middleware`   | `(&mut Request, &mut Response, Next) -> Result<void, Error>`        |
 //! | `Web::Next`         | `(&mut Request, &mut Response) -> Result<void, Error>`              |
 //! | `Web::Request`      | `http`; `create(&http)`, `method()`, `target()`, `path()`, `header(name)`, `body()`, `bodyText()`, `param(name)`, `query(name)` |
 //! | `Web::Response`     | `status`, `headers`, `body`; `new()`, `setStatus`, `header`, `setHeader`, `addHeader`, `write`, `writeStr`, `text`, `json`, `finish` |
 //! | `Web::Error`        | `status`, `message`; `new(message)` (500), `withStatus(status, message)` |
 //! | `Web::Param`        | One route parameter: `name` and decoded `value`                     |
+//!
+//! ## Starting a server
+//!
+//! `Web::listen` parses an address string, binds it and serves the app:
+//! `"127.0.0.1:8080"` binds that interface, and `":8080"` or `"*:8080"`
+//! binds every interface, `0.0.0.0`. `Web::listenOn` takes a host and a
+//! port, `Web::listenWith` a `Web::Config` (the thread count), and
+//! `Web::parseAddress` parses without serving. A malformed address is a
+//! `Web::ListenError` whose message names what was expected and what was
+//! given; names are not resolved. `Web::serve` and `Web::serveListener`
+//! are the layer below: they take the `std::net::SocketAddress` and the
+//! `std::http::ServerConfig` directly.
 //!
 //! ## Middleware and routes
 //!
@@ -82,9 +100,7 @@
 //! ## Example
 //!
 //! ```ignis
-//! import Http from "std::http";
 //! import Io from "std::io";
-//! import IpAddress, SocketAddress from "std::net";
 //! import Web from "std::web";
 //!
 //! function logger(
@@ -137,13 +153,13 @@
 //! }
 //!
 //! function main(): i32 {
-//!   let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);
 //!   let app: Users = Users { greeting: "hello" };
 //!
-//!   return Web::serve<Users>(&address, Http::ServerConfig::new(), app).isOk() ? 0 : 1;
+//!   return Web::listen<Users>("127.0.0.1:8080", app).isOk() ? 0 : 1;
 //! }
 //! ```
 
+import _ from "std::web::listen";
 import _ from "std::web::request";
 import _ from "std::web::router";
 
