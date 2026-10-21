@@ -634,6 +634,36 @@ export namespace Analyzer {
       return false;
     }
 
+    /// Whether `name` heads a path written in a pattern, such as the `Http`
+    /// of `Http::Method::POST` in a match arm, `if let`, `while let`, `let
+    /// else` or a nested variant pattern. Like an expression path, the
+    /// pattern resolves to the variant, never to the namespace it went
+    /// through. Nested patterns are nodes of the same store, so scanning
+    /// every node covers them.
+    function nameUsedInPatternPosition(module: &Ast::Module, name: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < module.patterns.length()) {
+        let patternId: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(index as u32);
+        let Option::SOME(pattern) = module.patterns.get(patternId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Pattern::Node::Path(path) = pattern) {
+          if (let Option::SOME(headSegment) = path.segments.get(0)) {
+            if (headSegment.equals(name)) {
+              return true;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     function nameUsedInTypePosition(module: &Ast::Module, name: str): boolean {
       let mut index: u64 = 0;
 
@@ -942,6 +972,11 @@ export namespace Analyzer {
         }
 
         if (Analyzer::Lint::nameUsedInExpressionPosition(module, name)) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::nameUsedInPatternPosition(module, name)) {
           index += 1;
           continue;
         }
@@ -1405,6 +1440,25 @@ export namespace Analyzer {
         _ -> {},
       };
 
+      // A parameter bounded by Send or Sync states the condition the
+      // declaration relies on, so it is taken at its word here: leaving it
+      // out of the scope makes `isThreadSafeType` accept it.
+      let mut unboundedParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < typeParams.length()) {
+        if (let Option::SOME(paramDefId) = typeParams.get(paramIndex)) {
+          let boundSend: boolean = Analyzer::Typecheck::typeParamHasBound(defStore, *paramDefId, "Send");
+          let boundSync: boolean = Analyzer::Typecheck::typeParamHasBound(defStore, *paramDefId, "Sync");
+
+          if (!boundSend && !boundSync) {
+            unboundedParams.push(*paramDefId);
+          }
+        }
+
+        paramIndex += 1;
+      }
+
       let traitName: str = Analyzer::Typecheck::threadSafetyTraitName(sync);
       let mut index: u64 = 0;
 
@@ -1441,7 +1495,7 @@ export namespace Analyzer {
           let mut visited: Vector<u32> = Vector::new<u32>();
           visited.push(ownTypeRaw);
 
-          if (!Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, *memberType, sync, &typeParams, &mut visited)) {
+          if (!Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, *memberType, sync, &unboundedParams, &mut visited)) {
             let mut ownerName: str = "?";
             let mut memberName: str = "?";
 

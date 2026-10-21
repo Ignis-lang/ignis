@@ -783,35 +783,35 @@ function httpTestExchange(request: str, config: Http::ServerConfig, closeWrite: 
   let message: String = String::create(request);
 
   let client: JoinHandle<String> = Thread::spawn<String>((): String -> {
-      let target: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
-      let mut received: Vector<u8> = Vector::new<u8>();
-      let mut stream: TcpStream = TcpStream::connect(&target).unwrap();
-      let bytes: Vector<u8> = (@move message).toBytes();
+    let target: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
+    let mut received: Vector<u8> = Vector::new<u8>();
+    let mut stream: TcpStream = TcpStream::connect(&target).unwrap();
+    let bytes: Vector<u8> = (@move message).toBytes();
 
-      if (stream.setReadTimeout(Option::SOME(Time::Duration::fromSeconds(10))).isError()) {
-        return String::create("<timeout setup failed>");
+    if (stream.setReadTimeout(Option::SOME(Time::Duration::fromSeconds(10))).isError()) {
+      return String::create("<timeout setup failed>");
+    }
+
+    if (stream.writeAllBytes(&bytes).isError()) {
+      return String::create("<write failed>");
+    }
+
+    if (closeWrite && stream.shutdown(Shutdown::WRITE).isError()) {
+      return String::create("<shutdown failed>");
+    }
+
+    while (true) {
+      let Result::OK(read) = stream.readInto(&mut received, 65536) else {
+        break;
+      };
+
+      if (read == 0) {
+        break;
       }
+    }
 
-      if (stream.writeAllBytes(&bytes).isError()) {
-        return String::create("<write failed>");
-      }
-
-      if (closeWrite && stream.shutdown(Shutdown::WRITE).isError()) {
-        return String::create("<shutdown failed>");
-      }
-
-      while (true) {
-        let Result::OK(read) = stream.readInto(&mut received, 65536) else {
-          break;
-        };
-
-        if (read == 0) {
-          break;
-        }
-      }
-
-      return httpTestBytesText(&received);
-    });
+    return httpTestBytesText(&received);
+  });
 
   {
     let mut stream: TcpStream = listener.accept().unwrap();

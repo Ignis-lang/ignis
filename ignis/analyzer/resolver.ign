@@ -70,6 +70,15 @@ export namespace Analyzer {
       public sendableParams: Vector<Analyzer::DefinitionId>;
       public sendableSpans: Vector<SourceSpan>;
       public sendableNames: Vector<String>;
+      /// Every type alias the module declares, with the item that declares
+      /// it, the namespace chain around it and how far its body got: 0
+      /// pending, 1 resolving, 2 resolved. An instance of a generic alias
+      /// resolves the alias body where it is written, so it expands whatever
+      /// order the declarations come in.
+      public aliasDefs: Vector<Analyzer::DefinitionId>;
+      public aliasItems: Vector<Ast::ItemId>;
+      public aliasChains: Vector<Vector<String>>;
+      public aliasStatuses: Vector<u8>;
       /// The names of every module whose trait defaults this module holds
       /// copies of, and the one the copy being resolved reads, as index + 1;
       /// 0 while no copy of another module's default is.
@@ -2222,6 +2231,17 @@ export namespace Analyzer {
             return tsRef.intern(Analyzer::Type::VOID);
           }
 
+          // An instance of a generic alias is the type the alias names, with
+          // the arguments in place of its parameters: every later phase then
+          // sees the nominal instance, and its bounds, and never the alias.
+          if (let Option::SOME(Analyzer::Definition::TypeAlias(_)) = defStore.get(defId)) {
+            Analyzer::Resolver::resolveCollectedAlias(state, defStore, typeStore, symbols, module, defId);
+
+            if (let Option::SOME(expanded) = Analyzer::Typecheck::expandGenericAlias(defStore, typeStore, defId, &args)) {
+              return expanded;
+            }
+          }
+
           let mut tsRef: &mut Analyzer::TypeStore = typeStore;
           return tsRef.instance(defId, args);
         },
@@ -2978,6 +2998,174 @@ export namespace Analyzer {
         return;
       };
 
+      if (Analyzer::Resolver::collectedAliasIndex(state, defId).isSome()) {
+        Analyzer::Resolver::resolveCollectedAlias(state, defStore, typeStore, symbols, module, defId);
+        return;
+      }
+
+      Analyzer::Resolver::resolveTypeAliasBodyOf(state, defStore, typeStore, symbols, module, defId, a);
+    }
+
+    /// The position of `defId` among the aliases the module declares.
+    function collectedAliasIndex(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defId: Analyzer::DefinitionId,
+    ): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < state.aliasDefs.length()) {
+        if (let Option::SOME(candidate) = state.aliasDefs.get(index)) {
+          if (candidate.raw() == defId.raw()) {
+            return Option::SOME(index);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Resolve the body of an alias the module declares, once, under the
+    /// namespace chain it is declared in. An alias already resolving is left
+    /// as it is: its expansion reaches itself, and the instance stays.
+    /// Aliases declared by another module are resolved with it already.
+    function resolveCollectedAlias(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      let Option::SOME(index) = Analyzer::Resolver::collectedAliasIndex(state, defId) else {
+        return;
+      };
+
+      let mut pending: boolean = false;
+      if (let Option::SOME(status) = state.aliasStatuses.get(index)) {
+        pending = *status == 0;
+      }
+
+      let mut itemIdOpt: Option<Ast::ItemId> = Option::NONE;
+      if (let Option::SOME(itemRef) = state.aliasItems.get(index)) {
+        itemIdOpt = Option::SOME(*itemRef);
+      }
+
+      let mut chain: Vector<String> = Vector::new<String>();
+      if (let Option::SOME(declaredChain) = state.aliasChains.get(index)) {
+        chain = Analyzer::Resolver::copyStringVector(declaredChain);
+      }
+
+      let Option::SOME(itemId) = itemIdOpt else {
+        return;
+      };
+
+      if (!pending) {
+        return;
+      }
+
+      let Option::SOME(node) = module.items.get(itemId) else {
+        return;
+      };
+
+      let Ast::Item::Node::TypeAlias(a) = node else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      stateRef.aliasStatuses.set(index, 1);
+      let savedChain: Vector<String> = Analyzer::Resolver::copyStringVector(&stateRef.namespaceChain);
+      stateRef.namespaceChain = chain;
+
+      // The alias body names resolve in this module even when the alias is
+      // first written inside a copy of another module's trait default.
+      let savedForeign: u64 = stateRef.activeForeign;
+      stateRef.activeForeign = 0;
+
+      Analyzer::Resolver::resolveTypeAliasBodyOf(state, defStore, typeStore, symbols, module, defId, &a);
+
+      let mut restoreRef: &mut Analyzer::Resolver::ResolverState = state;
+      restoreRef.namespaceChain = savedChain;
+      restoreRef.activeForeign = savedForeign;
+      restoreRef.aliasStatuses.set(index, 2);
+    }
+
+    /// Record every type alias `itemId` declares, recursing into namespaces,
+    /// exports and externs like `resolveItem`.
+    function collectAliasItems(
+      state: &mut Analyzer::Resolver::ResolverState,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+    ): void {
+      let Option::SOME(node) = module.items.get(itemId) else {
+        return;
+      };
+
+      match (node) {
+        Ast::Item::Node::TypeAlias(_) -> {
+          let Option::SOME(defId) = lookupDef(pass1, pass2, itemId.raw()) else {
+            return;
+          };
+
+          let chain: Vector<String> = Analyzer::Resolver::copyStringVector(&state.namespaceChain);
+          let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+          stateRef.aliasDefs.push(defId);
+          stateRef.aliasItems.push(itemId);
+          stateRef.aliasChains.push(chain);
+          stateRef.aliasStatuses.push(0);
+        },
+        Ast::Item::Node::Namespace(ns) -> {
+          Analyzer::Resolver::collectAliasItemsIn(state, module, pass1, pass2, ns.name.clone(), &ns.items);
+        },
+        Ast::Item::Node::Extern(externItem) -> {
+          Analyzer::Resolver::collectAliasItemsIn(state, module, pass1, pass2, externItem.name.clone(), &externItem.items);
+        },
+        Ast::Item::Node::Export(ex) -> {
+          if (let Option::SOME(innerItemId) = ex.declaration) {
+            Analyzer::Resolver::collectAliasItems(state, module, pass1, pass2, innerItemId);
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    function collectAliasItemsIn(
+      state: &mut Analyzer::Resolver::ResolverState,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      name: String,
+      items: &Vector<Ast::ItemId>,
+    ): void {
+      let mut enterRef: &mut Analyzer::Resolver::ResolverState = state;
+      enterRef.namespaceChain.push(name);
+
+      let mut childIndex: u64 = 0;
+
+      while (childIndex < items.length()) {
+        if (let Option::SOME(childId) = items.get(childIndex)) {
+          Analyzer::Resolver::collectAliasItems(state, module, pass1, pass2, *childId);
+        }
+
+        childIndex += 1;
+      }
+
+      let mut leaveRef: &mut Analyzer::Resolver::ResolverState = state;
+      let _left: Option<String> = leaveRef.namespaceChain.pop();
+    }
+
+    function resolveTypeAliasBodyOf(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      defId: Analyzer::DefinitionId,
+      a: &Ast::Item::TypeAlias,
+    ): void {
       resolveBoundTraits(state, defStore, symbols, defId, &a.genericParameters);
 
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &a.genericParameters);
@@ -3637,6 +3825,10 @@ export namespace Analyzer {
         sendableParams: Vector::new<Analyzer::DefinitionId>(),
         sendableSpans: Vector::new<SourceSpan>(),
         sendableNames: Vector::new<String>(),
+        aliasDefs: Vector::new<Analyzer::DefinitionId>(),
+        aliasItems: Vector::new<Ast::ItemId>(),
+        aliasChains: Vector::new<Vector<String>>(),
+        aliasStatuses: Vector::new<u8>(),
         foreignNames: foreignNames,
         activeForeign: 0,
       };
@@ -3645,6 +3837,16 @@ export namespace Analyzer {
       buildGlobalNameIndex(&mut state, defStore, pass2);
       appendImportOverlayToState(&mut state, overlay);
       copyProgramQualifiedIndex(&mut state, programIndex);
+
+      let mut aliasIndex: u64 = 0;
+
+      while (aliasIndex < module.roots.length()) {
+        if (let Option::SOME(itemId) = module.roots.get(aliasIndex)) {
+          collectAliasItems(&mut state, module, pass1, pass2, *itemId);
+        }
+
+        aliasIndex += 1;
+      }
 
       let mut index: u64 = 0;
 

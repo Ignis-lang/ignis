@@ -125,6 +125,33 @@ function captureAcceptsRefCaptureThroughANoescapeParameter(): void {
   Test::assertEq<u64>(captureCountErrors(&bag), 0);
 }
 
+const CAPTURE_TRY_PRELUDE: str = "@lang(try)\nenum Res {\n  OK(u32),\n  ERROR(Note),\n}\n\n@implements(Drop)\nrecord Note {\n  public code: u32;\n\n  drop(&mut self): void {}\n}\n\nfunction step(value: u32): Res {\n  return Res::OK(value);\n}\n\n";
+
+/// Scenario: a returned closure uses `!` inside an expression. The bindings
+/// the desugaring introduces are locals of the closure body, not captures.
+@test
+function captureTreatsTryBindingsInsideAnExpressionAsLocals(): void {
+  let source: String = `${CAPTURE_TRY_PRELUDE}function make(): (u32) -> Res {\n  return (value: u32): Res -> {\n    return Res::OK(step(value)! + 1);\n  };\n}\n`;
+  let bag: DiagnosticBag = captureDiagnosticsFor(source.toStr());
+
+  Test::assertEq<u64>(captureCountErrors(&bag), 0);
+}
+
+/// Scenario: the same closure also reads a non-copyable outer local, which is
+/// still a by-reference capture and still cannot escape.
+@test
+function captureStillRejectsARefCaptureNextToTry(): void {
+  let source: String = `${CAPTURE_TRY_PRELUDE}function make(): (u32) -> Res {\n  let note: Note = Note { code: 2 };\n  return (value: u32): Res -> {\n    return Res::OK(step(value)! + note.code);\n  };\n}\n`;
+  let bag: DiagnosticBag = captureDiagnosticsFor(source.toStr());
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `note` by reference",
+  );
+  Test::assertEq<u64>(captureCountErrors(&bag), 1);
+}
+
 /// Run `source` through parse, analysis, HIR lowering and capture analysis,
 /// then answer whether the `let` binding named `bindingName` owns the closure
 /// environment its initializer produces, as `Hir::bindingOwnsClosureEnv` decides.

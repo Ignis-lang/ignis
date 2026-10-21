@@ -3,7 +3,7 @@
 # Exercises scripts/bootstrap.sh's stage staleness stamps (IGN-210):
 # `ensure_stage` used to reuse an existing build/bootstrap/<stage>/ignis
 # unconditionally, even when the selfhost sources, std, or the stage0
-# compiler had changed since it was built, so a gate (gate-g7, gate-g5,
+# compiler had changed since it was built, so a gate (gate-g6, gate-g7,
 # gate-g3-*) could silently report results for stale code.
 #
 # Each test runs scripts/bootstrap.sh in an isolated project root (a temp
@@ -495,7 +495,7 @@ test_artifact_roundtrip_identity_is_stable() {
 # review blocker 4). Without that chain check, a stage2 whose own stamp
 # still matches stage1's *current* (not-yet-rebuilt) identity looks fresh
 # even though stage1 itself is stale — and a gate command that calls
-# `ensure_stage stage2` directly (gate-g3-stage2, gate-g5, gate-g6, gate-g7)
+# `ensure_stage stage2` directly (gate-g3-stage2, gate-g6, gate-g7)
 # never happens to rebuild stage2 unconditionally the way the plain "stage2"
 # subcommand does, so it would never notice either.
 test_chain_check_catches_a_stale_prior_stage() {
@@ -665,9 +665,10 @@ test_stage0_kind_mismatch_override_proceeds() {
 # PR #222: without this recorded-identity fallback, `ensure_stage stage1`
 # in a real gate job (IGNIS_STAGE0 unset, and the official asset that
 # actually built stage1 absent) misread *every single* official-stage0
-# night — any promotion streak >= 3 — as "stage0 identity changed", which
-# then hit the lineage guard and aborted every gate (G2, G3-stage2, G5, G6,
-# G7) with no gate file, sealed as skipped, degrading promotion.
+# night — any promotion streak at or above the then-threshold of 3 — as
+# "stage0 identity changed", which then hit the lineage guard and aborted
+# every gate (G3-stage2, G6, G7) with no gate file, sealed as skipped,
+# degrading promotion.
 test_gate_job_reuses_with_recorded_stage0_identity() {
   TESTS_RUN=$((TESTS_RUN + 1))
   echo "test: a gate job reuses stage1/stage2 via stage0.json's recorded identity, asset absent"

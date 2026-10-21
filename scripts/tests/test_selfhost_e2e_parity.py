@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Exercises how scripts/selfhost_e2e_parity.py (gate G2) lays a case out.
+"""Exercises how scripts/selfhost_e2e_parity.py lays a case out.
 
-A fixture whose helper modules sit in a directory named after it imports them
+The harness itself is no longer a promotion gate (G2 was removed once G3's
+`e2e::` fixtures covered the same corpus), but G7's harness reuses its case
+discovery, so the layout contract still has to hold. A fixture whose helper
+modules sit in a directory named after it imports them
 relative to itself. The generated project has to carry that directory, or the
 case fails to resolve its imports no matter which compiler runs it. Nothing
 here runs a compiler.

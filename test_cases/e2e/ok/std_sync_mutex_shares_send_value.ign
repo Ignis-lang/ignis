@@ -1,0 +1,82 @@
+// e2e: std
+// `Mutex<T>` is Sync when `T` is Send, so `Arc<Mutex<T>>` shares a value that
+// is only known to be Send. Two threads mutate the shared record through a
+// generic `share<T: Send>`, and the final value holds both threads' work.
+import JoinHandle, Thread from "std::thread";
+import Arc, Mutex, MutexGuard from "std::sync";
+
+record Inventory {
+  public items: Vector<i32>;
+  public label: String;
+}
+
+/// Send but not Sync: the declaration covers the pointer, and nothing claims
+/// it may be shared.
+@allow(thread_safety)
+@implements(Send)
+record Handle {
+  public raw: *mut i32;
+}
+
+function share<T: Send>(value: T): Arc<Mutex<T>> {
+  return Arc::new<Mutex<T>>(Mutex::new<T>(value));
+}
+
+function fill(shared: Arc<Mutex<Inventory>>, first: i32, tag: str): JoinHandle<u64> {
+  return Thread::spawn<u64>((): u64 -> {
+      let mut step: i32 = 0;
+
+      while (step < 100) {
+        let mut guard: MutexGuard<Inventory> = (@move shared).get().lock();
+        let inventory: &mut Inventory = guard.get();
+
+        inventory.items.push(first + step);
+        step += 1;
+      }
+
+      let mut guard: MutexGuard<Inventory> = (@move shared).get().lock();
+      let inventory: &mut Inventory = guard.get();
+
+      inventory.label.pushStr(tag);
+      return 100;
+    });
+}
+
+function main(): i32 {
+  let inventory: Arc<Mutex<Inventory>> = share<Inventory>(Inventory {
+    items: Vector::new<i32>(),
+    label: String::create(""),
+  });
+  let left: JoinHandle<u64> = fill(inventory.clone(), 0, "a");
+  let right: JoinHandle<u64> = fill(inventory.clone(), 1000, "b");
+
+  if (left.join() + right.join() != 200) {
+    return 1;
+  }
+
+  let handle: Arc<Mutex<Handle>> = share<Handle>(Handle { raw: 0 as *mut i32 });
+
+  if (handle.strongCount() != 1) {
+    return 2;
+  }
+
+  let guard: MutexGuard<Inventory> = inventory.get().lock();
+  let items: &Vector<i32> = &guard.read().items;
+  let mut sum: i64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    if (let Option::SOME(item) = items.get(index)) {
+      sum += *item as i64;
+    }
+
+    index += 1;
+  }
+
+  if (items.length() != 200 || guard.read().label.length() != 2) {
+    return 3;
+  }
+
+  // 0..99 from the left thread (4950) and 1000..1099 from the right one (104950).
+  return sum == 109900 ? 0 : 4;
+}

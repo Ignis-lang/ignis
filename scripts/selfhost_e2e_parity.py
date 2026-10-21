@@ -653,7 +653,8 @@ def run_err_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> 
   # Symmetric to the error check above: a program the host only warns on must
   # still compile under the selfhost. Without this, a diagnostic re-escalated
   # from warning to error (e.g. IGN-238's A0158 severity regression) would
-  # slip through G5 undetected, since the diagnostic text would still match.
+  # slip through the error-corpus check undetected, since the diagnostic text
+  # would still match.
   if case.kind == KIND_WARNING and compilation.returncode != 0:
     return CaseResult(
       case,
@@ -830,7 +831,11 @@ def build_report(results: list[CaseResult], counts: dict[str, int], corpus: str)
 
 
 def build_gate(results: list[CaseResult], counts: dict[str, int], class_order: tuple[str, ...]) -> dict:
-  """Describe the corpus run as a bootstrap gate result (G2).
+  """Describe the corpus run as a bootstrap gate result.
+
+  It no longer feeds a promotion gate: the `e2e::` fixtures G3 runs cover the
+  same corpus. The corpus runner itself stays, because the drop-schedule gate
+  reuses its case discovery.
 
   A case skipped because its header declares `// e2e: skip <reason>`
   (`CLASS_DECLARED_SKIP`) is a deliberate, reviewed exclusion and never fails

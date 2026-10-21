@@ -562,6 +562,28 @@ export namespace Borrowck {
       return Option::NONE;
     }
 
+    /// Whether `viewRaw` is a view local that holds a borrow of its owner,
+    /// taken when a method call produced the view.
+    public viewHoldsBorrow(&self, viewRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.viewDefs.length()) {
+        if (let Option::SOME(candidate) = self.viewDefs.get(index)) {
+          if (*candidate == viewRaw) {
+            if (let Option::SOME(owner) = self.viewOwners.get(index)) {
+              if (let Option::SOME(fromMethod) = self.viewFromMethod.get(index)) {
+                return *owner != viewRaw && *fromMethod == 1;
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// Records that the storage of `defRaw` is the temporary `nodeRaw`, alive
     /// down to scope depth `depth`.
     public setTemporaryStorage(&mut self, defRaw: u32, depth: u64, nodeRaw: u32): void {
@@ -3642,10 +3664,57 @@ export namespace Borrowck {
       return;
     }
 
-    let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, owner.local, mutable, span, true);
+    // A view taken through a live view local that holds its own borrow of the
+    // owner reborrows that local: the owner is already borrowed on its behalf,
+    // so a second borrow of the owner would conflict with the first.
+    let mut borrowTarget: Analyzer::DefinitionId = owner.local;
+
+    if (let Option::SOME(view) = Borrowck::reborrowedViewLocal(hir, state, value, owner.local.raw())) {
+      borrowTarget = view;
+    }
+
+    let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, borrowTarget, mutable, span, true);
 
     let mut heldRef: &mut Borrowck::State = state;
-    heldRef.recordHeldBorrow(owner.local.raw(), mutable, granted);
+    heldRef.recordHeldBorrow(borrowTarget.raw(), mutable, granted);
+  }
+
+  /// The view local `value` is derived from through receivers, fields,
+  /// elements, references and dereferences, when that local views `ownerRaw`
+  /// and holds a borrow of it (`let store: &mut Store = guard.get();` for
+  /// `store.tasks.get(index).unwrap()`).
+  function reborrowedViewLocal(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    value: Hir::HirId,
+    ownerRaw: u32,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(value) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> {
+        let viewOwner: Option<u32> = state.viewOwnerOf(defId.raw());
+
+        if (let Option::SOME(owner) = viewOwner) {
+          if (owner == ownerRaw && state.viewHoldsBorrow(defId.raw())) {
+            return Option::SOME(defId);
+          }
+        }
+
+        return Option::NONE;
+      },
+      Hir::HirKind::MethodCall(call) -> match (call.receiver) {
+        Option::SOME(receiver) -> Borrowck::reborrowedViewLocal(hir, state, receiver, ownerRaw),
+        Option::NONE -> Option::NONE,
+      },
+      Hir::HirKind::FieldAccess(access) -> Borrowck::reborrowedViewLocal(hir, state, access.base, ownerRaw),
+      Hir::HirKind::Index(indexNode) -> Borrowck::reborrowedViewLocal(hir, state, indexNode.base, ownerRaw),
+      Hir::HirKind::Reference(reference) -> Borrowck::reborrowedViewLocal(hir, state, reference.expression, ownerRaw),
+      Hir::HirKind::Dereference(inner) -> Borrowck::reborrowedViewLocal(hir, state, inner, ownerRaw),
+      _ -> Option::NONE,
+    };
   }
 
   /// Raw pointers are not tracked as views, except the data pointer a `for

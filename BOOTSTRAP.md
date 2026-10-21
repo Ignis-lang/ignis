@@ -26,8 +26,8 @@ stage3 exists only to compare its emitted C against stage2's, byte for byte
 
 stage0 is resolved by `scripts/resolve_official_stage0.sh`:
 
-- If a selfhost binary has been promoted (three consecutive candidate nightly
-  runs — see below), that binary (`ignis-selfhost-linux-amd64` on the
+- If a selfhost binary has been promoted (a candidate nightly run — see
+  below), that binary (`ignis-selfhost-linux-amd64` on the
   `nightly` release) becomes stage0.
 - Otherwise stage0 is a compiler built from the C seed (see below), which
   `scripts/bootstrap.sh` builds itself when no stage0 is recorded.
@@ -145,12 +145,15 @@ is verified by checksum, and needs only a C compiler to come back to life.
 Gate | Command | What it compares
 --- | --- | ---
 G1 | (part of `stage3`, no separate subcommand) | stage3's emitted C against stage2's — the fixed point
-G2 | `parity` | the e2e corpus, run through stage2 against its committed snapshots
 G3 | `gate-g3` | the selfhost test suite under stage2: it has to pass outright and report the same test names, skipped set and counts as stage1's run of the same suite (`gate-g3-stage1`, which has to pass on its own and is the pull-request check)
-G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x
-G5 | `gate-g5` | diagnostics: stage2 has to keep every diagnostic the committed error-corpus snapshots record
-G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against committed baselines
-G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines
+G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x — reported, but a budget, so it never decides the promotion verdict
+G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against committed baselines (`gate-g6-stage1` runs it against stage1 in pull-request CI)
+G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines (`gate-g7-stage1` runs it against stage1 in pull-request CI)
+
+The former G2 (the e2e corpus through stage2) and G5 (the committed error
+corpus) were removed once G3's `e2e::` fixtures covered the same corpora:
+running them again through a stage2 binary the ladder had just built proved
+what G3 already proves.
 
 Every gate compares against stage1 or against committed baselines. Some
 baselines, such as G7's under `test_cases/e2e/ok/__drop_schedules__/`, were
@@ -162,12 +165,14 @@ below.
 `report` turns `build/bootstrap/gates/*.json` into `report.md` and
 `promotion.json`. The nightly workflow (`.github/workflows/nightly.yml`)
 splits the same work across runners: `stages` builds stage1..stage3 and G1/G4,
-a matrix job runs G2/G3/G5/G6/G7, and `report` collects the results.
+a matrix job runs G3 (its stage2 and stage1 runs), and `report` collects the
+results.
 
-A run where every gate passes is a *promotion candidate*. Three consecutive
-candidate nightly runs promote that run's stage2 binary to
+A run whose promotion gates (G1 and G3) pass is a *promotion candidate*. One
+candidate nightly run promotes that run's stage2 binary to
 `ignis-selfhost-linux-amd64` on the `nightly` release — the new official
-stage0 for every following build.
+stage0 for every following build. G4, G6 and G7 are reported as informational
+rows that never decide the verdict.
 
 ## Parse-verdict baselines (G6)
 
@@ -181,10 +186,12 @@ repo-relative path with every run of non-alphanumeric characters flattened to
 A new `.ign` file anywhere in that corpus needs its baseline in the same
 commit, or pull-request CI fails its `--check-coverage` step (no compiler, a
 few seconds). A missing, malformed or orphaned baseline, and two sources that
-flatten to the same case name, all fail it. To record or refresh them:
+flatten to the same case name, all fail it. Pull-request CI also runs the
+full comparison against stage1 (`gate-g6-stage1`), so a parser behavior
+change shows up on the PR itself. To record or refresh them:
 
 ```bash
-scripts/bootstrap.sh gate-g6-baselines               # from stage2
+scripts/bootstrap.sh gate-g6-baselines               # from stage1, the compiler PR CI checks with
 # or, with any selfhost binary:
 python3 scripts/selfhost_syntax_parity.py --compiler <bin> --write-baselines
 ```
@@ -311,12 +318,12 @@ PR itself: it resolves the current official asset
 (`scripts/resolve_official_stage0.sh`) and builds stage1 with it, then stage2
 with that stage1; a failing official stage0 is terminal and names the rule. If
 no official asset exists
-yet (a fresh fork, or a promotion streak that has never reached 3), the job
-skips — there is nothing to check yet.
+yet (a fresh fork, or a promotion streak that has never promoted an asset),
+the job skips — there is nothing to check yet.
 
 On failure, split the PR: land the compiler support first, wait for it to
-promote to the official binary (three green nightlies), then use the feature
-in a follow-up PR.
+promote to the official binary (one green nightly), then use the feature in a
+follow-up PR.
 
 ### Override
 

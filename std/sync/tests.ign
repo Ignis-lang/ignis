@@ -342,18 +342,18 @@ function arcMutexCounterAcrossThreads(): void {
     let shared: Arc<Mutex<u64>> = counter.clone();
 
     handles.push(Thread::spawn<boolean>((): boolean -> {
-          let mut step: u64 = 0;
+      let mut step: u64 = 0;
 
-          while (step < 1000) {
-            let mut guard: MutexGuard<u64> = (@move shared).get().lock();
-            let value: &mut u64 = guard.get();
+      while (step < 1000) {
+        let mut guard: MutexGuard<u64> = (@move shared).get().lock();
+        let value: &mut u64 = guard.get();
 
-            *value += 1;
-            step += 1;
-          }
+        *value += 1;
+        step += 1;
+      }
 
-          return true;
-        }));
+      return true;
+    }));
     index += 1;
   }
 
@@ -379,14 +379,14 @@ function condvarWakesAWaiter(): void {
   let signal: Arc<Signal> = Arc::new<Signal>(Signal { ready: Mutex::new<boolean>(false), changed: Condvar::new() });
   let shared: Arc<Signal> = signal.clone();
   let notifier: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
-      let state: &Signal = (@move shared).get();
-      let mut guard: MutexGuard<boolean> = state.ready.lock();
-      let ready: &mut boolean = guard.get();
+    let state: &Signal = (@move shared).get();
+    let mut guard: MutexGuard<boolean> = state.ready.lock();
+    let ready: &mut boolean = guard.get();
 
-      *ready = true;
-      state.changed.notifyOne();
-      return true;
-    });
+    *ready = true;
+    state.changed.notifyOne();
+    return true;
+  });
   let mut guard: MutexGuard<boolean> = signal.get().ready.lock();
 
   while (!*guard.read()) {
@@ -484,13 +484,13 @@ function channelCollectsFromManyProducers(): void {
     let base: u64 = producer * VALUES_PER_PRODUCER;
 
     handles.push(Thread::spawn<void>((): void -> {
-          let mut step: u64 = 1;
+      let mut step: u64 = 1;
 
-          while (step <= VALUES_PER_PRODUCER) {
-            (@move own).send(base + step);
-            step += 1;
-          }
-        }));
+      while (step <= VALUES_PER_PRODUCER) {
+        (@move own).send(base + step);
+        step += 1;
+      }
+    }));
     producer += 1;
   }
 
@@ -528,14 +528,14 @@ function channelSplitsValuesAcrossManyConsumers(): void {
     let own: Receiver<u64> = receiver.clone();
 
     handles.push(Thread::spawn<u64>((): u64 -> {
-          let mut sum: u64 = 0;
+      let mut sum: u64 = 0;
 
-          while (let Option::SOME(value) = (@move own).recv()) {
-            sum += value;
-          }
+      while (let Option::SOME(value) = (@move own).recv()) {
+        sum += value;
+      }
 
-          return sum;
-        }));
+      return sum;
+    }));
     consumer += 1;
   }
 

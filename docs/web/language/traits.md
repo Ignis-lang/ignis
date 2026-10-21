@@ -111,7 +111,10 @@ structure to prove it; when the declaration is deliberate, `@allow(thread_safety
 keeps it without the warning.
 
 On a generic type the declaration covers only its own fields: an instance has the trait only when
-every type argument has it too. `Vector<String>` is Send; `Vector<*mut i32>` is not.
+every type argument has it too. `Vector<String>` is Send; `Vector<*mut i32>` is not. A type
+parameter bounded by `Send` or `Sync` changes that condition for its argument, which then only has
+to satisfy those bounds: `Mutex<T: Send>` declares Send and Sync, so `Mutex<T>` is both whenever `T`
+is Send, and `Arc<Mutex<T>>` shares it between threads.
 
 ```ignis
 @allow(thread_safety)

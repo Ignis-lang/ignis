@@ -34,7 +34,9 @@ function main(): i32 {
 
 ## Capture modes
 
-The mode is inferred from how the variable is used inside the closure.
+The mode is inferred from how the variable is used inside the closure. Variables declared inside
+the closure body, including the bindings a `!` introduces, belong to the closure and are never
+captured.
 
 | Use inside the closure | Mode | Effect |
 | --- | --- | --- |

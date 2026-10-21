@@ -1,0 +1,27 @@
+// e2e: err
+// A shared view derived from `store` is still live when a mutable one is
+// taken from `store`: the reborrows conflict with each other.
+import Mutex, MutexGuard from "std::sync";
+
+record Task {
+  public id: i32;
+}
+
+record Store {
+  public tasks: Vector<Task>;
+}
+
+function main(): i32 {
+  let shared: Mutex<Store> = Mutex::new<Store>(Store { tasks: Vector::new<Task>() });
+  let mut guard: MutexGuard<Store> = shared.lock();
+  let store: &mut Store = guard.get();
+
+  store.tasks.push(Task { id: 1 });
+
+  let first: &Task = store.tasks.get(0).unwrap();
+  let second: &mut Task = store.tasks.getMut(0).unwrap();
+
+  second.id = 2;
+
+  return first.id;
+}

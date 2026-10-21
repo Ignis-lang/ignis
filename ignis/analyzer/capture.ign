@@ -1068,8 +1068,9 @@ export namespace Capture {
   }
 
   /// Definitions introduced inside the subtree: `let` names and every
-  /// binding a pattern brings into scope. They belong to the closure, so they
-  /// are never captured.
+  /// binding a pattern brings into scope, including the synthetic bindings a
+  /// desugaring such as `!` introduces inside an expression. They belong to the
+  /// closure, so they are never captured. Inner closures own their locals.
   function collectLocals(
     hir: &mut Hir::HirStore,
     hirId: Hir::HirId,
@@ -1083,92 +1084,37 @@ export namespace Capture {
       Hir::HirKind::Let(letNode) -> {
         let mut localsRef: &mut HashSet<u32> = locals;
         localsRef.insert(letNode.name.raw());
-
-        if (let Option::SOME(valueId) = letNode.value) {
-          Capture::collectLocals(hir, valueId, locals);
-        }
       },
       Hir::HirKind::LetElse(letElseNode) -> {
         Capture::collectPatternBindings(&letElseNode.pattern, locals);
-        Capture::collectLocals(hir, letElseNode.value, locals);
-        Capture::collectLocals(hir, letElseNode.elseBlock, locals);
-      },
-      Hir::HirKind::Block(blockNode) -> {
-        let mut index: u64 = 0;
-
-        while (index < blockNode.statements.length()) {
-          if (let Option::SOME(statementId) = blockNode.statements.get(index)) {
-            Capture::collectLocals(hir, *statementId, locals);
-          }
-
-          index += 1;
-        }
-
-        if (let Option::SOME(expressionId) = blockNode.expression) {
-          Capture::collectLocals(hir, expressionId, locals);
-        }
-      },
-      Hir::HirKind::If(ifNode) -> {
-        Capture::collectLocals(hir, ifNode.condition, locals);
-        Capture::collectLocals(hir, ifNode.thenBranch, locals);
-
-        if (let Option::SOME(elseId) = ifNode.elseBranch) {
-          Capture::collectLocals(hir, elseId, locals);
-        }
-      },
-      Hir::HirKind::Loop(loopNode) -> {
-        match (&loopNode.condition) {
-          Hir::LoopKind::While(conditionId) -> {
-            Capture::collectLocals(hir, conditionId, locals);
-          },
-          Hir::LoopKind::For(forLoop) -> {
-            if (let Option::SOME(initId) = forLoop.init) {
-              Capture::collectLocals(hir, initId, locals);
-            }
-
-            if (let Option::SOME(conditionId) = forLoop.condition) {
-              Capture::collectLocals(hir, conditionId, locals);
-            }
-
-            if (let Option::SOME(updateId) = forLoop.update) {
-              Capture::collectLocals(hir, updateId, locals);
-            }
-          },
-          Hir::LoopKind::Infinite -> {},
-        };
-
-        Capture::collectLocals(hir, loopNode.body, locals);
       },
       Hir::HirKind::Match(matchNode) -> {
-        Capture::collectLocals(hir, matchNode.scrutinee, locals);
-
         let mut armIndex: u64 = 0;
 
         while (armIndex < matchNode.arms.length()) {
           if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
             Capture::collectPatternBindings(&arm.pattern, locals);
-
-            if (let Option::SOME(guardId) = arm.guard) {
-              Capture::collectLocals(hir, guardId, locals);
-            }
-
-            Capture::collectLocals(hir, arm.body, locals);
           }
 
           armIndex += 1;
         }
       },
-      Hir::HirKind::ExpressionStatement(inner) -> {
-        Capture::collectLocals(hir, inner, locals);
+      Hir::HirKind::Closure(_) -> {
+        return;
       },
-      Hir::HirKind::Return(value) -> {
-        if (let Option::SOME(valueId) = value) {
-          Capture::collectLocals(hir, valueId, locals);
-        }
-      },
-      Hir::HirKind::Closure(_) -> {},
       _ -> {},
     };
+
+    let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+    let mut index: u64 = 0;
+
+    while (index < children.length()) {
+      if (let Option::SOME(childId) = children.get(index)) {
+        Capture::collectLocals(hir, *childId, locals);
+      }
+
+      index += 1;
+    }
   }
 
   function collectPatternBindings(pattern: &Hir::HirPattern, locals: &mut HashSet<u32>): void {
