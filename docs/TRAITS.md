@@ -259,11 +259,21 @@ prove it, for example when it guards a raw pointer itself. The declaration wins,
 breaks it. `@allow(thread_safety)` on the record or enum, or on a top-level function for the whole
 module, silences it.
 
-On a generic record or enum the declaration speaks only for its own fields: an instance is Send
-(or Sync) only when every type argument is too, so `Vector<String>` is Send and
-`Vector<*mut i32>` is not. A type that needs a different condition states it as bounds on its own
-type parameters, as `Arc<T: Send & Sync>` does. `String`, `Vector<T>` and `HashMap<K, V>` declare
-both traits this way; `Rc` and `Weak` declare neither.
+On a generic record or enum the declaration speaks only for its own fields. Each type argument of
+an instance is judged by its type parameter:
+
+- a parameter with no `Send` or `Sync` bound: the argument has to be Send for the instance to be
+  Send, and Sync for it to be Sync. `Vector<String>` is Send and Sync; `Vector<*mut i32>` is
+  neither.
+- a parameter bounded by `Send` or `Sync`: the argument has to satisfy exactly those bounds,
+  whichever trait the instance is judged for. `Mutex<T: Send>` declares both, so `Mutex<T>` is Send
+  and Sync whenever `T` is Send, even when `T` is not Sync; `Arc<T: Send & Sync>` is Send and Sync
+  when `T` is both.
+
+A type that needs a condition other than the default states it as bounds on its own type
+parameters this way. The `thread_safety` lint takes such a bound at its word: a field of a bounded
+parameter's type does not make it warn. `String`, `Vector<T>` and `HashMap<K, V>` declare both
+traits with no bound; `Rc`, `Weak` and `MutexGuard` declare neither.
 
 ```ignis
 @allow(thread_safety)
