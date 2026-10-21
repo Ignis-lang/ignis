@@ -1,25 +1,22 @@
-#!/usr/bin/env python3
+#! /usr/bin/env python3
 """Exercises scripts/bootstrap_report.py's `report` command, and
 scripts/selfhost_drop_schedule_parity.py's gate-summary formatting, in
 isolation.
 
-G7 (drop-schedule parity) was promoted from informational to a real
-promotion gate once the selfhost's ownership analysis reached 623/623
-own-code parity with the host (nightly-34803378772). These tests pin the
-part of that promotion a shell test can't see as easily as a Python one: a
-failing G7 result must flip `candidate` to false in promotion.json exactly
-like a failing G5 or G6 would, a passing one must leave `candidate` true
-alongside every other passing gate, and the gate summary
-`selfhost_drop_schedule_parity.py`'s own `build_gate` writes — not a copy of
-its wording retyped into a fixture here — must no longer carry the old
-"(informational)" framing for G7 anywhere, while still noting how many
-timeouts a run retried.
+The nightly promotes on G1 (stage3 C identical to stage2) and G3 (the
+selfhost test suite under stage2, compared with stage1's run) only: those two
+are the gates whose result decides the `candidate` verdict. G4 (resource
+budget), G6 (parse verdicts) and G7 (drop schedules) are still reported —
+informational rows that never decide the verdict; G4 because a budget is not
+correctness, G6/G7 because pull-request CI runs them against stage1, next to
+G3. G2 (e2e parity) and G5 (error corpus) are gone entirely: G3's `e2e::`
+fixtures cover the same corpora.
 
-A second group covers what replaced the host oracle in G7: the committed
-drop-schedule baselines under `test_cases/e2e/ok/__drop_schedules__`. A
-fixture with no baseline and a baseline with no fixture both have to be gate
-failures with a message that says what to do, since either one silently
-removes a case from the gate otherwise.
+The G7-specific tests below pin the part of that gate a shell test can't see
+as easily as a Python one: the gate summary
+`selfhost_drop_schedule_parity.py`'s own `build_gate` writes — not a copy of
+its wording retyped into a fixture here — and how many timeouts a run
+retried.
 
 Each `bootstrap_report.py` test runs the real script as a subprocess against
 a throwaway `build/bootstrap`-shaped temp directory, the same black-box
@@ -72,11 +69,17 @@ from selfhost_drop_schedule_parity import (  # noqa: E402
   write_baselines,
 )
 
-# Every gate promotion.json's `candidate` verdict is computed over. Kept as a
+# The gates promotion.json's `candidate` verdict is computed over. Kept as a
 # literal here (rather than imported from bootstrap_report.py) so this test
-# fails loudly if G7 is ever quietly dropped back out of the set instead of
-# passing by construction.
-PROMOTION_GATE_IDS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7")
+# fails loudly if a gate is ever quietly added to or dropped from the
+# deciding set instead of passing by construction.
+DECIDING_GATE_IDS = ("G1", "G3")
+
+# Reported but never deciding: the informational rows the report marks.
+NON_DECIDING_GATE_IDS = ("G4", "G6", "G7")
+
+# Gates removed with their wiring (S3): no report row, no verdict say.
+REMOVED_GATE_IDS = ("G2", "G5")
 
 
 CLASSIFICATION_FOR = {
@@ -160,7 +163,7 @@ def run_report(bootstrap_root: Path) -> tuple[dict, str]:
   return promotion, report_md
 
 
-class BootstrapReportG7PromotionTests(unittest.TestCase):
+class BootstrapReportCandidateTests(unittest.TestCase):
   def setUp(self) -> None:
     self._tmp = tempfile.TemporaryDirectory()
     self.addCleanup(self._tmp.cleanup)
@@ -168,42 +171,69 @@ class BootstrapReportG7PromotionTests(unittest.TestCase):
     self.gates_dir = self.bootstrap_root / "gates"
 
   def all_passing(self) -> None:
-    for gate_id in PROMOTION_GATE_IDS:
-      if gate_id == "G7":
-        write_gate(self.gates_dir, "G7", "pass", summary=real_g7_gate("pass")["summary"])
-      else:
-        write_gate(self.gates_dir, gate_id, "pass")
+    for gate_id in DECIDING_GATE_IDS:
+      write_gate(self.gates_dir, gate_id, "pass")
 
-  def test_all_gates_passing_including_g7_is_a_candidate(self) -> None:
+  def test_deciding_gates_passing_is_a_candidate(self) -> None:
     self.all_passing()
 
     promotion, report_md = run_report(self.bootstrap_root)
 
     self.assertTrue(promotion["candidate"], promotion)
-    self.assertEqual(promotion["gates"]["G7"]["status"], "pass")
     self.assertIn("Candidate: **yes**", report_md)
 
-  def test_failing_g7_alone_blocks_candidacy(self) -> None:
+  def test_failing_g3_alone_blocks_candidacy(self) -> None:
     self.all_passing()
-    write_gate(self.gates_dir, "G7", "fail", summary=real_g7_gate("differs")["summary"])
+    write_gate(self.gates_dir, "G3", "fail")
 
     promotion, report_md = run_report(self.bootstrap_root)
 
     self.assertFalse(promotion["candidate"], promotion)
-    self.assertEqual(promotion["gates"]["G7"]["status"], "fail")
     self.assertIn("Candidate: **no**", report_md)
 
-  def test_missing_g7_result_is_skipped_and_blocks_candidacy(self) -> None:
-    # seal-gates' escape hatch: a gate a run never produced is "skipped", the
-    # same as G5 or G6 would be, not silently dropped from the verdict.
-    for gate_id in PROMOTION_GATE_IDS:
-      if gate_id != "G7":
-        write_gate(self.gates_dir, gate_id, "pass")
+  def test_failing_g1_alone_blocks_candidacy(self) -> None:
+    self.all_passing()
+    write_gate(self.gates_dir, "G1", "fail")
 
     promotion, _report_md = run_report(self.bootstrap_root)
 
     self.assertFalse(promotion["candidate"], promotion)
-    self.assertEqual(promotion["gates"]["G7"]["status"], "skipped")
+
+  def test_failing_g4_alone_leaves_the_run_a_candidate(self) -> None:
+    # G4 is a budget, not correctness: it is reported (informational) but
+    # never decides the verdict.
+    self.all_passing()
+    write_gate(self.gates_dir, "G4", "fail", summary="wall time 1.4x of stage1")
+
+    promotion, _report_md = run_report(self.bootstrap_root)
+
+    self.assertTrue(promotion["candidate"], promotion)
+    self.assertEqual(promotion["gates"]["G4"]["status"], "fail")
+
+  def test_absent_g2_g5_g6_and_g7_leave_the_run_a_candidate(self) -> None:
+    # The nightly no longer runs G2/G5 at all and G6/G7 only in PR CI, so a
+    # run with no result for any of them must still be a candidate; G2/G5
+    # have no row left, G4/G6/G7 show up as skipped informational rows.
+    self.all_passing()
+
+    promotion, report_md = run_report(self.bootstrap_root)
+
+    self.assertTrue(promotion["candidate"], promotion)
+    for gate_id in REMOVED_GATE_IDS:
+      self.assertNotIn(gate_id, promotion["gates"])
+    for gate_id in NON_DECIDING_GATE_IDS:
+      self.assertEqual(promotion["gates"][gate_id]["status"], "skipped", gate_id)
+      self.assertIn(f"| **{gate_id}**", report_md)
+
+  def test_missing_g3_result_is_skipped_and_blocks_candidacy(self) -> None:
+    # seal-gates' escape hatch: a gate a run never produced is "skipped",
+    # which still blocks candidacy for a deciding gate.
+    write_gate(self.gates_dir, "G1", "pass")
+
+    promotion, _report_md = run_report(self.bootstrap_root)
+
+    self.assertFalse(promotion["candidate"], promotion)
+    self.assertEqual(promotion["gates"]["G3"]["status"], "skipped")
 
   def test_g7_gate_summary_no_longer_calls_itself_informational(self) -> None:
     # Runs the real gate-summary formatting code (build_gate), not a copy of
@@ -224,15 +254,24 @@ class BootstrapReportG7PromotionTests(unittest.TestCase):
     self.assertIn("2 timeouts retried", retried["summary"])
     self.assertEqual(retried["details"]["timeouts_retried"], 2)
 
-  def test_report_no_longer_calls_g7_informational(self) -> None:
+  def test_report_marks_the_non_deciding_gates_informational(self) -> None:
     self.all_passing()
 
     _promotion, report_md = run_report(self.bootstrap_root)
 
-    self.assertNotIn("informational", report_md.lower())
-    # The real gate summary (not a fixture's prose) is what ends up in the
-    # rendered report.
-    self.assertIn(real_g7_gate("pass")["summary"], report_md)
+    self.assertIn("Gates marked informational (G4, G6, G7) are reported", report_md)
+    # One informational marker per non-deciding row, none on G1/G3.
+    self.assertEqual(report_md.count("(informational)"), len(NON_DECIDING_GATE_IDS))
+    for gate_id in NON_DECIDING_GATE_IDS:
+      self.assertIn(f"**{gate_id}**", report_md)
+
+  def test_report_explains_the_one_candidate_promotion_rule(self) -> None:
+    self.all_passing()
+
+    _promotion, report_md = run_report(self.bootstrap_root)
+
+    self.assertIn("candidate nightly run promotes", report_md)
+    self.assertNotIn("Three consecutive", report_md)
 
 
 class DropScheduleBaselineTests(unittest.TestCase):

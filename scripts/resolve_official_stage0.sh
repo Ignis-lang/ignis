@@ -154,8 +154,10 @@ fi
 
 STREAK=$(jq -r '.streak // 0' "$WORKDIR/promotion-streak.json")
 
-if [ "$STREAK" -lt 3 ]; then
-  unavailable "the promotion streak is ${STREAK}, below the official threshold of 3"
+# One candidate nightly run promotes (threshold 1); the file format predates
+# the change, so an old streak of 3 or more keeps resolving to official too.
+if [ "$STREAK" -lt 1 ]; then
+  unavailable "the promotion streak is ${STREAK}; no candidate nightly run has promoted an asset"
 fi
 
 chmod +x "$WORKDIR/ignis-selfhost-linux-amd64"

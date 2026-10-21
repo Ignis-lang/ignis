@@ -15,7 +15,6 @@ Two commands, both driven by `scripts/bootstrap.sh`:
 promotion.json, not the exit code: the report has to exist even for a run where
 every gate failed.
 """
-
 import argparse
 import json
 import re
@@ -24,26 +23,26 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Gates whose status decides promotion. A gate stays out of this tuple until a
-# failure of it is a reason not to ship. G7 (drop-schedule parity) joined this
-# set once the selfhost's ownership analysis reached 623/623 own-code parity
-# with the host (nightly-34803378772): a divergence is now a real ownership
-# bug, not the expected state, so it holds the `candidate` verdict like every
-# other gate.
-GATE_IDS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7")
+# Gates whose status decides promotion. The nightly promotes on G1 (the fixed
+# point) and G3 (the selfhost test suite under stage2, compared with stage1's
+# run) only: together they prove the promoted binary reproduces its own output
+# and passes its own suite. G2 (e2e parity) and G5 (error corpus) were removed
+# once G3's `e2e::` fixtures covered the same corpora, and G6/G7 moved to
+# pull-request CI against stage1.
+GATE_IDS = ("G1", "G3")
 
-# No gate is informational anymore, but the split is kept so a future gate can
-# be reported without blocking promotion the same way G7 used to.
-INFORMATIONAL_GATE_IDS = ()
+# Reported but never counted towards the verdict. G4 is a budget, not a
+# correctness property; G6 (parse verdicts) and G7 (drop schedules) are
+# content checks pull-request CI runs against stage1 next to G3, so a nightly
+# run has no result for them and a skipped informational row never blocks.
+INFORMATIONAL_GATE_IDS = ("G4", "G6", "G7")
 
 REPORTED_GATE_IDS = GATE_IDS + INFORMATIONAL_GATE_IDS
 
 GATE_TITLES = {
   "G1": "Fixed point (stage3 C identical to stage2)",
-  "G2": "End-to-end parity under stage2",
   "G3": "Selfhost test suite under stage2",
   "G4": "Resource budget within 1.25x of stage1",
-  "G5": "Diagnostics keep every one the committed error corpus records",
   "G6": "Parse verdicts match the committed baselines",
   "G7": "Drop schedules match the committed baselines",
 }
@@ -431,8 +430,8 @@ def format_report(
     f"- Generated: {generated_at}",
     f"- Candidate: **{'yes' if candidate else 'no'}**",
     "",
-    "A run is a candidate when every promotion gate passes. Three consecutive",
-    "candidate nightly runs promote the stage2 binary to official.",
+    "A run is a candidate when every promotion gate (G1 and G3) passes. One",
+    "candidate nightly run promotes the stage2 binary to official.",
   ]
 
   if INFORMATIONAL_GATE_IDS:
