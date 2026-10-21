@@ -163,6 +163,10 @@ A view must not outlive its owner:
 - While a binding keeps a view, its owner is borrowed until the end of the scope, so mutating
   or moving the owner (A0258) is reported. A binding typed `&mut T` borrows its owner mutably,
   so even reading the owner is reported until the binding's scope ends.
+- A view taken through a view local that holds such a borrow borrows that local, not its
+  owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
+  borrows `store`, so views derived from `store` only conflict with each other, while `guard`
+  stays borrowed by `store` until `store`'s scope ends.
 
 A view of a temporary used inside the statement that created it is fine, as a call argument
 or in a template literal. To keep it, bind the owner to a local first:
