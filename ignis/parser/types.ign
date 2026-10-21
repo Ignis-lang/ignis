@@ -189,6 +189,19 @@ export namespace ParserTypes {
     let mut last: Token = first.clone();
     segments.push(first.lexemeString());
 
+    // `static str` is one primitive spelled with two keywords. It stays a one-segment
+    // path, so every consumer of a path type (resolver, formatter, serializer) sees a
+    // primitive name and needs no node of its own.
+    if (first.kindValue() == TokenKind::KEYWORD && first.keywordValue() == Keyword::STATIC) {
+      let strToken = parserRef.expectKeyword(Keyword::STR_TYPE, "expected 'str' after 'static' in a type")!;
+      let mut staticSegments: Vector<String> = Vector::new<String>();
+      staticSegments.push(String::create("static str"));
+      return Option::SOME(parserRef.module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+        span: ParserShared::mergeSpans(first.span, strToken.span),
+        segments: ParserShared::copyStrings(&staticSegments),
+      })));
+    }
+
     if (ParserTypes::isPrimitiveTypeKeyword(&first)) {
       return Option::SOME(parserRef.module.addType(Ast::Type::Node::Path(Ast::Type::Path {
         span: first.span,

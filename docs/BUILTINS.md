@@ -123,7 +123,7 @@ Returns a human-readable string representation of a type name. Resolved at compi
 |---|---|
 | **Type arguments** | 1 type |
 | **Arguments** | none |
-| **Returns** | `str` |
+| **Returns** | `str`, or `static str` where that type is expected |
 
 ```ignis
 function main(): void {
@@ -663,7 +663,7 @@ identifier as a value, and no form that puts a type where a type is expected.
 | `@compileError("msg")` | 1 string literal | `Never` | No (compile error) |
 | `@sizeOf<T>()` | 1 type arg | `u64` | Yes (`sizeof`) |
 | `@alignOf<T>()` | 1 type arg | `u64` | Yes (`_Alignof`) |
-| `@typeName<T>()` | 1 type arg | `str` | No (resolved to literal) |
+| `@typeName<T>()` | 1 type arg | `str` / `static str` | No (resolved to literal) |
 | `@bitCast<T>(expr)` | 1 type arg + 1 expr | `T` | Yes (`memcpy`) |
 | `@pointerCast<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (C cast) |
 | `@integerFromPointer(ptr)` | 1 pointer expr | `u64` | Yes (C cast) |

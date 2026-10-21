@@ -5,6 +5,7 @@ import Test from "std::test";
 import Diagnostic, DiagnosticBag, SourceFile, SourceSpan, SourceMap from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import CompileFlags, ParseOutput, Parser from "@compiler::parser";
+import Id from "@compiler::ids";
 
 function readFixture(path: str): String {
   return match (Fs::readToString(path)) {
@@ -6352,4 +6353,45 @@ function parserRejectsAnOpenEndedInclusiveRange(): void {
 
   Test::assertEq<u64>(diagnostics.length(), 1);
   assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");
+}
+
+@test
+function parserParsesStaticStrInEveryTypePosition(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/static_str.ign",
+    "type Name = static str; record Entry { name: static str; } record Texts { static GREETING: static str = \"hi\"; } function pick(value: static str, list: Vector<static str>): Option<static str> { let local: static str = value; return Option::SOME(local); }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let mut staticStrPaths: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < module.types.length()) {
+    if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(Id::fromRaw<Ast::TypeTag>(index as u32))) {
+      if (let Option::SOME(segment) = path.segments.get(0)) {
+        if (segment.equals("static str")) {
+          staticStrPaths += 1;
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<u64>(staticStrPaths, 7);
+}
+
+@test
+function parserRejectsStaticWithoutStrInATypePosition(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/static_i32.ign", "function main(value: static i32): void {}");
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assert(diagnostics.length() > 0);
 }
