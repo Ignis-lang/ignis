@@ -188,6 +188,31 @@ EOF
   chmod +x "$path"
 }
 
+# Stands in for `gh` succeeding at the download with a *valid* promotion-
+# streak.json carrying the streak given as $2. One official asset plus one
+# streak file at or above the promotion threshold is what a promoted lineage
+# looks like to resolve_official_stage0.sh.
+write_gh_with_streak() {
+  local path="$1" streak="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+dir=""
+prev=""
+for arg in "\$@"; do
+  if [[ "\$prev" == "--dir" ]]; then
+    dir="\$arg"
+  fi
+  prev="\$arg"
+done
+mkdir -p "\$dir"
+printf '#!/usr/bin/env bash\nexit 0\n' >"\$dir/ignis-selfhost-linux-amd64"
+sha256sum "\$dir/ignis-selfhost-linux-amd64" >"\$dir/ignis-selfhost-linux-amd64.sha256"
+printf '{"streak": %s}\n' "$streak" >"\$dir/promotion-streak.json"
+exit 0
+EOF
+  chmod +x "$path"
+}
+
 write_stage0_json() {
   local root="$1" kind="$2" mode="$3" source="${4:-official}"
   printf '{"kind": "%s", "source": "%s", "sha256": "deadbeef", "mode": "%s"}\n' \
@@ -741,29 +766,25 @@ test_unexpected_failure_emits_no_resolved_output() {
 # exercised directly here without a gh/release round trip.
 test_promotion_decide() {
   TESTS_RUN=$((TESTS_RUN + 1))
-  echo "test: promotion-decide counts the streak and publishes at 3"
+  echo "test: promotion-decide publishes on the first candidate (threshold 1)"
 
   local out
 
-  out="$("$BOOTSTRAP_SH" promotion-decide true 2)"
-  [[ "$(jq -r '.streak' <<<"$out")" == "3" ]] && pass "candidate: streak increments to 3" \
-    || fail_test "candidate: streak is $(jq -r '.streak' <<<"$out"), expected 3"
+  out="$("$BOOTSTRAP_SH" promotion-decide true)"
+  [[ "$(jq -r '.streak' <<<"$out")" == "1" ]] && pass "candidate: streak increments to 1" \
+    || fail_test "candidate: streak is $(jq -r '.streak' <<<"$out"), expected 1"
   [[ "$(jq -r '.write_streak' <<<"$out")" == "true" ]] && pass "candidate: writes the streak file" \
     || fail_test "candidate: write_streak is $(jq -r '.write_streak' <<<"$out"), expected true"
-  [[ "$(jq -r '.publish_binary' <<<"$out")" == "true" ]] && pass "candidate: publishes at streak 3" \
+  [[ "$(jq -r '.publish_binary' <<<"$out")" == "true" ]] && pass "candidate: publishes at streak 1" \
     || fail_test "candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected true"
   [[ "$(jq -r 'has("reseed")' <<<"$out")" == "false" ]] && pass "candidate: no reseed field" \
     || fail_test "candidate: the decision still carries reseed: ${out}"
 
-  out="$("$BOOTSTRAP_SH" promotion-decide true 1)"
-  [[ "$(jq -r '.streak' <<<"$out")" == "2" ]] && pass "candidate: streak increments to 2" \
-    || fail_test "candidate: streak is $(jq -r '.streak' <<<"$out"), expected 2"
-  [[ "$(jq -r '.publish_binary' <<<"$out")" == "false" ]] && pass "candidate: does not publish below streak 3" \
-    || fail_test "candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected false"
-
-  out="$("$BOOTSTRAP_SH" promotion-decide true)"
-  [[ "$(jq -r '.streak' <<<"$out")" == "1" ]] && pass "candidate: a missing previous streak counts from 0" \
-    || fail_test "candidate: streak is $(jq -r '.streak' <<<"$out"), expected 1"
+  out="$("$BOOTSTRAP_SH" promotion-decide true 5)"
+  [[ "$(jq -r '.streak' <<<"$out")" == "6" ]] && pass "candidate: an old streak file keeps counting" \
+    || fail_test "candidate: streak is $(jq -r '.streak' <<<"$out"), expected 6"
+  [[ "$(jq -r '.publish_binary' <<<"$out")" == "true" ]] && pass "candidate: keeps publishing at an old streak" \
+    || fail_test "candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected true"
 
   out="$("$BOOTSTRAP_SH" promotion-decide false 5)"
   [[ "$(jq -r '.streak' <<<"$out")" == "0" ]] && pass "not candidate: streak resets to 0" \
@@ -772,6 +793,50 @@ test_promotion_decide() {
     || fail_test "not candidate: write_streak is $(jq -r '.write_streak' <<<"$out"), expected true"
   [[ "$(jq -r '.publish_binary' <<<"$out")" == "false" ]] && pass "not candidate: publishes nothing" \
     || fail_test "not candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected false"
+}
+
+# One candidate run promotes (threshold 1, S5): a streak-1 asset is accepted,
+# and a streak-0 one (a fresh release, or a run that reset the streak without
+# republishing) is not. Old streak files (>= 1 from the threshold-3 era) keep
+# working because the format never changed, only the threshold.
+test_official_asset_resolution_threshold() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: resolve_official_stage0.sh accepts a streak of 1 and rejects 0"
+
+  local streak status github_output kind
+  for streak in 0 1 3; do
+    local root
+    root="$(make_sandbox)"
+    write_gh_with_streak "$root/bin/gh" "$streak"
+
+    status=0
+    github_output="$root/github_output.txt"
+    (
+      cd "$root"
+      PATH="$root/bin:$PATH" \
+        STAGE0_MODE=official \
+        GH_TOKEN=fake \
+        GITHUB_OUTPUT="$github_output" \
+        scripts/resolve_official_stage0.sh
+    ) >"$root/run.log" 2>&1 || status=$?
+
+    if [[ "$streak" -ge 1 ]]; then
+      [[ "$status" -eq 0 ]] && pass "streak ${streak}: resolve_official_stage0.sh exits 0" \
+        || fail_test "streak ${streak}: expected exit 0, got ${status}, see ${root}/run.log"
+      grep -q '^resolved=true$' "$github_output" && pass "streak ${streak}: resolved=true" \
+        || fail_test "streak ${streak}: no resolved=true output, see ${github_output}"
+      kind="$(json_get "$root/build/bootstrap/stage0.json" kind)"
+      [[ "$kind" == "official" ]] && pass "streak ${streak}: stage0.json kind is official" \
+        || fail_test "streak ${streak}: stage0.json kind is '${kind}', expected official"
+    else
+      [[ "$status" -eq 1 ]] && pass "streak ${streak}: resolve_official_stage0.sh fails (exit 1)" \
+        || fail_test "streak ${streak}: expected exit 1, got ${status}, see ${root}/run.log"
+      grep -q '^resolved=false$' "$github_output" && pass "streak ${streak}: resolved=false" \
+        || fail_test "streak ${streak}: no resolved=false output, see ${github_output}"
+    fi
+
+    rm -rf "$root"
+  done
 }
 
 # A seed-built stage0 that cannot build stage1 says the seed needs a refresh,
@@ -878,6 +943,7 @@ test_auto_without_official_or_seed_fails
 test_forced_official_without_asset_fails
 test_host_mode_is_rejected
 test_unexpected_failure_emits_no_resolved_output
+test_official_asset_resolution_threshold
 test_promotion_decide
 test_seed_stage0_failure_asks_for_a_seed_refresh
 test_recorded_selfhost_stage0_is_adopted

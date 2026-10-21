@@ -63,24 +63,22 @@ ignis check                                    # Analyze the standard library an
 ignis fmt --check <files...>                   # Canonical formatting of std/, ignis/ and example/
 ignis test-std --std-path std                  # Standard library test suite
 scripts/bootstrap.sh gate-g3-stage1            # The compiler's own test suite, fixtures included, under stage1
+scripts/bootstrap.sh gate-g6-stage1            # Parse verdicts vs test_cases/__parse_verdicts__, under stage1
+scripts/bootstrap.sh gate-g7-stage1            # Drop schedules vs committed baselines, under stage1
 
-# Gates (see BOOTSTRAP.md for what each compares)
-scripts/bootstrap.sh parity                    # G2: e2e corpus through stage2 -> build/bootstrap/parity.md
+# Gates (see BOOTSTRAP.md for what each compares; G1 and G3 decide promotion,
+# G4/G6/G7 are reported but never decide it)
 scripts/bootstrap.sh gate-g3                   # G3: test suite under stage2, compared with stage1's run
-scripts/bootstrap.sh gate-g4                   # G4: stage2 vs stage1 RSS/wall budget
-scripts/bootstrap.sh gate-g5                   # G5: error corpus through stage2 against committed snapshots
+scripts/bootstrap.sh gate-g4                   # G4: stage2 vs stage1 RSS/wall budget (informational)
 scripts/bootstrap.sh gate-g6                   # G6: stage2 parse verdicts vs committed baselines
 scripts/bootstrap.sh gate-g6-baselines [bin]   # regenerate test_cases/__parse_verdicts__ (review the diff)
 scripts/bootstrap.sh gate-g7                   # G7: stage2 drop schedules vs committed baselines
-scripts/bootstrap.sh gate-g7-stage1            # same, against stage1 (what PR CI runs)
 scripts/bootstrap.sh gate-g7-baselines [bin]   # regenerate test_cases/e2e/ok/__drop_schedules__ (review the diff)
 scripts/bootstrap.sh stages                    # stage1 -> stage2 -> gate-g4 -> stage3 (the nightly's ladder job)
-scripts/bootstrap.sh gates                     # every stage and gate (G1..G7), then report
+scripts/bootstrap.sh gates                     # every stage and gate (G1, G3, G4, G6, G7), then report
 scripts/bootstrap.sh seal-gates                # write a skipped placeholder for every gate that has no result yet
 scripts/bootstrap.sh report                    # gates/*.json -> build/bootstrap/report.md + promotion.json
 scripts/bootstrap.sh seed                      # refresh bootstrap/seed (deliberate, see BOOTSTRAP.md)
-scripts/selfhost_e2e_parity.py --compiler <bin> --report parity.md                 # G2 harness, any compiler binary
-scripts/selfhost_e2e_parity.py --compiler <bin> --corpus err --report parity-err.md  # G5 harness
 scripts/selfhost_syntax_parity.py --check-coverage          # every G6 case has a baseline (no compiler)
 scripts/selfhost_drop_schedule_parity.py --check-coverage   # every ok fixture has a G7 baseline (no compiler)
 
