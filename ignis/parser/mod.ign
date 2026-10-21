@@ -7,6 +7,7 @@ import _ from "./statements";
 import _ from "./patterns";
 import _ from "./recovery";
 import _ from "./trait_defaults";
+import _ from "./cross_module_defaults";
 
 import Ast from "@compiler::ast";
 import Diagnostic, DiagnosticBag, DiagnosticNote, SourceFile from "@compiler::diagnostics";
@@ -78,6 +79,18 @@ function pushRoots(module: &mut Ast::Module, roots: &Vector<Ast::ItemId>): void 
 }
 
 export namespace Parser {
+  /// Copies the default methods of traits declared in one module onto the
+  /// types of other modules that implement them. Runs once every module of
+  /// the program is parsed and its imports name the modules they resolve to,
+  /// before analysis: `moduleSources[i]` is the resolved path of `modules[i]`.
+  function materializeCrossModuleDefaults(
+    modules: &mut Vector<Ast::Module>,
+    moduleSources: &Vector<String>,
+    preludePaths: &Vector<String>,
+  ): void {
+    ParserCrossModuleDefaults::materialize(modules, moduleSources, preludePaths);
+  }
+
   /// Parses with the configuration of the machine this compiler runs on. Use
   /// `parseIntoWithFlags` from a build, whose configuration the project and
   /// the command line decide.

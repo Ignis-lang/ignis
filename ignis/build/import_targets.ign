@@ -1,5 +1,6 @@
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import Parser from "@compiler::parser";
 
 import String from "std::string";
 import Vector from "std::vector";
@@ -207,4 +208,26 @@ export function restoreWrittenImportSources(
       metadata: Ast::copyMetadata(&importItem.metadata),
     });
   }
+}
+
+/// Copies the default methods of traits one module declares onto the types
+/// of other modules that implement them. `modules[i]` is the module `infos[i]`
+/// describes, with its imports already mapped to discovery targets.
+export function copyTraitDefaultsAcrossModules(
+  modules: &mut Vector<Ast::Module>,
+  infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  preludePaths: &Vector<String>,
+): void {
+  let mut moduleSources: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < infos.length()) {
+    if (let Option::SOME(info) = infos.get(index)) {
+      moduleSources.push(info.pathText.clone());
+    }
+
+    index += 1;
+  }
+
+  Parser::materializeCrossModuleDefaults(modules, &moduleSources, preludePaths);
 }

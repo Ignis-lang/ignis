@@ -1174,6 +1174,17 @@ export namespace Analyzer {
           Ast::Item::Node::Function(function_) -> {
             let start: u64 = state.diagnostics.length();
 
+            // A copy of a trait default another module declares names what
+            // that module sees, not what this one does.
+            let mut previousModule: Option<u64> = Option::NONE;
+
+            if (let Option::SOME(scope) = module.inheritedScopeOf(*methodItemId)) {
+              if (let Option::SOME(sourcePath) = &scope.sourceModule) {
+                let mut scopeRef: &mut Analyzer::DefinitionStore = defStore;
+                previousModule = scopeRef.enterModuleScope(&sourcePath);
+              }
+            }
+
             Analyzer::Typecheck::checkMethodItem(
               state,
               defStore,
@@ -1186,6 +1197,11 @@ export namespace Analyzer {
               *methodItemId,
               &function_,
             );
+
+            if (let Option::SOME(previous) = previousModule) {
+              let mut scopeRef: &mut Analyzer::DefinitionStore = defStore;
+              scopeRef.leaveModuleScope(previous);
+            }
 
             if (let Option::SOME(inherited) = module.inheritedMethod(*methodItemId)) {
               Analyzer::Typecheck::recordInheritedDiagnostics(state, start, inherited);
