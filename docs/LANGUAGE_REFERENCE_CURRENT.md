@@ -567,6 +567,8 @@ extern libc {
 }
 ```
 
+Some standard-library modules are auto-loaded into every program and need no import: `std::string`, `std::number`, `std::vector`, `std::types`, `std::option`, `std::result`, `std::format`, and `std::process_runtime`. The symbols they export (`String`, `Number`, `Float`, `Vector`, `Type`, `Option`, `Result`, `Display`, and the rest) are already in scope, so an import of one of them (`import String from "std::string";`) is redundant; the compiler reports it as a warning. Every other module, such as `std::io`, `std::collections` or `std::sync`, still needs an import.
+
 Extern blocks support qualified paths and can contain both function signatures and constant declarations (without initializers):
 
 ```ignis
@@ -1043,7 +1045,6 @@ The current contract is strict:
 The standard testing namespace is `std::test::Test`.
 
 ```ignis
-import String from "std::string";
 import Test from "std::test";
 
 @test

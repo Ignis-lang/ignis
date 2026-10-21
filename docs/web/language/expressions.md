@@ -115,7 +115,6 @@ left-associative.
 
 ```ignis
 import Io from "std::io";
-import String from "std::string";
 
 function add(x: i32, y: i32): i32 {
     return x + y;

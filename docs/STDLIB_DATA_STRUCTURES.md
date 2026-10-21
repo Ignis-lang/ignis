@@ -59,7 +59,6 @@ Use `str` when:
 `String` is the owned heap-backed standard-library string type.
 
 ```ignis
-import String from "std::string";
 
 function main(): i32 {
   let mut value: String = String::create("ignis");
@@ -111,7 +110,6 @@ Use fixed-size arrays when:
 `Vector<T>` is the standard-library growable contiguous array.
 
 ```ignis
-import Vector from "std::vector";
 
 function main(): i32 {
   let mut values: Vector<i32> = Vector::new<i32>();
