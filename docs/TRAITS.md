@@ -240,7 +240,7 @@ type is neither `Send` nor `Sync`.
 A type parameter `F: Send` cannot be called inside the function. `@sendable` on a parameter of
 function type gives the same check at every call while keeping the parameter an ordinary,
 callable function value. Arguments are judged with the `Send` rules above. `@sendable` on a
-parameter that is not of function type is an error (A0255). An alias is judged by the type it names: an alias to a function type is accepted, an alias to anything else is A0255, and so is a generic alias, which is not resolved to a function type. A parameter typed by an alias cannot be called today (A0024), so spell the function type out when the task is called. It combines with `@noescape`, which
+parameter that is not of function type is an error (A0255). An alias is judged by the type it names: an alias to a function type is accepted, an alias to anything else is A0255, and so is a generic alias, which is not resolved to a function type. A parameter typed by an alias to a function type is callable like one spelled out. It combines with `@noescape`, which
 keeps deciding where by-reference captures are allowed.
 
 ```ignis

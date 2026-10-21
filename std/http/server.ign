@@ -28,7 +28,7 @@ const LINGER_BYTES: u64 = 1048576;
 
 /// Whether `bytes` is well-formed UTF-8: no truncated or overlong sequence,
 /// no surrogate and nothing above U+10FFFF.
-function isUtf8(bytes: &Vector<u8>): boolean {
+export function isUtf8(bytes: &Vector<u8>): boolean {
   let data: *u8 = bytes.asPtr();
   let length: u64 = bytes.length();
   let mut index: u64 = 0;
@@ -191,43 +191,6 @@ function lingerClose(stream: &mut TcpStream): void {
   }
 }
 
-/// One worker of `Server::run`: accepts connections and serves each in turn
-/// until `accept` reports that the listener itself is unusable, and returns
-/// that error.
-///
-/// Any other `accept` failure concerns one connection or a passing shortage
-/// (a client that reset before it was accepted, no descriptors left), so the
-/// worker keeps going; after a shortage it waits briefly instead of spinning.
-function acceptLoop<H: Http::Handler>(
-  listener: &TcpListener,
-  handler: &H,
-  config: &Http::ServerConfig
-): Io::IoError {
-  while (true) {
-    let mut stream: TcpStream = match (listener.accept()) {
-      Result::OK(accepted) -> accepted,
-      Result::ERROR(error) -> {
-        let code: i32 = error.rawCode();
-
-        if (code == Platform::EBADF || code == Platform::EINVAL) {
-          return error;
-        }
-
-        if (code == Platform::EMFILE || code == Platform::ENFILE) {
-          LibC::Process::usleep(ACCEPT_BACKOFF_MICROSECONDS);
-        }
-
-        continue;
-      },
-    };
-
-    // An error on one connection only ends that connection.
-    Http::serveConnection<H>(&mut stream, handler, config).isOk();
-  }
-
-  return Io::IoError::lastError();
-}
-
 /// The HTTP/1.1 server driver.
 export namespace Http {
   /// What a server calls for every complete request. The handler fills
@@ -375,8 +338,8 @@ export namespace Http {
 
     /// Serves connections with `handler` on `config.threads` threads.
     ///
-    /// Each thread accepts a connection, serves it with `serveConnection`
-    /// and accepts the next one. An error on a connection ends only that
+    /// Each thread runs `acceptConnections`: it accepts a connection,
+    /// serves it with `serveConnection` and accepts the next one. An error on a connection ends only that
     /// connection. A thread stops when `accept` fails, and `run` returns
     /// once every thread stopped, with the first thread's error. There is
     /// no way to stop a running server yet, so in practice `run` blocks for
@@ -393,7 +356,7 @@ export namespace Http {
         let worker: Arc<H> = shared.clone();
 
         workers.push(Thread::spawn<Io::IoError>((): Io::IoError -> {
-              return acceptLoop<H>((@move listener).get(), (@move worker).get(), (@move config).get());
+              return Http::acceptConnections<H>((@move listener).get(), (@move worker).get(), (@move config).get());
             }));
         index += 1;
       }
@@ -413,6 +376,49 @@ export namespace Http {
 
       return Result::ERROR(error);
     }
+  }
+
+  /// Accepts connections on `listener` and serves each in turn with
+  /// `handler` on the calling thread, until `accept` reports that the
+  /// listener itself is unusable; returns that error.
+  ///
+  /// Every thread of `Server::run` runs this loop. Calling it directly on
+  /// threads of your own gives each thread its own handler, for state that
+  /// is not `Send` or `Sync` (`std::web` builds one router per thread this
+  /// way); the listener is shared, for example through an `Arc`.
+  ///
+  /// Any other `accept` failure concerns one connection or a passing
+  /// shortage (a client that reset before it was accepted, no descriptors
+  /// left), so the loop keeps going; after a shortage it waits briefly
+  /// instead of spinning. An error on one connection only ends that
+  /// connection.
+  function acceptConnections<H: Http::Handler>(
+    listener: &TcpListener,
+    handler: &H,
+    config: &ServerConfig
+  ): Io::IoError {
+    while (true) {
+      let mut stream: TcpStream = match (listener.accept()) {
+        Result::OK(accepted) -> accepted,
+        Result::ERROR(error) -> {
+          let code: i32 = error.rawCode();
+
+          if (code == Platform::EBADF || code == Platform::EINVAL) {
+            return error;
+          }
+
+          if (code == Platform::EMFILE || code == Platform::ENFILE) {
+            LibC::Process::usleep(ACCEPT_BACKOFF_MICROSECONDS);
+          }
+
+          continue;
+        },
+      };
+
+      Http::serveConnection<H>(&mut stream, handler, config).isOk();
+    }
+
+    return Io::IoError::lastError();
   }
 
   /// Serves HTTP/1.1 requests on `stream` until the connection ends.

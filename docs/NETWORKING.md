@@ -12,7 +12,7 @@ it is illustrative: it shows the shape of an API, not a final signature.
 | Topic | Decision |
 | --- | --- |
 | Panics | A panic aborts the process, always. Recoverable failures are `Result` and `Option`; a server that panics on bad input has a bug. |
-| Handler errors | A framework handler that returns an error `Result` produces a `500` response. |
+| Handler errors | A framework handler that returns an error `Result` produces a response with the error's status, `500` by default. |
 | Layering | Three layers, each built only on the one below: TCP, HTTP, framework. |
 | HTTP core | Sans-IO: the protocol is a state machine fed bytes, with no socket access. A thin driver does the I/O. |
 | First concurrency model | One thread per connection, from a thread pool. |
@@ -29,7 +29,7 @@ Each step is one or more pull requests. A step depends only on the steps above i
 | 1 | `std::net`: addresses, `TcpListener`, `TcpStream` | std | - |
 | 2 | Channel and thread pool in `std::sync` | std | - |
 | 3 | `std::http` core (sans-IO) and its blocking driver | std | 1 |
-| 4 | Framework: router, middleware, `next` | std or separate package | 2, 3 |
+| 4 | Framework: router, middleware, `next` (`std::web`) | std | 2, 3 |
 | 5 | Readiness reactor (`epoll`) | std | 0, 1 |
 | 6 | Event-driven model: decision and runtime | Language and/or std | 0, 5 |
 
@@ -198,8 +198,9 @@ WebSockets, TLS (Transport Layer Security), compression, a client.
 
 ## Layer 3: framework
 
-Minimally opinionated and extensible, in the spirit of Express. Routes and middleware receive the
-request, the response and the next function.
+`std::web`. Minimally opinionated and extensible, in the spirit of Express. Routes and middleware
+receive the request, the response and the next function. See the `std::web` module docs for the
+full surface.
 
 ### The `next` signature
 
@@ -210,23 +211,39 @@ receives them back as parameters:
 
 ```ignis
 function logger(
-  request: &mut Http::Request,
-  response: &mut Http::Response,
-  next: (&mut Http::Request, &mut Http::Response) -> Result<void, AppError>,
-): Result<void, AppError> {
-  next(request, response)!;
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+  next: Web::Next,
+): Result<void, Web::Error> {
+  let result: Result<void, Web::Error> = next(request, response);
   // `request` and `response` are usable again here.
-  Io::println(`${request.method()} ${request.path()} ${response.status()}`);
-  return Result::OK(());
+  Io::println(`${request.method().toString()} ${request.path()} ${response.status}`);
+  return result;
 }
 ```
 
-An error that reaches the router becomes a `500` response.
+`Web::Next` is `(&mut Web::Request, &mut Web::Response) -> Result<void, Web::Error>`. Code after
+`next` runs on the way back out (the onion model), and an error from `next` propagates up the chain.
+
+### Errors
+
+One framework error type, `Web::Error { status, message }`, with status `500` by default. Not
+found, bad request or unauthorized are errors with that status. An error that reaches the router
+becomes a response with its status and its message as a plain-text body. The router answers an
+unmatched path with `404`, and a path matched only with other methods with `405` and `Allow`.
+
+### Threads
+
+Function values are neither `Send` nor `Sync`, and a closure that captures one is not `Send`, so a
+router of closures cannot be shared between threads. An application is a record implementing
+`Web::App` (`build(&self): Web::Router`), shared through an `Arc`; every server thread builds its
+own router once and serves its connections with it through `Http::acceptConnections`, the accept
+loop `Http::Server::run` uses. The router never crosses threads.
 
 ### Open questions
 
-1. Lives in `std`, or in a separate package once packages exist?
-2. Error type: one framework error type, or generic over the application's error?
+1. Lives in `std` for now; it can move to a package once packages exist.
+2. Sub-router mounting, static files, cookies and templating are not in the first slice.
 
 ## Event-driven I/O (open)
 
