@@ -1,0 +1,49 @@
+// e2e: std
+// A view taken through a live `&mut` view local reborrows that local, not the
+// guard it views: `store` already holds the guard's borrow, so borrows derived
+// from `store` only have to respect each other.
+import Mutex, MutexGuard from "std::sync";
+
+record Task {
+  public id: i32;
+  public done: boolean;
+}
+
+record Store {
+  public tasks: Vector<Task>;
+}
+
+function describe(task: &Task): i32 {
+  if (task.done) {
+    return task.id * 10;
+  }
+
+  return task.id;
+}
+
+function main(): i32 {
+  let shared: Mutex<Store> = Mutex::new<Store>(Store { tasks: Vector::new<Task>() });
+  let mut guard: MutexGuard<Store> = shared.lock();
+  let store: &mut Store = guard.get();
+
+  store.tasks.push(Task { id: 1, done: false });
+  store.tasks.push(Task { id: 2, done: false });
+
+  {
+    let task: &mut Task = store.tasks.getMut(1).unwrap();
+    task.done = true;
+  }
+
+  let described: i32 = describe(store.tasks.get(1).unwrap());
+
+  let mut sum: i32 = 0;
+  let mut index: u64 = 0;
+
+  while (index < store.tasks.length()) {
+    let task: &Task = store.tasks.get(index).unwrap();
+    sum += describe(task);
+    index += 1;
+  }
+
+  return described + sum;
+}

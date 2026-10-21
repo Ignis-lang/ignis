@@ -203,6 +203,38 @@ function borrowckReportsTwoMutableBorrows(): void {
   Test::assertEq<u64>(diagnostics.length(), 1);
 }
 
+const BORROWCK_GUARD_PRELUDE: str = "record Store {\n  public value: u32;\n\n  public read(&self): &u32 {\n    return &self.value;\n  }\n\n  public write(&mut self): &mut u32 {\n    return &mut self.value;\n  }\n}\n\nrecord Guard {\n  public store: Store;\n\n  public get(&mut self): &mut Store {\n    return &mut self.store;\n  }\n\n  public peek(&self): &Store {\n    return &self.store;\n  }\n}\n\n";
+
+/// Scenario: views taken through a live `&mut` view local reborrow the view
+/// local, not the guard it views, so they do not conflict with the view's own
+/// borrow of the guard.
+@test
+function borrowckAcceptsReborrowThroughAMutableView(): void {
+  let source: String = `${BORROWCK_GUARD_PRELUDE}function run(): u32 {\n  let mut guard: Guard = Guard { store: Store { value: 1 } };\n  let store: &mut Store = guard.get();\n  {\n    let item: &mut u32 = store.write();\n    *item = 5;\n  }\n  let first: &u32 = store.read();\n  let second: &u32 = store.read();\n\n  return *first + *second;\n}\n`;
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(source.toStr());
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: the guard itself stays borrowed while its view is live.
+@test
+function borrowckRejectsTheOwnerWhileAMutableViewIsLive(): void {
+  let source: String = `${BORROWCK_GUARD_PRELUDE}function run(): u32 {\n  let mut guard: Guard = Guard { store: Store { value: 1 } };\n  let store: &mut Store = guard.get();\n  let other: &Store = guard.peek();\n\n  return *store.read() + other.value;\n}\n`;
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(source.toStr());
+
+  Test::assert(borrowckCountCode(&diagnostics, DiagnosticCode::BORROW_IMMUTABLE_WHILE_MUTABLE) > 0);
+}
+
+/// Scenario: a shared reborrow of the view is still live when a mutable one
+/// is taken from the same view.
+@test
+function borrowckRejectsConflictingReborrowsOfAMutableView(): void {
+  let source: String = `${BORROWCK_GUARD_PRELUDE}function run(): u32 {\n  let mut guard: Guard = Guard { store: Store { value: 1 } };\n  let store: &mut Store = guard.get();\n  let first: &u32 = store.read();\n  let second: &mut u32 = store.write();\n  *second = 2;\n\n  return *first;\n}\n`;
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(source.toStr());
+
+  Test::assert(borrowckCountCode(&diagnostics, DiagnosticCode::BORROW_MUTABLE_WHILE_IMMUTABLE) > 0);
+}
+
 /// Scenario: a mutable borrow taken while a shared borrow is live conflicts.
 /// Spec: IGN-38 — A0037.
 @test

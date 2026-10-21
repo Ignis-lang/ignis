@@ -1,0 +1,43 @@
+// e2e: std
+// A single-file variant of e2e::closure_signature_order: the outer signature
+// `(i32, Next) -> i32` is seen before `Next`, whose struct it takes by value.
+import Vector from "std::vector";
+
+type Next = (i32) -> i32;
+type Layer = (i32, Next) -> i32;
+
+record Router {
+  layers: Vector<Layer>;
+
+  public static new(): Router {
+    return Router { layers: Vector::new<Layer>() };
+  }
+
+  public add(&mut self, layer: Layer): void {
+    self.layers.push(layer);
+  }
+
+  public run(&self, index: u64, value: i32): i32 {
+    if (index >= self.layers.length()) {
+      return value;
+    }
+
+    let layer: &Layer = self.layers.get(index).unwrap();
+
+    return (*layer)(value, (inner: i32): i32 -> {
+      return self.run(index + 1, inner);
+    });
+  }
+}
+
+function twice(value: i32, next: Next): i32 {
+  return next(value) * 2;
+}
+
+function main(): i32 {
+  let mut router: Router = Router::new();
+
+  router.add(twice);
+
+  return router.run(0, 21);
+}
