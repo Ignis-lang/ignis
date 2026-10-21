@@ -31,6 +31,11 @@ record Item {
 A type opts in with `@implements(TraitName)` and then has to satisfy every method without a
 default. Missing one is a compile-time error, not a runtime surprise.
 
+A type inherits every default it does not write, also from a trait declared in another module.
+The inherited body means what it means in the trait's module: its names resolve there, so it can
+call that module's private helpers, and a same-named declaration in the implementing module does
+not change it. An error in an inherited default is reported at the trait.
+
 A trait declared in a namespace is named by its path, `@implements(Shapes::Measured)`, or by its
 bare name where it is in scope. A generic bound `T: Shapes::Measured` accepts either form. Both
 names resolve to the trait they refer to, the way a type name does, so two traits that share a name

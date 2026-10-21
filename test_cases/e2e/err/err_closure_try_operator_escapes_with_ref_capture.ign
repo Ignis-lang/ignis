@@ -1,0 +1,22 @@
+// e2e: err
+// The `!` operator's bindings are locals of the closure, but a real outer
+// variable the body only reads is still captured by reference, so the closure
+// cannot escape.
+function halve(value: i32): Result<i32, String> {
+  if (value % 2 != 0) {
+    return Result::ERROR(String::create("odd"));
+  }
+
+  return Result::OK(value / 2);
+}
+
+function main(): i32 {
+  let label: String = String::create("offset");
+  let mut results: Vector<(i32) -> Result<i32, String>> = Vector::new<(i32) -> Result<i32, String>>();
+
+  results.push((value: i32): Result<i32, String> -> {
+      return Result::OK(halve(value)! + (label.length() as i32));
+    });
+
+  return 0;
+}

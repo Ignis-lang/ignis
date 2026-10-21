@@ -1,0 +1,75 @@
+// e2e: std
+// A record, an enum and a generic record inherit the defaults of a trait
+// declared in another module, named through a module that republishes it,
+// and by a namespaced path whose defaults use bare names of their namespace.
+// The defaults read `self`, call another default and a required method, and
+// name a private helper and a record of the trait's module, which this module
+// declares differently: the copies bind to the trait's module.
+import Io from "std::io";
+import Shapes from "./trait_default_cross_module/shapes";
+import Measured from "./trait_default_cross_module/reexport";
+
+function scaleOf(value: i32): i32 {
+  return value * 100;
+}
+
+record Unit {
+  public label: boolean;
+}
+
+type Count = boolean;
+
+@implements(Measured)
+record Square {
+  public side: i32;
+
+  area(&self): i32 {
+    return self.side * self.side;
+  }
+}
+
+@implements(Measured)
+enum Tile {
+  EMPTY,
+  BLOCK(i32),
+
+  area(&self): i32 {
+    return match (self) {
+      Tile::EMPTY -> 0,
+      Tile::BLOCK(size) -> size,
+    };
+  }
+}
+
+@implements(Measured, Shapes::Sized)
+record Tagged<T> {
+  public tag: T;
+  public size: i32;
+
+  area(&self): i32 {
+    return self.size;
+  }
+
+  width(&self): i32 {
+    return self.size + 1;
+  }
+}
+
+function doubledArea<T: Measured>(value: &T): i32 {
+  return value.doubled();
+}
+
+function main(): i32 {
+  let square: Square = Square { side: 3 };
+  let block: Tile = Tile::BLOCK(4);
+  let tagged: Tagged<i32> = Tagged { tag: 7, size: 2 };
+  let local: Unit = Unit { label: true };
+
+  Io::println(`square ${square.doubled()} ${square.quadrupled()} ${square.inUnits().value} ${square.counted()}`.toStr());
+  Io::println(`block ${block.doubled()} ${block.quadrupled()} ${block.inUnits().value}`.toStr());
+  Io::println(`tagged ${tagged.tag} ${tagged.doubled()} ${tagged.perimeter()} ${tagged.edge().length} ${doubledArea<Tagged<i32>>(&tagged)}`.toStr());
+  let flag: Count = local.label;
+  Io::println(`local ${scaleOf(1)} ${flag}`.toStr());
+
+  return 0;
+}

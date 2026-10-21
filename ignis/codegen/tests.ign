@@ -1019,6 +1019,101 @@ function codegenKeepsClosureAndFunctionPointerOfOneSignatureApart(): void {
   Test::assert(codegenContains(&emission.source, ")twice_"));
 }
 
+/// A closure signature whose call pointer takes another closure by value is
+/// defined after that closure's struct, even when the outer signature is seen
+/// first: a struct tag first named in a parameter list has prototype scope, so
+/// the call pointer would take a different, incomplete type.
+@test
+function codegenDefinesClosureStructsBeforeTheSignaturesThatTakeThem(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "type Leaf = (i32) -> i32;\ntype Middle = (i32, Leaf) -> i32;\ntype Outer = (i32, Middle) -> i32;\n\nrecord Holder {\n  outer: Outer;\n\n  public replace(&mut self, outer: Outer): void {\n    self.outer = outer;\n  }\n\n  public run(&self, value: i32): i32 {\n    return (self.outer)(value, (inner: i32, leaf: Leaf): i32 -> leaf(inner) + 1);\n  }\n}\n\nfunction outerLayer(value: i32, middle: Middle): i32 {\n  return middle(value, (leafValue: i32): i32 -> leafValue * 2);\n}\n\nfunction main(): i32 {\n  let holder: Holder = Holder { outer: outerLayer };\n\n  return holder.run(20);\n}\n",
+  );
+
+  let lines: Vector<String> = emission.source.lines();
+  let mut tags: Vector<String> = Vector::new<String>();
+  let mut lineIndex: u64 = 0;
+
+  while (lineIndex < lines.length()) {
+    if (let Option::SOME(line) = lines.get(lineIndex)) {
+      if (line.startsWith("struct __ignis_closure_t") && line.endsWith(" {")) {
+        tags.push(line.substringBytes(0, line.length() - 2));
+      }
+    }
+
+    lineIndex += 1;
+  }
+
+  Test::assert(tags.length() >= 3);
+
+  let mut defined: u64 = 0;
+  let mut byValueUses: u64 = 0;
+
+  lineIndex = 0;
+
+  while (lineIndex < lines.length()) {
+    if (let Option::SOME(line) = lines.get(lineIndex)) {
+      if (line.startsWith("struct __ignis_closure_t") && line.endsWith(" {")) {
+        defined += 1;
+      }
+
+      if (codegenContains(line, "(*call)(")) {
+        let mut tagIndex: u64 = 0;
+
+        while (tagIndex < tags.length()) {
+          if (let Option::SOME(tag) = tags.get(tagIndex)) {
+            let asLast: String = `${tag.toStr()})`;
+            let asMiddle: String = `${tag.toStr()},`;
+
+            if (line.contains(&asLast) || line.contains(&asMiddle)) {
+              byValueUses += 1;
+              Test::assert(tagIndex < defined - 1);
+            }
+          }
+
+          tagIndex += 1;
+        }
+      }
+    }
+
+    lineIndex += 1;
+  }
+
+  Test::assert(byValueUses >= 2);
+}
+
+/// A closure signature that takes another closure by reference names that
+/// closure's struct tag only behind a pointer, but a tag first named inside a
+/// parameter list still has prototype scope: every closure struct tag is
+/// declared before the first call pointer.
+@test
+function codegenDeclaresClosureTagsBeforeSignaturesTakeThemByReference(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "type Next = (i32) -> i32;\ntype Layer = (i32, &Next) -> i32;\n\nrecord Holder {\n  layer: Layer;\n\n  public replace(&mut self, layer: Layer): void {\n    self.layer = layer;\n  }\n\n  public run(&self, value: i32): i32 {\n    let next: Next = (inner: i32): i32 -> inner + 1;\n\n    return (self.layer)(value, &next);\n  }\n}\n\nfunction twice(value: i32, next: &Next): i32 {\n  return (*next)(value) * 2;\n}\n\nfunction main(): i32 {\n  let holder: Holder = Holder { layer: twice };\n\n  return holder.run(20);\n}\n",
+  );
+
+  let lines: Vector<String> = emission.source.lines();
+  let mut declared: Vector<String> = Vector::new<String>();
+  let mut byPointerUses: u64 = 0;
+  let mut lineIndex: u64 = 0;
+
+  while (lineIndex < lines.length()) {
+    if (let Option::SOME(line) = lines.get(lineIndex)) {
+      if (line.startsWith("struct __ignis_closure_t") && line.endsWith(";")) {
+        declared.push(line.substringBytes(7, line.length() - 1));
+      }
+
+      if (codegenContains(line, "(*call)(") && codegenContains(line, "struct __ignis_closure_t")) {
+        byPointerUses += 1;
+        Test::assert(declared.length() >= 2);
+      }
+    }
+
+    lineIndex += 1;
+  }
+
+  Test::assert(byPointerUses >= 1);
+}
+
 /// Drop glue is a plain C function: passed to an extern it is cast to the
 /// signature's typedef, and held as a function value it is called through the
 /// C function pointer trampoline.

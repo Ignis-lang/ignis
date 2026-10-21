@@ -192,6 +192,16 @@ record Box {
 }
 ```
 
+The same holds for a trait declared in another module: the record inherits the default whether
+it names the trait directly, through a module that re-exports it, or by a namespaced path. Names
+in the inherited body and signature resolve in the trait's module and namespaces, never in the
+implementing module: a default may call a private helper of its module, and a declaration of the
+same name in the implementing module does not change what the default refers to.
+
+An error in a default that every implementing type hits the same way is reported once, at the
+trait's file and line. One that only some implementing type hits is reported once for that type,
+still at the trait's line, with a note that names the trait, the method and the inheriting type.
+
 ### Signature Validation
 
 When a record method implements a trait method, the signature must match exactly:

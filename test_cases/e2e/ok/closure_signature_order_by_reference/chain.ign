@@ -1,0 +1,32 @@
+// e2e: skip helper module of e2e::closure_signature_order_by_reference: alone it has no main and cannot link; it runs through the entry fixture
+import Vector from "std::vector";
+
+export namespace Chain {
+  type Next = (i32) -> i32;
+  type Layer = (i32, &Chain::Next) -> i32;
+
+  record Router {
+    layers: Vector<Chain::Layer>;
+
+    public static new(): Router {
+      return Router { layers: Vector::new<Chain::Layer>() };
+    }
+
+    public add(&mut self, layer: Chain::Layer): void {
+      self.layers.push(layer);
+    }
+
+    public run(&self, index: u64, value: i32): i32 {
+      if (index >= self.layers.length()) {
+        return value;
+      }
+
+      let layer: &Chain::Layer = self.layers.get(index).unwrap();
+      let next: Chain::Next = (inner: i32): i32 -> {
+        return self.run(index + 1, inner);
+      };
+
+      return (*layer)(value, &next);
+    }
+  }
+}

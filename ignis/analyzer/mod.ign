@@ -1086,6 +1086,135 @@ export namespace Analyzer {
   /// Appends `source` to `target`, dropping a diagnostic inside a trait
   /// declaration that repeats one already kept.
   ///
+  /// The index of the module whose resolved path is `path`.
+  function moduleIndexOfPath(
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+    path: &String
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < infos.length()) {
+      if (let Option::SOME(info) = infos.get(index)) {
+        if (info.pathText.equals(path.toStr())) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Whether `bag` holds a diagnostic with the code and primary span of
+  /// `diagnostic`; with `exactly`, one that also says the same thing.
+  function bagReports(bag: &DiagnosticBag, diagnostic: &Diagnostic, exactly: boolean): boolean {
+    let mut index: u64 = 0;
+
+    while (index < bag.length()) {
+      if (let Option::SOME(other) = bag.get(index)) {
+        if (exactly) {
+          if (Analyzer::sameDiagnostic(other, diagnostic)) {
+            return true;
+          }
+        } else if (other.code.equals(diagnostic.code) && Analyzer::sameSpan(&other.primarySpan, &diagnostic.primarySpan)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// `diagnostics` without what copies of trait defaults declared in other
+  /// modules report again.
+  ///
+  /// Such a copy keeps the trait's spans, so what it reports points into the
+  /// trait's module. That module checks the default once against the trait:
+  /// a diagnostic it reports at the same place is that report, and the copy's
+  /// version is dropped. One an earlier module already reported in the same
+  /// words, note included, is a repeat. What only this copy finds stays, with
+  /// the note naming the type.
+  function dropForeignInheritedRepeats(
+    diagnostics: &DiagnosticBag,
+    module: &Ast::Module,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  ): DiagnosticBag {
+    let mut spans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+    let mut sources: Vector<u64> = Vector::new<u64>();
+
+    if (module.crossModuleSources.length() > 0) {
+      let mut raw: u32 = 0;
+
+      while ((raw as u64) < module.items.length()) {
+        let itemId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(raw);
+
+        if (let Option::SOME(scope) = module.inheritedScopeOf(itemId)) {
+          if (let Option::SOME(sourcePath) = &scope.sourceModule) {
+            if (let Option::SOME(sourceModule) = Analyzer::moduleIndexOfPath(infos, &sourcePath)) {
+              if (let Option::SOME(item) = module.items.get(itemId)) {
+                if (let Ast::Item::Node::Function(method) = item) {
+                  spans.push(method.span);
+                  sources.push(sourceModule);
+                }
+              }
+            }
+          }
+        }
+
+        raw += 1;
+      }
+    }
+
+    let mut kept: DiagnosticBag = DiagnosticBag::init();
+    let mut index: u64 = 0;
+
+    while (index < diagnostics.length()) {
+      let Option::SOME(diagnostic) = diagnostics.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut repeated: boolean = false;
+      let mut spanIndex: u64 = 0;
+
+      while (spanIndex < spans.length() && !repeated) {
+        if (let Option::SOME(span) = spans.get(spanIndex)) {
+          if (Analyzer::spanWithin(&diagnostic.primarySpan, span)) {
+            if (let Option::SOME(sourceModule) = sources.get(spanIndex)) {
+              if (let Option::SOME(sourceRecord) = records.get(*sourceModule)) {
+                repeated = Analyzer::bagReports(&sourceRecord.output.diagnostics, diagnostic, false);
+              }
+            }
+
+            let mut recordIndex: u64 = 0;
+
+            while (recordIndex < records.length() && !repeated) {
+              if (let Option::SOME(earlier) = records.get(recordIndex)) {
+                repeated = Analyzer::bagReports(&earlier.output.diagnostics, diagnostic, true);
+              }
+
+              recordIndex += 1;
+            }
+          }
+        }
+
+        spanIndex += 1;
+      }
+
+      if (!repeated) {
+        kept.push(Analyzer::copyDiagnostic(diagnostic));
+      }
+
+      index += 1;
+    }
+
+    return kept;
+  }
+
   /// A trait default is checked once against the trait and again as a copy on
   /// every type that inherits it. The copies keep the trait's spans, so an
   /// error that does not depend on the implementing type would otherwise be
@@ -1831,6 +1960,7 @@ export namespace Analyzer {
       if (let Option::SOME(info) = infos.get(bindIndex)) {
         let mut namesRef: &mut Analyzer::DefinitionStore = defStore;
         namesRef.setModuleDisplayName(bindIndex, Analyzer::moduleDisplayName(info));
+        namesRef.setModulePath(bindIndex, info.pathText.clone());
       }
 
       pass1s.push(pass1);
@@ -1889,7 +2019,32 @@ export namespace Analyzer {
 
       Analyzer::seedPreludeOverlay(&mut overlay, &ownDirect, &directs, infos, preludePaths, &info.pathText);
 
-      let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
+      let mut foreignNames: Vector<Analyzer::Resolver::ForeignNames> = Vector::new<Analyzer::Resolver::ForeignNames>();
+      let mut sourceIndex: u64 = 0;
+
+      while (sourceIndex < module.crossModuleSources.length()) {
+        if (let Option::SOME(sourcePath) = module.crossModuleSources.get(sourceIndex)) {
+          if (let Option::SOME(sourceModule) = Analyzer::moduleIndexOfPath(infos, sourcePath)) {
+            if (let Option::SOME(sourcePass1) = pass1s.get(sourceModule)) {
+              if (let Option::SOME(sourcePass2) = pass2s.get(sourceModule)) {
+                if (let Option::SOME(sourceOverlay) = overlays.get(sourceModule)) {
+                  foreignNames.push(Analyzer::Resolver::foreignNamesOf(
+                    defStore,
+                    sourcePass1,
+                    sourcePass2,
+                    sourceOverlay,
+                    sourcePath.clone(),
+                  ));
+                }
+              }
+            }
+          }
+        }
+
+        sourceIndex += 1;
+      }
+
+      let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesInProgram(
         defStore,
         typeStore,
         symbols,
@@ -1898,6 +2053,7 @@ export namespace Analyzer {
         pass2,
         &overlay,
         &programIndex,
+        foreignNames,
       );
 
       overlays.push(overlay);
@@ -2013,7 +2169,28 @@ export namespace Analyzer {
       let mut visibleRef2b: &mut Analyzer::DefinitionStore = defStore;
       visibleRef2b.setActiveModuleVisibleDefs(&visibleDefs);
 
-      let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesWithImports(
+      let mut foreignScopes: Vector<Analyzer::ResolverBodies::BodyScope> = Vector::new<Analyzer::ResolverBodies::BodyScope>();
+      let mut sourceIndex: u64 = 0;
+
+      while (sourceIndex < module.crossModuleSources.length()) {
+        if (let Option::SOME(sourcePath) = module.crossModuleSources.get(sourceIndex)) {
+          if (let Option::SOME(sourceModule) = Analyzer::moduleIndexOfPath(infos, sourcePath)) {
+            if (let Option::SOME(sourceRecord) = records.get(sourceModule)) {
+              foreignScopes.push(Analyzer::ResolverBodies::bodyScopeOf(
+                defStore,
+                &sourceRecord.output.pass1,
+                &sourceRecord.output.pass2,
+                &sourceRecord.imports,
+                sourcePath.clone(),
+              ));
+            }
+          }
+        }
+
+        sourceIndex += 1;
+      }
+
+      let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesInProgram(
         defStore,
         typeStore,
         symbols,
@@ -2022,6 +2199,7 @@ export namespace Analyzer {
         &pass2,
         &overlay,
         &programIndex,
+        foreignScopes,
       );
 
       let typecheck: Analyzer::Typecheck::TypecheckOutput = Analyzer::Typecheck::checkModule(
@@ -2102,6 +2280,7 @@ export namespace Analyzer {
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &constValues.diagnostics, module);
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &checks.diagnostics, module);
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &lints.diagnostics, module);
+      diagnostics = Analyzer::dropForeignInheritedRepeats(&diagnostics, module, &records, infos);
 
       let output: Analyzer::AnalyzerOutput = Analyzer::AnalyzerOutput {
         pass1: pass1,
