@@ -9,7 +9,6 @@ from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
 import Id from "@compiler::ids";
-import Vector from "std::vector";
 
 /// Lint phase for the Ignis selfhost compiler.
 ///
@@ -75,6 +74,7 @@ export namespace Analyzer {
       UNUSED_MUT,
       DEPRECATED,
       THREAD_SAFETY,
+      REDUNDANT_PRELUDE_IMPORT,
     }
 
     /// Reporting level for one lint. `ALLOW` suppresses the lint entirely.
@@ -192,6 +192,9 @@ export namespace Analyzer {
       }
       if (argument.equals("thread_safety")) {
         return Option::SOME(Analyzer::Lint::LintKind::THREAD_SAFETY);
+      }
+      if (argument.equals("redundant_prelude_import")) {
+        return Option::SOME(Analyzer::Lint::LintKind::REDUNDANT_PRELUDE_IMPORT);
       }
 
       return Option::NONE;
@@ -1159,6 +1162,127 @@ export namespace Analyzer {
     ///
     /// Lint order mirrors the Rust `lint_phase`: unused variables, unused
     /// `mut`, unused imports, deprecated calls.
+    /// Redundant prelude-import lint (A0266). An explicit import binding is
+    /// redundant when the module it names is one of the auto-loaded prelude
+    /// modules and that module already provides the name: the prelude seed
+    /// puts it in scope before any import line is read. Imports from modules
+    /// outside the prelude never warn, and neither does a prelude symbol
+    /// reached through another module's re-export path.
+    function lintRedundantPreludeImports(
+      diagnostics: &mut DiagnosticBag,
+      module: &Ast::Module,
+      symbols: &mut Analyzer::SymbolTable,
+      infos: &Vector<Analyzer::Imports::ModuleInfo>,
+      directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+      preludePaths: &Vector<String>,
+      severity: Severity,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < module.roots.length()) {
+        let Option::SOME(rootId) = module.roots.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(item) = module.items.get(*rootId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Item::Node::Import(importItem) = item) {
+          Analyzer::Lint::lintPreludeImportIfRedundant(
+            diagnostics,
+            &importItem,
+            symbols,
+            infos,
+            directs,
+            preludePaths,
+            severity,
+          );
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Reports the bindings of one import statement the prelude seed already
+    /// provides. `import.source` is the resolved module path, so it is matched
+    /// against `preludePaths` the same way the seeding walk matches.
+    function lintPreludeImportIfRedundant(
+      diagnostics: &mut DiagnosticBag,
+      importItem: &Ast::Item::Import,
+      symbols: &mut Analyzer::SymbolTable,
+      infos: &Vector<Analyzer::Imports::ModuleInfo>,
+      directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+      preludePaths: &Vector<String>,
+      severity: Severity,
+    ): void {
+      if (!Analyzer::isPreludePath(preludePaths, &importItem.source)) {
+        return;
+      }
+
+      let Option::SOME(targetIndex) = Analyzer::moduleIndexOfPath(infos, &importItem.source) else {
+        return;
+      };
+      let Option::SOME(targetDirect) = directs.get(targetIndex) else {
+        return;
+      };
+
+      let mut bindingIndex: u64 = 0;
+
+      while (bindingIndex < importItem.items.length()) {
+        let Option::SOME(binding) = importItem.items.get(bindingIndex) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(name) = &binding.name) {
+          if (Analyzer::Lint::preludeProvidesName(targetDirect, symbols, name.toStr())) {
+            let message: String = `unnecessary import of '${name.toStr()}': ${importItem.writtenSource.toStr()} is auto-loaded`;
+            Analyzer::Lint::emitLint(
+              diagnostics,
+              severity,
+              binding.span,
+              DiagnosticCode::REDUNDANT_PRELUDE_IMPORT,
+              message.toStr(),
+              message.toStr(),
+            );
+          }
+        }
+
+        bindingIndex += 1;
+      }
+    }
+
+    /// Whether the prelude module's published declarations include `name`.
+    function preludeProvidesName(
+      direct: &Analyzer::Imports::DirectDeclarationIndex,
+      symbols: &mut Analyzer::SymbolTable,
+      name: str,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < direct.syms.length()) {
+        let Option::SOME(sym) = direct.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let published: str = match (symbols.resolve(*sym)) {
+          Option::SOME(resolved) -> resolved,
+          Option::NONE -> "",
+        };
+
+        if (name.equals(published)) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     function lintModule(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -1169,6 +1293,9 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       typecheck: &Analyzer::Typecheck::TypecheckOutput,
       overlay: &Analyzer::Imports::ImportOverlay,
+      infos: &Vector<Analyzer::Imports::ModuleInfo>,
+      directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+      preludePaths: &Vector<String>,
     ): Analyzer::Lint::LintOutput {
       let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
       let overrides: Analyzer::Lint::LintOverrides = Analyzer::Lint::collectLintDirectives(&mut diagnostics, module);
@@ -1215,6 +1342,22 @@ export namespace Analyzer {
           resolvedBodies,
           overlay,
           Analyzer::Lint::levelSeverity(unusedImportLevel),
+        );
+      }
+
+      let redundantPreludeImportLevel: Analyzer::Lint::LintLevel = Analyzer::Lint::effectiveLevel(
+        &overrides,
+        Analyzer::Lint::LintKind::REDUNDANT_PRELUDE_IMPORT,
+      );
+      if (redundantPreludeImportLevel != Analyzer::Lint::LintLevel::ALLOW) {
+        Analyzer::Lint::lintRedundantPreludeImports(
+          &mut diagnostics,
+          module,
+          symbols,
+          infos,
+          directs,
+          preludePaths,
+          Analyzer::Lint::levelSeverity(redundantPreludeImportLevel),
         );
       }
 
