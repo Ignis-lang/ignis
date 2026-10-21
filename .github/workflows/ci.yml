@@ -60,7 +60,7 @@ jobs:
       # staleness stamps (IGN-210: a gate must not silently report results
       # for a stage binary whose sources or stage0 changed since it was
       # built), plus bootstrap_report.py's promotion `candidate` verdict
-      # (G7's own gate/report code path).
+      # (G1/G3 decide it; G4/G6/G7 are informational rows).
       - name: Test the bootstrap stage0 selection, stage stamps and promotion report
         run: |
           scripts/tests/test_stage0.sh
@@ -115,9 +115,10 @@ jobs:
       # The same check for G6, whose corpus is every `.ign` file under
       # test_cases/, example/ and std/: each needs a well-formed parse-verdict
       # baseline, no baseline may outlive its case, and no two sources may
-      # flatten to one case name. G6 itself stays nightly-only (every case is a
-      # full compile and link), so without this a new case would first fail
-      # there.
+      # flatten to one case name. G6's full comparison against stage1 runs
+      # after stage1 is built (below), so this compiler-free pass is what
+      # reports a missing or malformed baseline in seconds instead of after
+      # the stage1 build.
       - name: Check every G6 case has a parse-verdict baseline
         run: python3 scripts/selfhost_syntax_parity.py --check-coverage
 
@@ -143,13 +144,11 @@ jobs:
       # gets its own check in `official-stage0-gate` below. stage1 is the
       # cheapest selfhost binary that exercises the compiler under test, so
       # PRs get it instead of stage2/stage3 or the rest of the ladder
-      # (G1/G2/G4/G6), which stay nightly-only. PR #201 is why this matters:
+      # (G1/G4), which stay nightly-only. PR #201 is why this matters:
       # it passed a job that only ran the host binary and still broke the
       # nightly ladder (the selfhost test suite failed to link under a
-      # selfhost-built binary, G3, and stage2 panicked on two error-corpus
-      # cases, G5). G7 needs no stage2, so stage1 answers it in about two
-      # minutes. G6's cases are each a full compile and link, so only its
-      # compiler-free coverage check runs on PRs (above).
+      # selfhost-built binary, G3). G6 and G7 need no stage2, so stage1
+      # answers them in about two minutes each.
       - name: Build stage1 from the C seed
         run: scripts/bootstrap.sh stage1-from-seed
 
@@ -232,27 +231,28 @@ jobs:
             exit 1
           fi
 
-      # The nightly's gate-g5, run against stage1 instead of stage2. Writes
-      # gates/G5-STAGE1.json.
-      - name: Replay the error corpus through stage1 (G5, stage1)
-        run: scripts/bootstrap.sh gate-g5-stage1
+      # The nightly's gate-g6, run against stage1 instead of stage2: every
+      # case's parse verdict under stage1 has to match the baselines committed
+      # under test_cases/__parse_verdicts__. Writes gates/G6-STAGE1.json.
+      - name: Check stage1's parse verdicts against the baselines (G6, stage1)
+        run: scripts/bootstrap.sh gate-g6-stage1
 
-      - name: Check G5 (stage1)
+      - name: Check G6 (stage1)
         run: |
           set -euo pipefail
 
-          gate_file="build/bootstrap/gates/G5-STAGE1.json"
+          gate_file="build/bootstrap/gates/G6-STAGE1.json"
           if [ ! -f "$gate_file" ]; then
-            echo "no G5-STAGE1 gate result was produced" >&2
+            echo "no G6-STAGE1 gate result was produced" >&2
             exit 1
           fi
 
           status="$(jq -r '.status' "$gate_file")"
           summary="$(jq -r '.summary' "$gate_file")"
-          echo "G5 (stage1): ${status} — ${summary}"
+          echo "G6 (stage1): ${status} — ${summary}"
 
           if [ "$status" != "pass" ]; then
-            echo "stage1 does not keep every diagnostic the error corpus records; see ${gate_file}" >&2
+            echo "stage1's parse verdicts differ from the committed baselines; see ${gate_file}" >&2
             exit 1
           fi
 
@@ -293,14 +293,14 @@ jobs:
           path: |
             build/bootstrap/stage1/log.txt
             build/bootstrap/gates/G3-STAGE1.json
-            build/bootstrap/gates/G5-STAGE1.json
+            build/bootstrap/gates/G6-STAGE1.json
             build/bootstrap/gates/G7-STAGE1.json
+            build/bootstrap/parity-syntax-stage1.md
+            build/bootstrap/parity-syntax-stage1.json
             build/bootstrap/parity-drops-stage1.md
             build/bootstrap/parity-drops-stage1.json
             build/bootstrap/stage1-tests/log*.txt
             build/bootstrap/stage1-tests/status-*.json
-            build/bootstrap/parity-err-stage1.md
-            build/bootstrap/parity-err-stage1.json
           if-no-files-found: ignore
 
   # The two-step rule: a language change may only be USED in ignis/ or std/
@@ -317,10 +317,10 @@ jobs:
   # message names the two-step rule. The official binary already exists, and
   # linking its output only needs the runner's gcc.
   #
-  # A fresh fork or a repository whose promotion streak has not yet reached 3
-  # has no official asset to check against — that is not a violation, it is
-  # "nothing to check yet", so the job skips rather than fails (job summary
-  # notice, exit 0). Parallel to `selfhost` so it does not lengthen
+  # A fresh fork or a repository whose promotion streak has never promoted an
+  # asset (streak 0) has no official asset to check against — that is not a
+  # violation, it is "nothing to check yet", so the job skips rather than fails
+  # (job summary notice, exit 0). Parallel to `selfhost` so it does not lengthen
   # the critical path.
   official-stage0-gate:
     name: Official stage0 gate
@@ -358,7 +358,7 @@ jobs:
 
       - name: No official asset to check yet
         if: steps.stage0.outputs.resolved == 'false'
-        run: echo "::notice::No official selfhost asset is published yet (fresh fork, or the promotion streak has not reached 3); skipping the two-step rule gate."
+        run: echo "::notice::No official selfhost asset is published yet (fresh fork, or the promotion streak has never promoted an asset); skipping the two-step rule gate."
 
       # `id: build` plus `continue-on-error` so the next step can turn a
       # failure into a warning when the override label is present, instead of

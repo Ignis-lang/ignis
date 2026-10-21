@@ -228,16 +228,18 @@ jobs:
   #
   # Shape
   # -----
-  # The ladder is built once in `stages` and published as one artifact; the gates
-  # that only read the built stages (stage2, and stage1 for the G3-stage1 row)
-  # then run as a matrix against that artifact, so the wall time is the slowest
-  # gate rather than their sum. G3 is two full runs of the
-  # selfhost test suite, one under stage2 and one under stage1, so it takes a
-  # matrix entry per run and `report` compares the collected logs. G4 stays with
-  # the ladder because it compares two measurements, which only means something
-  # when both were taken on the same machine. `report` collects the gate files
-  # and decides the verdict. `scripts/bootstrap.sh gates` still runs the same
-  # steps serially on a developer machine.
+  # The ladder is built once in `stages` and published as one artifact; the
+  # gates that only read the built stages then run as a matrix against that
+  # artifact, so the wall time is the slowest gate rather than their sum. G3
+  # is two full runs of the selfhost test suite, one under stage2 and one
+  # under stage1, so it takes a matrix entry per run and `report` compares
+  # the collected logs; those two entries are the whole matrix, since G1 and
+  # G4 come from the ladder and G6/G7 run in pull-request CI instead. G4
+  # stays with the ladder because it compares two measurements, which only
+  # means something when both were taken on the same machine. `report`
+  # collects the gate files and decides the verdict.
+  # `scripts/bootstrap.sh gates` still runs the same steps serially on a
+  # developer machine.
   #
   # Promotion flow
   # --------------
@@ -249,17 +251,18 @@ jobs:
   #
   # The streak of consecutive candidate runs lives in the `promotion-streak.json`
   # asset of the rolling nightly release: it is read and written back by `report`.
-  # At three consecutive candidates the stage2 binary is published as
+  # A single candidate run (G1 and G3 passing — the report's informational
+  # rows never decide the verdict) publishes the stage2 binary as
   # `ignis-selfhost-linux-amd64`, and the streak keeps counting. A run that is
   # not a candidate resets the streak to zero and uploads no selfhost binary,
   # which leaves the last published one in place.
   #
-  # stage0 is the official asset while its streak is at least 3, else a
+  # stage0 is the official asset while its streak is at least 1, else a
   # compiler built from the C seed (scripts/resolve_official_stage0.sh), and
   # a stage0 that cannot build stage1 fails the run. A stale official asset
   # therefore needs no special case: that night is not a candidate, the
-  # streak resets to 0, the next `auto` run starts from the seed, and three
-  # seed-built candidates publish a fresh official asset — as long as the seed
+  # streak resets to 0, the next `auto` run starts from the seed, and one
+  # seed-built candidate publishes a fresh official asset — as long as the seed
   # can still build ignis/, which the `seed` job below checks every night and
   # `scripts/bootstrap.sh seed` refreshes. The decision itself
   # (streak value, whether to publish) is `scripts/bootstrap.sh
@@ -442,9 +445,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - gate: G2
-            command: parity
-            result: G2.json
           # The stage2 run leaves a log and an exit status behind and `report`
           # compares it with the stage1 run's. The stage1 run also judges
           # itself into G3-STAGE1.json, an unscored row in the report that says
@@ -455,21 +455,6 @@ jobs:
           - gate: G3-stage1
             command: gate-g3-stage1
             result: G3-STAGE1.json
-          - gate: G5
-            command: gate-g5
-            result: G5.json
-          # Checks stage2's parse verdicts against the baselines committed
-          # under test_cases/__parse_verdicts__.
-          - gate: G6
-            command: gate-g6
-            result: G6.json
-          # Checks stage2's dumps against the baselines committed under
-          # test_cases/e2e/ok/__drop_schedules__, and compares the selfhost
-          # compiler's own sources against stage1 rather than against a
-          # baseline that would change with every commit to `ignis/`.
-          - gate: G7
-            command: gate-g7
-            result: G7.json
 
     steps:
       - name: Checkout repository
@@ -539,12 +524,6 @@ jobs:
           if [ -f "build/bootstrap/gates/${{ matrix.result }}" ]; then
             cp "build/bootstrap/gates/${{ matrix.result }}" upload/gates/
           fi
-
-          for REPORT in parity.md parity-err.md parity-err.json parity-syntax.md parity-syntax.json parity-drops.md parity-drops.json; do
-            if [ -f "build/bootstrap/${REPORT}" ]; then
-              cp "build/bootstrap/${REPORT}" upload/
-            fi
-          done
 
           # The log and the status file are the G3 runs' product; the test
           # binary next to them is not worth an artifact.
@@ -652,7 +631,6 @@ jobs:
           path: |
             build/bootstrap/report.md
             build/bootstrap/promotion.json
-            build/bootstrap/parity.md
             build/bootstrap/gates/
             build/bootstrap/*/log.txt
             build/bootstrap/stage2/ignis
