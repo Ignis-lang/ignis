@@ -1,0 +1,141 @@
+// e2e: std
+// `static str` is the type of string literals stored anywhere. A literal takes it when
+// the expected type is or contains `static str`; it converts implicitly to `str` wherever
+// a `str` is expected, and shares the C representation of `str`.
+import Io from "std::io";
+import Option from "std::option";
+import Vector from "std::vector";
+import HashMap from "std::collections";
+import Hasher from "std::hash";
+
+type Label = static str;
+
+record Entry {
+  public name: static str;
+  public code: i32;
+}
+
+enum Named {
+  ONE(static str),
+  NONE,
+}
+
+record Texts {
+  static GREETING: static str = "hello";
+}
+
+const FAREWELL: static str = "bye";
+
+function pick(flag: boolean): static str {
+  if (flag) {
+    return "yes";
+  }
+
+  return "no";
+}
+
+function identity<T>(value: T): T {
+  return value;
+}
+
+function viewLength(text: str): u64 {
+  return String::create(text).length();
+}
+
+function describe(text: str): str {
+  return text;
+}
+
+function returnsView(): str {
+  let text: static str = "returned";
+  return text;
+}
+
+function main(): i32 {
+  let label: Label = "label";
+  let annotated: static str = "annotated";
+  let viewed: str = annotated;
+  let entry: Entry = Entry { name: "entry", code: 1 };
+  let named: Named = Named::ONE("named");
+  let maybe: Option<static str> = Option::SOME("maybe");
+  let mut list: Vector<static str> = Vector::new<static str>();
+  list.push("first");
+  list.push(annotated);
+
+  Io::println(annotated);
+  Io::println(Texts::GREETING);
+  Io::println(FAREWELL);
+  Io::println(label);
+  Io::println(viewed);
+  Io::println(entry.name);
+  Io::println(pick(true));
+  Io::println(describe(entry.name));
+  Io::println(returnsView());
+  Io::println(identity<static str>("generic"));
+  Io::println(@typeName<i32>());
+  Io::println(@typeName<Vector<static str>>());
+
+  let inferred = identity(annotated);
+  let inferredView: str = inferred;
+  Io::println(inferredView);
+
+  if (let Named::ONE(text) = named) {
+    Io::println(text);
+  }
+
+  if (let Option::SOME(text) = maybe) {
+    Io::println(text);
+  }
+
+  let mut total: u64 = 0;
+  let mut index: u64 = 0;
+  while (index < list.length()) {
+    if (let Option::SOME(item) = list.get(index)) {
+      total += viewLength(*item);
+    }
+    index += 1;
+  }
+
+  let typeName: static str = @typeName<Entry>();
+  let mixedEqual: boolean = annotated == viewed;
+  let mixedNotEqual: boolean = viewed != Texts::GREETING;
+  let same: static str = "annotated";
+  let builtinEqual: boolean = @eq<static str>(&annotated, &same);
+  let owned: String = annotated.toString();
+  let methodLength: u64 = owned.length();
+  let viewOfStatic: str = owned.toStr();
+
+  let code: i32 = match (annotated) {
+    "other" -> 1,
+    "annotated" -> 2,
+    _ -> 3,
+  };
+
+  let mut map: HashMap<static str, i32> = HashMap::new<static str, i32>();
+  let _ = map.insert("key", 7);
+  let mut stored: i32 = 0;
+  let lookup: static str = "key";
+  if (let Option::SOME(value) = map.get(&lookup)) {
+    stored = *value;
+  }
+
+  let mut left: Hasher = Hasher::new();
+  let mut right: Hasher = Hasher::new();
+  let viewKey: str = "key";
+  let staticKey: static str = "key";
+  @hash<static str>(&staticKey, (&mut left) as &mut Hasher);
+  @hash<str>(&viewKey, (&mut right) as &mut Hasher);
+  let sameHash: boolean = left.finish() == right.finish();
+
+  let chosen: static str = methodLength > 3 ? "long" : "short";
+  let arm: static str = match (code) {
+    2 -> "two",
+    _ -> "other",
+  };
+  Io::println(`${chosen} ${arm} ${annotated}`);
+  Io::println(typeName);
+  Io::println(viewOfStatic);
+  Io::println(`${total} ${mixedEqual} ${mixedNotEqual} ${builtinEqual} ${methodLength} ${code} ${stored} ${sameHash}`);
+
+  return 0;
+}

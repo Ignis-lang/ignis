@@ -4,6 +4,7 @@ import Test from "std::test";
 
 import Diagnostic, DiagnosticBag, SourceFile, SourceSpan, SourceMap from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
 import CompileFlags, ParseOutput, Parser from "@compiler::parser";
 
 function readFixture(path: str): String {
@@ -5446,6 +5447,98 @@ function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
   Test::assertEq<str>(traitMethodName(&module, overrideId).toStr(), "answer");
 }
 
+/// The module at `index` of `modules`.
+function moduleAt(modules: &Vector<Ast::Module>, index: u64): &Ast::Module {
+  return match (modules.get(index)) {
+    Option::SOME(module) -> module,
+    Option::NONE -> @panic("missing module"),
+  };
+}
+
+/// Scenario: a type that implements a trait another module declares
+/// inherits its default as a method of its own, copied into the type's
+/// module with its signature types, and recording the trait's module and
+/// namespaces. The trait's module is only read; copying again adds nothing.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e::trait_default_cross_module.
+@test
+function parserCopiesTraitDefaultsAcrossModules(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let traitFile: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/shapes.ign",
+    "export namespace Shapes { trait Answerable { answer(&self): i32 { let value: i32 = 42; return value; } } }"
+  );
+  let implementerFile: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/main.ign",
+    "import Shapes from \"fixtures/shapes.ign\"; @implements(Shapes::Answerable) record Alpha { public x: i32; }"
+  );
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(Parser::parseFile(&traitFile).module);
+  modules.push(Parser::parseFile(&implementerFile).module);
+
+  let mut moduleSources: Vector<String> = Vector::new<String>();
+  moduleSources.push(String::create("fixtures/shapes.ign"));
+  moduleSources.push(String::create("fixtures/main.ign"));
+  let noPrelude: Vector<String> = Vector::new<String>();
+
+  let traitItems: u64 = moduleAt(&modules, 0).items.length();
+  let traitExpressions: u64 = moduleAt(&modules, 0).expressions.length();
+  let traitTypes: u64 = moduleAt(&modules, 0).types.length();
+
+  Parser::materializeCrossModuleDefaults(&mut modules, &moduleSources, &noPrelude);
+
+  let mut alphaId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(0);
+
+  {
+    let traitModule: &Ast::Module = moduleAt(&modules, 0);
+    Test::assertEq<u64>(traitModule.items.length(), traitItems);
+    Test::assertEq<u64>(traitModule.expressions.length(), traitExpressions);
+    Test::assertEq<u64>(traitModule.types.length(), traitTypes);
+
+    let implementer: &Ast::Module = moduleAt(&modules, 1);
+    alphaId = match (implementer.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+
+    Test::assertEq<u64>(recordMethodCount(implementer, alphaId), 1);
+
+    let inheritedId: Ast::ItemId = recordMethodId(implementer, alphaId, 0);
+    Test::assertEq<str>(traitMethodName(implementer, inheritedId).toStr(), "answer");
+
+    let Option::SOME(scope) = implementer.inheritedScopeOf(inheritedId) else {
+      @panic("the copy records no inherited scope");
+    };
+    let Option::SOME(sourceModule) = scope.sourceModule else {
+      @panic("the copy records no source module");
+    };
+    Test::assertEq<str>(sourceModule.toStr(), "fixtures/shapes.ign");
+    Test::assertEq<u64>(scope.namespaces.length(), 1);
+    Test::assertEq<u64>(implementer.crossModuleSources.length(), 1);
+
+    let returnType: Ast::TypeId = match (expectItem(implementer, inheritedId)) {
+    Ast::Item::Node::Function(functionItem) -> match (functionItem.returnType) {
+      Option::SOME(value) -> value,
+      Option::NONE -> @panic("the copy has no return type"),
+    },
+    _ -> @panic("the copy is not a method"),
+  };
+
+    match (expectType(implementer, returnType)) {
+    Ast::Type::Node::Path(path) -> {
+      Test::assertEq<u64>(path.segments.length(), 1);
+    },
+    _ -> {
+      @panic("the copy's return type is not the path the trait wrote");
+    },
+  };
+  }
+
+  Parser::materializeCrossModuleDefaults(&mut modules, &moduleSources, &noPrelude);
+  Test::assertEq<u64>(recordMethodCount(moduleAt(&modules, 1), alphaId), 1);
+}
+
 /// Reads the value of the `return` statement that opens method `id`'s body.
 function methodFirstReturnValue(module: &Ast::Module, id: Ast::ItemId): Ast::ExpressionId {
   let bodyId: Ast::StatementId = match (expectItem(module, id)) {
@@ -6352,4 +6445,45 @@ function parserRejectsAnOpenEndedInclusiveRange(): void {
 
   Test::assertEq<u64>(diagnostics.length(), 1);
   assertDiagnosticAt(&diagnostics, 0, "I0004", "Open-ended ranges are not supported");
+}
+
+@test
+function parserParsesStaticStrInEveryTypePosition(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/static_str.ign",
+    "type Name = static str; record Entry { name: static str; } record Texts { static GREETING: static str = \"hi\"; } function pick(value: static str, list: Vector<static str>): Option<static str> { let local: static str = value; return Option::SOME(local); }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let mut staticStrPaths: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < module.types.length()) {
+    if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(Id::fromRaw<Ast::TypeTag>(index as u32))) {
+      if (let Option::SOME(segment) = path.segments.get(0)) {
+        if (segment.equals("static str")) {
+          staticStrPaths += 1;
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<u64>(staticStrPaths, 7);
+}
+
+@test
+function parserRejectsStaticWithoutStrInATypePosition(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/static_i32.ign", "function main(value: static i32): void {}");
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assert(diagnostics.length() > 0);
 }

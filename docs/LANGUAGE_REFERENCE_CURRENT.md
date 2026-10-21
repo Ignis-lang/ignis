@@ -68,12 +68,30 @@ namespace Math {
 - `char` (one Unicode scalar value)
 - `atom`
 - `str`
+- `static str`
 - `void`
 - `never`
 
-### 3.2 `str`
+### 3.2 `str` and `static str`
 
 - `str` is a primitive UTF-8 byte string slice type.
+- `static str` is the type of string literals and compile-time strings such as `@typeName<T>()`. It has the same representation as `str` and is written with both keywords in any type position: annotations, parameters, return types, fields, statics, generic arguments and aliases.
+- A `static str` converts implicitly to `str` wherever a `str` is expected: assignment, argument, return, field initializer, and overload resolution (`Io::println(text)` picks the `str` overload). The conversion is not applied inside other types: `Vector<static str>` is not a `Vector<str>`.
+- A `str` never converts to `static str` (A0263). Use a literal, or an owned `String` when the text is not a literal.
+- A string literal or `@typeName` has type `static str` where `static str` is the expected type, also as a generic argument (`Vector<static str>`, `Option<static str>`). Anywhere else it has type `str`, so `let text = "a";` declares a `str`.
+- `==`, `!=`, `@eq`, `Hash`, literal `match` patterns and `@extension(str)` methods accept `static str`, including comparisons between a `static str` and a `str`.
+
+```ignis
+record Entry {
+  name: static str;
+}
+
+let entry: Entry = Entry { name: "first" };
+let view: str = entry.name;          // OK: static str converts to str
+// let stored: static str = view;    // ERROR A0263
+```
+
+Today `static str` adds the conversion only. The checks that keep `str` views from being stored where their owner cannot be seen (second-class views) come later; until then a `str` field or container stays accepted.
 
 ### 3.3 `char`
 

@@ -495,7 +495,7 @@ export namespace CodegenC {
       Analyzer::Type::CHAR -> {
         direct = String::create("ignis_char_t");
       },
-      Analyzer::Type::STR -> {
+      Analyzer::Type::STR | Analyzer::Type::STATIC_STR -> {
         direct = String::create("const char*");
       },
       Analyzer::Type::VOID -> {
@@ -2276,7 +2276,7 @@ export namespace CodegenC {
       Analyzer::Type::U16 -> "writeU16",
       Analyzer::Type::U32 -> "writeU32",
       Analyzer::Type::U64 -> "writeU64",
-      Analyzer::Type::STR -> "writeStr",
+      Analyzer::Type::STR | Analyzer::Type::STATIC_STR -> "writeStr",
       _ -> "",
     };
   }
@@ -7247,9 +7247,10 @@ export namespace CodegenC {
 
   function isStrType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
     if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
-      if (let Analyzer::Type::STR = typeNode) {
-        return true;
-      }
+      return match (typeNode) {
+        Analyzer::Type::STR | Analyzer::Type::STATIC_STR -> true,
+        _ -> false,
+      };
     }
 
     return false;

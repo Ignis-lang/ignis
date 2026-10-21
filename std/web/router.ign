@@ -1,0 +1,425 @@
+//! The router: `Web::Router` runs middleware and routes for one request,
+//! `Web::App` builds a router for every server thread, and `Web::serve`
+//! runs the server.
+
+import Http from "std::http";
+import Io from "std::io";
+import SocketAddress, TcpListener from "std::net";
+import String from "std::string";
+import Arc from "std::sync";
+import JoinHandle, Thread from "std::thread";
+import Vector from "std::vector";
+
+import findByte, percentDecode from "./request";
+
+/// The segments of a path: the parts between `/` after the leading one.
+/// `/` has one empty segment and `/users/` ends with one. A path that does
+/// not start with `/`, such as `*`, has none and matches no route.
+function pathSegments(path: &String): Vector<String> {
+  let mut segments: Vector<String> = Vector::new<String>();
+
+  if (path.length() == 0 || path.byteAt(0).unwrap() != '/' as u8) {
+    return segments;
+  }
+
+  let end: u64 = path.length();
+  let mut start: u64 = 1;
+
+  while (true) {
+    let slash: u64 = findByte(path, '/' as u8, start, end);
+    segments.push(path.substringBytes(start, slash));
+
+    if (slash == end) {
+      break;
+    }
+
+    start = slash + 1;
+  }
+
+  return segments;
+}
+
+/// Whether `segment` of a route path is a parameter, `:name`.
+function isParameter(segment: &String): boolean {
+  return segment.length() > 1 && segment.byteAt(0).unwrap() == ':' as u8;
+}
+
+/// Whether a route with `method` (empty for `any`) answers `requested`. A
+/// `HEAD` request is answered by `GET` routes.
+function methodMatches(method: &String, requested: &String): boolean {
+  if (method.length() == 0 || method.equals(requested)) {
+    return true;
+  }
+
+  return method.equals("GET") && requested.equals("HEAD");
+}
+
+/// One registered middleware. Kept in a record rather than as a bare
+/// function value so that `Vector<Layer>` has a short name: the QBE backend
+/// spells a `Vector` of a function type out in full, and QBE rejects
+/// identifiers longer than 80 bytes.
+record Layer {
+  public handler: Web::Middleware;
+}
+
+/// One registered route.
+record Route {
+  /// The method it answers, empty for `any`.
+  public method: String;
+  public segments: Vector<String>;
+  public handler: Web::Middleware;
+}
+
+/// Matches the route `pattern` against the request `segments`. `OK(NONE)`
+/// when the path does not match, `OK(SOME(params))` with the decoded
+/// parameters when it does, and a 400 error when a parameter is not valid
+/// percent-encoded UTF-8.
+function matchSegments(
+  pattern: &Vector<String>,
+  segments: &Vector<String>
+): Result<Option<Vector<Web::Param>>, Web::Error> {
+  if (pattern.length() != segments.length()) {
+    return Result::OK(Option::NONE);
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < pattern.length()) {
+    let expected: &String = pattern.get(index).unwrap();
+    let actual: &String = segments.get(index).unwrap();
+
+    if (isParameter(expected)) {
+      if (actual.length() == 0) {
+        return Result::OK(Option::NONE);
+      }
+    } else if (!expected.equals(actual)) {
+      return Result::OK(Option::NONE);
+    }
+
+    index += 1;
+  }
+
+  let mut params: Vector<Web::Param> = Vector::new<Web::Param>();
+  let mut position: u64 = 0;
+
+  while (position < pattern.length()) {
+    let expected: &String = pattern.get(position).unwrap();
+
+    if (isParameter(expected)) {
+      let actual: &String = segments.get(position).unwrap();
+      let Option::SOME(value) = percentDecode(actual, 0, actual.length(), false) else {
+        return Result::ERROR(Web::Error::withStatus(400, "Bad Request"));
+      };
+
+      params.push(Web::Param { name: expected.substringBytes(1, expected.length()), value: value });
+    }
+
+    position += 1;
+  }
+
+  return Result::OK(Option::SOME(params));
+}
+
+/// The router, the application and the server entry points.
+export namespace Web {
+  /// What a middleware or route calls to run the rest of the chain. It
+  /// returns once the rest of the chain did, with its error if it failed.
+  type Next = (&mut Web::Request, &mut Web::Response) -> Result<void, Web::Error>;
+
+  /// A middleware or a route: the request, the response and the rest of
+  /// the chain.
+  type Middleware = (&mut Web::Request, &mut Web::Response, Web::Next) -> Result<void, Web::Error>;
+
+  /// Middleware and routes for one thread. A router holds function values,
+  /// which are neither `Send` nor `Sync`, so it never leaves the thread
+  /// that built it; `Web::App` builds one per server thread.
+  @implements(Http::Handler)
+  record Router {
+    layers: Vector<Layer>;
+    routes: Vector<Route>;
+
+    /// A router without middleware or routes: it answers every request
+    /// with 404.
+    public static new(): Router {
+      return Router { layers: Vector::new<Layer>(), routes: Vector::new<Route>() };
+    }
+
+    // `runLayer` stays the first method after `new`: the C emitter writes
+    // closure structs in the order it first meets their types, without
+    // ordering them by dependency, so `Web::Next` has to be met (here, by
+    // the closure `runLayer` makes) before any function that only takes a
+    // `Web::Middleware`, whose struct holds a `Web::Next` by value.
+    runLayer(
+      &self,
+      index: u64,
+      request: &mut Web::Request,
+      response: &mut Web::Response
+    ): Result<void, Web::Error> {
+      if (index < self.layers.length()) {
+        let layer: &Layer = self.layers.get(index).unwrap();
+
+        return (*(&layer.handler))(
+          request,
+          response,
+          (innerRequest: &mut Web::Request, innerResponse: &mut Web::Response): Result<void, Web::Error> -> {
+            return self.runLayer(index + 1, innerRequest, innerResponse);
+          },
+        );
+      }
+
+      let path: String = String::create(request.path());
+      let segments: Vector<String> = pathSegments(&path);
+      return self.runRoute(0, &segments, request, response);
+    }
+
+    /// Runs the first route from `start` on that matches the request, with
+    /// a `next` that continues from the route after it. When none is left,
+    /// the request is answered with 404, or with 405 and `Allow` when no
+    /// route matched its method but some matched its path.
+    runRoute(
+      &self,
+      start: u64,
+      segments: &Vector<String>,
+      request: &mut Web::Request,
+      response: &mut Web::Response
+    ): Result<void, Web::Error> {
+      let requested: String = request.method().toString();
+      let mut index: u64 = start;
+
+      while (index < self.routes.length()) {
+        let route: &Route = self.routes.get(index).unwrap();
+
+        if (methodMatches(&route.method, &requested)) {
+          if (let Option::SOME(params) = matchSegments(&route.segments, segments)!) {
+            request.setParams(params);
+
+            return (*(&route.handler))(
+              request,
+              response,
+              (innerRequest: &mut Web::Request, innerResponse: &mut Web::Response): Result<void, Web::Error> -> {
+                return self.runRoute(index + 1, segments, innerRequest, innerResponse);
+              },
+            );
+          }
+        }
+
+        index += 1;
+      }
+
+      request.setParams(Vector::new<Web::Param>());
+
+      if (start == 0) {
+        let allow: String = self.allowedMethods(segments);
+
+        if (allow.length() > 0) {
+          response.setHeader("Allow", allow.toStr());
+          return Result::ERROR(Web::Error::withStatus(405, "Method Not Allowed"));
+        }
+      }
+
+      return Result::ERROR(Web::Error::withStatus(404, "Not Found"));
+    }
+
+    /// Adds a middleware. Middleware runs for every request, matched or
+    /// not, in the order it was added, before any route.
+    public use(&mut self, middleware: Web::Middleware): void {
+      self.layers.push(Layer { handler: middleware });
+    }
+
+    /// Adds a route for `GET` (and `HEAD`) requests to `path`.
+    public get(&mut self, path: str, handler: Web::Middleware): void {
+      self.route("GET", path, handler);
+    }
+
+    /// Adds a route for `POST` requests to `path`.
+    public post(&mut self, path: str, handler: Web::Middleware): void {
+      self.route("POST", path, handler);
+    }
+
+    /// Adds a route for `PUT` requests to `path`.
+    public put(&mut self, path: str, handler: Web::Middleware): void {
+      self.route("PUT", path, handler);
+    }
+
+    /// Adds a route for `PATCH` requests to `path`.
+    public patch(&mut self, path: str, handler: Web::Middleware): void {
+      self.route("PATCH", path, handler);
+    }
+
+    /// Adds a route for `DELETE` requests to `path`.
+    public delete(&mut self, path: str, handler: Web::Middleware): void {
+      self.route("DELETE", path, handler);
+    }
+
+    /// Adds a route for requests to `path` with any method.
+    public any(&mut self, path: str, handler: Web::Middleware): void {
+      self.route("", path, handler);
+    }
+
+    /// Adds a route for `method`, written as it appears on the request
+    /// line (`OPTIONS`, `PURGE`), or every method when it is empty.
+    public route(&mut self, method: str, path: str, handler: Web::Middleware): void {
+      let pathText: String = String::create(path);
+      self.routes.push(
+        Route { method: String::create(method), segments: pathSegments(&pathText), handler: handler },
+      );
+    }
+
+    /// Runs the middleware and then the routes for `request`. Returns the
+    /// error that reached the router, for a caller that answers it itself;
+    /// `handle` answers it with its status.
+    public dispatch(
+      &self,
+      request: &mut Web::Request,
+      response: &mut Web::Response
+    ): Result<void, Web::Error> {
+      return self.runLayer(0, request, response);
+    }
+
+    /// Answers `request` through `dispatch`. An error that reaches the
+    /// router becomes a response with its status and its message as a
+    /// plain-text body; header fields already set stay.
+    handle(&self, request: &Http::Request, response: &mut Http::Response): void {
+      let mut webRequest: Web::Request = Web::Request::create(request);
+      let mut webResponse: Web::Response = Web::Response::new();
+
+      if (let Result::ERROR(error) = self.dispatch(&mut webRequest, &mut webResponse)) {
+        webResponse.setStatus(error.status);
+        webResponse.text(error.message.toStr());
+      }
+
+      webResponse.finish(response);
+    }
+
+    /// The methods of the routes whose path matches `segments`, in the
+    /// order they were added, as an `Allow` value. A `GET` route allows
+    /// `HEAD` too.
+    allowedMethods(&self, segments: &Vector<String>): String {
+      let mut methods: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < self.routes.length()) {
+        let route: &Route = self.routes.get(index).unwrap();
+        let matches: boolean = match (matchSegments(&route.segments, segments)) {
+          Result::OK(Option::SOME(_)) -> true,
+          Result::OK(Option::NONE) -> false,
+          Result::ERROR(_) -> true,
+        };
+
+        if (matches) {
+          addMethod(&mut methods, &route.method);
+
+          if (route.method.equals("GET")) {
+            let head: String = String::create("HEAD");
+            addMethod(&mut methods, &head);
+          }
+        }
+
+        index += 1;
+      }
+
+      let mut allow: String = String::new();
+      let mut position: u64 = 0;
+
+      while (position < methods.length()) {
+        if (position > 0) {
+          allow.pushStr(", ");
+        }
+
+        allow.push(methods.get(position).unwrap());
+        position += 1;
+      }
+
+      return allow;
+    }
+  }
+
+  /// An application: builds the router every server thread uses. It is
+  /// shared by all threads, so it has to be `Send` and `Sync`; the routers
+  /// it builds are not shared.
+  trait App {
+    build(&self): Web::Router;
+  }
+
+  /// Binds `address` and serves `app` on `config.threads` threads, as
+  /// `serveListener` does.
+  function serve<A: Web::App & Send & Sync>(
+    address: &SocketAddress,
+    config: Http::ServerConfig,
+    app: A
+  ): Result<void, Io::IoError> {
+    let listener: TcpListener = TcpListener::bind(address)!;
+    return Web::serveListener<A>(listener, config, app);
+  }
+
+  /// Serves `app` on `listener` with `config.threads` threads (0 counts as
+  /// 1). Each thread calls `app.build()` once and serves its connections
+  /// with that router through `Http::acceptConnections`. Returns once
+  /// every thread stopped, with the first thread's error; like
+  /// `Http::Server::run`, in practice it blocks for as long as the process
+  /// lives.
+  function serveListener<A: Web::App & Send & Sync>(
+    listener: TcpListener,
+    config: Http::ServerConfig,
+    app: A
+  ): Result<void, Io::IoError> {
+    let count: u64 = config.threads == 0 ? 1 : config.threads;
+    let sharedListener: Arc<TcpListener> = Arc::new<TcpListener>(listener);
+    let sharedConfig: Arc<Http::ServerConfig> = Arc::new<Http::ServerConfig>(config);
+    let sharedApp: Arc<A> = Arc::new<A>(app);
+    let mut workers: Vector<JoinHandle<Io::IoError>> = Vector::new<JoinHandle<Io::IoError>>();
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      let workerListener: Arc<TcpListener> = sharedListener.clone();
+      let workerConfig: Arc<Http::ServerConfig> = sharedConfig.clone();
+      let workerApp: Arc<A> = sharedApp.clone();
+
+      workers.push(Thread::spawn<Io::IoError>((): Io::IoError -> {
+            let router: Web::Router = (@move workerApp).get().build();
+            return Http::acceptConnections<Web::Router>(
+              (@move workerListener).get(),
+              &router,
+              (@move workerConfig).get(),
+            );
+          }));
+      index += 1;
+    }
+
+    let mut first: Option<Io::IoError> = Option::NONE;
+
+    while (workers.length() > 0) {
+      if (let Option::SOME(handle) = workers.pop()) {
+        // `pop` takes the last worker, so the first one's error is kept last.
+        first = Option::SOME(handle.join());
+      }
+    }
+
+    let Option::SOME(error) = first else {
+      return Result::OK(());
+    };
+
+    return Result::ERROR(error);
+  }
+}
+
+/// Appends `method` to `methods` unless it is already there. An empty
+/// method (a route for any method) is skipped: such a route matches every
+/// method, so it never leads to a 405.
+function addMethod(methods: &mut Vector<String>, method: &String): void {
+  if (method.length() == 0) {
+    return;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < methods.length()) {
+    if (methods.get(index).unwrap().equals(method)) {
+      return;
+    }
+
+    index += 1;
+  }
+
+  methods.push(method.clone());
+}

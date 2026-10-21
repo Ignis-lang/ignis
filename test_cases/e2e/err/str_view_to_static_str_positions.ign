@@ -1,0 +1,30 @@
+// e2e: err
+// The `str` to `static str` direction is rejected in every position a value flows into:
+// argument, return, field initializer, assignment and a generic container element.
+import Vector from "std::vector";
+
+record Entry {
+  public name: static str;
+}
+
+function keep(text: static str): static str {
+  return text;
+}
+
+function leak(text: str): static str {
+  return text;
+}
+
+function main(): i32 {
+  let owned: String = String::create("text");
+  let view: str = owned.toStr();
+  let _ = keep(view);
+  let entry: Entry = Entry { name: view };
+  let mut slot: static str = "slot";
+  slot = view;
+  let mut list: Vector<static str> = Vector::new<static str>();
+  list.push(view);
+  let _ = leak(entry.name);
+  let _ = slot;
+  return 0;
+}

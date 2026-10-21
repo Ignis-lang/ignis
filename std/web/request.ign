@@ -1,0 +1,312 @@
+//! What routes and middleware see: `Web::Request`, a view of the HTTP
+//! request with its route parameters and query string, `Web::Response`, the
+//! answer they build, and `Web::Error`, the error that stops a chain.
+
+import Http from "std::http";
+import isUtf8 from "std::http::server";
+import Json, JsonValue from "std::json";
+import String from "std::string";
+import Vector from "std::vector";
+
+function hexValue(byte: u8): Option<u8> {
+  if (byte >= '0' as u8 && byte <= '9' as u8) {
+    return Option::SOME(byte - '0' as u8);
+  }
+
+  if (byte >= 'a' as u8 && byte <= 'f' as u8) {
+    return Option::SOME(byte - 'a' as u8 + 10);
+  }
+
+  if (byte >= 'A' as u8 && byte <= 'F' as u8) {
+    return Option::SOME(byte - 'A' as u8 + 10);
+  }
+
+  return Option::NONE;
+}
+
+/// Decodes `%XX` escapes in the bytes of `text` from `start` to `end`, and
+/// `+` as a space when `plusIsSpace`. `NONE` when an escape is not two hex
+/// digits or the result is not UTF-8.
+export function percentDecode(text: &String, start: u64, end: u64, plusIsSpace: boolean): Option<String> {
+  let mut bytes: Vector<u8> = Vector::new<u8>();
+  let mut index: u64 = start;
+
+  while (index < end) {
+    let byte: u8 = text.byteAt(index).unwrap();
+
+    if (byte == '%' as u8) {
+      if (end - index < 3) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(high) = hexValue(text.byteAt(index + 1).unwrap()) else {
+        return Option::NONE;
+      };
+      let Option::SOME(low) = hexValue(text.byteAt(index + 2).unwrap()) else {
+        return Option::NONE;
+      };
+
+      bytes.push(high * 16 + low);
+      index += 3;
+      continue;
+    }
+
+    bytes.push(plusIsSpace && byte == '+' as u8 ? ' ' as u8 : byte);
+    index += 1;
+  }
+
+  if (!isUtf8(&bytes)) {
+    return Option::NONE;
+  }
+
+  let mut decoded: String = String::withCapacity(bytes.length());
+  let mut position: u64 = 0;
+
+  while (position < bytes.length()) {
+    decoded.pushByte(*bytes.get(position).unwrap());
+    position += 1;
+  }
+
+  return Option::SOME(decoded);
+}
+
+/// The byte index of the first `byte` in `text` from `start` to `end`, or
+/// `end` when there is none.
+export function findByte(text: &String, byte: u8, start: u64, end: u64): u64 {
+  let mut index: u64 = start;
+
+  while (index < end) {
+    if (text.byteAt(index).unwrap() == byte) {
+      return index;
+    }
+
+    index += 1;
+  }
+
+  return end;
+}
+
+/// Whether the bytes of `text` from `start` to `end` spell `name`.
+function spells(text: &String, start: u64, end: u64, name: str): boolean {
+  let owned: String = String::create(name);
+
+  if (end - start != owned.length()) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < owned.length()) {
+    if (text.byteAt(start + index).unwrap() != owned.byteAt(index).unwrap()) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Request and response types of the framework.
+export namespace Web {
+  /// The error a route or middleware returns to stop the chain. The router
+  /// answers it with `status` and `message` as a plain-text body.
+  record Error {
+    public status: u16;
+    public message: String;
+
+    /// An error answered with 500.
+    public static new(message: str): Error {
+      return Error { status: 500, message: String::create(message) };
+    }
+
+    /// An error answered with `status`, 404 or 401 for example.
+    public static withStatus(status: u16, message: str): Error {
+      return Error { status: status, message: String::create(message) };
+    }
+  }
+
+  /// One route parameter: the name after `:` in the route path and the
+  /// decoded segment it matched.
+  record Param {
+    public name: String;
+    public value: String;
+  }
+
+  /// The request as a route or middleware sees it: the HTTP request, the
+  /// parameters of the route that matched, and its query string.
+  record Request {
+    /// The request the server parsed.
+    public http: &Http::Request;
+
+    /// End of the path within the target: the `?` or the target's length.
+    pathEnd: u64;
+    pathText: String;
+    params: Vector<Web::Param>;
+
+    /// A view of `http` without route parameters.
+    public static create(http: &Http::Request): Request {
+      let pathEnd: u64 = findByte(&http.head.target, '?' as u8, 0, http.head.target.length());
+      return Request {
+        http: http,
+        pathEnd: pathEnd,
+        pathText: http.head.target.substringBytes(0, pathEnd),
+        params: Vector::new<Web::Param>(),
+      };
+    }
+
+    /// The request method.
+    public method(&self): &Http::Method {
+      return &self.http.head.method;
+    }
+
+    /// The request target as received, `/users/7?full=1` for example.
+    public target(&self): str {
+      return self.http.target();
+    }
+
+    /// The path part of the target, before any `?`, not decoded.
+    public path(&self): str {
+      return self.pathText.toStr();
+    }
+
+    /// The value of the first header field named `name`, ignoring ASCII case.
+    public header(&self, name: str): Option<str> {
+      return self.http.header(name);
+    }
+
+    /// The request body.
+    public body(&self): &Vector<u8> {
+      return &self.http.body;
+    }
+
+    /// A copy of the body as text, or `NONE` when it is not valid UTF-8.
+    public bodyText(&self): Option<String> {
+      return self.http.bodyText();
+    }
+
+    /// The decoded value of the route parameter `name` (`:name` in the
+    /// route path), or `NONE` when the matched route has none.
+    public param(&self, name: str): Option<str> {
+      let mut index: u64 = 0;
+
+      while (index < self.params.length()) {
+        let param: &Web::Param = self.params.get(index).unwrap();
+
+        if (param.name.equals(name)) {
+          return Option::SOME(param.value.toStr());
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The decoded value of the first query parameter `name`, or `NONE`
+    /// when the query has none or its value is not valid percent-encoded
+    /// UTF-8. `+` decodes to a space; a parameter without `=` has an empty
+    /// value.
+    public query(&self, name: str): Option<String> {
+      let target: &String = &self.http.head.target;
+      let end: u64 = target.length();
+      let mut start: u64 = self.pathEnd + 1;
+
+      while (start <= end) {
+        let pairEnd: u64 = findByte(target, '&' as u8, start, end);
+        let equals: u64 = findByte(target, '=' as u8, start, pairEnd);
+
+        if (spells(target, start, equals, name)) {
+          let valueStart: u64 = equals == pairEnd ? pairEnd : equals + 1;
+          return percentDecode(target, valueStart, pairEnd, true);
+        }
+
+        start = pairEnd + 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Replaces the route parameters. The router calls it for each route it
+    /// tries.
+    public setParams(&mut self, params: Vector<Web::Param>): void {
+      self.params = params;
+    }
+  }
+
+  /// The answer routes and middleware build: status 200, no header fields
+  /// and an empty body until they change them. The server adds
+  /// `Content-Length` itself, as `Http::Response` describes.
+  record Response {
+    public status: u16;
+    public headers: Http::Headers;
+    public body: Vector<u8>;
+
+    /// An empty 200 response.
+    public static new(): Response {
+      return Response { status: 200, headers: Http::Headers::new(), body: Vector::new<u8>() };
+    }
+
+    /// Sets the status.
+    public setStatus(&mut self, status: u16): void {
+      self.status = status;
+    }
+
+    /// The value of the first header field named `name`, ignoring ASCII case.
+    public header(&self, name: str): Option<str> {
+      return self.headers.get(name);
+    }
+
+    /// Replaces every header field named `name` with one holding `value`.
+    public setHeader(&mut self, name: str, value: str): void {
+      self.headers.set(name, value);
+    }
+
+    /// Appends a header field, keeping any with the same name.
+    public addHeader(&mut self, name: str, value: str): void {
+      self.headers.add(name, value);
+    }
+
+    /// Appends `bytes` to the body.
+    public write(&mut self, bytes: &Vector<u8>): void {
+      Http::writeBody(bytes, &mut self.body);
+    }
+
+    /// Appends the bytes of `text` to the body.
+    public writeStr(&mut self, text: str): void {
+      let owned: String = String::create(text);
+      let bytes: Vector<u8> = owned.toBytes();
+      Http::writeBody(&bytes, &mut self.body);
+    }
+
+    /// Replaces the body with `text` and sets `Content-Type` to
+    /// `text/plain; charset=utf-8`.
+    public text(&mut self, text: str): void {
+      self.body.clear();
+      self.writeStr(text);
+      self.headers.set("Content-Type", "text/plain; charset=utf-8");
+    }
+
+    /// Replaces the body with `text` and sets `Content-Type` to
+    /// `text/plain; charset=utf-8`.
+    public text(&mut self, text: String): void {
+      self.text(text.toStr());
+    }
+
+    /// Replaces the body with `value` as compact JSON and sets
+    /// `Content-Type` to `application/json`.
+    public json(&mut self, value: &JsonValue): void {
+      let text: String = Json::toJsonString(value);
+      self.body.clear();
+      self.writeStr(text.toStr());
+      self.headers.set("Content-Type", "application/json");
+    }
+
+    /// Moves the status, header fields and body into `target`.
+    public finish(self, target: &mut Http::Response): void {
+      target.status = self.status;
+      target.headers = self.headers;
+      target.body = self.body;
+    }
+  }
+}

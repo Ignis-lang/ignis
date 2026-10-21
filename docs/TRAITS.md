@@ -192,6 +192,16 @@ record Box {
 }
 ```
 
+The same holds for a trait declared in another module: the record inherits the default whether
+it names the trait directly, through a module that re-exports it, or by a namespaced path. Names
+in the inherited body and signature resolve in the trait's module and namespaces, never in the
+implementing module: a default may call a private helper of its module, and a declaration of the
+same name in the implementing module does not change what the default refers to.
+
+An error in a default that every implementing type hits the same way is reported once, at the
+trait's file and line. One that only some implementing type hits is reported once for that type,
+still at the trait's line, with a note that names the trait, the method and the inheriting type.
+
 ### Signature Validation
 
 When a record method implements a trait method, the signature must match exactly:
@@ -240,7 +250,7 @@ type is neither `Send` nor `Sync`.
 A type parameter `F: Send` cannot be called inside the function. `@sendable` on a parameter of
 function type gives the same check at every call while keeping the parameter an ordinary,
 callable function value. Arguments are judged with the `Send` rules above. `@sendable` on a
-parameter that is not of function type is an error (A0255). An alias is judged by the type it names: an alias to a function type is accepted, an alias to anything else is A0255, and so is a generic alias, which is not resolved to a function type. A parameter typed by an alias cannot be called today (A0024), so spell the function type out when the task is called. It combines with `@noescape`, which
+parameter that is not of function type is an error (A0255). An alias is judged by the type it names: an alias to a function type is accepted, an alias to anything else is A0255, and so is a generic alias, which is not resolved to a function type. A parameter typed by an alias to a function type is callable like one spelled out. It combines with `@noescape`, which
 keeps deciding where by-reference captures are allowed.
 
 ```ignis

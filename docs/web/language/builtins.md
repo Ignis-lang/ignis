@@ -24,7 +24,7 @@ function main(): i32 {
 | --- | --- | --- |
 | `@sizeOf<T>()` | `u64` | Size in bytes, as the backend lays the type out. Emits C `sizeof` |
 | `@alignOf<T>()` | `u64` | Required alignment. Emits C `_Alignof` |
-| `@typeName<T>()` | `str` | The type's name, resolved to a literal at compile time |
+| `@typeName<T>()` | `str`, or `static str` where that type is expected | The type's name, resolved to a literal at compile time |
 | `maxOf<T>()`, `minOf<T>()` | `T` | The bounds of a numeric type |
 
 `@typeOf` is a reserved builtin name, but the current compiler does not support it yet: a
