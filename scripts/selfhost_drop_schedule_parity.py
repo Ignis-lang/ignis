@@ -32,7 +32,8 @@ stage1's, a self-consistency check on the same sources.
 The gate feeds the promotion `candidate` verdict: a differing case is a real
 ownership bug, not just a lead to follow.
 
-Case discovery is reused verbatim from `selfhost_e2e_parity.py`, so G7 and G2
+Case discovery is reused verbatim from `selfhost_e2e_parity.py`, which the e2e
+corpus runner still owns even though its own gate was retired, so G7 and it
 always run over the same corpus.
 """
 
