@@ -79,6 +79,22 @@ export namespace Analyzer {
       public aliasItems: Vector<Ast::ItemId>;
       public aliasChains: Vector<Vector<String>>;
       public aliasStatuses: Vector<u8>;
+      /// The names of every module whose trait defaults this module holds
+      /// copies of, and the one the copy being resolved reads, as index + 1;
+      /// 0 while no copy of another module's default is.
+      public foreignNames: Vector<Analyzer::Resolver::ForeignNames>;
+      public activeForeign: u64;
+    }
+
+    /// The bare-name tables of another module, laid out as `ResolverState`
+    /// holds its own. A copy of a trait default that module declares reads its
+    /// names through them, with the same reach rules.
+    record ForeignNames {
+      public modulePath: String;
+      public globalNameIndex: HashMap<u32, Vector<Analyzer::DefinitionId>>;
+      public globalNamePaths: HashMap<u32, Vector<String>>;
+      public importNameIndex: HashMap<u32, Vector<Analyzer::DefinitionId>>;
+      public importNamePaths: HashMap<u32, Vector<String>>;
     }
 
     /// Type-parameter scope for one item walk (Record, Enum, or Function).
@@ -344,6 +360,15 @@ export namespace Analyzer {
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::Resolver::BareCandidate> {
       let key: u32 = sym.raw();
+
+      if (state.activeForeign > 0) {
+        let Option::SOME(foreign) = state.foreignNames.get(state.activeForeign - 1) else {
+          return Option::NONE;
+        };
+
+        return Analyzer::Resolver::pickBareCandidate(foreign.globalNameIndex.get(&key), foreign.globalNamePaths.get(&key), &state.namespaceChain);
+      }
+
       return Analyzer::Resolver::pickBareCandidate(state.globalNameIndex.get(&key), state.globalNamePaths.get(&key), &state.namespaceChain);
     }
 
@@ -352,6 +377,15 @@ export namespace Analyzer {
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::Resolver::BareCandidate> {
       let key: u32 = sym.raw();
+
+      if (state.activeForeign > 0) {
+        let Option::SOME(foreign) = state.foreignNames.get(state.activeForeign - 1) else {
+          return Option::NONE;
+        };
+
+        return Analyzer::Resolver::pickBareCandidate(foreign.importNameIndex.get(&key), foreign.importNamePaths.get(&key), &state.namespaceChain);
+      }
+
       return Analyzer::Resolver::pickBareCandidate(state.importNameIndex.get(&key), state.importNamePaths.get(&key), &state.namespaceChain);
     }
 
@@ -903,107 +937,6 @@ export namespace Analyzer {
       }
 
       return Analyzer::Resolver::TypeParamScope { syms: syms, typeIds: typeIds };
-    }
-
-    /// Whether `inner` lies within `outer`, in the same file.
-    function spanContains(outer: SourceSpan, inner: SourceSpan): boolean {
-      if (outer.start > inner.start || inner.end > outer.end) {
-        return false;
-      }
-
-      return outer.file.raw() == inner.file.raw();
-    }
-
-    /// Push onto `chain` the namespaces (and extern blocks) under `itemId`
-    /// whose source contains `span`, outermost first.
-    function collectNamespaceChainAt(
-      module: &Ast::Module,
-      itemId: Ast::ItemId,
-      span: SourceSpan,
-      chain: &mut Vector<String>,
-    ): boolean {
-      let Option::SOME(item) = module.items.get(itemId) else {
-        return false;
-      };
-
-      match (item) {
-        Ast::Item::Node::Namespace(ns) -> {
-          if (!Analyzer::Resolver::spanContains(ns.span, span)) {
-            return false;
-          }
-
-          let mut chainRef: &mut Vector<String> = chain;
-          chainRef.push(ns.name.clone());
-
-          let mut childIndex: u64 = 0;
-          while (childIndex < ns.items.length()) {
-            if (let Option::SOME(childId) = ns.items.get(childIndex)) {
-              if (Analyzer::Resolver::collectNamespaceChainAt(module, *childId, span, chain)) {
-                return true;
-              }
-            }
-            childIndex += 1;
-          }
-
-          return true;
-        },
-        Ast::Item::Node::Extern(externItem) -> {
-          if (!Analyzer::Resolver::spanContains(externItem.span, span)) {
-            return false;
-          }
-
-          let mut chainRef: &mut Vector<String> = chain;
-          chainRef.push(externItem.name.clone());
-          return true;
-        },
-        Ast::Item::Node::Export(exported) -> {
-          if (let Option::SOME(innerItemId) = exported.declaration) {
-            return Analyzer::Resolver::collectNamespaceChainAt(module, innerItemId, span, chain);
-          }
-          return false;
-        },
-        _ -> {
-          return false;
-        },
-      };
-
-      @panic("unreachable: collectNamespaceChainAt match did not return");
-    }
-
-    /// The namespaces of `module` whose source contains `span`, outermost
-    /// first, or NONE when no namespace of the module does.
-    ///
-    /// An inherited trait default is a copy of the trait's method placed on
-    /// the implementing type, but its source, and so the namespace its bare
-    /// names are written in, is the trait's.
-    function namespaceChainAt(module: &Ast::Module, span: SourceSpan): Option<Vector<String>> {
-      let mut chain: Vector<String> = Vector::new<String>();
-      let mut index: u64 = 0;
-
-      while (index < module.roots.length()) {
-        if (let Option::SOME(rootId) = module.roots.get(index)) {
-          if (Analyzer::Resolver::collectNamespaceChainAt(module, *rootId, span, &mut chain)) {
-            return Option::SOME(chain);
-          }
-        }
-        index += 1;
-      }
-
-      return Option::NONE;
-    }
-
-    /// The chain a method written at `span` is read in: the namespaces around
-    /// its source when the module has any, else `current`.
-    function methodNamespaceChain(
-      module: &Ast::Module,
-      span: SourceSpan,
-      current: &Vector<String>
-    ): Vector<String> {
-      if (let Option::SOME(chain) = Analyzer::Resolver::namespaceChainAt(module, span)) {
-        return chain;
-      }
-
-      return Analyzer::Resolver::copyChain(current);
     }
 
     function copyChain(chain: &Vector<String>): Vector<String> {
@@ -2699,11 +2632,7 @@ export namespace Analyzer {
 
         match (item) {
           Ast::Item::Node::Function(fn_) -> {
-            // An inherited default reads its names in the trait's namespaces.
-            let methodChain: Vector<String> = Analyzer::Resolver::methodNamespaceChain(module, fn_.span, &state.namespaceChain);
-            let savedChain: Vector<String> = Analyzer::Resolver::copyChain(&state.namespaceChain);
-            let mut enterRef: &mut Analyzer::Resolver::ResolverState = state;
-            enterRef.namespaceChain = methodChain;
+            let savedChain: Option<Vector<String>> = Analyzer::Resolver::enterInheritedScope(state, module, *methodItemId);
 
             resolveBoundTraits(state, defStore, symbols, methodDefId, &fn_.genericParameters);
 
@@ -2760,8 +2689,7 @@ export namespace Analyzer {
               patchMethodReturnType(defStore, methodDefId, resolved);
             }
 
-            let mut leaveRef: &mut Analyzer::Resolver::ResolverState = state;
-            leaveRef.namespaceChain = savedChain;
+            Analyzer::Resolver::leaveInheritedScope(state, savedChain);
           },
           Ast::Item::Node::Record(_) -> {},
           Ast::Item::Node::Enum(_) -> {},
@@ -3145,10 +3073,16 @@ export namespace Analyzer {
       let savedChain: Vector<String> = Analyzer::Resolver::copyStringVector(&stateRef.namespaceChain);
       stateRef.namespaceChain = chain;
 
+      // The alias body names resolve in this module even when the alias is
+      // first written inside a copy of another module's trait default.
+      let savedForeign: u64 = stateRef.activeForeign;
+      stateRef.activeForeign = 0;
+
       Analyzer::Resolver::resolveTypeAliasBodyOf(state, defStore, typeStore, symbols, module, defId, &a);
 
       let mut restoreRef: &mut Analyzer::Resolver::ResolverState = state;
       restoreRef.namespaceChain = savedChain;
+      restoreRef.activeForeign = savedForeign;
       restoreRef.aliasStatuses.set(index, 2);
     }
 
@@ -3364,7 +3298,8 @@ export namespace Analyzer {
 
     /// Index `defId` under `sym` with the path it is published under.
     function insertGlobalName(
-      state: &mut Analyzer::Resolver::ResolverState,
+      index: &mut HashMap<u32, Vector<Analyzer::DefinitionId>>,
+      paths: &mut HashMap<u32, Vector<String>>,
       defStore: &mut Analyzer::DefinitionStore,
       sym: Analyzer::SymbolId,
       defId: Analyzer::DefinitionId,
@@ -3374,8 +3309,7 @@ export namespace Analyzer {
         path = stored.clone();
       }
 
-      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-      Analyzer::Resolver::appendNameCandidate(&mut stateRef.globalNameIndex, &mut stateRef.globalNamePaths, sym, defId, path);
+      Analyzer::Resolver::appendNameCandidate(index, paths, sym, defId, path);
     }
 
     /// Populate `state.globalNameIndex` from one `BinderOutput`. Records and
@@ -3384,6 +3318,17 @@ export namespace Analyzer {
     /// Called twice (pass-1 then pass-2); a declaration both list is indexed once.
     function buildGlobalNameIndex(
       state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      binderOutput: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      Analyzer::Resolver::indexGlobalNames(&mut stateRef.globalNameIndex, &mut stateRef.globalNamePaths, defStore, binderOutput);
+    }
+
+    /// `buildGlobalNameIndex` into the tables `names` and `paths`.
+    function indexGlobalNames(
+      names: &mut HashMap<u32, Vector<Analyzer::DefinitionId>>,
+      paths: &mut HashMap<u32, Vector<String>>,
       defStore: &mut Analyzer::DefinitionStore,
       binderOutput: &Analyzer::Binder::BinderOutput,
     ): void {
@@ -3402,10 +3347,10 @@ export namespace Analyzer {
 
         match (def) {
           Analyzer::Definition::Record(rec) -> {
-            Analyzer::Resolver::insertGlobalName(state, defStore, rec.name, *defId);
+            Analyzer::Resolver::insertGlobalName(names, paths, defStore, rec.name, *defId);
           },
           Analyzer::Definition::Enum(en) -> {
-            Analyzer::Resolver::insertGlobalName(state, defStore, en.name, *defId);
+            Analyzer::Resolver::insertGlobalName(names, paths, defStore, en.name, *defId);
           },
           Analyzer::Definition::Function(_) -> {},
           Analyzer::Definition::Variable(_) -> {},
@@ -3416,15 +3361,96 @@ export namespace Analyzer {
           // are never addressable as type names — excluded from the flat index.
           Analyzer::Definition::Method(_) -> {},
           Analyzer::Definition::TypeAlias(alias) -> {
-            Analyzer::Resolver::insertGlobalName(state, defStore, alias.name, *defId);
+            Analyzer::Resolver::insertGlobalName(names, paths, defStore, alias.name, *defId);
           },
           Analyzer::Definition::Trait(trait_) -> {
-            Analyzer::Resolver::insertGlobalName(state, defStore, trait_.name, *defId);
+            Analyzer::Resolver::insertGlobalName(names, paths, defStore, trait_.name, *defId);
           },
         };
 
         index += 1;
       }
+    }
+
+    /// The bare-name tables of the module at `modulePath`, bound as `pass1`
+    /// and `pass2` and importing `overlay`.
+    function foreignNamesOf(
+      defStore: &mut Analyzer::DefinitionStore,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+      modulePath: String,
+    ): Analyzer::Resolver::ForeignNames {
+      let mut globalNameIndex: HashMap<u32, Vector<Analyzer::DefinitionId>> = HashMap::new<u32, Vector<Analyzer::DefinitionId>>();
+      let mut globalNamePaths: HashMap<u32, Vector<String>> = HashMap::new<u32, Vector<String>>();
+      let mut importNameIndex: HashMap<u32, Vector<Analyzer::DefinitionId>> = HashMap::new<u32, Vector<Analyzer::DefinitionId>>();
+      let mut importNamePaths: HashMap<u32, Vector<String>> = HashMap::new<u32, Vector<String>>();
+
+      Analyzer::Resolver::indexGlobalNames(&mut globalNameIndex, &mut globalNamePaths, defStore, pass1);
+      Analyzer::Resolver::indexGlobalNames(&mut globalNameIndex, &mut globalNamePaths, defStore, pass2);
+      Analyzer::Resolver::indexImportOverlay(&mut importNameIndex, &mut importNamePaths, overlay);
+
+      return Analyzer::Resolver::ForeignNames {
+        modulePath: modulePath,
+        globalNameIndex: globalNameIndex,
+        globalNamePaths: globalNamePaths,
+        importNameIndex: importNameIndex,
+        importNamePaths: importNamePaths,
+      };
+    }
+
+    /// Reads the names of `methodItemId`, when it is a copy of a trait
+    /// default, where the trait is declared: inside the trait's namespaces
+    /// and, for a trait of another module, through that module's tables, so
+    /// the reach rules judge a bare name from the trait's side. Returns the
+    /// namespace chain `leaveInheritedScope` restores.
+    function enterInheritedScope(
+      state: &mut Analyzer::Resolver::ResolverState,
+      module: &Ast::Module,
+      methodItemId: Ast::ItemId,
+    ): Option<Vector<String>> {
+      let Option::SOME(scope) = module.inheritedScopeOf(methodItemId) else {
+        return Option::NONE;
+      };
+
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      let saved: Vector<String> = Analyzer::Resolver::copyChain(&stateRef.namespaceChain);
+      stateRef.namespaceChain = Analyzer::Resolver::copyChain(&scope.namespaces);
+
+      if (let Option::SOME(sourcePath) = &scope.sourceModule) {
+        let mut index: u64 = 0;
+
+        while (index < stateRef.foreignNames.length()) {
+          let mut matches: boolean = false;
+
+          if (let Option::SOME(foreign) = stateRef.foreignNames.get(index)) {
+            matches = foreign.modulePath.equals(sourcePath.toStr());
+          }
+
+          if (matches) {
+            stateRef.activeForeign = index + 1;
+            break;
+          }
+
+          index += 1;
+        }
+      }
+
+      return Option::SOME(saved);
+    }
+
+    /// Undoes `enterInheritedScope`.
+    function leaveInheritedScope(
+      state: &mut Analyzer::Resolver::ResolverState,
+      saved: Option<Vector<String>>,
+    ): void {
+      let Option::SOME(chain) = saved else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      stateRef.namespaceChain = chain;
+      stateRef.activeForeign = 0;
     }
 
     /// Dispatch a single item to the appropriate resolver handler.
@@ -3707,6 +3733,16 @@ export namespace Analyzer {
       state: &mut Analyzer::Resolver::ResolverState,
       overlay: &Analyzer::Imports::ImportOverlay,
     ): void {
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      Analyzer::Resolver::indexImportOverlay(&mut stateRef.importNameIndex, &mut stateRef.importNamePaths, overlay);
+    }
+
+    /// `appendImportOverlayToState` into the tables `names` and `paths`.
+    function indexImportOverlay(
+      names: &mut HashMap<u32, Vector<Analyzer::DefinitionId>>,
+      paths: &mut HashMap<u32, Vector<String>>,
+      overlay: &Analyzer::Imports::ImportOverlay,
+    ): void {
       let mut index: u64 = 0;
 
       while (index < overlay.syms.length()) {
@@ -3724,8 +3760,7 @@ export namespace Analyzer {
           path = stored.clone();
         }
 
-        let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-        Analyzer::Resolver::appendNameCandidate(&mut stateRef.importNameIndex, &mut stateRef.importNamePaths, *sym, *defId, path);
+        Analyzer::Resolver::appendNameCandidate(names, paths, *sym, *defId, path);
         index += 1;
       }
     }
@@ -3745,6 +3780,33 @@ export namespace Analyzer {
       overlay: &Analyzer::Imports::ImportOverlay,
       programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
     ): Analyzer::Resolver::ResolverOutput {
+      return Analyzer::Resolver::resolveTypesInProgram(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+        overlay,
+        programIndex,
+        Vector::new<Analyzer::Resolver::ForeignNames>(),
+      );
+    }
+
+    /// `resolveTypesWithImports` for a module that holds copies of trait
+    /// defaults other modules declare: `foreignNames` holds the bare-name
+    /// tables of each of those modules, which the copies' signatures read.
+    function resolveTypesInProgram(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
+      foreignNames: Vector<Analyzer::Resolver::ForeignNames>,
+    ): Analyzer::Resolver::ResolverOutput {
       let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
         diagnostics: DiagnosticBag::init(),
         globalNameIndex: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
@@ -3762,6 +3824,8 @@ export namespace Analyzer {
         aliasItems: Vector::new<Ast::ItemId>(),
         aliasChains: Vector::new<Vector<String>>(),
         aliasStatuses: Vector::new<u8>(),
+        foreignNames: foreignNames,
+        activeForeign: 0,
       };
 
       buildGlobalNameIndex(&mut state, defStore, pass1);

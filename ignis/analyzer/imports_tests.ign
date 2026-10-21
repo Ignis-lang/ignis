@@ -1585,3 +1585,155 @@ function analyzeProgramExportsReopenedNamespaceMembersFromEitherBlock(): void {
   };
   Test::assertEq<str>(importsDiagnosticCodes(exportSecondImporter).toStr(), "");
 }
+
+/// `importsParseModule` registering the file in `sourceMap`.
+function importsParseModuleIn(sourceMap: &mut SourceMap, pathText: str, source: str): Ast::Module {
+  let file: SourceFile = SourceFile::create(sourceMap, pathText, source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  return parsed.module;
+}
+
+/// Analyzes a trait module and a module that implements its traits as one
+/// program, copying the trait defaults across modules first, as the driver
+/// does.
+function importsAnalyzeWithInheritedDefaults(
+  traitSource: str,
+  implementerSource: str,
+): Vector<Analyzer::ModuleAnalysisRecord> {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+
+  // One source map for both, so the two files get distinct ids: the copies'
+  // repeats are told apart by file.
+  let mut sourceMap: SourceMap = SourceMap::new();
+  modules.push(importsParseModuleIn(&mut sourceMap, "shapes.ign", traitSource));
+  modules.push(importsParseModuleIn(&mut sourceMap, "main.ign", implementerSource));
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(importsModuleInfo(0, "shapes.ign"));
+  infos.push(importsModuleInfo(1, "main.ign"));
+
+  let mut moduleSources: Vector<String> = Vector::new<String>();
+  moduleSources.push(String::create("shapes.ign"));
+  moduleSources.push(String::create("main.ign"));
+
+  let noPrelude: Vector<String> = Vector::new<String>();
+  Parser::materializeCrossModuleDefaults(&mut modules, &moduleSources, &noPrelude);
+
+  return Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &noPrelude,
+  );
+}
+
+/// The note of the first diagnostic of `analysisRecord`, empty without one.
+function importsFirstNote(analysisRecord: &Analyzer::ModuleAnalysisRecord): String {
+  let Option::SOME(diagnostic) = analysisRecord.output.diagnostics.get(0) else {
+    return String::create("");
+  };
+  let Option::SOME(note) = diagnostic.notes.get(0) else {
+    return String::create("");
+  };
+
+  return String::create(note.messageText());
+}
+
+/// Where the first diagnostic of `analysisRecord` starts. Its file is not
+/// read: the parsed sources are gone once the analysis returns.
+function importsFirstStart(analysisRecord: &Analyzer::ModuleAnalysisRecord): u64 {
+  let Option::SOME(diagnostic) = analysisRecord.output.diagnostics.get(0) else {
+    return 0;
+  };
+
+  return diagnostic.primarySpan.start;
+}
+
+/// Scenario: a record and an enum inherit the defaults of a trait another
+/// module declares, a namespaced one included. The defaults call a private
+/// helper and name a record of the trait's module, which the implementing
+/// module declares differently: each copy binds to the trait's module, so the
+/// program checks clean.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e::trait_default_cross_module.
+@test
+function analyzeProgramGivesTypesTheDefaultsOfATraitInAnotherModule(): void {
+  let traitSource: str = "function scaleOf(value: i32): i32 {\n  return value * 2;\n}\n\nexport record Unit {\n  public value: i32;\n}\n\nexport trait Measured {\n  area(&self): i32;\n\n  doubled(&self): i32 {\n    return scaleOf(self.area());\n  }\n\n  inUnits(&self): Unit {\n    let unit: Unit = Unit { value: self.doubled() };\n    return unit;\n  }\n}\n\nexport namespace Shapes {\n  function twice(value: i32): i32 {\n    return value + value;\n  }\n\n  trait Sized {\n    width(&self): i32;\n\n    perimeter(&self): i32 {\n      return twice(self.width());\n    }\n  }\n}\n";
+  let implementerSource: str = "import Measured, Shapes from \"shapes.ign\";\n\nfunction scaleOf(flag: boolean): boolean {\n  return flag;\n}\n\nrecord Unit {\n  public label: boolean;\n}\n\n@implements(Measured, Shapes::Sized)\nrecord Square {\n  public side: i32;\n\n  area(&self): i32 {\n    return self.side;\n  }\n\n  width(&self): i32 {\n    return self.side;\n  }\n}\n\n@implements(Measured)\nenum Tile {\n  EMPTY,\n\n  area(&self): i32 {\n    return 0;\n  }\n}\n\nexport function total(square: Square, tile: Tile): i32 {\n  let local: Unit = Unit { label: scaleOf(true) };\n  return square.doubled() + square.inUnits().value + square.perimeter() + tile.doubled() + (local.label ? 1 : 0);\n}\n";
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeWithInheritedDefaults(traitSource, implementerSource);
+
+  let Option::SOME(record0) = records.get(0) else {
+    @panic("missing trait module record");
+  };
+  let Option::SOME(record1) = records.get(1) else {
+    @panic("missing implementing module record");
+  };
+
+  Test::assertEq<str>(importsDiagnosticCodes(record0).toStr(), "");
+  Test::assertEq<str>(importsDiagnosticCodes(record1).toStr(), "");
+}
+
+/// Scenario: an error in a default of a trait another module declares, that
+/// every type inheriting it hits the same way, is reported once, by the
+/// trait's module, at the trait's line.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e_err::trait_default_cross_module_error_shared.
+@test
+function analyzeProgramReportsASharedErrorOfACrossModuleDefaultOnceAtTheTrait(): void {
+  let traitSource: str = "export trait Shape {\n  area(&self): i32;\n\n  flagged(&self): boolean {\n    let flag: boolean = self.area();\n    return flag;\n  }\n}\n";
+  let implementerSource: str = "import Shape from \"shapes.ign\";\n\n@implements(Shape)\nrecord Square {\n  public side: i32;\n\n  area(&self): i32 {\n    return self.side;\n  }\n}\n\n@implements(Shape)\nrecord Line {\n  public length: i32;\n\n  area(&self): i32 {\n    return self.length;\n  }\n}\n";
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeWithInheritedDefaults(traitSource, implementerSource);
+
+  let Option::SOME(record0) = records.get(0) else {
+    @panic("missing trait module record");
+  };
+  let Option::SOME(record1) = records.get(1) else {
+    @panic("missing implementing module record");
+  };
+
+  Test::assertEq<str>(importsDiagnosticCodes(record0).toStr(), "A0045");
+
+  // The trait-level check of the default, at its `let` in the trait module.
+  Test::assertEq<u64>(importsFirstStart(record0), 74);
+  Test::assertEq<str>(importsFirstNote(record0).toStr(), "");
+  Test::assertEq<str>(importsDiagnosticCodes(record1).toStr(), "");
+}
+
+/// Scenario: a default of a trait another module declares, valid against the
+/// trait but not for one implementing type, is reported once, at the trait's
+/// line, with a note naming that type.
+/// Spec: TRAITS.md "Default Methods"; fixture e2e_err::trait_default_cross_module_error_specific.
+@test
+function analyzeProgramReportsATypeSpecificErrorOfACrossModuleDefaultForThatType(): void {
+  let traitSource: str = "export trait Shape {\n  area(&self): i32;\n\n  doubled(&self): i32 {\n    let area: i32 = self.area();\n    return area * 2;\n  }\n}\n";
+  let implementerSource: str = "import Shape from \"shapes.ign\";\n\n@implements(Shape)\nrecord Square {\n  public side: i32;\n\n  area(&self): i32 {\n    return self.side;\n  }\n}\n\n@implements(Shape)\nrecord Flag {\n  public set: boolean;\n\n  area(&self): boolean {\n    return self.set;\n  }\n}\n";
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeWithInheritedDefaults(traitSource, implementerSource);
+
+  let Option::SOME(record0) = records.get(0) else {
+    @panic("missing trait module record");
+  };
+  let Option::SOME(record1) = records.get(1) else {
+    @panic("missing implementing module record");
+  };
+
+  Test::assertEq<str>(importsDiagnosticCodes(record0).toStr(), "");
+  Test::assertEq<str>(importsDiagnosticCodes(record1).toStr(), "A0045");
+
+  // The trait module's `let`, although the importer reports it.
+  Test::assertEq<u64>(importsFirstStart(record1), 70);
+  Test::assertEq<str>(
+    importsFirstNote(record1).toStr(),
+    "in default method `doubled` of trait `Shape`, as inherited by `Flag`",
+  );
+}

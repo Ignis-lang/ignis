@@ -14,6 +14,21 @@ export namespace Ast {
     public traitName: String;
     public typeName: String;
     public methodName: String;
+    /// The resolved path of the module that declares the trait, when it is
+    /// not the module holding the copy.
+    public sourceModule: Option<String>;
+    /// The namespaces the trait is declared in, outermost first. Names in the
+    /// copy are read from inside them, in the trait's module.
+    public traitNamespaces: Vector<String>;
+  }
+
+  /// Where the names of an inherited method are read from.
+  record InheritedScope {
+    /// The resolved path of the module that declares the trait, when it is
+    /// another module than the one holding the copy.
+    public sourceModule: Option<String>;
+    /// The namespaces the trait is declared in, outermost first.
+    public namespaces: Vector<String>;
   }
 
   /// The note that names where an inherited method comes from, attached to
@@ -54,6 +69,11 @@ export namespace Ast {
     /// Methods copied from a trait default onto an implementing type, keyed by
     /// the copy's raw item id.
     public inheritedMethods: HashMap<u32, Ast::InheritedMethod>;
+    /// The resolved paths of the modules whose trait defaults were copied
+    /// into this one, each once, in copy order. Those copies depend on that
+    /// module's text, so a parse that holds one cannot be reused once that
+    /// module changes.
+    public crossModuleSources: Vector<String>;
 
     public static init(): Module {
       return Module {
@@ -69,6 +89,7 @@ export namespace Ast {
         variantAttributeLists: HashMap::new<u32, Vector<Ast::Attribute>>(),
         namespaceInnerDocs: HashMap::new<u32, String>(),
         inheritedMethods: HashMap::new<u32, Ast::InheritedMethod>(),
+        crossModuleSources: Vector::new<String>(),
       };
     }
 
@@ -123,7 +144,54 @@ export namespace Ast {
     }
 
     public setInheritedMethod(&mut self, id: Ast::ItemId, inherited: Ast::InheritedMethod): void {
+      if (let Option::SOME(source) = &inherited.sourceModule) {
+        let mut known: boolean = false;
+        let mut index: u64 = 0;
+
+        while (index < self.crossModuleSources.length()) {
+          if (let Option::SOME(existing) = self.crossModuleSources.get(index)) {
+            if (existing.equals(source.toStr())) {
+              known = true;
+            }
+          }
+
+          index += 1;
+        }
+
+        if (!known) {
+          self.crossModuleSources.push(source.clone());
+        }
+      }
+
       self.inheritedMethods.insert(id.raw(), inherited);
+    }
+
+    /// Where the names of the inherited method `id` are read from, when `id`
+    /// is a copy of a trait default.
+    public inheritedScopeOf(&self, id: Ast::ItemId): Option<Ast::InheritedScope> {
+      let raw: u32 = id.raw();
+      let Option::SOME(inherited) = self.inheritedMethods.get(&raw) else {
+        return Option::NONE;
+      };
+
+      let mut namespaces: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < inherited.traitNamespaces.length()) {
+        if (let Option::SOME(segment) = inherited.traitNamespaces.get(index)) {
+          namespaces.push(segment.clone());
+        }
+
+        index += 1;
+      }
+
+      let mut sourceModule: Option<String> = Option::NONE;
+
+      if (let Option::SOME(source) = &inherited.sourceModule) {
+        sourceModule = Option::SOME(source.clone());
+      }
+
+      return Option::SOME(Ast::InheritedScope { sourceModule: sourceModule, namespaces: namespaces });
     }
 
     public inheritedMethod(&self, id: Ast::ItemId): Option<&Ast::InheritedMethod> {

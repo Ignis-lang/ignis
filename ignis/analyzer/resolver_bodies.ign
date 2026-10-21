@@ -241,6 +241,34 @@ export namespace Analyzer {
       /// Side-tables being accumulated across the entire module walk.
       public bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap;
       public captures: Analyzer::ResolverBodies::LambdaCaptureMap;
+
+      /// The names of every module whose trait defaults the module holds
+      /// copies of. The body of such a copy resolves through them.
+      public foreignScopes: Vector<Analyzer::ResolverBodies::BodyScope>;
+    }
+
+    /// The names a module's bodies resolve through: the global and
+    /// namespace-scope tables of its own declarations and what it imports,
+    /// as `ResolverBodiesState` holds them.
+    record BodyScope {
+      public modulePath: String;
+      public globalNameSyms: Vector<Analyzer::SymbolId>;
+      public globalNameDefs: Vector<Analyzer::DefinitionId>;
+      public globalNameScopeKeys: Vector<u64>;
+      public globalNamePaths: Vector<String>;
+      public scopeItemKeys: Vector<u64>;
+      public scopeItemNameSyms: Vector<Analyzer::SymbolId>;
+      public scopeItemParentKeys: Vector<u64>;
+      public importSyms: Vector<Analyzer::SymbolId>;
+      public importDefs: Vector<Analyzer::DefinitionId>;
+      public importQualifiedNames: Vector<String>;
+    }
+
+    /// What `leaveInheritedScope` restores once a copied trait default is
+    /// walked.
+    record InheritedRestore {
+      public namespaceChain: Vector<String>;
+      public ownScope: Option<Analyzer::ResolverBodies::BodyScope>;
     }
 
     // =========================================================================
@@ -1648,6 +1676,207 @@ export namespace Analyzer {
         }
         state.importQualifiedNames.push(qualifiedName);
         i += 1;
+      }
+    }
+
+    function copySymbolIds(values: &Vector<Analyzer::SymbolId>): Vector<Analyzer::SymbolId> {
+      let mut copied: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (let Option::SOME(value) = values.get(index)) {
+          copied.push(*value);
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    function copyDefinitionIds(
+      values: &Vector<Analyzer::DefinitionId>
+    ): Vector<Analyzer::DefinitionId> {
+      let mut copied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (let Option::SOME(value) = values.get(index)) {
+          copied.push(*value);
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    function copyKeys(values: &Vector<u64>): Vector<u64> {
+      let mut copied: Vector<u64> = Vector::new<u64>();
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (let Option::SOME(value) = values.get(index)) {
+          copied.push(*value);
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    function copyTexts(values: &Vector<String>): Vector<String> {
+      let mut copied: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (let Option::SOME(value) = values.get(index)) {
+          copied.push(value.clone());
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    function copyBodyScope(
+      scope: &Analyzer::ResolverBodies::BodyScope
+    ): Analyzer::ResolverBodies::BodyScope {
+      return Analyzer::ResolverBodies::BodyScope {
+        modulePath: scope.modulePath.clone(),
+        globalNameSyms: Analyzer::ResolverBodies::copySymbolIds(&scope.globalNameSyms),
+        globalNameDefs: Analyzer::ResolverBodies::copyDefinitionIds(&scope.globalNameDefs),
+        globalNameScopeKeys: Analyzer::ResolverBodies::copyKeys(&scope.globalNameScopeKeys),
+        globalNamePaths: Analyzer::ResolverBodies::copyTexts(&scope.globalNamePaths),
+        scopeItemKeys: Analyzer::ResolverBodies::copyKeys(&scope.scopeItemKeys),
+        scopeItemNameSyms: Analyzer::ResolverBodies::copySymbolIds(&scope.scopeItemNameSyms),
+        scopeItemParentKeys: Analyzer::ResolverBodies::copyKeys(&scope.scopeItemParentKeys),
+        importSyms: Analyzer::ResolverBodies::copySymbolIds(&scope.importSyms),
+        importDefs: Analyzer::ResolverBodies::copyDefinitionIds(&scope.importDefs),
+        importQualifiedNames: Analyzer::ResolverBodies::copyTexts(&scope.importQualifiedNames),
+      };
+    }
+
+    /// The name tables `state` currently resolves through.
+    function captureBodyScope(
+      state: &Analyzer::ResolverBodies::ResolverBodiesState,
+      modulePath: String,
+    ): Analyzer::ResolverBodies::BodyScope {
+      return Analyzer::ResolverBodies::BodyScope {
+        modulePath: modulePath,
+        globalNameSyms: Analyzer::ResolverBodies::copySymbolIds(&state.globalNameSyms),
+        globalNameDefs: Analyzer::ResolverBodies::copyDefinitionIds(&state.globalNameDefs),
+        globalNameScopeKeys: Analyzer::ResolverBodies::copyKeys(&state.globalNameScopeKeys),
+        globalNamePaths: Analyzer::ResolverBodies::copyTexts(&state.globalNamePaths),
+        scopeItemKeys: Analyzer::ResolverBodies::copyKeys(&state.scopeItemKeys),
+        scopeItemNameSyms: Analyzer::ResolverBodies::copySymbolIds(&state.scopeItemNameSyms),
+        scopeItemParentKeys: Analyzer::ResolverBodies::copyKeys(&state.scopeItemParentKeys),
+        importSyms: Analyzer::ResolverBodies::copySymbolIds(&state.importSyms),
+        importDefs: Analyzer::ResolverBodies::copyDefinitionIds(&state.importDefs),
+        importQualifiedNames: Analyzer::ResolverBodies::copyTexts(&state.importQualifiedNames),
+      };
+    }
+
+    /// Makes `state` resolve through the name tables of `scope`.
+    function loadBodyScope(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      scope: Analyzer::ResolverBodies::BodyScope,
+    ): void {
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.globalNameSyms = scope.globalNameSyms;
+      stateRef.globalNameDefs = scope.globalNameDefs;
+      stateRef.globalNameScopeKeys = scope.globalNameScopeKeys;
+      stateRef.globalNamePaths = scope.globalNamePaths;
+      stateRef.scopeItemKeys = scope.scopeItemKeys;
+      stateRef.scopeItemNameSyms = scope.scopeItemNameSyms;
+      stateRef.scopeItemParentKeys = scope.scopeItemParentKeys;
+      stateRef.importSyms = scope.importSyms;
+      stateRef.importDefs = scope.importDefs;
+      stateRef.importQualifiedNames = scope.importQualifiedNames;
+    }
+
+    /// The names the module at `modulePath`, bound as `pass1` and `pass2`
+    /// and importing `overlay`, resolves bodies through.
+    function bodyScopeOf(
+      defStore: &mut Analyzer::DefinitionStore,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+      modulePath: String,
+    ): Analyzer::ResolverBodies::BodyScope {
+      let mut scratch: Analyzer::ResolverBodies::ResolverBodiesState = Analyzer::ResolverBodies::emptyState(
+        Vector::new<Analyzer::ResolverBodies::BodyScope>(),
+      );
+
+      Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut scratch, defStore, pass1);
+      Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut scratch, defStore, pass2);
+      Analyzer::ResolverBodies::copyBodyImportOverlay(&mut scratch, overlay);
+
+      return Analyzer::ResolverBodies::captureBodyScope(&scratch, modulePath);
+    }
+
+    /// Reads the names of `methodItemId`, when it is a copy of a trait
+    /// default, from where the trait is declared: inside the trait's
+    /// namespaces and, for a trait of another module, through that module's
+    /// names.
+    function enterInheritedScope(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      module: &Ast::Module,
+      methodItemId: Ast::ItemId,
+    ): Option<Analyzer::ResolverBodies::InheritedRestore> {
+      let Option::SOME(scope) = module.inheritedScopeOf(methodItemId) else {
+        return Option::NONE;
+      };
+
+      let mut foreign: Option<Analyzer::ResolverBodies::BodyScope> = Option::NONE;
+
+      if (let Option::SOME(sourcePath) = &scope.sourceModule) {
+        let mut index: u64 = 0;
+
+        while (index < state.foreignScopes.length()) {
+          if (let Option::SOME(candidate) = state.foreignScopes.get(index)) {
+            if (candidate.modulePath.equals(sourcePath.toStr())) {
+              foreign = Option::SOME(Analyzer::ResolverBodies::copyBodyScope(candidate));
+              break;
+            }
+          }
+
+          index += 1;
+        }
+      }
+
+      let mut restore: Analyzer::ResolverBodies::InheritedRestore = Analyzer::ResolverBodies::InheritedRestore {
+        namespaceChain: Analyzer::ResolverBodies::copyTexts(&state.namespaceChain),
+        ownScope: Option::NONE,
+      };
+
+      if (let Option::SOME(foreignScope) = foreign) {
+        restore.ownScope = Option::SOME(Analyzer::ResolverBodies::captureBodyScope(&*state, String::create("")));
+        Analyzer::ResolverBodies::loadBodyScope(state, foreignScope);
+      }
+
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.namespaceChain = Analyzer::ResolverBodies::copyTexts(&scope.namespaces);
+
+      return Option::SOME(restore);
+    }
+
+    /// Undoes `enterInheritedScope`.
+    function leaveInheritedScope(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      restore: Option<Analyzer::ResolverBodies::InheritedRestore>,
+    ): void {
+      let Option::SOME(saved) = restore else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.namespaceChain = Analyzer::ResolverBodies::copyTexts(&saved.namespaceChain);
+
+      if (let Option::SOME(ownScope) = &saved.ownScope) {
+        Analyzer::ResolverBodies::loadBodyScope(stateRef, Analyzer::ResolverBodies::copyBodyScope(&ownScope));
       }
     }
 
@@ -4087,11 +4316,11 @@ export namespace Analyzer {
 
         match (item) {
           Ast::Item::Node::Function(fn_) -> {
-            // An inherited default reads its names in the trait's namespaces.
-            let methodChain: Vector<String> = Analyzer::Resolver::methodNamespaceChain(module, fn_.span, &state.namespaceChain);
-            let mut enterRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
-            let savedChain: Vector<String> = Analyzer::Resolver::copyChain(&enterRef.namespaceChain);
-            enterRef.namespaceChain = methodChain;
+            let restore: Option<Analyzer::ResolverBodies::InheritedRestore> = Analyzer::ResolverBodies::enterInheritedScope(
+              state,
+              module,
+              *methodItemId,
+            );
 
             Analyzer::ResolverBodies::walkMethodBody(
               state,
@@ -4106,8 +4335,7 @@ export namespace Analyzer {
               ownerGenericParameters,
             );
 
-            let mut leaveRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
-            leaveRef.namespaceChain = savedChain;
+            Analyzer::ResolverBodies::leaveInheritedScope(state, restore);
           },
           Ast::Item::Node::Record(_) -> {},
           Ast::Item::Node::Enum(_) -> {},
@@ -4339,19 +4567,13 @@ export namespace Analyzer {
       );
     }
 
-    function resolveBodiesWithImports(
-      defStore: &mut Analyzer::DefinitionStore,
-      typeStore: &mut Analyzer::TypeStore,
-      symbols: &mut Analyzer::SymbolTable,
-      module: &Ast::Module,
-      pass1: &Analyzer::Binder::BinderOutput,
-      pass2: &Analyzer::Binder::BinderOutput,
-      overlay: &Analyzer::Imports::ImportOverlay,
-      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
-    ): Analyzer::ResolverBodies::ResolverBodiesOutput {
+    /// A body-resolver state with nothing indexed yet.
+    function emptyState(
+      foreignScopes: Vector<Analyzer::ResolverBodies::BodyScope>,
+    ): Analyzer::ResolverBodies::ResolverBodiesState {
       let sentinel: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
 
-      let mut state: Analyzer::ResolverBodies::ResolverBodiesState = Analyzer::ResolverBodies::ResolverBodiesState {
+      return Analyzer::ResolverBodies::ResolverBodiesState {
         diagnostics: DiagnosticBag::init(),
         globalNameSyms: Vector::new<Analyzer::SymbolId>(),
         globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
@@ -4393,7 +4615,48 @@ export namespace Analyzer {
           lengths: Vector::new<u64>(),
           locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
         },
+        foreignScopes: foreignScopes,
       };
+    }
+
+    function resolveBodiesWithImports(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
+    ): Analyzer::ResolverBodies::ResolverBodiesOutput {
+      return Analyzer::ResolverBodies::resolveBodiesInProgram(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+        overlay,
+        programIndex,
+        Vector::new<Analyzer::ResolverBodies::BodyScope>(),
+      );
+    }
+
+    /// `resolveBodiesWithImports` for a module that holds copies of trait
+    /// defaults other modules declare: `foreignScopes` holds the names of each
+    /// of those modules, which the copies' bodies resolve through.
+    function resolveBodiesInProgram(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
+      foreignScopes: Vector<Analyzer::ResolverBodies::BodyScope>,
+    ): Analyzer::ResolverBodies::ResolverBodiesOutput {
+      let mut state: Analyzer::ResolverBodies::ResolverBodiesState = Analyzer::ResolverBodies::emptyState(foreignScopes);
 
       // Build global name index from both binder passes (REQ-E5).
       Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut state, defStore, pass1);
