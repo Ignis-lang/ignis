@@ -1,0 +1,33 @@
+// A closure signature takes `Option<&Next>`, and the outer signature is seen
+// first (the record method comes before anything else): the closure struct
+// reached through the option's payload has to be declared too.
+type Next = (i32) -> i32;
+type Layer = (i32, Option<&Next>) -> i32;
+
+record Holder {
+  layer: Layer;
+
+  public replace(&mut self, layer: Layer): void {
+    self.layer = layer;
+  }
+
+  public run(&self, value: i32): i32 {
+    let next: Next = (inner: i32): i32 -> inner + 1;
+
+    return (self.layer)(value, Option::SOME(&next));
+  }
+}
+
+function twice(value: i32, next: Option<&Next>): i32 {
+  if (let Option::SOME(callback) = next) {
+    return (*callback)(value) * 2;
+  }
+
+  return 0;
+}
+
+function main(): i32 {
+  let holder: Holder = Holder { layer: twice };
+
+  return holder.run(20);
+}
