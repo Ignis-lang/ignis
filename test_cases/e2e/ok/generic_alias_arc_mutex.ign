@@ -1,0 +1,29 @@
+// e2e: std
+// A generic alias over a generic nominal type is transparent everywhere a type
+// is written: a return type, a parameter behind a reference, a local
+// annotation, and the receiver of a method call. `share` asks `T: Send & Sync`
+// rather than `T: Send` only because `Mutex<T>` is judged Sync structurally
+// today, which is a separate bug from the alias.
+import Arc, Mutex, MutexGuard from "std::sync";
+
+type Shared<T> = Arc<Mutex<T>>;
+
+record Store {
+  public count: i32;
+}
+
+function share<T: Send & Sync>(value: T): Shared<T> {
+  return Arc::new<Mutex<T>>(Mutex::new<T>(value));
+}
+
+function bump(store: &Shared<Store>): i32 {
+  let mut guard: MutexGuard<Store> = store.get().lock();
+  guard.get().count += 1;
+  return guard.read().count;
+}
+
+function main(): i32 {
+  let store: Shared<Store> = share<Store>(Store { count: 41 });
+  let other: Shared<Store> = store.clone();
+  return bump(&other);
+}
