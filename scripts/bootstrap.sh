@@ -112,19 +112,22 @@ Commands:
            (test_cases/__parse_verdicts__) -> gates/G6.json.
   gate-g6-baselines [compiler]
            Regenerate the parse-verdict baselines from <compiler> (default:
-           stage2's binary; the compiler is run with the selfhost CLI).
-           Review the diff: it is a parser change.
+           stage1's binary, the compiler gate-g6-stage1 checks with; the
+           compiler is run with the selfhost CLI). Review the diff: it is a
+           parser change.
   gate-g6-stage1   G6 run against stage1 instead of stage2 -> gates/G6-STAGE1.json
-                   (ci.yml's PR-only check; the promotion ladder still covers
-                   stage2). Same unscored-row note as gate-g3-stage1 above.
+                   (ci.yml's PR-only check, and the only G6 that runs in CI:
+                   parse verdicts are content, not the promoted binary's
+                   output). Same unscored-row note as gate-g3-stage1 above.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gate-g7  Check stage2's drop schedules against the committed baselines
            (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. The
            selfhost compiler's own sources have no baseline and are compared
            against stage1 instead.
   gate-g7-stage1   G7 run against stage1 instead of stage2 -> gates/G7-STAGE1.json
-                   (ci.yml's PR-only check; the promotion ladder still covers
-                   stage2). Same unscored-row note as gate-g3-stage1 above.
+                   (ci.yml's PR-only check, and the only G7 that runs in CI:
+                   drop schedules are content, not the promoted binary's
+                   output). Same unscored-row note as gate-g3-stage1 above.
   gate-g7-baselines [compiler]
            Regenerate the drop-schedule baselines from <compiler> (default:
            stage2's binary). A deliberate developer step: the new dumps land in
@@ -1201,13 +1204,15 @@ run_gate_g6_stage1() { run_gate_g6_for stage1 G6-STAGE1; }
 
 # Regenerate every parse-verdict baseline from one compiler. Deliberately a
 # manual step: the new verdicts land in the pull request's diff and a reviewer
-# reads them. The default is stage2's binary.
+# reads them. The default is stage1's binary, because `gate-g6-stage1` is the
+# only G6 that runs in CI and a baseline written by a different compiler would
+# fail the check it is supposed to feed.
 run_gate_g6_baselines() {
   local compiler="${1-}"
 
   if [[ -z "$compiler" ]]; then
-    ensure_stage stage2
-    compiler="$(stage_bin stage2)"
+    ensure_stage stage1
+    compiler="$(stage_bin stage1)"
   fi
 
   info "gate-g6-baselines: regenerating the parse-verdict baselines from ${compiler}"

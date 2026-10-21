@@ -804,7 +804,7 @@ test_official_asset_resolution_threshold() {
   echo "test: resolve_official_stage0.sh accepts a streak of 1 and rejects 0"
 
   local streak status github_output kind
-  for streak in 0 1; do
+  for streak in 0 1 3; do
     local root
     root="$(make_sandbox)"
     write_gh_with_streak "$root/bin/gh" "$streak"

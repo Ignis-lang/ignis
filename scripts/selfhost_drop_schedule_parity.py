@@ -29,8 +29,9 @@ than evidence. Those cases are compared against a second compiler given with
 `--reference` instead — in the gate, stage2's dump of `ignis/` against
 stage1's, a self-consistency check on the same sources.
 
-The gate feeds the promotion `candidate` verdict: a differing case is a real
-ownership bug, not just a lead to follow.
+A differing case is a real ownership bug, not just a lead to follow. The gate
+runs against stage1 in pull-request CI and no longer feeds the promotion
+`candidate` verdict, which G1 and G3 decide.
 
 Case discovery is reused verbatim from `selfhost_e2e_parity.py`, which the e2e
 corpus runner still owns even though its own gate was retired, so G7 and it
@@ -584,8 +585,9 @@ def build_report(
     "declaration site and every scheduled drop site with its reason. The dump",
     "is compared byte for byte against what was recorded for that case.",
     "",
-    "**This gate feeds the promotion `candidate` verdict**: a differing case",
-    "is a real ownership bug, not just a lead to follow.",
+    "**A differing case is a real ownership bug**, not just a lead to follow.",
+    "This gate runs against stage1 in pull-request CI; it does not feed the",
+    "promotion `candidate` verdict, which G1 and G3 decide.",
     "",
     f"- compiler under test: `{settings.compiler}`",
     f"- compared against: {against}",

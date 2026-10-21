@@ -191,7 +191,7 @@ full comparison against stage1 (`gate-g6-stage1`), so a parser behavior
 change shows up on the PR itself. To record or refresh them:
 
 ```bash
-scripts/bootstrap.sh gate-g6-baselines               # from stage2
+scripts/bootstrap.sh gate-g6-baselines               # from stage1, the compiler PR CI checks with
 # or, with any selfhost binary:
 python3 scripts/selfhost_syntax_parity.py --compiler <bin> --write-baselines
 ```

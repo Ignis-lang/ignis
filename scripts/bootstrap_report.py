@@ -15,6 +15,7 @@ Two commands, both driven by `scripts/bootstrap.sh`:
 promotion.json, not the exit code: the report has to exist even for a run where
 every gate failed.
 """
+
 import argparse
 import json
 import re

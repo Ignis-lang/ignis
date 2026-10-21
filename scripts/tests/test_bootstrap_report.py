@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+#!/usr/bin/env python3
 """Exercises scripts/bootstrap_report.py's `report` command, and
 scripts/selfhost_drop_schedule_parity.py's gate-summary formatting, in
 isolation.
@@ -223,6 +223,21 @@ class BootstrapReportCandidateTests(unittest.TestCase):
       self.assertNotIn(gate_id, promotion["gates"])
     for gate_id in NON_DECIDING_GATE_IDS:
       self.assertEqual(promotion["gates"][gate_id]["status"], "skipped", gate_id)
+      self.assertIn(f"| **{gate_id}**", report_md)
+
+  def test_a_stray_g2_or_g5_gate_file_cannot_decide_the_verdict(self) -> None:
+    # A leftover result from before the trim (a developer's old build/bootstrap,
+    # or an artifact from a workflow run of the previous wiring) is listed, but
+    # a removed gate must never come back into the verdict.
+    self.all_passing()
+    write_gate(self.gates_dir, "G2", "fail", summary="stale e2e parity result")
+    write_gate(self.gates_dir, "G5", "fail", summary="stale error-corpus result")
+
+    promotion, report_md = run_report(self.bootstrap_root)
+
+    self.assertTrue(promotion["candidate"], promotion)
+    for gate_id in REMOVED_GATE_IDS:
+      self.assertEqual(promotion["gates"][gate_id]["status"], "fail", gate_id)
       self.assertIn(f"| **{gate_id}**", report_md)
 
   def test_missing_g3_result_is_skipped_and_blocks_candidacy(self) -> None:
