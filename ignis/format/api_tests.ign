@@ -1471,3 +1471,79 @@ function apiFormatsADefaultCallingAnotherDefault(): void {
   let second: String = formatOrFail(first.toStr());
   Test::assertEq<str>(second.toStr(), canonical);
 }
+
+/// Formats `source`, checks the result against `canonical` byte for byte, and
+/// formats that result again to check it is a fixed point.
+function assertFormatsTo(source: str, canonical: str): void {
+  let first: String = formatOrFail(source);
+  Test::assertEq<str>(first.toStr(), canonical);
+
+  let second: String = formatOrFail(first.toStr());
+  Test::assertEq<str>(second.toStr(), canonical);
+}
+
+@test
+function apiHugsAShortTrailingClosureAndAlignsItsClosingWithTheStatement(): void {
+  let canonical: str = "function main(): void {\n  run((): i32 -> {\n    return 1;\n  });\n  return;\n}\n";
+
+  assertFormatsTo("function main(): void {\n  run((): i32 -> {\n        return 1;\n      });\n  return;\n}\n", canonical);
+  assertFormatsTo("function main(): void { run((): i32 -> { return 1; }); return; }\n", canonical);
+}
+
+@test
+function apiBreaksTheArgumentsOfATrailingClosureCallWhoseHeadDoesNotFit(): void {
+  assertFormatsTo(
+    "function main(): void {\n  registerHandler(\"a-fairly-long-route-name/with/segments/that/keep/going\", \"another-long-label\", (): void -> {\n    work();\n  });\n}\n",
+    "function main(): void {\n  registerHandler(\n    \"a-fairly-long-route-name/with/segments/that/keep/going\",\n    \"another-long-label\",\n    (): void -> {\n      work();\n    },\n  );\n}\n"
+  );
+}
+
+@test
+function apiBreaksTheParametersOfATrailingClosureThatDoesNotFit(): void {
+  assertFormatsTo(
+    "function main(): void {\n    router.post(\"/tasks\", (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {\n        return createTask((@move createStore).get(), request, response);\n      });\n}\n",
+    "function main(): void {\n  router.post(\n    \"/tasks\",\n    (\n      request: &mut Web::Request,\n      response: &mut Web::Response,\n      next: Web::Next,\n    ): Result<void, Web::Error> -> {\n      return createTask((@move createStore).get(), request, response);\n    },\n  );\n}\n"
+  );
+}
+
+@test
+function apiFormatsATrailingClosureCallNestedInsideAClosure(): void {
+  assertFormatsTo(
+    "function main(): void {\n  run((): void -> {\n    spawn<i32>((): i32 -> {\n          return 1;\n        });\n  });\n}\n",
+    "function main(): void {\n  run((): void -> {\n    spawn<i32>((): i32 -> {\n      return 1;\n    });\n  });\n}\n"
+  );
+}
+
+@test
+function apiHugsACallWhoseLastArgumentIsATrailingClosureCall(): void {
+  assertFormatsTo(
+    "function main(): void {\n  workers.push(Thread::spawn<i32>((): i32 -> {\n        return 1;\n      }));\n}\n",
+    "function main(): void {\n  workers.push(Thread::spawn<i32>((): i32 -> {\n    return 1;\n  }));\n}\n"
+  );
+}
+
+@test
+function apiFormatsATrailingClosureCallAsALetInitializer(): void {
+  assertFormatsTo(
+    "function main(): void {\n  let handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> {\n      return 1;\n    });\n}\n",
+    "function main(): void {\n  let handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> {\n    return 1;\n  });\n}\n"
+  );
+  assertFormatsTo(
+    "function main(): void {\n  let handle: JoinHandle<Result<Vector<u8>, Error>> = Thread::spawn<Result<Vector<u8>, Error>>((): Result<Vector<u8>, Error> -> {\n    return work();\n  });\n}\n",
+    "function main(): void {\n  let handle: JoinHandle<Result<Vector<u8>, Error>> = Thread::spawn<Result<Vector<u8>, Error>>(\n    (): Result<Vector<u8>, Error> -> {\n      return work();\n    },\n  );\n}\n"
+  );
+}
+
+@test
+function apiKeepsAMultilineCallWithoutATrailingClosureAsWritten(): void {
+  let canonical: str = "function main(): void {\n  compute(\n      first,\n    second);\n}\n";
+
+  assertFormatsTo(canonical, canonical);
+}
+
+@test
+function apiKeepsATrailingClosureCallInsideAConditionAsWritten(): void {
+  let canonical: str = "function main(): void {\n  if (let Option::SOME(dot) = name.findLastByte((byte: u8): boolean -> {\n    return byte == 46;\n  })) {\n    return;\n  }\n}\n";
+
+  assertFormatsTo(canonical, canonical);
+}

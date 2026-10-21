@@ -43,6 +43,12 @@ refer to it.
 - Import and re-export item lists wrap when the flat form exceeds `line_width`; multiline canonical output adds the final comma before `from`.
 - Range expressions are written without spaces around `..` and `..=` (`0..n`, `a + 1..b * 2`); their bounds keep the spacing of the operators inside them.
 - Single pipe expressions may stay inline when they fit `line_width`; pipe chains with 2+ `|>` always format multiline.
+- A call whose last argument is a closure with a `{ ... }` body (a trailing closure), or a call whose last argument is itself such a call, is laid out from the syntax tree whatever lines the source used, when the call is a whole expression statement or the whole value of a `let`, `const`, `static` or `return`. Anywhere else, such as inside an `if let` condition, it keeps the general call layout:
+  - The closure hugs the call when the line that opens its body, from the start of the call to the closing `-> {`, fits `line_width`. The body is indented one level deeper than the statement and the closing `})` aligns with the start of the statement.
+  - Otherwise every argument goes on its own line one level deeper than the statement, each followed by a comma, and the closing `)` aligns with the start of the statement. The closure's body is then one level deeper than its own line and its `}` closes on that line's indentation.
+  - When the closure's header still does not fit on its own line, its parameters break one per line, one level deeper again, with a trailing comma, and `): ReturnType -> {` closes the list.
+  - A nested trailing-closure call as last argument follows the same rule: `workers.push(Thread::spawn<T>((): T -> {` hugs both calls when it fits, and the outer call breaks first when it does not.
+  - A comment between the call's start and the closure body, or after the body inside the call, or another argument the source wrote across several lines, keeps the whole call as written, like any other multiline call.
 - There is still no shipped general-purpose wrapping contract for every long expression shape. When the formatter cannot prove a rewrite is safe, it fails rather than guessing.
 
 Import grouping example:
@@ -65,6 +71,29 @@ const GRID: u8[6] = [
   1, 2, 3,
   4, 5, 6,
 ];
+```
+
+Trailing closure examples. The head fits, so the closure hugs the call:
+
+```ignis
+let handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> {
+  return 1;
+});
+```
+
+The head does not fit, so the arguments break, and so do the closure's parameters:
+
+```ignis
+router.post(
+  "/tasks",
+  (
+    request: &mut Web::Request,
+    response: &mut Web::Response,
+    next: Web::Next,
+  ): Result<void, Web::Error> -> {
+    return createTask(request, response);
+  },
+);
 ```
 
 Long import example with `line_width = 80`:
@@ -142,7 +171,7 @@ Example:
 - Type: integer.
 - Accepted range: `40..=160`.
 - Default: `100`.
-- Controls layout-aware wrapping for supported constructs, including callable signatures, record initializers, array literal initializers, import/re-export item lists, and single pipe expressions.
+- Controls layout-aware wrapping for supported constructs, including callable signatures, record initializers, array literal initializers, import/re-export item lists, single pipe expressions, and calls with a trailing closure.
 
 ### `use_tabs`
 
