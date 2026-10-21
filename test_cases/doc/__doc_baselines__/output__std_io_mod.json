@@ -338,7 +338,11 @@
     },
     {
       "name": "std::web",
-      "doc": "  \n# Web  \n  \nA minimally opinionated web framework in the spirit of Express, built on  \n`std::http`. Middleware and routes take the request, the response and the  \nnext function, and return `Result<void, Web::Error>`; an error that  \nreaches the router becomes a response with its status.  \n  \n## Exports  \n  \n| Export              | Description                                                         |  \n|---------------------|---------------------------------------------------------------------|  \n| `Web::Router`       | `new()`, `use`, `get`, `post`, `put`, `patch`, `delete`, `any`, `route`, `dispatch`; implements `Http::Handler` |  \n| `Web::App`          | Trait: `build(&self): Web::Router`, called once per server thread   |  \n| `Web::serve`        | Binds an address and serves an app on `ServerConfig.threads` threads |  \n| `Web::serveListener` | Serves an app on a listener already bound                          |  \n| `Web::Middleware`   | `(&mut Request, &mut Response, Next) -> Result<void, Error>`        |  \n| `Web::Next`         | `(&mut Request, &mut Response) -> Result<void, Error>`              |  \n| `Web::Request`      | `http`; `create(&http)`, `method()`, `target()`, `path()`, `header(name)`, `body()`, `bodyText()`, `param(name)`, `query(name)` |  \n| `Web::Response`     | `status`, `headers`, `body`; `new()`, `setStatus`, `header`, `setHeader`, `addHeader`, `write`, `writeStr`, `text`, `json`, `finish` |  \n| `Web::Error`        | `status`, `message`; `new(message)` (500), `withStatus(status, message)` |  \n| `Web::Param`        | One route parameter: `name` and decoded `value`                     |  \n  \n## Middleware and routes  \n  \nBoth have the `Web::Middleware` shape. A middleware added with `use`  \nruns for every request, in the order it was added, before the routes.  \nCalling `next` runs the rest of the chain and returns once it finished,  \nso code after `next` runs on the way back out (the onion model), and an  \nerror from `next` propagates with `!` like any other. `next` takes the  \nrequest and the response back as arguments: a closure holding them would  \nkeep them borrowed for as long as it lives.  \n  \nA middleware that does not call `next` ends the chain; returning an  \nerror does too. A route that calls `next` passes the request to the next  \nroute that matches it; when there is none, the answer is 404.  \n  \n## Routing  \n  \nA route matches by method and path. `get` also answers `HEAD` (the  \nserver sends the head without the body); `any` answers every method;  \n`route` takes any method name as written on the request line.  \n  \nThe path is compared segment by segment, before any `?` and without  \ndecoding. A segment `:name` matches any non-empty segment and makes its  \npercent-decoded value available as `request.param(\"name\")`; any other  \nsegment matches only itself. Every segment counts, so a trailing slash  \nis significant: `/users/:id` matches `/users/7` but not `/users/7/`, and  \n`/users/` does not match `/users`. A parameter that is not valid  \npercent-encoded UTF-8 is answered with 400.  \n  \nWhen no route matches, the answer is 404. When some route matches the  \npath but none its method, the answer is 405 with an `Allow` header  \nlisting the methods that would match. Both run through the middleware  \nas errors, so a logger sees them.  \n  \n`request.query(\"name\")` decodes the first query parameter with that  \nname: `+` is a space, `%XX` an escaped byte, and a parameter written  \nwithout `=` has an empty value. A value that is not valid  \npercent-encoded UTF-8 is `NONE`.  \n  \n## Errors  \n  \n`Web::Error` carries a status (500 by default) and a message. The router  \nanswers an error with that status, `Content-Type: text/plain;  \ncharset=utf-8` and the message as the body, keeping header fields that  \nwere already set. Client input never makes the router panic.  \n  \n## Threads  \n  \nFunction values are neither `Send` nor `Sync`, so a router cannot be  \nshared between threads. An application is a record implementing  \n`Web::App`; `Web::serve` shares it among `ServerConfig.threads` threads,  \neach of which calls `build` once and serves its connections with its own  \nrouter through `Http::acceptConnections`. State shared by every thread  \nlives in the app record and has to be `Send` and `Sync`, behind an `Arc`,  \na `Mutex` or an atomic.  \n  \nA router is also an `Http::Handler`, so `Http::serveConnection` serves  \none connection with it, which is how a test drives it.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport Io from \"std::io\";  \nimport IpAddress, SocketAddress from \"std::net\";  \nimport String from \"std::string\";  \nimport Web from \"std::web\";  \n  \nfunction logger(  \n  request: &mut Web::Request,  \n  response: &mut Web::Response,  \n  next: Web::Next  \n): Result<void, Web::Error> {  \n  let result: Result<void, Web::Error> = next(request, response);  \n  Io::println(`${request.method().toString()} ${request.path()} ${response.status}`);  \n  return result;  \n}  \n  \nfunction showUser(  \n  request: &mut Web::Request,  \n  response: &mut Web::Response,  \n  next: Web::Next  \n): Result<void, Web::Error> {  \n  let Option::SOME(id) = request.param(\"id\") else {  \n    return Result::ERROR(Web::Error::withStatus(400, \"missing id\"));  \n  };  \n  \n  let text: String = String::create(id);  \n  \n  if (text.equals(\"0\")) {  \n    return Result::ERROR(Web::Error::withStatus(404, \"no such user\"));  \n  }  \n  \n  response.text(`user ${id}`);  \n  return Result::OK(());  \n}  \n  \n@implements(Web::App)  \nrecord Users {  \n  public greeting: str;  \n  \n  build(&self): Web::Router {  \n    let greeting: str = self.greeting;  \n    let mut router: Web::Router = Web::Router::new();  \n    router.use(logger);  \n    router.get(  \n      \"/\",  \n      (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {  \n        response.text(greeting);  \n        return Result::OK(());  \n      },  \n    );  \n    router.get(\"/users/:id\", showUser);  \n    return router;  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);  \n  let app: Users = Users { greeting: \"hello\" };  \n  \n  return Web::serve<Users>(&address, Http::ServerConfig::new(), app).isOk() ? 0 : 1;  \n}  \n```"
+      "doc": "  \n# Web  \n  \nA minimally opinionated web framework in the spirit of Express, built on  \n`std::http`. Middleware and routes take the request, the response and the  \nnext function, and return `Result<void, Web::Error>`; an error that  \nreaches the router becomes a response with its status.  \n  \n## Exports  \n  \n| Export              | Description                                                         |  \n|---------------------|---------------------------------------------------------------------|  \n| `Web::Router`       | `new()`, `use`, `get`, `post`, `put`, `patch`, `delete`, `any`, `route`, `dispatch`; implements `Http::Handler` |  \n| `Web::App`          | Trait: `build(&self): Web::Router`, called once per server thread   |  \n| `Web::listen`       | Parses `\"127.0.0.1:8080\"` and serves an app with the default configuration |  \n| `Web::listenOn`     | Serves an app from a host and a port                                |  \n| `Web::listenWith`   | Serves an app from an address and a `Web::Config`                   |  \n| `Web::parseAddress` | Parses `\"<host>:<port>\"`; `\":8080\"` and `\"*:8080\"` are every interface |  \n| `Web::Config`       | `threads`; `new()`, `toServerConfig()`                              |  \n| `Web::ListenError`  | A failed start; `message()` renders what was expected or the bind failure |  \n| `Web::serve`        | The layer below: binds a `SocketAddress` and serves an app on `ServerConfig.threads` threads |  \n| `Web::serveListener` | The layer below: serves an app on a listener already bound         |  \n| `Web::Middleware`   | `(&mut Request, &mut Response, Next) -> Result<void, Error>`        |  \n| `Web::Next`         | `(&mut Request, &mut Response) -> Result<void, Error>`              |  \n| `Web::Request`      | `http`; `create(&http)`, `method()`, `target()`, `path()`, `header(name)`, `body()`, `bodyText()`, `param(name)`, `query(name)` |  \n| `Web::Response`     | `status`, `headers`, `body`; `new()`, `setStatus`, `header`, `setHeader`, `addHeader`, `write`, `writeStr`, `text`, `json`, `finish` |  \n| `Web::Error`        | `status`, `message`; `new(message)` (500), `withStatus(status, message)` |  \n| `Web::Param`        | One route parameter: `name` and decoded `value`                     |  \n  \n## Starting a server  \n  \n`Web::listen` parses an address string, binds it and serves the app:  \n`\"127.0.0.1:8080\"` binds that interface, and `\":8080\"` or `\"*:8080\"`  \nbinds every interface, `0.0.0.0`. `Web::listenOn` takes a host and a  \nport, `Web::listenWith` a `Web::Config` (the thread count), and  \n`Web::parseAddress` parses without serving. A malformed address is a  \n`Web::ListenError` whose message names what was expected and what was  \ngiven; names are not resolved. `Web::serve` and `Web::serveListener`  \nare the layer below: they take the `std::net::SocketAddress` and the  \n`std::http::ServerConfig` directly.  \n  \n## Middleware and routes  \n  \nBoth have the `Web::Middleware` shape. A middleware added with `use`  \nruns for every request, in the order it was added, before the routes.  \nCalling `next` runs the rest of the chain and returns once it finished,  \nso code after `next` runs on the way back out (the onion model), and an  \nerror from `next` propagates with `!` like any other. `next` takes the  \nrequest and the response back as arguments: a closure holding them would  \nkeep them borrowed for as long as it lives.  \n  \nA middleware that does not call `next` ends the chain; returning an  \nerror does too. A route that calls `next` passes the request to the next  \nroute that matches it; when there is none, the answer is 404.  \n  \n## Routing  \n  \nA route matches by method and path. `get` also answers `HEAD` (the  \nserver sends the head without the body); `any` answers every method;  \n`route` takes any method name as written on the request line.  \n  \nThe path is compared segment by segment, before any `?` and without  \ndecoding. A segment `:name` matches any non-empty segment and makes its  \npercent-decoded value available as `request.param(\"name\")`; any other  \nsegment matches only itself. Every segment counts, so a trailing slash  \nis significant: `/users/:id` matches `/users/7` but not `/users/7/`, and  \n`/users/` does not match `/users`. A parameter that is not valid  \npercent-encoded UTF-8 is answered with 400.  \n  \nWhen no route matches, the answer is 404. When some route matches the  \npath but none its method, the answer is 405 with an `Allow` header  \nlisting the methods that would match. Both run through the middleware  \nas errors, so a logger sees them.  \n  \n`request.query(\"name\")` decodes the first query parameter with that  \nname: `+` is a space, `%XX` an escaped byte, and a parameter written  \nwithout `=` has an empty value. A value that is not valid  \npercent-encoded UTF-8 is `NONE`.  \n  \n## Errors  \n  \n`Web::Error` carries a status (500 by default) and a message. The router  \nanswers an error with that status, `Content-Type: text/plain;  \ncharset=utf-8` and the message as the body, keeping header fields that  \nwere already set. Client input never makes the router panic.  \n  \n## Threads  \n  \nFunction values are neither `Send` nor `Sync`, so a router cannot be  \nshared between threads. An application is a record implementing  \n`Web::App`; `Web::serve` shares it among `ServerConfig.threads` threads,  \neach of which calls `build` once and serves its connections with its own  \nrouter through `Http::acceptConnections`. State shared by every thread  \nlives in the app record and has to be `Send` and `Sync`, behind an `Arc`,  \na `Mutex` or an atomic.  \n  \nA router is also an `Http::Handler`, so `Http::serveConnection` serves  \none connection with it, which is how a test drives it.  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \nimport String from \"std::string\";  \nimport Web from \"std::web\";  \n  \nfunction logger(  \n  request: &mut Web::Request,  \n  response: &mut Web::Response,  \n  next: Web::Next  \n): Result<void, Web::Error> {  \n  let result: Result<void, Web::Error> = next(request, response);  \n  Io::println(`${request.method().toString()} ${request.path()} ${response.status}`);  \n  return result;  \n}  \n  \nfunction showUser(  \n  request: &mut Web::Request,  \n  response: &mut Web::Response,  \n  next: Web::Next  \n): Result<void, Web::Error> {  \n  let Option::SOME(id) = request.param(\"id\") else {  \n    return Result::ERROR(Web::Error::withStatus(400, \"missing id\"));  \n  };  \n  \n  let text: String = String::create(id);  \n  \n  if (text.equals(\"0\")) {  \n    return Result::ERROR(Web::Error::withStatus(404, \"no such user\"));  \n  }  \n  \n  response.text(`user ${id}`);  \n  return Result::OK(());  \n}  \n  \n@implements(Web::App)  \nrecord Users {  \n  public greeting: str;  \n  \n  build(&self): Web::Router {  \n    let greeting: str = self.greeting;  \n    let mut router: Web::Router = Web::Router::new();  \n    router.use(logger);  \n    router.get(  \n      \"/\",  \n      (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {  \n        response.text(greeting);  \n        return Result::OK(());  \n      },  \n    );  \n    router.get(\"/users/:id\", showUser);  \n    return router;  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let app: Users = Users { greeting: \"hello\" };  \n  \n  return Web::listen<Users>(\"127.0.0.1:8080\", app).isOk() ? 0 : 1;  \n}  \n```"
+    },
+    {
+      "name": "std::web::listen",
+      "doc": "Starting a server from a string address: `Web::listen` parses  \n`\"127.0.0.1:8080\"`, binds and serves, so an application's `main` needs  \nno other import. `Web::serve` and `Web::serveListener` are the layer  \nbelow, for a caller that already holds a `SocketAddress` and an  \n`Http::ServerConfig`."
     },
     {
       "name": "std::web::request",
@@ -21051,6 +21055,185 @@
           "doc": "Returns a non-owning slice view over initialized elements.  \n  \nThe returned `T[]` borrows the vector storage. It does not own, copy, or  \nextend the lifetime of the elements. Do not mutate the vector in a way  \nthat may reallocate while the slice is live."
         }
       ]
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::Web",
+      "name": "Web",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Web"
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::Web::Config",
+      "name": "Config",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Config",
+      "doc": "How a `listen` server runs: `std::web`'s own knobs, so an application  \nnever names `Http::ServerConfig`. The full configuration is the layer  \nbelow, `Web::serve`.",
+      "members": [
+        {
+          "name": "threads",
+          "kind": "field",
+          "signature": "threads: u64",
+          "doc": "Threads accepting and serving connections (0 counts as 1)."
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Config",
+          "doc": "The default configuration: 8 threads, the server's default."
+        },
+        {
+          "name": "toServerConfig",
+          "kind": "method",
+          "signature": "toServerConfig(&self): ServerConfig",
+          "doc": "The `Http::ServerConfig` this configuration describes: `threads`,  \nand the server's default for everything else. `listenWith` calls  \nit."
+        }
+      ]
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::Web::ListenError",
+      "name": "ListenError",
+      "kind": "enum",
+      "visibility": "private",
+      "signature": "enum ListenError",
+      "doc": "Why a server did not start. An enum because a failure is one of two  \nthings, never both: the address text did not parse, or the listener  \nfailed, and the `Io::IoError` stays whole instead of being flattened  \ninto text.",
+      "members": [
+        {
+          "name": "INVALID_ADDRESS",
+          "kind": "variant",
+          "signature": "INVALID_ADDRESS(String)"
+        },
+        {
+          "name": "IO",
+          "kind": "variant",
+          "signature": "IO(IoError)"
+        },
+        {
+          "name": "message",
+          "kind": "method",
+          "signature": "message(&self): String",
+          "doc": "The readable message: what was expected and what was given for a  \nbad address, the system's message for a failed bind."
+        }
+      ]
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::Web::listen",
+      "name": "listen",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function listen<A>(address: str, app: A): Result<void, ListenError>",
+      "doc": "Parses `address` and serves `app` with the default configuration, as  \n`listenWith` does."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::Web::listenOn",
+      "name": "listenOn",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function listenOn<A>(host: str, port: u16, app: A): Result<void, ListenError>",
+      "doc": "Serves `app` on `host`:`port` with the default configuration. The  \nhost is four dotted octets, or empty or `*` for every interface; no  \nname is resolved."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::Web::listenWith",
+      "name": "listenWith",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function listenWith<A>(address: str, config: Config, app: A): Result<void, ListenError>",
+      "doc": "Parses `address` and serves `app` on `config.threads` threads."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::Web::parseAddress",
+      "name": "parseAddress",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseAddress(text: str): Result<SocketAddress, ListenError>",
+      "doc": "Parses `\"<host>:<port>\"`. The host is four dotted octets, `127.0.0.1`  \nstyle, or empty or `*` for every interface, `0.0.0.0`; the port is a  \ndecimal 0-65535. `\"127.0.0.1:8080\"`, `\":8080\"` and `\"*:8080\"` are the  \nshapes to write; names are not resolved. A malformed address is an  \nerror whose message names what was expected and what was given."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::byteOf",
+      "name": "byteOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function byteOf(text: &String, index: u64): u8"
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::hostExpected",
+      "name": "hostExpected",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function hostExpected(): str",
+      "doc": "What a host may look like, as the error states it."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::indexOfColon",
+      "name": "indexOfColon",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function indexOfColon(text: &String, start: u64): u64",
+      "doc": "Index of the first `:` at or after `start` in `text`, or  \n`text.length()`."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::invalidAddress",
+      "name": "invalidAddress",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function invalidAddress(text: str, expected: str): ListenError",
+      "doc": "The error for an address `text` that does not parse: it names what was  \nexpected and what was given."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::isDigit",
+      "name": "isDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isDigit(byte: u8): boolean"
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::listenAt",
+      "name": "listenAt",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function listenAt<A>(address: SocketAddress, config: Config, app: A): Result<void, ListenError>",
+      "doc": "Binds `address` and serves `app` on `config.threads` threads. Maps both  \nthe bind failure and a serving error into a `Web::ListenError`, so no  \n`std::net` or `std::http` type reaches the caller."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::parseHost",
+      "name": "parseHost",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseHost(text: &String, start: u64, end: u64, given: str): Result<IpAddress, ListenError>",
+      "doc": "The IP address of `text[start..end]`: `0.0.0.0` when the host is empty  \nor `*`, otherwise four dotted octets."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::parseOctets",
+      "name": "parseOctets",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseOctets(text: &String, start: u64, end: u64, given: str): Result<u32, ListenError>",
+      "doc": "Parses `text[start..end]` as four dotted octets, as a 32-bit address  \nwith the first octet in the high byte. An octet is one to three digits  \nwith no leading zero and a value of at most 255."
+    },
+    {
+      "module": "std::web::listen",
+      "path": "std::web::listen::parsePort",
+      "name": "parsePort",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parsePort(text: &String, start: u64, end: u64, given: str): Result<u16, ListenError>",
+      "doc": "Parses `text[start..end]` as a decimal port 0-65535, with nothing left  \nover."
     },
     {
       "module": "std::web::request",

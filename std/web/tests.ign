@@ -584,3 +584,169 @@ function serveListenerRunsTheApp(): void {
   let text: String = webTestBytesText(&received);
   Test::assert(text.endsWith("\r\n\r\nhey bo"));
 }
+
+/// The message of the error `Web::parseAddress` reports for `text`, or
+/// `"<accepted>"` when it accepted the address.
+function webTestAddressError(text: str): String {
+  let result: Result<SocketAddress, Web::ListenError> = Web::parseAddress(text);
+  let Result::ERROR(error) = result else {
+    return String::create("<accepted>");
+  };
+
+  return error.message();
+}
+
+@test
+function parseAddressAcceptsTheDocumentedForms(): void {
+  let loopback: SocketAddress = Web::parseAddress("127.0.0.1:8080").unwrap();
+  Test::assertEq<str>(loopback.toString().toStr(), "127.0.0.1:8080");
+
+  // An empty host and `*` mean every interface, `0.0.0.0`.
+  Test::assertEq<str>(Web::parseAddress(":8080").unwrap().toString().toStr(), "0.0.0.0:8080");
+  Test::assertEq<str>(Web::parseAddress("*:8080").unwrap().toString().toStr(), "0.0.0.0:8080");
+  Test::assertEq<str>(Web::parseAddress("0.0.0.0:8080").unwrap().toString().toStr(), "0.0.0.0:8080");
+
+  Test::assertEq<str>(Web::parseAddress(":0").unwrap().toString().toStr(), "0.0.0.0:0");
+  Test::assertEq<str>(
+    Web::parseAddress("255.255.255.255:65535").unwrap().toString().toStr(),
+    "255.255.255.255:65535",
+  );
+}
+
+@test
+function parseAddressRejectsAMissingColon(): void {
+  Test::assertEq<str>(
+    webTestAddressError("127.0.0.1").toStr(),
+    "invalid address \"127.0.0.1\": expected \"<host>:<port>\" like \"127.0.0.1:8080\"",
+  );
+  Test::assertEq<str>(
+    webTestAddressError("").toStr(),
+    "invalid address \"\": expected \"<host>:<port>\" like \"127.0.0.1:8080\"",
+  );
+}
+
+@test
+function parseAddressRejectsTooFewOctets(): void {
+  Test::assertEq<str>(
+    webTestAddressError("1.2.3:8080").toStr(),
+    "invalid address \"1.2.3:8080\": expected four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces",
+  );
+}
+
+@test
+function parseAddressRejectsTooManyOctets(): void {
+  Test::assertEq<str>(
+    webTestAddressError("1.2.3.4.5:8080").toStr(),
+    "invalid address \"1.2.3.4.5:8080\": expected four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces",
+  );
+}
+
+@test
+function parseAddressRejectsAHostName(): void {
+  // Only numeric addresses: no name is resolved.
+  Test::assertEq<str>(
+    webTestAddressError("localhost:8080").toStr(),
+    "invalid address \"localhost:8080\": expected four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces",
+  );
+}
+
+@test
+function parseAddressRejectsANonDigitHost(): void {
+  Test::assertEq<str>(
+    webTestAddressError("+1.2.3.4:8080").toStr(),
+    "invalid address \"+1.2.3.4:8080\": expected four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces",
+  );
+  Test::assertEq<str>(
+    webTestAddressError(" 127.0.0.1:8080").toStr(),
+    "invalid address \" 127.0.0.1:8080\": expected four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces",
+  );
+}
+
+@test
+function parseAddressRejectsAnEmptyOctet(): void {
+  Test::assertEq<str>(
+    webTestAddressError("1..2.3:8080").toStr(),
+    "invalid address \"1..2.3:8080\": expected four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces",
+  );
+}
+
+@test
+function parseAddressRejectsAnOutOfRangeOctet(): void {
+  Test::assertEq<str>(
+    webTestAddressError("256.0.0.1:8080").toStr(),
+    "invalid address \"256.0.0.1:8080\": expected an octet 0-255",
+  );
+}
+
+@test
+function parseAddressRejectsALeadingZeroOctet(): void {
+  Test::assertEq<str>(
+    webTestAddressError("01.2.3.4:8080").toStr(),
+    "invalid address \"01.2.3.4:8080\": expected an octet 0-255 without leading zeros",
+  );
+}
+
+@test
+function parseAddressRejectsAPortWithoutDigits(): void {
+  Test::assertEq<str>(
+    webTestAddressError("127.0.0.1:").toStr(),
+    "invalid address \"127.0.0.1:\": expected a port 0-65535",
+  );
+}
+
+@test
+function parseAddressRejectsAnOutOfRangePort(): void {
+  Test::assertEq<str>(
+    webTestAddressError("127.0.0.1:65536").toStr(),
+    "invalid address \"127.0.0.1:65536\": expected a port 0-65535",
+  );
+  Test::assertEq<str>(
+    webTestAddressError("127.0.0.1:999999").toStr(),
+    "invalid address \"127.0.0.1:999999\": expected a port 0-65535",
+  );
+}
+
+@test
+function parseAddressRejectsTrailingRubbish(): void {
+  Test::assertEq<str>(
+    webTestAddressError("127.0.0.1:8080x").toStr(),
+    "invalid address \"127.0.0.1:8080x\": expected the address to end after the port",
+  );
+  Test::assertEq<str>(
+    webTestAddressError("127.0.0.1:80x").toStr(),
+    "invalid address \"127.0.0.1:80x\": expected the address to end after the port",
+  );
+}
+
+@test
+function configMapsOntoTheServerConfigBelow(): void {
+  let config: Web::Config = Web::Config::new();
+  Test::assertEq<u64>(config.threads, 8);
+
+  let mut tuned: Web::Config = Web::Config::new();
+  tuned.threads = 3;
+  let server: Http::ServerConfig = tuned.toServerConfig();
+  Test::assertEq<u64>(server.threads, 3);
+}
+
+@test
+function listenRejectsAnInvalidAddressWithoutBinding(): void {
+  let app: WebTestApp = WebTestApp { greeting: "hi" };
+  let result: Result<void, Web::ListenError> = Web::listen<WebTestApp>("localhost:8080", app);
+  let Result::ERROR(error) = result else {
+    Test::assert(false);
+    return;
+  };
+
+  Test::assertEq<str>(
+    error.message().toStr(),
+    "invalid address \"localhost:8080\": expected four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces",
+  );
+}
+
+@test
+function listenOnRejectsABadHostWithoutBinding(): void {
+  let app: WebTestApp = WebTestApp { greeting: "hi" };
+  let result: Result<void, Web::ListenError> = Web::listenOn<WebTestApp>("local host", 8080, app);
+  Test::assert(result.isError());
+}
