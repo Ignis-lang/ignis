@@ -44,6 +44,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::thread` | `Thread`, `JoinHandle<T>` | Spawn, join and detach POSIX threads |
 | `std::net` | `IpAddress`, `Ipv4Address`, `Ipv6Address`, `SocketAddress`, `TcpListener`, `TcpStream`, `Shutdown` | Numeric IP addresses and blocking or non-blocking TCP (x86_64 Linux only) |
 | `std::http` | `Http` | HTTP/1.1 server side: sans-IO request parser and response serializer, blocking `Http::Server` driver |
+| `std::web` | `Web` | Express-style framework on `std::http`: router, middleware with `next`, route parameters, query string, errors with a status |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
@@ -306,6 +307,26 @@ function main(): i32 {
 - `Http::Request` — `head`, `body`; `target()`, `header(name)`, `bodyText()` (`NONE` when
   not UTF-8). `Http::Response::new()` — 200, no fields, empty body; `setStatus`,
   `setHeader`, `addHeader`, `write(&Vector<u8>)`, `writeStr(str)`.
+- `Http::acceptConnections<H: Http::Handler>(&TcpListener, &H, &Http::ServerConfig)` — the
+  accept loop each `run` thread runs, for callers that want one handler per thread.
+
+### `std::web`
+
+- `Web::Router::new()` — `use(middleware)`, `get`/`post`/`put`/`patch`/`delete`/`any(path,
+  handler)`, `route(method, path, handler)`; implements `Http::Handler`. Middleware and routes
+  are `Web::Middleware`: `(&mut Web::Request, &mut Web::Response, Web::Next) ->
+  Result<void, Web::Error>`, where `Web::Next` takes the request and response back.
+- Paths match segment by segment; `:name` captures a percent-decoded segment
+  (`request.param("name")`); a trailing slash is significant. `request.query(name)` decodes
+  the query string. No match is 404; a path matched with another method is 405 with `Allow`;
+  `get` also answers `HEAD`.
+- `Web::Error { status, message }` — `new(message)` is 500, `withStatus(status, message)`.
+  An error reaching the router becomes its status with the message as a plain-text body.
+- `Web::Response` — `status`, `headers`, `body`; `setStatus`, `setHeader`, `addHeader`,
+  `write`, `writeStr`, `text(str)`, `json(&JsonValue)`.
+- `Web::App` — `build(&self): Web::Router`, run once per server thread by
+  `Web::serve<A: Web::App & Send & Sync>(&SocketAddress, Http::ServerConfig, app)` or
+  `Web::serveListener(TcpListener, ...)`: routers hold function values, which are not `Send`.
 
 ### `std::thread`
 
@@ -397,6 +418,7 @@ and only drop to `Memory` / `Pointer` / `LibC` when necessary.
 | Shared ownership | `std::rc` |
 | Atomic counters and flags | `std::sync` |
 | Threads | `std::thread` |
+| HTTP server, web framework | `std::http` / `std::web` |
 | Filesystem I/O | `std::fs` |
 | Path manipulation | `std::path` |
 | Environment variables | `std::env` |
