@@ -1,0 +1,26 @@
+// e2e: err
+// Only a type parameter bounded by Send or Sync is judged by its bound. `U`
+// has no such bound, so `Pair<i32, Handle>` is Sync only if `Handle` is, and
+// `Handle` is Send but not Sync.
+@allow(thread_safety)
+@implements(Send)
+record Handle {
+  public raw: *mut i32;
+}
+
+@allow(thread_safety)
+@implements(Send, Sync)
+record Pair<T: Send, U> {
+  public first: T;
+  public second: U;
+}
+
+function needsSync<T: Sync>(value: &T): i32 {
+  return 1;
+}
+
+function main(): i32 {
+  let pair: Pair<i32, Handle> = Pair { first: 1, second: Handle { raw: 0 as *mut i32 } };
+
+  return needsSync<Pair<i32, Handle>>(&pair);
+}
