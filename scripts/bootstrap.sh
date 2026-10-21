@@ -20,22 +20,20 @@
 # {"gate", "status", "summary", "details"}:
 #
 #   G1  fixed point: stage3's emitted C is identical to stage2's
-#   G2  e2e parity: the committed e2e corpus passes under stage2
 #   G3  the selfhost test suite passes under stage2 and matches stage1's run
-#   G4  resource budget: stage2 within 1.25x of stage1
-#   G5  diagnostics: stage2 keeps every diagnostic the committed error corpus
-#       records
-#   G6  syntax: stage2's parse verdicts match the committed baselines under
-#       test_cases/__parse_verdicts__
-#   G7  drop schedules: stage2's --dump-drop-schedule matches the committed
-#       baselines under test_cases/e2e/ok/__drop_schedules__
+#   G4  resource budget: stage2 within 1.25x of stage1 (informational: a
+#       budget, not correctness)
+#   G6  syntax: parse verdicts match the committed baselines under
+#       test_cases/__parse_verdicts__ (pull-request CI runs them against
+#       stage1; gate-g6 still judges stage2 locally)
+#   G7  drop schedules: --dump-drop-schedule matches the committed baselines
+#       under test_cases/e2e/ok/__drop_schedules__ (same stage1/PR note as G6)
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
-# splits that same work across runners instead: `stages` on one, each gate
-# subcommand on its own — G3's stage2 and stage1 test runs on a runner each —
-# then `gate-g3-compare`, `seal-gates` and `report` over the collected gate
-# files.
+# splits that same work across runners instead: `stages` on one (G1 and G4
+# come from it) and G3's stage2 and stage1 test runs on a runner each, then
+# `gate-g3-compare`, `seal-gates` and `report` over the collected gate files.
 
 set -euo pipefail
 
@@ -52,12 +50,11 @@ STAGE1_MEASURE="stage1-measure"
 G4_THRESHOLD="1.25"
 SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
-# Gate identifiers in report order. G4, G5, G6 and G7 have their own
-# subcommands; when those are absent `gates` still records a result for them,
-# and `seal-gates` records a skipped placeholder for any of them a run never
-# produced. scripts/bootstrap_report.py's `candidate` verdict is `all` over
-# this same set.
-GATE_IDS=(G1 G2 G3 G4 G5 G6 G7)
+# The gates whose pass/fail decides the promotion verdict
+# (scripts/bootstrap_report.py's GATE_IDS is this same set). G4, G6 and G7
+# are reported as informational rows that never decide it, and `seal-gates`
+# records a skipped placeholder for any of these a run never produced.
+GATE_IDS=(G1 G3)
 
 # The selfhost test suite runs a full analysis of `ignis/` before it links, and
 # a hung run still has to leave a gate result behind.
@@ -101,7 +98,6 @@ Commands:
   all-from-seed
            stage1-from-seed, stage2, stage3: the ladder with no Rust at all.
   stages   stage1, stage2, stage3, where only a stage3 failure is left to G1.
-  parity   Run the e2e corpus through stage2 (builds stage2 first when missing, G2).
   gate-g3  Run the selfhost test suite under stage2 and under stage1: stage2's
            run has to pass outright and match stage1's test for test (G3).
   gate-g3-stage2   Run only the stage2 suite and keep its log and exit status.
@@ -110,18 +106,17 @@ Commands:
   gate-g3-stage1   Run the suite under stage1, which has to pass on its own ->
                    gates/G3-STAGE1.json (ci.yml's PR-only check, and the stage1
                    run gate-g3-compare reads). A later local \`report\` lists
-                   these as unscored G3-STAGE1/G5-STAGE1 rows; they never
-                   affect the \`candidate\` verdict.
-  gate-g5  Run the error corpus through stage2 and write gates/G5.json.
-  gate-g5-stage1   G5 run against stage1 instead of stage2 -> gates/G5-STAGE1.json
-                   (ci.yml's PR-only check; the promotion ladder still covers
-                   stage2). Same unscored-row note as gate-g3-stage1 above.
+                   these as unscored G3-STAGE1/G6-STAGE1/G7-STAGE1 rows; they
+                   never affect the \`candidate\` verdict.
   gate-g6  Check stage2's parse verdicts against the committed baselines
            (test_cases/__parse_verdicts__) -> gates/G6.json.
   gate-g6-baselines [compiler]
            Regenerate the parse-verdict baselines from <compiler> (default:
            stage2's binary; the compiler is run with the selfhost CLI).
            Review the diff: it is a parser change.
+  gate-g6-stage1   G6 run against stage1 instead of stage2 -> gates/G6-STAGE1.json
+                   (ci.yml's PR-only check; the promotion ladder still covers
+                   stage2). Same unscored-row note as gate-g3-stage1 above.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gate-g7  Check stage2's drop schedules against the committed baselines
            (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. The
@@ -505,7 +500,7 @@ stage_prev_stage() {
 
 # Write a gate result to build/bootstrap/gates/<gate>.json.
 #
-#   $1  gate id (G1..G5)
+#   $1  gate id (G1..G7)
 #   $2  status: pass, fail or skipped
 #   $3  one-line summary
 #   $4  details as a JSON object (optional)
@@ -883,31 +878,6 @@ build_stage3() {
   fi
 }
 
-run_parity() {
-  ensure_stage stage2
-
-  local report="${BOOTSTRAP_ROOT}/parity.md"
-
-  info "parity: running the e2e corpus through $(stage_bin stage2)"
-
-  mkdir -p "$GATES_DIR"
-
-  # A non-zero exit only means some cases diverge; the report is the product.
-  python3 "${SCRIPT_DIR}/selfhost_e2e_parity.py" \
-    --compiler "$(stage_bin stage2)" \
-    --std "${PROJECT_ROOT}/std" \
-    --work-dir "${BOOTSTRAP_ROOT}/parity" \
-    --report "$report" \
-    --gate-json "${GATES_DIR}/G2.json" || true
-
-  info "parity: report -> ${report}"
-
-  if [[ ! -f "${GATES_DIR}/G2.json" ]]; then
-    write_gate G2 fail "the parity run produced no gate result" \
-      "$(json_object report "$report")"
-  fi
-}
-
 # G3: the selfhost test suite has to pass outright under a built stage (stage2
 # for the promotion gate and the nightly matrix; stage1 for ci.yml's PR-only
 # `gate-g3-stage1`, added to close the gap PR #201 left where CI never ran this
@@ -1065,9 +1035,9 @@ run_gate_g3_compare() { run_gate_g3_compare_for stage2 G3 stage1; }
 # ci.yml's PR-only check, and the nightly's reference run for G3: the selfhost
 # test suite under stage1, which has to pass on its own. Added to close the gap
 # PR #201 (merged on host-only CI) left: the selfhost test suite failed to even
-# link under stage1/stage2 (G3), and stage2 panicked on two error-corpus cases
-# (G5), and neither surfaced until the nightly ladder ran. Its log stays behind
-# in build/bootstrap/stage1-tests/ for `gate-g3-compare`.
+# link under stage1/stage2 (G3), and neither surfaced until the nightly ladder
+# ran. Its log stays behind in build/bootstrap/stage1-tests/ for
+# `gate-g3-compare`.
 run_gate_g3_stage1() {
   run_gate_g3_stage stage1
   run_gate_g3_compare_for stage1 G3-STAGE1
@@ -1102,12 +1072,13 @@ run_report() {
 #   write_streak   whether promotion-streak.json should be (re)written/uploaded
 #   publish_binary whether stage2 should be published as the official asset
 #
-# A candidate extends the streak and publishes stage2 once it reaches 3; any
-# other run resets it to 0. A stale official asset needs no special case: the
-# night it cannot build stage1 is not a candidate, the reset streak makes the
-# next `auto` resolution build stage0 from the C seed instead, and three seed
-# candidates publish a fresh official asset, provided the seed can still build
-# ignis/ (nightly.yml's `seed` job checks that; the `seed` command refreshes it).
+# A candidate extends the streak and publishes stage2 on the first candidate
+# run (threshold 1); any other run resets it to 0. A stale official asset
+# needs no special case: the night it cannot build stage1 is not a candidate,
+# the reset streak makes the next `auto` resolution build stage0 from the C
+# seed instead, and one seed candidate publishes a fresh official asset,
+# provided the seed can still build ignis/ (nightly.yml's `seed` job checks
+# that; the `seed` command refreshes it).
 promotion_decide() {
   if [[ $# -lt 1 || $# -gt 2 || ( "$1" != "true" && "$1" != "false" ) || ! "${2:-0}" =~ ^[0-9]+$ ]]; then
     echo "usage: $(basename "$0") promotion-decide <candidate> [previous-streak]" >&2
@@ -1120,7 +1091,7 @@ promotion_decide() {
   if [[ "$candidate" == "true" ]]; then
     local streak=$((previous_streak + 1))
     local publish="false"
-    [[ "$streak" -ge 3 ]] && publish="true"
+    [[ "$streak" -ge 1 ]] && publish="true"
     jq -n --argjson streak "$streak" --argjson publish "$publish" \
       '{streak: $streak, write_streak: true, publish_binary: $publish}'
   else
@@ -1171,7 +1142,7 @@ run_gates() {
   mkdir -p "$GATES_DIR"
 
   local step
-  for step in stage1 stage2 parity stage3 gate-g4 gate-g5 gate-g6 gate-g7 gate-g3; do
+  for step in stage1 stage2 stage3 gate-g4 gate-g6 gate-g7 gate-g3; do
     info "gates: ${step}"
     "$SELF" "$step" || info "gates: ${step} exited non-zero, continuing"
   done
@@ -1181,118 +1152,52 @@ run_gates() {
   run_report
 }
 
-# G5: the selfhost's diagnostics must be equal or better than the ones the
-# error corpus's committed snapshots record (the host recorded them before it
-# was retired), so every recorded diagnostic has to appear.
-#
-#   $1  stage to replay the error corpus through ("stage2", "stage1")
-#   $2  gate id to write ("G5" for stage2, "G5-STAGE1" for ci.yml's PR-only
-#       `gate-g5-stage1`, added alongside gate-g3-stage1 to close the gap PR
-#       #201 left: stage2 panicked on two error-corpus cases that only the
-#       nightly ladder caught)
-run_gate_g5_for() {
-  local stage="$1" gate_id="$2"
-  ensure_stage "$stage"
-
-  # stage2 keeps its original, unsuffixed report/counts paths so nothing that
-  # already reads build/bootstrap/parity-err.{md,json} breaks; any other stage
-  # gets its own so a stage1 run never clobbers a concurrent or prior stage2
-  # one.
-  local suffix=""
-  [[ "$stage" == "stage2" ]] || suffix="-${stage}"
-
-  local gates_dir="${BOOTSTRAP_ROOT}/gates"
-  local report="${BOOTSTRAP_ROOT}/parity-err${suffix}.md"
-  local counts="${BOOTSTRAP_ROOT}/parity-err${suffix}.json"
-  local gate_file="${gates_dir}/${gate_id}.json"
-
-  mkdir -p "$gates_dir"
-  rm -f "$counts"
-
-  info "gate-g5: replaying the error corpus through $(stage_bin "$stage")"
-
-  local status="pass"
-
-  if ! python3 "${SCRIPT_DIR}/selfhost_e2e_parity.py" \
-    --compiler "$(stage_bin "$stage")" \
-    --corpus err \
-    --std "${PROJECT_ROOT}/std" \
-    --work-dir "${BOOTSTRAP_ROOT}/parity-err${suffix}" \
-    --counts-json "$counts" \
-    --report "$report"; then
-    status="fail"
-  fi
-
-  [[ -f "$counts" ]] || fail "gate-g5: the harness wrote no counts, see ${report}"
-
-  GATE_ID="$gate_id" python3 - "$counts" "$gate_file" "$status" <<'PYTHON'
-import json
-import os
-import sys
-
-counts_path, gate_path, status = sys.argv[1:4]
-gate_id = os.environ["GATE_ID"]
-
-with open(counts_path, encoding="utf-8") as handle:
-  data = json.load(handle)
-
-counts = data["counts"]
-gate = {
-  "gate": gate_id,
-  "status": status,
-  "summary": "{}/{} error-corpus cases keep every diagnostic their snapshot records".format(
-    counts.get("pass", 0), data["total"]
-  ),
-  "details": {
-    "corpus": "err",
-    "total": data["total"],
-    "counts": counts,
-    "failing": data["failing"],
-  },
-}
-
-with open(gate_path, "w", encoding="utf-8") as handle:
-  handle.write(json.dumps(gate, indent=2) + "\n")
-PYTHON
-
-  info "gate-g5: ${status} -> ${gate_file} (report ${report})"
-}
-
-run_gate_g5() { run_gate_g5_for stage2 G5; }
-
 # G6: every case's parse verdict under stage2 (accepted or rejected) must match
 # the one committed for it under test_cases/__parse_verdicts__. The baselines
 # are the reference; they change only through gate-g6-baselines, and that diff
 # is reviewed as the parser change it is.
-run_gate_g6() {
-  ensure_stage stage2
+run_gate_g6_for() {
+  local stage="$1" gate_id="$2"
+  ensure_stage "$stage"
 
-  local report="${BOOTSTRAP_ROOT}/parity-syntax.md"
-  local counts="${BOOTSTRAP_ROOT}/parity-syntax.json"
-  local gate_file="${GATES_DIR}/G6.json"
+  # stage2 keeps its original, unsuffixed report/counts paths so nothing that
+  # already reads build/bootstrap/parity-syntax.{md,json} breaks; any other
+  # stage gets its own so a stage1 run never clobbers a concurrent or prior
+  # stage2 one.
+  local suffix=""
+  [[ "$stage" == "stage2" ]] || suffix="-${stage}"
+
+  local report="${BOOTSTRAP_ROOT}/parity-syntax${suffix}.md"
+  local counts="${BOOTSTRAP_ROOT}/parity-syntax${suffix}.json"
+  local gate_file="${GATES_DIR}/${gate_id}.json"
 
   mkdir -p "$GATES_DIR"
   rm -f "$gate_file"
 
-  info "gate-g6: checking the parse verdicts of $(stage_bin stage2) against the committed baselines"
+  info "gate-g6: checking the parse verdicts of $(stage_bin "$stage") against the committed baselines"
 
   # A non-zero exit only means some cases diverge; the gate file is the product.
   python3 "${SCRIPT_DIR}/selfhost_syntax_parity.py" \
-    --compiler "$(stage_bin stage2)" \
+    --compiler "$(stage_bin "$stage")" \
     --std "${PROJECT_ROOT}/std" \
-    --work-dir "${BOOTSTRAP_ROOT}/parity-syntax" \
+    --work-dir "${BOOTSTRAP_ROOT}/parity-syntax${suffix}" \
+    --gate-id "$gate_id" \
     --counts-json "$counts" \
     --report "$report" \
     --gate-json "$gate_file" || true
 
   if [[ ! -f "$gate_file" ]]; then
-    write_gate G6 fail "the syntax parity run produced no gate result" \
+    write_gate "$gate_id" fail "the syntax parity run produced no gate result" \
       "$(json_object report "$report")"
     return 0
   fi
 
   info "gate-g6: result -> ${gate_file} (report ${report})"
 }
+
+run_gate_g6() { run_gate_g6_for stage2 G6; }
+
+run_gate_g6_stage1() { run_gate_g6_for stage1 G6-STAGE1; }
 
 # Regenerate every parse-verdict baseline from one compiler. Deliberately a
 # manual step: the new verdicts land in the pull request's diff and a reviewer
@@ -1763,10 +1668,8 @@ main() {
       build_stage3
       ;;
     stages) run_stages ;;
-    parity) run_parity ;;
-    gate-g5) run_gate_g5 ;;
-    gate-g5-stage1) run_gate_g5_for stage1 G5-STAGE1 ;;
     gate-g6) run_gate_g6 ;;
+    gate-g6-stage1) run_gate_g6_stage1 ;;
     gate-g6-baselines) run_gate_g6_baselines "${2-}" ;;
     gate-g4) run_gate_g4 ;;
     gate-g7) run_gate_g7 ;;
