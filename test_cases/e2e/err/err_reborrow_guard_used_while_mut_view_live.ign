@@ -1,0 +1,19 @@
+// e2e: err
+// `store` holds the guard's mutable borrow for the rest of the scope, so the
+// guard itself cannot be read through while `store` is live.
+import Mutex, MutexGuard from "std::sync";
+
+record Store {
+  public count: i32;
+}
+
+function main(): i32 {
+  let shared: Mutex<Store> = Mutex::new<Store>(Store { count: 0 });
+  let mut guard: MutexGuard<Store> = shared.lock();
+  let store: &mut Store = guard.get();
+  let read: &Store = guard.read();
+
+  store.count = 1;
+
+  return read.count;
+}

@@ -1,0 +1,98 @@
+// e2e: std
+// The `!` operator inside an escaping closure binds its payload to locals of
+// the closure body, so they are never captures: on `Result` and `Option`, in a
+// nested closure, in a closure built inside a loop, and next to a real capture
+// taken by move.
+import Io from "std::io";
+
+function halve(value: i32): Result<i32, String> {
+  if (value % 2 != 0) {
+    return Result::ERROR(`odd: ${value}`);
+  }
+
+  return Result::OK(value / 2);
+}
+
+function positive(value: i32): Option<i32> {
+  if (value <= 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(value);
+}
+
+function report(result: Result<i32, String>): i32 {
+  return match (result) {
+    Result::OK(value) -> value,
+    Result::ERROR(message) -> {
+      Io::println(message.toStr());
+      -1
+    },
+  };
+}
+
+function main(): i32 {
+  let mut results: Vector<(i32) -> Result<i32, String>> = Vector::new<(i32) -> Result<i32, String>>();
+
+  results.push((value: i32): Result<i32, String> -> {
+      return Result::OK(halve(value)! + 1);
+    });
+
+  results.push((value: i32): Result<i32, String> -> {
+      let inner: (i32) -> Result<i32, String> = (input: i32): Result<i32, String> -> {
+        return Result::OK(halve(input)! * 10);
+      };
+
+      return Result::OK(inner(halve(value)!)! + 3);
+    });
+
+  let mut index: i32 = 0;
+
+  while (index < 2) {
+    results.push((value: i32): Result<i32, String> -> {
+        let half: i32 = halve(value)!;
+
+        return Result::OK(halve(half)! + 100);
+      });
+
+    index += 1;
+  }
+
+  let label: String = String::create("offset");
+
+  results.push((value: i32): Result<i32, String> -> {
+      return Result::OK(halve(value)! + ((@move label).length() as i32));
+    });
+
+  let mut options: Vector<(i32) -> Option<i32>> = Vector::new<(i32) -> Option<i32>>();
+
+  options.push((value: i32): Option<i32> -> {
+      return Option::SOME(positive(value)! * 2);
+    });
+
+  let mut total: i32 = 0;
+  let mut position: u64 = 0;
+
+  while (position < results.length()) {
+    if (let Option::SOME(callback) = results.get(position)) {
+      total += report((*callback)(8));
+      total += report((*callback)(6));
+    }
+
+    position += 1;
+  }
+
+  if (let Option::SOME(callback) = options.get(0)) {
+    if (let Option::SOME(value) = (*callback)(4)) {
+      total += value;
+    }
+
+    if ((*callback)(0).isNone()) {
+      total += 1000;
+    }
+  }
+
+  Io::println(`${total}`.toStr());
+
+  return 0;
+}
