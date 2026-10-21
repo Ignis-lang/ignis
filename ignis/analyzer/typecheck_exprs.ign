@@ -3217,7 +3217,15 @@ export namespace Analyzer {
       receiverType: Analyzer::TypeId,
       name: str,
     ): Option<Analyzer::DefinitionId> {
-      let receiverNormalized: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, receiverType, 0);
+      let mut receiverNormalized: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, receiverType, 0);
+
+      // A `static str` receiver uses the `@extension(str)` functions: it converts to the
+      // `str` parameter they take.
+      if (Analyzer::Typecheck::typeIdIsStaticStr(typeStore, receiverNormalized)) {
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        receiverNormalized = typeStoreRef.intern(Analyzer::Type::STR);
+      }
+
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let wanted: Analyzer::SymbolId = symbolsRef.intern(name);
       let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(wanted);
@@ -5629,6 +5637,18 @@ export namespace Analyzer {
             return Option::NONE;
           };
 
+          // `@typeName` is a compile-time string: like a literal, it is `static str`
+          // where that type is expected and `str` everywhere else.
+          if (value.name.equals("typeName")) {
+            if (let Option::SOME(expectedType) = expected) {
+              let expectedResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+              if (Analyzer::Typecheck::typeIdIsStaticStr(typeStore, expectedResolved.typeId)) {
+                Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
+                return Option::SOME(expectedType);
+              }
+            }
+          }
+
           Analyzer::Typecheck::recordExprType(state, exprId, builtinType);
           return Option::SOME(builtinType);
         },
@@ -5764,7 +5784,48 @@ export namespace Analyzer {
         return true;
       }
 
+      if (Analyzer::Typecheck::staticStrCoercesToStr(defStore, typeStore, expected, actual)) {
+        return true;
+      }
+
       return Analyzer::Typecheck::isNeverType(state, defStore, typeStore, actual);
+    }
+
+    /// Whether `actual` is `static str` supplied where `str` is expected. The two share
+    /// a representation, so the conversion is implicit; the reverse is an error.
+    ///
+    /// A shared reference converts the same way (`&static str` to `&str`, as template
+    /// literals pass their parts), since nothing can be written through it. A `&mut str`
+    /// target is not accepted: a view written through it would land in static storage.
+    function staticStrCoercesToStr(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      expected: Analyzer::TypeId,
+      actual: Analyzer::TypeId,
+    ): boolean {
+      let expectedResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expected);
+      let actualResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, actual);
+
+      if (let Option::SOME(Analyzer::Type::Reference(expectedReference)) = typeStore.get(expectedResolved.typeId)) {
+        if (expectedReference.mutable) {
+          return false;
+        }
+
+        let Option::SOME(Analyzer::Type::Reference(actualReference)) = typeStore.get(actualResolved.typeId) else {
+          return false;
+        };
+
+        return Analyzer::Typecheck::staticStrCoercesToStr(defStore, typeStore, expectedReference.referent, actualReference.referent);
+      }
+
+      let Option::SOME(Analyzer::Type::STR) = typeStore.get(expectedResolved.typeId) else {
+        return false;
+      };
+      let Option::SOME(Analyzer::Type::STATIC_STR) = typeStore.get(actualResolved.typeId) else {
+        return false;
+      };
+
+      return true;
     }
 
     /// Selects which pairwise-mismatch diagnostic `joinTypes` emits, so the
@@ -6050,6 +6111,7 @@ export namespace Analyzer {
       };
     }
 
+    /// Whether the type is `str` or `static str`, which compare and cast alike.
     function typeIdIsStr(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
       let Option::SOME(typeNode) = typeStore.get(typeId) else {
         return false;
@@ -6057,8 +6119,20 @@ export namespace Analyzer {
 
       return match (typeNode) {
         Analyzer::Type::STR -> true,
+        Analyzer::Type::STATIC_STR -> true,
         _ -> false,
       };
+    }
+
+    function typeIdIsStaticStr(
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId
+    ): boolean {
+      let Option::SOME(Analyzer::Type::STATIC_STR) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      return true;
     }
 
     function typeIdIsChar(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
@@ -6174,6 +6248,7 @@ export namespace Analyzer {
       let toIsReference: boolean = Analyzer::Typecheck::typeIdIsReference(typeStore, toId);
       let fromIsStr: boolean = Analyzer::Typecheck::typeIdIsStr(typeStore, fromId);
       let toIsStr: boolean = Analyzer::Typecheck::typeIdIsStr(typeStore, toId);
+      let toIsStaticStr: boolean = Analyzer::Typecheck::typeIdIsStaticStr(typeStore, toId);
 
       let mut valid: boolean = false;
       if (fromIsNumeric && toIsNumeric) {
@@ -6194,9 +6269,11 @@ export namespace Analyzer {
         valid = true;
       } else if (toIsPointer && fromIsInteger) {
         valid = true;
-      } else if (fromIsPointer && toIsStr) {
+      } else if (fromIsPointer && toIsStr && !toIsStaticStr) {
         valid = true;
       } else if (toIsPointer && fromIsStr) {
+        valid = true;
+      } else if (fromIsStr && toIsStr && !toIsStaticStr) {
         valid = true;
       } else {
         valid = Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, fromId, toId);

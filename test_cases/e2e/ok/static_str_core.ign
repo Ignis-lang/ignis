@@ -1,0 +1,46 @@
+// `static str` without the standard library, so both backends run it: a literal stored
+// in a field and a static, returned, compared with a `str` view and passed where `str`
+// is expected share the C and QBE representation of `str`.
+
+record Entry {
+  public name: static str;
+}
+
+record Texts {
+  static DEFAULT: static str = "default";
+}
+
+function pick(flag: boolean): static str {
+  return flag ? "yes" : "no";
+}
+
+function same(left: str, right: str): boolean {
+  return left == right;
+}
+
+function main(): i32 {
+  let entry: Entry = Entry { name: "entry" };
+  let view: str = entry.name;
+  let chosen: static str = pick(true);
+  let mut code: i32 = 0;
+
+  if (same(view, "entry")) {
+    code += 1;
+  }
+
+  if (chosen == "yes" && chosen != view) {
+    code += 2;
+  }
+
+  if (Texts::DEFAULT == "default") {
+    code += 4;
+  }
+
+  let matched: i32 = match (chosen) {
+    "no" -> 0,
+    "yes" -> 8,
+    _ -> 16,
+  };
+
+  return code + matched;
+}

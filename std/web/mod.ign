@@ -1,0 +1,151 @@
+//!
+//! # Web
+//!
+//! A minimally opinionated web framework in the spirit of Express, built on
+//! `std::http`. Middleware and routes take the request, the response and the
+//! next function, and return `Result<void, Web::Error>`; an error that
+//! reaches the router becomes a response with its status.
+//!
+//! ## Exports
+//!
+//! | Export              | Description                                                         |
+//! |---------------------|---------------------------------------------------------------------|
+//! | `Web::Router`       | `new()`, `use`, `get`, `post`, `put`, `patch`, `delete`, `any`, `route`, `dispatch`; implements `Http::Handler` |
+//! | `Web::App`          | Trait: `build(&self): Web::Router`, called once per server thread   |
+//! | `Web::serve`        | Binds an address and serves an app on `ServerConfig.threads` threads |
+//! | `Web::serveListener` | Serves an app on a listener already bound                          |
+//! | `Web::Middleware`   | `(&mut Request, &mut Response, Next) -> Result<void, Error>`        |
+//! | `Web::Next`         | `(&mut Request, &mut Response) -> Result<void, Error>`              |
+//! | `Web::Request`      | `http`; `create(&http)`, `method()`, `target()`, `path()`, `header(name)`, `body()`, `bodyText()`, `param(name)`, `query(name)` |
+//! | `Web::Response`     | `status`, `headers`, `body`; `new()`, `setStatus`, `header`, `setHeader`, `addHeader`, `write`, `writeStr`, `text`, `json`, `finish` |
+//! | `Web::Error`        | `status`, `message`; `new(message)` (500), `withStatus(status, message)` |
+//! | `Web::Param`        | One route parameter: `name` and decoded `value`                     |
+//!
+//! ## Middleware and routes
+//!
+//! Both have the `Web::Middleware` shape. A middleware added with `use`
+//! runs for every request, in the order it was added, before the routes.
+//! Calling `next` runs the rest of the chain and returns once it finished,
+//! so code after `next` runs on the way back out (the onion model), and an
+//! error from `next` propagates with `!` like any other. `next` takes the
+//! request and the response back as arguments: a closure holding them would
+//! keep them borrowed for as long as it lives.
+//!
+//! A middleware that does not call `next` ends the chain; returning an
+//! error does too. A route that calls `next` passes the request to the next
+//! route that matches it; when there is none, the answer is 404.
+//!
+//! ## Routing
+//!
+//! A route matches by method and path. `get` also answers `HEAD` (the
+//! server sends the head without the body); `any` answers every method;
+//! `route` takes any method name as written on the request line.
+//!
+//! The path is compared segment by segment, before any `?` and without
+//! decoding. A segment `:name` matches any non-empty segment and makes its
+//! percent-decoded value available as `request.param("name")`; any other
+//! segment matches only itself. Every segment counts, so a trailing slash
+//! is significant: `/users/:id` matches `/users/7` but not `/users/7/`, and
+//! `/users/` does not match `/users`. A parameter that is not valid
+//! percent-encoded UTF-8 is answered with 400.
+//!
+//! When no route matches, the answer is 404. When some route matches the
+//! path but none its method, the answer is 405 with an `Allow` header
+//! listing the methods that would match. Both run through the middleware
+//! as errors, so a logger sees them.
+//!
+//! `request.query("name")` decodes the first query parameter with that
+//! name: `+` is a space, `%XX` an escaped byte, and a parameter written
+//! without `=` has an empty value. A value that is not valid
+//! percent-encoded UTF-8 is `NONE`.
+//!
+//! ## Errors
+//!
+//! `Web::Error` carries a status (500 by default) and a message. The router
+//! answers an error with that status, `Content-Type: text/plain;
+//! charset=utf-8` and the message as the body, keeping header fields that
+//! were already set. Client input never makes the router panic.
+//!
+//! ## Threads
+//!
+//! Function values are neither `Send` nor `Sync`, so a router cannot be
+//! shared between threads. An application is a record implementing
+//! `Web::App`; `Web::serve` shares it among `ServerConfig.threads` threads,
+//! each of which calls `build` once and serves its connections with its own
+//! router through `Http::acceptConnections`. State shared by every thread
+//! lives in the app record and has to be `Send` and `Sync`, behind an `Arc`,
+//! a `Mutex` or an atomic.
+//!
+//! A router is also an `Http::Handler`, so `Http::serveConnection` serves
+//! one connection with it, which is how a test drives it.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Http from "std::http";
+//! import Io from "std::io";
+//! import IpAddress, SocketAddress from "std::net";
+//! import String from "std::string";
+//! import Web from "std::web";
+//!
+//! function logger(
+//!   request: &mut Web::Request,
+//!   response: &mut Web::Response,
+//!   next: Web::Next
+//! ): Result<void, Web::Error> {
+//!   let result: Result<void, Web::Error> = next(request, response);
+//!   Io::println(`${request.method().toString()} ${request.path()} ${response.status}`);
+//!   return result;
+//! }
+//!
+//! function showUser(
+//!   request: &mut Web::Request,
+//!   response: &mut Web::Response,
+//!   next: Web::Next
+//! ): Result<void, Web::Error> {
+//!   let Option::SOME(id) = request.param("id") else {
+//!     return Result::ERROR(Web::Error::withStatus(400, "missing id"));
+//!   };
+//!
+//!   let text: String = String::create(id);
+//!
+//!   if (text.equals("0")) {
+//!     return Result::ERROR(Web::Error::withStatus(404, "no such user"));
+//!   }
+//!
+//!   response.text(`user ${id}`);
+//!   return Result::OK(());
+//! }
+//!
+//! @implements(Web::App)
+//! record Users {
+//!   public greeting: str;
+//!
+//!   build(&self): Web::Router {
+//!     let greeting: str = self.greeting;
+//!     let mut router: Web::Router = Web::Router::new();
+//!     router.use(logger);
+//!     router.get(
+//!       "/",
+//!       (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {
+//!         response.text(greeting);
+//!         return Result::OK(());
+//!       },
+//!     );
+//!     router.get("/users/:id", showUser);
+//!     return router;
+//!   }
+//! }
+//!
+//! function main(): i32 {
+//!   let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);
+//!   let app: Users = Users { greeting: "hello" };
+//!
+//!   return Web::serve<Users>(&address, Http::ServerConfig::new(), app).isOk() ? 0 : 1;
+//! }
+//! ```
+
+import _ from "std::web::request";
+import _ from "std::web::router";
+
+export Web from "./router";

@@ -81,7 +81,7 @@
     },
     {
       "name": "std::http",
-      "doc": "  \n# HTTP  \n  \nHTTP/1.1 on the server side. The core is sans-IO: a request parser and a  \nresponse serializer that never touch a socket. Anything that speaks HTTP  \nbut is not a web application (a proxy, a test harness, a server driver)  \nbuilds on it. The parser receives bytes and returns what they mean; the  \nserializer turns a response into bytes and leaves writing them to the  \ncaller. On top of it, `Http::Server` is a blocking driver that accepts  \nconnections and calls a handler with a request and a response.  \n  \n## Exports  \n  \n| Export                 | Description                                                          |  \n|------------------------|----------------------------------------------------------------------|  \n| `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |  \n| `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |  \n| `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |  \n| `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |  \n| `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |  \n| `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |  \n| `Http::HeaderField`    | One `name` and `value`                                               |  \n| `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |  \n| `Http::ParseError`     | `kind` and the suggested response `status`                           |  \n| `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |  \n| `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |  \n| `Http::SerializeError` | Why a response head cannot be written                                |  \n| `Http::writeHead`      | Appends a response head                                              |  \n| `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |  \n| `Http::writeBody`      | Appends body bytes unchanged                                         |  \n| `Http::writeChunk`     | Appends one chunk of a chunked body                                  |  \n| `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |  \n| `Http::reasonPhrase`   | The standard reason phrase of a status                               |  \n| `Http::Server`         | `bind(&address, config)`, `localAddress()`, `run(handler)`           |  \n| `Http::ServerConfig`   | `threads`, `limits`, `idleTimeout`, `maxRequestsPerConnection`; `new()` gives the defaults |  \n| `Http::Handler`        | Trait: `handle(&self, &Request, &mut Response)`                      |  \n| `Http::Request`        | `head`, `body`; `target()`, `header(name)`, `bodyText()`             |  \n| `Http::Response`       | `status`, `headers`, `body`; `new()`, `setStatus`, `setHeader`, `addHeader`, `write`, `writeStr` |  \n| `Http::serveConnection` | Serves one connection with a handler                                |  \n  \n## Parsing  \n  \n`feed` copies bytes into the parser; `next` reports the next event. Each  \nrequest produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.  \n`NEED_MORE` means the bytes fed so far are not enough to report anything  \nelse. After `DONE` the parser starts on the next request of the same  \nconnection, and bytes already fed past the end of a request belong to the  \nnext one, so keep-alive and pipelining need nothing special.  \n`RequestHead.keepAlive()` tells whether the connection stays open: an  \nHTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0  \nrequest closes it unless `Connection` lists `keep-alive`.  \n  \nEvents own their payloads: a `RequestHead` or a body chunk is a copy and  \nstays valid after more bytes are fed.  \n  \n`MALFORMED` is terminal: once the parser reports it, every later `next`  \nreports the same error, because the rest of the connection cannot be  \nframed. The `ParseError` carries the status a server should answer with  \n(400, 413, 414, 431, 501 or 505) before it closes the connection.  \nMalformed input never panics.  \n  \n## Message syntax  \n  \n- Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2  \n  allows a recipient to; a CR anywhere else is malformed.  \n- Empty lines before a request line are skipped.  \n- The request line is `method SP target SP HTTP/1.x` with exactly one space  \n  between the parts. The method is a case-sensitive token; methods other  \n  than the nine standard ones are `Method::OTHER`. The target is kept as  \n  received and must be visible ASCII.  \n- A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.  \n- A header line is `name: value`. Whitespace between the name and the  \n  colon, an obsolete line folding (a line starting with a space or a tab)  \n  and a control byte in the value are `INVALID_HEADER`. Names keep their  \n  casing; lookups ignore ASCII case.  \n  \n## Body framing  \n  \nPer RFC 9112 section 6.3:  \n  \n| Head                                   | Body                                           |  \n|----------------------------------------|------------------------------------------------|  \n| `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |  \n| Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |  \n| `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |  \n| `Content-Length: n`                    | Exactly `n` bytes                              |  \n| `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |  \n| A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |  \n| Neither                                | No body                                        |  \n  \nRepeated `Content-Length` fields, or a comma list in one, are accepted when  \nevery value is the same. Chunk extensions are ignored. Trailer fields  \nafter the last chunk are checked like header fields, counted against  \n`maxHeaders`, and discarded.  \n  \n## Limits  \n  \n| Limit            | Default   | Violation                                 |  \n|------------------|-----------|-------------------------------------------|  \n| `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |  \n| `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |  \n| `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |  \n| `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |  \n  \nLine lengths exclude the line terminator, and a length exactly at its  \nlimit is accepted. A line is rejected as soon as it grows past its limit,  \nbefore it ends, and a body as soon as its declared size passes `maxBody`,  \nso a client cannot make the parser buffer without bound.  \n  \n## Serializing  \n  \n`writeHead` appends `HTTP/1.1 <status> <reason>\\r\\n`, every header field  \nand the blank line. `writeResponse` does the same with a `Content-Length`  \nfield and appends the body. For a chunked body, add  \n`Transfer-Encoding: chunked` to the head, then call `writeChunk` for each  \npiece and `writeLastChunk` at the end. A header name, header value or  \nreason phrase holding CR or LF could split the response, so it is a  \n`SerializeError` and nothing is appended.  \n  \nByte inputs are `&Vector<u8>`: a slice parameter cannot report its length  \nyet.  \n  \n## Serving  \n  \nA handler is a record that implements `Http::Handler`. Outside the `Http`  \nnamespace the trait is reached by its path: `@implements(Http::Handler)`.  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport IpAddress, SocketAddress from \"std::net\";  \n  \n@implements(Http::Handler)  \nrecord Greeter {  \n  public greeting: str;  \n  \n  handle(&self, request: &Http::Request, response: &mut Http::Response): void {  \n    if (!request.head.target.equals(\"/\")) {  \n      response.setStatus(404);  \n      return;  \n    }  \n  \n    response.setHeader(\"Content-Type\", \"text/plain\");  \n    response.writeStr(self.greeting);  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);  \n  let Result::OK(server) = Http::Server::bind(&address, Http::ServerConfig::new()) else {  \n    return 1;  \n  };  \n  \n  return server.run<Greeter>(Greeter { greeting: \"hello\" }).isOk() ? 0 : 1;  \n}  \n```  \n  \n`run` starts `ServerConfig.threads` threads (default 8). Each accepts a  \nconnection, serves it to the end and accepts the next, so up to `threads`  \nconnections are served at once. The handler is shared by all of them,  \nwhich is why it has to be `Send` and `Sync` and `handle` takes `&self`.  \n`run` returns only once every thread's `accept` failed; there is no way  \nto stop a running server yet, so it blocks for as long as the process  \nlives.  \n  \n`serveConnection` serves one accepted connection on the calling thread,  \nwhich is what each `run` thread does and what a test calls directly:  \n  \n- A request reaches the handler once its whole body is in, bounded by  \n  `Limits.maxBody`. `Expect: 100-continue` is not answered: the client  \n  sends the body after its own wait.  \n- The response always carries `Content-Length`; a `Content-Length` or  \n  `Transfer-Encoding` the handler set is dropped. A `HEAD` request gets  \n  the head, with the length the body would have, and no body.  \n- The connection stays open unless the request does not keep it alive  \n  (`RequestHead.keepAlive`), the response lists `Connection: close`, or  \n  `maxRequestsPerConnection` (0, no limit, by default) is reached. When  \n  it closes, the response carries `Connection: close`.  \n- Every read waits at most `idleTimeout` (default 30 seconds). When it  \n  expires, or the client closes, the connection ends without a response.  \n- A malformed request gets an empty response with the parser's status  \n  and `Connection: close`, then the connection ends.  \n- A response the serializer rejects, a status outside 100 to 999 or a  \n  header that holds CR or LF, is replaced by an empty 500.  \n- Before closing, the server shuts its writing side and discards what  \n  the client still sends for up to 2 seconds, so the close does not reset  \n  the connection before the client reads the response.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport Vector from \"std::vector\";  \n  \nfunction answer(request: str, out: &mut Vector<u8>): i32 {  \n  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());  \n  parser.feedStr(request);  \n  \n  let Http::ParseEvent::HEAD(head) = parser.next() else {  \n    return 1;  \n  };  \n  \n  let mut response: Http::ResponseHead = Http::ResponseHead::create(200);  \n  response.headers.add(\"Content-Type\", \"text/plain\");  \n  let body: Vector<u8> = head.target.toBytes();  \n  \n  return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;  \n}  \n```"
+      "doc": "  \n# HTTP  \n  \nHTTP/1.1 on the server side. The core is sans-IO: a request parser and a  \nresponse serializer that never touch a socket. Anything that speaks HTTP  \nbut is not a web application (a proxy, a test harness, a server driver)  \nbuilds on it. The parser receives bytes and returns what they mean; the  \nserializer turns a response into bytes and leaves writing them to the  \ncaller. On top of it, `Http::Server` is a blocking driver that accepts  \nconnections and calls a handler with a request and a response.  \n  \n## Exports  \n  \n| Export                 | Description                                                          |  \n|------------------------|----------------------------------------------------------------------|  \n| `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |  \n| `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |  \n| `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |  \n| `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |  \n| `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |  \n| `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |  \n| `Http::HeaderField`    | One `name` and `value`                                               |  \n| `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |  \n| `Http::ParseError`     | `kind` and the suggested response `status`                           |  \n| `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |  \n| `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |  \n| `Http::SerializeError` | Why a response head cannot be written                                |  \n| `Http::writeHead`      | Appends a response head                                              |  \n| `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |  \n| `Http::writeBody`      | Appends body bytes unchanged                                         |  \n| `Http::writeChunk`     | Appends one chunk of a chunked body                                  |  \n| `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |  \n| `Http::reasonPhrase`   | The standard reason phrase of a status                               |  \n| `Http::Server`         | `bind(&address, config)`, `localAddress()`, `run(handler)`           |  \n| `Http::ServerConfig`   | `threads`, `limits`, `idleTimeout`, `maxRequestsPerConnection`; `new()` gives the defaults |  \n| `Http::Handler`        | Trait: `handle(&self, &Request, &mut Response)`                      |  \n| `Http::Request`        | `head`, `body`; `target()`, `header(name)`, `bodyText()`             |  \n| `Http::Response`       | `status`, `headers`, `body`; `new()`, `setStatus`, `setHeader`, `addHeader`, `write`, `writeStr` |  \n| `Http::serveConnection` | Serves one connection with a handler                                |  \n| `Http::acceptConnections` | Accepts and serves connections on the calling thread              |  \n  \n## Parsing  \n  \n`feed` copies bytes into the parser; `next` reports the next event. Each  \nrequest produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.  \n`NEED_MORE` means the bytes fed so far are not enough to report anything  \nelse. After `DONE` the parser starts on the next request of the same  \nconnection, and bytes already fed past the end of a request belong to the  \nnext one, so keep-alive and pipelining need nothing special.  \n`RequestHead.keepAlive()` tells whether the connection stays open: an  \nHTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0  \nrequest closes it unless `Connection` lists `keep-alive`.  \n  \nEvents own their payloads: a `RequestHead` or a body chunk is a copy and  \nstays valid after more bytes are fed.  \n  \n`MALFORMED` is terminal: once the parser reports it, every later `next`  \nreports the same error, because the rest of the connection cannot be  \nframed. The `ParseError` carries the status a server should answer with  \n(400, 413, 414, 431, 501 or 505) before it closes the connection.  \nMalformed input never panics.  \n  \n## Message syntax  \n  \n- Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2  \n  allows a recipient to; a CR anywhere else is malformed.  \n- Empty lines before a request line are skipped.  \n- The request line is `method SP target SP HTTP/1.x` with exactly one space  \n  between the parts. The method is a case-sensitive token; methods other  \n  than the nine standard ones are `Method::OTHER`. The target is kept as  \n  received and must be visible ASCII.  \n- A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.  \n- A header line is `name: value`. Whitespace between the name and the  \n  colon, an obsolete line folding (a line starting with a space or a tab)  \n  and a control byte in the value are `INVALID_HEADER`. Names keep their  \n  casing; lookups ignore ASCII case.  \n  \n## Body framing  \n  \nPer RFC 9112 section 6.3:  \n  \n| Head                                   | Body                                           |  \n|----------------------------------------|------------------------------------------------|  \n| `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |  \n| Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |  \n| `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |  \n| `Content-Length: n`                    | Exactly `n` bytes                              |  \n| `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |  \n| A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |  \n| Neither                                | No body                                        |  \n  \nRepeated `Content-Length` fields, or a comma list in one, are accepted when  \nevery value is the same. Chunk extensions are ignored. Trailer fields  \nafter the last chunk are checked like header fields, counted against  \n`maxHeaders`, and discarded.  \n  \n## Limits  \n  \n| Limit            | Default   | Violation                                 |  \n|------------------|-----------|-------------------------------------------|  \n| `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |  \n| `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |  \n| `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |  \n| `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |  \n  \nLine lengths exclude the line terminator, and a length exactly at its  \nlimit is accepted. A line is rejected as soon as it grows past its limit,  \nbefore it ends, and a body as soon as its declared size passes `maxBody`,  \nso a client cannot make the parser buffer without bound.  \n  \n## Serializing  \n  \n`writeHead` appends `HTTP/1.1 <status> <reason>\\r\\n`, every header field  \nand the blank line. `writeResponse` does the same with a `Content-Length`  \nfield and appends the body. For a chunked body, add  \n`Transfer-Encoding: chunked` to the head, then call `writeChunk` for each  \npiece and `writeLastChunk` at the end. A header name, header value or  \nreason phrase holding CR or LF could split the response, so it is a  \n`SerializeError` and nothing is appended.  \n  \nByte inputs are `&Vector<u8>`: a slice parameter cannot report its length  \nyet.  \n  \n## Serving  \n  \nA handler is a record that implements `Http::Handler`. Outside the `Http`  \nnamespace the trait is reached by its path: `@implements(Http::Handler)`.  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport IpAddress, SocketAddress from \"std::net\";  \n  \n@implements(Http::Handler)  \nrecord Greeter {  \n  public greeting: str;  \n  \n  handle(&self, request: &Http::Request, response: &mut Http::Response): void {  \n    if (!request.head.target.equals(\"/\")) {  \n      response.setStatus(404);  \n      return;  \n    }  \n  \n    response.setHeader(\"Content-Type\", \"text/plain\");  \n    response.writeStr(self.greeting);  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);  \n  let Result::OK(server) = Http::Server::bind(&address, Http::ServerConfig::new()) else {  \n    return 1;  \n  };  \n  \n  return server.run<Greeter>(Greeter { greeting: \"hello\" }).isOk() ? 0 : 1;  \n}  \n```  \n  \n`run` starts `ServerConfig.threads` threads (default 8). Each accepts a  \nconnection, serves it to the end and accepts the next, so up to `threads`  \nconnections are served at once. The handler is shared by all of them,  \nwhich is why it has to be `Send` and `Sync` and `handle` takes `&self`.  \n`run` returns only once every thread's `accept` failed; there is no way  \nto stop a running server yet, so it blocks for as long as the process  \nlives.  \n  \n`acceptConnections` is the loop each `run` thread runs: it accepts a  \nconnection, serves it and accepts the next. Calling it on threads of  \nyour own gives every thread its own handler, for state that cannot be  \nshared; `std::web` builds one router per thread this way.  \n  \n`serveConnection` serves one accepted connection on the calling thread,  \nwhich is what each `run` thread does and what a test calls directly:  \n  \n- A request reaches the handler once its whole body is in, bounded by  \n  `Limits.maxBody`. `Expect: 100-continue` is not answered: the client  \n  sends the body after its own wait.  \n- The response always carries `Content-Length`; a `Content-Length` or  \n  `Transfer-Encoding` the handler set is dropped. A `HEAD` request gets  \n  the head, with the length the body would have, and no body.  \n- The connection stays open unless the request does not keep it alive  \n  (`RequestHead.keepAlive`), the response lists `Connection: close`, or  \n  `maxRequestsPerConnection` (0, no limit, by default) is reached. When  \n  it closes, the response carries `Connection: close`.  \n- Every read waits at most `idleTimeout` (default 30 seconds). When it  \n  expires, or the client closes, the connection ends without a response.  \n- A malformed request gets an empty response with the parser's status  \n  and `Connection: close`, then the connection ends.  \n- A response the serializer rejects, a status outside 100 to 999 or a  \n  header that holds CR or LF, is replaced by an empty 500.  \n- Before closing, the server shuts its writing side and discards what  \n  the client still sends for up to 2 seconds, so the close does not reset  \n  the connection before the client reads the response.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport Vector from \"std::vector\";  \n  \nfunction answer(request: str, out: &mut Vector<u8>): i32 {  \n  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());  \n  parser.feedStr(request);  \n  \n  let Http::ParseEvent::HEAD(head) = parser.next() else {  \n    return 1;  \n  };  \n  \n  let mut response: Http::ResponseHead = Http::ResponseHead::create(200);  \n  response.headers.add(\"Content-Type\", \"text/plain\");  \n  let body: Vector<u8> = head.target.toBytes();  \n  \n  return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;  \n}  \n```"
     },
     {
       "name": "std::http::headers",
@@ -335,6 +335,18 @@
     {
       "name": "std::vector",
       "doc": "  \n# Vector Module  \n  \nGrowable contiguous array backed by `std::memory`.  \n  \n## Overview  \n  \n`Vector<T>` stores elements in a contiguous heap allocation and grows  \ncapacity geometrically (`x2`) when needed.  \n  \n- `length` is the number of initialized elements  \n- `capacity` is the number of elements that can be stored without reallocating  \n- `data` points to the first element (or `null` when empty)  \n  \n## Memory Layout  \n  \n```text  \n  Vector<T>  \n  ┌──────────────┐  \n  │ data ────────┼──────► ┌───┬───┬───┬───┬───┬───┬───┬───┐  \n  │ length: 5    │        │ 0 │ 1 │ 2 │ 3 │ 4 │   │   │   │  \n  │ capacity: 8  │        └───┴───┴───┴───┴───┴───┴───┴───┘  \n  └──────────────┘        ◄── initialized ──►◄─ reserved ─►  \n```  \n  \n## Growth Strategy  \n  \nWhen `push()` is called and `length == capacity`, the vector doubles its  \nbacking storage (or allocates 1 slot if currently empty):  \n  \n```text  \n  push() when length == capacity  \n  ┌──────────────────────────────────────────────────────────────────────┐  \n  │ old capacity = N                                                     │  \n  │ new capacity = max(1, N * 2)                                         │  \n  │ reallocate buffer to new capacity                                    │  \n  └──────────────────────────────────────────────────────────────────────┘  \n  \n  Example:  \n    cap=0 → push → cap=1  \n    cap=1 → push → cap=2  \n    cap=2 → push → cap=4  \n    cap=4 → push → cap=8  \n```  \n  \n## Higher-Order Methods  \n  \nVector provides callback-based operations for functional-style iteration,  \nfiltering, transformation, and aggregation:  \n  \n| Method       | Signature                                     | Description                           |  \n|------------- |-----------------------------------------------|---------------------------------------|  \n| `forEach`    | `(&T) -> void`                                | Iterate elements by immutable ref     |  \n| `forEachMut` | `(&mut T) -> void`                            | Iterate elements by mutable ref       |  \n| `filter`     | `(&T) -> boolean` → `Vector<T>`               | Keep matching elements                |  \n| `any`        | `(&T) -> boolean` → `boolean`                 | Short-circuit existential check       |  \n| `all`        | `(&T) -> boolean` → `boolean`                 | Short-circuit universal check         |  \n| `findIndex`  | `(&T) -> boolean` → `Option<u64>`             | Index of first match                  |  \n| `count`      | `(&T) -> boolean` → `u64`                     | Count matching elements               |  \n| `reduce`     | `(T, &T) -> T` → `Option<T>`                 | Fold without initial value            |  \n| `sort`       | `(&T, &T) -> i32`                             | In-place insertion sort               |  \n| `map<U>`     | `(&T) -> U` → `Vector<U>`                    | Transform each element                |  \n| `fold<U>`    | `U, (U, &T) -> U` → `U`                      | Fold with initial value               |  \n  \nAll callbacks are `@noescape`: the closure must not outlive the method call.  \n  \n## Safety Notes  \n  \nThis container performs manual memory management and raw pointer writes.  \nIt does not run element destructors automatically.  \n  \nThe vector implements `Drop` and will automatically release its backing  \nstorage when it goes out of scope.  \n  \n## Example  \n  \n```ignis  \nimport Vector from \"std::vector\";  \nimport String from \"std::string\";  \nimport Io from \"std::io\";  \n  \nfunction main(): i32 {  \n  let mut values: Vector<i32> = Vector::new<i32>();  \n  values.push(10);  \n  values.push(20);  \n  values.push(30);  \n  \n  // Functional-style: double every even element, then sum  \n  let sum: i32 = values  \n    .filter((x: &i32): boolean -> { return *x % 2 == 0; })  \n    .map<i32>((x: &i32): i32 -> { return *x * 2; })  \n    .fold<i32>(0, (acc: i32, x: &i32): i32 -> { return acc + *x; });  \n  \n  // Vector is automatically dropped here  \n  return 0;  \n}  \n```"
+    },
+    {
+      "name": "std::web",
+      "doc": "  \n# Web  \n  \nA minimally opinionated web framework in the spirit of Express, built on  \n`std::http`. Middleware and routes take the request, the response and the  \nnext function, and return `Result<void, Web::Error>`; an error that  \nreaches the router becomes a response with its status.  \n  \n## Exports  \n  \n| Export              | Description                                                         |  \n|---------------------|---------------------------------------------------------------------|  \n| `Web::Router`       | `new()`, `use`, `get`, `post`, `put`, `patch`, `delete`, `any`, `route`, `dispatch`; implements `Http::Handler` |  \n| `Web::App`          | Trait: `build(&self): Web::Router`, called once per server thread   |  \n| `Web::serve`        | Binds an address and serves an app on `ServerConfig.threads` threads |  \n| `Web::serveListener` | Serves an app on a listener already bound                          |  \n| `Web::Middleware`   | `(&mut Request, &mut Response, Next) -> Result<void, Error>`        |  \n| `Web::Next`         | `(&mut Request, &mut Response) -> Result<void, Error>`              |  \n| `Web::Request`      | `http`; `create(&http)`, `method()`, `target()`, `path()`, `header(name)`, `body()`, `bodyText()`, `param(name)`, `query(name)` |  \n| `Web::Response`     | `status`, `headers`, `body`; `new()`, `setStatus`, `header`, `setHeader`, `addHeader`, `write`, `writeStr`, `text`, `json`, `finish` |  \n| `Web::Error`        | `status`, `message`; `new(message)` (500), `withStatus(status, message)` |  \n| `Web::Param`        | One route parameter: `name` and decoded `value`                     |  \n  \n## Middleware and routes  \n  \nBoth have the `Web::Middleware` shape. A middleware added with `use`  \nruns for every request, in the order it was added, before the routes.  \nCalling `next` runs the rest of the chain and returns once it finished,  \nso code after `next` runs on the way back out (the onion model), and an  \nerror from `next` propagates with `!` like any other. `next` takes the  \nrequest and the response back as arguments: a closure holding them would  \nkeep them borrowed for as long as it lives.  \n  \nA middleware that does not call `next` ends the chain; returning an  \nerror does too. A route that calls `next` passes the request to the next  \nroute that matches it; when there is none, the answer is 404.  \n  \n## Routing  \n  \nA route matches by method and path. `get` also answers `HEAD` (the  \nserver sends the head without the body); `any` answers every method;  \n`route` takes any method name as written on the request line.  \n  \nThe path is compared segment by segment, before any `?` and without  \ndecoding. A segment `:name` matches any non-empty segment and makes its  \npercent-decoded value available as `request.param(\"name\")`; any other  \nsegment matches only itself. Every segment counts, so a trailing slash  \nis significant: `/users/:id` matches `/users/7` but not `/users/7/`, and  \n`/users/` does not match `/users`. A parameter that is not valid  \npercent-encoded UTF-8 is answered with 400.  \n  \nWhen no route matches, the answer is 404. When some route matches the  \npath but none its method, the answer is 405 with an `Allow` header  \nlisting the methods that would match. Both run through the middleware  \nas errors, so a logger sees them.  \n  \n`request.query(\"name\")` decodes the first query parameter with that  \nname: `+` is a space, `%XX` an escaped byte, and a parameter written  \nwithout `=` has an empty value. A value that is not valid  \npercent-encoded UTF-8 is `NONE`.  \n  \n## Errors  \n  \n`Web::Error` carries a status (500 by default) and a message. The router  \nanswers an error with that status, `Content-Type: text/plain;  \ncharset=utf-8` and the message as the body, keeping header fields that  \nwere already set. Client input never makes the router panic.  \n  \n## Threads  \n  \nFunction values are neither `Send` nor `Sync`, so a router cannot be  \nshared between threads. An application is a record implementing  \n`Web::App`; `Web::serve` shares it among `ServerConfig.threads` threads,  \neach of which calls `build` once and serves its connections with its own  \nrouter through `Http::acceptConnections`. State shared by every thread  \nlives in the app record and has to be `Send` and `Sync`, behind an `Arc`,  \na `Mutex` or an atomic.  \n  \nA router is also an `Http::Handler`, so `Http::serveConnection` serves  \none connection with it, which is how a test drives it.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport Io from \"std::io\";  \nimport IpAddress, SocketAddress from \"std::net\";  \nimport String from \"std::string\";  \nimport Web from \"std::web\";  \n  \nfunction logger(  \n  request: &mut Web::Request,  \n  response: &mut Web::Response,  \n  next: Web::Next  \n): Result<void, Web::Error> {  \n  let result: Result<void, Web::Error> = next(request, response);  \n  Io::println(`${request.method().toString()} ${request.path()} ${response.status}`);  \n  return result;  \n}  \n  \nfunction showUser(  \n  request: &mut Web::Request,  \n  response: &mut Web::Response,  \n  next: Web::Next  \n): Result<void, Web::Error> {  \n  let Option::SOME(id) = request.param(\"id\") else {  \n    return Result::ERROR(Web::Error::withStatus(400, \"missing id\"));  \n  };  \n  \n  let text: String = String::create(id);  \n  \n  if (text.equals(\"0\")) {  \n    return Result::ERROR(Web::Error::withStatus(404, \"no such user\"));  \n  }  \n  \n  response.text(`user ${id}`);  \n  return Result::OK(());  \n}  \n  \n@implements(Web::App)  \nrecord Users {  \n  public greeting: str;  \n  \n  build(&self): Web::Router {  \n    let greeting: str = self.greeting;  \n    let mut router: Web::Router = Web::Router::new();  \n    router.use(logger);  \n    router.get(  \n      \"/\",  \n      (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {  \n        response.text(greeting);  \n        return Result::OK(());  \n      },  \n    );  \n    router.get(\"/users/:id\", showUser);  \n    return router;  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);  \n  let app: Users = Users { greeting: \"hello\" };  \n  \n  return Web::serve<Users>(&address, Http::ServerConfig::new(), app).isOk() ? 0 : 1;  \n}  \n```"
+    },
+    {
+      "name": "std::web::request",
+      "doc": "What routes and middleware see: `Web::Request`, a view of the HTTP  \nrequest with its route parameters and query string, `Web::Response`, the  \nanswer they build, and `Web::Error`, the error that stops a chain."
+    },
+    {
+      "name": "std::web::router",
+      "doc": "The router: `Web::Router` runs middleware and routes for one request,  \n`Web::App` builds a router for every server thread, and `Web::serve`  \nruns the server."
     }
   ],
   "items": [
@@ -5393,7 +5405,7 @@
           "name": "run",
           "kind": "method",
           "signature": "run(self, handler: H): Result<void, IoError>",
-          "doc": "Serves connections with `handler` on `config.threads` threads.  \n  \nEach thread accepts a connection, serves it with `serveConnection`  \nand accepts the next one. An error on a connection ends only that  \nconnection. A thread stops when `accept` fails, and `run` returns  \nonce every thread stopped, with the first thread's error. There is  \nno way to stop a running server yet, so in practice `run` blocks for  \nas long as the process lives."
+          "doc": "Serves connections with `handler` on `config.threads` threads.  \n  \nEach thread runs `acceptConnections`: it accepts a connection,  \nserves it with `serveConnection` and accepts the next one. An error on a connection ends only that  \nconnection. A thread stops when `accept` fails, and `run` returns  \nonce every thread stopped, with the first thread's error. There is  \nno way to stop a running server yet, so in practice `run` blocks for  \nas long as the process lives."
         }
       ]
     },
@@ -5437,6 +5449,15 @@
           "doc": "The default configuration."
         }
       ]
+    },
+    {
+      "module": "std::http::server",
+      "path": "std::http::server::Http::acceptConnections",
+      "name": "acceptConnections",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function acceptConnections<H>(listener: &TcpListener, handler: &H, config: &ServerConfig): IoError",
+      "doc": "Accepts connections on `listener` and serves each in turn with  \n`handler` on the calling thread, until `accept` reports that the  \nlistener itself is unusable; returns that error.  \n  \nEvery thread of `Server::run` runs this loop. Calling it directly on  \nthreads of your own gives each thread its own handler, for state that  \nis not `Send` or `Sync` (`std::web` builds one router per thread this  \nway); the listener is shared, for example through an `Arc`.  \n  \nAny other `accept` failure concerns one connection or a passing  \nshortage (a client that reset before it was accepted, no descriptors  \nleft), so the loop keeps going; after a shortage it waits briefly  \ninstead of spinning. An error on one connection only ends that  \nconnection."
     },
     {
       "module": "std::http::server",
@@ -5489,15 +5510,6 @@
     },
     {
       "module": "std::http::server",
-      "path": "std::http::server::acceptLoop",
-      "name": "acceptLoop",
-      "kind": "function",
-      "visibility": "private",
-      "signature": "function acceptLoop<H>(listener: &TcpListener, handler: &H, config: &ServerConfig): IoError",
-      "doc": "One worker of `Server::run`: accepts connections and serves each in turn  \nuntil `accept` reports that the listener itself is unusable, and returns  \nthat error.  \n  \nAny other `accept` failure concerns one connection or a passing shortage  \n(a client that reset before it was accepted, no descriptors left), so the  \nworker keeps going; after a shortage it waits briefly instead of spinning."
-    },
-    {
-      "module": "std::http::server",
       "path": "std::http::server::appendBytes",
       "name": "appendBytes",
       "kind": "function",
@@ -5517,7 +5529,7 @@
       "path": "std::http::server::isUtf8",
       "name": "isUtf8",
       "kind": "function",
-      "visibility": "private",
+      "visibility": "public",
       "signature": "function isUtf8(bytes: &Vector<u8>): boolean",
       "doc": "Whether `bytes` is well-formed UTF-8: no truncated or overlong sequence,  \nno surrogate and nothing above U+10FFFF."
     },
@@ -21039,6 +21051,590 @@
           "doc": "Returns a non-owning slice view over initialized elements.  \n  \nThe returned `T[]` borrows the vector storage. It does not own, copy, or  \nextend the lifetime of the elements. Do not mutate the vector in a way  \nthat may reallocate while the slice is live."
         }
       ]
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::Web",
+      "name": "Web",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Web",
+      "doc": "Request and response types of the framework."
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::Web::Error",
+      "name": "Error",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Error",
+      "doc": "The error a route or middleware returns to stop the chain. The router  \nanswers it with `status` and `message` as a plain-text body.",
+      "members": [
+        {
+          "name": "status",
+          "kind": "field",
+          "signature": "status: u16"
+        },
+        {
+          "name": "message",
+          "kind": "field",
+          "signature": "message: String"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(message: str): Error",
+          "doc": "An error answered with 500."
+        },
+        {
+          "name": "withStatus",
+          "kind": "method",
+          "signature": "static withStatus(status: u16, message: str): Error",
+          "doc": "An error answered with `status`, 404 or 401 for example."
+        }
+      ]
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::Web::Param",
+      "name": "Param",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Param",
+      "doc": "One route parameter: the name after `:` in the route path and the  \ndecoded segment it matched.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String"
+        },
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: String"
+        }
+      ]
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::Web::Request",
+      "name": "Request",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Request",
+      "doc": "The request as a route or middleware sees it: the HTTP request, the  \nparameters of the route that matched, and its query string.",
+      "members": [
+        {
+          "name": "http",
+          "kind": "field",
+          "signature": "http: &Request",
+          "doc": "The request the server parsed."
+        },
+        {
+          "name": "pathEnd",
+          "kind": "field",
+          "signature": "pathEnd: u64",
+          "doc": "End of the path within the target: the `?` or the target's length."
+        },
+        {
+          "name": "pathText",
+          "kind": "field",
+          "signature": "pathText: String"
+        },
+        {
+          "name": "params",
+          "kind": "field",
+          "signature": "params: Vector<Param>"
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(http: &Request): Request",
+          "doc": "A view of `http` without route parameters."
+        },
+        {
+          "name": "body",
+          "kind": "method",
+          "signature": "body(&self): &Vector<u8>",
+          "doc": "The request body."
+        },
+        {
+          "name": "bodyText",
+          "kind": "method",
+          "signature": "bodyText(&self): Option<String>",
+          "doc": "A copy of the body as text, or `NONE` when it is not valid UTF-8."
+        },
+        {
+          "name": "header",
+          "kind": "method",
+          "signature": "header(&self, name: str): Option<str>",
+          "doc": "The value of the first header field named `name`, ignoring ASCII case."
+        },
+        {
+          "name": "method",
+          "kind": "method",
+          "signature": "method(&self): &Method",
+          "doc": "The request method."
+        },
+        {
+          "name": "param",
+          "kind": "method",
+          "signature": "param(&self, name: str): Option<str>",
+          "doc": "The decoded value of the route parameter `name` (`:name` in the  \nroute path), or `NONE` when the matched route has none."
+        },
+        {
+          "name": "path",
+          "kind": "method",
+          "signature": "path(&self): str",
+          "doc": "The path part of the target, before any `?`, not decoded."
+        },
+        {
+          "name": "query",
+          "kind": "method",
+          "signature": "query(&self, name: str): Option<String>",
+          "doc": "The decoded value of the first query parameter `name`, or `NONE`  \nwhen the query has none or its value is not valid percent-encoded  \nUTF-8. `+` decodes to a space; a parameter without `=` has an empty  \nvalue."
+        },
+        {
+          "name": "setParams",
+          "kind": "method",
+          "signature": "setParams(&mut self, params: Vector<Param>): void",
+          "doc": "Replaces the route parameters. The router calls it for each route it  \ntries."
+        },
+        {
+          "name": "target",
+          "kind": "method",
+          "signature": "target(&self): str",
+          "doc": "The request target as received, `/users/7?full=1` for example."
+        }
+      ]
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::Web::Response",
+      "name": "Response",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Response",
+      "doc": "The answer routes and middleware build: status 200, no header fields  \nand an empty body until they change them. The server adds  \n`Content-Length` itself, as `Http::Response` describes.",
+      "members": [
+        {
+          "name": "status",
+          "kind": "field",
+          "signature": "status: u16"
+        },
+        {
+          "name": "headers",
+          "kind": "field",
+          "signature": "headers: Headers"
+        },
+        {
+          "name": "body",
+          "kind": "field",
+          "signature": "body: Vector<u8>"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Response",
+          "doc": "An empty 200 response."
+        },
+        {
+          "name": "addHeader",
+          "kind": "method",
+          "signature": "addHeader(&mut self, name: str, value: str): void",
+          "doc": "Appends a header field, keeping any with the same name."
+        },
+        {
+          "name": "finish",
+          "kind": "method",
+          "signature": "finish(self, target: &mut Response): void",
+          "doc": "Moves the status, header fields and body into `target`."
+        },
+        {
+          "name": "header",
+          "kind": "method",
+          "signature": "header(&self, name: str): Option<str>",
+          "doc": "The value of the first header field named `name`, ignoring ASCII case."
+        },
+        {
+          "name": "json",
+          "kind": "method",
+          "signature": "json(&mut self, value: &JsonValue): void",
+          "doc": "Replaces the body with `value` as compact JSON and sets  \n`Content-Type` to `application/json`."
+        },
+        {
+          "name": "setHeader",
+          "kind": "method",
+          "signature": "setHeader(&mut self, name: str, value: str): void",
+          "doc": "Replaces every header field named `name` with one holding `value`."
+        },
+        {
+          "name": "setStatus",
+          "kind": "method",
+          "signature": "setStatus(&mut self, status: u16): void",
+          "doc": "Sets the status."
+        },
+        {
+          "name": "text",
+          "kind": "method",
+          "signature": "text(&mut self, text: String): void",
+          "doc": "Replaces the body with `text` and sets `Content-Type` to  \n`text/plain; charset=utf-8`."
+        },
+        {
+          "name": "text",
+          "kind": "method",
+          "signature": "text(&mut self, text: str): void",
+          "doc": "Replaces the body with `text` and sets `Content-Type` to  \n`text/plain; charset=utf-8`."
+        },
+        {
+          "name": "write",
+          "kind": "method",
+          "signature": "write(&mut self, bytes: &Vector<u8>): void",
+          "doc": "Appends `bytes` to the body."
+        },
+        {
+          "name": "writeStr",
+          "kind": "method",
+          "signature": "writeStr(&mut self, text: str): void",
+          "doc": "Appends the bytes of `text` to the body."
+        }
+      ]
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::findByte",
+      "name": "findByte",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function findByte(text: &String, byte: u8, start: u64, end: u64): u64",
+      "doc": "The byte index of the first `byte` in `text` from `start` to `end`, or  \n`end` when there is none."
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::hexValue",
+      "name": "hexValue",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function hexValue(byte: u8): Option<u8>"
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::percentDecode",
+      "name": "percentDecode",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function percentDecode(text: &String, start: u64, end: u64, plusIsSpace: boolean): Option<String>",
+      "doc": "Decodes `%XX` escapes in the bytes of `text` from `start` to `end`, and  \n`+` as a space when `plusIsSpace`. `NONE` when an escape is not two hex  \ndigits or the result is not UTF-8."
+    },
+    {
+      "module": "std::web::request",
+      "path": "std::web::request::spells",
+      "name": "spells",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function spells(text: &String, start: u64, end: u64, name: str): boolean",
+      "doc": "Whether the bytes of `text` from `start` to `end` spell `name`."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Layer",
+      "name": "Layer",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Layer",
+      "doc": "One registered middleware. Kept in a record rather than as a bare  \nfunction value so that `Vector<Layer>` has a short name: the QBE backend  \nspells a `Vector` of a function type out in full, and QBE rejects  \nidentifiers longer than 80 bytes.",
+      "members": [
+        {
+          "name": "handler",
+          "kind": "field",
+          "signature": "handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>"
+        }
+      ]
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Route",
+      "name": "Route",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Route",
+      "doc": "One registered route.",
+      "members": [
+        {
+          "name": "method",
+          "kind": "field",
+          "signature": "method: String",
+          "doc": "The method it answers, empty for `any`."
+        },
+        {
+          "name": "segments",
+          "kind": "field",
+          "signature": "segments: Vector<String>"
+        },
+        {
+          "name": "handler",
+          "kind": "field",
+          "signature": "handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>"
+        }
+      ]
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Web",
+      "name": "Web",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Web",
+      "doc": "The router, the application and the server entry points."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Web::App",
+      "name": "App",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait App",
+      "doc": "An application: builds the router every server thread uses. It is  \nshared by all threads, so it has to be `Send` and `Sync`; the routers  \nit builds are not shared.",
+      "members": [
+        {
+          "name": "build",
+          "kind": "method",
+          "signature": "build(&self): Router"
+        }
+      ]
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Web::Middleware",
+      "name": "Middleware",
+      "kind": "type_alias",
+      "visibility": "private",
+      "signature": "type Middleware = fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>",
+      "doc": "A middleware or a route: the request, the response and the rest of  \nthe chain."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Web::Next",
+      "name": "Next",
+      "kind": "type_alias",
+      "visibility": "private",
+      "signature": "type Next = fn(&mut Request, &mut Response) -> Result<void, Error>",
+      "doc": "What a middleware or route calls to run the rest of the chain. It  \nreturns once the rest of the chain did, with its error if it failed."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Web::Router",
+      "name": "Router",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Router",
+      "doc": "Middleware and routes for one thread. A router holds function values,  \nwhich are neither `Send` nor `Sync`, so it never leaves the thread  \nthat built it; `Web::App` builds one per server thread.",
+      "members": [
+        {
+          "name": "layers",
+          "kind": "field",
+          "signature": "layers: Vector<Layer>"
+        },
+        {
+          "name": "routes",
+          "kind": "field",
+          "signature": "routes: Vector<Route>"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Router",
+          "doc": "A router without middleware or routes: it answers every request  \nwith 404."
+        },
+        {
+          "name": "allowedMethods",
+          "kind": "method",
+          "signature": "allowedMethods(&self, segments: &Vector<String>): String",
+          "doc": "The methods of the routes whose path matches `segments`, in the  \norder they were added, as an `Allow` value. A `GET` route allows  \n`HEAD` too."
+        },
+        {
+          "name": "any",
+          "kind": "method",
+          "signature": "any(&mut self, path: str, handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a route for requests to `path` with any method."
+        },
+        {
+          "name": "delete",
+          "kind": "method",
+          "signature": "delete(&mut self, path: str, handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a route for `DELETE` requests to `path`."
+        },
+        {
+          "name": "dispatch",
+          "kind": "method",
+          "signature": "dispatch(&self, request: &mut Request, response: &mut Response): Result<void, Error>",
+          "doc": "Runs the middleware and then the routes for `request`. Returns the  \nerror that reached the router, for a caller that answers it itself;  \n`handle` answers it with its status."
+        },
+        {
+          "name": "get",
+          "kind": "method",
+          "signature": "get(&mut self, path: str, handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a route for `GET` (and `HEAD`) requests to `path`."
+        },
+        {
+          "name": "handle",
+          "kind": "method",
+          "signature": "handle(&self, request: &Request, response: &mut Response): void",
+          "doc": "Answers `request` through `dispatch`. An error that reaches the  \nrouter becomes a response with its status and its message as a  \nplain-text body; header fields already set stay."
+        },
+        {
+          "name": "patch",
+          "kind": "method",
+          "signature": "patch(&mut self, path: str, handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a route for `PATCH` requests to `path`."
+        },
+        {
+          "name": "post",
+          "kind": "method",
+          "signature": "post(&mut self, path: str, handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a route for `POST` requests to `path`."
+        },
+        {
+          "name": "put",
+          "kind": "method",
+          "signature": "put(&mut self, path: str, handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a route for `PUT` requests to `path`."
+        },
+        {
+          "name": "route",
+          "kind": "method",
+          "signature": "route(&mut self, method: str, path: str, handler: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a route for `method`, written as it appears on the request  \nline (`OPTIONS`, `PURGE`), or every method when it is empty."
+        },
+        {
+          "name": "runLayer",
+          "kind": "method",
+          "signature": "runLayer(&self, index: u64, request: &mut Request, response: &mut Response): Result<void, Error>"
+        },
+        {
+          "name": "runRoute",
+          "kind": "method",
+          "signature": "runRoute(&self, start: u64, segments: &Vector<String>, request: &mut Request, response: &mut Response): Result<void, Error>",
+          "doc": "Runs the first route from `start` on that matches the request, with  \na `next` that continues from the route after it. When none is left,  \nthe request is answered with 404, or with 405 and `Allow` when no  \nroute matched its method but some matched its path."
+        },
+        {
+          "name": "use",
+          "kind": "method",
+          "signature": "use(&mut self, middleware: fn(&mut Request, &mut Response, fn(&mut Request, &mut Response) -> Result<void, Error>) -> Result<void, Error>): void",
+          "doc": "Adds a middleware. Middleware runs for every request, matched or  \nnot, in the order it was added, before any route."
+        }
+      ]
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Web::serve",
+      "name": "serve",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function serve<A>(address: &SocketAddress, config: ServerConfig, app: A): Result<void, IoError>",
+      "doc": "Binds `address` and serves `app` on `config.threads` threads, as  \n`serveListener` does."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::Web::serveListener",
+      "name": "serveListener",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function serveListener<A>(listener: TcpListener, config: ServerConfig, app: A): Result<void, IoError>",
+      "doc": "Serves `app` on `listener` with `config.threads` threads (0 counts as  \n1). Each thread calls `app.build()` once and serves its connections  \nwith that router through `Http::acceptConnections`. Returns once  \nevery thread stopped, with the first thread's error; like  \n`Http::Server::run`, in practice it blocks for as long as the process  \nlives."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::__closure_drop_0",
+      "name": "__closure_drop_0",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_drop_0(__closure_drop_env_0: *mut u8): void"
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::__closure_drop_1",
+      "name": "__closure_drop_1",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_drop_1(__closure_drop_env_1: *mut u8): void"
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::__closure_drop_2",
+      "name": "__closure_drop_2",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_drop_2(__closure_drop_env_2: *mut u8): void"
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::__closure_thunk_0",
+      "name": "__closure_thunk_0",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_thunk_0(__closure_env_0: *mut u8, innerRequest: &mut Request, innerResponse: &mut Response): Result<void, Error>"
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::__closure_thunk_1",
+      "name": "__closure_thunk_1",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_thunk_1(__closure_env_1: *mut u8, innerRequest: &mut Request, innerResponse: &mut Response): Result<void, Error>"
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::__closure_thunk_2",
+      "name": "__closure_thunk_2",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_thunk_2(__closure_env_2: *mut u8): IoError"
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::addMethod",
+      "name": "addMethod",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function addMethod(methods: &mut Vector<String>, method: &String): void",
+      "doc": "Appends `method` to `methods` unless it is already there. An empty  \nmethod (a route for any method) is skipped: such a route matches every  \nmethod, so it never leads to a 405."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::isParameter",
+      "name": "isParameter",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isParameter(segment: &String): boolean",
+      "doc": "Whether `segment` of a route path is a parameter, `:name`."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::matchSegments",
+      "name": "matchSegments",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function matchSegments(pattern: &Vector<String>, segments: &Vector<String>): Result<Option<Vector<Param>>, Error>",
+      "doc": "Matches the route `pattern` against the request `segments`. `OK(NONE)`  \nwhen the path does not match, `OK(SOME(params))` with the decoded  \nparameters when it does, and a 400 error when a parameter is not valid  \npercent-encoded UTF-8."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::methodMatches",
+      "name": "methodMatches",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function methodMatches(method: &String, requested: &String): boolean",
+      "doc": "Whether a route with `method` (empty for `any`) answers `requested`. A  \n`HEAD` request is answered by `GET` routes."
+    },
+    {
+      "module": "std::web::router",
+      "path": "std::web::router::pathSegments",
+      "name": "pathSegments",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pathSegments(path: &String): Vector<String>",
+      "doc": "The segments of a path: the parts between `/` after the leading one.  \n`/` has one empty segment and `/users/` ends with one. A path that does  \nnot start with `/`, such as `*`, has none and matches no route."
     }
   ]
 }

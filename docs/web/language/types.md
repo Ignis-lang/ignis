@@ -17,7 +17,7 @@ infers within an expression rather than across one.
 | Unsigned integers | `u8`, `u16`, `u32`, `u64` |
 | Floating point | `f32`, `f64` |
 | Boolean | `boolean` |
-| Text | `char`, `str` |
+| Text | `char`, `str`, `static str` |
 | Labels | `atom` |
 | Unit and bottom | `void`, `never` |
 
@@ -26,6 +26,15 @@ infers within an expression rather than across one.
 `str` is a UTF-8 byte string slice. `char` is one Unicode scalar value — not a byte, and not a
 grapheme cluster. A character literal that resolves to zero scalars, more than one scalar, or a
 surrogate escape is rejected at compile time.
+
+`static str` is the type of a string literal or a compile-time string such as `@typeName<T>()`,
+stored where it can live for the whole program: a field, a static, a container. It shares the
+representation of `str` and converts to `str` wherever a `str` is expected, but never the other way:
+a `str` supplied where `static str` is required is an error (A0263). A literal takes the type
+`static str` only where that type is expected, as in `let name: static str = "a";` or a
+`Vector<static str>` element; elsewhere it is a `str`. For now the type only adds that
+conversion: the checks that stop a `str` view from being stored past its owner come in a later
+release.
 
 `String` is the owned, heap-backed counterpart. A template literal — `` `hello ${name}` `` —
 produces one; see [Template literals](/language/template-literals).
@@ -91,7 +100,8 @@ rather than copies. Everywhere else you can treat them as types like any other.
 
 | Type | Comes from | Use it for |
 | --- | --- | --- |
-| `str` | The language | A borrowed, immutable string — every string literal is one |
+| `str` | The language | A borrowed, immutable string |
+| `static str` | The language | A string literal stored anywhere; converts to `str` |
 | `String` | `std::string` | An owned, growable string you can mutate |
 | `T[N]` | The language | A fixed-size sequence, sized at compile time |
 | `T[]` | The language | A read-only view of elements stored elsewhere |
