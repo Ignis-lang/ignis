@@ -1,0 +1,903 @@
+import Test from "std::test";
+
+import DiagnosticBag, Severity, SourceFile, SourceMap from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import Id from "@compiler::ids";
+import ParseOutput, Parser from "@compiler::parser";
+
+import _ from "./view_type";
+import Lowering from "./lowering";
+import Capture from "./capture";
+
+// ─── Fixture helpers ──────────────────────────────────────────────────────────
+
+/// Creates a record definition whose fields have the given types, and returns
+/// the record's definition id. The fields are pushed first (their owner is the
+/// id the record definition is about to get) and the record definition last.
+function viewTestRecordDef(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+  fieldTypes: Vector<Analyzer::TypeId>,
+): Analyzer::DefinitionId {
+  let recordId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>((defs.length() + fieldTypes.length()) as u32);
+  let typeId: Analyzer::TypeId = store.recordType(recordId);
+  let sym: Analyzer::SymbolId = syms.intern(name);
+
+  let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut index: u64 = 0;
+
+  while (index < fieldTypes.length()) {
+    if (let Option::SOME(fieldType) = fieldTypes.get(index)) {
+      fields.push(defs.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+        name: syms.intern("field"),
+        fieldType: *fieldType,
+        owner: recordId,
+        index: index as u32,
+        alignment: Option::NONE,
+      })));
+    }
+
+    index += 1;
+  }
+
+  let pushedId: Analyzer::DefinitionId = defs.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: fields,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: typeId,
+    implementsCopy: false,
+    implementsDrop: false,
+    implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
+    cLayout: false,
+    isExtern: false,
+  }));
+
+  Test::assertEq<u32>(pushedId.raw(), recordId.raw());
+
+  return pushedId;
+}
+
+/// Replaces an existing record definition's fields (used for recursive
+/// records, whose self-referential field type needs the record's own type id).
+function viewTestSetRecordFields(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+  defId: Analyzer::DefinitionId,
+  fieldTypes: Vector<Analyzer::TypeId>,
+): void {
+  let sym: Analyzer::SymbolId = syms.intern(name);
+
+  let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut index: u64 = 0;
+
+  while (index < fieldTypes.length()) {
+    if (let Option::SOME(fieldType) = fieldTypes.get(index)) {
+      fields.push(defs.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+        name: syms.intern("field"),
+        fieldType: *fieldType,
+        owner: defId,
+        index: index as u32,
+        alignment: Option::NONE,
+      })));
+    }
+
+    index += 1;
+  }
+
+  defs.replace(defId, Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: fields,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: store.recordType(defId),
+    implementsCopy: false,
+    implementsDrop: false,
+    implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
+    cLayout: false,
+    isExtern: false,
+  }));
+}
+
+/// Creates an enum definition whose variants carry the given payload types
+/// (one variant per entry), and returns the enum's definition id.
+function viewTestEnumDef(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+  variantPayloads: Vector<Vector<Analyzer::TypeId>>,
+): Analyzer::DefinitionId {
+  let sym: Analyzer::SymbolId = syms.intern(name);
+  let defId: Analyzer::DefinitionId = defs.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    tryCapable: Option::NONE,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: store.enumType(Id::fromRaw<Analyzer::DefinitionTag>(defs.length() as u32)),
+    implementsCopy: false,
+    implementsDrop: false,
+    implementedTraits: Vector::new<String>(),
+  }));
+
+  let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut tagValue: u32 = 0;
+  let mut index: u64 = 0;
+
+  while (index < variantPayloads.length()) {
+    let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(entry) = variantPayloads.get(index)) {
+      let mut payloadIndex: u64 = 0;
+
+      while (payloadIndex < entry.length()) {
+        if (let Option::SOME(payloadType) = entry.get(payloadIndex)) {
+          payload.push(*payloadType);
+        }
+
+        payloadIndex += 1;
+      }
+    }
+
+    variants.push(defs.push(Analyzer::Definition::Variant(Analyzer::VariantDef {
+      name: syms.intern("VARIANT"),
+      payload: payload,
+      owner: defId,
+      tagValue: tagValue,
+    })));
+
+    tagValue += 1;
+    index += 1;
+  }
+
+  defs.replace(defId, Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: variants,
+    tryCapable: Option::NONE,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: store.enumType(defId),
+    implementsCopy: false,
+    implementsDrop: false,
+    implementedTraits: Vector::new<String>(),
+  }));
+
+  return defId;
+}
+
+/// Creates a type alias definition targeting `aliasedType`.
+function viewTestAliasDef(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+  aliasedType: Analyzer::TypeId,
+): Analyzer::DefinitionId {
+  return defs.push(Analyzer::Definition::TypeAlias(Analyzer::TypeAliasDef {
+    name: syms.intern(name),
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    aliasedType: aliasedType,
+    typeId: store.aliasType(Id::fromRaw<Analyzer::DefinitionTag>(defs.length() as u32)),
+  }));
+}
+
+// ─── Type shapes ──────────────────────────────────────────────────────────────
+
+/// Scenario: `str` — what `toStr()` and slicing produce — is a view.
+/// Spec: S2.
+@test
+function viewTypeStrIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `static str` is not a view: a static string owns its bytes, so a
+/// record holding only one is storable anywhere.
+/// Spec: S2.
+@test
+function viewTypeStaticStrIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::STATIC_STR);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&T` is a view.
+/// Spec: S2.
+@test
+function viewTypeSharedReferenceIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.reference(idI32);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&mut T` is a view.
+/// Spec: S2.
+@test
+function viewTypeMutableReferenceIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a slice is a view.
+/// Spec: S2.
+@test
+function viewTypeSliceIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.slice(idI32);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a tuple with a view element is a view.
+/// Spec: S2.
+@test
+function viewTypeTupleWithViewElementIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  elements.push(idStr);
+
+  let id: Analyzer::TypeId = store.tuple(elements);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a tuple without view elements is not a view.
+/// Spec: S2 (a tuple is a view only through its fields).
+@test
+function viewTypeTupleWithoutViewElementIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  elements.push(idI32);
+
+  let id: Analyzer::TypeId = store.tuple(elements);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a reference field is a view.
+/// Spec: S2.
+@test
+function viewTypeRecordWithReferenceFieldIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idRef: Analyzer::TypeId = store.reference(idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idRef);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a `str` field is a view: `str` is the view type
+/// `toStr()` produces.
+/// Spec: S2.
+@test
+function viewTypeRecordWithStrFieldIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idStr);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Named", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record whose only string field is `static str` is not a view:
+/// a static string owns its bytes, so the record is storable anywhere.
+/// Spec: S2.
+@test
+function viewTypeRecordWithOnlyStaticStrFieldIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idStaticStr: Analyzer::TypeId = store.intern(Analyzer::Type::STATIC_STR);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idStaticStr);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Label", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum payload holding a reference makes the enum a view
+/// (`Option<&T>`).
+/// Spec: S2.
+@test
+function viewTypeEnumWithViewPayloadIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idRef: Analyzer::TypeId = store.reference(idI32);
+
+  let mut somePayload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  somePayload.push(idRef);
+
+  let mut payloads: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  payloads.push(somePayload);
+  payloads.push(Vector::new<Analyzer::TypeId>());
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "OptRef", payloads);
+  let id: Analyzer::TypeId = store.enumType(defId);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum with no view payloads is not a view.
+/// Spec: S2.
+@test
+function viewTypeEnumWithoutViewPayloadIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut payloads: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  payloads.push(Vector::new<Analyzer::TypeId>());
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Choice", payloads);
+  let id: Analyzer::TypeId = store.enumType(defId);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a generic instance with a view type argument is a view
+/// (`Option<&T>`).
+/// Spec: S2.
+@test
+function viewTypeInstanceWithViewArgumentIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idRef: Analyzer::TypeId = store.reference(idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idRef);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a generic instance with a `static str` argument is not a view:
+/// the instance's own view-ness follows its arguments, and `static str` owns
+/// its bytes (`Vector<static str>` of literals is storable anywhere).
+/// Spec: S2.
+@test
+function viewTypeInstanceWithStaticStrArgumentIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idStaticStr: Analyzer::TypeId = store.intern(Analyzer::Type::STATIC_STR);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Vector", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idStaticStr);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a generic instance with a non-view argument is not a view
+/// (`Vector<i32>`).
+/// Spec: S2.
+@test
+function viewTypeInstanceWithPrimitiveArgumentIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Vector", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a fixed array of views is a view, since its elements are views
+/// the aggregate carries.
+/// Spec: S2.
+@test
+function viewTypeFixedArrayOfViewsIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idRef: Analyzer::TypeId = store.reference(idI32);
+  let id: Analyzer::TypeId = store.fixedArray(idRef, 4);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a raw pointer is not a view: raw pointers and `extern` functions
+/// are the unchecked boundary (S5), and the predicate must not follow them.
+/// Spec: S2, S5.
+@test
+function viewTypePointerIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.pointer(idI32);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a function type is not a view at the type level. Capture
+/// information is a property of the closure value, not of the type (function
+/// types are interned structurally, so two same-signature closures share one
+/// type id); whether a concrete closure value is a view is
+/// `Analyzer::ViewType::closureIsView`, and aggregates with function-typed
+/// fields are decided at the node level by the enforcement passes (T4b/T4c).
+/// Spec: S2, L14.
+@test
+function viewTypeFunctionTypeIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params.push(idI32);
+
+  let id: Analyzer::TypeId = store.functionType(params, idI32);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a plain C function pointer is not a view either.
+/// Spec: S2, L14.
+@test
+function viewTypeRawFunctionTypeIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let id: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an unresolved generic parameter is not a view; the substituted
+/// type is what the predicate answers on after monomorphization.
+/// Spec: S2.
+@test
+function viewTypeParamIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = syms.intern("T");
+  let id: Analyzer::TypeId = store.param(sym);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias to a view is a view: aliases are transparent.
+/// Spec: S2.
+@test
+function viewTypeAliasToViewIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idRef: Analyzer::TypeId = store.reference(idI32);
+
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "RefOf", idRef);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias to `static str` is not a view.
+/// Spec: S2.
+@test
+function viewTypeAliasToStaticStrIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idStaticStr: Analyzer::TypeId = store.intern(Analyzer::Type::STATIC_STR);
+
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "Label", idStaticStr);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a recursive record whose only self-reference is through a raw
+/// pointer is not a view, and the recursion terminates.
+/// Spec: S2, S5.
+@test
+function viewTypeRecursiveRecordThroughPointerIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Node", Vector::new<Analyzer::TypeId>());
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let idPointer: Analyzer::TypeId = store.pointer(idRecord);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idPointer);
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "Node", defId, fields);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, idRecord));
+}
+
+/// Scenario: a recursive record holding a reference to itself is a view, and
+/// the recursion terminates instead of looping.
+/// Spec: S2.
+@test
+function viewTypeRecursiveRecordThroughViewFieldIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "SelfView", Vector::new<Analyzer::TypeId>());
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let idRef: Analyzer::TypeId = store.reference(idRecord);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idRef);
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "SelfView", defId, fields);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, idRecord));
+}
+
+/// Scenario: two records referencing each other through fields terminate on
+/// the revisit guard instead of looping.
+/// Spec: S2.
+@test
+function viewTypeMutuallyRecursiveRecordsTerminate(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idA: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "First", Vector::new<Analyzer::TypeId>());
+  let idB: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Second", Vector::new<Analyzer::TypeId>());
+
+  let typeIdA: Analyzer::TypeId = store.recordType(idA);
+  let typeIdB: Analyzer::TypeId = store.recordType(idB);
+
+  let mut fieldsA: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsA.push(typeIdB);
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "First", idA, fieldsA);
+
+  let mut fieldsB: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsB.push(typeIdA);
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "Second", idB, fieldsB);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, typeIdA));
+}
+
+// ─── Closure values ───────────────────────────────────────────────────────────
+
+/// Builds a closure value with the given captures.
+function viewTestClosure(captures: Vector<Hir::HirCapture>): Hir::HirClosure {
+  return Hir::HirClosure {
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: Id::fromRaw<Analyzer::TypeTag>(0),
+    body: Id::fromRaw<Hir::NodeTag>(0),
+    captures: captures,
+    escapes: false,
+    thunkDef: Option::NONE,
+    dropDef: Option::NONE,
+    captureOverrides: Vector::new<Hir::HirCaptureOverride>(),
+  };
+}
+
+function viewTestCapture(mode: Hir::CaptureMode): Hir::HirCapture {
+  return Hir::HirCapture {
+    sourceDef: Id::fromRaw<Analyzer::DefinitionTag>(0),
+    fieldIndex: 0,
+    mode: mode,
+    typeInEnv: Id::fromRaw<Analyzer::TypeTag>(0),
+  };
+}
+
+/// Scenario: a closure that captures nothing is not a view.
+/// Spec: S2, L14.
+@test
+function viewTypeClosureWithoutCapturesIsNotAView(): void {
+  let closure: Hir::HirClosure = viewTestClosure(Vector::new<Hir::HirCapture>());
+
+  Test::assert(!Analyzer::ViewType::closureIsView(&closure));
+}
+
+/// Scenario: a closure capturing by value is not a view: the closure owns its
+/// copy of the capture.
+/// Spec: S2, L14.
+@test
+function viewTypeClosureWithByValueCaptureIsNotAView(): void {
+  let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+  captures.push(viewTestCapture(Hir::CaptureMode::ByValue));
+
+  let closure: Hir::HirClosure = viewTestClosure(captures);
+
+  Test::assert(!Analyzer::ViewType::closureIsView(&closure));
+}
+
+/// Scenario: a closure capturing by shared reference is a view.
+/// Spec: S2, L14.
+@test
+function viewTypeClosureWithByRefCaptureIsAView(): void {
+  let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+  captures.push(viewTestCapture(Hir::CaptureMode::ByRef));
+
+  let closure: Hir::HirClosure = viewTestClosure(captures);
+
+  Test::assert(Analyzer::ViewType::closureIsView(&closure));
+}
+
+/// Scenario: a closure capturing by mutable reference is a view.
+/// Spec: S2, L14.
+@test
+function viewTypeClosureWithByMutRefCaptureIsAView(): void {
+  let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+  captures.push(viewTestCapture(Hir::CaptureMode::ByMutRef));
+
+  let closure: Hir::HirClosure = viewTestClosure(captures);
+
+  Test::assert(Analyzer::ViewType::closureIsView(&closure));
+}
+
+// ─── Pipeline: real closures through capture analysis ─────────────────────────
+
+record ViewTypePipelineClosures {
+  public total: u64;
+  public viewCount: u64;
+  public captureTotal: u64;
+  public byRefCount: u64;
+  public byMutRefCount: u64;
+  public byValueCount: u64;
+}
+
+/// Parses, analyzes, lowers and capture-analyzes `source`, then counts the
+/// closures in the resulting HIR and how many of them `closureIsView` flags.
+function viewTypePipelineClosures(source: str): ViewTypePipelineClosures {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "view_type_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  let lexErrors: u64 = countErrors(&parsed.lexDiagnostics);
+  let parseErrors: u64 = countErrors(&parsed.parseDiagnostics);
+
+  Test::assertEq<u64>(lexErrors, 0);
+  Test::assertEq<u64>(parseErrors, 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(countErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut hir,
+  );
+
+  Test::assertEq<u64>(countErrors(&captureDiagnostics), 0);
+
+  let mut total: u64 = 0;
+  let mut viewCount: u64 = 0;
+  let mut captureTotal: u64 = 0;
+  let mut byRefCount: u64 = 0;
+  let mut byMutRefCount: u64 = 0;
+  let mut byValueCount: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < hir.length()) {
+    if (let Option::SOME(node) = hir.get(Id::fromRaw<Hir::NodeTag>(index as u32))) {
+      if (let Hir::HirKind::Closure(closure) = &node.kind) {
+        total += 1;
+
+        if (Analyzer::ViewType::closureIsView(&closure)) {
+          viewCount += 1;
+        }
+
+        let mut captureIndex: u64 = 0;
+
+        while (captureIndex < closure.captures.length()) {
+          if (let Option::SOME(capture) = closure.captures.get(captureIndex)) {
+            captureTotal += 1;
+
+            match (&capture.mode) {
+              Hir::CaptureMode::ByRef -> {
+                byRefCount += 1;
+              },
+              Hir::CaptureMode::ByMutRef -> {
+                byMutRefCount += 1;
+              },
+              _ -> {
+                byValueCount += 1;
+              },
+            };
+          }
+
+          captureIndex += 1;
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return ViewTypePipelineClosures {
+    total: total,
+    viewCount: viewCount,
+    captureTotal: captureTotal,
+    byRefCount: byRefCount,
+    byMutRefCount: byMutRefCount,
+    byValueCount: byValueCount,
+  };
+}
+
+function countErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      if (diagnostic.severity == Severity::ERROR) {
+        count += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Scenario: the by-ref fixture is a clean program through parse, analysis,
+/// lowering and capture analysis.
+/// Spec: S2, L14.
+@test
+function viewTypePipelineByRefFixtureIsClean(): void {
+  let closures: ViewTypePipelineClosures = viewTypePipelineClosures(
+    "@implements(Drop)\nrecord Payload {\n  public id: u64;\n}\n\nfunction run(): u64 {\n  let payload: Payload = Payload { id: 7 };\n  let read = (): u64 -> {\n    return payload.id;\n  };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<u64>(closures.total, 1);
+}
+
+/// Scenario: `closureIsView` flags the closure as a view.
+/// Spec: S2, L14.
+@test
+function viewTypePipelineByRefCaptureIsAView(): void {
+  let closures: ViewTypePipelineClosures = viewTypePipelineClosures(
+    "@implements(Drop)\nrecord Payload {\n  public id: u64;\n}\n\nfunction run(): u64 {\n  let payload: Payload = Payload { id: 7 };\n  let read = (): u64 -> {\n    return payload.id;\n  };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<u64>(closures.viewCount, 1);
+}
+
+/// Scenario: capture analysis records the read of the non-Copy local as a
+/// by-reference capture.
+/// Spec: S2, L14.
+@test
+function viewTypePipelineByRefCaptureModeIsByRef(): void {
+  let closures: ViewTypePipelineClosures = viewTypePipelineClosures(
+    "@implements(Drop)\nrecord Payload {\n  public id: u64;\n}\n\nfunction run(): u64 {\n  let payload: Payload = Payload { id: 7 };\n  let read = (): u64 -> {\n    return payload.id;\n  };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<u64>(closures.byRefCount, 1);
+  Test::assertEq<u64>(closures.byMutRefCount, 0);
+  Test::assertEq<u64>(closures.byValueCount, 0);
+}
+
+/// Scenario: a closure that captures nothing is not a view through the real
+/// pipeline.
+/// Spec: S2, L14.
+@test
+function viewTypePipelineClosureCapturingNothingIsNotAView(): void {
+  let closures: ViewTypePipelineClosures = viewTypePipelineClosures(
+    "function run(): u32 {\n  let read = (): u32 -> {\n    return 7;\n  };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<u64>(closures.total, 1);
+  Test::assertEq<u64>(closures.viewCount, 0);
+}
