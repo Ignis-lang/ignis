@@ -1470,6 +1470,283 @@ export namespace Format {
     return Result::OK(formatted);
   }
 
+  /// The `{ ... }` body span of the closure a call ends with: its last
+  /// argument is a lambda with a braced body, or a call that itself ends with
+  /// one (`workers.push(Thread::spawn((): T -> { ... }))`).
+  function trailingClosureBodySpan(
+    module: &Ast::Module,
+    call: &Ast::Expression::Call,
+    source: &String
+  ): Option<SourceSpan> {
+    if (call.arguments.length() == 0) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(lastArgumentId) = call.arguments.get(call.arguments.length() - 1) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(lastArgumentNode) = module.expressions.get(*lastArgumentId) else {
+      return Option::NONE;
+    };
+
+    if (let Ast::Expression::Node::Call(innerCall) = lastArgumentNode) {
+      return Format::trailingClosureBodySpan(module, &innerCall, source);
+    }
+
+    let Ast::Expression::Node::Lambda(lambda) = lastArgumentNode else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(bodyNode) = module.statements.get(lambda.body) else {
+      return Option::NONE;
+    };
+
+    let Ast::Statement::Node::Block(block) = bodyNode else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(firstByte) = source.byteAt(block.span.start) else {
+      return Option::NONE;
+    };
+
+    if (firstByte != '{' as u8) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(block.span);
+  }
+
+  /// Lays out a call that ends with a trailing closure, whatever lines the
+  /// source wrote it on. The closure hugs the call when the line that opens
+  /// its body fits `line_width`, so the body sits one level deeper than the
+  /// statement and `})` closes at the statement's indentation. Otherwise every
+  /// argument goes on its own line one level deeper, and the closure's
+  /// parameters break one per line too when its header still does not fit.
+  ///
+  /// `leadingColumns` is the column the call starts at. `NONE` keeps the
+  /// verbatim fallback of `formatCallExpression`: a comment outside the
+  /// closure body, or another argument the source wrote over several lines.
+  function formatTrailingClosureCall(
+    module: &Ast::Module,
+    call: &Ast::Expression::Call,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    leadingColumns: u64
+  ): Result<Option<String>, FormatError> {
+    let Option::SOME(bodySpan) = Format::trailingClosureBodySpan(module, call, source) else {
+      return Result::OK(Option::NONE);
+    };
+
+    let commentBeforeBody: boolean = Format::regionContainsCommentText(source, call.span.start, bodySpan.start);
+    let commentAfterBody: boolean = Format::regionContainsCommentText(source, bodySpan.end, call.span.end);
+
+    if (commentBeforeBody || commentAfterBody) {
+      return Result::OK(Option::NONE);
+    }
+
+    let mut head: String = Format::formatExpressionNode(module, call.callee, 10, source, config, 0)!;
+
+    if (Format::expressionContainsNewline(&head)) {
+      return Result::OK(Option::NONE);
+    }
+
+    if (call.typeArguments.length() > 0) {
+      let typeArgs: String = Format::joinFormattedTypes(module, &call.typeArguments, source);
+      head.pushStr("<");
+      head.push(&typeArgs);
+      head.pushStr(">");
+    }
+
+    head.pushStr("(");
+
+    let mut leadingArguments: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index + 1 < call.arguments.length()) {
+      let Option::SOME(argumentId) = call.arguments.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let argumentText: String = Format::formatExpressionNode(module, *argumentId, 0, source, config, 0)!;
+
+      if (Format::expressionContainsNewline(&argumentText)) {
+        return Result::OK(Option::NONE);
+      }
+
+      leadingArguments.push(argumentText);
+      index += 1;
+    }
+
+    let Option::SOME(lastArgumentId) = call.arguments.get(call.arguments.length() - 1) else {
+      return Result::OK(Option::NONE);
+    };
+
+    let Option::SOME(lastArgumentNode) = module.expressions.get(*lastArgumentId) else {
+      return Result::OK(Option::NONE);
+    };
+
+    let mut huggedPrefix: String = head.clone();
+
+    if (leadingArguments.length() > 0) {
+      let joined: String = Format::joinSegments(&leadingArguments, ", ");
+      huggedPrefix.push(&joined);
+      huggedPrefix.pushStr(", ");
+    }
+
+    let argumentIndentLevel: u64 = indentLevel + 1;
+    let argumentIndent: String = config.indentString(argumentIndentLevel);
+    let mut lastArgumentBroken: String = String::new();
+
+    if (let Ast::Expression::Node::Call(innerCall) = lastArgumentNode) {
+      let huggedInner: Option<String> = Format::formatTrailingClosureCall(
+        module,
+        &innerCall,
+        source,
+        config,
+        indentLevel,
+        leadingColumns + huggedPrefix.length(),
+      )!;
+
+      let Option::SOME(innerText) = huggedInner else {
+        return Result::OK(Option::NONE);
+      };
+
+      if (leadingColumns + huggedPrefix.length() + Format::firstLineLength(&innerText) <= config.lineWidth) {
+        let mut hugged: String = huggedPrefix;
+        hugged.push(&innerText);
+        hugged.pushStr(")");
+        return Result::OK(Option::SOME(hugged));
+      }
+
+      let brokenInner: Option<String> = Format::formatTrailingClosureCall(
+        module,
+        &innerCall,
+        source,
+        config,
+        argumentIndentLevel,
+        config.indentColumns(argumentIndentLevel),
+      )!;
+
+      let Option::SOME(brokenInnerText) = brokenInner else {
+        return Result::OK(Option::NONE);
+      };
+
+      lastArgumentBroken = brokenInnerText;
+    } else {
+      let Ast::Expression::Node::Lambda(lambda) = lastArgumentNode else {
+        return Result::OK(Option::NONE);
+      };
+
+      let parameters: Vector<String> = Format::formatParameterList(module, &lambda.parameters, source);
+      let mut returnTypeText: String = String::create("void");
+
+      if (let Option::SOME(returnType) = lambda.returnType) {
+        returnTypeText = Format::formatType(module, returnType, source);
+      }
+
+      let mut flatHeader: String = String::create("(");
+      let parametersText: String = Format::joinSegments(&parameters, ", ");
+      flatHeader.push(&parametersText);
+      flatHeader.pushStr("): ");
+      flatHeader.push(&returnTypeText);
+      flatHeader.pushStr(" -> ");
+
+      if (leadingColumns + huggedPrefix.length() + flatHeader.length() + 1 <= config.lineWidth) {
+        let bodyText: String = Format::formatLambdaBody(module, lambda.body, source, config, indentLevel)!;
+        let mut hugged: String = huggedPrefix;
+        hugged.push(&flatHeader);
+        hugged.push(&bodyText);
+        hugged.pushStr(")");
+        return Result::OK(Option::SOME(hugged));
+      }
+
+      let headerFitsOwnLine: boolean = config.indentColumns(argumentIndentLevel) + flatHeader.length() + 1 <= config.lineWidth;
+
+      if (parameters.length() == 0 || headerFitsOwnLine) {
+        lastArgumentBroken = flatHeader.clone();
+      } else {
+        let parameterIndent: String = config.indentString(argumentIndentLevel + 1);
+        lastArgumentBroken = String::create("(\n");
+        let mut parameterIndex: u64 = 0;
+
+        while (parameterIndex < parameters.length()) {
+          let Option::SOME(parameterText) = parameters.get(parameterIndex) else {
+            parameterIndex += 1;
+            continue;
+          };
+
+          lastArgumentBroken.push(&parameterIndent);
+          lastArgumentBroken.push(parameterText);
+          lastArgumentBroken.pushStr(",\n");
+          parameterIndex += 1;
+        }
+
+        lastArgumentBroken.push(&argumentIndent);
+        lastArgumentBroken.pushStr("): ");
+        lastArgumentBroken.push(&returnTypeText);
+        lastArgumentBroken.pushStr(" -> ");
+      }
+
+      let bodyText: String = Format::formatLambdaBody(module, lambda.body, source, config, argumentIndentLevel)!;
+      lastArgumentBroken.push(&bodyText);
+    }
+
+    let mut broken: String = head;
+    broken.pushStr("\n");
+    let mut argumentIndex: u64 = 0;
+
+    while (argumentIndex < leadingArguments.length()) {
+      let Option::SOME(argumentText) = leadingArguments.get(argumentIndex) else {
+        argumentIndex += 1;
+        continue;
+      };
+
+      broken.push(&argumentIndent);
+      broken.push(argumentText);
+      broken.pushStr(",\n");
+      argumentIndex += 1;
+    }
+
+    broken.push(&argumentIndent);
+    broken.push(&lastArgumentBroken);
+    broken.pushStr(",\n");
+
+    let closingIndent: String = config.indentString(indentLevel);
+    broken.push(&closingIndent);
+    broken.pushStr(")");
+
+    return Result::OK(Option::SOME(broken));
+  }
+
+  /// The length of `text` up to its first newline.
+  function firstLineLength(text: &String): u64 {
+    let Option::SOME(newline) = Format::firstIndexOfByte(text, '\n' as u8, 0) else {
+      return text.length();
+    };
+
+    return newline;
+  }
+
+  /// The length of the text after the last newline in `text`.
+  function lastLineLength(text: &String): u64 {
+    let mut cursor: u64 = text.length();
+
+    while (cursor > 0) {
+      if (let Option::SOME(byte) = text.byteAt(cursor - 1)) {
+        if (byte == '\n' as u8) {
+          return text.length() - cursor;
+        }
+      }
+
+      cursor -= 1;
+    }
+
+    return text.length();
+  }
+
   function formatMatchExpression(
     module: &Ast::Module,
     matchExpression: &Ast::Expression::Match,
@@ -2006,12 +2283,16 @@ export namespace Format {
   /// Renders the value of a `return`/`let`/`const`, which is the one place the
   /// host lets a record initializer or an array literal spread over several
   /// lines.
+  ///
+  /// `leadingColumns` is the column the value starts at, after the keyword
+  /// or binding that introduces it.
   function formatInitializerValue(
     module: &Ast::Module,
     expressionId: Ast::ExpressionId,
     source: &String,
     config: &FormatterConfig,
-    indentLevel: u64
+    indentLevel: u64,
+    leadingColumns: u64
   ): Result<String, FormatError> {
     let Option::SOME(node) = module.expressions.get(expressionId) else {
       return Result::OK(String::new());
@@ -2025,7 +2306,43 @@ export namespace Format {
       return Format::formatArrayLiteralMultiline(module, &arrayLiteral, source, config, indentLevel);
     }
 
+    if (let Option::SOME(trailingClosureText) = Format::formatStatementLevelCall(
+      module,
+      node,
+      source,
+      config,
+      indentLevel,
+      leadingColumns,
+    )!) {
+      return Result::OK(trailingClosureText);
+    }
+
     return Format::formatExpression(module, node, 0, source, config, indentLevel);
+  }
+
+  /// A trailing-closure call is only laid out where it starts a statement's
+  /// value, the one place its indentation and starting column are known. A
+  /// call nested anywhere else, such as in an `if let` condition, keeps the
+  /// layout of `formatCallExpression`.
+  function formatStatementLevelCall(
+    module: &Ast::Module,
+    node: &Ast::Expression::Node,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    leadingColumns: u64
+  ): Result<Option<String>, FormatError> {
+    let Ast::Expression::Node::Call(call) = node else {
+      return Result::OK(Option::NONE);
+    };
+
+    // A template literal is a desugared call too, printed back from its
+    // source slice by `formatExpression`.
+    if (let Option::SOME(_) = Format::templateSlice(module, node, source)) {
+      return Result::OK(Option::NONE);
+    }
+
+    return Format::formatTrailingClosureCall(module, &call, source, config, indentLevel, leadingColumns);
   }
 
   function formatStatementNode(
@@ -2052,7 +2369,27 @@ export namespace Format {
     let indentText: String = config.indentString(indentLevel);
 
     if (let Ast::Statement::Node::Expression(expressionStatement) = node) {
-      let expressionText: String = Format::formatExpressionNode(module, expressionStatement.expression, 0, source, config, indentLevel)!;
+      let mut expressionText: String = String::new();
+      let mut laidOut: boolean = false;
+
+      if (let Option::SOME(expressionNode) = module.expressions.get(expressionStatement.expression)) {
+        if (let Option::SOME(callText) = Format::formatStatementLevelCall(
+          module,
+          expressionNode,
+          source,
+          config,
+          indentLevel,
+          config.indentColumns(indentLevel),
+        )!) {
+          expressionText = callText;
+          laidOut = true;
+        }
+      }
+
+      if (!laidOut) {
+        expressionText = Format::formatExpressionNode(module, expressionStatement.expression, 0, source, config, indentLevel)!;
+      }
+
       let mut result: String = indentText;
       result.push(&expressionText);
       result.pushStr(";");
@@ -2064,7 +2401,14 @@ export namespace Format {
       result.pushStr("return");
 
       if (let Option::SOME(value) = returnStatement.value) {
-        let valueText: String = Format::formatInitializerValue(module, value, source, config, indentLevel)!;
+        let valueText: String = Format::formatInitializerValue(
+          module,
+          value,
+          source,
+          config,
+          indentLevel,
+          config.indentColumns(indentLevel) + 7,
+        )!;
         result.pushStr(" ");
         result.push(&valueText);
       }
@@ -2299,7 +2643,8 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let mut result: String = config.indentString(indentLevel);
+    let indentText: String = config.indentString(indentLevel);
+    let mut result: String = indentText.clone();
     result.pushStr(keyword);
 
     if (mutable) {
@@ -2322,7 +2667,8 @@ export namespace Format {
     }
 
     if (let Option::SOME(valueId) = value) {
-      let valueText: String = Format::formatInitializerValue(module, valueId, source, config, indentLevel)!;
+      let leadingColumns: u64 = config.indentColumns(indentLevel) + result.length() - indentText.length() + 3;
+      let valueText: String = Format::formatInitializerValue(module, valueId, source, config, indentLevel, leadingColumns)!;
       result.pushStr(" = ");
       result.push(&valueText);
     }
