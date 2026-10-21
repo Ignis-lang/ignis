@@ -1,0 +1,29 @@
+// A closure taking a closure that takes a closure, with the outermost
+// signature seen first (the record method comes before anything else): each
+// signature struct takes the next one by value, so the C unit has to declare
+// the innermost first.
+type Leaf = (i32) -> i32;
+type Middle = (i32, Leaf) -> i32;
+type Outer = (i32, Middle) -> i32;
+
+record Holder {
+  outer: Outer;
+
+  public replace(&mut self, outer: Outer): void {
+    self.outer = outer;
+  }
+
+  public run(&self, value: i32): i32 {
+    return (self.outer)(value, (inner: i32, leaf: Leaf): i32 -> leaf(inner) + 1);
+  }
+}
+
+function outerLayer(value: i32, middle: Middle): i32 {
+  return middle(value, (leafValue: i32): i32 -> leafValue * 2);
+}
+
+function main(): i32 {
+  let holder: Holder = Holder { outer: outerLayer };
+
+  return holder.run(20) == 41 ? 42 : 1;
+}
