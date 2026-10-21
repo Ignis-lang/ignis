@@ -552,23 +552,23 @@ function writeAllBytesSendsALargePayloadInFull(): void {
   // The writer runs on its own thread so that a host with small socket
   // buffers makes it wait for the reader instead of blocking this test.
   let writer: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
-      let mut payload: Vector<u8> = Vector::new<u8>(total);
-      let mut position: u64 = 0;
+    let mut payload: Vector<u8> = Vector::new<u8>(total);
+    let mut position: u64 = 0;
 
-      while (position < total) {
-        payload.push((position % 251) as u8);
-        position += 1;
-      }
+    while (position < total) {
+      payload.push((position % 251) as u8);
+      position += 1;
+    }
 
-      let mut guard: MutexGuard<TcpStream> = (@move client).get().lock();
-      let stream: &mut TcpStream = guard.get();
+    let mut guard: MutexGuard<TcpStream> = (@move client).get().lock();
+    let stream: &mut TcpStream = guard.get();
 
-      if (stream.writeAllBytes(&payload).isError()) {
-        return false;
-      }
+    if (stream.writeAllBytes(&payload).isError()) {
+      return false;
+    }
 
-      return stream.shutdown(Shutdown::WRITE).isOk();
-    });
+    return stream.shutdown(Shutdown::WRITE).isOk();
+  });
 
   let mut received: Vector<u8> = Vector::new<u8>();
 

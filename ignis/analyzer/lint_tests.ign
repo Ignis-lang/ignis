@@ -301,6 +301,63 @@ function lintImportUsedOnlyInPathExpressionIsClean(): void {
   Test::assertEq<u64>(importingRecord.output.lints.diagnostics.length(), 0);
 }
 
+/// Builds module B importing `helper` from A, with one pattern whose path is
+/// `segments`, and analyzes both modules.
+function lintAnalyzeImportWithPattern(
+  segments: Vector<String>
+): Vector<Analyzer::ModuleAnalysisRecord> {
+  let first: Ast::Module = lintHelperModule();
+
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(lintNamedBinding("helper", 7, 13));
+  let mut second: Ast::Module = lintModuleWithImport("a.ign", bindings);
+
+  second.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: lintSpan(20, 26),
+    segments: segments,
+    arguments: Vector::new<Ast::PatternId>(),
+  }));
+
+  let body: Ast::StatementId = lintAddEmptyBody(&mut second);
+  lintAddFunction(&mut second, "main", body, Ast::emptyMetadata());
+
+  return lintAnalyzeTwoModules(first, second);
+}
+
+/// Scenario: module B imports `helper` and reaches it only through a path
+/// written in a pattern, the shape `Http::Method::POST` takes in a match arm.
+/// Clean via the pattern-position scan.
+@test
+function lintImportUsedOnlyInPatternPathIsClean(): void {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("helper"));
+  segments.push(String::create("Kind"));
+  segments.push(String::create("POST"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = lintAnalyzeImportWithPattern(segments);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.output.lints.diagnostics.length(), 0);
+}
+
+/// Scenario: a pattern path headed by another name does not count as a use of
+/// `helper`, which still reports unused.
+@test
+function lintPatternPathHeadedByAnotherNameKeepsTheImportUnused(): void {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("Other"));
+  segments.push(String::create("helper"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = lintAnalyzeImportWithPattern(segments);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  lintAssertSingleLint(&importingRecord.output.lints.diagnostics, DiagnosticCode::UNUSED_IMPORT);
+}
+
 /// Scenario: module B imports `Marker` and names it only inside an
 /// `@implements(...)` attribute — clean via the attribute-argument scan.
 @test

@@ -16315,3 +16315,70 @@ function exprTypeMapLookupOfAnUnrecordedIdIsNone(): void {
   Test::assert(map.lookup(2).isNone());
   Test::assert(map.lookup(9).isNone());
 }
+
+// ===========================================================================
+// Generic type aliases over generic nominal types
+//
+// An instance of a generic alias is the type the alias names with the
+// arguments in place of its parameters, wherever it is written.
+// ===========================================================================
+
+/// Analyzes `source` and returns every diagnostic the analyzer reports.
+function typecheckGenericAliasDiagnostics(source: str): DiagnosticBag {
+  let parsed: ParseOutput = typecheckParseSource(source);
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+  return output.diagnostics;
+}
+
+/// Scenario: a generic alias names a generic record in a return type, a
+/// parameter behind a reference, a local annotation and a method receiver.
+@test
+function typecheckGenericAliasIsTheInstanceItNames(): void {
+  let diagnostics: DiagnosticBag = typecheckGenericAliasDiagnostics(
+    "record Cell<T> {\n  public value: T;\n\n  public get(&self): &T {\n    return &self.value;\n  }\n}\n\ntype Boxed<T> = Cell<T>;\n\nfunction wrap<T>(value: T): Boxed<T> {\n  return Cell { value: value };\n}\n\nfunction read(cell: &Boxed<i32>): i32 {\n  return *cell.get();\n}\n\nfunction main(): i32 {\n  let cell: Boxed<i32> = wrap<i32>(42);\n  return read(&cell);\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: an alias of an alias declared after it, and an alias with two
+/// parameters that swaps them.
+@test
+function typecheckGenericAliasChainsAndSwapsParameters(): void {
+  let diagnostics: DiagnosticBag = typecheckGenericAliasDiagnostics(
+    "record Pair<L, R> {\n  public left: L;\n  public right: R;\n}\n\ntype Twin<T> = Same<T>;\n\ntype Same<T> = Pair<T, T>;\n\ntype Swapped<A, B> = Pair<B, A>;\n\nfunction twin(value: i32): Twin<i32> {\n  return Pair { left: value, right: value };\n}\n\nfunction swap(pair: Pair<i32, boolean>): Swapped<i32, boolean> {\n  return Pair { left: pair.right, right: pair.left };\n}\n\nfunction main(): i32 {\n  let doubled: Twin<i32> = twin(1);\n  let swapped: Swapped<i32, boolean> = swap(Pair { left: 2, right: true });\n  return doubled.left + swapped.right;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a return through a generic alias still compares against the
+/// type the alias names, so a different instance is a mismatch.
+@test
+function typecheckGenericAliasMismatchStillReports(): void {
+  let diagnostics: DiagnosticBag = typecheckGenericAliasDiagnostics(
+    "record Cell<T> {\n  public value: T;\n}\n\ntype Boxed<T> = Cell<T>;\n\nfunction wrap(value: boolean): Boxed<i32> {\n  return Cell { value: value };\n}\n",
+  );
+
+  Test::assertEq<boolean>(diagnostics.length() > 0, true);
+}
+
+/// Scenario: the bounds of the record a generic alias names hold for the
+/// arguments written through the alias.
+@test
+function typecheckGenericAliasKeepsTheTargetBounds(): void {
+  let diagnostics: DiagnosticBag = typecheckGenericAliasDiagnostics(
+    "record Holder<T: Send> {\n  public value: T;\n}\n\ntype Held<T> = Holder<T>;\n\nfunction keep(held: Held<*mut i32>): void {}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = diagnostics.get(0) else {
+    @panic("missing bound diagnostic");
+  };
+
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED);
+}

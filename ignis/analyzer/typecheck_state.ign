@@ -1184,6 +1184,43 @@ export namespace Analyzer {
       }
     }
 
+    /// The type an instance of a generic alias stands for: the alias target
+    /// with the alias parameters replaced by `typeArguments`. `NONE` when
+    /// `definition` is not a generic alias, the argument count differs, or
+    /// the target is not resolved yet (an alias whose expansion reaches
+    /// itself), so the caller keeps the instance.
+    function expandGenericAlias(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      definition: Analyzer::DefinitionId,
+      typeArguments: &Vector<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(Analyzer::Definition::TypeAlias(aliasDef)) = defStore.get(definition) else {
+        return Option::NONE;
+      };
+
+      // `aliasDef` points into the definition store: read it before anything grows a store.
+      let aliasedType: Analyzer::TypeId = aliasDef.aliasedType;
+      let typeParams: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::copyDefinitionIdVector(&aliasDef.typeParams);
+
+      if (typeParams.isEmpty() || typeParams.length() != typeArguments.length()) {
+        return Option::NONE;
+      }
+
+      if (let Option::SOME(Analyzer::Type::VOID) = typeStore.get(aliasedType)) {
+        return Option::NONE;
+      }
+
+      let paramSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &typeParams);
+
+      if (paramSymbols.length() != typeArguments.length()) {
+        return Option::NONE;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return Option::SOME(typeStoreRef.substitute(aliasedType, &paramSymbols, typeArguments));
+    }
+
     function resolveAliasChainChecked(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -1239,6 +1276,30 @@ export namespace Analyzer {
                 };
               },
             };
+          },
+          // The resolver expands a generic alias where it is written; an
+          // instance can still reach here when the alias was not resolved yet
+          // at that point, such as across an import cycle.
+          Analyzer::Type::Instance(instance) -> {
+            let definition: Analyzer::DefinitionId = instance.definition;
+            let typeArguments: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyVariantPayloadTypeIds(&instance.typeArguments);
+
+            if (Analyzer::Resolver::containsDefinitionId(&mut visited, definition)) {
+              return Analyzer::Typecheck::AliasResolutionResult {
+                typeId: current,
+                cycleAlias: Option::NONE,
+              };
+            }
+
+            let Option::SOME(expanded) = Analyzer::Typecheck::expandGenericAlias(defStore, typeStore, definition, &typeArguments) else {
+              return Analyzer::Typecheck::AliasResolutionResult {
+                typeId: current,
+                cycleAlias: Option::NONE,
+              };
+            };
+
+            visited.push(definition);
+            current = expanded;
           },
           _ -> {
             return Analyzer::Typecheck::AliasResolutionResult {
@@ -5409,8 +5470,8 @@ export namespace Analyzer {
       return Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, false, false);
     }
 
-    /// The record or enum named `symbol` whose stamped qualified path the written
-    /// `path` names, either in full or as a trailing run of its segments.
+    /// The record, enum or alias named `symbol` whose stamped qualified path the
+    /// written `path` names, either in full or as a trailing run of its segments.
     function findQualifiedTypeDefinition(
       defStore: &mut Analyzer::DefinitionStore,
       symbol: Analyzer::SymbolId,
@@ -5457,6 +5518,9 @@ export namespace Analyzer {
             Analyzer::Definition::Enum(_) -> {
               return Option::SOME(defId);
             },
+            Analyzer::Definition::TypeAlias(_) -> {
+              return Option::SOME(defId);
+            },
             _ -> {},
           };
         }
@@ -5467,7 +5531,7 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
-    /// First record or enum in the store named `symbol`. When `activeModuleOnly`
+    /// First record, enum or alias in the store named `symbol`. When `activeModuleOnly`
     /// is set, only declarations published by the module being analyzed count;
     /// when `visibleOnly` is set, only declarations that module can name.
     function findNamedTypeDefinition(
@@ -5506,6 +5570,9 @@ export namespace Analyzer {
             return Option::SOME(defId);
           },
           Analyzer::Definition::Enum(_) -> {
+            return Option::SOME(defId);
+          },
+          Analyzer::Definition::TypeAlias(_) -> {
             return Option::SOME(defId);
           },
           _ -> {},
@@ -6008,6 +6075,10 @@ export namespace Analyzer {
 
             arguments.push(resolvedArgument);
             argumentIndex += 1;
+          }
+
+          if (let Option::SOME(Analyzer::Definition::TypeAlias(_)) = defStore.get(baseDefId)) {
+            return Analyzer::Typecheck::expandGenericAlias(defStore, typeStore, baseDefId, &arguments);
           }
 
           let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;

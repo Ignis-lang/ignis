@@ -1,0 +1,39 @@
+// e2e: warn
+// A namespace import reached only through patterns is used: match arms,
+// if let, while let, let else and nested variant patterns all name it. The
+// import nothing names still warns.
+import Shapes, Unused, square, maybeSquare from "./warn_unused_import_patterns_only/shapes";
+
+function main(): i32 {
+  let mut total: i32 = match (maybeSquare(1)) {
+    Option::SOME(Shapes::Kind::SQUARE(length)) -> length,
+    _ -> 0,
+  };
+
+  if (let Shapes::Kind::SQUARE(length) = square(3)) {
+    total += length;
+  }
+
+  let mut remaining: i32 = 2;
+  while (let Shapes::Kind::SQUARE(_) = square(remaining)) {
+    if (remaining == 0) {
+      break;
+    }
+    remaining -= 1;
+  }
+
+  let Shapes::Kind::SQUARE(last) = square(4) else {
+    return 1;
+  };
+
+  let circle: boolean = match (square(total)) {
+    Shapes::Kind::CIRCLE -> true,
+    _ -> false,
+  };
+
+  if (circle) {
+    return 2;
+  }
+
+  return total + last;
+}
