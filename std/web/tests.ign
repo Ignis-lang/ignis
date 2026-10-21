@@ -380,14 +380,22 @@ function routesAcceptClosures(): void {
   let mut router: Web::Router = Web::Router::new();
   router.put(
     "/items/:name",
-    (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {
+    (
+      request: &mut Web::Request,
+      response: &mut Web::Response,
+      next: Web::Next,
+    ): Result<void, Web::Error> -> {
       response.text(`${request.param("name").unwrap()}${suffix}`);
       return Result::OK(());
     },
   );
   router.patch(
     "/items/:name",
-    (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {
+    (
+      request: &mut Web::Request,
+      response: &mut Web::Response,
+      next: Web::Next,
+    ): Result<void, Web::Error> -> {
       response.text("patched");
       return Result::OK(());
     },
@@ -454,7 +462,11 @@ record WebTestApp {
     router.use(webTestObserve);
     router.get(
       "/hello/:name",
-      (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {
+      (
+        request: &mut Web::Request,
+        response: &mut Web::Response,
+        next: Web::Next,
+      ): Result<void, Web::Error> -> {
         response.text(`${greeting} ${request.param("name").unwrap()}`);
         return Result::OK(());
       },
@@ -473,35 +485,35 @@ function webTestExchange(request: str): String {
   let message: String = String::create(request);
 
   let client: JoinHandle<String> = Thread::spawn<String>((): String -> {
-      let target: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
-      let mut received: Vector<u8> = Vector::new<u8>();
-      let mut stream: TcpStream = TcpStream::connect(&target).unwrap();
-      let bytes: Vector<u8> = (@move message).toBytes();
+    let target: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
+    let mut received: Vector<u8> = Vector::new<u8>();
+    let mut stream: TcpStream = TcpStream::connect(&target).unwrap();
+    let bytes: Vector<u8> = (@move message).toBytes();
 
-      if (stream.setReadTimeout(Option::SOME(Time::Duration::fromSeconds(10))).isError()) {
-        return String::create("<timeout setup failed>");
+    if (stream.setReadTimeout(Option::SOME(Time::Duration::fromSeconds(10))).isError()) {
+      return String::create("<timeout setup failed>");
+    }
+
+    if (stream.writeAllBytes(&bytes).isError()) {
+      return String::create("<write failed>");
+    }
+
+    if (stream.shutdown(Shutdown::WRITE).isError()) {
+      return String::create("<shutdown failed>");
+    }
+
+    while (true) {
+      let Result::OK(read) = stream.readInto(&mut received, 65536) else {
+        break;
+      };
+
+      if (read == 0) {
+        break;
       }
+    }
 
-      if (stream.writeAllBytes(&bytes).isError()) {
-        return String::create("<write failed>");
-      }
-
-      if (stream.shutdown(Shutdown::WRITE).isError()) {
-        return String::create("<shutdown failed>");
-      }
-
-      while (true) {
-        let Result::OK(read) = stream.readInto(&mut received, 65536) else {
-          break;
-        };
-
-        if (read == 0) {
-          break;
-        }
-      }
-
-      return webTestBytesText(&received);
-    });
+    return webTestBytesText(&received);
+  });
 
   {
     let app: WebTestApp = WebTestApp { greeting: "hi" };
@@ -536,19 +548,19 @@ function serveListenerRunsTheApp(): void {
   // running. It binds its own listener, since a spawned task cannot move a
   // captured value out, and reports the port.
   Thread::spawn<boolean>((): boolean -> {
-      let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 0);
-      let listener: TcpListener = TcpListener::bind(&address).unwrap();
-      let port: u16 = listener.localAddress().unwrap().port();
-      let mut config: Http::ServerConfig = Http::ServerConfig::new();
-      config.threads = 2;
-      config.idleTimeout = Time::Duration::fromSeconds(5);
+    let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 0);
+    let listener: TcpListener = TcpListener::bind(&address).unwrap();
+    let port: u16 = listener.localAddress().unwrap().port();
+    let mut config: Http::ServerConfig = Http::ServerConfig::new();
+    config.threads = 2;
+    config.idleTimeout = Time::Duration::fromSeconds(5);
 
-      if ((@move sender).send(port).isError()) {
-        return false;
-      }
+    if ((@move sender).send(port).isError()) {
+      return false;
+    }
 
-      return Web::serveListener<WebTestApp>(listener, config, WebTestApp { greeting: "hey" }).isOk();
-    });
+    return Web::serveListener<WebTestApp>(listener, config, WebTestApp { greeting: "hey" }).isOk();
+  });
 
   let port: u16 = receiver.recv().unwrap();
   let target: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), port);
