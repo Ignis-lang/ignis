@@ -1,0 +1,30 @@
+// A closure signature takes another closure through a raw pointer, and the
+// outer signature is seen first (the record method comes before anything
+// else): the pointee's closure struct tag has to be declared before the
+// signature names it.
+type Next = (i32) -> i32;
+type Layer = (i32, *Next) -> i32;
+
+record Holder {
+  layer: Layer;
+
+  public replace(&mut self, layer: Layer): void {
+    self.layer = layer;
+  }
+
+  public run(&self, value: i32): i32 {
+    let next: Next = (inner: i32): i32 -> inner + 1;
+
+    return (self.layer)(value, &next as *Next);
+  }
+}
+
+function twice(value: i32, next: *Next): i32 {
+  return (*next)(value) * 2;
+}
+
+function main(): i32 {
+  let holder: Holder = Holder { layer: twice };
+
+  return holder.run(20);
+}

@@ -4927,7 +4927,131 @@ export namespace CodegenC {
       functionIndex += 1;
     }
 
+    tables.signatures = CodegenC::orderClosureSignatures(typeStore, &tables.signatures);
+
     return tables;
+  }
+
+  /// Orders closure signatures so that each one comes after every closure
+  /// signature its call pointer takes or returns by value, and adds every
+  /// closure signature one names through an indirection. C needs a struct
+  /// declared before a declarator names it by value: a tag first named inside
+  /// a parameter list only has prototype scope, so the call pointer would take
+  /// a different, incomplete type. A signature reached only that way is added
+  /// too. Depth-first from each signature in first-seen order, so the order is
+  /// deterministic.
+  function orderClosureSignatures(
+    typeStore: &mut Analyzer::TypeStore,
+    signatures: &Vector<u32>,
+  ): Vector<u32> {
+    let mut ordered: Vector<u32> = Vector::new<u32>();
+    let mut visited: Vector<u32> = Vector::new<u32>();
+    let mut signatureIndex: u64 = 0;
+
+    while (signatureIndex < signatures.length()) {
+      if (let Option::SOME(raw) = signatures.get(signatureIndex)) {
+        CodegenC::visitClosureSignature(typeStore, *raw, &mut visited, &mut ordered);
+      }
+
+      signatureIndex += 1;
+    }
+
+    return ordered;
+  }
+
+  function visitClosureSignature(
+    typeStore: &mut Analyzer::TypeStore,
+    raw: u32,
+    visited: &mut Vector<u32>,
+    ordered: &mut Vector<u32>,
+  ): void {
+    if (CodegenC::containsRaw(visited, raw)) {
+      return;
+    }
+
+    visited.push(raw);
+
+    let mut dependencies: Vector<u32> = Vector::new<u32>();
+
+    if (let Option::SOME(Analyzer::Type::Function(functionType)) = typeStore.get(Id::fromRaw<Analyzer::TypeTag>(raw))) {
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < functionType.params.length()) {
+        if (let Option::SOME(param) = functionType.params.get(paramIndex)) {
+          dependencies.push(param.raw());
+        }
+
+        paramIndex += 1;
+      }
+
+      dependencies.push(functionType.returnType.raw());
+    }
+
+    let mut dependencyIndex: u64 = 0;
+
+    while (dependencyIndex < dependencies.length()) {
+      if (let Option::SOME(dependency) = dependencies.get(dependencyIndex)) {
+        CodegenC::visitClosuresWithin(typeStore, *dependency, visited, ordered);
+      }
+
+      dependencyIndex += 1;
+    }
+
+    ordered.push(raw);
+  }
+
+  /// Visits every closure signature `raw` names, by value or through a
+  /// pointer, reference, slice, array or tuple. One reached only behind an
+  /// indirection needs no ordering, since every closure struct tag is declared
+  /// up front, but its struct has to exist for the code that calls through it.
+  function visitClosuresWithin(
+    typeStore: &mut Analyzer::TypeStore,
+    raw: u32,
+    visited: &mut Vector<u32>,
+    ordered: &mut Vector<u32>,
+  ): void {
+    let mut inner: Vector<u32> = Vector::new<u32>();
+
+    match (typeStore.get(Id::fromRaw<Analyzer::TypeTag>(raw))) {
+      Option::SOME(Analyzer::Type::Function(_)) -> {
+        CodegenC::visitClosureSignature(typeStore, raw, visited, ordered);
+        return;
+      },
+      Option::SOME(Analyzer::Type::Pointer(pointerType)) -> {
+        inner.push(pointerType.pointee.raw());
+      },
+      Option::SOME(Analyzer::Type::Reference(referenceType)) -> {
+        inner.push(referenceType.referent.raw());
+      },
+      Option::SOME(Analyzer::Type::Slice(element)) -> {
+        inner.push(element.raw());
+      },
+      Option::SOME(Analyzer::Type::FixedArray(element, _)) -> {
+        inner.push(element.raw());
+      },
+      Option::SOME(Analyzer::Type::Tuple(tupleType)) -> {
+        let mut elementIndex: u64 = 0;
+
+        while (elementIndex < tupleType.elements.length()) {
+          if (let Option::SOME(element) = tupleType.elements.get(elementIndex)) {
+            inner.push(element.raw());
+          }
+
+          elementIndex += 1;
+        }
+      },
+      _ -> {},
+    };
+
+    let mut innerIndex: u64 = 0;
+
+    while (innerIndex < inner.length()) {
+      if (let Option::SOME(innerRaw) = inner.get(innerIndex)) {
+        CodegenC::visitClosuresWithin(typeStore, *innerRaw, visited, ordered);
+      }
+
+      innerIndex += 1;
+    }
   }
 
   function tempIsVoid(
@@ -5407,6 +5531,22 @@ export namespace CodegenC {
 
     let mut headerRef: &mut String = output;
     headerRef.pushStr("\n// Closure types\n");
+
+    // A struct tag first named inside a parameter list has prototype scope,
+    // even behind a pointer, so every tag is declared before any call pointer
+    // can name it. By-value uses are ordered by `orderClosureSignatures`.
+    let mut forwardIndex: u64 = 0;
+
+    while (forwardIndex < closures.signatures.length()) {
+      if (let Option::SOME(raw) = closures.signatures.get(forwardIndex)) {
+        let forwardName: String = CodegenC::closureStructName(Id::fromRaw<Analyzer::TypeTag>(*raw));
+        let line: String = `struct ${forwardName.toStr()};\n`;
+        let mut lineRef: &mut String = output;
+        lineRef.pushStr(line.toStr());
+      }
+
+      forwardIndex += 1;
+    }
 
     let mut signatureIndex: u64 = 0;
 
