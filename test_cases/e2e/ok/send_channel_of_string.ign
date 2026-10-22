@@ -1,0 +1,24 @@
+// e2e: std
+// `String` owns its bytes, so it is `Send`: a `Channel<String>` carries a
+// payload from one thread to another and the received value stays owned.
+import Channel, Receiver, Sender from "std::sync";
+import JoinHandle, Thread from "std::thread";
+
+function main(): i32 {
+  let channel: Channel<String> = Channel::new<String>();
+  let sender: Sender<String> = channel.sender;
+  let receiver: Receiver<String> = channel.receiver;
+  let producer: JoinHandle<void> = Thread::spawn<void>((): void -> {
+      (@move sender).send(String::create("done"));
+    });
+
+  producer.join();
+
+  let mut received: boolean = false;
+
+  while (let Option::SOME(value) = receiver.recv()) {
+    received = value.length() == 4;
+  }
+
+  return received ? 0 : 1;
+}

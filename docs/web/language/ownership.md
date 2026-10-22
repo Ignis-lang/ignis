@@ -167,6 +167,14 @@ A view must not outlive its owner:
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
   borrows `store`, so views derived from `store` only conflict with each other, while `guard`
   stays borrowed by `store` until `store`'s scope ends.
+- A view cannot be stored where its owner cannot be seen: a `static` or `static mut` field of a
+  view type is an error (A0268). A `static str` field is accepted, because a static string owns
+  its bytes.
+- A view type is neither `Send` nor `Sync`, so every API bounded by them rejects one: a
+  `Channel<T: Send>`, a `Thread::spawn` task, an `Arc<T>` and their friends cannot carry a
+  `str`, a reference, a slice, or a record or container holding one. A closure that captures by
+  reference — or by value a view — is itself a view, and is rejected the same way; a closure
+  that owns everything it captures is not.
 
 A view of a temporary used inside the statement that created it is fine, as a call argument
 or in a template literal. To keep it, bind the owner to a local first:

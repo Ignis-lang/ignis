@@ -78,6 +78,36 @@ function zeroAssertRejected(source: str, code: str): void {
   Test::assertEq<str>(zeroFirstErrorCode(&diagnostics).toStr(), code);
 }
 
+/// Like `zeroAssertRejected`, for a `static mut` whose type is also a view:
+/// the view-type diagnostic (A0264) and the zeroing one (A0239) both appear,
+/// the view type first, since the static-field check runs before the
+/// zero-value one.
+function zeroAssertRejectedWithView(source: str, viewCode: str, zeroCode: str): void {
+  let diagnostics: DiagnosticBag = zeroAnalyze(source);
+  Test::assertEq<u64>(zeroCountErrors(&diagnostics), 2);
+  Test::assertEq<str>(zeroFirstErrorCode(&diagnostics).toStr(), viewCode);
+  Test::assert(zeroHasCode(&diagnostics, zeroCode));
+}
+
+function zeroHasCode(bag: &DiagnosticBag, code: str): boolean {
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR && diagnostic.code == code) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
 @test
 function zeroStaticMutWithoutInitializerAcceptsScalars(): void {
   zeroAssertAccepted(
@@ -99,12 +129,12 @@ function zeroStaticMutKeepsItsInitializerWhenItHasOne(): void {
 
 @test
 function zeroStaticMutWithoutInitializerRejectsStrings(): void {
-  zeroAssertRejected("record Zeroed {\n  static mut NAME: str;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", "A0239");
+  zeroAssertRejectedWithView("record Zeroed {\n  static mut NAME: str;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", DiagnosticCode::STATIC_FIELD_OF_VIEW_TYPE, "A0239");
 }
 
 @test
 function zeroStaticMutWithoutInitializerRejectsReferences(): void {
-  zeroAssertRejected("record Zeroed {\n  static mut LINK: &i32;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", "A0239");
+  zeroAssertRejectedWithView("record Zeroed {\n  static mut LINK: &i32;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n", DiagnosticCode::STATIC_FIELD_OF_VIEW_TYPE, "A0239");
 }
 
 @test
@@ -125,8 +155,9 @@ function zeroStaticMutWithoutInitializerRejectsArraysOfValuesThatDrop(): void {
 
 @test
 function zeroStaticMutWithoutInitializerRejectsRecordsWithANonZeroableField(): void {
-  zeroAssertRejected(
+  zeroAssertRejectedWithView(
     "record Named {\n  public id: i32;\n  public name: str;\n}\n\nrecord Zeroed {\n  static mut ENTRY: Named;\n}\n\nfunction main(): i32 {\n  return 0;\n}\n",
+    DiagnosticCode::STATIC_FIELD_OF_VIEW_TYPE,
     "A0239",
   );
 }

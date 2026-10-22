@@ -7,6 +7,7 @@ import Id from "@compiler::ids";
 import ParseOutput, Parser from "@compiler::parser";
 
 import _ from "./view_type";
+import _ from "./view_type_closure";
 import Lowering from "./lowering";
 import Capture from "./capture";
 
@@ -673,11 +674,18 @@ function viewTestClosure(captures: Vector<Hir::HirCapture>): Hir::HirClosure {
 }
 
 function viewTestCapture(mode: Hir::CaptureMode): Hir::HirCapture {
+  return viewTestCaptureOfType(mode, Id::fromRaw<Analyzer::TypeTag>(0));
+}
+
+function viewTestCaptureOfType(
+  mode: Hir::CaptureMode,
+  typeInEnv: Analyzer::TypeId
+): Hir::HirCapture {
   return Hir::HirCapture {
     sourceDef: Id::fromRaw<Analyzer::DefinitionTag>(0),
     fieldIndex: 0,
     mode: mode,
-    typeInEnv: Id::fromRaw<Analyzer::TypeTag>(0),
+    typeInEnv: typeInEnv,
   };
 }
 
@@ -685,9 +693,11 @@ function viewTestCapture(mode: Hir::CaptureMode): Hir::HirCapture {
 /// Spec: S2, L14.
 @test
 function viewTypeClosureWithoutCapturesIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let closure: Hir::HirClosure = viewTestClosure(Vector::new<Hir::HirCapture>());
 
-  Test::assert(!Analyzer::ViewType::closureIsView(&closure));
+  Test::assert(!Analyzer::ViewType::closureIsView(&mut defs, &mut store, &closure));
 }
 
 /// Scenario: a closure capturing by value is not a view: the closure owns its
@@ -695,36 +705,70 @@ function viewTypeClosureWithoutCapturesIsNotAView(): void {
 /// Spec: S2, L14.
 @test
 function viewTypeClosureWithByValueCaptureIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
   captures.push(viewTestCapture(Hir::CaptureMode::ByValue));
 
   let closure: Hir::HirClosure = viewTestClosure(captures);
 
-  Test::assert(!Analyzer::ViewType::closureIsView(&closure));
+  Test::assert(!Analyzer::ViewType::closureIsView(&mut defs, &mut store, &closure));
+}
+
+/// Scenario: a closure capturing a view type by value is a view: the
+/// environment holds storage it does not own, be it a `str` or a `&T` read
+/// of a `Copy` local.
+/// Spec: S2, T4b.
+@test
+function viewTypeClosureWithByValueViewCaptureIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idRef: Analyzer::TypeId = store.reference(idI32);
+
+  let mut strCaptures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+  strCaptures.push(viewTestCaptureOfType(Hir::CaptureMode::ByValue, idStr));
+
+  let strClosure: Hir::HirClosure = viewTestClosure(strCaptures);
+
+  Test::assert(Analyzer::ViewType::closureIsView(&mut defs, &mut store, &strClosure));
+
+  let mut refCaptures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+  refCaptures.push(viewTestCaptureOfType(Hir::CaptureMode::ByValue, idRef));
+
+  let refClosure: Hir::HirClosure = viewTestClosure(refCaptures);
+
+  Test::assert(Analyzer::ViewType::closureIsView(&mut defs, &mut store, &refClosure));
 }
 
 /// Scenario: a closure capturing by shared reference is a view.
 /// Spec: S2, L14.
 @test
 function viewTypeClosureWithByRefCaptureIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
   captures.push(viewTestCapture(Hir::CaptureMode::ByRef));
 
   let closure: Hir::HirClosure = viewTestClosure(captures);
 
-  Test::assert(Analyzer::ViewType::closureIsView(&closure));
+  Test::assert(Analyzer::ViewType::closureIsView(&mut defs, &mut store, &closure));
 }
 
 /// Scenario: a closure capturing by mutable reference is a view.
 /// Spec: S2, L14.
 @test
 function viewTypeClosureWithByMutRefCaptureIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
   captures.push(viewTestCapture(Hir::CaptureMode::ByMutRef));
 
   let closure: Hir::HirClosure = viewTestClosure(captures);
 
-  Test::assert(Analyzer::ViewType::closureIsView(&closure));
+  Test::assert(Analyzer::ViewType::closureIsView(&mut defs, &mut store, &closure));
 }
 
 // ─── Pipeline: real closures through capture analysis ─────────────────────────
@@ -794,7 +838,7 @@ function viewTypePipelineClosures(source: str): ViewTypePipelineClosures {
       if (let Hir::HirKind::Closure(closure) = &node.kind) {
         total += 1;
 
-        if (Analyzer::ViewType::closureIsView(&closure)) {
+        if (Analyzer::ViewType::closureIsView(&mut defStore, &mut typeStore, &closure)) {
           viewCount += 1;
         }
 

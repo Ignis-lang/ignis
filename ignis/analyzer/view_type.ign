@@ -1,6 +1,7 @@
-import Analyzer from "@compiler::analyzer";
-import Hir from "@compiler::hir";
 import Vector from "std::vector";
+
+import _ from "./types";
+import _ from "./definitions";
 
 /// The S2 view-type predicate: one authoritative answer, per `TypeId`, to
 /// "is this type a second-class view?".
@@ -20,9 +21,14 @@ import Vector from "std::vector";
 /// capture information is a property of the closure VALUE, not of the type
 /// (function types are interned structurally, so two same-signature closures
 /// share one `TypeId`). Whether a concrete closure value is a view is
-/// `Analyzer::ViewType::closureIsView` over its HIR captures. Consequences the
-/// enforcement passes own (T4b storage/Send, T4c call sites), decided at the
-/// node level where the closure value is at hand:
+/// `Analyzer::ViewType::closureIsView` (declared in `view_type_closure.ign`,
+/// beside this file) over the HIR captures and the types they carry into the
+/// environment. It sits in its own file because this module is part of the
+/// analyzer's Hir-free core (the typechecker members that judge `Send` and
+/// declared types), which must not depend on `@compiler::hir`; the passes
+/// that hold closure nodes (T4b storage/Send, T4c call sites) import it
+/// directly. Consequences the enforcement passes own, decided at the node
+/// level where the closure value is at hand:
 ///
 /// - An aggregate with a function-typed field is not flagged by `isView` even
 ///   when the closure stored in it captures by reference; the passes must
@@ -41,38 +47,6 @@ export namespace Analyzer::ViewType {
   ): boolean {
     let mut visiting: Vector<u32> = Vector::new<u32>();
     return ViewType::isViewInner(defStore, typeStore, typeId, &mut visiting);
-  }
-
-  /// Whether the closure value described by `closure` is itself a view: true
-  /// exactly when it captures at least one binding by reference (`ByRef` or
-  /// `ByMutRef`). A closure capturing nothing, or only by value, owns its
-  /// environment and is not a view.
-  public function closureIsView(closure: &Hir::HirClosure): boolean {
-    let mut index: u64 = 0;
-
-    while (index < closure.captures.length()) {
-      if (let Option::SOME(capture) = closure.captures.get(index)) {
-        let mut byReference: boolean = false;
-
-        match (&capture.mode) {
-          Hir::CaptureMode::ByRef -> {
-            byReference = true;
-          },
-          Hir::CaptureMode::ByMutRef -> {
-            byReference = true;
-          },
-          _ -> {},
-        };
-
-        if (byReference) {
-          return true;
-        }
-      }
-
-      index += 1;
-    }
-
-    return false;
   }
 
   function isViewInner(
