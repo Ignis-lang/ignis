@@ -8,6 +8,8 @@ import
 from "@compiler::diagnostics";
 import Vector from "std::vector";
 
+import _ from "./view_type";
+
 export namespace Analyzer {
   /// The type-level half of generic bound checking: whether the type
   /// arguments of an instance, or of a call, satisfy the bounds of the type
@@ -127,10 +129,24 @@ export namespace Analyzer {
 
         let mut paramName: Option<Analyzer::SymbolId> = Option::NONE;
         let mut bounds: Vector<String> = Vector::new<String>();
+        let mut ownsStorage: boolean = false;
 
         if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
           paramName = Option::SOME(typeParam.name);
           bounds = Analyzer::TypeBounds::copyStrings(&typeParam.bounds);
+          ownsStorage = typeParam.ownsStorage;
+        }
+
+        // An `@owns` parameter is an owning storage slot: the declaring type
+        // keeps the argument in storage it allocates or in a field, where the
+        // type system cannot see whose bytes a view borrows. A view argument
+        // is therefore rejected here, at every instantiation (L17).
+        if (ownsStorage) {
+          let resolvedArgument: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, *typeArg);
+
+          if (resolvedArgument.cycleAlias.isNone() && Analyzer::ViewType::isView(defStore, typeStore, resolvedArgument.typeId)) {
+            Analyzer::TypeBounds::reportViewInOwningSlot(defStore, typeStore, symbols, generic, paramName, resolvedArgument.typeId, span, diagnostics);
+          }
         }
 
         let boundTraits: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(*paramDefId);
@@ -157,6 +173,43 @@ export namespace Analyzer {
 
         index += 1;
       }
+    }
+
+    /// Reports a view type argument bound to an `@owns` parameter (A0265).
+    function reportViewInOwningSlot(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      generic: Analyzer::DefinitionId,
+      paramName: Option<Analyzer::SymbolId>,
+      typeArg: Analyzer::TypeId,
+      span: SourceSpan,
+      diagnostics: &mut DiagnosticBag,
+    ): void {
+      let typeName: String = typeStore.nameOfResolved(typeArg, &*defStore, &*symbols);
+      let mut genericName: str = "?";
+      let mut parameter: str = "?";
+
+      if (let Option::SOME(definition) = defStore.get(generic)) {
+        if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+          genericName = name;
+        }
+      }
+
+      if (let Option::SOME(paramSymbol) = paramName) {
+        if (let Option::SOME(name) = symbols.resolve(paramSymbol)) {
+          parameter = name;
+        }
+      }
+
+      let message: String = `type '${typeName.toStr()}' is a view and cannot be stored in '${genericName}': its parameter '${parameter}' owns its storage (@owns)`;
+      let label: String = `'${typeName.toStr()}' borrows storage it does not own; store an owned type here, such as a 'String' or a 'static str'`;
+
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::VIEW_IN_OWNING_SLOT, message.toStr(), span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, label.toStr());
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
     }
 
     /// The trait the name at `index` resolved to, `NONE` when it named no
@@ -452,7 +505,11 @@ export namespace Analyzer {
       let threadSafety: boolean = boundText.equals("Send") || boundText.equals("Sync");
 
       if (threadSafety) {
-        label = `'${typeName.toStr()}' holds a raw pointer, a function value or another member that is not ${bound}`;
+        if (Analyzer::ViewType::isView(defStore, typeStore, typeArg)) {
+          label = `'${typeName.toStr()}' is a view: it borrows storage it does not own, so it is neither Send nor Sync`;
+        } else {
+          label = `'${typeName.toStr()}' holds a raw pointer, a function value or another member that is not ${bound}`;
+        }
       }
 
       if (let Option::SOME(type_) = typeStore.get(typeArg)) {

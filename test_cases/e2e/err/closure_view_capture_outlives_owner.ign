@@ -1,0 +1,23 @@
+// e2e: err
+// A closure whose captures are views is itself a view: storing one into a
+// binding that outlives the capture's scope keeps the environment pointing at
+// storage that was already dropped, and calling the closure later reads freed
+// bytes.
+record Holder {
+  public run: () -> u64;
+}
+
+function main(): i32 {
+  let mut kept: Option<Holder> = Option::NONE;
+  {
+    let owned: String = String::create("dangling-closure-bytes");
+    let text: str = owned.toStr();
+    kept = Option::SOME(Holder { run: (): u64 -> {
+          return String::create(text).length();
+        } });
+  }
+  if (let Option::SOME(holder) = kept) {
+    return (holder.run)() as i32;
+  }
+  return 0;
+}

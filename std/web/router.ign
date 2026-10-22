@@ -371,7 +371,12 @@ export namespace Web {
     let sharedListener: Arc<TcpListener> = Arc::new<TcpListener>(listener);
     let sharedConfig: Arc<Http::ServerConfig> = Arc::new<Http::ServerConfig>(config);
     let sharedApp: Arc<A> = Arc::new<A>(app);
-    let mut workers: Vector<JoinHandle<Io::IoError>> = Vector::new<JoinHandle<Io::IoError>>();
+
+    // The workers carry the failing errno as an `i32` rather than an
+    // `IoError`: the error's message borrows a C-managed buffer, which makes
+    // `IoError` a view, and a view cannot cross a thread boundary. The
+    // errno is mapped back to an `IoError` on the calling thread.
+    let mut workers: Vector<JoinHandle<i32>> = Vector::new<JoinHandle<i32>>();
     let mut index: u64 = 0;
 
     while (index < count) {
@@ -379,7 +384,7 @@ export namespace Web {
       let workerConfig: Arc<Http::ServerConfig> = sharedConfig.clone();
       let workerApp: Arc<A> = sharedApp.clone();
 
-      workers.push(Thread::spawn<Io::IoError>((): Io::IoError -> {
+      workers.push(Thread::spawn<i32>((): i32 -> {
         let router: Web::Router = (@move workerApp).get().build();
         return Http::acceptConnections<Web::Router>(
               (@move workerListener).get(),
@@ -390,7 +395,7 @@ export namespace Web {
       index += 1;
     }
 
-    let mut first: Option<Io::IoError> = Option::NONE;
+    let mut first: Option<i32> = Option::NONE;
 
     while (workers.length() > 0) {
       if (let Option::SOME(handle) = workers.pop()) {
@@ -399,11 +404,11 @@ export namespace Web {
       }
     }
 
-    let Option::SOME(error) = first else {
+    let Option::SOME(errno) = first else {
       return Result::OK(());
     };
 
-    return Result::ERROR(error);
+    return Result::ERROR(Io::IoError::fromErrno(errno));
   }
 }
 

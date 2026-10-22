@@ -2,7 +2,9 @@
 // primitives, tuples and arrays are both. A record that declares them keeps
 // its declaration even when a field is not, and `@allow` silences the
 // warning that declaration gets. A type parameter satisfies them by declaring
-// them as bounds.
+// them as bounds. A view type (`str`, a `&T` as a type argument) is neither:
+// `text` is a static string, which owns its bytes, and a reference crosses a
+// `Sync` bound through `share`, never a `Send` one.
 @allow(thread_safety)
 @implements(Send, Sync)
 record Handle {
@@ -36,11 +38,11 @@ function main(): i32 {
   let handle: Handle = Handle { raw: 0 as *mut i32 };
   let pair = (1, true);
   let values: i32[3] = [1, 2, 3];
-  let text: str = "text";
+  let text: static str = "text";
 
   let mut total: i32 = send(7) + send(2.5) + send('c') + send(text);
   total += send(point) + send(pair) + send(values) + send(Shape::CIRCLE(3));
-  total += send(handle) + share(&handle) + send(&point);
+  total += send(handle) + share(&handle) + share(&point);
   total += forward(5);
 
   return total;

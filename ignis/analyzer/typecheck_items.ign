@@ -485,6 +485,7 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, recordDefId, &fields, &record_.fields, record_.span);
       Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, recordDefId, &staticFields, &record_.fields, record_.span);
+      Analyzer::Typecheck::checkStaticFieldsHoldNoViews(state, defStore, typeStore, symbols, module, &staticFields, &record_.fields, record_.span);
     }
 
     /// Checks every variant payload type and static field type an enum declares.
@@ -507,6 +508,7 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, enumDefId, &variants, &enum_.variants, enum_.span);
       Analyzer::Typecheck::checkMemberBounds(state, defStore, typeStore, symbols, module, enumDefId, &staticFields, &enum_.variants, enum_.span);
+      Analyzer::Typecheck::checkStaticFieldsHoldNoViews(state, defStore, typeStore, symbols, module, &staticFields, &enum_.variants, enum_.span);
     }
 
     /// Checks the declared types of `members`, each at the span of the member
@@ -825,6 +827,74 @@ export namespace Analyzer {
       let message: String = `thread-local '${fieldName.toStr()}' has type '${typeName.toStr()}', which runs a drop that no thread exit runs`;
 
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::THREAD_LOCAL_NEEDS_DROP, message.toStr());
+    }
+
+    /// A view type cannot be stored in a `static` or `static mut` field (S3):
+    /// a view borrows storage it does not own, and a static outlives every
+    /// owner it could borrow. A `static str` field is accepted: a static
+    /// string owns its bytes. Reported at the written type when the field has
+    /// one, at the whole binding otherwise.
+    function checkStaticFieldsHoldNoViews(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      staticFields: &Vector<Analyzer::DefinitionId>,
+      memberPatterns: &Vector<Ast::PatternId>,
+      fallback: SourceSpan,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < staticFields.length()) {
+        if (let Option::SOME(staticDefId) = staticFields.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(*staticDefId)) {
+            if (Analyzer::ViewType::isView(defStore, typeStore, variableDef.declaredType)) {
+              if (let Option::SOME(name) = symbols.resolve(variableDef.name)) {
+                let kind: str = variableDef.mutable ? "'static mut'" : "'static'";
+                let typeName: String = typeStore.nameOfResolved(variableDef.declaredType, &*defStore, &*symbols);
+                let message: String = `${kind} field '${name}' has type '${typeName.toStr()}', which is a view type: a view borrows storage it does not own, and a static outlives every owner`;
+                let span: SourceSpan = Analyzer::Typecheck::staticFieldTypeSpan(module, memberPatterns, name, fallback);
+
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::STATIC_FIELD_OF_VIEW_TYPE, message.toStr());
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    /// The span of the type a member binding annotates, of the whole binding
+    /// when it annotates none, or of `fallback` when no binding names `name`.
+    function staticFieldTypeSpan(
+      module: &Ast::Module,
+      memberPatterns: &Vector<Ast::PatternId>,
+      name: str,
+      fallback: SourceSpan,
+    ): SourceSpan {
+      let mut index: u64 = 0;
+
+      while (index < memberPatterns.length()) {
+        if (let Option::SOME(patternId) = memberPatterns.get(index)) {
+          if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*patternId)) {
+            if (binding.name.equals(name)) {
+              if (let Option::SOME(annotationId) = binding.annotation) {
+                if (let Option::SOME(typeNode) = module.types.get(annotationId)) {
+                  return Ast::Serializer::typeSpan(typeNode);
+                }
+              }
+
+              return binding.span;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return fallback;
     }
 
     /// A `static mut` field written without an initializer starts with every

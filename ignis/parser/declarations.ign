@@ -207,14 +207,33 @@ export namespace ParserDeclarations {
     let mut parserRef: &mut ParserShared::State = parser;
     let mut bounds: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
 
+    // An `@`-attribute may mark the parameter itself; the only one the
+    // analyzer reads today is `@owns`, which declares an owning storage slot.
+    let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+    let mut span: Option<SourceSpan> = Option::NONE;
+
+    while (parserRef.atPunctuation(Punctuation::AT)) {
+      let attribute = ParserDeclarations::parseAttribute(parserRef)!;
+
+      attributes.push(Ast::copyAttribute(&attribute));
+      span = Option::SOME(match (span) {
+        Option::SOME(existing) -> ParserShared::mergeSpans(existing, attribute.span),
+        Option::NONE -> attribute.span,
+      });
+    }
+
     let nameToken = parserRef.expectIdentifier("expected generic parameter")!;
-    let mut span: SourceSpan = nameToken.span;
+    let mut parameterSpan: SourceSpan = nameToken.span;
+
+    if (let Option::SOME(attributeSpan) = span) {
+      parameterSpan = ParserShared::mergeSpans(attributeSpan, nameToken.span);
+    }
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
       while (true) {
         let bound = ParserDeclarations::parseGenericBound(parserRef)!;
 
-        span = ParserShared::mergeSpans(span, bound.span);
+        parameterSpan = ParserShared::mergeSpans(parameterSpan, bound.span);
         bounds.push(bound);
 
         if (parserRef.consumePunctuation(Punctuation::AMPERSAND).isSome()) {
@@ -226,9 +245,10 @@ export namespace ParserDeclarations {
     }
 
     return Option::SOME(Ast::GenericParam {
-      span: span,
+      span: parameterSpan,
       name: nameToken.lexemeString(),
       bounds: Ast::copyGenericBounds(&bounds),
+      attributes: Ast::copyGenericAttributes(&attributes),
     });
   }
 

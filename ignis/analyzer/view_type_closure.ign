@@ -1,0 +1,58 @@
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+
+import _ from "./view_type";
+
+/// The closure half of the S2 view predicate: whether a concrete closure
+/// VALUE is itself a second-class view.
+///
+/// This is a separate file from `view_type.ign` — both declare the
+/// `Analyzer::ViewType` namespace — because that module is part of the
+/// analyzer's Hir-free core (the typechecker members that judge `Send` and
+/// declared types must not depend on `@compiler::hir`), while judging a
+/// closure value needs its HIR captures. The passes that hold closure nodes
+/// (T4b storage/Send, T4c call sites) import this file directly.
+export namespace Analyzer::ViewType {
+  /// Whether the closure value described by `closure` is itself a view: true
+  /// when it captures at least one binding by reference (`ByRef` or
+  /// `ByMutRef`, the environment borrows from the defining frame), or by
+  /// value of a type that is itself a view (`str`, `&T`, a record holding
+  /// one), since the environment then holds storage it does not own. A
+  /// closure capturing only owned values by value owns its environment and
+  /// is not a view.
+  public function closureIsView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    closure: &Hir::HirClosure,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < closure.captures.length()) {
+      if (let Option::SOME(capture) = closure.captures.get(index)) {
+        let mut byReference: boolean = false;
+
+        match (&capture.mode) {
+          Hir::CaptureMode::ByRef -> {
+            byReference = true;
+          },
+          Hir::CaptureMode::ByMutRef -> {
+            byReference = true;
+          },
+          _ -> {},
+        };
+
+        if (byReference) {
+          return true;
+        }
+
+        if (Analyzer::ViewType::isView(defStore, typeStore, capture.typeInEnv)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+}

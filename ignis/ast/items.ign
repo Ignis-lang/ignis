@@ -11,6 +11,10 @@ export namespace Ast {
     public span: SourceSpan;
     public name: String;
     public bounds: Vector<Ast::GenericBound>;
+    /// Attributes written on the parameter itself. The one the analyzer reads
+    /// today is `@owns`, which the binder turns into an owning storage slot:
+    /// instantiating the parameter with a view type is rejected (A0265).
+    public attributes: Vector<Ast::Attribute>;
   }
 
   enum ImportBindingKind {
@@ -62,6 +66,23 @@ export namespace Ast {
     return copied;
   }
 
+  function copyGenericAttributes(source: &Vector<Ast::Attribute>): Vector<Ast::Attribute> {
+    let mut copied: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(Ast::copyAttribute(value));
+      index += 1;
+    }
+
+    return copied;
+  }
+
   function copyGenericParams(source: &Vector<Ast::GenericParam>): Vector<Ast::GenericParam> {
     let mut copied: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
     let mut index: u64 = 0;
@@ -76,6 +97,7 @@ export namespace Ast {
         span: value.span,
         name: value.name.clone(),
         bounds: Ast::copyGenericBounds(&value.bounds),
+        attributes: Ast::copyGenericAttributes(&value.attributes),
       });
       index += 1;
     }

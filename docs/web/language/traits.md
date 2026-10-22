@@ -84,8 +84,11 @@ Two rules that catch people out:
 
 `Send` and `Sync` are judged from a type's structure, so most types never name them:
 
-- Primitives, `str`, ranges and raw C function pointers are both.
+- Primitives, ranges and raw C function pointers are both.
 - Raw pointers (`*T`, `*mut T`) are neither: the compiler does not track what they point to.
+- View types are neither: a `str`, a reference, a slice, or a record or container holding one
+  borrows storage it does not own, so `share<T: Sync>(&text)` rejects a `str` just as
+  `Channel<T: Send>` does.
 - `&T` is either one only when `T` is `Sync`; `&mut T` follows `T`. Slices (`T[]`) follow `&T`.
 - Arrays, tuples, records and enums are `Send` (or `Sync`) when every element, field or payload is,
   with a generic instance judged after its type arguments are substituted.
