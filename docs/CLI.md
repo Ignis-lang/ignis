@@ -356,4 +356,4 @@ Start the Language Server Protocol process.
 ignis lsp
 ```
 
-Known limitation: the language server does not yet report `A0217` for a capturing closure passed to a function-typed extern parameter. The CLI reaches that diagnostic in the capture pass it runs over the HIR, a stage the editor analysis does not perform, so run `ignis check` to validate FFI boundaries even when the editor is silent.
+Known limitation: the language server does not yet report `A0217` for a capturing closure passed to a function-typed extern parameter, nor `A0264` for a capturing closure taken as a function pointer (`fn(A) -> R`). The CLI reaches both in the capture pass it runs over the HIR, a stage the editor analysis does not perform, so run `ignis check` to validate function pointers and FFI boundaries even when the editor is silent.

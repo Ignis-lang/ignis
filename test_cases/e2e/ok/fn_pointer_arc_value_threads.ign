@@ -1,0 +1,23 @@
+// e2e: std
+// A bare `fn` value is Send and Sync, so `Arc<fn(i32) -> i32>` is shared with
+// two threads that each call it through the `Arc`.
+import JoinHandle, Thread from "std::thread";
+import Arc from "std::sync";
+
+function square(value: i32): i32 {
+  return value * value;
+}
+
+function main(): i32 {
+  let shared: Arc<fn(i32) -> i32> = Arc::new<fn(i32) -> i32>(square);
+  let first: Arc<fn(i32) -> i32> = shared.clone();
+  let second: Arc<fn(i32) -> i32> = shared.clone();
+
+  let firstHandle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> (*(@move first).get())(3));
+  let secondHandle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> (*(@move second).get())(4));
+
+  let total: i32 = firstHandle.join() + secondHandle.join();
+
+  // 9 + 16
+  return total - 25;
+}

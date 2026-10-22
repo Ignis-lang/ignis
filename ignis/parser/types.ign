@@ -175,7 +175,12 @@ export namespace ParserTypes {
     parserRef.skipTrivia();
 
     if (parserRef.atPunctuation(Punctuation::LEFT_PAREN)) {
-      return ParserTypes::parseFunctionType(parserRef);
+      return ParserTypes::parseFunctionType(parserRef, Option::NONE);
+    }
+
+    if (ParserTypes::atFunctionPointerType(parserRef)) {
+      let fnToken: Token = parserRef.bump();
+      return ParserTypes::parseFunctionType(parserRef, Option::SOME(fnToken.span));
     }
 
     if (!ParserTypes::isTypeSegment(parserRef)) {
@@ -250,7 +255,31 @@ export namespace ParserTypes {
     })));
   }
 
-  /// Parses `(T, U) -> R` function type syntax.
+  /// Whether the type starts with `fn(`, the function pointer type.
+  ///
+  /// `fn` is not a keyword: it means a function pointer only in type position
+  /// and only when `(` follows, which no path type can, so the word stays free
+  /// as a name everywhere else.
+  function atFunctionPointerType(parser: &mut ParserShared::State): boolean {
+    let parserRef: &mut ParserShared::State = parser;
+    let token: Token = parserRef.current();
+
+    if (token.kindValue() != TokenKind::IDENTIFIER) {
+      return false;
+    }
+
+    let lexeme: String = token.lexemeString();
+
+    if (!lexeme.equals("fn")) {
+      return false;
+    }
+
+    let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+    return next.kindValue() == TokenKind::PUNCTUATION && next.punctuationValue() == Punctuation::LEFT_PAREN;
+  }
+
+  /// Parses `(T, U) -> R` function type syntax, or `fn(T, U) -> R` when
+  /// `fnSpan` holds the span of the `fn` already consumed.
   ///
   /// `(...)` in type position never spells a tuple type: the host parser
   /// (`parse_function_type` in `crates/ignis_parser/src/parser/type_syntax.rs`)
@@ -259,7 +288,10 @@ export namespace ParserTypes {
   /// `Ast::Type::Node::Tuple` for the parenthesized list. Tuple *patterns*
   /// and *expressions* still parse fine; only the type-syntax spelling is
   /// unsupported, matching the host.
-  function parseFunctionType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
+  function parseFunctionType(
+    parser: &mut ParserShared::State,
+    fnSpan: Option<SourceSpan>
+  ): Option<Ast::TypeId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
     let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start function type")!;
@@ -290,10 +322,15 @@ export namespace ParserTypes {
       Option::SOME(node) -> Ast::Serializer::typeSpan(node),
       Option::NONE -> closeParen.span,
     };
+    let startSpan: SourceSpan = match (fnSpan) {
+      Option::SOME(span) -> span,
+      Option::NONE -> openParen.span,
+    };
     return Option::SOME(parserRef.module.addType(Ast::Type::Node::Function(Ast::Type::Function {
-      span: ParserShared::mergeSpans(openParen.span, returnSpan),
+      span: ParserShared::mergeSpans(startSpan, returnSpan),
       parameters: functionParameters,
       returnType: returnType,
+      pointer: fnSpan.isSome(),
     })));
   }
 }

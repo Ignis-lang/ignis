@@ -1282,6 +1282,10 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, SourceSpan::detached(0, 0));
     };
 
+    if (let Option::SOME(pointer) = Lowering::lowerFunctionPointerSource(defStore, typeStore, symbols, module, output, locals, hir, exprId)) {
+      return pointer;
+    }
+
     match (expression) {
       Ast::Expression::Node::Literal(literal) -> {
         let literalType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
@@ -2332,6 +2336,11 @@ export namespace Lowering {
     };
 
     let functionType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, expressionId);
+
+    if (Analyzer::Typecheck::functionPointerClosureType(defStore, typeStore, functionType).isSome()) {
+      return Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, expressionId);
+    }
+
     let mut span: SourceSpan = SourceSpan::detached(0, 0);
 
     if (let Option::SOME(Ast::Expression::Node::Variable(variable)) = module.expressions.get(expressionId)) {
@@ -2379,6 +2388,11 @@ export namespace Lowering {
 
     if (let Option::SOME(node) = hir.get(argumentId)) {
       span = node.span;
+
+      // A function pointer value already is what C takes.
+      if (node.typeId.raw() == rawType.raw()) {
+        return argumentId;
+      }
 
       if (let Hir::HirKind::FromRawFunction(inner) = &node.kind) {
         if (let Option::SOME(innerNode) = hir.get(inner)) {
@@ -2500,7 +2514,8 @@ export namespace Lowering {
     exprId: Ast::ExpressionId,
     call: &Ast::Expression::Call,
   ): Hir::HirId {
-    let closureCallee: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, call.callee);
+    let calleeValue: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, call.callee);
+    let closureCallee: Hir::HirId = Lowering::functionPointerAsClosure(defStore, typeStore, hir, calleeValue);
 
     let closureArgs: Vector<Hir::HirId> = Lowering::lowerExpressionList(
       defStore,
@@ -2523,6 +2538,34 @@ export namespace Lowering {
       }),
       span: call.span,
       typeId: closureCallType,
+    });
+  }
+
+  /// `valueId` as a closure: a function pointer value is wrapped in
+  /// `FromRawFunction`, which gives it a null environment and a trampoline
+  /// that calls the pointer, and any other value is returned unchanged.
+  function functionPointerAsClosure(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    valueId: Hir::HirId,
+  ): Hir::HirId {
+    let Option::SOME(valueNode) = hir.get(valueId) else {
+      return valueId;
+    };
+
+    let span: SourceSpan = valueNode.span;
+    let valueType: Analyzer::TypeId = valueNode.typeId;
+
+    let Option::SOME(closureType) = Analyzer::Typecheck::functionPointerClosureType(defStore, typeStore, valueType) else {
+      return valueId;
+    };
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FromRawFunction(valueId),
+      span: span,
+      typeId: closureType,
     });
   }
 
@@ -2850,6 +2893,87 @@ export namespace Lowering {
     });
   }
 
+  /// The function pointer `exprId` stands for, when the typechecker recorded
+  /// a function pointer type for a closure literal or for a function or
+  /// static method named directly: `ToRawFunction` of the closure literal or
+  /// of a `Variable` naming the definition. `NONE` for every other
+  /// expression, including a value that already is a function pointer.
+  function lowerFunctionPointerSource(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+  ): Option<Hir::HirId> {
+    let Option::SOME(recordedType) = Lowering::lookupExprType(&output.typecheck, exprId) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(closureType) = Analyzer::Typecheck::functionPointerClosureType(defStore, typeStore, recordedType) else {
+      return Option::NONE;
+    };
+
+    let pointerType: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, recordedType).typeId;
+    let mut operand: Option<Hir::HirId> = Option::NONE;
+    let mut span: SourceSpan = SourceSpan::detached(0, 0);
+
+    match (module.expressions.get(exprId)) {
+      Option::SOME(Ast::Expression::Node::Lambda(lambda)) -> {
+        span = lambda.span;
+        operand = Option::SOME(Lowering::lowerLambda(defStore, typeStore, symbols, module, output, locals, hir, exprId, &lambda));
+      },
+      Option::SOME(Ast::Expression::Node::Variable(variable)) -> {
+        span = variable.span;
+      },
+      Option::SOME(Ast::Expression::Node::Path(path)) -> {
+        span = path.span;
+      },
+      _ -> {
+        return Option::NONE;
+      },
+    };
+
+    if (operand.isNone()) {
+      let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = Analyzer::ResolverBodies::findExprRef(
+        &output.resolvedBodies.bodyResolution,
+        exprId.raw(),
+      ) else {
+        return Option::NONE;
+      };
+
+      let namesFunction: boolean = match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Function(_)) -> true,
+        Option::SOME(Analyzer::Definition::Method(_)) -> true,
+        _ -> false,
+      };
+
+      if (!namesFunction) {
+        return Option::NONE;
+      }
+
+      let mut variableHirRef: &mut Hir::HirStore = hir;
+      operand = Option::SOME(variableHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Variable(defId),
+        span: span,
+        typeId: closureType,
+      }));
+    }
+
+    let Option::SOME(operandId) = operand else {
+      return Option::NONE;
+    };
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return Option::SOME(hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::ToRawFunction(operandId),
+      span: span,
+      typeId: pointerType,
+    }));
+  }
+
   /// Lowers `obj.field` to `HirKind::FieldAccess`, inserting the single
   /// `Dereference` the oracle's `auto_deref_for_lowering` inserts when the
   /// object is a reference.
@@ -2861,7 +2985,8 @@ export namespace Lowering {
   ///
   /// A function-typed field of a C-layout record holds a C function pointer,
   /// so reading it as a value converts the pointer back to a function value
-  /// with `FromRawFunction`.
+  /// with `FromRawFunction`; a field declared `fn(A) -> R` is read as the
+  /// pointer it is.
   function lowerMemberAccess(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2889,6 +3014,11 @@ export namespace Lowering {
     };
 
     if (!Lowering::isRawFunctionType(typeStore, placeType)) {
+      return place;
+    }
+
+    // A field declared with a function pointer type is read as one.
+    if (Analyzer::Typecheck::functionPointerClosureType(defStore, typeStore, valueType).isSome()) {
       return place;
     }
 
@@ -3385,7 +3515,13 @@ export namespace Lowering {
     exprId: Ast::ExpressionId,
     lambda: &Ast::Expression::Lambda,
   ): Hir::HirId {
-    let fnType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+    let mut fnType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+    // A closure literal taken as a function pointer is still built as a
+    // closure; `lowerFunctionPointerSource` takes its thunk's pointer.
+    if (let Option::SOME(closureType) = Analyzer::Typecheck::functionPointerClosureType(defStore, typeStore, fnType)) {
+      fnType = closureType;
+    }
 
     let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
     let mut returnType: Analyzer::TypeId = Lowering::voidType(typeStore);

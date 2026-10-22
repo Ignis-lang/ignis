@@ -1609,11 +1609,13 @@ export namespace LirLowering {
   }
 
   /// Builds the slice an array-typed operand stands for when the position it
-  /// flows into asks for a slice of the same element type.
+  /// flows into asks for a slice of the same element type, and the closure a
+  /// function pointer stands for when the position asks for a closure.
   ///
-  /// The typechecker accepts that flow without a written conversion, so the
-  /// data pointer and the array's static length have to be packed here.
-  /// Every other pair of types passes the operand through unchanged.
+  /// The typechecker accepts both flows without a written conversion, so the
+  /// data pointer and the array's static length, or the pointer and its
+  /// trampoline, have to be packed here. Every other pair of types passes the
+  /// operand through unchanged.
   function coerceOperandToType(
     typeStore: &mut Analyzer::TypeStore,
     function_: &mut Lir::FunctionLir,
@@ -1623,6 +1625,19 @@ export namespace LirLowering {
     targetType: Analyzer::TypeId,
     span: SourceSpan,
   ): Lir::Operand {
+    if (LirLowering::isFunctionPointerToClosure(typeStore, sourceType, targetType)) {
+      let closure: Lir::TempId = LirLowering::freshTemp(function_, targetType, span);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::RawToClosure(Lir::InstrRawToClosure {
+        dest: closure,
+        raw: operand,
+        rawType: sourceType,
+        closureType: targetType,
+      }));
+
+      return Lir::Operand::Temp(closure);
+    }
+
     let mut targetElement: Option<Analyzer::TypeId> = Option::NONE;
 
     if (let Option::SOME(targetNode) = typeStore.get(targetType)) {
@@ -1667,6 +1682,24 @@ export namespace LirLowering {
     return Lir::Operand::Temp(dest);
   }
 
+  /// Whether a value of the function pointer type `sourceType` flows into a
+  /// position of the closure type `targetType`, which the typechecker accepts
+  /// for the same signature.
+  function isFunctionPointerToClosure(
+    typeStore: &mut Analyzer::TypeStore,
+    sourceType: Analyzer::TypeId,
+    targetType: Analyzer::TypeId,
+  ): boolean {
+    let Option::SOME(Analyzer::Type::RawFunction(_)) = typeStore.get(sourceType) else {
+      return false;
+    };
+
+    return match (typeStore.get(targetType)) {
+      Option::SOME(Analyzer::Type::Function(_)) -> true,
+      _ -> false,
+    };
+  }
+
   /// Coerces the lowered value of the HIR node `valueId` to the type of the
   /// storage it goes into: a fixed array stored into a slice becomes a slice
   /// over the array, as it does for a `let`, an argument or a return.
@@ -1694,13 +1727,31 @@ export namespace LirLowering {
     typeStore: &mut Analyzer::TypeStore,
     recordType: Analyzer::TypeId,
   ): Vector<Analyzer::TypeId> {
-    if (let Option::SOME(typeNode) = typeStore.get(recordType)) {
-      if (let Analyzer::Type::Record(defId) = typeNode) {
-        return Borrowck::recordFieldTypes(defStore, defId);
-      }
+    let mut recordId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Type::Record(defId)) = typeStore.get(recordType)) {
+      recordId = Option::SOME(defId);
     }
 
-    return Vector::new<Analyzer::TypeId>();
+    let Option::SOME(defId) = recordId else {
+      return Vector::new<Analyzer::TypeId>();
+    };
+
+    // A function-typed field of a C-layout record stores a C function
+    // pointer, which its initializer already is.
+    let declaredTypes: Vector<Analyzer::TypeId> = Borrowck::recordFieldTypes(defStore, defId);
+    let mut storageTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < declaredTypes.length()) {
+      if (let Option::SOME(declaredType) = declaredTypes.get(index)) {
+        storageTypes.push(Hir::recordFieldStorageType(defStore, typeStore, defId, *declaredType));
+      }
+
+      index += 1;
+    }
+
+    return storageTypes;
   }
 
   /// `&place` lowers to the place's address, a temp typed as a raw pointer to
@@ -1985,8 +2036,12 @@ export namespace LirLowering {
             let rawValue: Lir::Operand = LirLowering::lowerCallArgument(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId, &callParams, argIndex);
             let mut argValue: Lir::Operand = rawValue;
 
+            // An extern function takes a function-typed argument as the C
+            // function pointer lowering already made of it.
             if (let Option::SOME(parameterType) = parameterTypes.get(argIndex)) {
-              argValue = LirLowering::coerceOperandToType(typeStore, function_, state, argValue, argType, *parameterType, argSpan);
+              if (!isExtern || !LirLowering::isFunctionPointerToClosure(typeStore, argType, *parameterType)) {
+                argValue = LirLowering::coerceOperandToType(typeStore, function_, state, argValue, argType, *parameterType, argSpan);
+              }
             }
 
             args.push(LirLowering::spillOwnedCallArgument(defStore, typeStore, function_, state, argValue, argType, isExtern));
@@ -3613,9 +3668,9 @@ export namespace LirLowering {
 
   /// The C function pointer a `ToRawFunction` produces, of type `rawType`.
   ///
-  /// Capture-free checking only lets through a named function, a closure
-  /// literal without captures and drop glue, so those are the operands with
-  /// a pointer to take. A closure literal is never built: its thunk already
+  /// Capture-free checking only lets through a named function or static
+  /// method, a closure literal without captures and drop glue, so those are
+  /// the operands with a pointer to take. A closure literal is never built: its thunk already
   /// is the function, reached through a wrapper that supplies a null
   /// environment. Anything else was reported, and lowers to an undefined
   /// pointer the build never emits.
@@ -3635,9 +3690,15 @@ export namespace LirLowering {
     if (let Option::SOME(operand) = hirStore.get(operandId)) {
       match (&operand.kind) {
         Hir::HirKind::Variable(defId) -> {
-          if (let Option::SOME(Analyzer::Definition::Function(_)) = defStore.get(defId)) {
-            target = Option::SOME(defId);
-          }
+          match (defStore.get(defId)) {
+            Option::SOME(Analyzer::Definition::Function(_)) -> {
+              target = Option::SOME(defId);
+            },
+            Option::SOME(Analyzer::Definition::Method(_)) -> {
+              target = Option::SOME(defId);
+            },
+            _ -> {},
+          };
         },
         Hir::HirKind::Closure(closureNode) -> {
           if (closureNode.captures.isEmpty()) {
