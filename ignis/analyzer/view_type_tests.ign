@@ -657,6 +657,136 @@ function viewTypeMutuallyRecursiveRecordsTerminate(): void {
   Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, typeIdA));
 }
 
+/// Scenario: the same generic nested inside itself with a view argument at
+/// the bottom is a view (`Vector<Vector<str>>`): the revisit guard is keyed on
+/// the instance — definition AND type arguments — so the inner instance's
+/// `str` argument is still examined.
+/// Spec: S2, L18.
+@test
+function viewTypeNestedSameGenericInstanceWithViewArgumentIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Vector", Vector::new<Analyzer::TypeId>());
+
+  let mut innerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  innerArgs.push(idStr);
+  let idInner: Analyzer::TypeId = store.instance(defId, innerArgs);
+
+  let mut outerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerArgs.push(idInner);
+  let id: Analyzer::TypeId = store.instance(defId, outerArgs);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: the same generic nested inside itself with a reference at the
+/// bottom is a view (`Option<Option<&i32>>`), for the same reason.
+/// Spec: S2, L18.
+@test
+function viewTypeNestedSameGenericInstanceWithReferenceIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idRef: Analyzer::TypeId = store.reference(idI32);
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Option", Vector::new<Analyzer::TypeId>());
+
+  let mut innerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  innerArgs.push(idRef);
+  let idInner: Analyzer::TypeId = store.instance(defId, innerArgs);
+
+  let mut outerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerArgs.push(idInner);
+  let id: Analyzer::TypeId = store.instance(defId, outerArgs);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: different generics nested with a view at the bottom is a view
+/// (`Vector<Option<str>>`).
+/// Spec: S2, L18.
+@test
+function viewTypeNestedDifferentGenericInstancesWithViewArgumentIsAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idVector: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Vector", Vector::new<Analyzer::TypeId>());
+  let idOption: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Opt", Vector::new<Analyzer::TypeId>());
+
+  let mut optionArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  optionArgs.push(idStr);
+  let idInner: Analyzer::TypeId = store.instance(idOption, optionArgs);
+
+  let mut vectorArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  vectorArgs.push(idInner);
+  let id: Analyzer::TypeId = store.instance(idVector, vectorArgs);
+
+  Test::assert(Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: the same generic nested inside itself with an owned argument at
+/// the bottom is not a view (`Vector<Vector<i32>>`): the guard must not turn
+/// every repetition into a view either.
+/// Spec: S2, L18.
+@test
+function viewTypeNestedSameGenericInstanceWithOwnedArgumentIsNotAView(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Vector", Vector::new<Analyzer::TypeId>());
+
+  let mut innerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  innerArgs.push(idI32);
+  let idInner: Analyzer::TypeId = store.instance(defId, innerArgs);
+
+  let mut outerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerArgs.push(idInner);
+  let id: Analyzer::TypeId = store.instance(defId, outerArgs);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, id));
+}
+
+/// Scenario: two records referencing each other through generic instances
+/// still terminate on the revisit guard instead of looping.
+/// Spec: S2.
+@test
+function viewTypeMutuallyRecursiveInstancesTerminate(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idA: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "First", Vector::new<Analyzer::TypeId>());
+  let idB: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Second", Vector::new<Analyzer::TypeId>());
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut argsB: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  argsB.push(idI32);
+  let idInstanceB: Analyzer::TypeId = store.instance(idB, argsB);
+
+  let mut argsA: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  argsA.push(idI32);
+  let idInstanceA: Analyzer::TypeId = store.instance(idA, argsA);
+
+  let mut fieldsA: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsA.push(idInstanceB);
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "First", idA, fieldsA);
+
+  let mut fieldsB: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsB.push(idInstanceA);
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "Second", idB, fieldsB);
+
+  Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, store.recordType(idA)));
+}
+
 // ─── Closure values ───────────────────────────────────────────────────────────
 
 /// Builds a closure value with the given captures.

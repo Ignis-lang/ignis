@@ -2584,12 +2584,45 @@ export namespace Analyzer {
             Option::NONE -> `<param:Symbol(${String::create(symbol.raw()).toStr()})>`,
           },
           Analyzer::Type::Instance(inst) -> self.instanceNameOfResolved(&inst, defs, syms),
-          Analyzer::Type::Alias(defId) -> `<alias:DefId(${String::create(defId.raw()).toStr()})>`,
+          Analyzer::Type::Alias(defId) -> self.aliasNameOfResolved(defId, defs, syms),
           Analyzer::Type::RawFunction(f) -> self.functionNameOfResolved(&f, true, defs, syms),
         };
       }
 
       return `<unknown-type:TypeId(${String::create(id.raw()).toStr()})>`;
+    }
+
+    /// How a diagnostic names an alias: the type it resolves to, followed
+    /// through alias chains. A cyclic alias (reported where it is declared)
+    /// stops after a bounded number of hops and falls back to the internal
+    /// name instead of recursing forever.
+    public aliasNameOfResolved(
+      &self,
+      aliasDefId: Analyzer::DefinitionId,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      let internalName: String = `<alias:DefId(${String::create(aliasDefId.raw()).toStr()})>`;
+      let mut current: Analyzer::DefinitionId = aliasDefId;
+      let mut hops: u64 = 0;
+
+      while (hops < 32) {
+        if (let Option::SOME(definition) = defs.get(current)) {
+          if (let Analyzer::Definition::TypeAlias(aliasDef) = definition) {
+            if (let Option::SOME(Analyzer::Type::Alias(next)) = self.types.get(aliasDef.aliasedType)) {
+              current = next;
+              hops += 1;
+              continue;
+            }
+
+            return self.nameOfResolved(aliasDef.aliasedType, defs, syms);
+          }
+        }
+
+        return internalName;
+      }
+
+      return internalName;
     }
 
     public get(&self, id: Analyzer::TypeId): Option<&Analyzer::Type> {

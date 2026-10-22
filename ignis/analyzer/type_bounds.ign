@@ -505,7 +505,11 @@ export namespace Analyzer {
       let threadSafety: boolean = boundText.equals("Send") || boundText.equals("Sync");
 
       if (threadSafety) {
-        label = `'${typeName.toStr()}' holds a raw pointer, a function value or another member that is not ${bound}`;
+        if (Analyzer::ViewType::isView(defStore, typeStore, typeArg)) {
+          label = `'${typeName.toStr()}' is a view: it borrows storage it does not own, so it is neither Send nor Sync`;
+        } else {
+          label = `'${typeName.toStr()}' holds a raw pointer, a function value or another member that is not ${bound}`;
+        }
       }
 
       if (let Option::SOME(type_) = typeStore.get(typeArg)) {

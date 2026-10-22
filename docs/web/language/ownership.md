@@ -172,9 +172,16 @@ A view must not outlive its owner:
   its bytes.
 - A view type is neither `Send` nor `Sync`, so every API bounded by them rejects one: a
   `Channel<T: Send>`, a `Thread::spawn` task, an `Arc<T>` and their friends cannot carry a
-  `str`, a reference, a slice, or a record or container holding one. A closure that captures by
+  `str`, a reference, a slice, or a record or container holding one. Sharing a view by
+  reference across threads (`&T: Sync`) has the same dangling-owner risk as sending it, so
+  `Sync` is refused too. A closure that captures by
   reference — or by value a view — is itself a view, and is rejected the same way; a closure
   that owns everything it captures is not.
+- A closure whose captures are views obeys the same storage depth rule as a view: storing it
+  in a `let`, an assignment, a field or an aggregate built in place keeps every capture alive
+  that long, so a capture taken from a local whose scope ends before the binding is an error
+  (A0202, A0043 for a return). Calling the closure later would read storage that was already
+  dropped.
 - A type parameter written `@owns` (`record Slot<@owns T>`) is an owning storage slot: the
   declaring type keeps the argument in storage it allocates, where no owner is visible, so
   instantiating it with a view type is an error (A0269). `Option`, `Result` and `Mutex` hold

@@ -37,15 +37,19 @@ import _ from "./definitions";
 ///   property of the function type.
 export namespace Analyzer::ViewType {
   /// Whether `typeId` is a second-class view type (S2). Recursive records and
-  /// enums terminate: nominal definitions currently being visited are skipped
-  /// on revisit, which is sound because a revisit can only happen through a
-  /// non-view component (a view component answers before recursing).
+  /// enums terminate: nominal instances currently being visited are skipped on
+  /// revisit, which is sound because a revisit can only happen through a
+  /// non-view component (a view component answers before recursing). The
+  /// guard is keyed on the instance — the definition AND its type arguments —
+  /// not the definition alone: `Vector<Vector<str>>` and `Option<Option<&i32>>`
+  /// repeat the same definition with different arguments, and a guard on the
+  /// definition would prune the inner one before its view argument was seen.
   public function isView(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
   ): boolean {
-    let mut visiting: Vector<u32> = Vector::new<u32>();
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
     return ViewType::isViewInner(defStore, typeStore, typeId, &mut visiting);
   }
 
@@ -53,7 +57,7 @@ export namespace Analyzer::ViewType {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
-    visiting: &mut Vector<u32>,
+    visiting: &mut Vector<Vector<u32>>,
   ): boolean {
     let Option::SOME(type_) = typeStore.get(typeId) else {
       return false;
@@ -114,12 +118,14 @@ export namespace Analyzer::ViewType {
     }
 
     if (let Option::SOME(defId) = nominal) {
-      if (ViewType::containsRaw(visiting, defId.raw())) {
+      let key: Vector<u32> = ViewType::visitKey(defId.raw(), &components);
+
+      if (ViewType::containsKey(&*visiting, &key)) {
         return false;
       }
 
-      let mut visitingRef: &mut Vector<u32> = visiting;
-      visitingRef.push(defId.raw());
+      let mut visitingRef: &mut Vector<Vector<u32>> = visiting;
+      visitingRef.push(key);
 
       if (!hasPayloadComponents) {
         if (isEnum) {
@@ -238,12 +244,33 @@ export namespace Analyzer::ViewType {
     };
   }
 
-  function containsRaw(visiting: &mut Vector<u32>, raw: u32): boolean {
+  /// The revisit-guard key of a nominal visit: the definition's raw id
+  /// followed by its type arguments (`Instance`) or none (a plain record or
+  /// enum, whose field types are gathered after the key is pushed).
+  function visitKey(defRaw: u32, args: &Vector<Analyzer::TypeId>): Vector<u32> {
+    let mut key: Vector<u32> = Vector::new<u32>();
+    key.push(defRaw);
+    key.push(args.length() as u32);
+
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        key.push(argument.raw());
+      }
+
+      index += 1;
+    }
+
+    return key;
+  }
+
+  function containsKey(visiting: &Vector<Vector<u32>>, key: &Vector<u32>): boolean {
     let mut index: u64 = 0;
 
     while (index < visiting.length()) {
       if (let Option::SOME(entry) = visiting.get(index)) {
-        if (*entry == raw) {
+        if (ViewType::keysEqual(entry, key)) {
           return true;
         }
       }
@@ -252,5 +279,27 @@ export namespace Analyzer::ViewType {
     }
 
     return false;
+  }
+
+  function keysEqual(left: &Vector<u32>, right: &Vector<u32>): boolean {
+    if (left.length() != right.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.length()) {
+      if (let Option::SOME(leftEntry) = left.get(index)) {
+        if (let Option::SOME(rightEntry) = right.get(index)) {
+          if (*leftEntry != *rightEntry) {
+            return false;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return true;
   }
 }
