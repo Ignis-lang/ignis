@@ -36,7 +36,6 @@ Reach for it when the bytes already exist and you neither own nor mutate them.
 `String` owns a heap buffer and can grow.
 
 ```ignis
-import String from "std::string";
 
 function main(): i32 {
     let mut value: String = String::create("ignis");
@@ -68,7 +67,6 @@ function main(): i32 {
 `Vector<T>` is a standard-library container: heap-backed, growable, cleaned up through `Drop`.
 
 ```ignis
-import Vector from "std::vector";
 
 function main(): i32 {
     let mut values: Vector<i32> = Vector::new<i32>();

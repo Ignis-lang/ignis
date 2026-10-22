@@ -1,0 +1,71 @@
+// e2e: std
+// A generic router holding `fn(&A, i32) -> i32` handlers is built once and
+// shared across threads: the handlers have no environment, so the router is
+// Send and Sync whenever its state is.
+import JoinHandle, Thread from "std::thread";
+import Arc from "std::sync";
+
+record Route<A> {
+  public code: i32;
+  public handler: fn(&A, i32) -> i32;
+}
+
+record Router<A: Send & Sync> {
+  public state: A;
+  public routes: Vector<Route<A>>;
+
+  static create(state: A): Router<A> {
+    return Router { state: state, routes: Vector::new<Route<A>>() };
+  }
+
+  add(&mut self, code: i32, handler: fn(&A, i32) -> i32): void {
+    self.routes.push(Route { code: code, handler: handler });
+  }
+
+  dispatch(&self, code: i32, input: i32): i32 {
+    let mut index: u64 = 0;
+
+    while (index < self.routes.length()) {
+      if (let Option::SOME(route) = self.routes.get(index)) {
+        if (route.code == code) {
+          return (route.handler)(&self.state, input);
+        }
+      }
+
+      index += 1;
+    }
+
+    return -1;
+  }
+}
+
+record Config {
+  public offset: i32;
+}
+
+function addOffset(config: &Config, input: i32): i32 {
+  return input + config.offset;
+}
+
+function scaleByOffset(config: &Config, input: i32): i32 {
+  return input * config.offset;
+}
+
+function main(): i32 {
+  let mut router: Router<Config> = Router::create<Config>(Config { offset: 10 });
+
+  router.add(1, addOffset);
+  router.add(2, scaleByOffset);
+
+  let shared: Arc<Router<Config>> = Arc::new<Router<Config>>(router);
+  let first: Arc<Router<Config>> = shared.clone();
+  let second: Arc<Router<Config>> = shared.clone();
+
+  let firstHandle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> (@move first).get().dispatch(1, 5));
+  let secondHandle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> (@move second).get().dispatch(2, 5));
+
+  let total: i32 = firstHandle.join() + secondHandle.join() + shared.get().dispatch(3, 0);
+
+  // 15 + 50 - 1
+  return total - 64;
+}

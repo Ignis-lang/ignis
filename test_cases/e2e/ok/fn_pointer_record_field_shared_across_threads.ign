@@ -1,0 +1,40 @@
+// e2e: std
+// A record holding `fn` fields is Send and Sync, so it is shared through an
+// `Arc` and called from two threads; a `fn` local is passed to the
+// `@sendable` task parameter of `Thread::spawn` as it is.
+import JoinHandle, Thread from "std::thread";
+import Arc from "std::sync";
+
+record Operations {
+  public apply: fn(i32) -> i32;
+  public combine: fn(i32, i32) -> i32;
+}
+
+function square(value: i32): i32 {
+  return value * value;
+}
+
+function add(left: i32, right: i32): i32 {
+  return left + right;
+}
+
+function answer(): i32 {
+  return 7;
+}
+
+function main(): i32 {
+  let operations: Arc<Operations> = Arc::new<Operations>(Operations { apply: square, combine: add });
+  let first: Arc<Operations> = operations.clone();
+  let second: Arc<Operations> = operations.clone();
+
+  let firstHandle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> ((@move first).get().apply)(3));
+  let secondHandle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> (@move second).get().combine(4, 5));
+
+  let task: fn() -> i32 = answer;
+  let thirdHandle: JoinHandle<i32> = Thread::spawn<i32>(task);
+
+  let total: i32 = firstHandle.join() + secondHandle.join() + thirdHandle.join();
+
+  // 9 + 9 + 7
+  return total - 25;
+}

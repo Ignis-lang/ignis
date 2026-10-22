@@ -86,7 +86,6 @@ function booleanChecks(): void {
 `assertEq<T>` and `assertNe<T>` route through canonical builtin equality.
 
 ```ignis
-import String from "std::string";
 import Test from "std::test";
 
 @test

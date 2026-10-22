@@ -1,0 +1,15 @@
+// e2e: err
+// A `MutexGuard` holds raw pointers and declares neither Send nor Sync, so it
+// cannot be shared through an `Arc`, even when its value is Send.
+import Arc, Mutex, MutexGuard from "std::sync";
+
+function shareGuard<T: Send>(guard: MutexGuard<T>): Arc<MutexGuard<T>> {
+  return Arc::new<MutexGuard<T>>(guard);
+}
+
+function main(): i32 {
+  let mutex: Mutex<i32> = Mutex::new<i32>(1);
+  let _shared: Arc<MutexGuard<i32>> = shareGuard<i32>(mutex.lock());
+
+  return 0;
+}

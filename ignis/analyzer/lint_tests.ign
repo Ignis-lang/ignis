@@ -953,3 +953,181 @@ function lintUnusedForOfBindingWarns(): void {
     "unused variable 'item'",
   );
 }
+
+// ===========================================================================
+// Redundant prelude-import lint (A0266)
+// ===========================================================================
+
+function lintParseSourceFile(sourceMap: &mut SourceMap, name: str, source: str): Ast::Module {
+  let file: SourceFile = SourceFile::create(sourceMap, name, source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  return parsed.module;
+}
+
+/// Analyze `prelude.ign` as the auto-loaded prelude, an optional middle module
+/// `helper.ign` that is NOT auto-loaded, and `main.ign` last; return the
+/// analysis record of `main.ign`.
+function lintAnalyzeWithPrelude(
+  preludeSource: str,
+  helperSource: Option<str>,
+  mainSource: str,
+): Analyzer::ModuleAnalysisRecord {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+
+  modules.push(lintParseSourceFile(&mut sourceMap, "prelude.ign", preludeSource));
+  infos.push(Analyzer::Imports::ModuleInfo {
+    index: 0,
+    pathText: String::create("prelude.ign"),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  });
+
+  let mut nextIndex: u64 = 1;
+
+  if (let Option::SOME(helper) = helperSource) {
+    modules.push(lintParseSourceFile(&mut sourceMap, "helper.ign", helper));
+    infos.push(Analyzer::Imports::ModuleInfo {
+      index: nextIndex,
+      pathText: String::create("helper.ign"),
+      kind: Analyzer::Imports::ModuleKind::PROJECT,
+    });
+    nextIndex += 1;
+  }
+
+  modules.push(lintParseSourceFile(&mut sourceMap, "main.ign", mainSource));
+  infos.push(Analyzer::Imports::ModuleInfo {
+    index: nextIndex,
+    pathText: String::create("main.ign"),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  });
+
+  let mut preludePaths: Vector<String> = Vector::new<String>();
+  preludePaths.push(String::create("prelude.ign"));
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &preludePaths,
+  );
+
+  let Option::SOME(mainRecord) = records.pop() else {
+    @panic("lintAnalyzeWithPrelude: missing main module record");
+  };
+
+  return mainRecord;
+}
+
+function lintAssertPreludeImportReported(
+  analyzed: &Analyzer::ModuleAnalysisRecord,
+  name: str
+): void {
+  lintAssertSingleLint(&analyzed.output.lints.diagnostics, DiagnosticCode::REDUNDANT_PRELUDE_IMPORT);
+
+  let Option::SOME(diagnostic) = analyzed.output.lints.diagnostics.get(0) else {
+    @panic("missing redundant-prelude-import diagnostic");
+  };
+
+  Test::assertEq<str>(
+    diagnostic.messageText(),
+    `unnecessary import of '${name}': prelude.ign is auto-loaded`.toStr(),
+  );
+}
+
+/// Scenario: the prelude already provides `String`, so importing it warns.
+@test
+function lintPreludeImportOfStringIsReported(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = lintAnalyzeWithPrelude(
+    "export record String {\n  public data: str;\n}\n",
+    Option::NONE,
+    "import String from \"prelude.ign\";\n\nfunction make(s: String): String {\n  return s;\n}\n",
+  );
+
+  lintAssertPreludeImportReported(&analyzed, "String");
+}
+
+/// Scenario: the prelude already provides `Vector`, so importing it warns.
+@test
+function lintPreludeImportOfVectorIsReported(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = lintAnalyzeWithPrelude(
+    "export record Vector<T> {\n  public head: T;\n}\n",
+    Option::NONE,
+    "import Vector from \"prelude.ign\";\n\nfunction pick(values: Vector<i32>): i32 {\n  return values.head;\n}\n",
+  );
+
+  lintAssertPreludeImportReported(&analyzed, "Vector");
+}
+
+/// Scenario: the prelude already provides `Option`, so importing it warns.
+@test
+function lintPreludeImportOfOptionIsReported(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = lintAnalyzeWithPrelude(
+    "export enum Option<T> {\n  SOME(T),\n  NONE,\n}\n",
+    Option::NONE,
+    "import Option from \"prelude.ign\";\n\nfunction maybe(): Option<i32> {\n  return Option::NONE;\n}\n",
+  );
+
+  lintAssertPreludeImportReported(&analyzed, "Option");
+}
+
+/// Scenario: the prelude already provides `Result`, so importing it warns.
+@test
+function lintPreludeImportOfResultIsReported(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = lintAnalyzeWithPrelude(
+    "export enum Result<T, E> {\n  OK(T),\n  ERROR(E),\n}\n",
+    Option::NONE,
+    "import Result from \"prelude.ign\";\n\nfunction attempt(): Result<i32, str> {\n  return Result::OK(1);\n}\n",
+  );
+
+  lintAssertPreludeImportReported(&analyzed, "Result");
+}
+
+/// Scenario: a module that is not auto-loaded may require an import even when
+/// the prelude happens to provide a symbol of the same name.
+@test
+function lintImportFromNonPreludeModuleIsClean(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = lintAnalyzeWithPrelude(
+    "export record String {\n  public data: str;\n}\n",
+    Option::SOME("export record String {\n  public data: str;\n}\n"),
+    "import String from \"helper.ign\";\n\nfunction make(s: String): String {\n  return s;\n}\n",
+  );
+
+  Test::assertEq<u64>(analyzed.output.lints.diagnostics.length(), 0);
+}
+
+/// Scenario: an unused import of a non-prelude module stays an
+/// unused-import warning and nothing else.
+@test
+function lintUnusedNonPreludeImportDoesNotReportPreludeImport(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = lintAnalyzeWithPrelude(
+    "export function ping(): void {\n  return;\n}\n",
+    Option::SOME("export function ping(): void {\n  return;\n}\n"),
+    "import ping from \"helper.ign\";\n\nfunction main(): void {\n  return;\n}\n",
+  );
+
+  lintAssertSingleLint(&analyzed.output.lints.diagnostics, DiagnosticCode::UNUSED_IMPORT);
+}
+
+/// Scenario: a module re-exporting a prelude symbol under a different path
+/// keeps the import meaningful — the lint stays silent.
+@test
+function lintImportOfReExportedPreludeSymbolFromAnotherPathIsClean(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = lintAnalyzeWithPrelude(
+    "export record Widget {\n  public id: i32;\n}\n",
+    Option::SOME("export Widget from \"prelude.ign\";\n"),
+    "import Widget from \"helper.ign\";\n\nfunction pick(widget: Widget): i32 {\n  return widget.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(analyzed.output.lints.diagnostics.length(), 0);
+}

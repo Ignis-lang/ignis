@@ -1,0 +1,60 @@
+// A module whose name alone pushes the QBE identifier limit: a function
+// pointer read back out of a C-layout record field and called goes through
+// the raw-to-closure adapter, whose `_raw` wrapper symbol appends to the
+// already capped module symbol, so every emitted identifier has to stay
+// length-safe for the build to succeed.
+extern Native {
+  record Handler {
+    public apply: (i32) -> i32;
+    public bias: i32;
+  }
+}
+
+@cLayout
+record Adapter {
+  public first: (i32) -> i32;
+  public second: (i32) -> i32;
+}
+
+function doubleIt(value: i32): i32 {
+  return value * 2;
+}
+
+function negateIt(value: i32): i32 {
+  return -value;
+}
+
+function main(): i32 {
+  let mut handler: Native::Handler = Native::Handler { apply: doubleIt, bias: 5 };
+  let named: (i32) -> i32 = handler.apply;
+
+  if (named(handler.bias) != 10) {
+    return 1;
+  }
+
+  handler.apply = (value: i32): i32 -> value + 100;
+  let lambda: (i32) -> i32 = handler.apply;
+
+  if (lambda(handler.bias) != 105) {
+    return 2;
+  }
+
+  let mut adapter: Adapter = Adapter { first: (value: i32): i32 -> value - 7, second: negateIt };
+  let first: (i32) -> i32 = adapter.first;
+  let second: (i32) -> i32 = adapter.second;
+
+  if (first(50) != 43 || second(9) != -9) {
+    return 3;
+  }
+
+  adapter.first = handler.apply;
+  adapter.second = doubleIt;
+  let copied: (i32) -> i32 = adapter.first;
+  let replaced: (i32) -> i32 = adapter.second;
+
+  if (copied(1) != 101 || replaced(21) != 42) {
+    return 4;
+  }
+
+  return 40;
+}

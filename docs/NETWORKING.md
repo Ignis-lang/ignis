@@ -202,6 +202,25 @@ WebSockets, TLS (Transport Layer Security), compression, a client.
 receive the request, the response and the next function. See the `std::web` module docs for the
 full surface.
 
+The layers are `std::net` → `std::http` → `std::web`, each built only on the one below. An
+application targets `std::web` and imports nothing else to start a server; it only drops a layer
+when it needs that layer's types directly — a `SocketAddress` it already holds, the full
+`Http::ServerConfig`, a raw socket:
+
+```ignis
+import Web from "std::web";
+
+function main(): i32 {
+  // `"127.0.0.1:8080"`; `":8080"` or `"*:8080"` binds every interface, `0.0.0.0`.
+  return Web::listen<Users>("127.0.0.1:8080", Users::new()).isOk() ? 0 : 1;
+}
+```
+
+`Web::listen` parses the address string, binds it and serves with the default configuration;
+`Web::listenOn` takes a host and a port, and `Web::listenWith` a `Web::Config` (the thread count).
+The layer below stays available: `Web::serve` takes a `std::net::SocketAddress` and an
+`std::http::ServerConfig` directly.
+
 ### The `next` signature
 
 In Express, `next` is a closure the middleware calls and then keeps using `req` and `res`. In Ignis,

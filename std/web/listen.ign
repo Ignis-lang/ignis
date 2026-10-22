@@ -1,0 +1,297 @@
+//! Starting a server from a string address: `Web::listen` parses
+//! `"127.0.0.1:8080"`, binds and serves, so an application's `main` needs
+//! no other import. `Web::serve` and `Web::serveListener` are the layer
+//! below, for a caller that already holds a `SocketAddress` and an
+//! `Http::ServerConfig`.
+
+import Http from "std::http";
+import Io from "std::io";
+import IpAddress, SocketAddress, TcpListener from "std::net";
+
+function byteOf(text: &String, index: u64): u8 {
+  return match (text.byteAt(index)) {
+    Option::SOME(byte) -> byte,
+    Option::NONE -> 0,
+  };
+}
+
+function isDigit(byte: u8): boolean {
+  return byte >= 48 && byte <= 57;
+}
+
+/// What a host may look like, as the error states it.
+function hostExpected(): str {
+  return "four octets 0-255 like \"127.0.0.1\", or no host (\"*\" or empty) for all interfaces";
+}
+
+/// The error for an address `text` that does not parse: it names what was
+/// expected and what was given.
+function invalidAddress(text: str, expected: str): Web::ListenError {
+  return Web::ListenError::INVALID_ADDRESS(`invalid address "${text}": expected ${expected}`);
+}
+
+/// Parses `text[start..end]` as four dotted octets, as a 32-bit address
+/// with the first octet in the high byte. An octet is one to three digits
+/// with no leading zero and a value of at most 255.
+function parseOctets(
+  text: &String,
+  start: u64,
+  end: u64,
+  given: str
+): Result<u32, Web::ListenError> {
+  let mut bits: u32 = 0;
+  let mut octets: u64 = 0;
+  let mut index: u64 = start;
+
+  while (octets < 4) {
+    let first: u64 = index;
+    let mut value: u32 = 0;
+    let mut digits: u64 = 0;
+
+    while (index < end && isDigit(byteOf(text, index))) {
+      value = value * 10 + (byteOf(text, index) - 48) as u32;
+      digits += 1;
+      index += 1;
+
+      if (digits > 3) {
+        return Result::ERROR(invalidAddress(given, "an octet 0-255"));
+      }
+    }
+
+    if (digits == 0) {
+      return Result::ERROR(invalidAddress(given, hostExpected()));
+    }
+
+    if (value > 255) {
+      return Result::ERROR(invalidAddress(given, "an octet 0-255"));
+    }
+
+    if (digits > 1 && byteOf(text, first) == 48) {
+      return Result::ERROR(invalidAddress(given, "an octet 0-255 without leading zeros"));
+    }
+
+    bits = (bits << 8) | value;
+    octets += 1;
+
+    if (octets < 4) {
+      if (index >= end || byteOf(text, index) != 46) {
+        return Result::ERROR(invalidAddress(given, hostExpected()));
+      }
+
+      index += 1;
+    }
+  }
+
+  if (index != end) {
+    return Result::ERROR(invalidAddress(given, hostExpected()));
+  }
+
+  return Result::OK(bits);
+}
+
+/// The IP address of `text[start..end]`: `0.0.0.0` when the host is empty
+/// or `*`, otherwise four dotted octets.
+function parseHost(
+  text: &String,
+  start: u64,
+  end: u64,
+  given: str
+): Result<IpAddress, Web::ListenError> {
+  if (start == end || (end - start == 1 && byteOf(text, start) == 42)) {
+    return Result::OK(IpAddress::v4(0, 0, 0, 0));
+  }
+
+  let bits: u32 = parseOctets(text, start, end, given)!;
+  return Result::OK(
+    IpAddress::v4((bits >> 24) as u8, ((bits >> 16) & 255) as u8, ((bits >> 8) & 255) as u8, (bits & 255) as u8),
+  );
+}
+
+/// Parses `text[start..end]` as a decimal port 0-65535, with nothing left
+/// over.
+function parsePort(text: &String, start: u64, end: u64, given: str): Result<u16, Web::ListenError> {
+  let mut value: u32 = 0;
+  let mut digits: u64 = 0;
+  let mut index: u64 = start;
+
+  while (index < end && isDigit(byteOf(text, index))) {
+    value = value * 10 + (byteOf(text, index) - 48) as u32;
+    digits += 1;
+    index += 1;
+
+    if (digits > 5) {
+      return Result::ERROR(invalidAddress(given, "a port 0-65535"));
+    }
+  }
+
+  if (digits == 0) {
+    return Result::ERROR(invalidAddress(given, "a port 0-65535"));
+  }
+
+  if (index != end) {
+    return Result::ERROR(invalidAddress(given, "the address to end after the port"));
+  }
+
+  if (value > 65535) {
+    return Result::ERROR(invalidAddress(given, "a port 0-65535"));
+  }
+
+  return Result::OK(value as u16);
+}
+
+/// Binds `address` and serves `app` on `config.threads` threads. Maps both
+/// the bind failure and a serving error into a `Web::ListenError`, so no
+/// `std::net` or `std::http` type reaches the caller.
+function listenAt<A: Web::App & Send & Sync>(
+  address: SocketAddress,
+  config: Web::Config,
+  app: A
+): Result<void, Web::ListenError> {
+  let listener: TcpListener = match (TcpListener::bind(&address)) {
+    Result::OK(listener) -> listener,
+    Result::ERROR(error) -> {
+      return Result::ERROR(Web::ListenError::IO(error));
+    },
+  };
+
+  let serverConfig: Http::ServerConfig = config.toServerConfig();
+  return match (Web::serveListener<A>(listener, serverConfig, app)) {
+    Result::OK(_) -> Result::OK(()),
+    Result::ERROR(error) -> Result::ERROR(Web::ListenError::IO(error)),
+  };
+}
+
+export namespace Web {
+  /// Why a server did not start. An enum because a failure is one of two
+  /// things, never both: the address text did not parse, or the listener
+  /// failed, and the `Io::IoError` stays whole instead of being flattened
+  /// into text.
+  enum ListenError {
+    /// The address did not parse; the message names what was expected and
+    /// what was given.
+    INVALID_ADDRESS(String),
+    /// Binding the listener or serving failed.
+    IO(Io::IoError),
+
+    /// The readable message: what was expected and what was given for a
+    /// bad address, the system's message for a failed bind.
+    public message(&self): String {
+      return match (self) {
+        Web::ListenError::INVALID_ADDRESS(text) -> text.clone(),
+        Web::ListenError::IO(error) -> {
+          return `could not start the server: ${error.errorMessage()}`;
+        },
+      };
+    }
+  }
+
+  /// How a `listen` server runs: `std::web`'s own knobs, so an application
+  /// never names `Http::ServerConfig`. The full configuration is the layer
+  /// below, `Web::serve`.
+  record Config {
+    /// Threads accepting and serving connections (0 counts as 1).
+    public threads: u64;
+
+    /// The default configuration: 8 threads, the server's default.
+    public static new(): Config {
+      return Config { threads: 8 };
+    }
+
+    /// The `Http::ServerConfig` this configuration describes: `threads`,
+    /// and the server's default for everything else. `listenWith` calls
+    /// it.
+    public toServerConfig(&self): Http::ServerConfig {
+      let mut config: Http::ServerConfig = Http::ServerConfig::new();
+      config.threads = self.threads;
+      return config;
+    }
+  }
+
+  /// Parses `"<host>:<port>"`. The host is four dotted octets, `127.0.0.1`
+  /// style, or empty or `*` for every interface, `0.0.0.0`; the port is a
+  /// decimal 0-65535. `"127.0.0.1:8080"`, `":8080"` and `"*:8080"` are the
+  /// shapes to write; names are not resolved. A malformed address is an
+  /// error whose message names what was expected and what was given.
+  function parseAddress(text: str): Result<SocketAddress, Web::ListenError> {
+    let owned: String = String::create(text);
+    let length: u64 = owned.length();
+    let colon: u64 = indexOfColon(&owned, 0);
+
+    if (colon == length) {
+      return Result::ERROR(invalidAddress(text, "\"<host>:<port>\" like \"127.0.0.1:8080\""));
+    }
+
+    let address: IpAddress = match (parseHost(&owned, 0, colon, text)) {
+      Result::OK(address) -> address,
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+    };
+
+    let port: u16 = match (parsePort(&owned, colon + 1, length, text)) {
+      Result::OK(port) -> port,
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+    };
+
+    return Result::OK(SocketAddress::create(address, port));
+  }
+
+  /// Parses `address` and serves `app` with the default configuration, as
+  /// `listenWith` does.
+  function listen<A: Web::App & Send & Sync>(address: str, app: A): Result<void, Web::ListenError> {
+    return Web::listenWith<A>(address, Web::Config::new(), app);
+  }
+
+  /// Serves `app` on `host`:`port` with the default configuration. The
+  /// host is four dotted octets, or empty or `*` for every interface; no
+  /// name is resolved.
+  function listenOn<A: Web::App & Send & Sync>(
+    host: str,
+    port: u16,
+    app: A
+  ): Result<void, Web::ListenError> {
+    let owned: String = String::create(host);
+    let address: IpAddress = match (parseHost(&owned, 0, owned.length(), host)) {
+      Result::OK(address) -> address,
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+    };
+
+    return listenAt<A>(SocketAddress::create(address, port), Web::Config::new(), app);
+  }
+
+  /// Parses `address` and serves `app` on `config.threads` threads.
+  function listenWith<A: Web::App & Send & Sync>(
+    address: str,
+    config: Web::Config,
+    app: A
+  ): Result<void, Web::ListenError> {
+    let parsed: SocketAddress = match (Web::parseAddress(address)) {
+      Result::OK(parsed) -> parsed,
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+    };
+
+    return listenAt<A>(parsed, config, app);
+  }
+}
+
+/// Index of the first `:` at or after `start` in `text`, or
+/// `text.length()`.
+function indexOfColon(text: &String, start: u64): u64 {
+  let mut index: u64 = start;
+
+  while (index < text.length()) {
+    if (byteOf(text, index) == 58) {
+      return index;
+    }
+
+    index += 1;
+  }
+
+  return text.length();
+}

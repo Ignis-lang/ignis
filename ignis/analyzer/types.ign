@@ -121,9 +121,10 @@ export namespace Analyzer {
     Alias(Analyzer::DefinitionId),
 
     /// A plain C function pointer with the payload's signature: no
-    /// environment, no drop function. Lowering produces it where a function
-    /// type crosses into C (`Hir::cFacingType`); the typechecker never does,
-    /// so source programs only ever see `Function`.
+    /// environment, no drop function. Source spells it `fn(A) -> R`, and
+    /// lowering also produces it where a closure type crosses into C
+    /// (`Hir::cFacingType`). It is Copy, Send and Sync, since there is no
+    /// environment to own or share.
     RawFunction(Analyzer::FunctionType),
 
     /// The value of `a..b` or `a..=b`: a pair of bounds of one integer type.
@@ -1787,6 +1788,17 @@ export namespace Analyzer {
 
           return self.unifyForInference(f.returnType, actualFunction.returnType, paramSymbols, bindings);
         },
+        Analyzer::Type::RawFunction(f) -> {
+          let Analyzer::Type::RawFunction(actualFunction) = actualKind else {
+            return false;
+          };
+
+          if (!self.unifyEachForInference(&f.params, &actualFunction.params, paramSymbols, bindings)) {
+            return false;
+          }
+
+          return self.unifyForInference(f.returnType, actualFunction.returnType, paramSymbols, bindings);
+        },
         Analyzer::Type::Instance(instance) -> {
           let Analyzer::Type::Instance(actualInstance) = actualKind else {
             return false;
@@ -2193,11 +2205,12 @@ export namespace Analyzer {
       return `&${self.nameOf(refType.referent).toStr()}`;
     }
 
-    /// Formats a function type as "fn(p1, p2) -> r".
-    /// Empty params produce "fn() -> r". Parameters are joined with ", ".
-    /// Recurses through nameOf for each param and the return type.
-    private functionNameOf(&self, fn_: &Analyzer::FunctionType): String {
-      let mut result: String = String::create("fn(");
+    /// Formats a closure type as "(p1, p2) -> r", or a function pointer type
+    /// as "fn(p1, p2) -> r" when `pointer` is set. Empty params produce
+    /// "() -> r". Parameters are joined with ", ". Recurses through nameOf for
+    /// each param and the return type.
+    private functionNameOf(&self, fn_: &Analyzer::FunctionType, pointer: boolean): String {
+      let mut result: String = String::create(pointer ? "fn(" : "(");
       let mut index: u64 = 0;
 
       while (index < fn_.params.length()) {
@@ -2271,13 +2284,13 @@ export namespace Analyzer {
           Analyzer::Type::Range(range) -> self.rangeNameOf(&range, self.nameOf(range.element)),
           Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
           Analyzer::Type::Tuple(t) -> self.tupleNameOf(&t.elements),
-          Analyzer::Type::Function(f) -> self.functionNameOf(&f),
+          Analyzer::Type::Function(f) -> self.functionNameOf(&f, false),
           Analyzer::Type::Record(defId) -> `<record:DefId(${String::create(defId.raw()).toStr()})>`,
           Analyzer::Type::Enum(defId) -> `<enum:DefId(${String::create(defId.raw()).toStr()})>`,
           Analyzer::Type::Param(symbol) -> `<param:Symbol(${String::create(symbol.raw()).toStr()})>`,
           Analyzer::Type::Instance(instance) -> self.instanceNameOf(&instance),
           Analyzer::Type::Alias(defId) -> `<alias:DefId(${String::create(defId.raw()).toStr()})>`,
-          Analyzer::Type::RawFunction(f) -> self.functionNameOf(&f),
+          Analyzer::Type::RawFunction(f) -> self.functionNameOf(&f, true),
         };
       }
 
@@ -2433,15 +2446,17 @@ export namespace Analyzer {
       return `&${self.nameOfResolved(refType.referent, defs, syms).toStr()}`;
     }
 
-    /// Formats a function type as "fn(p1, p2) -> r", using `nameOfResolved`
-    /// for each parameter and the return type to produce real nominal names.
+    /// Formats a function type the way `functionNameOf` does, using
+    /// `nameOfResolved` for each parameter and the return type to produce real
+    /// nominal names.
     private functionNameOfResolved(
       &self,
       fn_: &Analyzer::FunctionType,
+      pointer: boolean,
       defs: &Analyzer::DefinitionStore,
       syms: &Analyzer::SymbolTable,
     ): String {
-      let mut result: String = String::create("fn(");
+      let mut result: String = String::create(pointer ? "fn(" : "(");
       let mut index: u64 = 0;
 
       while (index < fn_.params.length()) {
@@ -2561,7 +2576,7 @@ export namespace Analyzer {
             .concat(String::create(length).toStr())
             .concat("]"),
           Analyzer::Type::Tuple(t) -> self.tupleNameOfResolved(&t.elements, defs, syms),
-          Analyzer::Type::Function(f) -> self.functionNameOfResolved(&f, defs, syms),
+          Analyzer::Type::Function(f) -> self.functionNameOfResolved(&f, false, defs, syms),
           Analyzer::Type::Record(defId) -> self.recordNameOfResolved(defId, defs, syms),
           Analyzer::Type::Enum(defId) -> self.enumNameOfResolved(defId, defs, syms),
           Analyzer::Type::Param(symbol) -> match (syms.resolve(symbol)) {
@@ -2570,7 +2585,7 @@ export namespace Analyzer {
           },
           Analyzer::Type::Instance(inst) -> self.instanceNameOfResolved(&inst, defs, syms),
           Analyzer::Type::Alias(defId) -> `<alias:DefId(${String::create(defId.raw()).toStr()})>`,
-          Analyzer::Type::RawFunction(f) -> self.functionNameOfResolved(&f, defs, syms),
+          Analyzer::Type::RawFunction(f) -> self.functionNameOfResolved(&f, true, defs, syms),
         };
       }
 

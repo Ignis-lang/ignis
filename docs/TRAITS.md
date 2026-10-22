@@ -222,18 +222,23 @@ The compiler answers them from a type's structure:
 
 | Type | `Send` | `Sync` |
 |------|--------|--------|
-| Integer and float primitives, `boolean`, `char`, `str`, `void`, `never`, atoms, ranges, raw C function pointers | yes | yes |
+| Integer and float primitives, `boolean`, `char`, `str`, `void`, `never`, atoms, ranges, function pointers `fn(A) -> R` | yes | yes |
 | `*T`, `*mut T` | no | no |
 | `&T`, slices `T[]` | when `T` is `Sync` | when `T` is `Sync` |
 | `&mut T` | when `T` is `Send` | when `T` is `Sync` |
 | Fixed arrays, tuples | when every element is | when every element is |
 | Records, enums, generic instances | declared, or every field / payload is | declared, or every field / payload is |
-| Function values | no; only a call argument is judged, at the call (below) | no; only a call argument is judged, at the call (below) |
+| Closure values `(A) -> R` | no; only a call argument is judged, at the call (below) | no; only a call argument is judged, at the call (below) |
 | Type parameters | when the parameter declares the bound | when the parameter declares the bound |
 
-A function type does not record what a closure captured, so a function-typed argument bound to a
+A function pointer type `fn(A) -> R` has no environment, so it is always both, everywhere: as a
+field, a type argument, a `@sendable` argument or a value moved into another thread. A record whose
+fields are function pointers is Send and Sync from its structure, with no declaration. See
+[function pointers](web/language/closures.md#function-pointers).
+
+A closure type does not record what a closure captured, so a closure-typed argument bound to a
 `Send` or `Sync` type parameter, or passed to a `@sendable` parameter, is judged where it is
-passed, once captures are known. Anywhere else, such as a field of `Holder<() -> i32>`, a function
+passed, once captures are known. Anywhere else, such as a field of `Holder<() -> i32>`, a closure
 type is neither `Send` nor `Sync`.
 
 - a closure literal: every capture moved in by value has to be `Send` (`Sync` for a `Sync` bound),
@@ -269,11 +274,21 @@ prove it, for example when it guards a raw pointer itself. The declaration wins,
 breaks it. `@allow(thread_safety)` on the record or enum, or on a top-level function for the whole
 module, silences it.
 
-On a generic record or enum the declaration speaks only for its own fields: an instance is Send
-(or Sync) only when every type argument is too, so `Vector<String>` is Send and
-`Vector<*mut i32>` is not. A type that needs a different condition states it as bounds on its own
-type parameters, as `Arc<T: Send & Sync>` does. `String`, `Vector<T>` and `HashMap<K, V>` declare
-both traits this way; `Rc` and `Weak` declare neither.
+On a generic record or enum the declaration speaks only for its own fields. Each type argument of
+an instance is judged by its type parameter:
+
+- a parameter with no `Send` or `Sync` bound: the argument has to be Send for the instance to be
+  Send, and Sync for it to be Sync. `Vector<String>` is Send and Sync; `Vector<*mut i32>` is
+  neither.
+- a parameter bounded by `Send` or `Sync`: the argument has to satisfy exactly those bounds,
+  whichever trait the instance is judged for. `Mutex<T: Send>` declares both, so `Mutex<T>` is Send
+  and Sync whenever `T` is Send, even when `T` is not Sync; `Arc<T: Send & Sync>` is Send and Sync
+  when `T` is both.
+
+A type that needs a condition other than the default states it as bounds on its own type
+parameters this way. The `thread_safety` lint takes such a bound at its word: a field of a bounded
+parameter's type does not make it warn. `String`, `Vector<T>` and `HashMap<K, V>` declare both
+traits with no bound; `Rc`, `Weak` and `MutexGuard` declare neither.
 
 ```ignis
 @allow(thread_safety)

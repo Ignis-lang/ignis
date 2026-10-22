@@ -24,7 +24,6 @@ Run them with [`ignis test`](/docs/tooling/cli), in a project or against a singl
 ## Assertions
 
 ```ignis
-import String from "std::string";
 import Test from "std::test";
 
 @test

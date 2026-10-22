@@ -24,10 +24,10 @@
 //!
 //! ## Thread safety
 //!
-//! `Mutex<T>` requires `T: Send`. Its fields are the lock storage, which is
-//! plain bytes, and the value, so it is Send when `T` is and Sync when `T` is.
-//! It needs no declaration. To share a mutex between threads, put it in an
-//! `Arc` (`Shared<T>`, the alias for `Arc<Mutex<T>>`).
+//! `Mutex<T>` requires `T: Send` and declares Send and Sync: the lock lets one
+//! thread at a time reach the value, so a mutex is Send and Sync whenever `T`
+//! is Send, even when `T` is not Sync. To share a mutex between threads, put it
+//! in an `Arc` (`Shared<T>`, the alias for `Arc<Mutex<T>>`).
 //!
 //! ## Waiting
 //!
@@ -88,7 +88,8 @@ extern __sync_posix {
 }
 
 /// Owns a value that one thread at a time may reach, through a `MutexGuard`.
-@implements(Drop)
+/// Send and Sync when `T` is Send.
+@implements(Drop, Send, Sync)
 export record Mutex<T: Send> {
   /// Storage of the `pthread_mutex_t`: 40 bytes, 8-byte aligned.
   storage: u64[5];

@@ -1,0 +1,53 @@
+// A `fn` value already is a C function pointer: it passes to a function-typed
+// extern parameter as it is, from a local, from a field and from an extern
+// parameter declared with a `fn` type.
+extern LibC {
+  function qsort(base: *mut u8, count: u64, size: u64, compare: (*u8, *u8) -> i32): void;
+}
+
+extern Sorter {
+  @externName("qsort")
+  function sortWith(base: *mut u8, count: u64, size: u64, compare: fn(*u8, *u8) -> i32): void;
+}
+
+record Order {
+  public compare: fn(*u8, *u8) -> i32;
+}
+
+function ascending(left: *u8, right: *u8): i32 {
+  return *(left as *i32) - *(right as *i32);
+}
+
+function descending(left: *u8, right: *u8): i32 {
+  return *(right as *i32) - *(left as *i32);
+}
+
+function main(): i32 {
+  let mut values: i32[4] = [3, 1, 4, 2];
+  let base: *mut u8 = (&mut values[0]) as *mut u8;
+  let compare: fn(*u8, *u8) -> i32 = ascending;
+
+  LibC::qsort(base, 4, 4, compare);
+
+  if (values[0] != 1 || values[3] != 4) {
+    return 1;
+  }
+
+  let order: Order = Order { compare: descending };
+
+  LibC::qsort(base, 4, 4, order.compare);
+
+  if (values[0] != 4 || values[3] != 1) {
+    return 2;
+  }
+
+  Sorter::sortWith(base, 4, 4, compare);
+
+  if (values[0] != 1 || values[3] != 4) {
+    return 3;
+  }
+
+  Sorter::sortWith(base, 4, 4, (left: *u8, right: *u8): i32 -> *(right as *i32) - *(left as *i32));
+
+  return values[0] == 4 && values[3] == 1 ? 0 : 4;
+}

@@ -7854,6 +7854,7 @@ function typecheckLambdaExpressionHappyPath(): void {
     span: typecheckDummySpan(),
     parameters: annotationParams,
     returnType: i32TypeId,
+    pointer: false,
   }));
 
   let paramPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
@@ -7942,6 +7943,7 @@ function typecheckCallThroughLocalFunctionValueHappyPath(): void {
     span: typecheckDummySpan(),
     parameters: annotationParams,
     returnType: i32TypeId,
+    pointer: false,
   }));
 
   let paramPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
@@ -8030,6 +8032,7 @@ function typecheckAddFunctionValuedLocal(
     span: typecheckDummySpan(),
     parameters: annotationParams,
     returnType: i32TypeId,
+    pointer: false,
   }));
 
   let paramPattern: Ast::PatternId = typecheckAddAnnotatedBinding(module, "x", i32TypeId);
@@ -15129,6 +15132,79 @@ function typecheckImplementsAcceptsTraitsThatNeedNoDeclaration(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// The number of diagnostics in `bag` that carry `code`.
+function typecheckCountCode(bag: &DiagnosticBag, code: str): u64 {
+  let expected: String = String::create(code);
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      if (expected.equals(diagnostic.code)) {
+        count += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Scenario: a generic record declaring Sync whose parameter is bounded by
+/// Send is Sync for a Send argument that is not Sync, with no thread_safety
+/// warning on the declaration.
+@test
+function typecheckDeclaredSyncJudgesABoundedParameterByItsBound(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@allow(thread_safety)\n@implements(Send)\nrecord Handle {\n  public raw: *mut i32;\n}\n\n@implements(Send, Sync)\nrecord Guarded<T: Send> {\n  public value: T;\n}\n\nrecord SyncHolder<T: Sync> {\n  public value: T;\n}\n\nfunction keep(holder: SyncHolder<Guarded<Handle>>): i32 {\n  return 0;\n}\n\nfunction share<T: Send>(holder: SyncHolder<Guarded<T>>): i32 {\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  Test::assertEq<u64>(typecheckCountErrors(&output.typecheck.diagnostics), 0);
+  Test::assertEq<u64>(typecheckCountCode(&output.diagnostics, DiagnosticCode::THREAD_SAFETY_DECLARATION), 0);
+}
+
+/// Scenario: a parameter with no Send or Sync bound still needs the trait
+/// itself: `Pair<i32, Handle>` is not Sync because `Handle` is only Send.
+@test
+function typecheckDeclaredSyncStillJudgesAnUnboundedParameterByTheTrait(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@allow(thread_safety)\n@implements(Send)\nrecord Handle {\n  public raw: *mut i32;\n}\n\n@allow(thread_safety)\n@implements(Send, Sync)\nrecord Pair<T: Send, U> {\n  public first: T;\n  public second: U;\n}\n\nrecord SyncHolder<T: Sync> {\n  public value: T;\n}\n\nfunction keep(holder: SyncHolder<Pair<i32, Handle>>): i32 {\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED);
+}
+
+/// Scenario: a record declaring Send with no bound on its parameter is not
+/// Send for a raw pointer argument, as `Vector<*mut i32>` is not.
+@test
+function typecheckDeclaredSendStillRejectsANonSendArgument(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@allow(thread_safety)\n@implements(Send, Sync)\nrecord Bag<T> {\n  public value: T;\n}\n\nrecord SendHolder<T: Send> {\n  public value: T;\n}\n\nfunction keep(holder: SendHolder<Bag<*mut i32>>): i32 {\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED);
 }
 
 /// Scenario: a bound naming no trait, or a declaration that is not a trait, is

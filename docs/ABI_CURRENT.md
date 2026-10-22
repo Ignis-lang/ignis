@@ -64,6 +64,7 @@ typedef void* null;
 | `Range<T>`, `RangeInclusive<T>` | `struct __ignis_range_<T> { T field_0; T field_1; }` (`start`, then `end`) |
 | `(T1, T2, ...)` | `void*` |
 | `(T...) -> R` | closure struct (see below); a typed C function pointer at extern boundaries and in C-layout record fields |
+| `fn(T...) -> R` | typed C function pointer `ignis_fn_<id>` (see C Function Pointers) |
 
 A range is passed and returned by value as that struct. There is one struct per element type, emitted ahead of the record definitions, and `Range<T>` and `RangeInclusive<T>` share it: whether the end is included is part of the Ignis type and is not stored.
 
@@ -135,7 +136,7 @@ struct Counter_12 {
 
 Field access, record initialization and drop paths use the written field name for these records, so a field named by a C keyword is rejected (A0218). Neither kind can be generic or carry a drop state byte.
 
-A function-typed field of a C-layout record is a typed C function pointer, spelled by its signature's `ignis_fn_<id>` typedef (see C Function Pointers), so C code can call it. Storing into the field, by initialization or assignment, takes a capture-free value exactly as a function-typed extern parameter does, and anything else is A0217. Reading the field yields a closure through the signature's trampoline. Copying one such field into another copies the pointer. The field owns nothing, so the record's drop skips it.
+A function-typed field of a C-layout record is a typed C function pointer, spelled by its signature's `ignis_fn_<id>` typedef (see C Function Pointers), so C code can call it. Storing into the field, by initialization or assignment, takes a capture-free value exactly as a function-typed extern parameter does: a capturing closure literal is A0264, and anything else is A0217. Reading the field yields a closure through the signature's trampoline. Copying one such field into another copies the pointer. The field owns nothing, so the record's drop skips it.
 
 ```c
 struct Handler {
@@ -420,7 +421,7 @@ An Ignis function value is a closure struct: a call pointer, a drop pointer and 
 typedef i32 (*ignis_fn_331)(u8*, u8*);
 ```
 
-An argument passed to a function-typed extern parameter must be capture-free: a function named directly, or a closure literal that captures nothing. Anything else, such as a capturing closure or a local holding a closure, is rejected (A0217), and so is a signature that itself takes or returns a function value. A named function is passed as itself; a capture-free closure literal is passed as a wrapper around its thunk that supplies a null environment. In a hosted unit both cross the call through `void*`, like pointer arguments:
+An argument passed to a function-typed extern parameter must be capture-free: a function named directly, or a closure literal that captures nothing. A closure literal that captures something is rejected with the capture named (A0264). Anything else, such as a local holding a closure, is rejected (A0217), and so is a signature that itself takes or returns a closure value. A named function is passed as itself; a capture-free closure literal is passed as a wrapper around its thunk that supplies a null environment. In a hosted unit both cross the call through `void*`, like pointer arguments:
 
 ```c
 static i32 __closure_thunk_0_1931_raw(u8* a0, u8* a1) {
@@ -444,6 +445,8 @@ t2 = (struct __ignis_closure_t162){ ignis_raw_tramp_326, NULL, (u8*)t1 };
 ```
 
 A pointer to a function type, `*(T) -> R`, still points at a closure struct.
+
+A function pointer type `fn(T) -> R` is that same C function pointer as an Ignis value: the same typedef, held in a local, field or argument as is, copied by copying the pointer and never dropped. Taking one from a named function or static method stores the function's address; from a capture-free closure literal, the address of the thunk wrapper above. Calling one reads it back through the trampoline and calls the closure, and converting it to the closure type of its signature builds the same closure. The typedefs are emitted before the closure signature structs, which can name them in their call pointer; a signature that itself takes or returns a closure type follows the closure structs instead. In the QBE backend the pointer is an `l` value.
 
 ## Inline Assembly
 

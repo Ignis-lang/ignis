@@ -1719,9 +1719,10 @@ export namespace Analyzer {
     ///
     /// Raw pointers are neither: what they point to is not tracked. A shared
     /// reference, or a slice, is either one only when its referent is Sync,
-    /// since every holder reads the same value. A function value is neither,
+    /// since every holder reads the same value. A closure value is neither,
     /// because its type does not say what it captured; callers judge closure
-    /// arguments by their captures instead. A record or enum that declares the
+    /// arguments by their captures instead. A function pointer (`fn(A) -> R`)
+    /// is both: it has no environment. A record or enum that declares the
     /// trait in `@implements` is taken at its word, provided every type
     /// argument of an instance has the trait too; any other is judged by its
     /// fields or payloads, with an instance's type arguments substituted in. A
@@ -1823,9 +1824,10 @@ export namespace Analyzer {
 
       if (let Option::SOME(defId) = nominal) {
         // A declaration speaks for the type's own fields, not for what its
-        // type arguments hold, so those still have to carry the trait.
+        // type arguments hold, so those still have to carry the trait, or
+        // the Send and Sync bounds the declaration states for them.
         if (Analyzer::Typecheck::declaresThreadSafety(defStore, defId, sync)) {
-          return Analyzer::Typecheck::allThreadSafe(defStore, typeStore, &typeArguments, sync, scope, visited);
+          return Analyzer::Typecheck::declaredArgumentsThreadSafe(defStore, typeStore, defId, &typeArguments, sync, scope, visited);
         }
 
         let typeRaw: u32 = resolved.typeId.raw();
@@ -1870,6 +1872,100 @@ export namespace Analyzer {
       }
 
       return true;
+    }
+
+    /// Whether the type arguments of an instance of `defId`, which declares
+    /// `Send` (`sync` false) or `Sync` (`sync` true), let the instance have
+    /// it. An argument whose parameter is bounded by `Send` or `Sync` has to
+    /// satisfy exactly those bounds; any other argument has to carry the
+    /// trait itself.
+    function declaredArgumentsThreadSafe(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      defId: Analyzer::DefinitionId,
+      typeArguments: &Vector<Analyzer::TypeId>,
+      sync: boolean,
+      scope: &Vector<Analyzer::DefinitionId>,
+      visited: &mut Vector<u32>,
+    ): boolean {
+      let typeParams: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::nominalTypeParams(defStore, defId);
+      let mut index: u64 = 0;
+
+      while (index < typeArguments.length()) {
+        let Option::SOME(argument) = typeArguments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut boundSend: boolean = false;
+        let mut boundSync: boolean = false;
+
+        if (let Option::SOME(paramDefId) = typeParams.get(index)) {
+          boundSend = Analyzer::Typecheck::typeParamHasBound(defStore, *paramDefId, "Send");
+          boundSync = Analyzer::Typecheck::typeParamHasBound(defStore, *paramDefId, "Sync");
+        }
+
+        if (!boundSend && !boundSync) {
+          if (!Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, *argument, sync, scope, visited)) {
+            return false;
+          }
+        }
+
+        if (boundSend && !Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, *argument, false, scope, visited)) {
+          return false;
+        }
+
+        if (boundSync && !Analyzer::Typecheck::isThreadSafeType(defStore, typeStore, *argument, true, scope, visited)) {
+          return false;
+        }
+
+        index += 1;
+      }
+
+      return true;
+    }
+
+    /// The type parameters of a record or enum, empty for any other definition.
+    function nominalTypeParams(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Record(record_)) -> {
+          return Analyzer::Typecheck::copyDefinitionIdVector(&record_.typeParams);
+        },
+        Option::SOME(Analyzer::Definition::Enum(enum_)) -> {
+          return Analyzer::Typecheck::copyDefinitionIdVector(&enum_.typeParams);
+        },
+        _ -> {},
+      };
+
+      return Vector::new<Analyzer::DefinitionId>();
+    }
+
+    /// Whether the type parameter `paramDefId` lists the bound `traitName`.
+    function typeParamHasBound(
+      defStore: &mut Analyzer::DefinitionStore,
+      paramDefId: Analyzer::DefinitionId,
+      traitName: str,
+    ): boolean {
+      let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(paramDefId) else {
+        return false;
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < typeParam.bounds.length()) {
+        if (let Option::SOME(bound) = typeParam.bounds.get(index)) {
+          if (bound.equals(traitName)) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     /// The name of the lang trait `isThreadSafeType` judges.
@@ -5940,6 +6036,10 @@ export namespace Analyzer {
           };
 
           let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+          if (functionType.pointer) {
+            return Option::SOME(typeStoreRef.rawFunctionType(params, resolvedReturn));
+          }
 
           return Option::SOME(typeStoreRef.intern(Analyzer::Type::Function(Analyzer::FunctionType {
             params: params,
