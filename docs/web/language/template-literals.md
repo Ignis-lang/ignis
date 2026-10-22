@@ -10,7 +10,6 @@ A template literal is delimited by backticks and evaluates to an owned `String`.
 expression into the surrounding text.
 
 ```ignis
-import String from "std::string";
 
 function banner(name: str, version: i32): String {
     return `hello ${name} v${version}`;
@@ -70,7 +69,6 @@ A record needs an explicit conversion. The compiler does not infer a method's ty
 its arguments yet, so a generic conversion cannot be selected from the slot itself.
 
 ```ignis
-import String from "std::string";
 
 record Point {
     x: i32;
@@ -94,7 +92,6 @@ A slot that names a place — a variable, a field, an element — is borrowed, n
 stays usable afterwards.
 
 ```ignis
-import String from "std::string";
 
 function twice(): String {
     let owned: String = String::create("kept");

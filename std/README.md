@@ -76,8 +76,6 @@ layer and depend on multiple lower modules.
 
 ```ignis
 import Io from "std::io";
-import String from "std::string";
-import Vector from "std::vector";
 
 function main(): i32 {
   let mut values: Vector<i32> = Vector::new<i32>();
