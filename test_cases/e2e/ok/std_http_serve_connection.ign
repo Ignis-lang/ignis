@@ -13,7 +13,7 @@ import Vector from "std::vector";
 
 @implements(Http::Handler)
 record Greeter {
-  public greeting: str;
+  public greeting: static str;
 
   handle(&self, request: &Http::Request, response: &mut Http::Response): void {
     if (request.head.target.equals("/echo")) {
@@ -55,48 +55,48 @@ function main(argc: i32, argv: *str): i32 {
   let port: u16 = local.port();
 
   let client: JoinHandle<String> = Thread::spawn<String>((): String -> {
-      let target: SocketAddress = loopback(port);
-      let Result::OK(stream) = TcpStream::connect(&target) else {
-        return String::create("<connect failed>");
+    let target: SocketAddress = loopback(port);
+    let Result::OK(stream) = TcpStream::connect(&target) else {
+      return String::create("<connect failed>");
+    };
+    let mut connection: TcpStream = stream;
+    let request: String = String::create("GET /hello HTTP/1.1\r\nHost: a\r\n\r\nPOST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nping");
+    let bytes: Vector<u8> = request.toBytes();
+
+    if (connection.writeAllBytes(&bytes).isError() || connection.shutdown(Shutdown::WRITE).isError()) {
+      return String::create("<write failed>");
+    }
+
+    let mut received: Vector<u8> = Vector::new<u8>();
+
+    while (true) {
+      let Result::OK(read) = connection.readInto(&mut received, 65536) else {
+        break;
       };
-      let mut connection: TcpStream = stream;
-      let request: String = String::create("GET /hello HTTP/1.1\r\nHost: a\r\n\r\nPOST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nping");
-      let bytes: Vector<u8> = request.toBytes();
 
-      if (connection.writeAllBytes(&bytes).isError() || connection.shutdown(Shutdown::WRITE).isError()) {
-        return String::create("<write failed>");
+      if (read == 0) {
+        break;
+      }
+    }
+
+    let mut text: String = String::new();
+    let mut index: u64 = 0;
+
+    // Line ends are printed as LF, so the baseline holds no CR.
+    while (index < received.length()) {
+      let byte: u8 = *received.get(index).unwrap();
+
+      if (byte != '\r' as u8) {
+        text.pushByte(byte);
       }
 
-      let mut received: Vector<u8> = Vector::new<u8>();
+      index += 1;
+    }
 
-      while (true) {
-        let Result::OK(read) = connection.readInto(&mut received, 65536) else {
-          break;
-        };
+    text.pushStr("\n");
 
-        if (read == 0) {
-          break;
-        }
-      }
-
-      let mut text: String = String::new();
-      let mut index: u64 = 0;
-
-      // Line ends are printed as LF, so the baseline holds no CR.
-      while (index < received.length()) {
-        let byte: u8 = *received.get(index).unwrap();
-
-        if (byte != '\r' as u8) {
-          text.pushByte(byte);
-        }
-
-        index += 1;
-      }
-
-      text.pushStr("\n");
-
-      return text;
-    });
+    return text;
+  });
 
   let mut served: boolean = false;
 

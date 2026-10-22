@@ -30,7 +30,7 @@ surrogate escape is rejected at compile time.
 `static str` is the type of a string literal or a compile-time string such as `@typeName<T>()`,
 stored where it can live for the whole program: a field, a static, a container. It shares the
 representation of `str` and converts to `str` wherever a `str` is expected, but never the other way:
-a `str` supplied where `static str` is required is an error (A0263). A literal takes the type
+a `str` supplied where `static str` is required is an error (A0266). A literal takes the type
 `static str` only where that type is expected, as in `let name: static str = "a";` or a
 `Vector<static str>` element; elsewhere it is a `str`. For now the type only adds that
 conversion: the checks that stop a `str` view from being stored past its owner come in a later

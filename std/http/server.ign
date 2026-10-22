@@ -342,10 +342,15 @@ export namespace Http {
     /// once every thread stopped, with the first thread's error. There is
     /// no way to stop a running server yet, so in practice `run` blocks for
     /// as long as the process lives.
+    ///
+    /// The workers carry the failing errno as an `i32` rather than an
+    /// `IoError`: the error's message borrows a C-managed buffer, which makes
+    /// `IoError` a view, and a view cannot cross a thread boundary. The
+    /// errno is mapped back to an `IoError` on the calling thread.
     public run<H: Http::Handler & Send & Sync>(self, handler: H): Result<void, Io::IoError> {
       let shared: Arc<H> = Arc::new<H>(handler);
       let count: u64 = self.config.get().threads == 0 ? 1 : self.config.get().threads;
-      let mut workers: Vector<JoinHandle<Io::IoError>> = Vector::new<JoinHandle<Io::IoError>>();
+      let mut workers: Vector<JoinHandle<i32>> = Vector::new<JoinHandle<i32>>();
       let mut index: u64 = 0;
 
       while (index < count) {
@@ -353,13 +358,13 @@ export namespace Http {
         let config: Arc<ServerConfig> = self.config.clone();
         let worker: Arc<H> = shared.clone();
 
-        workers.push(Thread::spawn<Io::IoError>((): Io::IoError -> {
+        workers.push(Thread::spawn<i32>((): i32 -> {
           return Http::acceptConnections<H>((@move listener).get(), (@move worker).get(), (@move config).get());
         }));
         index += 1;
       }
 
-      let mut first: Option<Io::IoError> = Option::NONE;
+      let mut first: Option<i32> = Option::NONE;
 
       while (workers.length() > 0) {
         if (let Option::SOME(handle) = workers.pop()) {
@@ -368,17 +373,18 @@ export namespace Http {
         }
       }
 
-      let Option::SOME(error) = first else {
+      let Option::SOME(errno) = first else {
         return Result::OK(());
       };
 
-      return Result::ERROR(error);
+      return Result::ERROR(Io::IoError::fromErrno(errno));
     }
   }
 
   /// Accepts connections on `listener` and serves each in turn with
   /// `handler` on the calling thread, until `accept` reports that the
-  /// listener itself is unusable; returns that error.
+  /// listener itself is unusable; returns that error's raw errno, and `0`
+  /// is never returned on that path.
   ///
   /// Every thread of `Server::run` runs this loop. Calling it directly on
   /// threads of your own gives each thread its own handler, for state that
@@ -390,11 +396,15 @@ export namespace Http {
   /// left), so the loop keeps going; after a shortage it waits briefly
   /// instead of spinning. An error on one connection only ends that
   /// connection.
+  ///
+  /// The errno is returned instead of an `IoError` so the value can cross a
+  /// thread boundary: the error's message borrows a C-managed buffer, which
+  /// makes `IoError` a view. Map it back with `Io::IoError::fromErrno`.
   function acceptConnections<H: Http::Handler>(
     listener: &TcpListener,
     handler: &H,
     config: &ServerConfig
-  ): Io::IoError {
+  ): i32 {
     while (true) {
       let mut stream: TcpStream = match (listener.accept()) {
         Result::OK(accepted) -> accepted,
@@ -402,7 +412,7 @@ export namespace Http {
           let code: i32 = error.rawCode();
 
           if (code == Platform::EBADF || code == Platform::EINVAL) {
-            return error;
+            return code;
           }
 
           if (code == Platform::EMFILE || code == Platform::ENFILE) {
@@ -416,7 +426,7 @@ export namespace Http {
       Http::serveConnection<H>(&mut stream, handler, config).isOk();
     }
 
-    return Io::IoError::lastError();
+    return Io::IoError::lastError().rawCode();
   }
 
   /// Serves HTTP/1.1 requests on `stream` until the connection ends.

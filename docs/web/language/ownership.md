@@ -175,6 +175,12 @@ A view must not outlive its owner:
   `str`, a reference, a slice, or a record or container holding one. A closure that captures by
   reference — or by value a view — is itself a view, and is rejected the same way; a closure
   that owns everything it captures is not.
+- A type parameter written `@owns` (`record Slot<@owns T>`) is an owning storage slot: the
+  declaring type keeps the argument in storage it allocates, where no owner is visible, so
+  instantiating it with a view type is an error (A0269). `Option`, `Result` and `Mutex` hold
+  their payload inline and stay unmarked, so `Option<&T>` is legal. The standard library's
+  heap-owning containers (`Vector`, `HashMap`, `HashSet`, `Rc`, `Weak`) are marked in a
+  follow-up step, after the syntax reaches the promoted compiler.
 
 A view of a temporary used inside the statement that created it is fine, as a call argument
 or in a template literal. To keep it, bind the owner to a local first:

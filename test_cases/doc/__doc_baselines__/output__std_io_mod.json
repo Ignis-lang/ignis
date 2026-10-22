@@ -5410,7 +5410,7 @@
           "name": "run",
           "kind": "method",
           "signature": "run(self, handler: H): Result<void, IoError>",
-          "doc": "Serves connections with `handler` on `config.threads` threads.  \n  \nEach thread runs `acceptConnections`: it accepts a connection,  \nserves it with `serveConnection` and accepts the next one. An error on a connection ends only that  \nconnection. A thread stops when `accept` fails, and `run` returns  \nonce every thread stopped, with the first thread's error. There is  \nno way to stop a running server yet, so in practice `run` blocks for  \nas long as the process lives."
+          "doc": "Serves connections with `handler` on `config.threads` threads.  \n  \nEach thread runs `acceptConnections`: it accepts a connection,  \nserves it with `serveConnection` and accepts the next one. An error on a connection ends only that  \nconnection. A thread stops when `accept` fails, and `run` returns  \nonce every thread stopped, with the first thread's error. There is  \nno way to stop a running server yet, so in practice `run` blocks for  \nas long as the process lives.  \n  \nThe workers carry the failing errno as an `i32` rather than an  \n`IoError`: the error's message borrows a C-managed buffer, which makes  \n`IoError` a view, and a view cannot cross a thread boundary. The  \nerrno is mapped back to an `IoError` on the calling thread."
         }
       ]
     },
@@ -5461,8 +5461,8 @@
       "name": "acceptConnections",
       "kind": "function",
       "visibility": "private",
-      "signature": "function acceptConnections<H>(listener: &TcpListener, handler: &H, config: &ServerConfig): IoError",
-      "doc": "Accepts connections on `listener` and serves each in turn with  \n`handler` on the calling thread, until `accept` reports that the  \nlistener itself is unusable; returns that error.  \n  \nEvery thread of `Server::run` runs this loop. Calling it directly on  \nthreads of your own gives each thread its own handler, for state that  \nis not `Send` or `Sync` (`std::web` builds one router per thread this  \nway); the listener is shared, for example through an `Arc`.  \n  \nAny other `accept` failure concerns one connection or a passing  \nshortage (a client that reset before it was accepted, no descriptors  \nleft), so the loop keeps going; after a shortage it waits briefly  \ninstead of spinning. An error on one connection only ends that  \nconnection."
+      "signature": "function acceptConnections<H>(listener: &TcpListener, handler: &H, config: &ServerConfig): i32",
+      "doc": "Accepts connections on `listener` and serves each in turn with  \n`handler` on the calling thread, until `accept` reports that the  \nlistener itself is unusable; returns that error's raw errno, and `0`  \nis never returned on that path.  \n  \nEvery thread of `Server::run` runs this loop. Calling it directly on  \nthreads of your own gives each thread its own handler, for state that  \nis not `Send` or `Sync` (`std::web` builds one router per thread this  \nway); the listener is shared, for example through an `Arc`.  \n  \nAny other `accept` failure concerns one connection or a passing  \nshortage (a client that reset before it was accepted, no descriptors  \nleft), so the loop keeps going; after a shortage it waits briefly  \ninstead of spinning. An error on one connection only ends that  \nconnection.  \n  \nThe errno is returned instead of an `IoError` so the value can cross a  \nthread boundary: the error's message borrows a C-managed buffer, which  \nmakes `IoError` a view. Map it back with `Io::IoError::fromErrno`."
     },
     {
       "module": "std::http::server",
@@ -5511,7 +5511,7 @@
       "name": "__closure_thunk_0",
       "kind": "function",
       "visibility": "private",
-      "signature": "function __closure_thunk_0(__closure_env_0: *mut u8): IoError"
+      "signature": "function __closure_thunk_0(__closure_env_0: *mut u8): i32"
     },
     {
       "module": "std::http::server",
@@ -21773,7 +21773,7 @@
       "name": "__closure_thunk_2",
       "kind": "function",
       "visibility": "private",
-      "signature": "function __closure_thunk_2(__closure_env_2: *mut u8): IoError"
+      "signature": "function __closure_thunk_2(__closure_env_2: *mut u8): i32"
     },
     {
       "module": "std::web::router",
