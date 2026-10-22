@@ -6,6 +6,7 @@ import Hir from "@compiler::hir";
 import Lir from "@compiler::lir";
 
 import CodegenC from "../mod";
+import SymbolNames from "../../abi/symbols";
 import Abi from "@compiler::abi";
 import Id from "@compiler::ids";
 import Diagnostic, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
@@ -125,6 +126,58 @@ export namespace CodegenQbe {
     let message: String = `not supported by the qbe target yet: ${name}`;
 
     emitter.error = Option::SOME(message);
+  }
+
+  /// The longest identifier QBE 1.2 accepts, for globals (`$name`) and types
+  /// (`:name`) alike. Locals are `%t<n>` and the emitter's own `v<n>`
+  /// temporaries, both far below it.
+  const MAX_IDENTIFIER_LENGTH: u64 = 79;
+
+  /// Every global identifier this backend emits passes through here, so a
+  /// definition and its references can never disagree. The stable symbols
+  /// `SymbolNames` builds are already capped at the QBE limit, but names
+  /// derived afterwards are not: the `_raw` wrapper suffix, a per-program
+  /// `_<definition id>` fallback, a type's `_<id>` spelling. `SymbolNames::capped`
+  /// shortens deterministically and idempotently — the first 62 characters,
+  /// `_`, then sixteen hex digits of the FNV-1a hash of the whole name — so
+  /// two long names that share a prefix stay distinct: the hash covers the
+  /// full name, not just the kept prefix.
+  function qbeIdentifier(name: String): String {
+    return SymbolNames::capped(name);
+  }
+
+  /// The length-safe QBE global symbol of a definition.
+  function qbeMangledName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    return CodegenQbe::qbeIdentifier(CodegenC::mangledName(defStore, symbols, defId));
+  }
+
+  /// The length-safe name of the `_raw` wrapper around a capture-free thunk.
+  function qbeRawThunkWrapperName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    thunk: Analyzer::DefinitionId,
+  ): String {
+    return CodegenQbe::qbeIdentifier(CodegenC::rawThunkWrapperName(defStore, symbols, thunk));
+  }
+
+  /// The length-safe name of the raw call trampoline of one raw function type.
+  function qbeRawTrampolineName(rawType: Analyzer::TypeId): String {
+    return CodegenQbe::qbeIdentifier(CodegenC::rawTrampolineName(rawType));
+  }
+
+  /// The length-safe QBE aggregate type name of a record or enum, without the
+  /// leading `:`. The `type` declaration and every reference to it build the
+  /// same string, so they are capped the same way.
+  function qbeAggregateTypeName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    return CodegenQbe::qbeIdentifier(`${CodegenC::structName(defStore, symbols, defId).toStr()}_${defId.raw()}`);
   }
 
   /// `ty` with every type alias resolved away, or the input unchanged when
@@ -772,7 +825,7 @@ export namespace CodegenQbe {
     symbols: &mut Analyzer::SymbolTable,
     defId: Analyzer::DefinitionId,
   ): String {
-    let name: String = CodegenC::mangledName(defStore, symbols, defId);
+    let name: String = CodegenQbe::qbeMangledName(defStore, symbols, defId);
 
     if (CodegenQbe::isThreadLocalGlobal(defStore, defId)) {
       return `thread $${name.toStr()}`;
@@ -949,7 +1002,7 @@ export namespace CodegenQbe {
         return value;
       },
       Lir::Operand::FuncRef(defId) -> {
-        let name: String = CodegenC::mangledName(defStore, symbols, defId);
+        let name: String = CodegenQbe::qbeMangledName(defStore, symbols, defId);
         return Option::SOME(`$${name.toStr()}`);
       },
       Lir::Operand::GlobalRef(defId) -> {
@@ -1082,18 +1135,18 @@ export namespace CodegenQbe {
 
     match (typeNode) {
       Analyzer::Type::Record(defId) -> {
-        let name: String = CodegenC::structName(defStore, symbols, defId);
+        let name: String = CodegenQbe::qbeAggregateTypeName(defStore, symbols, defId);
 
-        return `:${name.toStr()}_${defId.raw()}`;
+        return `:${name.toStr()}`;
       },
       Analyzer::Type::Enum(defId) -> {
         if (CodegenQbe::enumIsScalar(defStore, defId)) {
           return String::create("");
         }
 
-        let name: String = CodegenC::structName(defStore, symbols, defId);
+        let name: String = CodegenQbe::qbeAggregateTypeName(defStore, symbols, defId);
 
-        return `:${name.toStr()}_${defId.raw()}`;
+        return `:${name.toStr()}`;
       },
       Analyzer::Type::Slice(_) -> {
         return `:ignis_slice_${resolved.raw()}`;
@@ -1437,7 +1490,7 @@ export namespace CodegenQbe {
       },
     };
 
-    let name: String = CodegenC::structName(defStore, symbols, defId);
+    let name: String = CodegenQbe::qbeAggregateTypeName(defStore, symbols, defId);
     let mut items: String = String::create("w");
 
     if (layout.payloadOffset > 4) {
@@ -1448,7 +1501,7 @@ export namespace CodegenQbe {
       items.pushStr(`, b ${layout.layout.size - layout.payloadOffset}`.toStr());
     }
 
-    let line: String = `type :${name.toStr()}_${defId.raw()} = align ${layout.layout.alignment} { ${items.toStr()} }\n`;
+    let line: String = `type :${name.toStr()} = align ${layout.layout.alignment} { ${items.toStr()} }\n`;
 
     emitter.data.pushStr(line.toStr());
   }
@@ -1485,7 +1538,7 @@ export namespace CodegenQbe {
       return;
     }
 
-    let name: String = CodegenC::structName(defStore, symbols, defId);
+    let name: String = CodegenQbe::qbeAggregateTypeName(defStore, symbols, defId);
 
     let mut unaligned: boolean = false;
     let mut fieldIndex: u64 = 0;
@@ -1502,7 +1555,7 @@ export namespace CodegenQbe {
       fieldIndex += 1;
     }
     if (unaligned) {
-      let line: String = `type :${name.toStr()}_${defId.raw()} = align ${layout.alignment} { ${layout.size} }\n`;
+      let line: String = `type :${name.toStr()} = align ${layout.alignment} { ${layout.size} }\n`;
 
       emitter.data.pushStr(line.toStr());
       return;
@@ -1570,7 +1623,7 @@ export namespace CodegenQbe {
       items.pushStr(pad.toStr());
     }
 
-    let line: String = `type :${name.toStr()}_${defId.raw()} = align ${layout.alignment} {${items.toStr()} }\n`;
+    let line: String = `type :${name.toStr()} = align ${layout.alignment} {${items.toStr()} }\n`;
 
     emitter.data.pushStr(line.toStr());
   }
@@ -1675,7 +1728,7 @@ export namespace CodegenQbe {
       return;
     };
 
-    let name: String = CodegenC::mangledName(defStore, symbols, init.defId);
+    let name: String = CodegenQbe::qbeMangledName(defStore, symbols, init.defId);
     let layout: CodegenQbe::TypeLayout = CodegenQbe::typeLayout(emitter, defStore, typeStore, variableType);
 
     if (emitter.error.isSome()) {
@@ -2032,6 +2085,16 @@ export namespace CodegenQbe {
           context.reserve(node.dest.raw(), slot);
         }
 
+        // A function pointer read back as a closure gets the closure's slot
+        // the same way.
+        if (let Lir::Instr::RawToClosure(node) = instruction) {
+          let closureSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.closureType);
+          let closureSlot: String = CodegenQbe::freshTemp(emitter);
+
+          emitter.out.pushStr(`    ${closureSlot.toStr()} =l alloc16 ${closureSize}\n`.toStr());
+          context.reserve(node.dest.raw(), closureSlot);
+        }
+
         if (let Lir::Instr::MakeClosure(node) = instruction) {
           let closureSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.closureType);
           let closureSlot: String = CodegenQbe::freshTemp(emitter);
@@ -2129,7 +2192,7 @@ export namespace CodegenQbe {
     function_: &Lir::FunctionLir,
     externalSymbols: &Vector<u32>,
   ): String {
-    let name: String = CodegenC::mangledName(defStore, symbols, function_.defId);
+    let name: String = CodegenQbe::qbeMangledName(defStore, symbols, function_.defId);
     let mut linkage: String = String::create("function ");
 
     if (CodegenC::isExportedSymbol(defStore, function_.defId)) {
@@ -3196,7 +3259,7 @@ export namespace CodegenQbe {
   ): void {
     CodegenQbe::qbeEmitReceiverGuard(emitter, defStore, typeStore, symbols, function_, node);
 
-    let name: String = CodegenC::mangledName(defStore, symbols, node.callee);
+    let name: String = CodegenQbe::qbeMangledName(defStore, symbols, node.callee);
     let mut args: Vector<String> = Vector::new<String>();
     let mut index: u64 = 0;
 
@@ -4016,7 +4079,7 @@ export namespace CodegenQbe {
     let methodOpt: Option<Analyzer::DefinitionId> = CodegenC::findDropMethod(defStore, symbols, nominal);
 
     if (let Option::SOME(methodId) = methodOpt) {
-      let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+      let name: String = CodegenQbe::qbeMangledName(defStore, symbols, methodId);
 
       if (!guarded) {
         body.pushStr(`    call $${name.toStr()}(l ${address.toStr()})\n`.toStr());
@@ -5532,7 +5595,7 @@ export namespace CodegenQbe {
       Lir::BuiltinEqKind::Method(methodId) -> {
         // `equals(&self, other: &T)` returns a `boolean`, which comes back as
         // a byte in a `w`.
-        let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+        let name: String = CodegenQbe::qbeMangledName(defStore, symbols, methodId);
         let call: String = CodegenQbe::freshTemp(emitter);
 
         emitter.out.pushStr(`    ${call.toStr()} =w call $${name.toStr()}(l ${left.toStr()}, l ${right.toStr()})\n`.toStr());
@@ -5684,7 +5747,7 @@ export namespace CodegenQbe {
       captureIndex += 1;
     }
 
-    let thunkName: String = CodegenC::mangledName(defStore, symbols, node.thunk);
+    let thunkName: String = CodegenQbe::qbeMangledName(defStore, symbols, node.thunk);
     let callField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 0);
 
     emitter.out.pushStr(`    storel $${thunkName.toStr()}, ${callField.toStr()}\n`.toStr());
@@ -5692,7 +5755,7 @@ export namespace CodegenQbe {
     let dropField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 8);
 
     if (let Option::SOME(dropId) = node.dropFn) {
-      let dropName: String = CodegenC::mangledName(defStore, symbols, dropId);
+      let dropName: String = CodegenQbe::qbeMangledName(defStore, symbols, dropId);
 
       emitter.out.pushStr(`    storel $${dropName.toStr()}, ${dropField.toStr()}\n`.toStr());
     } else {
@@ -5844,10 +5907,10 @@ export namespace CodegenQbe {
     function_: &Lir::FunctionLir,
     node: &Lir::InstrMakeRawFunction,
   ): void {
-    let mut target: String = CodegenC::mangledName(defStore, symbols, node.callee);
+    let mut target: String = CodegenQbe::qbeMangledName(defStore, symbols, node.callee);
 
     if (node.viaThunk) {
-      target = CodegenC::rawThunkWrapperName(defStore, symbols, node.callee);
+      target = CodegenQbe::qbeRawThunkWrapperName(defStore, symbols, node.callee);
     }
 
     emitter.out.pushStr(`    %t${node.dest.raw()} =l copy $${target.toStr()}\n`.toStr());
@@ -5873,7 +5936,7 @@ export namespace CodegenQbe {
       return;
     };
 
-    let trampoline: String = CodegenC::rawTrampolineName(node.rawType);
+    let trampoline: String = CodegenQbe::qbeRawTrampolineName(node.rawType);
     let callField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 0);
     let dropField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 8);
     let envField: String = CodegenQbe::qbeAddressOffset(emitter, &closureSlot, 16);
@@ -5957,8 +6020,8 @@ export namespace CodegenQbe {
         continue;
       };
 
-      let wrapper: String = CodegenC::rawThunkWrapperName(defStore, symbols, thunk);
-      let thunkName: String = CodegenC::mangledName(defStore, symbols, thunk);
+      let wrapper: String = CodegenQbe::qbeRawThunkWrapperName(defStore, symbols, thunk);
+      let thunkName: String = CodegenQbe::qbeMangledName(defStore, symbols, thunk);
       let returnText: String = CodegenQbe::qbeTypeText(emitter, defStore, typeStore, symbols, thunkFunction.returnType);
 
       if (emitter.error.isSome()) {
@@ -6029,7 +6092,7 @@ export namespace CodegenQbe {
         continue;
       };
 
-      let trampoline: String = CodegenC::rawTrampolineName(rawType);
+      let trampoline: String = CodegenQbe::qbeRawTrampolineName(rawType);
       let returnText: String = CodegenQbe::qbeTypeText(emitter, defStore, typeStore, symbols, signature.returnType);
 
       if (emitter.error.isSome()) {
@@ -6310,7 +6373,7 @@ export namespace CodegenQbe {
       }
     }
 
-    let name: String = CodegenC::mangledName(defStore, symbols, entryDef);
+    let name: String = CodegenQbe::qbeMangledName(defStore, symbols, entryDef);
     let mut callBody: String = `call $${name.toStr()}()`;
 
     if (entry.params.length() == 2) {

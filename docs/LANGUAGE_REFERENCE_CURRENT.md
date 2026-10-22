@@ -166,6 +166,8 @@ function main(): i32 {
 }
 ```
 
+`(A, B) -> R` is a closure type: a function value that may carry an environment. `fn(A, B) -> R` is a function pointer type: a function value with no environment, which is Copy, `Send` and `Sync` (see [Section 5.5](#55-function-pointers)). `fn` is not a keyword; it means a function pointer only in type position, right before `(`.
+
 An array can also be built from a range of integer literals: `[0..4]` is `[0, 1, 2, 3]` (see [Section 9.14](#914-ranges)).
 
 A fixed array also coerces to a slice of the same element type: `T[]` is the slice type, a
@@ -226,7 +228,7 @@ function main(): i32 {
 }
 ```
 
-A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and function values are neither, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements` (for a generic one, every type argument must also have the trait), which the `thread_safety` lint warns about when its structure disagrees (A0254). A closure bound to a `Send` or `Sync` type parameter, or passed to a parameter marked `@sendable`, is judged by its captures at the call (A0252), and a closure bound to `Sync` may not capture by mutable reference; a named function or a forwarded `@sendable` parameter is accepted, and any other function value is rejected there (A0253). `@sendable` is valid only on a parameter of function type (A0255), which stays callable inside the function.
+A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and closure values are neither, function pointers (`fn(A) -> R`) are both, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements` (for a generic one, every type argument must also have the trait), which the `thread_safety` lint warns about when its structure disagrees (A0254). A closure bound to a `Send` or `Sync` type parameter, or passed to a parameter marked `@sendable`, is judged by its captures at the call (A0252), and a closure bound to `Sync` may not capture by mutable reference; a named function or a forwarded `@sendable` parameter is accepted, and any other function value is rejected there (A0253). `@sendable` is valid only on a parameter of function type (A0255), which stays callable inside the function.
 
 ## 4. Declarations
 
@@ -584,7 +586,7 @@ The members of an extern block follow the namespace rule: outside the block they
 
 #### Function Pointers in Extern Functions
 
-A function-typed parameter or result of an extern function is a plain C function pointer. The argument must be capture-free: a function named directly, or a closure literal that captures nothing. A capturing closure, or a variable holding a closure, is an error, and so is a function pointer signature that itself takes or returns a function value.
+A function-typed parameter or result of an extern function is a plain C function pointer. The argument must be capture-free: a function named directly, or a closure literal that captures nothing. A capturing closure (A0264), or a variable holding a closure (A0217), is an error, and so is a function pointer signature that itself takes or returns a closure value (A0217).
 
 ```ignis
 extern LibC {
@@ -602,7 +604,7 @@ function sort(values: *mut i32, count: u64): void {
 }
 ```
 
-A function pointer an extern function returns is an ordinary function value: it can be stored, called, or passed back to an extern function.
+A function pointer an extern function returns is an ordinary function value: it can be stored, called, or passed back to an extern function. A value of a function pointer type `fn(A) -> R` (see [Section 5.5](#55-function-pointers)) is already a C function pointer and passes to a function-typed extern parameter as it is.
 
 #### Extern Records
 
@@ -808,6 +810,51 @@ function main(): i32 {
 ### 5.4 Environment Lifetime
 
 An escaping closure's environment is heap-allocated and freed when the closure value is dropped, even when every capture is `Copy` and needs no drop of its own. This holds whichever modules create and use the closure. In a freestanding build the allocation and the free go through the program's `@allocHandler` and `@freeHandler`. Capture-free closures need no environment; non-escaping captured closures use a stack environment and never heap-allocate.
+
+### 5.5 Function Pointers
+
+`fn(A, B) -> R` is the type of a function value with no environment. It is written wherever a type is: parameters, results, locals, record and enum fields, type arguments (`Vector<fn(i32) -> i32>`) and aliases (`type Handler = fn(&Request) -> void;`). `fn() -> void` takes nothing.
+
+```ignis
+record Math {
+    static negate(value: i32): i32 {
+        return -value;
+    }
+}
+
+function double(value: i32): i32 {
+    return value * 2;
+}
+
+function apply(operation: (i32) -> i32, value: i32): i32 {
+    return operation(value);
+}
+
+function main(): i32 {
+    let named: fn(i32) -> i32 = double;
+    let method: fn(i32) -> i32 = Math::negate;
+    let literal: fn(i32) -> i32 = (value: i32): i32 -> value + 1;
+
+    return named(1) + method(2) + apply(literal, 3);
+}
+```
+
+A `fn` value is one of:
+
+- a non-generic function named directly,
+- a static method of a non-generic record or enum, named by its path (`Math::negate`),
+- a closure literal that captures nothing,
+- another `fn` value.
+
+A closure literal that captures a variable is an error that names the capture (A0264): a function pointer has no environment to hold it. A closure-typed value, such as a variable or parameter of type `(i32) -> i32`, is an error too (A0265), even when it captured nothing, because its type does not show what it captured. A generic function cannot be named as a value, as for closures.
+
+A `fn` value converts implicitly to the closure type of the same signature, so it can be passed, returned or stored where `(A) -> R` is expected. The closure gets no environment and calls the pointer. The other direction is limited to the forms above.
+
+A `fn` value is called like any function value: `handler(x)`, through a field as `(record.handler)(x)` or `record.handler(x)`, and through a reference as `(*reference)(x)`.
+
+A `fn` value is Copy, `Send` and `Sync`: copying it copies the pointer, and it owns nothing to drop. A record or enum whose fields are function pointers is Send and Sync by its structure. Function pointers cannot be compared with `==` (A0019).
+
+A function pointer signature cannot take or return a closure type (A0217); it can take or return another function pointer type. The language server does not report A0264 and A0217, which come from the capture pass; `ignis check` does.
 
 ## 6. Ownership and Borrowing
 

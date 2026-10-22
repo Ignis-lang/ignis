@@ -701,3 +701,67 @@ function qbeClosureTakesFixedArray(): void {
 function qbeNoescapeClosureKeepsStackEnvironment(): void {
   qbeRunExpected("function applyTwice(@noescape f: (i32) -> i32, x: i32): i32 { return f(f(x)); } function main(): i32 { let base: i32 = 20; let add = (x: i32): i32 -> x + base; return applyTwice(add, 2); }", 42);
 }
+
+/// An identifier of exactly `total` characters: `_I` then `a` filler, so two
+/// such names can share any prefix length a test needs.
+function qbeNameOfLength(total: u64): String {
+  let mut name: String = String::create("_I");
+
+  while (name.length() < total) {
+    name.pushByte('a' as u8);
+  }
+
+  return name;
+}
+
+/// A short identifier needs no shortening: the cap returns it unchanged.
+@test
+function qbeIdentifierPassesShortNamesThrough(): void {
+  let short: String = String::create("_IN4main4mainE");
+
+  Test::assert(CodegenQbe::qbeIdentifier(short.clone()).equals(&short));
+}
+
+/// A name at exactly the QBE limit is legal as it is; the cap must not touch
+/// it, or a definition and a reference built at different times could disagree.
+@test
+function qbeIdentifierKeepsANameAtTheQbeLimit(): void {
+  let atLimit: String = qbeNameOfLength(CodegenQbe::MAX_IDENTIFIER_LENGTH);
+
+  Test::assertEq<u64>(atLimit.length(), CodegenQbe::MAX_IDENTIFIER_LENGTH);
+  Test::assert(CodegenQbe::qbeIdentifier(atLimit.clone()).equals(&atLimit));
+}
+
+/// A name over the limit is shortened once, deterministically: it keeps the
+/// readable prefix, stays under the limit, and shortening twice gives the
+/// same result.
+@test
+function qbeIdentifierCapsALongNameDeterministically(): void {
+  let long: String = qbeNameOfLength(CodegenQbe::MAX_IDENTIFIER_LENGTH + 21);
+  let capped: String = CodegenQbe::qbeIdentifier(long.clone());
+  let again: String = CodegenQbe::qbeIdentifier(capped.clone());
+
+  Test::assertEq<u64>(capped.length(), CodegenQbe::MAX_IDENTIFIER_LENGTH);
+  Test::assert(capped.equals(&again));
+  Test::assert(long.startsWith("_I"));
+  Test::assert(capped.startsWith(long.substringBytes(0, 62).toStr()));
+}
+
+/// Two long names that share their first 60 characters stay distinct: the
+/// hash that follows the kept prefix covers the whole name, not the prefix.
+@test
+function qbeIdentifierKeepsLongSharedPrefixNamesDistinct(): void {
+  let shared: String = qbeNameOfLength(CodegenQbe::MAX_IDENTIFIER_LENGTH + 1);
+  let mut first: String = shared.clone();
+  let mut second: String = shared.clone();
+
+  first.pushByte('1' as u8);
+  second.pushByte('2' as u8);
+
+  let cappedFirst: String = CodegenQbe::qbeIdentifier(first);
+  let cappedSecond: String = CodegenQbe::qbeIdentifier(second);
+
+  Test::assertEq<u64>(cappedFirst.length(), CodegenQbe::MAX_IDENTIFIER_LENGTH);
+  Test::assertEq<u64>(cappedSecond.length(), CodegenQbe::MAX_IDENTIFIER_LENGTH);
+  Test::assert(!cappedFirst.equals(&cappedSecond));
+}

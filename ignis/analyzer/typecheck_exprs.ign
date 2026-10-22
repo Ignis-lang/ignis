@@ -1179,20 +1179,7 @@ export namespace Analyzer {
           return Option::NONE;
         }
 
-        let Option::SOME(calleeType) = typeStore.get(constantType) else {
-          return Option::NONE;
-        };
-
-        let Analyzer::Type::Function(signature) = calleeType else {
-          return Option::NONE;
-        };
-
-        // `signature` points into the type store, which checking the arguments
-        // grows and may move: copy what the check reads.
-        let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
-        let returnType: Analyzer::TypeId = signature.returnType;
-
-        return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+        return Analyzer::Typecheck::checkCallThroughFunctionType(
           state,
           defStore,
           typeStore,
@@ -1201,8 +1188,7 @@ export namespace Analyzer {
           resolvedBodies,
           callExprId,
           call,
-          &paramTypes,
-          returnType,
+          constantType,
         );
       }
 
@@ -1375,7 +1361,8 @@ export namespace Analyzer {
       return Analyzer::Typecheck::functionTypeThroughAliases(defStore, typeStore, declared);
     }
 
-    /// `typeId` with its alias chain resolved, when that is a function type.
+    /// `typeId` with its alias chain resolved, when that is a closure or
+    /// function pointer type.
     /// Whether a value can be called is decided on what its type names, not on
     /// the alias spelling it.
     function functionTypeThroughAliases(
@@ -1389,11 +1376,30 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      if (let Option::SOME(Analyzer::Type::Function(_)) = typeStore.get(resolved.typeId)) {
-        return Option::SOME(resolved.typeId);
+      return match (typeStore.get(resolved.typeId)) {
+        Option::SOME(Analyzer::Type::Function(_)) -> Option::SOME(resolved.typeId),
+        Option::SOME(Analyzer::Type::RawFunction(_)) -> Option::SOME(resolved.typeId),
+        _ -> Option::NONE,
+      };
+    }
+
+    /// Whether `typeId`, behind any aliases, is a closure type rather than a
+    /// function pointer type or anything else.
+    function isClosureType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return false;
       }
 
-      return Option::NONE;
+      return match (typeStore.get(resolved.typeId)) {
+        Option::SOME(Analyzer::Type::Function(_)) -> true,
+        _ -> false,
+      };
     }
 
     /// Typechecks a call whose callee is a function-typed value: `calleeType`
@@ -1409,15 +1415,27 @@ export namespace Analyzer {
       call: &Ast::Expression::Call,
       calleeType: Analyzer::TypeId,
     ): Option<Analyzer::TypeId> {
-      let Option::SOME(Analyzer::Type::Function(signature)) = typeStore.get(calleeType) else {
+      // `signature` points into the type store, which checking the arguments
+      // grows and may move: copy what the check reads.
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+      match (typeStore.get(calleeType)) {
+        Option::SOME(Analyzer::Type::Function(signature)) -> {
+          paramTypes = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+          returnType = Option::SOME(signature.returnType);
+        },
+        Option::SOME(Analyzer::Type::RawFunction(signature)) -> {
+          paramTypes = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+          returnType = Option::SOME(signature.returnType);
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(resultType) = returnType else {
         Analyzer::Typecheck::emitCallOnNonCallable(state, defStore, typeStore, symbols, call.span, calleeType);
         return Option::NONE;
       };
-
-      // `signature` points into the type store, which checking the arguments
-      // grows and may move: copy what the check reads.
-      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
-      let returnType: Analyzer::TypeId = signature.returnType;
 
       return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
         state,
@@ -1429,7 +1447,7 @@ export namespace Analyzer {
         callExprId,
         call,
         &paramTypes,
-        returnType,
+        resultType,
       );
     }
 
@@ -5224,6 +5242,267 @@ export namespace Analyzer {
       exprId: Ast::ExpressionId,
       expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
+      if (let Option::SOME(expectedType) = expected) {
+        if (let Option::SOME(closureType) = Analyzer::Typecheck::functionPointerClosureType(defStore, typeStore, expectedType)) {
+          return Analyzer::Typecheck::checkFunctionPointerValue(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            expectedType,
+            closureType,
+          );
+        }
+      }
+
+      return Analyzer::Typecheck::checkExprExpectedDirect(state, defStore, typeStore, symbols, module, resolvedBodies, exprId, expected);
+    }
+
+    /// The closure type with the signature of the function pointer type
+    /// `typeId` names, behind any aliases; `NONE` for any other type.
+    function functionPointerClosureType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(Analyzer::Type::RawFunction(signature)) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      let params: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+      let returnType: Analyzer::TypeId = signature.returnType;
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      return Option::SOME(typeStoreRef.functionType(params, returnType));
+    }
+
+    /// What an expression supplied for a function pointer is: a closure
+    /// literal (1), a non-generic function named directly (2), a static method
+    /// of a non-generic owner named by its path (3), or anything else (0).
+    function functionPointerSourceKind(
+      defStore: &mut Analyzer::DefinitionStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): u8 {
+      let mut isName: boolean = false;
+
+      match (module.expressions.get(exprId)) {
+        Option::SOME(Ast::Expression::Node::Lambda(_)) -> {
+          return 1;
+        },
+        Option::SOME(Ast::Expression::Node::Variable(_)) -> {
+          isName = true;
+        },
+        Option::SOME(Ast::Expression::Node::Path(_)) -> {
+          isName = true;
+        },
+        _ -> {},
+      };
+
+      if (!isName) {
+        return 0;
+      }
+
+      let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, exprId) else {
+        return 0;
+      };
+
+      let mut owner: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Function(functionDef)) -> {
+          if (functionDef.typeParams.isEmpty()) {
+            return 2;
+          }
+
+          return 0;
+        },
+        Option::SOME(Analyzer::Definition::Method(methodDef)) -> {
+          if (!methodDef.isStatic || !methodDef.typeParams.isEmpty()) {
+            return 0;
+          }
+
+          owner = Option::SOME(methodDef.owner);
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(ownerId) = owner else {
+        return 0;
+      };
+
+      let ownerGeneric: boolean = match (defStore.get(ownerId)) {
+        Option::SOME(Analyzer::Definition::Record(recordDef)) -> !recordDef.typeParams.isEmpty(),
+        Option::SOME(Analyzer::Definition::Enum(enumDef)) -> !enumDef.typeParams.isEmpty(),
+        _ -> true,
+      };
+
+      if (ownerGeneric) {
+        return 0;
+      }
+
+      return 3;
+    }
+
+    /// The closure type of the static method `methodId`'s signature.
+    function staticMethodClosureType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      methodId: Analyzer::DefinitionId,
+    ): Option<Analyzer::TypeId> {
+      let mut paramIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut returnType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(methodId)) {
+        let mut index: u64 = 0;
+
+        while (index < methodDef.params.length()) {
+          if (let Option::SOME(paramId) = methodDef.params.get(index)) {
+            paramIds.push(*paramId);
+          }
+
+          index += 1;
+        }
+
+        returnType = Option::SOME(methodDef.returnType);
+      }
+
+      let Option::SOME(resultType) = returnType else {
+        return Option::NONE;
+      };
+
+      let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < paramIds.length()) {
+        if (let Option::SOME(paramId) = paramIds.get(paramIndex)) {
+          if (let Option::SOME(Analyzer::Definition::Variable(paramDef)) = defStore.get(*paramId)) {
+            params.push(paramDef.declaredType);
+          }
+        }
+
+        paramIndex += 1;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      return Option::SOME(typeStoreRef.functionType(params, resultType));
+    }
+
+    /// Checks `exprId` where the function pointer type `pointerType` is
+    /// expected; `closureType` is the closure type of the same signature.
+    ///
+    /// A function pointer has no environment, so only what provably has none
+    /// converts to one: a function or static method named directly, or a
+    /// closure literal, whose captures the capture pass rejects later
+    /// (A0264). Such an expression is checked against the closure type and
+    /// then recorded with the pointer type, which is what tells lowering to
+    /// take its pointer. Any other closure-typed value is A0265.
+    function checkFunctionPointerValue(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      pointerType: Analyzer::TypeId,
+      closureType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let span: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, exprId, SourceSpan::detached(0, 0));
+      let sourceKind: u8 = Analyzer::Typecheck::functionPointerSourceKind(defStore, module, resolvedBodies, exprId);
+
+      if (sourceKind == 0) {
+        let actual: Analyzer::TypeId = Analyzer::Typecheck::checkExprExpectedDirect(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          exprId,
+          Option::SOME(pointerType),
+        )!;
+
+        if (Analyzer::Typecheck::isClosureType(defStore, typeStore, actual) && Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, closureType, actual)) {
+          let pointerName: String = typeStore.nameOfResolved(pointerType, &*defStore, &*symbols);
+          let message: String = `a closure value cannot be used as '${pointerName.toStr()}': its type does not show what it captured`;
+          Analyzer::Typecheck::emitDiagnosticLabeled(
+            state,
+            span,
+            DiagnosticCode::FUNCTION_POINTER_FROM_CLOSURE_VALUE,
+            message.toStr(),
+            "pass a named function or a closure literal that captures nothing",
+          );
+          return Option::SOME(pointerType);
+        }
+
+        return Option::SOME(actual);
+      }
+
+      let mut actual: Analyzer::TypeId = closureType;
+
+      if (sourceKind == 3) {
+        let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(methodId)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, exprId) else {
+          return Option::NONE;
+        };
+
+        actual = Analyzer::Typecheck::staticMethodClosureType(defStore, typeStore, methodId)!;
+      } else {
+        actual = Analyzer::Typecheck::checkExprExpectedDirect(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          exprId,
+          Option::SOME(closureType),
+        )!;
+      }
+
+      if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, closureType, actual)) {
+        Analyzer::Typecheck::recordExprType(state, exprId, pointerType);
+        return Option::SOME(pointerType);
+      }
+
+      // The signatures differ, or the expected one still names type
+      // parameters an enclosing inference binds from this value: the value is
+      // the function pointer of its own signature, which the caller compares.
+      let Option::SOME(Analyzer::Type::Function(signature)) = typeStore.get(actual) else {
+        Analyzer::Typecheck::recordExprType(state, exprId, actual);
+        return Option::SOME(actual);
+      };
+
+      let params: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&signature.params);
+      let returnType: Analyzer::TypeId = signature.returnType;
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let ownPointerType: Analyzer::TypeId = typeStoreRef.rawFunctionType(params, returnType);
+
+      Analyzer::Typecheck::recordExprType(state, exprId, ownPointerType);
+      return Option::SOME(ownPointerType);
+    }
+
+    function checkExprExpectedDirect(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
       let Option::SOME(expr) = module.expressions.get(exprId) else {
         return Option::NONE;
       };
@@ -5788,7 +6067,35 @@ export namespace Analyzer {
         return true;
       }
 
+      if (Analyzer::Typecheck::functionPointerCoercesToClosure(state, defStore, typeStore, span, expected, actual)) {
+        return true;
+      }
+
       return Analyzer::Typecheck::isNeverType(state, defStore, typeStore, actual);
+    }
+
+    /// Whether `actual` is a function pointer type supplied where the closure
+    /// type of the same signature is expected. The closure gets a null
+    /// environment and a trampoline that calls the pointer, so the conversion
+    /// is implicit; the reverse holds only for the expressions
+    /// `checkFunctionPointerValue` accepts.
+    function functionPointerCoercesToClosure(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      expected: Analyzer::TypeId,
+      actual: Analyzer::TypeId,
+    ): boolean {
+      let Option::SOME(closureType) = Analyzer::Typecheck::functionPointerClosureType(defStore, typeStore, actual) else {
+        return false;
+      };
+
+      if (!Analyzer::Typecheck::isClosureType(defStore, typeStore, expected)) {
+        return false;
+      }
+
+      return Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expected, closureType);
     }
 
     /// Whether `actual` is `static str` supplied where `str` is expected. The two share
