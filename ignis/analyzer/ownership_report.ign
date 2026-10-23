@@ -66,7 +66,7 @@ export namespace Borrowck {
     /// Where a closure environment lives. Meaningless for every other kind.
     public envKind: u32;
     public scopeDepth: u64;
-    public code: str;
+    public code: static str;
     public span: SourceSpan;
   }
 
@@ -154,15 +154,15 @@ export namespace Borrowck {
       public kind: u32;
       public variableRaw: u32;
       public hasVariable: boolean;
-      public variableName: str;
+      public variableName: String;
       public relatedRaw: u32;
       public hasRelated: boolean;
-      public relatedName: str;
+      public relatedName: String;
       public detail: u32;
       public flag: boolean;
       public envKind: u32;
       public scopeDepth: u64;
-      public code: str;
+      public code: static str;
       public position: Borrowck::OwnershipReport::ReportPosition;
       public order: u64;
     }
@@ -174,7 +174,7 @@ export namespace Borrowck {
       public qualifiedName: String;
       /// Symbol-table name, which monomorphization mangles for a generic
       /// instantiation and leaves alone otherwise.
-      public symbolName: str;
+      public symbolName: String;
       public defRaw: u32;
       public position: Borrowck::OwnershipReport::ReportPosition;
       public events: Vector<Borrowck::OwnershipReport::ReportEvent>;
@@ -778,15 +778,15 @@ export namespace Borrowck {
       workingDirectory: str,
       order: u64,
     ): Borrowck::OwnershipReport::ReportEvent {
-      let mut variableName: str = "";
-      let mut relatedName: str = "";
+      let mut variableName: String = String::new();
+      let mut relatedName: String = String::new();
 
       if (event.hasVariable) {
-        variableName = Borrowck::OwnershipReport::nameOf(defs, symbols, event.variableRaw);
+        variableName = String::create(Borrowck::OwnershipReport::nameOf(defs, symbols, event.variableRaw));
       }
 
       if (event.hasRelated) {
-        relatedName = Borrowck::OwnershipReport::nameOf(defs, symbols, event.relatedRaw);
+        relatedName = String::create(Borrowck::OwnershipReport::nameOf(defs, symbols, event.relatedRaw));
       }
 
       return Borrowck::OwnershipReport::ReportEvent {
@@ -866,10 +866,10 @@ export namespace Borrowck {
           kind: Borrowck::OwnershipReport::EVENT_DROP,
           variableRaw: defId.raw(),
           hasVariable: true,
-          variableName: Borrowck::OwnershipReport::nameOf(defs, symbols, defId.raw()),
+          variableName: String::create(Borrowck::OwnershipReport::nameOf(defs, symbols, defId.raw())),
           relatedRaw: 0,
           hasRelated: false,
-          relatedName: "",
+          relatedName: String::new(),
           detail: reason,
           flag: false,
           envKind: Borrowck::OwnershipReport::ENV_UNKNOWN,
@@ -1044,7 +1044,7 @@ export namespace Borrowck {
 
       let thunks: Vector<Hir::DropScheduleDump::ThunkSpan> = Hir::DropScheduleDump::collectClosureThunks(hir);
       let functions: Vector<Hir::DropScheduleDump::FunctionEntry> = Hir::DropScheduleDump::collectFunctions(
-        hir, defs, symbols, files, workingDirectory, &mut storage, &thunks,
+        hir, defs, symbols, files, workingDirectory, &thunks,
       );
 
       let mut member: Vector<boolean> = Hir::DropScheduleDump::newMembership(hir.length());
@@ -1056,9 +1056,9 @@ export namespace Borrowck {
           continue;
         };
 
-        let qualifiedName: String = Borrowck::OwnershipReport::qualifiedNameOf(defs, entry.defId, entry.name);
+        let qualifiedName: String = Borrowck::OwnershipReport::qualifiedNameOf(defs, entry.defId, entry.name.toStr());
 
-        if (!Borrowck::OwnershipReport::nameMatchesFilter(&qualifiedName, entry.name, filter)) {
+        if (!Borrowck::OwnershipReport::nameMatchesFilter(&qualifiedName, entry.name.toStr(), filter)) {
           functionIndex += 1;
           continue;
         }
@@ -1069,7 +1069,7 @@ export namespace Borrowck {
 
         let functionRaw: u32 = entry.defId.raw();
         let functionPosition: Borrowck::OwnershipReport::ReportPosition = Borrowck::OwnershipReport::ReportPosition {
-          path: entry.position.path.toString(),
+          path: entry.position.path.clone(),
           line: entry.position.line,
           column: entry.position.column,
         };
@@ -1086,7 +1086,7 @@ export namespace Borrowck {
 
         reports.push(Borrowck::OwnershipReport::FunctionReport {
           qualifiedName: qualifiedName,
-          symbolName: entry.name,
+          symbolName: entry.name.clone(),
           defRaw: functionRaw,
           position: functionPosition,
           events: collected,
@@ -1228,7 +1228,7 @@ export namespace Borrowck {
 
       if (event.hasRelated) {
         outputRef.pushStr(",");
-        Borrowck::OwnershipReport::pushJsonField(outputRef, "owner", event.relatedName);
+        Borrowck::OwnershipReport::pushJsonField(outputRef, "owner", event.relatedName.toStr());
         outputRef.pushStr(",");
         Borrowck::OwnershipReport::pushJsonNumberField(outputRef, "owner_id", event.relatedRaw as u64);
       }
@@ -1244,7 +1244,7 @@ export namespace Borrowck {
 
       if (event.hasVariable) {
         outputRef.pushStr(",");
-        Borrowck::OwnershipReport::pushJsonField(outputRef, "variable", event.variableName);
+        Borrowck::OwnershipReport::pushJsonField(outputRef, "variable", event.variableName.toStr());
         outputRef.pushStr(",");
         Borrowck::OwnershipReport::pushJsonNumberField(outputRef, "variable_id", event.variableRaw as u64);
       }
@@ -1270,7 +1270,7 @@ export namespace Borrowck {
       outputRef.pushStr(",");
       Borrowck::OwnershipReport::pushJsonField(outputRef, "function", report.qualifiedName.toStr());
       outputRef.pushStr(",");
-      Borrowck::OwnershipReport::pushJsonField(outputRef, "symbol", report.symbolName);
+      Borrowck::OwnershipReport::pushJsonField(outputRef, "symbol", report.symbolName.toStr());
       outputRef.pushStr(",");
       Borrowck::OwnershipReport::pushJsonNumberField(outputRef, "function_id", report.defRaw as u64);
       outputRef.pushStr(",");

@@ -92,11 +92,7 @@ import _ from "./pattern";
 ///   this language (see `Hir::copyExitKey`) and every reader here only
 ///   needs the label and a sort key. The rank values reproduce the Rust
 ///   enums' declaration order exactly, so sorting is identical.
-/// - Interned/normalized path text is retained in a caller-owned
-///   `Vector<String>` "storage" arena for the lifetime of one `render`
-///   call, mirroring `diagnostics/source.ign`'s `storeSourceSpanPath`; this
-///   keeps `RenderedPosition.path` a trivially-copyable `str` instead of an
-///   owned `String`.
+/// - Path text is owned by each `RenderedPosition` as a `String`.
 /// - Every value/defer/function ordering below is a hand-written selection
 ///   sort over a named comparator, never `Vector<T>::sort` with a lambda:
 ///   the selfhost C backend miscompiles a monomorphized `Vector<T>::sort`
@@ -134,42 +130,66 @@ export namespace Hir {
     const REASON_CONDITION_FAIL: u32 = 7;
     const REASON_CONDITION_SKIP: u32 = 8;
 
-    const KIND_LOCAL: str = "local";
-    const KIND_BINDING: str = "binding";
-    const KIND_PARAMETER: str = "parameter";
-    const KIND_VALUE: str = "value";
+    const KIND_LOCAL: static str = "local";
+    const KIND_BINDING: static str = "binding";
+    const KIND_PARAMETER: static str = "parameter";
+    const KIND_VALUE: static str = "value";
 
     /// A rendered source position, pre-resolved so sorting is textual and
-    /// total. `path` is a view into the caller's storage arena (or a `'static`
-    /// literal like `<synthetic>`), never an owned buffer.
+    /// total. `path` is owned: the normalized path of the position's file.
     record RenderedPosition {
-      public path: str;
+      public path: String;
       public line: u32;
       public column: u32;
+
+      clonePosition(&self): Hir::DropScheduleDump::RenderedPosition {
+        return Hir::DropScheduleDump::RenderedPosition {
+          path: self.path.clone(),
+          line: self.line,
+          column: self.column,
+        };
+      }
     }
 
     /// Where and how a value entered the function it is listed under.
     record Declaration {
       public position: Hir::DropScheduleDump::RenderedPosition;
-      public kind: str;
+      public kind: static str;
+
+      copyDeclaration(&self): Hir::DropScheduleDump::Declaration {
+        return Hir::DropScheduleDump::Declaration {
+          position: self.position.clonePosition(),
+          kind: self.kind,
+        };
+      }
     }
 
     record DropSiteEntry {
       public position: Hir::DropScheduleDump::RenderedPosition;
       public reasonRank: u32;
-      public reasonText: str;
+      public reasonText: static str;
 
       /// End of the node the schedule keyed on, printed only for the reasons
       /// whose keys can share a start position. `hasNodeEnd` is the `Option`
       /// this language would otherwise need inside a record.
       public hasNodeEnd: boolean;
       public nodeEnd: Hir::DropScheduleDump::RenderedPosition;
+
+      copyDropSite(&self): Hir::DropScheduleDump::DropSiteEntry {
+        return Hir::DropScheduleDump::DropSiteEntry {
+          position: self.position.clonePosition(),
+          reasonRank: self.reasonRank,
+          reasonText: self.reasonText,
+          hasNodeEnd: self.hasNodeEnd,
+          nodeEnd: self.nodeEnd.clonePosition(),
+        };
+      }
     }
 
     record ValueEntry {
       public defRaw: u32;
       public declaration: Hir::DropScheduleDump::Declaration;
-      public name: str;
+      public name: String;
       public dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry>;
       public moveSites: Vector<Hir::DropScheduleDump::RenderedPosition>;
     }
@@ -178,14 +198,23 @@ export namespace Hir {
       public declared: Hir::DropScheduleDump::RenderedPosition;
       public runs: Hir::DropScheduleDump::RenderedPosition;
       public reasonRank: u32;
-      public reasonText: str;
+      public reasonText: static str;
+
+      copyDeferEntry(&self): Hir::DropScheduleDump::DeferEntry {
+        return Hir::DropScheduleDump::DeferEntry {
+          declared: self.declared.clonePosition(),
+          runs: self.runs.clonePosition(),
+          reasonRank: self.reasonRank,
+          reasonText: self.reasonText,
+        };
+      }
     }
 
     record FunctionEntry {
       public defId: Analyzer::DefinitionId;
       public bodyId: Hir::HirId;
       public position: Hir::DropScheduleDump::RenderedPosition;
-      public name: str;
+      public name: String;
     }
 
     record DeclarationEntry {
@@ -199,7 +228,7 @@ export namespace Hir {
       public found: boolean;
       public span: SourceSpan;
       public reasonRank: u32;
-      public reasonText: str;
+      public reasonText: static str;
     }
 
     // --- small primitive helpers -------------------------------------------------
@@ -272,19 +301,6 @@ export namespace Hir {
       return Hir::DropScheduleDump::stripLeadingDotSlash(pathString);
     }
 
-    /// Appends `value` to the storage arena and returns a stable `str` view
-    /// into it, mirroring `diagnostics/source.ign::storeSourceSpanPath`.
-    function internPath(storage: &mut Vector<String>, value: String): str {
-      let mut storageRef: &mut Vector<String> = storage;
-      storageRef.push(value);
-
-      let Option::SOME(storedValue) = storageRef.get(storageRef.length() - 1) else {
-        @panic("failed to retain a rendered drop-schedule path");
-      };
-
-      return storedValue.toStr();
-    }
-
     /// The file of `files` that `id` names.
     function findSourceFile(files: &Vector<SourceFile>, id: FileId): Option<&SourceFile> {
       let mut index: u64 = 0;
@@ -301,7 +317,11 @@ export namespace Hir {
     }
 
     function syntheticPosition(): Hir::DropScheduleDump::RenderedPosition {
-      return Hir::DropScheduleDump::RenderedPosition { path: "<synthetic>", line: 0, column: 0 };
+      return Hir::DropScheduleDump::RenderedPosition {
+        path: String::create("<synthetic>"),
+        line: 0,
+        column: 0,
+      };
     }
 
     /// Resolves a span to a rendered position, or `<synthetic>:0:0` when the
@@ -311,7 +331,6 @@ export namespace Hir {
       span: &SourceSpan,
       files: &Vector<SourceFile>,
       workingDirectory: str,
-      storage: &mut Vector<String>,
     ): Hir::DropScheduleDump::RenderedPosition {
       if (!span.hasFile()) {
         return Hir::DropScheduleDump::syntheticPosition();
@@ -323,10 +342,9 @@ export namespace Hir {
 
       let location: SourceLocation = file.byteLineCol(span.start);
       let normalized: String = Hir::DropScheduleDump::normalizePath(file.path.asStr(), workingDirectory);
-      let internedPath: str = Hir::DropScheduleDump::internPath(storage, normalized);
 
       return Hir::DropScheduleDump::RenderedPosition {
-        path: internedPath,
+        path: normalized,
         line: location.line,
         column: location.byteColumn,
       };
@@ -338,11 +356,10 @@ export namespace Hir {
       span: &SourceSpan,
       files: &Vector<SourceFile>,
       workingDirectory: str,
-      storage: &mut Vector<String>,
     ): Hir::DropScheduleDump::RenderedPosition {
       let endSpan: SourceSpan = SourceSpan::new(span.file, span.end, span.end);
 
-      return Hir::DropScheduleDump::resolvePosition(&endSpan, files, workingDirectory, storage);
+      return Hir::DropScheduleDump::resolvePosition(&endSpan, files, workingDirectory);
     }
 
     function positionsEqual(
@@ -353,17 +370,14 @@ export namespace Hir {
         return false;
       }
 
-      let leftPath: str = a.path;
-      let rightPath: str = b.path;
-
-      return @eq<str>(&leftPath, &rightPath);
+      return Hir::DropScheduleDump::compareStr(a.path.toStr(), b.path.toStr()) == 0;
     }
 
     function comparePositions(
       a: &Hir::DropScheduleDump::RenderedPosition,
       b: &Hir::DropScheduleDump::RenderedPosition,
     ): i32 {
-      let pathCompare: i32 = Hir::DropScheduleDump::compareStr(a.path, b.path);
+      let pathCompare: i32 = Hir::DropScheduleDump::compareStr(a.path.toStr(), b.path.toStr());
 
       if (pathCompare != 0) {
         return pathCompare;
@@ -385,7 +399,7 @@ export namespace Hir {
       while (index < positions.length()) {
         if (let Option::SOME(position) = positions.get(index)) {
           result.push(Hir::DropScheduleDump::RenderedPosition {
-          path: position.path,
+          path: position.path.clone(),
           line: position.line,
           column: position.column,
         });
@@ -793,7 +807,7 @@ export namespace Hir {
       if (let Option::SOME(index) = existing) {
         if (let Option::SOME(entry) = result.get(index)) {
           if (Hir::DropScheduleDump::declarationLess(&declaration, &entry.declaration)) {
-            result.set(index, Hir::DropScheduleDump::DeclarationEntry { defRaw: defRaw, declaration: declaration });
+            result.set(index, Hir::DropScheduleDump::DeclarationEntry { defRaw: defRaw, declaration: declaration.copyDeclaration() });
           }
         }
 
@@ -814,14 +828,13 @@ export namespace Hir {
       span: &SourceSpan,
       files: &Vector<SourceFile>,
       workingDirectory: str,
-      storage: &mut Vector<String>,
     ): Vector<Hir::DropScheduleDump::DeclarationEntry> {
       let mut result: Vector<Hir::DropScheduleDump::DeclarationEntry> = declarations;
 
       match (kind) {
       Hir::HirKind::Let(letNode) -> {
         let position: Hir::DropScheduleDump::RenderedPosition =
-          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory, storage);
+          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory);
 
         result = Hir::DropScheduleDump::declareInto(
           result,
@@ -831,7 +844,7 @@ export namespace Hir {
       },
       Hir::HirKind::LetElse(letElse) -> {
         let position: Hir::DropScheduleDump::RenderedPosition =
-          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory, storage);
+          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory);
         let bindings: Vector<u32> = Hir::DropScheduleDump::patternBindings(&letElse.pattern);
         let mut bindingIndex: u64 = 0;
 
@@ -840,7 +853,7 @@ export namespace Hir {
             result = Hir::DropScheduleDump::declareInto(
               result,
               *defRaw,
-              Hir::DropScheduleDump::Declaration { position: position, kind: Hir::DropScheduleDump::KIND_BINDING },
+              Hir::DropScheduleDump::Declaration { position: position.clonePosition(), kind: Hir::DropScheduleDump::KIND_BINDING },
             );
           }
 
@@ -854,7 +867,7 @@ export namespace Hir {
           if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
             let armSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, arm.body);
             let position: Hir::DropScheduleDump::RenderedPosition =
-              Hir::DropScheduleDump::resolvePosition(&armSpan, files, workingDirectory, storage);
+              Hir::DropScheduleDump::resolvePosition(&armSpan, files, workingDirectory);
             let bindings: Vector<u32> = Hir::DropScheduleDump::patternBindings(&arm.pattern);
             let mut bindingIndex: u64 = 0;
 
@@ -863,7 +876,7 @@ export namespace Hir {
                 result = Hir::DropScheduleDump::declareInto(
                   result,
                   *defRaw,
-                  Hir::DropScheduleDump::Declaration { position: position, kind: Hir::DropScheduleDump::KIND_BINDING },
+                  Hir::DropScheduleDump::Declaration { position: position.clonePosition(), kind: Hir::DropScheduleDump::KIND_BINDING },
                 );
               }
 
@@ -876,7 +889,7 @@ export namespace Hir {
       },
       Hir::HirKind::Closure(closure) -> {
         let position: Hir::DropScheduleDump::RenderedPosition =
-          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory, storage);
+          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory);
         let mut paramIndex: u64 = 0;
 
         while (paramIndex < closure.params.length()) {
@@ -884,7 +897,7 @@ export namespace Hir {
             result = Hir::DropScheduleDump::declareInto(
               result,
               paramId.raw(),
-              Hir::DropScheduleDump::Declaration { position: position, kind: Hir::DropScheduleDump::KIND_PARAMETER },
+              Hir::DropScheduleDump::Declaration { position: position.clonePosition(), kind: Hir::DropScheduleDump::KIND_PARAMETER },
             );
           }
 
@@ -909,12 +922,11 @@ export namespace Hir {
       nodes: &Vector<u32>,
       files: &Vector<SourceFile>,
       workingDirectory: str,
-      storage: &mut Vector<String>,
     ): Vector<Hir::DropScheduleDump::DeclarationEntry> {
       let mut declarations: Vector<Hir::DropScheduleDump::DeclarationEntry> = Vector::new<Hir::DropScheduleDump::DeclarationEntry>();
 
       let bodySpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, bodyId);
-      let bodyPosition: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&bodySpan, files, workingDirectory, storage);
+      let bodyPosition: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&bodySpan, files, workingDirectory);
 
       let parameters: Vector<Analyzer::DefinitionId> = Hir::DropScheduleDump::parametersOf(defs, functionId);
       let mut paramIndex: u64 = 0;
@@ -924,7 +936,7 @@ export namespace Hir {
           declarations = Hir::DropScheduleDump::declareInto(
           declarations,
           paramId.raw(),
-          Hir::DropScheduleDump::Declaration { position: bodyPosition, kind: Hir::DropScheduleDump::KIND_PARAMETER },
+          Hir::DropScheduleDump::Declaration { position: bodyPosition.clonePosition(), kind: Hir::DropScheduleDump::KIND_PARAMETER },
         );
         }
 
@@ -945,7 +957,7 @@ export namespace Hir {
 
           if (let Option::SOME(node) = hir.get(id)) {
             declarations = Hir::DropScheduleDump::declareFromNode(
-            declarations, hir, &node.kind, &node.span, files, workingDirectory, storage,
+            declarations, hir, &node.kind, &node.span, files, workingDirectory,
           );
           }
         }
@@ -967,7 +979,7 @@ export namespace Hir {
         if (let Option::SOME(entry) = declarations.get(index)) {
           if (entry.defRaw == defRaw) {
             return Hir::DropScheduleDump::Declaration {
-              position: entry.declaration.position,
+              position: entry.declaration.position.clonePosition(),
               kind: entry.declaration.kind,
             };
           }
@@ -978,7 +990,7 @@ export namespace Hir {
 
       return Hir::DropScheduleDump::Declaration {
         position: Hir::DropScheduleDump::RenderedPosition {
-          path: fallbackPosition.path,
+          path: fallbackPosition.path.clone(),
           line: fallbackPosition.line,
           column: fallbackPosition.column,
         },
@@ -997,11 +1009,11 @@ export namespace Hir {
       while (index < sites.length()) {
         if (let Option::SOME(site) = sites.get(index)) {
           result.push(Hir::DropScheduleDump::DropSiteEntry {
-          position: site.position,
+          position: site.position.clonePosition(),
           reasonRank: site.reasonRank,
           reasonText: site.reasonText,
           hasNodeEnd: site.hasNodeEnd,
-          nodeEnd: site.nodeEnd,
+          nodeEnd: site.nodeEnd.clonePosition(),
         });
         }
 
@@ -1041,7 +1053,7 @@ export namespace Hir {
       defId: Analyzer::DefinitionId,
       position: Hir::DropScheduleDump::RenderedPosition,
       reasonRank: u32,
-      reasonText: str,
+      reasonText: static str,
       hasNodeEnd: boolean,
       nodeEnd: Hir::DropScheduleDump::RenderedPosition,
     ): Vector<Hir::DropScheduleDump::ValueEntry> {
@@ -1060,14 +1072,14 @@ export namespace Hir {
       if (let Option::SOME(index) = existing) {
         if (let Option::SOME(entry) = result.get(index)) {
           let mut newDropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
-          newDropSites.push(site);
+          newDropSites.push(site.copyDropSite());
 
           let newMoveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
 
           result.set(index, Hir::DropScheduleDump::ValueEntry {
             defRaw: defRaw,
-            declaration: entry.declaration,
-            name: entry.name,
+            declaration: entry.declaration.copyDeclaration(),
+            name: entry.name.clone(),
             dropSites: newDropSites,
             moveSites: newMoveSites,
           });
@@ -1077,7 +1089,7 @@ export namespace Hir {
       }
 
       let declaration: Hir::DropScheduleDump::Declaration = Hir::DropScheduleDump::declarationFor(declarations, defRaw, fallbackPosition);
-      let name: str = Hir::DropScheduleDump::valueName(defs, symbols, defId);
+      let name: String = String::create(Hir::DropScheduleDump::valueName(defs, symbols, defId));
 
       let mut dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Vector::new<Hir::DropScheduleDump::DropSiteEntry>();
       dropSites.push(site);
@@ -1113,12 +1125,12 @@ export namespace Hir {
         if (let Option::SOME(entry) = result.get(index)) {
           let dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
           let mut moveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
-          moveSites.push(position);
+          moveSites.push(position.clonePosition());
 
           result.set(index, Hir::DropScheduleDump::ValueEntry {
             defRaw: defRaw,
-            declaration: entry.declaration,
-            name: entry.name,
+            declaration: entry.declaration.copyDeclaration(),
+            name: entry.name.clone(),
             dropSites: dropSites,
             moveSites: moveSites,
           });
@@ -1128,7 +1140,7 @@ export namespace Hir {
       }
 
       let declaration: Hir::DropScheduleDump::Declaration = Hir::DropScheduleDump::declarationFor(declarations, defRaw, fallbackPosition);
-      let name: str = Hir::DropScheduleDump::valueName(defs, symbols, defId);
+      let name: String = String::create(Hir::DropScheduleDump::valueName(defs, symbols, defId));
 
       let mut moveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Vector::new<Hir::DropScheduleDump::RenderedPosition>();
       moveSites.push(position);
@@ -1157,7 +1169,7 @@ export namespace Hir {
       let mut found: boolean = false;
       let mut span: SourceSpan = SourceSpan::detached(0, 0);
       let mut reasonRank: u32 = 0;
-      let mut reasonText: str = "";
+      let mut reasonText: static str = "";
 
       match (key) {
       Hir::ExitKey::Return(nodeId) -> {
@@ -1293,11 +1305,11 @@ export namespace Hir {
         if (haveBest) {
           if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
             sorted.push(Hir::DropScheduleDump::DropSiteEntry {
-              position: chosen.position,
+              position: chosen.position.clonePosition(),
               reasonRank: chosen.reasonRank,
               reasonText: chosen.reasonText,
               hasNodeEnd: chosen.hasNodeEnd,
-              nodeEnd: chosen.nodeEnd,
+              nodeEnd: chosen.nodeEnd.clonePosition(),
             });
           }
 
@@ -1359,7 +1371,7 @@ export namespace Hir {
         if (haveBest) {
           if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
             sorted.push(Hir::DropScheduleDump::RenderedPosition {
-              path: chosen.path,
+              path: chosen.path.clone(),
               line: chosen.line,
               column: chosen.column,
             });
@@ -1391,8 +1403,8 @@ export namespace Hir {
 
           result.push(Hir::DropScheduleDump::ValueEntry {
             defRaw: entry.defRaw,
-            declaration: entry.declaration,
-            name: entry.name,
+            declaration: entry.declaration.copyDeclaration(),
+            name: entry.name.clone(),
             dropSites: dropSites,
             moveSites: moveSites,
           });
@@ -1430,12 +1442,11 @@ export namespace Hir {
       declarations: &Vector<Hir::DropScheduleDump::DeclarationEntry>,
       files: &Vector<SourceFile>,
       workingDirectory: str,
-      storage: &mut Vector<String>,
     ): Vector<Hir::DropScheduleDump::ValueEntry> {
       let mut values: Vector<Hir::DropScheduleDump::ValueEntry> = Vector::new<Hir::DropScheduleDump::ValueEntry>();
 
       let bodySpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, bodyId);
-      let fallbackPosition: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&bodySpan, files, workingDirectory, storage);
+      let fallbackPosition: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&bodySpan, files, workingDirectory);
 
       let mut scopeIndex: u64 = 0;
 
@@ -1443,13 +1454,13 @@ export namespace Hir {
         if (let Option::SOME(entry) = schedules.onScopeEnd.get(scopeIndex)) {
           if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
             let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
-            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory);
             let mut defIndex: u64 = 0;
 
             while (defIndex < entry.defs.length()) {
               if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
                 values = Hir::DropScheduleDump::recordDropSite(
-                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position.clonePosition(),
                 Hir::DropScheduleDump::REASON_SCOPE_END, "scope-end",
                 false, Hir::DropScheduleDump::syntheticPosition(),
               );
@@ -1469,13 +1480,13 @@ export namespace Hir {
         if (let Option::SOME(entry) = schedules.onMatchArmEnd.get(armIndex)) {
           if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
             let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
-            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory);
             let mut defIndex: u64 = 0;
 
             while (defIndex < entry.defs.length()) {
               if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
                 values = Hir::DropScheduleDump::recordDropSite(
-                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position.clonePosition(),
                 Hir::DropScheduleDump::REASON_ARM_END, "arm-end",
                 false, Hir::DropScheduleDump::syntheticPosition(),
               );
@@ -1495,15 +1506,15 @@ export namespace Hir {
         if (let Option::SOME(entry) = schedules.onConditionFail.get(conditionFailIndex)) {
           if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
             let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
-            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory);
             let mut defIndex: u64 = 0;
 
             while (defIndex < entry.defs.length()) {
               if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
                 values = Hir::DropScheduleDump::recordDropSite(
-                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position.clonePosition(),
                 Hir::DropScheduleDump::REASON_CONDITION_FAIL, "condition-fail",
-                true, Hir::DropScheduleDump::resolveEndPosition(&span, files, workingDirectory, storage),
+                true, Hir::DropScheduleDump::resolveEndPosition(&span, files, workingDirectory),
               );
               }
 
@@ -1521,15 +1532,15 @@ export namespace Hir {
         if (let Option::SOME(entry) = schedules.onConditionSkip.get(conditionSkipIndex)) {
           if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
             let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
-            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory);
             let mut defIndex: u64 = 0;
 
             while (defIndex < entry.defs.length()) {
               if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
                 values = Hir::DropScheduleDump::recordDropSite(
-                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position.clonePosition(),
                 Hir::DropScheduleDump::REASON_CONDITION_SKIP, "condition-skip",
-                true, Hir::DropScheduleDump::resolveEndPosition(&span, files, workingDirectory, storage),
+                true, Hir::DropScheduleDump::resolveEndPosition(&span, files, workingDirectory),
               );
               }
 
@@ -1547,13 +1558,13 @@ export namespace Hir {
         if (let Option::SOME(entry) = schedules.onOverwrite.get(overwriteIndex)) {
           if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
             let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
-            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory);
             let mut defIndex: u64 = 0;
 
             while (defIndex < entry.defs.length()) {
               if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
                 values = Hir::DropScheduleDump::recordDropSite(
-                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position.clonePosition(),
                 Hir::DropScheduleDump::REASON_OVERWRITE, "overwrite",
                 false, Hir::DropScheduleDump::syntheticPosition(),
               );
@@ -1573,13 +1584,13 @@ export namespace Hir {
         if (let Option::SOME(entry) = schedules.onFieldOverwrite.get(fieldOverwriteIndex)) {
           if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
             let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
-            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory);
             let mut defIndex: u64 = 0;
 
             while (defIndex < entry.defs.length()) {
               if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
                 values = Hir::DropScheduleDump::recordDropSite(
-                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position.clonePosition(),
                 Hir::DropScheduleDump::REASON_OVERWRITE, "overwrite",
                 false, Hir::DropScheduleDump::syntheticPosition(),
               );
@@ -1600,13 +1611,13 @@ export namespace Hir {
           let site: Hir::DropScheduleDump::ExitSiteResult = Hir::DropScheduleDump::exitSite(hir, &entry.key, functionId, bodyId, member);
 
           if (site.found) {
-            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&site.span, files, workingDirectory, storage);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&site.span, files, workingDirectory);
             let mut defIndex: u64 = 0;
 
             while (defIndex < entry.defs.length()) {
               if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
                 values = Hir::DropScheduleDump::recordDropSite(
-                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position.clonePosition(),
                 site.reasonRank, site.reasonText,
                 false, Hir::DropScheduleDump::syntheticPosition(),
               );
@@ -1629,10 +1640,10 @@ export namespace Hir {
           while (siteIndex < moveEntry.sites.length()) {
             if (let Option::SOME(site) = moveEntry.sites.get(siteIndex)) {
               if (site.functionId.equals(&functionId)) {
-                let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&site.span, files, workingDirectory, storage);
+                let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&site.span, files, workingDirectory);
 
                 values = Hir::DropScheduleDump::recordMoveSite(
-                values, defs, symbols, declarations, &fallbackPosition, moveEntry.def, position,
+                values, defs, symbols, declarations, &fallbackPosition, moveEntry.def, position.clonePosition(),
               );
               }
             }
@@ -1660,7 +1671,7 @@ export namespace Hir {
         return declarationCompare;
       }
 
-      let nameCompare: i32 = Hir::DropScheduleDump::compareStr(a.name, b.name);
+      let nameCompare: i32 = Hir::DropScheduleDump::compareStr(a.name.toStr(), b.name.toStr());
 
       if (nameCompare != 0) {
         return nameCompare;
@@ -1720,8 +1731,8 @@ export namespace Hir {
           if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
             sorted.push(Hir::DropScheduleDump::ValueEntry {
               defRaw: chosen.defRaw,
-              declaration: chosen.declaration,
-              name: chosen.name,
+              declaration: chosen.declaration.copyDeclaration(),
+              name: chosen.name.clone(),
               dropSites: Hir::DropScheduleDump::copyDropSites(&chosen.dropSites),
               moveSites: Hir::DropScheduleDump::copyPositions(&chosen.moveSites),
             });
@@ -1750,7 +1761,7 @@ export namespace Hir {
       declared: Hir::DropScheduleDump::RenderedPosition,
       runs: Hir::DropScheduleDump::RenderedPosition,
       reasonRank: u32,
-      reasonText: str,
+      reasonText: static str,
     ): Vector<Hir::DropScheduleDump::DeferEntry> {
       let mut result: Vector<Hir::DropScheduleDump::DeferEntry> = defers;
       let candidate: Hir::DropScheduleDump::DeferEntry = Hir::DropScheduleDump::DeferEntry {
@@ -1774,7 +1785,7 @@ export namespace Hir {
       }
 
       if (!alreadyPresent) {
-        result.push(candidate);
+        result.push(candidate.copyDeferEntry());
       }
 
       return result;
@@ -1788,7 +1799,6 @@ export namespace Hir {
       member: &Vector<boolean>,
       files: &Vector<SourceFile>,
       workingDirectory: str,
-      storage: &mut Vector<String>,
     ): Vector<Hir::DropScheduleDump::DeferEntry> {
       let mut defers: Vector<Hir::DropScheduleDump::DeferEntry> = Vector::new<Hir::DropScheduleDump::DeferEntry>();
 
@@ -1798,16 +1808,16 @@ export namespace Hir {
         if (let Option::SOME(entry) = schedules.onScopeEndDefers.get(scopeIndex)) {
           if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
             let runsSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
-            let runs: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&runsSpan, files, workingDirectory, storage);
+            let runs: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&runsSpan, files, workingDirectory);
             let mut bodyIndex: u64 = 0;
 
             while (bodyIndex < entry.bodies.length()) {
               if (let Option::SOME(bodyId) = entry.bodies.get(bodyIndex)) {
                 let declaredSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, *bodyId);
-                let declared: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&declaredSpan, files, workingDirectory, storage);
+                let declared: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&declaredSpan, files, workingDirectory);
 
                 defers = Hir::DropScheduleDump::insertDefer(
-                defers, declared, runs, Hir::DropScheduleDump::REASON_SCOPE_END, "scope-end",
+                defers, declared, runs.clonePosition(), Hir::DropScheduleDump::REASON_SCOPE_END, "scope-end",
               );
               }
 
@@ -1826,7 +1836,7 @@ export namespace Hir {
           let mut applicable: boolean = false;
           let mut siteId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(0);
           let mut reasonRank: u32 = 0;
-          let mut reasonText: str = "";
+          let mut reasonText: static str = "";
 
           match (&entry.key) {
           Hir::ExitKey::Return(nodeId) -> {
@@ -1855,15 +1865,15 @@ export namespace Hir {
 
           if (applicable && Hir::DropScheduleDump::isMember(member, siteId.raw())) {
             let runsSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, siteId);
-            let runs: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&runsSpan, files, workingDirectory, storage);
+            let runs: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&runsSpan, files, workingDirectory);
             let mut bodyIndex: u64 = 0;
 
             while (bodyIndex < entry.bodies.length()) {
               if (let Option::SOME(bodyId) = entry.bodies.get(bodyIndex)) {
                 let declaredSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, *bodyId);
-                let declared: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&declaredSpan, files, workingDirectory, storage);
+                let declared: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&declaredSpan, files, workingDirectory);
 
-                defers = Hir::DropScheduleDump::insertDefer(defers, declared, runs, reasonRank, reasonText);
+                defers = Hir::DropScheduleDump::insertDefer(defers, declared, runs.clonePosition(), reasonRank, reasonText);
               }
 
               bodyIndex += 1;
@@ -1946,8 +1956,8 @@ export namespace Hir {
         if (haveBest) {
           if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
             sorted.push(Hir::DropScheduleDump::DeferEntry {
-              declared: chosen.declared,
-              runs: chosen.runs,
+              declared: chosen.declared.clonePosition(),
+              runs: chosen.runs.clonePosition(),
               reasonRank: chosen.reasonRank,
               reasonText: chosen.reasonText,
             });
@@ -1972,7 +1982,6 @@ export namespace Hir {
       symbols: &Analyzer::SymbolTable,
       files: &Vector<SourceFile>,
       workingDirectory: str,
-      storage: &mut Vector<String>,
       thunks: &Vector<Hir::DropScheduleDump::ThunkSpan>,
     ): Vector<Hir::DropScheduleDump::FunctionEntry> {
       let mut entries: Vector<Hir::DropScheduleDump::FunctionEntry> = Vector::new<Hir::DropScheduleDump::FunctionEntry>();
@@ -2010,8 +2019,8 @@ export namespace Hir {
         };
 
         let span: SourceSpan = Hir::DropScheduleDump::functionSpan(hir, thunks, *itemId, bodyId);
-        let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
-        let name: str = Hir::DropScheduleDump::resolveSymbol(symbols, definition.name());
+        let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory);
+        let name: String = String::create(Hir::DropScheduleDump::resolveSymbol(symbols, definition.name()));
 
         entries.push(Hir::DropScheduleDump::FunctionEntry {
         defId: *itemId,
@@ -2036,7 +2045,7 @@ export namespace Hir {
         return positionCompare;
       }
 
-      let nameCompare: i32 = Hir::DropScheduleDump::compareStr(a.name, b.name);
+      let nameCompare: i32 = Hir::DropScheduleDump::compareStr(a.name.toStr(), b.name.toStr());
 
       if (nameCompare != 0) {
         return nameCompare;
@@ -2097,8 +2106,8 @@ export namespace Hir {
             sorted.push(Hir::DropScheduleDump::FunctionEntry {
               defId: chosen.defId,
               bodyId: chosen.bodyId,
-              position: chosen.position,
-              name: chosen.name,
+              position: chosen.position.clonePosition(),
+              name: chosen.name.clone(),
             });
           }
 
@@ -2126,11 +2135,10 @@ export namespace Hir {
       files: &Vector<SourceFile>,
       workingDirectory: str,
     ): String {
-      let mut storage: Vector<String> = Vector::new<String>();
       let mut output: String = String::create("drop-schedule v1\n");
 
       let thunks: Vector<Hir::DropScheduleDump::ThunkSpan> = Hir::DropScheduleDump::collectClosureThunks(hir);
-      let functions: Vector<Hir::DropScheduleDump::FunctionEntry> = Hir::DropScheduleDump::collectFunctions(hir, defs, symbols, files, workingDirectory, &mut storage, &thunks);
+      let functions: Vector<Hir::DropScheduleDump::FunctionEntry> = Hir::DropScheduleDump::collectFunctions(hir, defs, symbols, files, workingDirectory, &thunks);
 
       // Allocated once for the whole program and reused function to
       // function (`clearMembership` below), so membership checks stay O(1)
@@ -2145,21 +2153,20 @@ export namespace Hir {
           continue;
         };
 
-        output.pushStr(`function ${entry.name} at ${Hir::DropScheduleDump::renderPosition(&entry.position)}\n`.toStr());
+        output.pushStr(`function ${entry.name.toStr()} at ${Hir::DropScheduleDump::renderPosition(&entry.position)}\n`.toStr());
 
         let bodyNodesResult: Hir::DropScheduleDump::BodyNodes = Hir::DropScheduleDump::bodyNodes(hir, entry.bodyId, member);
         let nodes: Vector<u32> = bodyNodesResult.raw;
         member = bodyNodesResult.member;
 
         let declarations: Vector<Hir::DropScheduleDump::DeclarationEntry> = Hir::DropScheduleDump::collectDeclarations(
-        hir, defs, entry.defId, entry.bodyId, &nodes, files, workingDirectory, &mut storage,
+        hir, defs, entry.defId, entry.bodyId, &nodes, files, workingDirectory,
       );
         let values: Vector<Hir::DropScheduleDump::ValueEntry> = Hir::DropScheduleDump::collectValues(
         hir, defs, symbols, schedules, entry.defId, entry.bodyId, &member, &declarations, files, workingDirectory,
-        &mut storage,
       );
         let defers: Vector<Hir::DropScheduleDump::DeferEntry> = Hir::DropScheduleDump::collectDefers(
-        hir, schedules, &member, files, workingDirectory, &mut storage,
+        hir, schedules, &member, files, workingDirectory,
       );
 
         if (values.isEmpty() && defers.isEmpty()) {
