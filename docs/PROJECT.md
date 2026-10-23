@@ -252,6 +252,15 @@ entry = "lib.ign"
 A hosted library project writes the C translation unit only. A freestanding
 one (`[ignis] std = false`) also compiles it into an object file.
 
+## System Dependencies
+
+The standard library's `[linking.*]` sections name the C headers and libraries
+every hosted C unit carries. `std::sqlite3` needs the SQLite development
+headers and library (`libsqlite3-dev` on Debian and Ubuntu, `pkgs.sqlite` in
+this repository's Nix dev shell); because `build-std` compiles every module in
+`std/manifest.toml`, `sqlite3.h` is required to build the compiler and std even
+in projects that never import the module.
+
 ## `ignis init` Generation Rules
 
 When running `ignis init`, std paths are generated in this order:

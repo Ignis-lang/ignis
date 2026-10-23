@@ -138,6 +138,15 @@ jobs:
             test_cases/parser/host_unit_tests \
             test_cases/doc/__doc_baselines__
 
+      # std/sqlite3 links libsqlite3, and build-std compiles every module in
+      # std/manifest.toml, so sqlite3.h must be on the C include path before
+      # anything builds the compiler, std, or any fixture. Every job below
+      # that builds or runs C needs it.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
       # Every step from here runs stage1: stage0 is built from the committed C
       # seed with gcc alone, and compiles `ignis/main.ign` once. This job never
       # depends on the Rust host. Stage construction needs no network download;
@@ -332,6 +341,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # std/sqlite3 links libsqlite3, and build-std compiles every module in
+      # std/manifest.toml, so sqlite3.h must be on the C include path before
+      # the stage build. The stages artifact carries no C toolchain inputs, so
+      # every job that builds or runs C needs this step.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
 
       # Exits 2 (not 0) on the skip path (no official asset to check against
       # yet), which would otherwise fail this step and skip every step below

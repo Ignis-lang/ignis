@@ -1,0 +1,252 @@
+//!
+//! # Connection
+//!
+//! `Sqlite3::Connection`, one open SQLite database. Owns the `sqlite3*`
+//! handle and closes it on drop; `close()` does the same thing early and
+//! reports the result.
+//!
+//! ## Construction
+//!
+//! | Method           | Description                                       |
+//! |------------------|---------------------------------------------------|
+//! | `Connection::open(path)` | Opens (or creates) the database file `path` |
+//! | `Connection::openInMemory()` | Opens a private `:memory:` database     |
+//!
+//! Both run `PRAGMA journal_mode=WAL` on a file database so readers do not
+//! block behind a writer; SQLite silently keeps the previous journal mode
+//! where the filesystem cannot support WAL, and `open` still succeeds. An
+//! in-memory database skips the pragma: WAL never applies to `:memory:`, and
+//! only the exact path `":memory:"` is recognized as one.
+//!
+//! ## Errors
+//!
+//! Every fallible operation returns `Result<T, Sqlite3::Error>`. The error's
+//! `code` is the extended result code and `message` is what `sqlite3_errmsg`
+//! reports; see `std::sqlite3::error`.
+//!
+//! ## Threading
+//!
+//! A SQLite handle is thread-bound, so a `Connection` is not `Send`. Share one
+//! connection behind a `Mutex` (`Shared<Sqlite3::Connection>`); SQLite
+//! serializes writers, and WAL keeps readers concurrent.
+
+import Error from "std::sqlite3::error";
+
+extern __sqlite3_connection {
+  /// Opens (or creates) the database `filename`. Declared in `sqlite3.h`.
+  function sqlite3_open(filename: *u8, db: *mut *mut void): i32;
+  /// Closes `db`, deferring the deallocation while statements are live.
+  /// Declared in `sqlite3.h`.
+  function sqlite3_close_v2(db: *mut void): i32;
+  /// Runs one or more statements separated by semicolons. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_exec(
+    db: *mut void,
+    sql: *u8,
+    callback: *void,
+    callbackArgument: *void,
+    errorMessage: *mut *mut u8,
+  ): i32;
+  /// Compiles the first statement in `sql`. Declared in `sqlite3.h`.
+  function sqlite3_prepare_v2(
+    db: *mut void,
+    sql: *u8,
+    maximumBytes: i32,
+    statement: *mut *mut void,
+    tail: *mut *mut u8,
+  ): i32;
+  /// The rowid of the most recent successful insert. Declared in `sqlite3.h`.
+  function sqlite3_last_insert_rowid(db: *mut void): i64;
+  /// How many rows the most recent statement changed. Declared in `sqlite3.h`.
+  function sqlite3_changes(db: *mut void): i32;
+  /// Sets the busy handler's timeout in milliseconds. Declared in `sqlite3.h`.
+  function sqlite3_busy_timeout(db: *mut void, milliseconds: i32): i32;
+}
+
+/// `sqlite3_open` succeeds.
+const SQLITE_OK: i32 = 0;
+
+/// `sqlite3_close_v2` reports misuse, e.g. a second close.
+const SQLITE_MISUSE: i32 = 21;
+
+/// `sqlite3_prepare_v2` reads `sql` up to the NUL terminator.
+const PREPARE_TO_NUL: i32 = -1;
+
+/// Runs `sql` on the raw handle. The plumbing `begin`, `exec` and
+/// `Transaction` share; not part of the public API.
+export function sqlite3ExecDirect(db: *mut void, sql: str): Result<void, Error> {
+  if (db == null) {
+    return Result::ERROR(Error {
+      code: SQLITE_MISUSE,
+      message: String::create("std::sqlite3: the connection is closed"),
+    });
+  }
+
+  let result: i32 = __sqlite3_connection::sqlite3_exec(db, sql as *u8, null, null, null);
+
+  if (result != SQLITE_OK) {
+    return Result::ERROR(Error::fromConnection(db));
+  }
+
+  return Result::OK(());
+}
+
+/// One open SQLite database.
+///
+/// The handle is closed on drop. Because drop order is the reverse of
+/// declaration order, declaring the connection before the statements and
+/// transactions it produces closes it last.
+export namespace Sqlite3 {
+  /// A single open SQLite database.
+  @implements(Drop)
+  record Connection {
+    /// The `sqlite3*` handle, or `null` after `close`.
+    db: *mut void;
+
+    /// Opens (or creates) the database file at `path`.
+    ///
+    /// On failure the handle SQLite allocated for the message is closed and
+    /// the error is returned. A file database gets `PRAGMA journal_mode=WAL`
+    /// (see the module docs); `":memory:"` skips it.
+    public static open(path: str): Result<Connection, Error> {
+      let mut db: *mut void = null;
+
+      let result: i32 = __sqlite3_connection::sqlite3_open(
+        path as *u8,
+        (&mut db) as *mut *mut void,
+      );
+
+      if (result != SQLITE_OK) {
+        let error: Error = Error::fromConnection(db);
+        __sqlite3_connection::sqlite3_close_v2(db);
+        return Result::ERROR(error);
+      }
+
+      if (path != ":memory:") {
+        match (sqlite3ExecDirect(db, "PRAGMA journal_mode=WAL")) {
+          Result::OK(_) -> {},
+          Result::ERROR(error) -> {
+            __sqlite3_connection::sqlite3_close_v2(db);
+            return Result::ERROR(error);
+          },
+        };
+      }
+
+      return Result::OK(Connection { db: db });
+    }
+
+    /// Opens a private in-memory database. `close` or drop erases it.
+    public static openInMemory(): Result<Connection, Error> {
+      return Connection::open(":memory:");
+    }
+
+    /// Closes the database before drop. A second `close` (or any call after
+    /// it) is a misuse error, not a panic.
+    public close(&mut self): Result<void, Error> {
+      if (self.db == null) {
+        return Result::ERROR(Error {
+          code: SQLITE_MISUSE,
+          message: String::create("std::sqlite3: the connection is closed"),
+        });
+      }
+
+      let result: i32 = __sqlite3_connection::sqlite3_close_v2(self.db);
+      self.db = null;
+
+      if (result != SQLITE_OK) {
+        return Result::ERROR(Error {
+          code: result,
+          message: String::create("std::sqlite3: sqlite3_close_v2 failed"),
+        });
+      }
+
+      return Result::OK(());
+    }
+
+    /// Runs one or more semicolon-separated statements; every result row is
+    /// discarded. Use `prepare` when values are bound or rows are read.
+    public exec(&mut self, sql: str): Result<void, Error> {
+      return sqlite3ExecDirect(self.db, sql);
+    }
+
+    /// Compiles the first statement of `sql`. Any statements after the first
+    /// semicolon are not compiled; run them in their own `prepare` or `exec`.
+    /// The statement is finalized on drop; it must not outlive the connection.
+    public prepare(&self, sql: str): Result<Statement, Error> {
+      if (self.db == null) {
+        return Result::ERROR(Error {
+          code: SQLITE_MISUSE,
+          message: String::create("std::sqlite3: the connection is closed"),
+        });
+      }
+
+      let mut statement: *mut void = null;
+
+      let result: i32 = __sqlite3_connection::sqlite3_prepare_v2(
+        self.db,
+        sql as *u8,
+        PREPARE_TO_NUL,
+        (&mut statement) as *mut *mut void,
+        null,
+      );
+
+      if (result != SQLITE_OK) {
+        return Result::ERROR(Error::fromConnection(self.db));
+      }
+
+      return Result::OK(Statement { stmt: statement });
+    }
+
+    /// The rowid of the most recent successful insert on this connection.
+    public lastInsertRowId(&self): i64 {
+      return __sqlite3_connection::sqlite3_last_insert_rowid(self.db);
+    }
+
+    /// How many rows the most recent statement on this connection changed.
+    public changes(&self): i32 {
+      return __sqlite3_connection::sqlite3_changes(self.db);
+    }
+
+    /// Sets how long a statement waits for a locked database before it fails
+    /// with `SQLITE_BUSY`. Zero disables the wait.
+    public busyTimeout(&mut self, milliseconds: i32): Result<void, Error> {
+      if (self.db == null) {
+        return Result::ERROR(Error {
+          code: SQLITE_MISUSE,
+          message: String::create("std::sqlite3: the connection is closed"),
+        });
+      }
+
+      let result: i32 = __sqlite3_connection::sqlite3_busy_timeout(self.db, milliseconds);
+
+      if (result != SQLITE_OK) {
+        return Result::ERROR(Error::fromConnection(self.db));
+      }
+
+      return Result::OK(());
+    }
+
+    /// Begins a deferred transaction. Commit with `commit`; dropping the
+    /// `Transaction` first rolls it back, so an early `return` cannot leave
+    /// one open.
+    public begin(&mut self): Result<Transaction, Error> {
+      match (sqlite3ExecDirect(self.db, "BEGIN")) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(Transaction { connection: self as *mut Connection, finished: false });
+    }
+
+    /// Closes the database. Statements prepared on it must already be gone;
+    /// drop order (reverse of declaration) gives that in ordinary use.
+    drop(&mut self): void {
+      if (self.db != null) {
+        __sqlite3_connection::sqlite3_close_v2(self.db);
+        self.db = null;
+      }
+    }
+  }
+}

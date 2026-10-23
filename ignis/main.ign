@@ -688,6 +688,7 @@ function relinkCachedBuild(
     &artifacts.executable,
     &discovery.stdRoot,
     profile,
+    discovery,
     file,
     verbose,
     false,
@@ -821,24 +822,378 @@ function toolchainLinkerFlagsText(profile: &BuildProfile): String {
   return text;
 }
 
-/// The libraries a build links: `libm` and `libpthread` for a hosted build,
-/// none for a freestanding one. `std::thread` calls pthread; on glibc 2.34 and
-/// later it lives in libc and `-lpthread` resolves to an empty stub.
-function toolchainLinkLibraries(profile: &BuildProfile): Vector<String> {
+/// One `[linking.<module>]` lib entry of the std manifest.
+export record StdManifestLib {
+  /// The manifest module the `[linking.<module>]` section belongs to.
+  public module: String;
+  /// The module's registered source path (`sqlite3/mod.ign`), which tells the
+  /// file and directory a used module has to match. Empty when the manifest
+  /// declares the linking section for a module it never registers.
+  public path: String;
+  /// The `-l<name>` library the section declares, empty when it names none.
+  public name: String;
+}
+
+/// Reads `[linking.<module>]` `lib` entries out of the std manifest, in file
+/// order, with each entry's module path resolved from the `[modules]` table.
+///
+/// The driver re-derives these two line-shaped facts instead of carrying the
+/// parsed manifest through discovery because the resolver hands downstream
+/// stages only the headers, not the lib fields; the scan mirrors
+/// `ignis/build/manifest.ign`'s line grammar for exactly those lines. A
+/// manifest that cannot be read contributes no libraries, which keeps a
+/// build without a std root linking the builtins only.
+function stdManifestLibraries(stdRoot: &Path::PathBuf): Vector<StdManifestLib> {
+  let manifestPath: Path::PathBuf = stdRoot.join("manifest.toml");
+
+  let Result::OK(source) = Fs::readToString(&manifestPath) else {
+    return Vector::new<StdManifestLib>();
+  };
+
+  let lines: Vector<String> = source.lines();
+  let mut section: String = String::new();
+  let mut moduleNames: Vector<String> = Vector::new<String>();
+  let mut modulePaths: Vector<String> = Vector::new<String>();
+  let mut libs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      break;
+    };
+
+    let trimmed: String = line.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0 || trimmed.startsWith("#")) {
+      index += 1;
+      continue;
+    }
+
+    let Option::SOME(first) = trimmed.charAt(0) else {
+      index += 1;
+      continue;
+    };
+
+    if (first == '[' && trimmed.endsWith("]")) {
+      section = trimmed.substringBytes(1, trimmed.length() - 1).trimAsciiWhitespace();
+      index += 1;
+      continue;
+    }
+
+    let Option::SOME(equalsIndex) = trimmed.indexOfCharFrom('=', 0) else {
+      index += 1;
+      continue;
+    };
+
+    let key: String = trimmed.substringBytes(0, equalsIndex).trimAsciiWhitespace();
+    let value: String = trimmed.substringBytes(equalsIndex + 1, trimmed.length()).trimAsciiWhitespace();
+
+    if (section.equals("modules")) {
+      let moduleName: String = stripManifestQuotes(&key);
+      let modulePath: String = stripManifestQuotes(&value);
+
+      if (moduleName.length() > 0 && modulePath.length() > 0) {
+        moduleNames.push(moduleName.clone());
+        modulePaths.push(modulePath.clone());
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (section.startsWith("linking.") && key.equals("lib") && value.length() > 0) {
+      let segments: Vector<String> = splitDottedSection(&section);
+      let Option::SOME(moduleName) = segments.get(1) else {
+        index += 1;
+        continue;
+      };
+
+      libs.push(StdManifestLib {
+        module: moduleName.clone(),
+        path: manifestModulePath(&moduleNames, &modulePaths, moduleName),
+        name: stripManifestQuotes(&value),
+      });
+    }
+
+    index += 1;
+  }
+
+  return libs;
+}
+
+/// A manifest key or value without its surrounding double quotes.
+function stripManifestQuotes(text: &String): String {
+  if (text.length() >= 2 && text.startsWith("\"") && text.endsWith("\"")) {
+    return text.substringBytes(1, text.length() - 1);
+  }
+
+  return text.clone();
+}
+
+/// The dot-separated segments of a `[a.b]` section name.
+function splitDottedSection(section: &String): Vector<String> {
+  let mut segments: Vector<String> = Vector::new<String>();
+  let mut cursor: u64 = 0;
+
+  while (true) {
+    let Option::SOME(dotIndex) = section.indexOfCharFrom('.', cursor) else {
+      segments.push(section.substringBytes(cursor, section.length()));
+      break;
+    };
+
+    segments.push(section.substringBytes(cursor, dotIndex));
+    cursor = dotIndex + 1;
+  }
+
+  return segments;
+}
+
+/// The source path `[modules]` registers for `name`, or the empty string.
+function manifestModulePath(names: &Vector<String>, paths: &Vector<String>, name: &String): String {
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    let Option::SOME(candidate) = names.get(index) else {
+      break;
+    };
+    let Option::SOME(path) = paths.get(index) else {
+      break;
+    };
+
+    if (candidate.equals(name)) {
+      return path.clone();
+    }
+
+    index += 1;
+  }
+
+  return String::new();
+}
+
+/// The std-relative paths of every std module the build parses: the graph's
+/// STD nodes plus the auto-loaded prelude, which every module sees without
+/// importing it.
+function usedStdModulePaths(discovery: &DiscoveryResult): Vector<String> {
+  let root: String = discovery.stdRoot.toString();
+  let mut paths: Vector<String> = Vector::new<String>();
+
+  let mut nodeIndex: u64 = 0;
+
+  while (nodeIndex < discovery.graph.nodes.length()) {
+    let Option::SOME(node) = discovery.graph.nodes.get(nodeIndex) else {
+      break;
+    };
+
+    if (node.kind == BuildModuleKind::STD) {
+      let nodePath: String = node.path.toString();
+
+      match (pathBelowRoot(&nodePath, &root)) {
+        Option::SOME(relative) -> {
+          paths.push(relative);
+        },
+        Option::NONE -> {},
+      };
+    }
+
+    nodeIndex += 1;
+  }
+
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < discovery.preludePaths.length()) {
+    let Option::SOME(preludePath) = discovery.preludePaths.get(preludeIndex) else {
+      break;
+    };
+
+    let preludeText: String = preludePath.toString();
+
+    match (pathBelowRoot(&preludeText, &root)) {
+      Option::SOME(relative) -> {
+        paths.push(relative);
+      },
+      Option::NONE -> {},
+    };
+
+    preludeIndex += 1;
+  }
+
+  return paths;
+}
+
+/// The link libraries a hosted build pulls in, pure and unit-tested.
+///
+/// The builtin libraries come first and unchanged — `m` and `pthread` for a
+/// hosted build, plus `atomic` for QBE — then every std manifest
+/// `[linking.<module>]` `lib` entry whose module the build's graph actually
+/// pulls in, in manifest order, deduplicated against the builtins and each
+/// other. A freestanding build links none of them. A module the program does
+/// not import contributes no library: a program that never imports
+/// `std::sqlite3` gets no `-lsqlite3` on its link line.
+///
+/// `usedStdPaths` holds the std-relative paths of the modules the build
+/// parses (`sqlite3/mod.ign`, `net/tcp.ign`, ...). A manifest entry applies
+/// when one of those paths is the module's own file or any file in the
+/// module's directory, so importing `std::sqlite3::statement` alone still
+/// pulls the library.
+export function toolchainLinkLibrariesFor(
+  freestanding: boolean,
+  backend: &String,
+  manifestLibraries: &Vector<StdManifestLib>,
+  usedStdPaths: &Vector<String>,
+  wholeStdArchive: boolean,
+): Vector<String> {
   let mut libs: Vector<String> = Vector::new<String>();
 
-  if (!profile.freestanding) {
+  if (!freestanding) {
     libs.push(String::create("m"));
     libs.push(String::create("pthread"));
   }
 
   // QBE has no atomic instructions, so its units call libatomic for every
   // atomic builtin. The C backend inlines them and needs nothing.
-  if (!profile.freestanding && profile.backend.equals("qbe")) {
+  if (!freestanding && backend.equals("qbe")) {
     libs.push(String::create("atomic"));
   }
 
+  if (freestanding) {
+    return libs;
+  }
+
+  // A std-archive build links `libignis_std.a`, and the archive is one object
+  // that defines every std module, so every manifest lib is referenced no
+  // matter what the program itself imports.
+  if (wholeStdArchive) {
+    let mut archiveIndex: u64 = 0;
+
+    while (archiveIndex < manifestLibraries.length()) {
+      let Option::SOME(entry) = manifestLibraries.get(archiveIndex) else {
+        break;
+      };
+
+      if (entry.name.length() > 0 && entry.path.length() > 0 && !linkLibrariesContains(&libs, &entry.name)) {
+        libs.push(entry.name.clone());
+      }
+
+      archiveIndex += 1;
+    }
+
+    return libs;
+  }
+
+  let mut manifestIndex: u64 = 0;
+
+  while (manifestIndex < manifestLibraries.length()) {
+    let Option::SOME(entry) = manifestLibraries.get(manifestIndex) else {
+      break;
+    };
+
+    if (entry.name.length() == 0 || entry.path.length() == 0) {
+      manifestIndex += 1;
+      continue;
+    }
+
+    if (manifestLibraryInUse(entry, usedStdPaths) && !linkLibrariesContains(&libs, &entry.name)) {
+      libs.push(entry.name.clone());
+    }
+
+    manifestIndex += 1;
+  }
+
   return libs;
+}
+
+/// Whether one manifest lib entry's module is in use: a used path is the
+/// module's own file or any file in the module's directory, so importing
+/// `std::sqlite3::statement` alone still pulls the library.
+function manifestLibraryInUse(entry: &StdManifestLib, usedStdPaths: &Vector<String>): boolean {
+  let directory: String = manifestModuleDirectory(&entry.path);
+  let separator: u8 = '/' as u8;
+
+  let mut index: u64 = 0;
+
+  while (index < usedStdPaths.length()) {
+    let Option::SOME(used) = usedStdPaths.get(index) else {
+      break;
+    };
+
+    if (used.equals(&entry.path)) {
+      return true;
+    }
+
+    if (directory.length() > 0 && used.startsWith(directory.toStr()) && used.length() > directory.length()) {
+      if (let Option::SOME(byte) = used.byteAt(directory.length())) {
+        if (byte == separator) {
+          return true;
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// The directory part of a manifest module path (`sqlite3` for
+/// `sqlite3/mod.ign`), empty for a single-file module.
+function manifestModuleDirectory(modulePath: &String): String {
+  let mut lastSlash: Option<u64> = Option::NONE;
+  let mut cursor: u64 = 0;
+
+  while (true) {
+    let Option::SOME(slashIndex) = modulePath.indexOfCharFrom('/', cursor) else {
+      break;
+    };
+
+    lastSlash = Option::SOME(slashIndex);
+    cursor = slashIndex + 1;
+  }
+
+  let Option::SOME(slashIndex) = lastSlash else {
+    return String::new();
+  };
+
+  return modulePath.substringBytes(0, slashIndex);
+}
+
+/// Whether `libs` already names `library`.
+function linkLibrariesContains(libs: &Vector<String>, library: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < libs.length()) {
+    let Option::SOME(named) = libs.get(index) else {
+      break;
+    };
+
+    if (named.equals(library)) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// The libraries a build links. `toolchainLinkLibrariesFor` holds the rules;
+/// this resolves its inputs from the discovery the build already has: the
+/// std manifest's `[linking.*]` lib entries and the std modules the graph
+/// pulls in.
+function toolchainLinkLibraries(
+  profile: &BuildProfile,
+  discovery: &DiscoveryResult
+): Vector<String> {
+  let manifestLibraries: Vector<StdManifestLib> = stdManifestLibraries(&discovery.stdRoot);
+  let used: Vector<String> = usedStdModulePaths(discovery);
+
+  return toolchainLinkLibrariesFor(
+    profile.freestanding,
+    &profile.backend,
+    &manifestLibraries,
+    &used,
+    profile.stdArchive,
+  );
 }
 
 /// The backend a validated target names. The resolver has already rejected
@@ -951,6 +1306,7 @@ function linkObjects(
   objects: &Vector<Path::PathBuf>,
   outputPath: &Path::PathBuf,
   profile: &BuildProfile,
+  discovery: &DiscoveryResult,
   file: &SourceFile,
   verbose: boolean,
   quiet: boolean,
@@ -972,7 +1328,7 @@ function linkObjects(
     archives.push(archivePath.toString());
   }
 
-  let libs: Vector<String> = toolchainLinkLibraries(profile);
+  let libs: Vector<String> = toolchainLinkLibraries(profile, discovery);
 
   let linkFlags: Vector<String> = toolchainLinkFlags(profile);
 
@@ -1006,6 +1362,7 @@ function buildAndLinkUnits(
   outputPath: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
+  discovery: &DiscoveryResult,
   file: &SourceFile,
   verbose: boolean,
   quiet: boolean,
@@ -1037,7 +1394,7 @@ function buildAndLinkUnits(
     index += 1;
   }
 
-  return linkObjects(&objects, outputPath, profile, file, verbose, quiet);
+  return linkObjects(&objects, outputPath, profile, discovery, file, verbose, quiet);
 }
 
 /// `path` below `root`, or `NONE` when it lies elsewhere.
@@ -2818,6 +3175,7 @@ function runCompile(
           &artifacts.executable,
           &discovery.stdRoot,
           &profile,
+          &discovery,
           &file,
           verbose,
           false,
@@ -3106,6 +3464,7 @@ function runProgramFixture(
     &binaryPath,
     &fixtureDiscovery.stdRoot,
     &profile,
+    &fixtureDiscovery,
     &quietFile,
     false,
     true,
@@ -3494,7 +3853,7 @@ function linkTestBinary(
   let jobs: u64 = TestRunner::jobLimit(options.jobs);
 
   // The harness is always C, and so is the program unit of a test build.
-  if (buildAndLinkUnits(Backend::C, &sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, options.verbose, false, jobs, &inlineAsmUnits) > 0) {
+  if (buildAndLinkUnits(Backend::C, &sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, discovery, file, options.verbose, false, jobs, &inlineAsmUnits) > 0) {
     return Option::NONE;
   }
 

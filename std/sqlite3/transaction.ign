@@ -1,0 +1,144 @@
+//!
+//! # Transaction
+//!
+//! `Sqlite3::Transaction`, the guard `Connection::begin` returns. `commit()`
+//! commits; dropping the transaction without `commit` rolls it back, so an
+//! early `return` or an error path cannot leave a transaction open.
+//!
+//! ## Exports
+//!
+//! | Export               | Description                                |
+//! |----------------------|--------------------------------------------|
+//! | `Sqlite3::Transaction` | `commit`, `rollback`; rolls back on drop |
+//!
+//! ## The Drop contract
+//!
+//! A `Transaction` that is dropped while still open runs `ROLLBACK` on its
+//! connection. Nothing can be reported at that point, so a rollback on drop
+//! is silent and best effort: if the connection is already closed, the
+//! rollback does nothing. Code that wants the outcome calls `commit` or
+//! `rollback` and gets a `Result`; drop is the safety net, not the API.
+//!
+//! After `commit` or `rollback`, calling either method again is a misuse
+//! error, not a panic. A failed `commit` leaves the transaction unfinished,
+//! so drop still cleans up.
+//!
+//! ## Lifetime
+//!
+//! The transaction does not own its connection: it holds the address of the
+//! `Connection` that produced it and reads the connection's live handle on
+//! every use, so a transaction outliving a `close()` is refused with a misuse
+//! error instead of touching freed memory. What it cannot survive is the
+//! `Connection` value itself being gone — the same contract a `MutexGuard`
+//! has with its mutex, and declaration order gives it in ordinary use: the
+//! connection declared first drops last, after every transaction and
+//! statement it produced.
+
+import sqlite3ExecDirect from "./connection";
+
+/// `sqlite3_close_v2` reports misuse, e.g. a commit on a finished transaction
+/// or on a closed connection.
+const SQLITE_MISUSE: i32 = 21;
+
+/// A scoped transaction: commit explicitly, roll back on drop.
+export namespace Sqlite3 {
+  /// One open transaction on a `Connection`.
+  @implements(Drop)
+  record Transaction {
+    /// The `Connection` this transaction belongs to. Read, never written:
+    /// the live `sqlite3*` handle is the connection's own field, so a
+    /// `close()` before `commit` is visible here as a null handle.
+    connection: *mut Connection;
+    /// Whether `commit` or `rollback` already ended it.
+    finished: boolean;
+
+    /// Commits the transaction. A transaction already ended by `commit` or
+    /// `rollback`, or one whose connection is closed, is a misuse error.
+    public commit(&mut self): Result<void, Error> {
+      if (self.finished) {
+        return Result::ERROR(finishedError("commit"));
+      }
+
+      return match (connectionHandle(self.connection)) {
+        Result::ERROR(error) -> Result::ERROR(error),
+        Result::OK(db) -> match (sqlite3ExecDirect(db, "COMMIT")) {
+          Result::OK(_) -> {
+            self.finished = true;
+            Result::OK(())
+          },
+          Result::ERROR(error) -> Result::ERROR(error),
+        },
+      };
+    }
+
+    /// Rolls the transaction back now. The same thing drop does, with the
+    /// outcome reported.
+    public rollback(&mut self): Result<void, Error> {
+      if (self.finished) {
+        return Result::ERROR(finishedError("rollback"));
+      }
+
+      return match (connectionHandle(self.connection)) {
+        Result::ERROR(error) -> Result::ERROR(error),
+        Result::OK(db) -> match (sqlite3ExecDirect(db, "ROLLBACK")) {
+          Result::OK(_) -> {
+            self.finished = true;
+            Result::OK(())
+          },
+          Result::ERROR(error) -> Result::ERROR(error),
+        },
+      };
+    }
+
+    /// Rolls the transaction back when it is still open and its connection
+    /// still exists. Silent by contract: there is no caller to report to.
+    /// See the module docs.
+    drop(&mut self): void {
+      if (self.finished) {
+        return;
+      }
+
+      if (let Result::OK(db) = connectionHandle(self.connection)) {
+        match (sqlite3ExecDirect(db, "ROLLBACK")) {
+          Result::OK(_) -> {},
+          Result::ERROR(_) -> {},
+        };
+      }
+
+      self.finished = true;
+    }
+  }
+
+  /// The connection's live `sqlite3*` handle, or a misuse error when the
+  /// connection is gone — either the guard lost it (never in ordinary use)
+  /// or the connection was closed first.
+  function connectionHandle(connection: *mut Connection): Result<*mut void, Error> {
+    if (connection == null) {
+      return Result::ERROR(Error {
+        code: SQLITE_MISUSE,
+        message: String::create("std::sqlite3: the transaction's connection is gone"),
+      });
+    }
+
+    let live: &Connection = connection as &Connection;
+
+    if (live.db == null) {
+      return Result::ERROR(Error {
+        code: SQLITE_MISUSE,
+        message: String::create("std::sqlite3: the transaction's connection is closed"),
+      });
+    }
+
+    return Result::OK(live.db);
+  }
+
+  /// The misuse error for an operation on a finished transaction.
+  function finishedError(operation: str): Error {
+    let operationText: String = String::create(operation);
+
+    return Error {
+      code: SQLITE_MISUSE,
+      message: `std::sqlite3: ${operationText} on a finished transaction`,
+    };
+  }
+}

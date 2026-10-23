@@ -32,8 +32,10 @@ import
   replayedReport,
   resolveTarget,
   statusLine,
+  StdManifestLib,
   stripAnsiEscapes,
   testBinaryPath,
+  toolchainLinkLibrariesFor,
   validateUtf8From,
 from "./main";
 
@@ -803,4 +805,244 @@ function noPathIsAProjectBuildOfTheCurrentDirectory(): void {
   let target: CommandTarget = checkTarget(Option::NONE);
   Test::assertEq<boolean>(target.projectMode, true);
   Test::assertEq<str>(target.path.asStr(), root.asStr());
+}
+
+// ---------------------------------------------------------------------------
+// toolchainLinkLibrariesFor: builtin libraries first and unchanged, then the
+// std manifest's [linking.<module>] lib entries for the modules the build's
+// graph actually pulls in, deduplicated. A freestanding build links none.
+// ---------------------------------------------------------------------------
+
+function linkLibrariesEntry(module: str, name: str): StdManifestLib {
+  return StdManifestLib {
+    module: String::create(module),
+    path: `${module}/mod.ign`,
+    name: String::create(name),
+  };
+}
+
+function linkLibrariesAssertList(actual: &Vector<String>, expected: &Vector<String>): void {
+  Test::assertEq<u64>(actual.length(), expected.length());
+
+  let mut index: u64 = 0;
+
+  while (index < expected.length()) {
+    let Option::SOME(expectedLib) = expected.get(index) else {
+      break;
+    };
+    let Option::SOME(actualLib) = actual.get(index) else {
+      break;
+    };
+
+    Test::assertEq<str>(actualLib.toStr(), expectedLib.toStr());
+    index += 1;
+  }
+}
+
+/// A hosted C build without manifest libraries links the two builtins.
+@test
+function linkLibrariesHostedCBuiltins(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  let mut used: Vector<String> = Vector::new<String>();
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// QBE's units call libatomic, so the builtin list gains it, last.
+@test
+function linkLibrariesQbeAddsAtomic(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  let mut used: Vector<String> = Vector::new<String>();
+  let backend: String = String::create("qbe");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+  expected.push(String::create("atomic"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// A freestanding build links no library at all.
+@test
+function linkLibrariesFreestandingLinksNone(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  let mut used: Vector<String> = Vector::new<String>();
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(true, &backend, &manifestLibs, &used, false);
+
+  Test::assertEq<u64>(libs.length(), 0);
+}
+
+/// A manifest module in use contributes its library after the builtins.
+@test
+function linkLibrariesManifestModuleInUse(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("sqlite3", "sqlite3"));
+
+  let mut used: Vector<String> = Vector::new<String>();
+  used.push(String::create("sqlite3/mod.ign"));
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+  expected.push(String::create("sqlite3"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// A submodule of a manifest module counts as using it, so importing
+/// `std::sqlite3::statement` alone still pulls the library.
+@test
+function linkLibrariesManifestSubmoduleInUse(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("sqlite3", "sqlite3"));
+
+  let mut used: Vector<String> = Vector::new<String>();
+  used.push(String::create("sqlite3/statement.ign"));
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+  expected.push(String::create("sqlite3"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// A program that does not import the module gains no library.
+@test
+function linkLibrariesManifestModuleNotUsed(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("sqlite3", "sqlite3"));
+
+  let mut used: Vector<String> = Vector::new<String>();
+  used.push(String::create("net/tcp.ign"));
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// Two manifest modules naming the same library link it once.
+@test
+function linkLibrariesDeduplicatesManifestLibs(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("sqlite3", "sqlite3"));
+  manifestLibs.push(linkLibrariesEntry("orm", "sqlite3"));
+
+  let mut used: Vector<String> = Vector::new<String>();
+  used.push(String::create("sqlite3/mod.ign"));
+  used.push(String::create("orm/mod.ign"));
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+  expected.push(String::create("sqlite3"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// A manifest library the builtins already cover is not linked twice.
+@test
+function linkLibrariesDeduplicatesAgainstBuiltins(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("math", "m"));
+
+  let mut used: Vector<String> = Vector::new<String>();
+  used.push(String::create("math/mod.ign"));
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// A linking section with a header but no lib contributes nothing.
+@test
+function linkLibrariesSkipsHeaderOnlyModules(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("libc", ""));
+
+  let mut used: Vector<String> = Vector::new<String>();
+  used.push(String::create("libc/mod.ign"));
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, false);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// A std-archive build links from the monolithic `libignis_std.a`, which
+/// defines every module in one object, so every manifest lib applies even
+/// though the program's own graph imports none of them.
+@test
+function linkLibrariesStdArchiveLinksEveryManifestLib(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("sqlite3", "sqlite3"));
+  manifestLibs.push(linkLibrariesEntry("libc", ""));
+
+  let used: Vector<String> = Vector::new<String>();
+  let backend: String = String::create("c");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, true);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+  expected.push(String::create("sqlite3"));
+
+  linkLibrariesAssertList(&libs, &expected);
+}
+
+/// Whole-program std-archive keeps the builtins-first order.
+@test
+function linkLibrariesStdArchiveKeepsBuiltinsFirst(): void {
+  let mut manifestLibs: Vector<StdManifestLib> = Vector::new<StdManifestLib>();
+  manifestLibs.push(linkLibrariesEntry("sqlite3", "sqlite3"));
+
+  let mut used: Vector<String> = Vector::new<String>();
+  used.push(String::create("sqlite3/mod.ign"));
+  let backend: String = String::create("qbe");
+
+  let libs: Vector<String> = toolchainLinkLibrariesFor(false, &backend, &manifestLibs, &used, true);
+
+  let mut expected: Vector<String> = Vector::new<String>();
+  expected.push(String::create("m"));
+  expected.push(String::create("pthread"));
+  expected.push(String::create("atomic"));
+  expected.push(String::create("sqlite3"));
+
+  linkLibrariesAssertList(&libs, &expected);
 }
