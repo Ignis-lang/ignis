@@ -1,0 +1,57 @@
+//! The task entity and its invariants. Domain code imports neither
+//! std::web nor std::http: it knows nothing about requests or statuses.
+
+import TaskError, validationError from "./errors";
+
+/// A title may not be longer than this many UTF-8 bytes.
+export const MAX_TITLE_BYTES: u64 = 120;
+
+export record Task {
+  public id: u64;
+  public title: String;
+  public done: boolean;
+  public owner: String;
+
+  public clone(&self): Task {
+    return Task {
+      id: self.id,
+      title: self.title.clone(),
+      done: self.done,
+      owner: self.owner.clone(),
+    };
+  }
+
+  public static validateTitle(title: &String): Result<void, TaskError> {
+    if (title.length() == 0) {
+      return Result::ERROR(validationError("title must not be empty"));
+    }
+
+    if (title.length() > MAX_TITLE_BYTES) {
+      return Result::ERROR(validationError("title is longer than 120 bytes"));
+    }
+
+    return Result::OK(());
+  }
+
+  /// Builds an unsaved task: trims the title, validates it, and leaves the
+  /// id at 0 for the repository to assign.
+  public static draft(title: String, done: boolean, owner: String): Result<Task, TaskError> {
+    let trimmed: String = title.trimAsciiWhitespace();
+
+    match (Task::validateTitle(&trimmed)) {
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+      Result::OK(_) -> {},
+    };
+
+    return Result::OK(Task { id: 0, title: trimmed, done: done, owner: owner });
+  }
+}
+
+/// The list query the application hands to the repository: keep every task
+/// whose `done` matches (or all of them), up to `limit` entries.
+export record TaskFilter {
+  public done: Option<boolean>;
+  public limit: u64;
+}

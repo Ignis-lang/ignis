@@ -1,0 +1,217 @@
+//! In-process tests: every request goes through the same router the server
+//! threads use, without a socket.
+
+import Http from "std::http";
+import Test from "std::test";
+import Web from "std::web";
+import TasksApi from "@app";
+import MemoryTaskRepository from "@infra::memory_repository";
+
+/// What a test sends: one request, built step by step and run in process
+/// through the router, without a socket.
+record Call {
+  public request: Http::Request;
+
+  public static to(method: Http::Method, target: str): Call {
+    return Call {
+      request: Http::Request {
+        head: Http::RequestHead {
+          method: method,
+          target: String::create(target),
+          version: Http::Version::HTTP_1_1,
+          headers: Http::Headers::new(),
+        },
+        body: Vector::new<u8>(),
+      },
+    };
+  }
+
+  public header(self, name: str, value: str): Call {
+    let mut call: Call = self;
+    call.request.head.headers.add(name, value);
+    return call;
+  }
+
+  /// Authenticated as `user`.
+  public asUser(self, user: str): Call {
+    return self.header("Authorization", "Bearer test-token").header("X-User", user);
+  }
+
+  public json(self, text: str): Call {
+    let mut call: Call = self.header("Content-Type", "application/json");
+    let body: String = String::create(text);
+    call.request.body = body.toBytes();
+    return call;
+  }
+
+  public send(&self, router: &Web::Router): Http::Response {
+    let mut response: Http::Response = Http::Response::new();
+    router.handle(&self.request, &mut response);
+    return response;
+  }
+}
+
+function bodyText(response: &Http::Response): String {
+  let mut text: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < response.body.length()) {
+    text.pushByte(*response.body.get(index).unwrap());
+    index += 1;
+  }
+
+  return text;
+}
+
+function router(): Web::Router {
+  let app: TasksApi<MemoryTaskRepository> = TasksApi::new<MemoryTaskRepository>(
+    MemoryTaskRepository::new(),
+    String::create("test-token"),
+  );
+  return app.build();
+}
+
+@test
+function healthNeedsNoToken(): void {
+  let app: Web::Router = router();
+  let response: Http::Response = Call::to(Http::Method::GET, "/health").send(&app);
+
+  Test::assertEq<u16>(response.status, 200);
+  Test::assertEq<str>(bodyText(&response).toStr(), "ok");
+}
+
+@test
+function tasksNeedABearerToken(): void {
+  let app: Web::Router = router();
+  let missing: Http::Response = Call::to(Http::Method::GET, "/tasks").send(&app);
+  let wrong: Http::Response = Call::to(Http::Method::GET, "/tasks")
+    .header("Authorization", "Bearer nope")
+    .header("X-User", "ana")
+    .send(&app);
+
+  Test::assertEq<u16>(missing.status, 401);
+  Test::assertEq<str>(missing.headers.get("WWW-Authenticate").unwrap(), "Bearer");
+  Test::assertEq<u16>(wrong.status, 403);
+}
+
+@test
+function createsAndReadsATask(): void {
+  let app: Web::Router = router();
+  let created: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"  Write tests  \"}")
+    .send(&app);
+
+  Test::assertEq<u16>(created.status, 201);
+  Test::assertEq<str>(created.headers.get("Location").unwrap(), "/tasks/1");
+  Test::assertEq<str>(
+    bodyText(&created).toStr(),
+    "{\"id\":1,\"title\":\"Write tests\",\"done\":false,\"owner\":\"ana\"}",
+  );
+
+  let read: Http::Response = Call::to(Http::Method::GET, "/tasks/1").asUser("ana").send(&app);
+  Test::assertEq<u16>(read.status, 200);
+  Test::assertEq<str>(bodyText(&read).toStr(), bodyText(&created).toStr());
+}
+
+@test
+function rejectsInvalidBodies(): void {
+  let app: Web::Router = router();
+  let empty: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"   \"}")
+    .send(&app);
+  let unknown: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"t\", \"priority\": 3}")
+    .send(&app);
+  let broken: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\":")
+    .send(&app);
+  let plain: Http::Response = Call::to(Http::Method::POST, "/tasks").asUser("ana").send(&app);
+
+  Test::assertEq<u16>(empty.status, 422);
+  Test::assertEq<str>(bodyText(&empty).toStr(), "title must not be empty");
+  Test::assertEq<u16>(unknown.status, 422);
+  Test::assertEq<u16>(broken.status, 400);
+  Test::assertEq<u16>(plain.status, 415);
+}
+
+@test
+function onlyTheOwnerUpdatesATask(): void {
+  let app: Web::Router = router();
+  let _created: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"mine\"}")
+    .send(&app);
+  let byBob: Http::Response = Call::to(Http::Method::PATCH, "/tasks/1")
+    .asUser("bob")
+    .json("{\"done\": true}")
+    .send(&app);
+  let byAna: Http::Response = Call::to(Http::Method::PATCH, "/tasks/1")
+    .asUser("ana")
+    .json("{\"done\": true}")
+    .send(&app);
+
+  Test::assertEq<u16>(byBob.status, 403);
+  Test::assertEq<u16>(byAna.status, 200);
+  Test::assertEq<str>(bodyText(&byAna).toStr(), "{\"id\":1,\"title\":\"mine\",\"done\":true,\"owner\":\"ana\"}");
+}
+
+@test
+function filtersAndValidatesTheQuery(): void {
+  let app: Web::Router = router();
+  let _open: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"open\"}")
+    .send(&app);
+  let _done: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"closed\", \"done\": true}")
+    .send(&app);
+
+  let done: Http::Response = Call::to(Http::Method::GET, "/tasks?done=true").asUser("ana").send(&app);
+  let badLimit: Http::Response = Call::to(Http::Method::GET, "/tasks?limit=abc").asUser("ana").send(&app);
+  let bigLimit: Http::Response = Call::to(Http::Method::GET, "/tasks?limit=101").asUser("ana").send(&app);
+  let badDone: Http::Response = Call::to(Http::Method::GET, "/tasks?done=maybe").asUser("ana").send(&app);
+
+  Test::assertEq<str>(bodyText(&done).toStr(), "[{\"id\":2,\"title\":\"closed\",\"done\":true,\"owner\":\"ana\"}]");
+  Test::assertEq<u16>(badLimit.status, 400);
+  Test::assertEq<str>(bodyText(&badLimit).toStr(), "limit must be a positive number");
+  Test::assertEq<u16>(bigLimit.status, 400);
+  Test::assertEq<str>(bodyText(&bigLimit).toStr(), "limit must be at most 100");
+  Test::assertEq<u16>(badDone.status, 400);
+}
+
+@test
+function reportsMissingTasksAndMethod(): void {
+  let app: Web::Router = router();
+  let _created: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"temp\"}")
+    .send(&app);
+  let missing: Http::Response = Call::to(Http::Method::GET, "/tasks/7").asUser("ana").send(&app);
+  let wrongMethod: Http::Response = Call::to(Http::Method::PUT, "/tasks/1")
+    .asUser("ana")
+    .json("{\"done\": true}")
+    .send(&app);
+  let badId: Http::Response = Call::to(Http::Method::GET, "/tasks/0").asUser("ana").send(&app);
+
+  Test::assertEq<u16>(missing.status, 404);
+  Test::assertEq<u16>(wrongMethod.status, 405);
+  Test::assertEq<str>(wrongMethod.headers.get("Allow").unwrap(), "GET, HEAD, PATCH, DELETE");
+  Test::assertEq<u16>(badId.status, 400);
+}
+
+@test
+function deletesAndReportsMissingTasks(): void {
+  let app: Web::Router = router();
+  let _created: Http::Response = Call::to(Http::Method::POST, "/tasks")
+    .asUser("ana")
+    .json("{\"title\": \"temp\"}")
+    .send(&app);
+
+  Test::assertEq<u16>(Call::to(Http::Method::DELETE, "/tasks/1").asUser("ana").send(&app).status, 204);
+  Test::assertEq<u16>(Call::to(Http::Method::GET, "/tasks/1").asUser("ana").send(&app).status, 404);
+}

@@ -1,0 +1,22 @@
+//! The port the application drives: every task store implements this
+//! trait. The application layer and the domain never see a concrete store.
+
+import Task, TaskFilter from "./task";
+import TaskError from "./errors";
+
+export trait TaskRepository {
+  /// Every task matching `filter`, in insertion order, at most
+  /// `filter.limit` entries.
+  all(&self, filter: &TaskFilter): Vector<Task>;
+
+  find(&self, id: u64): Option<Task>;
+
+  /// Stores `task`, assigns its id, and returns the stored task.
+  insert(&self, task: Task): Task;
+
+  /// Replaces the stored task with the same id; NOT_FOUND when absent.
+  replace(&self, task: Task): Result<Task, TaskError>;
+
+  /// Removes the task with this id; NOT_FOUND when absent.
+  remove(&self, id: u64): Result<void, TaskError>;
+}
