@@ -1,7 +1,6 @@
-import Vector from "std::vector";
-
 import _ from "./types";
 import _ from "./definitions";
+import _ from "./symbols";
 
 /// The S2 view-type predicate: one authoritative answer, per `TypeId`, to
 /// "is this type a second-class view?".
@@ -10,8 +9,9 @@ import _ from "./definitions";
 /// and similar views produce), `&T`, `&mut T`, and slices are views; a record,
 /// enum, tuple or fixed array with a field of view type is a view (a `static
 /// str` field does not make it one, because a static string owns its bytes); a
-/// generic instance with a view type argument (`Vector<str>`, `Option<&T>`) is
-/// a view. Type aliases are transparent. Raw pointers are not views and are
+/// generic instance is a view when a type argument is (`Vector<str>`,
+/// `Option<&T>`) or when a declared field or payload is once the arguments are
+/// substituted (`Tagged<i32>` with a `text: str` field). Type aliases are transparent. Raw pointers are not views and are
 /// not followed: raw pointers and `extern` functions are the unchecked
 /// boundary (S5). A `static str` is not a view. Unresolved `Param`s are not
 /// views; after monomorphization the predicate answers on the substituted
@@ -66,7 +66,7 @@ export namespace Analyzer::ViewType {
     let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
     let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
     let mut isEnum: boolean = false;
-    let mut hasPayloadComponents: boolean = false;
+    let mut hasTypeArguments: boolean = false;
     let mut aliased: Option<Analyzer::TypeId> = Option::NONE;
     let mut holds: boolean = false;
 
@@ -101,7 +101,8 @@ export namespace Analyzer::ViewType {
       Analyzer::Type::Instance(instance) -> {
         nominal = Option::SOME(instance.definition);
         components = ViewType::copyTypeIds(&instance.typeArguments);
-        hasPayloadComponents = true;
+        isEnum = ViewType::isEnumDefinition(defStore, instance.definition);
+        hasTypeArguments = true;
       },
       Analyzer::Type::Alias(aliasDefId) -> {
         aliased = ViewType::aliasedTypeOf(defStore, aliasDefId);
@@ -127,12 +128,32 @@ export namespace Analyzer::ViewType {
       let mut visitingRef: &mut Vector<Vector<u32>> = visiting;
       visitingRef.push(key);
 
-      if (!hasPayloadComponents) {
-        if (isEnum) {
-          components = ViewType::enumPayloadTypes(defStore, defId);
-        } else {
-          components = ViewType::recordFieldTypes(defStore, defId);
+      let mut members: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      if (isEnum) {
+        members = ViewType::enumPayloadTypes(defStore, defId);
+      } else {
+        members = ViewType::recordFieldTypes(defStore, defId);
+      }
+
+      // A type argument can be a view the members never mention (`Vector`
+      // keeps its elements behind a raw pointer), so the arguments stay
+      // components alongside the substituted members.
+      let paramSymbols: Vector<Analyzer::SymbolId> = ViewType::typeParamSymbols(defStore, defId);
+      let arguments: Vector<Analyzer::TypeId> = ViewType::copyTypeIds(&components);
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < members.length()) {
+        if (let Option::SOME(member) = members.get(memberIndex)) {
+          if (hasTypeArguments) {
+            let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+            components.push(typeStoreRef.substitute(*member, &paramSymbols, &arguments));
+          } else {
+            components.push(*member);
+          }
         }
+
+        memberIndex += 1;
       }
     }
 
@@ -228,6 +249,67 @@ export namespace Analyzer::ViewType {
     }
 
     return types;
+  }
+
+  function isEnumDefinition(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    return match (defStore.get(defId)) {
+      Option::SOME(Analyzer::Definition::Enum(_)) -> true,
+      _ -> false,
+    };
+  }
+
+  /// The interned names of a record's or enum's type parameters, in
+  /// declaration order: the parameters an instance's arguments substitute.
+  function typeParamSymbols(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::SymbolId> {
+    let mut paramDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    match (defStore.get(defId)) {
+      Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+        paramDefIds = ViewType::copyDefinitionIds(&recordDef.typeParams);
+      },
+      Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+        paramDefIds = ViewType::copyDefinitionIds(&enumDef.typeParams);
+      },
+      _ -> {},
+    };
+
+    let mut symbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+    let mut index: u64 = 0;
+
+    while (index < paramDefIds.length()) {
+      if (let Option::SOME(paramDefId) = paramDefIds.get(index)) {
+        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+          symbols.push(typeParam.name);
+        }
+      }
+
+      index += 1;
+    }
+
+    return symbols;
+  }
+
+  function copyDefinitionIds(
+    source: &Vector<Analyzer::DefinitionId>
+  ): Vector<Analyzer::DefinitionId> {
+    let mut copied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copied.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copied;
   }
 
   function aliasedTypeOf(
