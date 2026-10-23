@@ -325,13 +325,14 @@ type Id = i32;
 type IntBox = Box<i32>;
 type Identity<T> = T;
 type Callback = (i32) -> i32;
-type Shared<T> = Arc<Mutex<T>>;
 ```
 
 An alias is transparent: `Shared<Store>` is `Arc<Mutex<Store>>` wherever it is written, in a
 signature, a local annotation, a type argument or the receiver of a method call, and the bounds of
-`Arc` and `Mutex` apply to `Store`. An alias may name another alias, declared before or after it,
-and may be exported and imported like any declaration.
+`Arc` and `Mutex` apply to `Store`. The alias that shape needs is already in the standard library:
+`std::sync` exports `Shared<T>` as `Arc<Mutex<T>>`, so import it instead of declaring your own. An
+alias may name another alias, declared before or after it, and may be exported and imported like any
+declaration.
 
 Tuple patterns and tuple expressions parse, but a tuple type cannot be spelled: `(...)` in
 type position always requires `->`, so an alias like `type Pair<T> = (T, T);` is rejected

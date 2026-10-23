@@ -102,8 +102,8 @@ a new one.
 ```ignis
 type Id = i32;
 type Handler<T> = (T) -> void;
-type Shared<T> = Arc<Mutex<T>>;
 ```
 
 `Shared<Store>` is `Arc<Mutex<Store>>` everywhere you write it, method calls included, and the
-bounds of `Arc` and `Mutex` still apply to `Store`.
+bounds of `Arc` and `Mutex` still apply to `Store`. That alias is already in the standard library:
+`std::sync` exports `Shared<T>` as `Arc<Mutex<T>>`, so import it instead of declaring your own.

@@ -12,6 +12,7 @@ import
   Ordering,
   Receiver,
   Sender,
+  Shared,
   ThreadPool,
 from "std::sync";
 import JoinHandle, Thread from "std::thread";
@@ -367,6 +368,30 @@ function arcMutexCounterAcrossThreads(): void {
 
   Test::assertEq<u64>(*guard.read(), 4000);
   Test::assertEq<u64>(counter.strongCount(), 1);
+}
+
+@test
+function sharedCountsClonesAndLocksThroughTheAlias(): void {
+  Test::assert(requireSend<Shared<u64>>());
+  Test::assert(requireSync<Shared<u64>>());
+
+  let counter: Shared<u64> = Arc::new<Mutex<u64>>(Mutex::new<u64>(41));
+
+  {
+    let shared: Shared<u64> = counter.clone();
+
+    Test::assertEq<u64>(shared.strongCount(), 2);
+
+    let mut guard: MutexGuard<u64> = shared.get().lock();
+    let value: &mut u64 = guard.get();
+
+    *value += 1;
+  }
+
+  let guard: MutexGuard<u64> = counter.get().lock();
+
+  Test::assertEq<u64>(counter.strongCount(), 1);
+  Test::assertEq<u64>(*guard.read(), 42);
 }
 
 record Signal {
