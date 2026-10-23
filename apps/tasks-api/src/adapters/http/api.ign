@@ -1,0 +1,52 @@
+//! The contract the HTTP surface offers its named functions: the state
+//! record, the two function-type signatures, the endpoint ids the route
+//! table dispatches on, and where a domain failure becomes a status.
+
+import Arc, AtomicU64, Shared from "std::sync";
+import Web from "std::web";
+import TaskError from "@domain::errors";
+import TaskRepository from "@domain::repository";
+
+/// The state the named HTTP functions receive: the shared repository
+/// handle, the bearer token, and the request-id counter. Built once per
+/// server thread by app.ign.
+@implements(Send, Sync)
+export record Api<R: TaskRepository & Send & Sync> {
+  public tasks: Shared<R>;
+  public token: String;
+  public requests: Arc<AtomicU64>;
+}
+
+/// A named controller: one HTTP endpoint as a function.
+export type Controller<R: TaskRepository & Send & Sync> = (&Api<R>, &mut Web::Request, &mut Web::Response) -> Result<void, Web::Error>;
+
+/// A named filter: one link of the middleware chain.
+export type Filter<R: TaskRepository & Send & Sync> = (&Api<R>, &mut Web::Request, &mut Web::Response, Web::Next) -> Result<void, Web::Error>;
+
+/// Which controller a route runs; see `adaptController`.
+export enum Endpoint {
+  HEALTH,
+  LIST,
+  CREATE,
+  SHOW,
+  UPDATE,
+  REMOVE,
+}
+
+/// Which stateful filter a route runs; see `adaptFilter`.
+export enum FilterId {
+  REQUEST_ID,
+  AUTH,
+}
+
+/// Where a domain failure becomes a status: the only status mapping in the
+/// project. NOT_FOUND -> 404, VALIDATION -> 422, FORBIDDEN -> 403,
+/// BAD_REQUEST -> 400.
+export function taskErrorToWeb(error: &TaskError): Web::Error {
+  return match (error) {
+    TaskError::NOT_FOUND -> Web::Error::withStatus(404, "no such task"),
+    TaskError::VALIDATION(message) -> Web::Error::withStatus(422, message.toStr()),
+    TaskError::FORBIDDEN -> Web::Error::withStatus(403, "only the owner can change a task"),
+    TaskError::BAD_REQUEST(message) -> Web::Error::withStatus(400, message.toStr()),
+  };
+}

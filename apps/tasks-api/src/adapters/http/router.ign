@@ -1,0 +1,104 @@
+//! The HTTP route table and the single adapter from a named function to
+//! Web::Middleware. This file is the only place that knows which routes
+//! exist; controllers and filters are named functions in tasks.ign,
+//! health.ign and middleware.ign, and their shared contract lives in
+//! api.ign.
+
+import Arc, AtomicU64, Shared from "std::sync";
+import Web from "std::web";
+import Api, Endpoint, FilterId from "@adapters::http::api";
+import TaskRepository from "@domain::repository";
+import list, create, show, update, remove from "@adapters::http::tasks";
+import health from "@adapters::http::health";
+import bearerAuth, logRequests, requestId, requireJson from "@adapters::http::middleware";
+
+export function adaptController<R: TaskRepository & Send & Sync>(
+  api: Arc<Api<R>>,
+  endpoint: Endpoint,
+): Web::Middleware {
+  return (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {
+    // Web::Middleware is a closure type and a closure is not Send or Sync,
+    // so one adapter per route captures the shared state once; when
+    // fn(A) -> R reaches the official stage0 the adapter can take the
+    // function pointer directly.
+    //
+    // Until then, the controller also travels as an enum: the route table
+    // is generic, and the compiler cannot yet take the value of a generic
+    // function. dispatchController calls the named function directly.
+    return dispatchController((@move api).get(), (@move endpoint), request, response);
+  };
+}
+
+function dispatchController<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  endpoint: Endpoint,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+): Result<void, Web::Error> {
+  return match (endpoint) {
+    Endpoint::HEALTH -> health(api, request, response),
+    Endpoint::LIST -> list(api, request, response),
+    Endpoint::CREATE -> create(api, request, response),
+    Endpoint::SHOW -> show(api, request, response),
+    Endpoint::UPDATE -> update(api, request, response),
+    Endpoint::REMOVE -> remove(api, request, response),
+  };
+}
+
+export function adaptFilter<R: TaskRepository & Send & Sync>(
+  api: Arc<Api<R>>,
+  filter: FilterId,
+): Web::Middleware {
+  return (request: &mut Web::Request, response: &mut Web::Response, next: Web::Next): Result<void, Web::Error> -> {
+    // Same two limits as in adaptController: the closure is not Send or
+    // Sync, and a generic filter cannot be passed as a value yet.
+    return dispatchFilter((@move api).get(), (@move filter), request, response, next);
+  };
+}
+
+function dispatchFilter<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  filter: FilterId,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+  next: Web::Next,
+): Result<void, Web::Error> {
+  return match (filter) {
+    FilterId::REQUEST_ID -> requestId(api, request, response, next),
+    FilterId::AUTH -> bearerAuth(api, request, response, next),
+  };
+}
+
+/// The route table. app.ign calls this from `App::build` on every server
+/// thread; the shared state travels as one `Arc` that every route's
+/// adapter captures.
+export function buildRouter<R: TaskRepository & Send & Sync>(
+  tasks: Shared<R>,
+  token: String,
+  requests: Arc<AtomicU64>,
+): Web::Router {
+  let api: Arc<Api<R>> = Arc::new<Api<R>>(Api {
+    tasks: tasks,
+    token: token,
+    requests: requests,
+  });
+
+  let mut router: Web::Router = Web::Router::new();
+
+  // Request ids and logs first, then auth for everything under /tasks;
+  // /health stays public. logRequests and requireJson are stateless, so
+  // they register directly.
+  router.use(adaptFilter(api.clone(), FilterId::REQUEST_ID));
+  router.use(logRequests);
+  router.use(adaptFilter(api.clone(), FilterId::AUTH));
+  router.use(requireJson);
+
+  router.get("/health", adaptController(api.clone(), Endpoint::HEALTH));
+  router.get("/tasks", adaptController(api.clone(), Endpoint::LIST));
+  router.post("/tasks", adaptController(api.clone(), Endpoint::CREATE));
+  router.get("/tasks/:id", adaptController(api.clone(), Endpoint::SHOW));
+  router.patch("/tasks/:id", adaptController(api.clone(), Endpoint::UPDATE));
+  router.delete("/tasks/:id", adaptController(api.clone(), Endpoint::REMOVE));
+
+  return router;
+}

@@ -1,0 +1,113 @@
+//! Cross-cutting HTTP behavior: request ids, request logs, bearer auth and
+//! the JSON content-type rule. All four are named functions; the route
+//! table in router.ign decides the order they run in.
+
+import Http from "std::http";
+import Io from "std::io";
+import Ordering from "std::sync";
+import Time from "std::time";
+import Web from "std::web";
+import TaskRepository from "@domain::repository";
+import Api from "@adapters::http::api";
+
+/// Logs method, path, status and duration once the rest of the chain has
+/// answered, errors included. Stateless, so the route table registers it
+/// directly.
+export function logRequests(
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+  next: Web::Next,
+): Result<void, Web::Error> {
+  let started: Result<Time::MonotonicInstant, Io::IoError> = Time::MonotonicInstant::now();
+  let result: Result<void, Web::Error> = next(request, response);
+
+  let mut status: u16 = response.status;
+
+  if (let Result::ERROR(error) = &result) {
+    status = error.status;
+  }
+
+  let mut micros: u64 = 0;
+
+  if (let Result::OK(instant) = started) {
+    if (let Result::OK(elapsed) = instant.elapsed()) {
+      micros = elapsed.wholeMicros();
+    }
+  }
+
+  Io::println(`${request.method().toString()} ${request.path()} ${status} ${micros}us`);
+  return result;
+}
+
+/// Every write needs a JSON body. Stateless, so the route table registers
+/// it directly.
+export function requireJson(
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+  next: Web::Next,
+): Result<void, Web::Error> {
+  let isWrite: boolean = match (request.method()) {
+    Http::Method::POST -> true,
+    Http::Method::PUT -> true,
+    Http::Method::PATCH -> true,
+    _ -> false,
+  };
+
+  if (isWrite) {
+    let Option::SOME(contentType) = request.header("Content-Type") else {
+      return Result::ERROR(Web::Error::withStatus(415, "Content-Type must be application/json"));
+    };
+
+    let value: String = String::create(contentType);
+
+    if (!value.startsWith("application/json")) {
+      return Result::ERROR(Web::Error::withStatus(415, "Content-Type must be application/json"));
+    }
+  }
+
+  return next(request, response);
+}
+
+/// One counter for the whole server, read on every thread.
+export function requestId<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+  next: Web::Next,
+): Result<void, Web::Error> {
+  let id: u64 = api.requests.get().fetchAdd(1, Ordering::RELAXED) + 1;
+  response.setHeader("X-Request-Id", id.toString().toStr());
+  return next(request, response);
+}
+
+/// `Bearer <token>` for every /tasks request; /health stays public, and
+/// every authenticated request names its user in X-User.
+export function bearerAuth<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+  next: Web::Next,
+): Result<void, Web::Error> {
+  let path: String = String::create(request.path());
+
+  if (!path.startsWith("/tasks")) {
+    return next(request, response);
+  }
+
+  let expected: String = `Bearer ${api.token.toStr()}`;
+
+  let Option::SOME(header) = request.header("Authorization") else {
+    response.setHeader("WWW-Authenticate", "Bearer");
+    return Result::ERROR(Web::Error::withStatus(401, "missing bearer token"));
+  };
+
+  if (!expected.equals(header)) {
+    return Result::ERROR(Web::Error::withStatus(403, "invalid token"));
+  }
+
+  if (request.header("X-User").isNone()) {
+    return Result::ERROR(Web::Error::withStatus(400, "missing X-User"));
+  }
+
+  return next(request, response);
+}

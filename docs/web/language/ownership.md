@@ -186,8 +186,8 @@ A view must not outlive its owner:
   declaring type keeps the argument in storage it allocates, where no owner is visible, so
   instantiating it with a view type is an error (A0269). `Option`, `Result` and `Mutex` hold
   their payload inline and stay unmarked, so `Option<&T>` is legal. The standard library's
-  heap-owning containers (`Vector`, `HashMap`, `HashSet`, `Rc`, `Weak`) are marked in a
-  follow-up step, after the syntax reaches the promoted compiler.
+  heap-owning containers are marked: `Vector`, `HashMap` (both parameters), `HashSet`, `Rc`,
+  `Weak`, `Arc`, and the channel's `ChannelQueue` and `ChannelState`.
 
 A view of a temporary used inside the statement that created it is fine, as a call argument
 or in a template literal. To keep it, bind the owner to a local first:

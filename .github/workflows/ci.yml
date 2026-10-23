@@ -170,7 +170,7 @@ jobs:
       # canonical layout.
       - name: Check Ignis formatting
         run: |
-          mapfile -t sources < <(find std ignis example -name '*.ign')
+          mapfile -t sources < <(find std ignis example apps -name '*.ign')
           ignis fmt --check "${sources[@]}"
 
       - name: Analyze the standard library and the selfhost compiler
@@ -180,6 +180,15 @@ jobs:
       # example is checked, and each program built and run, in seconds.
       - name: Check, build and run every example
         run: scripts/tests/test_examples.sh build/bootstrap/stage1/ignis
+
+      # apps/ holds programs CI must not run to completion: tasks-api serves
+      # HTTP and would block forever, so CI builds it and runs its
+      # in-process test suite, which terminates.
+      - name: Build the tasks-api app and run its in-process tests
+        run: |
+          cd apps/tasks-api
+          ignis build --progress plain
+          ignis test --progress plain
 
       # `ignis doc` publishes the API package the release ships, so stage1's
       # has to match the committed baselines byte for byte on the release

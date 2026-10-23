@@ -1,0 +1,30 @@
+// e2e: err
+// Writing a view into a `Vector<str>` field through a `&self` method: the
+// field's `&mut Vector<str>` hands out the vector's heap storage, and the
+// pushed `str` outlives its owner and reads freed memory (ASan:
+// heap-use-after-free). The vector's element type must be owned.
+import Vector from "std::vector";
+import Io from "std::io";
+
+record Sink {
+  items: &mut Vector<str>;
+
+  add(&self, text: str): void {
+    self.items.push(text);
+  }
+
+  first(&self): str {
+    return self.items.toSlice()[0];
+  }
+}
+
+function main(): i32 {
+  let mut list: Vector<str> = Vector::new<str>();
+  let sink: Sink = Sink { items: &mut list };
+  {
+    let owner: String = String::create("leaked");
+    sink.add(owner.toStr());
+  }
+  Io::println(sink.first());
+  return 0;
+}

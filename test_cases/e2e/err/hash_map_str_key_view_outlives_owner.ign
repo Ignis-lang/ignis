@@ -1,0 +1,21 @@
+// e2e: err
+// A `HashMap` keeps keys and values in heap buckets it owns: a `str` key
+// borrows bytes whose owner the map cannot see, so a view inserted into the
+// map outlives its owner and reads freed memory (ASan: heap-use-after-free).
+// Both parameters are `@owns` slots and need owned arguments.
+import HashMap from "std::collections";
+import Io from "std::io";
+
+function main(): i32 {
+  let mut map: HashMap<str, i32> = HashMap::new<str, i32>();
+  {
+    let owner: String = String::create("answer");
+    map.insert(owner.toStr(), 42);
+  }
+
+  if (let Option::SOME(cursor) = map.firstEntryCursor()) {
+    Io::println(*map.entryKey(cursor));
+  }
+
+  return 0;
+}

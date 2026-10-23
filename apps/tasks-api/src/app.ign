@@ -1,0 +1,31 @@
+//! The application record: it owns the shared state and builds the router
+//! for every server thread. Only main.ign names the concrete repository.
+
+import Arc, AtomicU64, Mutex, Shared from "std::sync";
+import Web from "std::web";
+import TaskRepository from "@domain::repository";
+import buildRouter from "@adapters::http::router";
+
+@implements(Web::App, Send, Sync)
+export record TasksApi<R: TaskRepository & Send & Sync> {
+  /// The task store, shared by every endpoint and every server thread.
+  public tasks: Shared<R>;
+
+  /// `Bearer <token>` every /tasks request has to send.
+  public token: String;
+
+  /// One counter for the whole server; every request gets an id from it.
+  public requests: Arc<AtomicU64>;
+
+  public static new<R: TaskRepository & Send & Sync>(repo: R, token: String): TasksApi<R> {
+    return TasksApi {
+      tasks: Arc::new<Mutex<R>>(Mutex::new<R>(repo)),
+      token: token,
+      requests: Arc::new<AtomicU64>(AtomicU64::new(0)),
+    };
+  }
+
+  build(&self): Web::Router {
+    return buildRouter(self.tasks.clone(), self.token.clone(), self.requests.clone());
+  }
+}
