@@ -1,0 +1,235 @@
+//!
+//! # Row
+//!
+//! `Orm::Row`, a typed view of the current row of a `Sqlite3::Statement`.
+//! Every getter checks what the binding's coercing getters cannot: the column
+//! exists, it is not NULL where a value is required, and a boolean is 0 or 1.
+//!
+//! ## Exports
+//!
+//! | Export     | Description                                             |
+//! |------------|---------------------------------------------------------|
+//! | `Orm::Row` | `create`, `columnCount`, `readInt`, `readReal`, `readText`, `readBlob`, `readBoolean` and their `readOptional*` forms |
+//!
+//! ## Decoding
+//!
+//! Column indexes are 0-based. A negative or out-of-range index is a
+//! `DECODE` error in every getter. `read*` reports NULL as `DECODE`;
+//! `readOptional*` reports it as `Option::NONE`. Values are otherwise read
+//! with SQLite's own coercion, so `readInt` on a TEXT column parses a number.
+//!
+//! ## Lifetime
+//!
+//! A `Row` borrows its statement and reads the row the statement is on now:
+//! use it between a `step()` that returned `Step::ROW` and the next `step()`.
+
+import Sqlite3 from "std::sqlite3";
+import Error, ErrorKind from "std::orm::error";
+
+/// A typed view of a statement's current row.
+export namespace Orm {
+  /// The current row of a stepped statement.
+  record Row {
+    /// The statement whose current row this reads.
+    statement: &Sqlite3::Statement;
+
+    /// A view of `statement`'s current row.
+    public static create(statement: &Sqlite3::Statement): Row {
+      return Row { statement: statement };
+    }
+
+    /// How many columns the row has.
+    public columnCount(&self): i32 {
+      return self.statement.columnCount();
+    }
+
+    /// Column `column` as an integer; NULL is a `DECODE` error.
+    public readInt(&self, column: i32): Result<i64, Error> {
+      match (self.required(column)) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(self.statement.columnInt(column));
+    }
+
+    /// Column `column` as a float; NULL is a `DECODE` error.
+    public readReal(&self, column: i32): Result<f64, Error> {
+      match (self.required(column)) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(self.statement.columnReal(column));
+    }
+
+    /// Column `column` as an owned `String`; NULL is a `DECODE` error.
+    public readText(&self, column: i32): Result<String, Error> {
+      match (self.required(column)) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(self.statement.columnText(column));
+    }
+
+    /// Column `column` as owned bytes; NULL is a `DECODE` error.
+    public readBlob(&self, column: i32): Result<Vector<u8>, Error> {
+      match (self.required(column)) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(self.statement.columnBlob(column));
+    }
+
+    /// Column `column` as a boolean stored as INTEGER 0 or 1; NULL or any
+    /// other value is a `DECODE` error.
+    public readBoolean(&self, column: i32): Result<boolean, Error> {
+      match (self.required(column)) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return decodeBoolean(self.statement.columnInt(column), column);
+    }
+
+    /// Column `column` as an integer, or `NONE` when it is NULL.
+    public readOptionalInt(&self, column: i32): Result<Option<i64>, Error> {
+      match (self.present(column)) {
+        Result::OK(true) -> {},
+        Result::OK(false) -> {
+          return Result::OK(Option::NONE);
+        },
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(Option::SOME(self.statement.columnInt(column)));
+    }
+
+    /// Column `column` as a float, or `NONE` when it is NULL.
+    public readOptionalReal(&self, column: i32): Result<Option<f64>, Error> {
+      match (self.present(column)) {
+        Result::OK(true) -> {},
+        Result::OK(false) -> {
+          return Result::OK(Option::NONE);
+        },
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(Option::SOME(self.statement.columnReal(column)));
+    }
+
+    /// Column `column` as an owned `String`, or `NONE` when it is NULL.
+    public readOptionalText(&self, column: i32): Result<Option<String>, Error> {
+      match (self.present(column)) {
+        Result::OK(true) -> {},
+        Result::OK(false) -> {
+          return Result::OK(Option::NONE);
+        },
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(Option::SOME(self.statement.columnText(column)));
+    }
+
+    /// Column `column` as owned bytes, or `NONE` when it is NULL.
+    public readOptionalBlob(&self, column: i32): Result<Option<Vector<u8>>, Error> {
+      match (self.present(column)) {
+        Result::OK(true) -> {},
+        Result::OK(false) -> {
+          return Result::OK(Option::NONE);
+        },
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(Option::SOME(self.statement.columnBlob(column)));
+    }
+
+    /// Column `column` as a boolean, or `NONE` when it is NULL; a value other
+    /// than 0 or 1 is a `DECODE` error.
+    public readOptionalBoolean(&self, column: i32): Result<Option<boolean>, Error> {
+      match (self.present(column)) {
+        Result::OK(true) -> {},
+        Result::OK(false) -> {
+          return Result::OK(Option::NONE);
+        },
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return match (decodeBoolean(self.statement.columnInt(column), column)) {
+        Result::OK(value) -> Result::OK(Option::SOME(value)),
+        Result::ERROR(error) -> Result::ERROR(error),
+      };
+    }
+
+    /// Whether column `column` holds a value (`false` for NULL); an index
+    /// outside the row is a `DECODE` error.
+    present(&self, column: i32): Result<boolean, Error> {
+      if (column < 0 || column >= self.statement.columnCount()) {
+        let columnText: String = String::create(column);
+
+        return Result::ERROR(Error::create(
+          ErrorKind::DECODE,
+          `std::orm: column ${columnText} is out of range`,
+        ));
+      }
+
+      return Result::OK(!self.statement.columnIsNull(column));
+    }
+
+    /// Succeeds when column `column` exists and is not NULL.
+    required(&self, column: i32): Result<void, Error> {
+      return match (self.present(column)) {
+        Result::OK(true) -> Result::OK(()),
+        Result::OK(false) -> {
+          let columnText: String = String::create(column);
+
+          Result::ERROR(Error::create(
+            ErrorKind::DECODE,
+            `std::orm: column ${columnText} is NULL in a required read`,
+          ))
+        },
+        Result::ERROR(error) -> Result::ERROR(error),
+      };
+    }
+  }
+
+  /// A stored boolean: 0 is `false`, 1 is `true`, anything else is `DECODE`.
+  function decodeBoolean(value: i64, column: i32): Result<boolean, Error> {
+    if (value == 0) {
+      return Result::OK(false);
+    }
+
+    if (value == 1) {
+      return Result::OK(true);
+    }
+
+    let columnText: String = String::create(column);
+
+    return Result::ERROR(Error::create(
+      ErrorKind::DECODE,
+      `std::orm: column ${columnText} is not a boolean (0 or 1)`,
+    ));
+  }
+}

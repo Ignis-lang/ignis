@@ -1,0 +1,184 @@
+//!
+//! # Migrations
+//!
+//! `Orm::Migration` and `Orm::migrate`, ordered schema steps applied once.
+//! Each step is a version and the SQL that moves the schema to it; the
+//! versions already applied are recorded in a `schema_migrations` table.
+//!
+//! ## Exports
+//!
+//! | Export           | Description                                       |
+//! |------------------|---------------------------------------------------|
+//! | `Orm::Migration` | `create(version, sql)`: one versioned step        |
+//! | `Orm::migrate`   | Applies the pending steps in one transaction and returns how many it applied |
+//!
+//! ## Contract
+//!
+//! `migrate` checks the list before touching the database: every version is
+//! positive and the versions strictly increase, or the call fails with a
+//! `SCHEMA` error and nothing runs. Then, in one transaction, it creates
+//! `schema_migrations (version INTEGER PRIMARY KEY)` when it is missing,
+//! applies in order every step above the highest recorded version and
+//! records each one. A failing step rolls back the whole call, the
+//! `schema_migrations` table included, and is returned as a `SQLITE` error.
+//!
+//! A step's SQL runs through `Connection::exec`, so it may hold several
+//! statements separated by semicolons; it takes no parameters.
+
+import Sqlite3 from "std::sqlite3";
+import Error, ErrorKind from "std::orm::error";
+
+/// Versioned schema steps.
+export namespace Orm {
+  /// One schema step: the version it moves the schema to and its SQL.
+  record Migration {
+    /// The version, positive and strictly increasing along the list.
+    public version: i64;
+    /// The SQL of the step, one or more statements.
+    public sql: String;
+
+    /// The step that moves the schema to `version` by running `sql`.
+    public static create(version: i64, sql: str): Migration {
+      return Migration { version: version, sql: String::create(sql) };
+    }
+  }
+
+  /// Applies the steps of `migrations` that are above the highest version
+  /// recorded in `schema_migrations`, in order, in one transaction, and
+  /// returns how many it applied. See the module docs for the contract.
+  function migrate(
+    connection: &mut Sqlite3::Connection,
+    migrations: &Vector<Migration>
+  ): Result<i64, Error> {
+    match (validateMigrations(migrations)) {
+      Result::OK(_) -> {},
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+    };
+
+    let mut transaction: Sqlite3::Transaction = match (connection.begin()) {
+      Result::OK(transaction) -> transaction,
+      Result::ERROR(error) -> {
+        return Result::ERROR(Error::fromSqlite(error));
+      },
+    };
+
+    match (connection.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")) {
+      Result::OK(_) -> {},
+      Result::ERROR(error) -> {
+        return Result::ERROR(Error::fromSqlite(error));
+      },
+    };
+
+    let current: i64 = match (recordedVersion(connection)) {
+      Result::OK(version) -> version,
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+    };
+
+    let mut applied: i64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < migrations.length()) {
+      let migration: &Migration = migrations.get(index).unwrap();
+
+      if (migration.version > current) {
+        match (connection.exec(migration.sql.toStr())) {
+          Result::OK(_) -> {},
+          Result::ERROR(error) -> {
+            return Result::ERROR(Error::fromSqlite(error));
+          },
+        };
+
+        match (recordVersion(connection, migration.version)) {
+          Result::OK(_) -> {},
+          Result::ERROR(error) -> {
+            return Result::ERROR(error);
+          },
+        };
+
+        applied = applied + 1;
+      }
+
+      index = index + 1;
+    }
+
+    match (transaction.commit()) {
+      Result::OK(_) -> {},
+      Result::ERROR(error) -> {
+        return Result::ERROR(Error::fromSqlite(error));
+      },
+    };
+
+    return Result::OK(applied);
+  }
+
+  /// Succeeds when every version is positive and the versions strictly
+  /// increase; a `SCHEMA` error otherwise.
+  function validateMigrations(migrations: &Vector<Migration>): Result<void, Error> {
+    let mut previous: i64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < migrations.length()) {
+      let version: i64 = migrations.get(index).unwrap().version;
+
+      if (version <= previous) {
+        let versionText: String = String::create(version);
+
+        return Result::ERROR(Error::create(
+          ErrorKind::SCHEMA,
+          `std::orm: migration version ${versionText} is not positive or not above the previous one`,
+        ));
+      }
+
+      previous = version;
+      index = index + 1;
+    }
+
+    return Result::OK(());
+  }
+
+  /// The highest version in `schema_migrations`, or 0 when it is empty.
+  function recordedVersion(connection: &mut Sqlite3::Connection): Result<i64, Error> {
+    let mut statement: Sqlite3::Statement = match (connection.prepare(
+      "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+    )) {
+      Result::OK(statement) -> statement,
+      Result::ERROR(error) -> {
+        return Result::ERROR(Error::fromSqlite(error));
+      },
+    };
+
+    return match (statement.step()) {
+      Result::OK(Sqlite3::Step::ROW) -> Result::OK(statement.columnInt(0)),
+      Result::OK(Sqlite3::Step::DONE) -> Result::OK(0),
+      Result::ERROR(error) -> Result::ERROR(Error::fromSqlite(error)),
+    };
+  }
+
+  /// Records `version` as applied, binding it as a parameter.
+  function recordVersion(connection: &mut Sqlite3::Connection, version: i64): Result<void, Error> {
+    let mut statement: Sqlite3::Statement = match (connection.prepare(
+      "INSERT INTO schema_migrations (version) VALUES (?)",
+    )) {
+      Result::OK(statement) -> statement,
+      Result::ERROR(error) -> {
+        return Result::ERROR(Error::fromSqlite(error));
+      },
+    };
+
+    match (statement.bindInt(1, version)) {
+      Result::OK(_) -> {},
+      Result::ERROR(error) -> {
+        return Result::ERROR(Error::fromSqlite(error));
+      },
+    };
+
+    return match (statement.step()) {
+      Result::OK(_) -> Result::OK(()),
+      Result::ERROR(error) -> Result::ERROR(Error::fromSqlite(error)),
+    };
+  }
+}

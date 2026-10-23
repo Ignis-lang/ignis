@@ -46,6 +46,7 @@ The design goal is to stay small, explicit and predictable.
 | `std::http` | `Http` | HTTP/1.1 server side: sans-IO request parser and response serializer, blocking `Http::Server` driver |
 | `std::web` | `Web` | Express-style framework on `std::http`: router, middleware with `next`, route parameters, query string, errors with a status |
 | `std::sqlite3` | `Sqlite3` | SQLite binding: `Connection`, `Statement`, `Transaction`, `Error` (libsqlite3) |
+| `std::orm` | `Orm` | Mapping layer on `std::sqlite3`: `Table` descriptors that emit their SQL, typed `Row` reads, ordered migrations, `Error` |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
