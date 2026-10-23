@@ -9,7 +9,8 @@ from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import HashSet from "std::collections";
-import Vector from "std::vector";
+
+import _ from "./view_type_closure";
 
 /// Generic bound checking: every type argument has to satisfy the bounds of
 /// the type parameter it binds.
@@ -352,6 +353,10 @@ export namespace Bounds {
 
     match (&argNode.kind) {
       Hir::HirKind::Closure(closure) -> {
+        // Whether the closure value is a view: any capture it holds by
+        // reference, or by value of a view type, makes the environment hold
+        // storage it does not own (S2).
+        let viewClosure: boolean = Analyzer::ViewType::closureIsView(defStore, typeStore, &closure);
         let mut captureIndex: u64 = 0;
 
         while (captureIndex < closure.captures.length()) {
@@ -387,6 +392,25 @@ export namespace Bounds {
             let name: str = Bounds::definitionName(defStore, symbols, capture.sourceDef);
             let message: String = `closure passed as '${target}' captures '${name}' by mutable reference, and a closure shared between threads may not mutate what it captures`;
             let label: String = `'${name}' is mutated through the capture`;
+
+            let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::CLOSURE_CAPTURE_NOT_THREAD_SAFE, message.toStr(), argSpan);
+            diagnostic.addLabel(LabelKind::PRIMARY, argSpan, label.toStr());
+
+            let mut bag: &mut DiagnosticBag = diagnostics;
+            bag.push(diagnostic);
+            captureIndex += 1;
+            continue;
+          }
+
+          // A capture by reference makes the closure a view (S2): the
+          // environment borrows from the defining frame, and a view is
+          // neither Send nor Sync (S3). A capture by value of a view falls
+          // through to the type check below, which now rejects the view type
+          // itself.
+          if (viewClosure && capture.mode != Hir::CaptureMode::ByValue) {
+            let name: str = Bounds::definitionName(defStore, symbols, capture.sourceDef);
+            let message: String = `closure passed as '${target}' captures '${name}' ${access}, and a view cannot cross a thread boundary`;
+            let label: String = `'${name}' is captured here`;
 
             let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::CLOSURE_CAPTURE_NOT_THREAD_SAFE, message.toStr(), argSpan);
             diagnostic.addLabel(LabelKind::PRIMARY, argSpan, label.toStr());

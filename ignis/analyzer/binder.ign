@@ -1426,6 +1426,10 @@ export namespace Analyzer {
         return name.equals("aligned") || name.equals("threadLocal");
       }
 
+      if (targetName.equals("type parameter")) {
+        return name.equals("owns");
+      }
+
       if (targetName.equals("parameter")) {
         return name.equals("takes") || name.equals("noescape") || name.equals("sendable");
       }
@@ -1688,6 +1692,43 @@ export namespace Analyzer {
     /// Allocate `Definition::TypeParam` sub-defs for each generic parameter in source order.
     ///
     /// Duplicate type-parameter names emit a diagnostic and skip the duplicate.
+    function validateGenericParamAttributes(
+      state: &mut Analyzer::Binder::BinderState,
+      parameter: &Ast::GenericParam,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < parameter.attributes.length()) {
+        let Option::SOME(attribute) = parameter.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!Analyzer::Binder::attributeIsKnownFor(&attribute.name, "type parameter")) {
+          Analyzer::Binder::emitUnknownAttribute(state, &attribute.name, "type parameter", attribute.span);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Whether any `@owns` attribute marks the parameter as an owning storage
+    /// slot: instantiating it with a view type is rejected (A0265).
+    function genericParamIsOwning(parameter: &Ast::GenericParam): boolean {
+      let mut index: u64 = 0;
+
+      while (index < parameter.attributes.length()) {
+        if (let Option::SOME(attribute) = parameter.attributes.get(index)) {
+          if (attribute.name.equals("owns")) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
     function bindTypeParams(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1707,6 +1748,8 @@ export namespace Analyzer {
 
         let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
         let sym: Analyzer::SymbolId = symbolsRef.intern(gp.name.toStr());
+
+        Analyzer::Binder::validateGenericParamAttributes(state, gp);
 
         // Linear duplicate check among already-seen type-param names.
         let mut isDuplicate: boolean = false;
@@ -1733,6 +1776,7 @@ export namespace Analyzer {
           owner: owner,
           index: index as u32,
           bounds: Analyzer::Binder::typeParamBoundNames(gp),
+          ownsStorage: Analyzer::Binder::genericParamIsOwning(gp),
         };
         let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
         let tpId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::TypeParam(tpDef));

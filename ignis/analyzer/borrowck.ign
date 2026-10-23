@@ -11,7 +11,6 @@ import Id from "@compiler::ids";
 import Output from "@compiler::output";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
-import Vector from "std::vector";
 
 import _ from "./ownership_report";
 
@@ -3584,6 +3583,7 @@ export namespace Borrowck {
     }
 
     Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, bindingDepth, value, span);
+    Borrowck::checkStoredClosureCaptures(defStore, typeStore, symbols, hir, state, diagnostics, bindingDepth, value, span);
 
     if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
       return;
@@ -3846,6 +3846,192 @@ export namespace Borrowck {
     }
   }
 
+  /// Checks the closures stored with `value` — the value itself, or one held
+  /// by a record initializer, enum payload, tuple or vector literal built in
+  /// place — whose captures are views. A closure that captures by reference,
+  /// or by value a view type, is itself a view: its environment borrows (or
+  /// points into) storage it does not own, so storing it obeys the same
+  /// storage depth rule as a view. A capture taken from a local declared
+  /// deeper than the place the closure is stored into outlives that local;
+  /// each offending capture is reported naming it. `bindingDepth` is `NONE`
+  /// for a `return`, which outlives every local of the function.
+  function checkStoredClosureCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    bindingDepth: Option<u64>,
+    value: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let mut closures: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Borrowck::collectStoredClosures(hir, value, &mut closures);
+
+    let mut index: u64 = 0;
+
+    while (index < closures.length()) {
+      if (let Option::SOME(closureId) = closures.get(index)) {
+        if (let Option::SOME(node) = hir.get(*closureId)) {
+          if (let Hir::HirKind::Closure(closure) = &node.kind) {
+            if (Analyzer::ViewType::closureIsView(defStore, typeStore, &closure)) {
+              let mut captureIndex: u64 = 0;
+
+              while (captureIndex < closure.captures.length()) {
+                if (let Option::SOME(capture) = closure.captures.get(captureIndex)) {
+                  Borrowck::checkStoredClosureCapture(defStore, typeStore, symbols, state, diagnostics, bindingDepth, capture, span);
+                }
+
+                captureIndex += 1;
+              }
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  /// One view capture of a stored closure, judged against the depth of the
+  /// place the closure is stored into.
+  function checkStoredClosureCapture(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    bindingDepth: Option<u64>,
+    capture: &Hir::HirCapture,
+    span: SourceSpan,
+  ): void {
+    let mut byReference: boolean = false;
+
+    match (&capture.mode) {
+      Hir::CaptureMode::ByRef -> {
+        byReference = true;
+      },
+      Hir::CaptureMode::ByMutRef -> {
+        byReference = true;
+      },
+      _ -> {},
+    };
+
+    if (!byReference && !Analyzer::ViewType::isView(defStore, typeStore, capture.typeInEnv)) {
+      return;
+    }
+
+    let Option::SOME(captureDepth) = state.localDepth(capture.sourceDef.raw()) else {
+      return;
+    };
+
+    if (let Option::SOME(depth) = bindingDepth) {
+      if (captureDepth <= depth) {
+        return;
+      }
+    }
+
+    Borrowck::emitClosureCaptureOutlivesOwner(defStore, symbols, state, diagnostics, capture, bindingDepth.isNone(), span);
+  }
+
+  /// Reports a stored closure whose view capture does not live where the
+  /// closure is kept: the environment would point into storage dropped before
+  /// the closure could run. The primary label sits on the store, naming the
+  /// capture.
+  function emitClosureCaptureOutlivesOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    capture: &Hir::HirCapture,
+    isReturn: boolean,
+    span: SourceSpan,
+  ): void {
+    let name: String = Borrowck::definitionName(defStore, symbols, capture.sourceDef);
+    let mut code: str = DiagnosticCode::VIEW_OUTLIVES_OWNER;
+    let mut message: String = String::create("");
+    let mut label: str = "";
+    let mut help: String = String::create("");
+
+    if (isReturn) {
+      code = DiagnosticCode::RETURN_OF_LOCAL_VIEW;
+      message = `Cannot return a closure that captures '${name.toStr()}', which is dropped when the function returns`;
+      label = "the returned closure points into storage this function drops";
+      help = String::create("return a closure that owns what it captures instead");
+    } else {
+      message = `Cannot keep a closure that captures '${name.toStr()}' in a binding that outlives it: the capture is dropped before the closure`;
+      label = "the binding outlives the scope of the captured view";
+      help = String::create("store the closure where the captured value lives, or capture an owned copy");
+    }
+
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message.toStr(), span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, label);
+    diagnostic.setHelp(help.toStr());
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+
+    Borrowck::noteDiagnostic(state, code, Option::SOME(capture.sourceDef), span);
+  }
+
+  /// The closures `value` stores: the value itself when it is a closure, plus
+  /// every closure held by a record initializer, enum payload, tuple or
+  /// vector literal built in place, flattened. Closure bodies are not
+  /// entered: a closure written inside another closure's body is stored where
+  /// that inner closure runs, not here.
+  function collectStoredClosures(
+    hir: &Hir::HirStore,
+    value: Hir::HirId,
+    output: &mut Vector<Hir::HirId>
+  ): void {
+    let Option::SOME(node) = hir.get(value) else {
+      return;
+    };
+
+    if (let Hir::HirKind::Closure(_) = &node.kind) {
+      let mut outputRef: &mut Vector<Hir::HirId> = output;
+      outputRef.push(value);
+      return;
+    }
+
+    let mut operands: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    match (&node.kind) {
+      Hir::HirKind::RecordInit(init) -> {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < init.fields.length()) {
+          if (let Option::SOME(field) = init.fields.get(fieldIndex)) {
+            operands.push(field.value);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variant) -> {
+        operands = Borrowck::copyHirIds(&variant.payload);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        operands = Borrowck::copyHirIds(&elements);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        operands = Borrowck::copyHirIds(&elements);
+      },
+      _ -> {},
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < operands.length()) {
+      if (let Option::SOME(operand) = operands.get(index)) {
+        Borrowck::collectStoredClosures(hir, *operand, output);
+      }
+
+      index += 1;
+    }
+  }
+
   function copyHirIds(source: &Vector<Hir::HirId>): Vector<Hir::HirId> {
     let mut copied: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     let mut index: u64 = 0;
@@ -4098,6 +4284,7 @@ export namespace Borrowck {
     let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
     Borrowck::checkKeptElementView(defStore, symbols, hir, state, diagnostics, rootDepth, &owner, span);
     Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, rootDepth, value, span);
+    Borrowck::checkStoredClosureCaptures(defStore, typeStore, symbols, hir, state, diagnostics, rootDepth, value, span);
   }
 
   /// Rejects a `return` (or a returned body tail) whose value is a view of a
@@ -4114,6 +4301,7 @@ export namespace Borrowck {
     span: SourceSpan,
   ): void {
     Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, Option::NONE, value, span);
+    Borrowck::checkStoredClosureCaptures(defStore, typeStore, symbols, hir, state, diagnostics, Option::NONE, value, span);
 
     let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
 

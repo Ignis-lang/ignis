@@ -194,6 +194,7 @@ function typecheckGenericParam(name: str): Ast::GenericParam {
     span: typecheckDummySpan(),
     name: String::create(name),
     bounds: Vector::new<Ast::GenericBound>(),
+    attributes: Vector::new<Ast::Attribute>(),
   };
 }
 
@@ -10388,7 +10389,8 @@ function typecheckPipeIntoGenericFunctionInfersTypeArgument(): void {
     span: typecheckDummySpan(),
     name: String::create("T"),
     bounds: Vector::new<Ast::GenericBound>(),
-  });
+
+    attributes: Vector::new<Ast::Attribute>(),  });
 
   module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
     span: typecheckDummySpan(),
@@ -15223,6 +15225,75 @@ function typecheckBoundRejectsANameThatIsNotATraitInScope(): void {
 
   assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::UNKNOWN_IMPLEMENTED_TRAIT);
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 2);
+}
+
+/// Scenario: a type parameter marked `@owns` is an owning storage slot, and a
+/// view type argument for it is rejected (A0265): a `str` borrows bytes the
+/// record would keep without an owner of its own.
+@test
+function typecheckOwningSlotRejectsAViewArgument(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Slot<@owns T> {\n  public value: T;\n}\n\nfunction keep(slot: Slot<str>): void {\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::VIEW_IN_OWNING_SLOT);
+}
+
+/// Scenario: an owned argument fills an `@owns` slot without complaint.
+@test
+function typecheckOwningSlotAcceptsAnOwnedArgument(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Slot<@owns T> {\n  public value: T;\n}\n\nfunction keep(slot: Slot<i32>): i32 {\n  return slot.value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a parameter without `@owns` is not an owning storage slot, so a
+/// view argument stays legal (`Option<&T>` reads the same way).
+@test
+function typecheckUnmarkedParameterAcceptsAViewArgument(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Bag<T> {\n  public value: T;\n}\n\nfunction keep(bag: Bag<str>): str {\n  return bag.value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: inside a generic body the slot is still filled by its own type
+/// parameter, which is no view, so the declaration is accepted; every later
+/// instantiation is judged by the argument it binds.
+@test
+function typecheckGenericBodyFillingAnOwningSlotWithItsParameterIsAccepted(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Slot<@owns T> {\n  public value: T;\n}\n\nfunction wrap<U>(value: U): Slot<U> {\n  return Slot { value: value };\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
 
 /// Scenario: a trait declared in a namespace is not reached by its bare name

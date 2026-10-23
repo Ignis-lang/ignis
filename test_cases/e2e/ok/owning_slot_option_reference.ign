@@ -1,0 +1,44 @@
+// e2e: std
+// `Option` holds its payload inline, so its type parameter is not an owning
+// storage slot and a reference stays legal (`Option<&T>`).
+import Io from "std::io";
+import Vector from "std::vector";
+
+function largest(values: &Vector<i32>): Option<&i32> {
+  let mut best: Option<&i32> = Option::NONE;
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    let Option::SOME(candidate) = values.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (let Option::SOME(current) = best) {
+      if (*candidate > *current) {
+        best = Option::SOME(candidate);
+      }
+    } else {
+      best = Option::SOME(candidate);
+    }
+
+    index += 1;
+  }
+
+  return best;
+}
+
+function main(): i32 {
+  let mut numbers: Vector<i32> = Vector::new<i32>();
+  numbers.push(3);
+  numbers.push(9);
+  numbers.push(4);
+
+  if (let Option::SOME(best) = largest(&numbers)) {
+    Io::print(`largest=${*best}\n`);
+
+    return *best == 9 ? 0 : 1;
+  }
+
+  return 1;
+}

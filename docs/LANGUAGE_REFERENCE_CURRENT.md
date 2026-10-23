@@ -77,7 +77,7 @@ namespace Math {
 - `str` is a primitive UTF-8 byte string slice type.
 - `static str` is the type of string literals and compile-time strings such as `@typeName<T>()`. It has the same representation as `str` and is written with both keywords in any type position: annotations, parameters, return types, fields, statics, generic arguments and aliases.
 - A `static str` converts implicitly to `str` wherever a `str` is expected: assignment, argument, return, field initializer, and overload resolution (`Io::println(text)` picks the `str` overload). The conversion is not applied inside other types: `Vector<static str>` is not a `Vector<str>`.
-- A `str` never converts to `static str` (A0263). Use a literal, or an owned `String` when the text is not a literal.
+- A `str` never converts to `static str` (A0267). Use a literal, or an owned `String` when the text is not a literal.
 - A string literal or `@typeName` has type `static str` where `static str` is the expected type, also as a generic argument (`Vector<static str>`, `Option<static str>`). Anywhere else it has type `str`, so `let text = "a";` declares a `str`.
 - `==`, `!=`, `@eq`, `Hash`, literal `match` patterns and `@extension(str)` methods accept `static str`, including comparisons between a `static str` and a `str`.
 
@@ -88,10 +88,10 @@ record Entry {
 
 let entry: Entry = Entry { name: "first" };
 let view: str = entry.name;          // OK: static str converts to str
-// let stored: static str = view;    // ERROR A0263
+// let stored: static str = view;    // ERROR A0267
 ```
 
-Today `static str` adds the conversion only. The checks that keep `str` views from being stored where their owner cannot be seen (second-class views) come later; until then a `str` field or container stays accepted.
+`str` is second-class: a value of view type (`str`, `&T`, `&mut T`, a slice, a record or container holding one) may only live where its owner is visible. It cannot sit in a `static` or `static mut` field (A0268), and it is neither `Send` nor `Sync`, so `Channel<T: Send>`, `Thread::spawn`, `Arc<T>` and every other API bounded by them reject it. See Views below for the full rules.
 
 ### 3.3 `char`
 
@@ -228,7 +228,7 @@ function main(): i32 {
 }
 ```
 
-A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and closure values are neither, function pointers (`fn(A) -> R`) are both, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements` (for a generic one, every type argument must also have the trait), which the `thread_safety` lint warns about when its structure disagrees (A0254). A closure bound to a `Send` or `Sync` type parameter, or passed to a parameter marked `@sendable`, is judged by its captures at the call (A0252), and a closure bound to `Sync` may not capture by mutable reference; a named function or a forwarded `@sendable` parameter is accepted, and any other function value is rejected there (A0253). `@sendable` is valid only on a parameter of function type (A0255), which stays callable inside the function.
+A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and closure values are neither, function pointers (`fn(A) -> R`) are both, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements` (for a generic one, every type argument must also have the trait), which the `thread_safety` lint warns about when its structure disagrees (A0254). View types — a `str`, a reference, a slice, or a record or container holding one — are neither, so `share<T: Sync>(&text)` rejects a `str` just as `Channel<T: Send>` does: sharing a view by reference across threads outlives the owner it borrows, exactly as sending it would. A closure bound to a `Send` or `Sync` type parameter, or passed to a parameter marked `@sendable`, is judged by its captures at the call (A0252), and a closure bound to `Sync` may not capture by mutable reference; a named function or a forwarded `@sendable` parameter is accepted, and any other function value is rejected there (A0253). `@sendable` is valid only on a parameter of function type (A0255), which stays callable inside the function.
 
 ## 4. Declarations
 
@@ -971,6 +971,10 @@ A view must not outlive its owner:
 - The same rules apply to a view kept inside a value: a field, an enum payload or a tuple or vector element built in place, an assignment into a field of a local, an `Option<&T>` a method returned, and the value a `match` arm produces.
 - A pattern binding lives in its scrutinee. When the scrutinee is a temporary, it is dropped when the `match`, `if let` or `while let` condition ends: a view of the binding may be used and kept inside the arm, but not stored into a local declared outside it, and a `let ... else` may not bind into a temporary by reference. An owned arm binding is dropped at the end of its arm, so the same holds for a view of it.
 - While a view kept by a binding is in scope, its owner is borrowed. Mutating the owner meanwhile is reported by the borrow rules above, and moving it is an error (A0258). A view kept by a `&mut T` binding borrows its owner mutably, so any other use of the owner, a shared one included, is reported. The borrow lasts until the end of the scope, not until the view's last use.
+- A view cannot be stored where its owner cannot be seen: a `static` or `static mut` field whose type is a view type is an error (A0268). A `static str` field is accepted, because a static string owns its bytes.
+- A view type is neither `Send` nor `Sync`, so every API bounded by them rejects one: a `Channel<T: Send>`, a `Thread::spawn` task, an `Arc<T>` and their friends cannot carry a `str`, a reference, a slice, or a record or container holding one. Sharing a view by reference across threads (`&T: Sync`) has the same dangling-owner risk as sending it, so `Sync` is refused too. A closure that captures by reference — or by value a view — is itself a view, and is rejected the same way; a closure that owns everything it captures is not.
+- A closure whose captures are views obeys the same storage depth rule as a view: storing it in a `let`, an assignment, a field or an aggregate built in place keeps every capture alive that long, so a capture taken from a local whose scope ends before the binding is an error (A0202, A0043 for a return). Calling the closure later would read storage that was already dropped.
+- A type parameter written `@owns` (`record Slot<@owns T>`) is an owning storage slot: the declaring type keeps the argument in storage it allocates, where no owner is visible, so instantiating it with a view type is an error (A0269). `Option`, `Result` and `Mutex` hold their payload inline, so their parameters stay unmarked and `Option<&T>` is legal. Any declaration can mark its own parameters, a generic function's included: `function intoVector<@owns T>(value: T): Vector<T>` rejects `intoVector<str>(view)` at the call. The standard library's heap-owning containers (`Vector`, `HashMap`, `HashSet`, `Rc`, `Weak`) are marked in a follow-up step, after the syntax reaches the promoted compiler.
 
 Using a view of a temporary inside the statement that created it is fine, for example as a call argument or inside a template literal. To keep the view, bind the owner to a local first:
 

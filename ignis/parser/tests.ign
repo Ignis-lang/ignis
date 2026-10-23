@@ -183,6 +183,53 @@ function parserPreservesGenericBoundsOnItemsAndSerializer(): void {
 }
 
 @test
+function parserParsesAnOwnsAttributeOnAGenericParameter(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_owns_generic.ign",
+    "record Box<@owns T, U> { value: T; other: U; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let expectedRenderedNeedle: String = String::create("generics=[@owns \"T\", \"U\"]");
+  Test::assert(rendered.contains(&expectedRenderedNeedle));
+
+  match (expectItem(&module, match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing owning record root"),
+  })) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.genericParameters.length(), 2);
+
+      let owning: &Ast::GenericParam = match (recordItem.genericParameters.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing owning generic parameter"),
+      };
+      let plain: &Ast::GenericParam = match (recordItem.genericParameters.get(1)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing plain generic parameter"),
+      };
+
+      Test::assertEq<u64>(owning.attributes.length(), 1);
+      let attribute: &Ast::Attribute = match (owning.attributes.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing owning attribute"),
+      };
+
+      Test::assertEq<str>(attribute.name.toStr(), "owns");
+      Test::assertEq<u64>(plain.attributes.length(), 0);
+    },
+    _ -> @panic("expected owning record root"),
+  };
+}
+
+@test
 function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
   let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(

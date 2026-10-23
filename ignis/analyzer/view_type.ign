@@ -1,0 +1,305 @@
+import Vector from "std::vector";
+
+import _ from "./types";
+import _ from "./definitions";
+
+/// The S2 view-type predicate: one authoritative answer, per `TypeId`, to
+/// "is this type a second-class view?".
+///
+/// A view type borrows storage it does not own: `str` (what `toStr()`, slicing
+/// and similar views produce), `&T`, `&mut T`, and slices are views; a record,
+/// enum, tuple or fixed array with a field of view type is a view (a `static
+/// str` field does not make it one, because a static string owns its bytes); a
+/// generic instance with a view type argument (`Vector<str>`, `Option<&T>`) is
+/// a view. Type aliases are transparent. Raw pointers are not views and are
+/// not followed: raw pointers and `extern` functions are the unchecked
+/// boundary (S5). A `static str` is not a view. Unresolved `Param`s are not
+/// views; after monomorphization the predicate answers on the substituted
+/// type.
+///
+/// Function types (`Function`, `RawFunction`) are not views at the type level:
+/// capture information is a property of the closure VALUE, not of the type
+/// (function types are interned structurally, so two same-signature closures
+/// share one `TypeId`). Whether a concrete closure value is a view is
+/// `Analyzer::ViewType::closureIsView` (declared in `view_type_closure.ign`,
+/// beside this file) over the HIR captures and the types they carry into the
+/// environment. It sits in its own file because this module is part of the
+/// analyzer's Hir-free core (the typechecker members that judge `Send` and
+/// declared types), which must not depend on `@compiler::hir`; the passes
+/// that hold closure nodes (T4b storage/Send, T4c call sites) import it
+/// directly. Consequences the enforcement passes own, decided at the node
+/// level where the closure value is at hand:
+///
+/// - An aggregate with a function-typed field is not flagged by `isView` even
+///   when the closure stored in it captures by reference; the passes must
+///   combine `isView` with `closureIsView` on the closure nodes they inspect.
+/// - The `Send` verdict for closure values is likewise node-level, not a
+///   property of the function type.
+export namespace Analyzer::ViewType {
+  /// Whether `typeId` is a second-class view type (S2). Recursive records and
+  /// enums terminate: nominal instances currently being visited are skipped on
+  /// revisit, which is sound because a revisit can only happen through a
+  /// non-view component (a view component answers before recursing). The
+  /// guard is keyed on the instance — the definition AND its type arguments —
+  /// not the definition alone: `Vector<Vector<str>>` and `Option<Option<&i32>>`
+  /// repeat the same definition with different arguments, and a guard on the
+  /// definition would prune the inner one before its view argument was seen.
+  public function isView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::isViewInner(defStore, typeStore, typeId, &mut visiting);
+  }
+
+  function isViewInner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    visiting: &mut Vector<Vector<u32>>,
+  ): boolean {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isEnum: boolean = false;
+    let mut hasPayloadComponents: boolean = false;
+    let mut aliased: Option<Analyzer::TypeId> = Option::NONE;
+    let mut holds: boolean = false;
+
+    match (type_) {
+      Analyzer::Type::STR -> {
+        holds = true;
+      },
+      Analyzer::Type::Reference(_) -> {
+        holds = true;
+      },
+      Analyzer::Type::Slice(_) -> {
+        holds = true;
+      },
+      // A `static str` owns its bytes. Raw pointers are the unchecked
+      // boundary (S5) and are not followed. Function types carry no capture
+      // information; see the module doc comment. Everything else (primitives,
+      // `Param`, `Range`) is not a view.
+      Analyzer::Type::STATIC_STR | Analyzer::Type::Pointer(_) -> {},
+      Analyzer::Type::FixedArray(element, _) -> {
+        components.push(element);
+      },
+      Analyzer::Type::Tuple(tuple) -> {
+        components = ViewType::copyTypeIds(&tuple.elements);
+      },
+      Analyzer::Type::Record(defId) -> {
+        nominal = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominal = Option::SOME(defId);
+        isEnum = true;
+      },
+      Analyzer::Type::Instance(instance) -> {
+        nominal = Option::SOME(instance.definition);
+        components = ViewType::copyTypeIds(&instance.typeArguments);
+        hasPayloadComponents = true;
+      },
+      Analyzer::Type::Alias(aliasDefId) -> {
+        aliased = ViewType::aliasedTypeOf(defStore, aliasDefId);
+      },
+      _ -> {},
+    };
+
+    if (holds) {
+      return true;
+    }
+
+    if (let Option::SOME(target) = aliased) {
+      return ViewType::isViewInner(defStore, typeStore, target, visiting);
+    }
+
+    if (let Option::SOME(defId) = nominal) {
+      let key: Vector<u32> = ViewType::visitKey(defId.raw(), &components);
+
+      if (ViewType::containsKey(&*visiting, &key)) {
+        return false;
+      }
+
+      let mut visitingRef: &mut Vector<Vector<u32>> = visiting;
+      visitingRef.push(key);
+
+      if (!hasPayloadComponents) {
+        if (isEnum) {
+          components = ViewType::enumPayloadTypes(defStore, defId);
+        } else {
+          components = ViewType::recordFieldTypes(defStore, defId);
+        }
+      }
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < components.length()) {
+      if (let Option::SOME(component) = components.get(index)) {
+        if (ViewType::isViewInner(defStore, typeStore, *component, visiting)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+    let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(entry) = source.get(index)) {
+        copied.push(*entry);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  /// Every field type of a record definition, in declaration order.
+  function recordFieldTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    recordDefId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::TypeId> {
+    let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(definition) = defStore.get(recordDefId)) {
+      if (let Analyzer::Definition::Record(recordDef) = definition) {
+        let mut index: u64 = 0;
+
+        while (index < recordDef.fields.length()) {
+          if (let Option::SOME(fieldId) = recordDef.fields.get(index)) {
+            if (let Option::SOME(fieldDefinition) = defStore.get(*fieldId)) {
+              if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
+                types.push(fieldDef.fieldType);
+              }
+            }
+          }
+
+          index += 1;
+        }
+      }
+    }
+
+    return types;
+  }
+
+  /// Every payload type of every variant of an enum definition.
+  function enumPayloadTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    enumDefId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::TypeId> {
+    let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(definition) = defStore.get(enumDefId)) {
+      if (let Analyzer::Definition::Enum(enumDef) = definition) {
+        let mut index: u64 = 0;
+
+        while (index < enumDef.variants.length()) {
+          if (let Option::SOME(variantId) = enumDef.variants.get(index)) {
+            if (let Option::SOME(variantDefinition) = defStore.get(*variantId)) {
+              if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
+                let mut payloadIndex: u64 = 0;
+
+                while (payloadIndex < variantDef.payload.length()) {
+                  if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+                    types.push(*payloadType);
+                  }
+
+                  payloadIndex += 1;
+                }
+              }
+            }
+          }
+
+          index += 1;
+        }
+      }
+    }
+
+    return types;
+  }
+
+  function aliasedTypeOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    aliasDefId: Analyzer::DefinitionId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(aliasDefId) else {
+      return Option::NONE;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::TypeAlias(aliasDef) -> Option::SOME(aliasDef.aliasedType),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The revisit-guard key of a nominal visit: the definition's raw id
+  /// followed by its type arguments (`Instance`) or none (a plain record or
+  /// enum, whose field types are gathered after the key is pushed).
+  function visitKey(defRaw: u32, args: &Vector<Analyzer::TypeId>): Vector<u32> {
+    let mut key: Vector<u32> = Vector::new<u32>();
+    key.push(defRaw);
+    key.push(args.length() as u32);
+
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        key.push(argument.raw());
+      }
+
+      index += 1;
+    }
+
+    return key;
+  }
+
+  function containsKey(visiting: &Vector<Vector<u32>>, key: &Vector<u32>): boolean {
+    let mut index: u64 = 0;
+
+    while (index < visiting.length()) {
+      if (let Option::SOME(entry) = visiting.get(index)) {
+        if (ViewType::keysEqual(entry, key)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function keysEqual(left: &Vector<u32>, right: &Vector<u32>): boolean {
+    if (left.length() != right.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.length()) {
+      if (let Option::SOME(leftEntry) = left.get(index)) {
+        if (let Option::SOME(rightEntry) = right.get(index)) {
+          if (*leftEntry != *rightEntry) {
+            return false;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+}

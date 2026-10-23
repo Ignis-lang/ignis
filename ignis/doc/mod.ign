@@ -1,7 +1,5 @@
 import Json, JsonObjectEntry, JsonValue from "std::json";
-import String from "std::string";
 import Test from "std::test";
-import Vector from "std::vector";
 
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
@@ -905,6 +903,17 @@ export namespace Doc {
 
         if (let Option::SOME(param) = defs.get(*paramId)) {
           let paramName: String = Doc::symbolText(symbols, param.name());
+          let mut owning: boolean = false;
+
+          if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defs.get(*paramId)) {
+            owning = typeParam.ownsStorage;
+          }
+
+          // An owning storage slot is part of the declaration's contract.
+          if (owning) {
+            text.pushStr("@owns ");
+          }
+
           text.push(&paramName);
         }
       }
