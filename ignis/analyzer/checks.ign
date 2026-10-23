@@ -1444,6 +1444,326 @@ export namespace Analyzer {
       }
     }
 
+    /// Reject a generic record or enum whose members reach the same
+    /// definition with a type argument that nests one of its type parameters,
+    /// such as `Nest<T>` holding `Vector<Nest<Vector<T>>>`. Each instance would
+    /// need a larger one, so monomorphization could never finish. Arguments
+    /// that are bare parameters (`List<T>`, or `Pair<B, A>` inside `Pair<A, B>`)
+    /// or hold no parameter (`Nest<i32>`) name finitely many instances and
+    /// stay accepted. `memberPatterns` are the record's fields or the enum's
+    /// variants as written, used to point at the member that recurses.
+    function checkExpandingRecursion(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      name: &String,
+      span: SourceSpan,
+      memberPatterns: &Vector<Ast::PatternId>,
+    ): void {
+      let Option::SOME(defId) = Analyzer::Checks::findItemDef(pass1, pass2, itemId) else {
+        return;
+      };
+
+      let mut memberIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut isGeneric: boolean = false;
+      let mut isEnum: boolean = false;
+
+      match (defStore.get(defId)) {
+        Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+          memberIds = Analyzer::Checks::copyDefinitionIds(&recordDef.fields);
+          isGeneric = !recordDef.typeParams.isEmpty();
+        },
+        Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+          memberIds = Analyzer::Checks::copyDefinitionIds(&enumDef.variants);
+          isGeneric = !enumDef.typeParams.isEmpty();
+          isEnum = true;
+        },
+        _ -> {},
+      };
+
+      if (!isGeneric) {
+        return;
+      }
+
+      let memberSpans: Vector<SourceSpan> = Analyzer::Checks::declaredMemberSpans(module, memberPatterns, isEnum, span);
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < memberIds.length()) {
+        let mut memberTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+        if (let Option::SOME(memberId) = memberIds.get(memberIndex)) {
+          match (defStore.get(*memberId)) {
+            Option::SOME(Analyzer::Definition::Field(fieldDef)) -> {
+              memberTypes.push(fieldDef.fieldType);
+            },
+            Option::SOME(Analyzer::Definition::Variant(variantDef)) -> {
+              memberTypes = Analyzer::Checks::copyTypeIds(&variantDef.payload);
+            },
+            _ -> {},
+          };
+        }
+
+        let mut typeIndex: u64 = 0;
+
+        while (typeIndex < memberTypes.length()) {
+          if (let Option::SOME(memberType) = memberTypes.get(typeIndex)) {
+            let mut visited: Vector<u32> = Vector::new<u32>();
+
+            if (Analyzer::Checks::reachesWithNestedParameter(defStore, typeStore, *memberType, defId, &mut visited, 0)) {
+              // The member list and the written patterns line up one to one;
+              // the declaration span is the fallback if they ever do not.
+              let mut reportSpan: SourceSpan = span;
+
+              if (memberSpans.length() == memberIds.length()) {
+                if (let Option::SOME(memberSpan) = memberSpans.get(memberIndex)) {
+                  reportSpan = *memberSpan;
+                }
+              }
+
+              let message: String = `generic type '${name.toStr()}' refers to itself with growing type arguments`;
+              Analyzer::Checks::emitError(
+                diagnostics,
+                reportSpan,
+                DiagnosticCode::EXPANDING_GENERIC_RECURSION,
+                message.toStr(),
+                "each instance would need a larger one; refer to the type with its own type parameters",
+              );
+              return;
+            }
+          }
+
+          typeIndex += 1;
+        }
+
+        memberIndex += 1;
+      }
+    }
+
+    /// The spans of a record's instance fields or an enum's variants, in
+    /// declaration order, skipping static members as the binder does.
+    function declaredMemberSpans(
+      module: &Ast::Module,
+      memberPatterns: &Vector<Ast::PatternId>,
+      isEnum: boolean,
+      fallback: SourceSpan,
+    ): Vector<SourceSpan> {
+      let mut spans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+      let mut index: u64 = 0;
+
+      while (index < memberPatterns.length()) {
+        if (let Option::SOME(patternId) = memberPatterns.get(index)) {
+          let isStatic: boolean = isEnum ? Analyzer::Binder::variantPatternIsStaticField(module, *patternId) : Analyzer::Binder::fieldPatternIsStatic(module, *patternId);
+
+          if (!isStatic) {
+            spans.push(Analyzer::Typecheck::patternSpanOr(module, *patternId, fallback));
+          }
+        }
+
+        index += 1;
+      }
+
+      return spans;
+    }
+
+    function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+      let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        if (let Option::SOME(entry) = source.get(index)) {
+          copied.push(*entry);
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    /// Whether `typeId` reaches an instance of `target` with a type argument
+    /// that nests a type parameter. Other generic definitions are entered
+    /// with their arguments substituted, once each, so the walk ends even
+    /// when they recurse themselves.
+    function reachesWithNestedParameter(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+      target: Analyzer::DefinitionId,
+      visited: &mut Vector<u32>,
+      depth: u64,
+    ): boolean {
+      if (depth > 64) {
+        return false;
+      }
+
+      let mut inner: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      match (typeStore.get(typeId)) {
+        Option::SOME(Analyzer::Type::Instance(instance)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&instance.typeArguments);
+
+          if (instance.definition.raw() == target.raw()) {
+            let mut argumentIndex: u64 = 0;
+
+            while (argumentIndex < inner.length()) {
+              if (let Option::SOME(argument) = inner.get(argumentIndex)) {
+                if (Analyzer::Checks::nestsTypeParameter(typeStore, *argument, false, 0)) {
+                  return true;
+                }
+              }
+
+              argumentIndex += 1;
+            }
+          } else if (!Analyzer::Checks::rawSeen(&*visited, instance.definition.raw())) {
+            let mut visitedRef: &mut Vector<u32> = visited;
+            visitedRef.push(instance.definition.raw());
+
+            let members: Vector<Analyzer::TypeId> = Analyzer::Checks::nominalMemberTypes(
+              defStore,
+              typeStore,
+              instance.definition,
+              &instance.typeArguments,
+            );
+            let mut memberIndex: u64 = 0;
+
+            while (memberIndex < members.length()) {
+              if (let Option::SOME(member) = members.get(memberIndex)) {
+                inner.push(*member);
+              }
+
+              memberIndex += 1;
+            }
+          }
+        },
+        Option::SOME(Analyzer::Type::Pointer(pointer)) -> {
+          inner.push(pointer.pointee);
+        },
+        Option::SOME(Analyzer::Type::Reference(reference)) -> {
+          inner.push(reference.referent);
+        },
+        Option::SOME(Analyzer::Type::Slice(element)) -> {
+          inner.push(element);
+        },
+        Option::SOME(Analyzer::Type::FixedArray(element, _)) -> {
+          inner.push(element);
+        },
+        Option::SOME(Analyzer::Type::Tuple(tuple)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&tuple.elements);
+        },
+        Option::SOME(Analyzer::Type::Function(function_)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&function_.params);
+          inner.push(function_.returnType);
+        },
+        Option::SOME(Analyzer::Type::RawFunction(function_)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&function_.params);
+          inner.push(function_.returnType);
+        },
+        Option::SOME(Analyzer::Type::Alias(definition)) -> {
+          if (let Option::SOME(Analyzer::Definition::TypeAlias(aliasDef)) = defStore.get(definition)) {
+            inner.push(aliasDef.aliasedType);
+          }
+        },
+        _ -> {},
+      };
+
+      let mut innerIndex: u64 = 0;
+
+      while (innerIndex < inner.length()) {
+        if (let Option::SOME(innerType) = inner.get(innerIndex)) {
+          if (Analyzer::Checks::reachesWithNestedParameter(defStore, typeStore, *innerType, target, visited, depth + 1)) {
+            return true;
+          }
+        }
+
+        innerIndex += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether `typeId` holds a type parameter below at least one type
+    /// constructor. `enclosed` says whether `typeId` itself already sits
+    /// below one.
+    function nestsTypeParameter(
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+      enclosed: boolean,
+      depth: u64,
+    ): boolean {
+      if (depth > 64) {
+        return false;
+      }
+
+      let mut inner: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      match (typeStore.get(typeId)) {
+        Option::SOME(Analyzer::Type::Param(_)) -> {
+          return enclosed;
+        },
+        Option::SOME(Analyzer::Type::Instance(instance)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&instance.typeArguments);
+        },
+        Option::SOME(Analyzer::Type::Pointer(pointer)) -> {
+          inner.push(pointer.pointee);
+        },
+        Option::SOME(Analyzer::Type::Reference(reference)) -> {
+          inner.push(reference.referent);
+        },
+        Option::SOME(Analyzer::Type::Slice(element)) -> {
+          inner.push(element);
+        },
+        Option::SOME(Analyzer::Type::FixedArray(element, _)) -> {
+          inner.push(element);
+        },
+        Option::SOME(Analyzer::Type::Tuple(tuple)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&tuple.elements);
+        },
+        Option::SOME(Analyzer::Type::Function(function_)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&function_.params);
+          inner.push(function_.returnType);
+        },
+        Option::SOME(Analyzer::Type::RawFunction(function_)) -> {
+          inner = Analyzer::Checks::copyTypeIds(&function_.params);
+          inner.push(function_.returnType);
+        },
+        _ -> {},
+      };
+
+      let mut innerIndex: u64 = 0;
+
+      while (innerIndex < inner.length()) {
+        if (let Option::SOME(innerType) = inner.get(innerIndex)) {
+          if (Analyzer::Checks::nestsTypeParameter(typeStore, *innerType, true, depth + 1)) {
+            return true;
+          }
+        }
+
+        innerIndex += 1;
+      }
+
+      return false;
+    }
+
+    function rawSeen(visited: &Vector<u32>, raw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < visited.length()) {
+        if (let Option::SOME(seen) = visited.get(index)) {
+          if (*seen == raw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// Reject a record whose instance method and function-typed field share a
     /// name: `value.name(args)` calls a function-typed field as well as a
     /// method, so the call would be ambiguous.
@@ -1572,6 +1892,18 @@ export namespace Analyzer {
         Ast::Item::Node::Record(record_) -> {
           Analyzer::Checks::checkCLayoutRecord(diagnostics, defStore, typeStore, module, pass1, pass2, itemId, &record_);
           Analyzer::Checks::checkInlineRecursion(diagnostics, defStore, typeStore, pass1, pass2, itemId, &record_.name, record_.span);
+          Analyzer::Checks::checkExpandingRecursion(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            itemId,
+            &record_.name,
+            record_.span,
+            &record_.fields,
+          );
           Analyzer::Checks::checkMethodFieldNameClash(diagnostics, defStore, typeStore, module, pass1, pass2, itemId, &record_);
           Analyzer::Checks::checkMethods(
             diagnostics,
@@ -1589,6 +1921,18 @@ export namespace Analyzer {
         },
         Ast::Item::Node::Enum(enum_) -> {
           Analyzer::Checks::checkInlineRecursion(diagnostics, defStore, typeStore, pass1, pass2, itemId, &enum_.name, enum_.span);
+          Analyzer::Checks::checkExpandingRecursion(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            itemId,
+            &enum_.name,
+            enum_.span,
+            &enum_.variants,
+          );
           Analyzer::Checks::checkMethods(
             diagnostics,
             defStore,
