@@ -1,0 +1,36 @@
+// e2e: err
+// A generic record is a view when one of its declared fields is, whatever its
+// type arguments are: `Tagged<i32>` keeps a `str` in `text`, so it cannot fill
+// an `@owns` slot such as `Vector`'s, and neither can `Either<i32>`, whose
+// variant carries a `str`. `Owned<i32>` holds only a `static str`, so it can.
+record Tagged<T> {
+  public value: T;
+  public text: str;
+}
+
+record Owned<T> {
+  public value: T;
+  public text: static str;
+}
+
+enum Either<T> {
+  VALUE(T),
+  TEXT(str),
+}
+
+function keepTagged(list: &mut Vector<Tagged<i32>>): void {
+  let owned: String = String::create("temporary");
+  list.push(Tagged { value: 1, text: owned.toStr() });
+}
+
+function keepEither(list: &mut Vector<Either<i32>>): void {
+  list.push(Either::VALUE(1));
+}
+
+function keepOwned(list: &mut Vector<Owned<i32>>): void {
+  list.push(Owned { value: 1, text: "kept" });
+}
+
+function main(): i32 {
+  return 0;
+}

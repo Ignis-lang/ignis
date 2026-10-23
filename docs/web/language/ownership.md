@@ -169,7 +169,8 @@ A view must not outlive its owner:
   stays borrowed by `store` until `store`'s scope ends.
 - A view cannot be stored where its owner cannot be seen: a `static` or `static mut` field of a
   view type is an error (A0268). A `static str` field is accepted, because a static string owns
-  its bytes.
+  its bytes. A generic record or enum whose declared field or payload is a view is a view type
+  whatever its type arguments are: `Tagged<i32>` with a `text: str` field is one.
 - A view type is neither `Send` nor `Sync`, so every API bounded by them rejects one: a
   `Channel<T: Send>`, a `Thread::spawn` task, an `Arc<T>` and their friends cannot carry a
   `str`, a reference, a slice, or a record or container holding one. Sharing a view by
