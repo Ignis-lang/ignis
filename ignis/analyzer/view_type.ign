@@ -36,6 +36,9 @@ import _ from "./symbols";
 /// - The `Send` verdict for closure values is likewise node-level, not a
 ///   property of the function type.
 export namespace Analyzer::ViewType {
+  /// How deep `isView` follows nested component types.
+  const VIEW_WALK_DEPTH_LIMIT: u64 = 64;
+
   /// Whether `typeId` is a second-class view type (S2). Recursive records and
   /// enums terminate: nominal instances currently being visited are skipped on
   /// revisit, which is sound because a revisit can only happen through a
@@ -50,7 +53,7 @@ export namespace Analyzer::ViewType {
     typeId: Analyzer::TypeId,
   ): boolean {
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::isViewInner(defStore, typeStore, typeId, &mut visiting);
+    return ViewType::isViewInner(defStore, typeStore, typeId, &mut visiting, 0);
   }
 
   function isViewInner(
@@ -58,7 +61,15 @@ export namespace Analyzer::ViewType {
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
     visiting: &mut Vector<Vector<u32>>,
+    depth: u64,
   ): boolean {
+    // A generic type whose arguments grow on every self-reference never
+    // revisits an instance, so depth is what ends the walk; the checks phase
+    // reports such a type (A0275).
+    if (depth > VIEW_WALK_DEPTH_LIMIT) {
+      return false;
+    }
+
     let Option::SOME(type_) = typeStore.get(typeId) else {
       return false;
     };
@@ -115,7 +126,7 @@ export namespace Analyzer::ViewType {
     }
 
     if (let Option::SOME(target) = aliased) {
-      return ViewType::isViewInner(defStore, typeStore, target, visiting);
+      return ViewType::isViewInner(defStore, typeStore, target, visiting, depth + 1);
     }
 
     if (let Option::SOME(defId) = nominal) {
@@ -161,7 +172,7 @@ export namespace Analyzer::ViewType {
 
     while (index < components.length()) {
       if (let Option::SOME(component) = components.get(index)) {
-        if (ViewType::isViewInner(defStore, typeStore, *component, visiting)) {
+        if (ViewType::isViewInner(defStore, typeStore, *component, visiting, depth + 1)) {
           return true;
         }
       }
