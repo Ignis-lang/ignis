@@ -1,0 +1,16 @@
+// e2e: err
+// `Rc`/`Weak` keep the payload in a heap block they allocate, so their slot is
+// `@owns`: a `str` payload dangles once its owner dies (ASan:
+// heap-use-after-free on the read below).
+import Rc from "std::rc";
+import Io from "std::io";
+
+function main(): i32 {
+  let mut shared: Rc<str> = Rc::new<str>("placeholder");
+  {
+    let owner: String = String::create("shared view");
+    shared = Rc::new<str>(owner.toStr());
+  }
+  Io::println(*shared.get());
+  return 0;
+}

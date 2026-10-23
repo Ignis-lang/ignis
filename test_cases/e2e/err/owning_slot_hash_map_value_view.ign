@@ -1,0 +1,18 @@
+// e2e: err
+// Both `HashMap` parameters are `@owns` slots: a `str` value borrows bytes the
+// map cannot keep alive, so the value side rejects a view exactly as the key
+// side does.
+import HashMap from "std::collections";
+import Io from "std::io";
+
+function main(): i32 {
+  let mut map: HashMap<i32, str> = HashMap::new<i32, str>();
+  {
+    let owner: String = String::create("value from owner");
+    map.insert(7, owner.toStr());
+  }
+  if (let Option::SOME(cursor) = map.firstEntryCursor()) {
+    Io::println(*map.entryValue(cursor));
+  }
+  return 0;
+}
