@@ -1,0 +1,65 @@
+import Fs from "std::fs";
+import Test from "std::test";
+
+/// The code each `DiagnosticCode` constant declares, read from the source of
+/// `codes.ign`: the namespace is a list of constants, so the source is the
+/// only place every code can be enumerated.
+function declaredCodes(): Vector<String> {
+  let source: String = match (Fs::readToString("ignis/diagnostics/codes.ign")) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("missing ignis/diagnostics/codes.ign"),
+  };
+  let marker: String = String::create("static str = \"");
+  let mut codes: Vector<String> = Vector::new<String>();
+  let lines: Vector<String> = source.lines();
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    if (let Option::SOME(line) = lines.get(index)) {
+      if (let Option::SOME(start) = line.indexOf(&marker)) {
+        let codeStart: u64 = start + marker.length();
+
+        if (let Option::SOME(codeEnd) = line.indexOfCharFrom('"', codeStart)) {
+          codes.push(line.substringBytes(codeStart, codeEnd));
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return codes;
+}
+
+/// Scenario: no two diagnostics share a code, so a code names exactly one
+/// error. The failure lists every code declared more than once.
+@test
+function diagnosticCodesAreUnique(): void {
+  let codes: Vector<String> = declaredCodes();
+  let mut duplicates: String = String::new();
+  let mut index: u64 = 0;
+
+  Test::assert(codes.length() > 200);
+
+  while (index < codes.length()) {
+    if (let Option::SOME(code) = codes.get(index)) {
+      let mut earlier: u64 = 0;
+
+      while (earlier < index) {
+        if (let Option::SOME(other) = codes.get(earlier)) {
+          if (other.equals(code.toStr())) {
+            duplicates.pushStr(code.toStr());
+            duplicates.pushStr(" ");
+            break;
+          }
+        }
+
+        earlier += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  Test::assertEq<str>(duplicates.toStr(), "");
+}
