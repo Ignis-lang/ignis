@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-CORPUS_DIRECTORIES = ("test_cases", "example", "std")
+CORPUS_DIRECTORIES = ("test_cases", "example", "apps", "std")
 
 # The codes a lexer or parser emits, taken from the retired host's diagnostics
 # and `ignis/diagnostics/codes.ign` and restricted to the codes their

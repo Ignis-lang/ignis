@@ -1,0 +1,98 @@
+//! Task use cases. This layer is generic over the repository port and
+//! imports the domain and nothing else: no std::web, no std::http, no
+//! status codes.
+
+import Task, TaskFilter from "@domain::task";
+import TaskError, badRequestError from "@domain::errors";
+import TaskRepository from "@domain::repository";
+
+/// The limit a list request gets when it does not ask for one.
+export const DEFAULT_LIMIT: u64 = 20;
+
+const MAX_LIMIT: u64 = 100;
+
+export function listTasks<R: TaskRepository>(
+  repo: &R,
+  done: Option<boolean>,
+  limit: u64,
+): Result<Vector<Task>, TaskError> {
+  if (limit == 0) {
+    return Result::ERROR(badRequestError("limit must be a positive number"));
+  }
+
+  if (limit > MAX_LIMIT) {
+    return Result::ERROR(badRequestError("limit must be at most 100"));
+  }
+
+  let filter: TaskFilter = TaskFilter { done: done, limit: limit };
+  return Result::OK(repo.all(&filter));
+}
+
+export function createTask<R: TaskRepository>(
+  repo: &R,
+  title: String,
+  done: boolean,
+  owner: &String,
+): Result<Task, TaskError> {
+  match (Task::draft(title, done, owner.clone())) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(error);
+    },
+    Result::OK(draft) -> {
+      return Result::OK(repo.insert(draft));
+    },
+  };
+}
+
+export function getTask<R: TaskRepository>(repo: &R, id: u64): Result<Task, TaskError> {
+  if (let Option::SOME(task) = repo.find(id)) {
+    return Result::OK(task);
+  }
+
+  return Result::ERROR(TaskError::NOT_FOUND);
+}
+
+/// Updates a task on behalf of `requester`: only the owner may change a
+/// task, and a changed title has to satisfy the domain's invariants again.
+export function updateTask<R: TaskRepository>(
+  repo: &R,
+  id: u64,
+  title: Option<String>,
+  done: Option<boolean>,
+  requester: &String,
+): Result<Task, TaskError> {
+  let found: Option<Task> = repo.find(id);
+
+  if (let Option::NONE = &found) {
+    return Result::ERROR(TaskError::NOT_FOUND);
+  }
+
+  let mut existing: Task = found.unwrap();
+
+  if (!existing.owner.equals(requester.toStr())) {
+    return Result::ERROR(TaskError::FORBIDDEN);
+  }
+
+  if (let Option::SOME(newTitle) = title) {
+    let trimmed: String = newTitle.trimAsciiWhitespace();
+
+    match (Task::validateTitle(&trimmed)) {
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+      Result::OK(_) -> {},
+    };
+
+    existing.title = trimmed;
+  }
+
+  if (let Option::SOME(newDone) = done) {
+    existing.done = newDone;
+  }
+
+  return repo.replace(existing);
+}
+
+export function deleteTask<R: TaskRepository>(repo: &R, id: u64): Result<void, TaskError> {
+  return repo.remove(id);
+}

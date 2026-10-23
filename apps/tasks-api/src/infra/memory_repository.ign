@@ -1,0 +1,127 @@
+//! Adapter: the task port backed by an in-memory table shared by threads.
+
+import Arc, Mutex, Shared from "std::sync";
+import Task, TaskFilter from "@domain::task";
+import TaskError from "@domain::errors";
+import TaskRepository from "@domain::repository";
+
+/// The mutable table behind the shared handle. The next id lives with the
+/// tasks: it only makes sense together with the rows it names.
+record TaskTable {
+  public tasks: Vector<Task>;
+  public nextId: u64;
+}
+
+@implements(TaskRepository)
+export record MemoryTaskRepository {
+  public table: Shared<TaskTable>;
+
+  public static new(): MemoryTaskRepository {
+    return MemoryTaskRepository {
+      table: Arc::new<Mutex<TaskTable>>(Mutex::new<TaskTable>(TaskTable {
+        tasks: Vector::new<Task>(),
+        nextId: 1,
+      })),
+    };
+  }
+
+  public all(&self, filter: &TaskFilter): Vector<Task> {
+    let guard: MutexGuard<TaskTable> = self.table.get().lock();
+    let table: &TaskTable = guard.read();
+    let mut found: Vector<Task> = Vector::new<Task>();
+    let mut index: u64 = 0;
+
+    while (index < table.tasks.length() && found.length() < filter.limit) {
+      let task: &Task = table.tasks.get(index).unwrap();
+      let keep: boolean = match (filter.done) {
+        Option::SOME(done) -> task.done == done,
+        Option::NONE -> true,
+      };
+
+      if (keep) {
+        found.push(task.clone());
+      }
+
+      index += 1;
+    }
+
+    return found;
+  }
+
+  public find(&self, id: u64): Option<Task> {
+    let guard: MutexGuard<TaskTable> = self.table.get().lock();
+    let table: &TaskTable = guard.read();
+    let mut index: u64 = 0;
+
+    while (index < table.tasks.length()) {
+      let task: &Task = table.tasks.get(index).unwrap();
+
+      if (task.id == id) {
+        return Option::SOME(task.clone());
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public insert(&self, task: Task): Task {
+    let mut guard: MutexGuard<TaskTable> = self.table.get().lock();
+    let table: &mut TaskTable = guard.get();
+    let mut stored: Task = task;
+
+    stored.id = table.nextId;
+    table.nextId += 1;
+    table.tasks.push(stored.clone());
+    return stored;
+  }
+
+  public replace(&self, task: Task): Result<Task, TaskError> {
+    let mut guard: MutexGuard<TaskTable> = self.table.get().lock();
+    let table: &mut TaskTable = guard.get();
+    let mut index: u64 = 0;
+
+    while (index < table.tasks.length()) {
+      if (table.tasks.get(index).unwrap().id == task.id) {
+        // The id and the owner never change through a replace.
+        table.tasks.getMut(index).unwrap().title = task.title.clone();
+        table.tasks.getMut(index).unwrap().done = task.done;
+        return Result::OK(task);
+      }
+
+      index += 1;
+    }
+
+    return Result::ERROR(TaskError::NOT_FOUND);
+  }
+
+  public remove(&self, id: u64): Result<void, TaskError> {
+    let mut guard: MutexGuard<TaskTable> = self.table.get().lock();
+    let table: &mut TaskTable = guard.get();
+    let mut index: u64 = 0;
+
+    while (index < table.tasks.length()) {
+      if (table.tasks.get(index).unwrap().id == id) {
+        // Vector has no remove, so the tail is popped and pushed back.
+        let mut tail: Vector<Task> = Vector::new<Task>();
+
+        while (table.tasks.length() > index + 1) {
+          tail.push(table.tasks.pop().unwrap());
+        }
+
+        let _removed: Option<Task> = table.tasks.pop();
+
+        while (let Option::SOME(task) = tail.pop()) {
+          table.tasks.push(task);
+        }
+
+        return Result::OK(());
+      }
+
+      index += 1;
+    }
+
+    return Result::ERROR(TaskError::NOT_FOUND);
+  }
+}

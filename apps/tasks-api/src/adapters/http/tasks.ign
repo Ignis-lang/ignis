@@ -1,0 +1,247 @@
+//! The /tasks controllers: named functions, one per endpoint. They parse
+//! the request surface, call the application layer, and turn TaskError
+//! values into HTTP errors; the route table lives in router.ign.
+
+import JsonValue from "std::json";
+import MutexGuard from "std::sync";
+import Web from "std::web";
+import Task from "@domain::task";
+import TaskRepository from "@domain::repository";
+import
+  createTask,
+  deleteTask,
+  getTask,
+  listTasks,
+  updateTask,
+  DEFAULT_LIMIT,
+from "@application::tasks";
+import readTaskInput, taskToJson from "@adapters::http::json";
+import Api, taskErrorToWeb from "@adapters::http::api";
+
+/// A positive decimal number from the path or the query string; `field`
+/// names it in the error. std has no integer parser yet.
+function parsePositive(text: str, field: str): Result<u64, Web::Error> {
+  let digits: String = String::create(text);
+  let message: String = `${field} must be a positive number`;
+
+  if (digits.length() == 0 || digits.length() > 18) {
+    return Result::ERROR(Web::Error::withStatus(400, message.toStr()));
+  }
+
+  let mut value: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < digits.length()) {
+    let byte: u8 = digits.byteAt(index).unwrap();
+
+    if (byte < '0' as u8 || byte > '9' as u8) {
+      return Result::ERROR(Web::Error::withStatus(400, message.toStr()));
+    }
+
+    value = value * 10 + (byte - '0' as u8) as u64;
+    index += 1;
+  }
+
+  if (value == 0) {
+    return Result::ERROR(Web::Error::withStatus(400, message.toStr()));
+  }
+
+  return Result::OK(value);
+}
+
+function respondWithTask(task: &Task, response: &mut Web::Response): void {
+  let value: JsonValue = taskToJson(task);
+  response.json(&value);
+}
+
+export function list<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+): Result<void, Web::Error> {
+  let mut doneFilter: Option<boolean> = Option::NONE;
+
+  if (let Option::SOME(done) = request.query("done")) {
+    if (done.equals("true")) {
+      doneFilter = Option::SOME(true);
+    } else if (done.equals("false")) {
+      doneFilter = Option::SOME(false);
+    } else {
+      return Result::ERROR(Web::Error::withStatus(400, "done must be true or false"));
+    }
+  }
+
+  let mut limit: u64 = DEFAULT_LIMIT;
+
+  if (let Option::SOME(text) = request.query("limit")) {
+    match (parsePositive(text.toStr(), "limit")) {
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+      Result::OK(value) -> {
+        limit = value;
+      },
+    };
+  }
+
+  let guard: MutexGuard<R> = api.tasks.get().lock();
+  let repo: &R = guard.read();
+
+  match (listTasks(repo, doneFilter, limit)) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(taskErrorToWeb(&error));
+    },
+    Result::OK(tasks) -> {
+      let mut items: Vector<JsonValue> = Vector::new<JsonValue>();
+      let mut index: u64 = 0;
+
+      while (index < tasks.length()) {
+        items.push(taskToJson(tasks.get(index).unwrap()));
+        index += 1;
+      }
+
+      let value: JsonValue = JsonValue::array(items);
+      response.json(&value);
+      return Result::OK(());
+    },
+  };
+}
+
+export function show<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+): Result<void, Web::Error> {
+  let mut id: u64;
+
+  match (parsePositive(request.param("id").unwrap(), "id")) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(error);
+    },
+    Result::OK(value) -> {
+      id = value;
+    },
+  };
+
+  let guard: MutexGuard<R> = api.tasks.get().lock();
+  let repo: &R = guard.read();
+
+  match (getTask(repo, id)) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(taskErrorToWeb(&error));
+    },
+    Result::OK(task) -> {
+      respondWithTask(&task, response);
+      return Result::OK(());
+    },
+  };
+}
+
+export function create<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+): Result<void, Web::Error> {
+  let mut input: TaskInput;
+
+  match (readTaskInput(request)) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(error);
+    },
+    Result::OK(value) -> {
+      input = value;
+    },
+  };
+
+  let Option::SOME(title) = input.title else {
+    return Result::ERROR(Web::Error::withStatus(422, "title is required"));
+  };
+
+  let owner: String = String::create(request.header("X-User").unwrap());
+  let guard: MutexGuard<R> = api.tasks.get().lock();
+  let repo: &R = guard.read();
+
+  match (createTask(repo, title, input.done.unwrapOr(false), &owner)) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(taskErrorToWeb(&error));
+    },
+    Result::OK(task) -> {
+      response.setStatus(201);
+      response.setHeader("Location", `/tasks/${task.id}`.toStr());
+      respondWithTask(&task, response);
+      return Result::OK(());
+    },
+  };
+}
+
+export function update<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+): Result<void, Web::Error> {
+  let mut id: u64;
+
+  match (parsePositive(request.param("id").unwrap(), "id")) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(error);
+    },
+    Result::OK(value) -> {
+      id = value;
+    },
+  };
+
+  let mut input: TaskInput;
+
+  match (readTaskInput(request)) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(error);
+    },
+    Result::OK(value) -> {
+      input = value;
+    },
+  };
+
+  let user: String = String::create(request.header("X-User").unwrap());
+  let guard: MutexGuard<R> = api.tasks.get().lock();
+  let repo: &R = guard.read();
+
+  match (updateTask(repo, id, input.title, input.done, &user)) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(taskErrorToWeb(&error));
+    },
+    Result::OK(task) -> {
+      respondWithTask(&task, response);
+      return Result::OK(());
+    },
+  };
+}
+
+export function remove<R: TaskRepository & Send & Sync>(
+  api: &Api<R>,
+  request: &mut Web::Request,
+  response: &mut Web::Response,
+): Result<void, Web::Error> {
+  let mut id: u64;
+
+  match (parsePositive(request.param("id").unwrap(), "id")) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(error);
+    },
+    Result::OK(value) -> {
+      id = value;
+    },
+  };
+
+  let guard: MutexGuard<R> = api.tasks.get().lock();
+  let repo: &R = guard.read();
+
+  match (deleteTask(repo, id)) {
+    Result::ERROR(error) -> {
+      return Result::ERROR(taskErrorToWeb(&error));
+    },
+    Result::OK(_) -> {
+      response.setStatus(204);
+      return Result::OK(());
+    },
+  };
+}

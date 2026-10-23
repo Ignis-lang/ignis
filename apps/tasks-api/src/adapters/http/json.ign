@@ -1,0 +1,71 @@
+//! Task <-> JSON mapping for the HTTP surface, plus reading the body a
+//! client sends. Shape errors are HTTP errors here: 400 for broken JSON,
+//! 422 for fields of the wrong type or names nobody knows.
+
+import Json, JsonObjectEntry, JsonValue, JsonValueKind from "std::json";
+import Web from "std::web";
+import Task from "@domain::task";
+
+/// The fields a client may send to create or update a task.
+export record TaskInput {
+  public title: Option<String>;
+  public done: Option<boolean>;
+}
+
+export function taskToJson(task: &Task): JsonValue {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  entries.push(JsonObjectEntry::create("id", JsonValue::unsignedValue(task.id)));
+  entries.push(JsonObjectEntry::create("title", JsonValue::fromString(task.title.clone())));
+  entries.push(JsonObjectEntry::create("done", JsonValue::boolValue(task.done)));
+  entries.push(JsonObjectEntry::create("owner", JsonValue::fromString(task.owner.clone())));
+  return JsonValue::object(entries);
+}
+
+/// Reads `title` and `done` from a JSON object body. Unknown fields are an
+/// error, so a typo in a field name does not pass silently.
+export function readTaskInput(request: &mut Web::Request): Result<TaskInput, Web::Error> {
+  let Option::SOME(text) = request.bodyText() else {
+    return Result::ERROR(Web::Error::withStatus(400, "body is not valid UTF-8"));
+  };
+
+  let Result::OK(value) = Json::parse(&text) else {
+    return Result::ERROR(Web::Error::withStatus(400, "body is not valid JSON"));
+  };
+
+  let JsonValueKind::OBJECT(entries) = value.kind else {
+    return Result::ERROR(Web::Error::withStatus(422, "body must be a JSON object"));
+  };
+
+  let mut input: TaskInput = TaskInput { title: Option::NONE, done: Option::NONE };
+  let mut index: u64 = 0;
+
+  while (index < entries.length()) {
+    let entry: &JsonObjectEntry = entries.get(index).unwrap();
+
+    if (entry.key.equals("title")) {
+      match (&entry.value.kind) {
+        JsonValueKind::STRING(title) -> {
+          input.title = Option::SOME(title.clone());
+        },
+        _ -> {
+          return Result::ERROR(Web::Error::withStatus(422, "title must be a string"));
+        },
+      };
+    } else if (entry.key.equals("done")) {
+      match (&entry.value.kind) {
+        JsonValueKind::BOOL(done) -> {
+          input.done = Option::SOME(done);
+        },
+        _ -> {
+          return Result::ERROR(Web::Error::withStatus(422, "done must be a boolean"));
+        },
+      };
+    } else {
+      return Result::ERROR(Web::Error::withStatus(422, "unknown field"));
+    }
+
+    index += 1;
+  }
+
+  return Result::OK(input);
+}
