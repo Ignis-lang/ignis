@@ -65,7 +65,7 @@ record Annotation {
   public column: u32;
   public width: u32;
   public primary: boolean;
-  public message: str;
+  public message: String;
 }
 
 /// How one diagnostic is drawn: whether ANSI styling is on, the color of its
@@ -80,7 +80,7 @@ function annotationFor(
   source: &SourceFile,
   span: &SourceSpan,
   primary: boolean,
-  message: str
+  message: String
 ): Annotation {
   let location: SourceLocation = source.lineCol(span.start);
 
@@ -144,7 +144,7 @@ function collectAnnotations(
 ): Vector<Annotation> {
   let primarySpan: SourceSpan = diagnostic.primarySpan;
   let diagnosticMessage: str = diagnostic.messageText();
-  let mut primaryMessage: str = "";
+  let mut primaryMessage: String = String::new();
   let mut primaryMerged: boolean = false;
   let mut labelAnnotations: Vector<Annotation> = Vector::new<Annotation>();
   let mut labelIndex: u64 = 0;
@@ -163,10 +163,10 @@ function collectAnnotations(
     }
 
     let primary: boolean = label.kind == LabelKind::PRIMARY;
-    let mut message: str = label.messageText();
+    let mut message: String = String::create(label.messageText());
 
     if (primary && message.equals(diagnosticMessage)) {
-      message = "";
+      message = String::new();
     }
 
     if (primary && !primaryMerged && @eq<SourceSpan>(&labelSpan, &primarySpan)) {
@@ -185,7 +185,13 @@ function collectAnnotations(
   let mut index: u64 = 0;
   while (index < labelAnnotations.length()) {
     if (let Option::SOME(annotation) = labelAnnotations.get(index)) {
-      annotations.push(*annotation);
+      annotations.push(Annotation {
+        lineIndex: annotation.lineIndex,
+        column: annotation.column,
+        width: annotation.width,
+        primary: annotation.primary,
+        message: annotation.message.clone(),
+      });
     }
 
     index += 1;
@@ -204,7 +210,7 @@ function collectLabelsIn(diagnostic: &Diagnostic, file: &SourceFile): Vector<Ann
     if (let Option::SOME(label) = diagnostic.labels.get(labelIndex) && label.span.file.equals(&file.id)) {
       let labelSpan: SourceSpan = label.span;
 
-      annotations.push(annotationFor(file, &labelSpan, label.kind == LabelKind::PRIMARY, label.messageText()));
+      annotations.push(annotationFor(file, &labelSpan, label.kind == LabelKind::PRIMARY, String::create(label.messageText())));
     }
 
     labelIndex += 1;
@@ -382,7 +388,7 @@ function appendUnderline(output: &mut String, style: &SnippetStyle, annotation: 
 
   if (!annotation.message.equals("")) {
     underline.pushStr(" ");
-    underline.pushStr(annotation.message);
+    underline.pushStr(annotation.message.toStr());
   }
 
   appendGutter(output, style, Option::NONE);

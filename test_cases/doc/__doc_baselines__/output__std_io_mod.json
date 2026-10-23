@@ -951,7 +951,7 @@
       "name": "HashMap",
       "kind": "record",
       "visibility": "public",
-      "signature": "record HashMap<K, V>",
+      "signature": "record HashMap<@owns K, @owns V>",
       "doc": "Deterministic open-addressed map from `K` to `V`.  \n  \nThis container owns both keys and values. Replacing or removing an entry  \ndrops the previous key/value exactly once.  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the map  \nowns its heap buffers exclusively, so moving it moves the only handle to the  \nbuffers, and a shared reference only reads it. An instance is  \nSend or Sync only when `K` and `V` are.",
       "members": [
         {
@@ -1170,7 +1170,7 @@
       "name": "HashSet",
       "kind": "record",
       "visibility": "public",
-      "signature": "record HashSet<T>",
+      "signature": "record HashSet<@owns T>",
       "doc": "Deterministic set of unique values of type `T`.",
       "members": [
         {
@@ -14412,7 +14412,7 @@
       "name": "Rc",
       "kind": "record",
       "visibility": "public",
-      "signature": "record Rc<T>",
+      "signature": "record Rc<@owns T>",
       "doc": "Reference-counted shared pointer.  \n  \n## Memory Layout  \n  \n```text  \n  Rc { handle } ──────┐  \n  Rc { handle } ──┐   │  \n                   │   │  \n                   v   v  \n               ┌───────────────────────┐  \n               │  strong: u32          │  reference counts  \n               │  weak:   u32          │  \n               ├───────────────────────┤  \n               │  T payload            │  user data  \n               └───────────────────────┘  \n```  \n  \nWhen `strong` reaches 0 the payload is destroyed. The allocation is freed  \nwhen both `strong` and `weak` reach 0.  \n  \n## Method Reference  \n  \n| Method        | Signature                         | Description                    |  \n|---------------|-----------------------------------|--------------------------------|  \n| `new`         | `(T) -> Rc<T>`                    | Allocate with strong count 1   |  \n| `strongCount` | `(&self) -> u32`                  | Current strong references      |  \n| `weakCount`   | `(&self) -> u32`                  | Current weak references        |  \n| `downgrade`   | `(&self) -> Weak<T>`              | Create a weak observer         |  \n| `get`         | `(&self) -> &T`                   | Immutable ref to payload       |  \n| `getMut`      | `(&mut self) -> Option<*mut T>`   | Mutable access if unique       |  \n| `clone`       | `(&self) -> Rc<T>`                | Increment strong, share        |  \n| `drop`        | `(&mut self) -> void`             | Decrement strong                |",
       "members": [
         {
@@ -14609,7 +14609,7 @@
       "name": "Weak",
       "kind": "record",
       "visibility": "public",
-      "signature": "record Weak<T>",
+      "signature": "record Weak<@owns T>",
       "doc": "Non-owning observer of an `Rc<T>` allocation.  \n  \nKeeps the allocation header alive so `upgrade()` can check whether the  \nvalue still exists. Use `Rc::downgrade()` to create one.  \n  \n## Lifecycle  \n  \n```text  \n  Rc::new(42)        strong=1  weak=0     payload alive  \n      │  \n  a.downgrade()      strong=1  weak=1     Weak created  \n      │  \n  drop(a)            strong=0  weak=1     payload destroyed  \n      │  \n  w.upgrade()        returns NONE         value gone  \n      │  \n  drop(w)            strong=0  weak=0     allocation freed  \n```  \n  \n## Method Reference  \n  \n| Method        | Signature                       | Description                    |  \n|---------------|---------------------------------|--------------------------------|  \n| `upgrade`     | `(&self) -> Option<Rc<T>>`      | Promote to strong if alive     |  \n| `weakCount`   | `(&self) -> u32`                | Current weak references        |  \n| `strongCount` | `(&self) -> u32`                | Current strong references      |  \n| `clone`       | `(&self) -> Weak<T>`            | Increment weak, share          |  \n| `drop`        | `(&mut self) -> void`           | Decrement weak                 |",
       "members": [
         {
@@ -16030,7 +16030,7 @@
       "name": "Arc",
       "kind": "record",
       "visibility": "public",
-      "signature": "record Arc<T>",
+      "signature": "record Arc<@owns T>",
       "doc": "A thread-safe reference-counted pointer to a `T` on the heap.  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the count is  \nupdated atomically, the payload is only read through it, and the bound  \n`T: Send & Sync` covers reading the value from several threads and dropping  \nit on any of them.",
       "members": [
         {
@@ -16698,7 +16698,7 @@
       "name": "ChannelQueue",
       "kind": "record",
       "visibility": "public",
-      "signature": "record ChannelQueue<T>",
+      "signature": "record ChannelQueue<@owns T>",
       "doc": "The values in a channel and the number of ends of each kind.  \n  \nFirst in, first out with two stacks: `send` pushes on `incoming`, and a  \nreceive pops `outgoing`, refilling it from `incoming` (which reverses the  \norder back) when it runs empty.  \n  \nExported because a monomorphized `Sender<T>` or `Receiver<T>` method is  \nemitted into the unit that instantiates it and reaches it by name. Nothing  \noutside this module should use it.",
       "members": [
         {
@@ -16739,7 +16739,7 @@
       "name": "ChannelState",
       "kind": "record",
       "visibility": "public",
-      "signature": "record ChannelState<T>",
+      "signature": "record ChannelState<@owns T>",
       "doc": "State shared by every end of one channel.  \n  \nExported for the same reason as `ChannelQueue`.",
       "members": [
         {
@@ -20862,7 +20862,7 @@
       "name": "Vector",
       "kind": "record",
       "visibility": "public",
-      "signature": "record Vector<T>",
+      "signature": "record Vector<@owns T>",
       "doc": "Growable contiguous array of `T`.  \n  \n# Example  \n  \n```ignis  \n  \nfunction main(): i32 {  \n  let mut values: Vector<i32> = Vector::new<i32>();  \n  values.push(1);  \n  values.push(2);  \n  // Vector is automatically dropped here  \n  return 0;  \n}  \n```  \n  \nDeclared `Send` and `Sync` although it holds a raw pointer: the vector  \nowns its heap buffer exclusively, so moving it moves the only handle to the  \nbuffer, and a shared reference only reads it. An instance is  \nSend or Sync only when `T` is.",
       "members": [
         {

@@ -1,0 +1,23 @@
+// e2e: err
+// A `Vector<str>` stores its elements in heap storage the vector owns: a `str`
+// element borrows bytes whose owner the vector cannot see, so a view kept in
+// the vector outlives its owner and reads freed memory (ASan:
+// heap-use-after-free). The element type must be owned: `Vector<static str>`
+// or `Vector<String>`.
+import Vector from "std::vector";
+import Io from "std::io";
+
+function keepView(): Vector<str> {
+  let owner: String = String::create("hello from the owner");
+  let mut list: Vector<str> = Vector::new<str>();
+  list.push(owner.toStr());
+  return list;
+}
+
+function main(): i32 {
+  let list: Vector<str> = keepView();
+  if (let Option::SOME(view) = list.get(0)) {
+    Io::println(*view);
+  }
+  return 0;
+}

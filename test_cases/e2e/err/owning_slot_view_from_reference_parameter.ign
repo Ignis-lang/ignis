@@ -1,0 +1,24 @@
+// e2e: err
+// A view read out of a `&T` parameter is still a view: `holder.text.toStr()`
+// borrows the caller's record, which the vector does not keep alive.
+import Io from "std::io";
+
+record Holder {
+  text: String;
+}
+
+function add(sink: &mut Vector<str>, holder: &Holder): void {
+  sink.push(holder.text.toStr());
+}
+
+function main(): i32 {
+  let mut list: Vector<str> = Vector::new<str>();
+  {
+    let holder: Holder = Holder { text: String::create("from a ref param") };
+    add(&mut list, &holder);
+  }
+  if (let Option::SOME(view) = list.get(0)) {
+    Io::println(*view);
+  }
+  return 0;
+}

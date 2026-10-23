@@ -1,0 +1,21 @@
+// e2e: err
+// A generic forwarder cannot launder a view: `relay<str>` builds a `Vector<T>`
+// and returns it, and the instantiation at the call site names `Vector<str>`,
+// which the `@owns` slot rejects.
+import Io from "std::io";
+
+function relay<T>(value: T): Vector<T> {
+  let mut list: Vector<T> = Vector::new<T>();
+  list.push(value);
+  return list;
+}
+
+function main(): i32 {
+  let mut holder: String = String::create("owner");
+  let mut out = relay<str>(holder.toStr());
+  holder = String::create("replaced");
+  if (let Option::SOME(view) = out.get(0)) {
+    Io::println(*view);
+  }
+  return 0;
+}
