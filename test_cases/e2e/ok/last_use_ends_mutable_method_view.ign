@@ -1,0 +1,30 @@
+// e2e: std
+// A `&mut` view a method returns holds a mutable borrow of its owner only until the
+// binding's last use, so the owner can be borrowed again right after it.
+import Io from "std::io";
+import String from "std::string";
+
+record Inner {
+  public label: String;
+}
+
+record Outer {
+  public inner: Inner;
+
+  public label(&self): &String {
+    return &self.inner.label;
+  }
+
+  public labelMut(&mut self): &mut String {
+    return &mut self.inner.label;
+  }
+}
+
+function main(): i32 {
+  let mut outer: Outer = Outer { inner: Inner { label: String::create("Ada") } };
+  let label: &mut String = outer.labelMut();
+  label.pushStr(" Lovelace");
+  let shown: &String = outer.label();
+  Io::println(shown.toStr());
+  return 0;
+}

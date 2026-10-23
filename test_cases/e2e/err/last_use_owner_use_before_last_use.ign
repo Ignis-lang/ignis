@@ -1,0 +1,46 @@
+// e2e: err
+//
+// Using the owner before the view's last use still conflicts with the view's borrow,
+// in straight-line code and inside a loop body that uses the view after the owner.
+import String from "std::string";
+
+record Inner {
+  public label: String;
+}
+
+record Outer {
+  public inner: Inner;
+
+  public label(&self): &String {
+    return &self.inner.label;
+  }
+
+  public labelMut(&mut self): &mut String {
+    return &mut self.inner.label;
+  }
+}
+
+function straightLine(): void {
+  let mut outer: Outer = Outer { inner: Inner { label: String::create("Ada") } };
+  let label: &mut String = outer.labelMut();
+  let shown: &String = outer.label();
+  label.pushStr("x");
+}
+
+function inLoop(): void {
+  let mut outer: Outer = Outer { inner: Inner { label: String::create("Ada") } };
+  let label: &mut String = outer.labelMut();
+  let mut index: i32 = 0;
+
+  while (index < 2) {
+    let shown: &String = outer.label();
+    label.pushStr("x");
+    index += 1;
+  }
+}
+
+function main(): i32 {
+  straightLine();
+  inLoop();
+  return 0;
+}

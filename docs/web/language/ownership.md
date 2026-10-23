@@ -160,13 +160,20 @@ A view must not outlive its owner:
 - A pattern binding lives in its scrutinee. A view of a binding of a temporary scrutinee can
   be used inside the arm but not stored into a local declared outside it, and a
   `let ... else` cannot bind into a temporary by reference.
-- While a binding keeps a view, its owner is borrowed until the end of the scope, so mutating
-  or moving the owner (A0258) is reported. A binding typed `&mut T` borrows its owner mutably,
-  so even reading the owner is reported until the binding's scope ends.
+- While a binding keeps a view, its owner is borrowed, so mutating or moving the owner (A0258)
+  is reported. A binding typed `&mut T` borrows its owner mutably, so even reading the owner is
+  reported. The borrow ends after the last statement of the binding's block that uses the
+  binding or anything carrying its view — a copy, an aggregate or field initialized from it, a
+  pattern binding destructured from it, or a closure capturing it. Granularity is the whole
+  statement: a use inside a loop body keeps the borrow for every iteration, a use in the
+  block's tail or in a `defer` body keeps it to the end of the block, and so does a view handed
+  somewhere it can outlive its statement — into a place whose type can carry a view, to a call
+  that also receives a mutable destination whose referent can carry a view, through a raw
+  pointer or into a volatile, `@write` or atomic sink, or to a closure call.
 - A view taken through a view local that holds such a borrow borrows that local, not its
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
   borrows `store`, so views derived from `store` only conflict with each other, while `guard`
-  stays borrowed by `store` until `store`'s scope ends.
+  stays borrowed by `store` until `store`'s last use.
 - A view cannot be stored where its owner cannot be seen: a `static` or `static mut` field of a
   view type is an error (A0268). A `static str` field is accepted, because a static string owns
   its bytes. A generic record or enum whose declared field or payload is a view is a view type
