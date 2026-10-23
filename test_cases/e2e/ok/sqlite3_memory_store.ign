@@ -1,0 +1,50 @@
+// e2e: std
+// Opens an in-memory SQLite database, creates a table, inserts two rows with
+// bound parameters, and queries them back. The exit code proves the values:
+// each step that misbehaves returns a distinct non-zero code, and 0 is only
+// reachable when the row id, the text, the real and the NULL column all
+// round-trip. C target only: the fixture links libsqlite3, which the QBE lane
+// does not link (test_cases/qbe_skip.tsv).
+import Sqlite3 from "std::sqlite3";
+
+function main(): i32 {
+  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();
+
+  connection
+    .exec("CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, score REAL, note BLOB)")
+    .unwrap();
+
+  let mut insert: Sqlite3::Statement = connection
+    .prepare("INSERT INTO tasks (title, score, note) VALUES (?, ?, ?)")
+    .unwrap();
+
+  insert.bindText(1, "write the ORM").unwrap();
+  insert.bindReal(2, 0.5).unwrap();
+  insert.bindNull(3).unwrap();
+  insert.step().unwrap();
+
+  if (connection.lastInsertRowId() != 1) {
+    return 8;
+  }
+
+  let mut select: Sqlite3::Statement = connection
+    .prepare("SELECT id, title, score, note FROM tasks WHERE id = 1")
+    .unwrap();
+
+  select.step().unwrap();
+
+  if (select.columnInt(0) != 1) {
+    return 11;
+  }
+  if (!select.columnText(1).equals("write the ORM")) {
+    return 12;
+  }
+  if (select.columnReal(2) != 0.5) {
+    return 13;
+  }
+  if (!select.columnIsNull(3)) {
+    return 14;
+  }
+
+  return 0;
+}

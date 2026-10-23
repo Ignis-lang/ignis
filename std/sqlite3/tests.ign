@@ -1,0 +1,445 @@
+//!
+//! Unit tests for `std::sqlite3`, all against `:memory:` databases: no files,
+//! no network.
+
+import Sqlite3 from "std::sqlite3";
+
+import Test from "std::test";
+
+/// Opens an in-memory database or fails the test.
+function sqlite3TestConnection(): Sqlite3::Connection {
+  return Sqlite3::Connection::openInMemory().unwrap();
+}
+
+/// Fails the test with the error's message when `result` is an error.
+function sqlite3TestOk(result: Result<void, Sqlite3::Error>): void {
+  match (result) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+/// A schema the CRUD tests share.
+const SCHEMA: str = "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL, value REAL, data BLOB)";
+
+/// Inserts one row with bound parameters and returns the statement's outcome.
+function sqlite3TestInsert(connection: &mut Sqlite3::Connection, name: str, value: f64): i64 {
+  let mut statement: Sqlite3::Statement = connection.prepare("INSERT INTO items (name, value) VALUES (?, ?)").unwrap();
+  sqlite3TestOk(statement.bindText(1, name));
+  sqlite3TestOk(statement.bindReal(2, value));
+  let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+    Test::fail();
+    return 0;
+  };
+
+  return connection.lastInsertRowId();
+}
+
+@test
+function sqlite3OpensInMemoryAndCloses(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  Test::assertEq<i64>(connection.lastInsertRowId(), 0);
+  sqlite3TestOk(connection.close());
+
+  // A second close is a misuse error, not a panic.
+  match (connection.close()) {
+    Result::ERROR(error) -> {
+      Test::assertEq<i32>(error.code, 21);
+    },
+    Result::OK(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+@test
+function sqlite3ExecCreatesATable(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+
+  // A second CREATE of the same table is an error, which proves the first ran.
+  match (connection.exec(SCHEMA)) {
+    Result::ERROR(error) -> {
+      Test::assert(error.message.length() > 0);
+    },
+    Result::OK(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+@test
+function sqlite3InsertBindsParametersAndReadsBackTheRowId(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+
+  let first: i64 = sqlite3TestInsert(&mut connection, "alpha", 1.5);
+  let second: i64 = sqlite3TestInsert(&mut connection, "beta", 2.5);
+
+  Test::assertEq<i64>(first, 1);
+  Test::assertEq<i64>(second, 2);
+
+  Test::assertEq<i32>(connection.changes(), 1);
+}
+
+@test
+function sqlite3SelectReturnsRowsInOrderWithTypedColumns(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+  sqlite3TestInsert(&mut connection, "alpha", 1.5);
+  sqlite3TestInsert(&mut connection, "beta", 2.5);
+
+  let mut statement: Sqlite3::Statement = connection
+    .prepare("SELECT id, name, value FROM items ORDER BY id")
+    .unwrap();
+
+  Test::assertEq<i32>(statement.columnCount(), 3);
+
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i64>(statement.columnInt(0), 1);
+  Test::assert(statement.columnText(1).equals("alpha"));
+  Test::assert(statement.columnReal(2) == 1.5);
+
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i64>(statement.columnInt(0), 2);
+  Test::assert(statement.columnText(1).equals("beta"));
+  Test::assert(statement.columnReal(2) == 2.5);
+
+  let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function sqlite3ReadsANullColumn(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+
+  // A row whose nullable REAL column is never bound: NULL, not 0.0.
+  let mut statement: Sqlite3::Statement = connection
+    .prepare("INSERT INTO items (name) VALUES ('gamma')")
+    .unwrap();
+  let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+    Test::fail();
+    return;
+  };
+  let id: i64 = connection.lastInsertRowId();
+
+  let mut statement: Sqlite3::Statement = connection
+    .prepare("SELECT value FROM items WHERE id = ?")
+    .unwrap();
+  sqlite3TestOk(statement.bindInt(1, id));
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(statement.columnIsNull(0));
+
+  // A non-null column answers false.
+  let mut named: Sqlite3::Statement = connection
+    .prepare("SELECT name FROM items WHERE id = ?")
+    .unwrap();
+  sqlite3TestOk(named.bindInt(1, id));
+  let Result::OK(Sqlite3::Step::ROW) = named.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assert(!named.columnIsNull(0));
+}
+
+@test
+function sqlite3BindsNull(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+
+  let mut statement: Sqlite3::Statement = connection
+    .prepare("INSERT INTO items (id, name, value) VALUES (?, ?, ?)")
+    .unwrap();
+  sqlite3TestOk(statement.bindInt(1, 7));
+  sqlite3TestOk(statement.bindText(2, "delta"));
+  sqlite3TestOk(statement.bindNull(3));
+  let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i64>(connection.lastInsertRowId(), 7);
+
+  let mut select: Sqlite3::Statement = connection
+    .prepare("SELECT value FROM items WHERE id = 7")
+    .unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = select.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assert(select.columnIsNull(0));
+}
+
+@test
+function sqlite3ConstraintViolationIsAnErrorNotAPanic(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+  let id: i64 = sqlite3TestInsert(&mut connection, "alpha", 1.0);
+
+  let mut statement: Sqlite3::Statement = connection
+    .prepare("INSERT INTO items (id, name) VALUES (?, ?)")
+    .unwrap();
+  sqlite3TestOk(statement.bindInt(1, id));
+  sqlite3TestOk(statement.bindText(2, "duplicate"));
+
+  match (statement.step()) {
+    Result::ERROR(error) -> {
+      // The primary-key violation is one of the SQLITE_CONSTRAINT extended
+      // codes (here 1555, SQLITE_CONSTRAINT_PRIMARYKEY); the API contract is
+      // the family check, not one exact number.
+      Test::assert(error.isConstraint());
+      Test::assert(error.message.length() > 0);
+    },
+    Result::OK(_) -> {
+      Test::fail();
+    },
+  };
+
+  // The failed statement did not insert anything.
+  Test::assertEq<i32>(connection.changes(), 0);
+}
+
+@test
+function sqlite3TransactionRollsBackOnDrop(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+  sqlite3TestInsert(&mut connection, "kept", 1.0);
+
+  {
+    let mut transaction: Sqlite3::Transaction = connection.begin().unwrap();
+
+    let mut statement: Sqlite3::Statement = connection
+      .prepare("INSERT INTO items (name, value) VALUES ('dropped', 2.0)")
+      .unwrap();
+    let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+      Test::fail();
+      return;
+    };
+
+    // No commit: the end of the block drops the transaction, which rolls
+    // the insert back.
+  }
+
+  let mut count: Sqlite3::Statement = connection.prepare("SELECT count(*) FROM items").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = count.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i64>(count.columnInt(0), 1);
+}
+
+@test
+function sqlite3CommitPersists(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+
+  {
+    let mut transaction: Sqlite3::Transaction = connection.begin().unwrap();
+
+    let mut statement: Sqlite3::Statement = connection
+      .prepare("INSERT INTO items (name, value) VALUES ('committed', 3.0)")
+      .unwrap();
+    let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+      Test::fail();
+      return;
+    };
+
+    sqlite3TestOk(transaction.commit());
+
+    // A second commit is a misuse error, not a panic.
+    match (transaction.commit()) {
+      Result::ERROR(error) -> {
+        Test::assertEq<i32>(error.code, 21);
+      },
+      Result::OK(_) -> {
+        Test::fail();
+      },
+    };
+  }
+
+  let mut count: Sqlite3::Statement = connection.prepare("SELECT count(*) FROM items").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = count.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i64>(count.columnInt(0), 1);
+}
+
+@test
+function sqlite3ExplicitRollbackReportsTheOutcome(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+  sqlite3TestInsert(&mut connection, "kept", 1.0);
+
+  let mut transaction: Sqlite3::Transaction = connection.begin().unwrap();
+
+  let mut statement: Sqlite3::Statement = connection
+    .prepare("INSERT INTO items (name, value) VALUES ('gone', 2.0)")
+    .unwrap();
+  let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  sqlite3TestOk(transaction.rollback());
+
+  // The pre-transaction row survived; the rolled-back one did not.
+  let mut count: Sqlite3::Statement = connection.prepare("SELECT count(*) FROM items").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = count.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i64>(count.columnInt(0), 1);
+
+  let mut gone: Sqlite3::Statement = connection
+    .prepare("SELECT count(*) FROM items WHERE name = 'gone'")
+    .unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = gone.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i64>(gone.columnInt(0), 0);
+}
+
+@test
+function sqlite3ReusesAPreparedStatementWithReset(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+
+  let mut statement: Sqlite3::Statement = connection
+    .prepare("INSERT INTO items (name, value) VALUES (?, ?)")
+    .unwrap();
+
+  sqlite3TestOk(statement.bindText(1, "first"));
+  sqlite3TestOk(statement.bindReal(2, 1.0));
+  let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  sqlite3TestOk(statement.reset());
+  sqlite3TestOk(statement.bindText(1, "second"));
+  sqlite3TestOk(statement.bindReal(2, 2.0));
+  let Result::OK(Sqlite3::Step::DONE) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  let mut count: Sqlite3::Statement = connection
+    .prepare("SELECT count(*) FROM items WHERE name = 'second' AND value = 2.0")
+    .unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = count.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<i64>(count.columnInt(0), 1);
+}
+
+@test
+function sqlite3TextRoundTrips(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec("CREATE TABLE texts (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"));
+
+  let mut insert: Sqlite3::Statement = connection
+    .prepare("INSERT INTO texts (body) VALUES (?)")
+    .unwrap();
+  sqlite3TestOk(insert.bindText(1, "héllo — UTF-8 ✓"));
+  let Result::OK(Sqlite3::Step::DONE) = insert.step() else {
+    Test::fail();
+    return;
+  };
+
+  let mut select: Sqlite3::Statement = connection.prepare("SELECT body FROM texts").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = select.step() else {
+    Test::fail();
+    return;
+  };
+  Test::assert(select.columnText(0).equals("héllo — UTF-8 ✓"));
+}
+
+@test
+function sqlite3BlobRoundTripsIncludingAZeroByte(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec("CREATE TABLE blobs (id INTEGER PRIMARY KEY, data BLOB NOT NULL)"));
+
+  let mut original: Vector<u8> = Vector::new<u8>();
+  original.push(1);
+  original.push(0);
+  original.push(2);
+  original.push(0);
+  original.push(255);
+
+  let mut insert: Sqlite3::Statement = connection
+    .prepare("INSERT INTO blobs (data) VALUES (?)")
+    .unwrap();
+  sqlite3TestOk(insert.bindBlob(1, &original));
+  let Result::OK(Sqlite3::Step::DONE) = insert.step() else {
+    Test::fail();
+    return;
+  };
+
+  let mut select: Sqlite3::Statement = connection.prepare("SELECT data FROM blobs").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = select.step() else {
+    Test::fail();
+    return;
+  };
+
+  let readBack: Vector<u8> = select.columnBlob(0);
+  Test::assertEq<u64>(readBack.length(), 5);
+  Test::assertEq<u8>(*readBack.get(0).unwrap(), 1);
+  Test::assertEq<u8>(*readBack.get(1).unwrap(), 0);
+  Test::assertEq<u8>(*readBack.get(2).unwrap(), 2);
+  Test::assertEq<u8>(*readBack.get(3).unwrap(), 0);
+  Test::assertEq<u8>(*readBack.get(4).unwrap(), 255);
+}
+
+@test
+function sqlite3CommitOnAClosedConnectionIsRefused(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+
+  sqlite3TestOk(connection.exec(SCHEMA));
+
+  let mut transaction: Sqlite3::Transaction = connection.begin().unwrap();
+
+  // Closing the connection under the open transaction is visible to the
+  // guard: the commit is a misuse error, not a crash on a freed handle.
+  sqlite3TestOk(connection.close());
+
+  match (transaction.commit()) {
+    Result::ERROR(error) -> {
+      Test::assertEq<i32>(error.code, 21);
+      Test::assert(error.message.length() > 0);
+    },
+    Result::OK(_) -> {
+      Test::fail();
+    },
+  };
+}

@@ -294,6 +294,14 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      # std/sqlite3 links libsqlite3, and build-std compiles every module in
+      # std/manifest.toml, so sqlite3.h must be on the C include path before
+      # the ladder builds stage1 and stage2.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
       # Once a selfhost binary has been promoted `official`, the ladder starts
       # stage1 from it, so the ladder measures the promoted selfhost lineage
       # compiling the current sources; until then (or after a streak reset)
@@ -475,6 +483,13 @@ jobs:
           set -euo pipefail
 
           chmod +x build/bootstrap/stage1/ignis build/bootstrap/stage2/ignis
+
+      # The G3 runs compile the std C sources and link -lsqlite3, so the dev
+      # headers must be present even though the stages were built elsewhere.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
 
       # A gate is only worth its runner while its commit is still the head.
       - name: Check whether the head moved
@@ -764,6 +779,11 @@ jobs:
       # step or environment file can put the toolchain back before it runs.
       # Every PATH entry containing `cargo`, `rustup` or `/rust/` is dropped,
       # e.g. ~/.cargo/bin.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
       - name: Build stage1, stage2 and stage3 from the C seed, with Rust removed from PATH
         run: |
           set -euo pipefail

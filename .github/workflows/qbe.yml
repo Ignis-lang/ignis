@@ -34,6 +34,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # std/sqlite3 links libsqlite3, and build-std compiles every module in
+      # std/manifest.toml, so sqlite3.h must be on the C include path before
+      # the stage build. The shards compile fixture C units too, which include
+      # the std linking headers, so the matrix jobs install it as well.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
       # stage0 comes from the committed C seed with gcc alone; stage1 is the
       # selfhost binary the shards run every fixture through.
       - name: Build stage1 from the C seed
@@ -125,6 +134,14 @@ jobs:
           chmod +x build/qbe-ci-downloads/qbe-stage1-compiler/ignis
           chmod +x build/qbe-ci-downloads/qbe-ci-tools/runner
           chmod +x build/qbe-ci-downloads/qbe-ci-tools/qbe
+
+      # The shards compile fixture C units, and every C unit includes the std
+      # linking headers (sqlite3.h among them), so the dev headers must be
+      # here even though no shard links sqlite3 itself.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
 
       # The compiler the runner drives emits QBE through the `qbe` binary, so
       # it has to be on PATH for every fixture build.

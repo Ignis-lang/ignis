@@ -45,10 +45,16 @@ The design goal is to stay small, explicit and predictable.
 | `std::net` | `IpAddress`, `Ipv4Address`, `Ipv6Address`, `SocketAddress`, `TcpListener`, `TcpStream`, `Shutdown` | Numeric IP addresses and blocking or non-blocking TCP (x86_64 Linux only) |
 | `std::http` | `Http` | HTTP/1.1 server side: sans-IO request parser and response serializer, blocking `Http::Server` driver |
 | `std::web` | `Web` | Express-style framework on `std::http`: router, middleware with `next`, route parameters, query string, errors with a status |
+| `std::sqlite3` | `Sqlite3` | SQLite binding: `Connection`, `Statement`, `Transaction`, `Error` (libsqlite3) |
 
 Auto-loaded (imported implicitly): `string`, `number`, `vector`, `types`, `option`,
 `result`, `format`, plus the internal `process_runtime`, which the generated C entrypoint
 requires in every program.
+
+System dependency: `std::sqlite3` links `libsqlite3` and includes `sqlite3.h`
+(`libsqlite3-dev` on Debian and Ubuntu, `pkgs.sqlite` in the Nix dev shell). Because
+`build-std` compiles every module in `std/manifest.toml`, that header is required to build
+the compiler and the standard library, not only programs that import the module.
 
 ## Layering
 

@@ -101,6 +101,11 @@
                 # The `--target qbe` backend lowers Ignis LIR to QBE IL and
                 # runs this tool to get assembly.
                 pkgs.qbe
+                # std::sqlite3 links libsqlite3, and build-std compiles every
+                # module in std/manifest.toml, so sqlite3.h has to be on the
+                # C include path for every build, not only for programs that
+                # import the module.
+                pkgs.sqlite
               ];
 
             shellHook = ''

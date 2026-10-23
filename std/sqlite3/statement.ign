@@ -1,0 +1,324 @@
+//!
+//! # Statement
+//!
+//! `Sqlite3::Statement`, one compiled SQL statement. Wraps the `sqlite3_stmt*`
+//! that `Connection::prepare` produces, binds parameters, steps through rows
+//! and reads columns; finalizes on drop.
+//!
+//! ## Exports
+//!
+//! | Export          | Description                                          |
+//! |-----------------|------------------------------------------------------|
+//! | `Sqlite3::Statement` | `bindNull`, `bindInt`, `bindReal`, `bindText`, `bindBlob`, `step`, `columnCount`, `columnIsNull`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `reset` |
+//! | `Sqlite3::Step` | `ROW` or `DONE`, what `step` reports                |
+//!
+//! ## Binding and reading
+//!
+//! Parameter indexes are 1-based, the way SQLite itself counts them in the C
+//! API (`?1` is index 1). Column indexes are 0-based. `bindText` and
+//! `bindBlob` pass `SQLITE_TRANSIENT` to SQLite, so the bound bytes are
+//! copied at bind time and the caller's buffer can go away before `step`.
+//! `SQLITE_TRANSIENT` is SQLite's own documented sentinel — the
+//! `sqlite3_bind_text` docs define it as "a special destructor (...) which
+//! makes SQLite copy the bytes" — spelled here as the pointer value `-1`
+//! because the C header defines it as a cast of -1 to the destructor's
+//! function-pointer type.
+//!
+//! `step()` returns `Result::OK(Step::ROW)` for each row and
+//! `Result::OK(Step::DONE)` when the statement is finished; anything else is
+//! an `Sqlite3::Error`. Column getters coerce the value the way SQLite does
+//! (`columnInt` on a TEXT column parses a number); `columnIsNull` tells the
+//! two cases apart that a coercion would blur. After an error the statement
+//! is reset before reuse.
+//!
+//! ## Reuse
+//!
+//! `reset()` rewinds the statement so it can run again with new bindings;
+//! rebinding replaces every bound parameter. The statement stays compiled, so
+//! a query run many times prepares once.
+
+import Error from "std::sqlite3::error";
+import LibC from "std::libc";
+
+extern __sqlite3_statement {
+  /// Advances `statement` to its next row or to completion. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_step(statement: *mut void): i32;
+  /// Rewinds `statement` for another run with new bindings. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_reset(statement: *mut void): i32;
+  /// Destroys `statement` and releases its memory. Declared in `sqlite3.h`.
+  function sqlite3_finalize(statement: *mut void): i32;
+  /// How many columns a row of `statement` has. Declared in `sqlite3.h`.
+  function sqlite3_column_count(statement: *mut void): i32;
+  /// The storage class of column `column` of the current row. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_column_type(statement: *mut void, column: i32): i32;
+  /// Column `column` of the current row as an integer. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_column_int64(statement: *mut void, column: i32): i64;
+  /// Column `column` of the current row as a float. Declared in `sqlite3.h`.
+  function sqlite3_column_double(statement: *mut void, column: i32): f64;
+  /// Column `column` of the current row as UTF-8 text. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_column_text(statement: *mut void, column: i32): *u8;
+  /// Column `column` of the current row as bytes. Declared in `sqlite3.h`.
+  function sqlite3_column_blob(statement: *mut void, column: i32): *void;
+  /// The byte length of column `column` of the current row. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_column_bytes(statement: *mut void, column: i32): i32;
+  /// Binds an untyped value; the parameter stays NULL. Declared in
+  /// `sqlite3.h`.
+  function sqlite3_bind_null(statement: *mut void, index: i32): i32;
+  /// Binds a 64-bit integer. Declared in `sqlite3.h`.
+  function sqlite3_bind_int64(statement: *mut void, index: i32, value: i64): i32;
+  /// Binds a 64-bit float. Declared in `sqlite3.h`.
+  function sqlite3_bind_double(statement: *mut void, index: i32, value: f64): i32;
+  /// Binds `length` bytes of UTF-8 text. Declared in `sqlite3.h`.
+  function sqlite3_bind_text(
+    statement: *mut void,
+    index: i32,
+    value: *u8,
+    length: i32,
+    destructor: *void,
+  ): i32;
+  /// Binds `length` bytes of a blob. Declared in `sqlite3.h`.
+  function sqlite3_bind_blob(
+    statement: *mut void,
+    index: i32,
+    value: *void,
+    length: i32,
+    destructor: *void,
+  ): i32;
+  /// The connection `statement` was prepared on. Declared in `sqlite3.h`.
+  function sqlite3_db_handle(statement: *mut void): *mut void;
+}
+
+/// `sqlite3_step` produced a row.
+const SQLITE_ROW: i32 = 100;
+
+/// `sqlite3_step` finished the statement.
+const SQLITE_DONE: i32 = 101;
+
+/// `sqlite3_close_v2` reports misuse, e.g. a second close.
+const SQLITE_MISUSE: i32 = 21;
+
+/// A NULL column's storage class.
+const SQLITE_NULL: i32 = 5;
+
+/// The destructor argument that makes SQLite copy the bound bytes:
+/// `SQLITE_TRANSIENT`, the sentinel the `sqlite3_bind_text` documentation
+/// defines — "`((sqlite3_destructor_type)-1)`, ... makes a private copy" —
+/// spelled as the pointer value -1.
+function transientDestructor(): *void {
+  return @pointerFromInteger<*void>(-1 as i64);
+}
+
+/// A negative or out-of-range bind index.
+function bindIndexError(index: i32): Error {
+  let indexText: String = String::create(index);
+
+  return Error {
+    code: SQLITE_MISUSE,
+    message: `std::sqlite3: bind index ${indexText} is out of range`,
+  };
+}
+
+/// One compiled SQL statement, finalized on drop.
+///
+/// A statement borrows its connection: it must not outlive it, and it must
+/// not be used after the connection is closed. Because drop order is the
+/// reverse of declaration order, declaring the connection before the
+/// statement finalizes the statement first.
+export namespace Sqlite3 {
+  /// What one call of `step` found.
+  export enum Step {
+    /// The current row is ready for the column getters.
+    ROW,
+    /// The statement produced its last row.
+    DONE,
+  }
+
+  /// One compiled SQL statement.
+  @implements(Drop)
+  record Statement {
+    /// The `sqlite3_stmt*` handle, or `null` after finalize.
+    stmt: *mut void;
+
+    /// Binds NULL to parameter `index` (1-based).
+    public bindNull(&mut self, index: i32): Result<void, Error> {
+      return bound(__sqlite3_statement::sqlite3_bind_null(self.stmt, index), self.stmt, index);
+    }
+
+    /// Binds a 64-bit integer to parameter `index` (1-based).
+    public bindInt(&mut self, index: i32, value: i64): Result<void, Error> {
+      return bound(__sqlite3_statement::sqlite3_bind_int64(self.stmt, index, value), self.stmt, index);
+    }
+
+    /// Binds a 64-bit float to parameter `index` (1-based).
+    public bindReal(&mut self, index: i32, value: f64): Result<void, Error> {
+      return bound(__sqlite3_statement::sqlite3_bind_double(self.stmt, index, value), self.stmt, index);
+    }
+
+    /// Binds UTF-8 text to parameter `index` (1-based). SQLite copies the
+    /// bytes; interior NUL bytes are preserved and bound with the text.
+    public bindText(&mut self, index: i32, text: str): Result<void, Error> {
+      return bound(
+        __sqlite3_statement::sqlite3_bind_text(
+          self.stmt,
+          index,
+          text as *u8,
+          LibC::String::strlen(text as *u8) as i32,
+          transientDestructor(),
+        ),
+        self.stmt,
+        index,
+      );
+    }
+
+    /// Binds `bytes` to parameter `index` (1-based). SQLite copies the bytes,
+    /// so a zero byte inside is fine.
+    public bindBlob(&mut self, index: i32, bytes: &Vector<u8>): Result<void, Error> {
+      let pointer: *void = bytes.asPtr() as *void;
+
+      return bound(
+        __sqlite3_statement::sqlite3_bind_blob(
+          self.stmt,
+          index,
+          pointer,
+          bytes.length() as i32,
+          transientDestructor(),
+        ),
+        self.stmt,
+        index,
+      );
+    }
+
+    /// Advances to the next row (`Step::ROW`) or finishes (`Step::DONE`).
+    /// After `DONE` the column getters are no longer meaningful until
+    /// `reset`.
+    public step(&mut self): Result<Step, Error> {
+      if (self.stmt == null) {
+        return Result::ERROR(Error {
+          code: SQLITE_MISUSE,
+          message: String::create("std::sqlite3: the statement is finalized"),
+        });
+      }
+
+      let result: i32 = __sqlite3_statement::sqlite3_step(self.stmt);
+
+      if (result == SQLITE_ROW) {
+        return Result::OK(Step::ROW);
+      }
+
+      if (result == SQLITE_DONE) {
+        return Result::OK(Step::DONE);
+      }
+
+      return Result::ERROR(Error::fromConnection(self.connection()));
+    }
+
+    /// How many columns one row of this statement has.
+    public columnCount(&self): i32 {
+      return __sqlite3_statement::sqlite3_column_count(self.stmt);
+    }
+
+    /// Whether column `column` of the current row is NULL. A coercion would
+    /// report both NULL and 0 as `columnInt() == 0`; this tells them apart.
+    public columnIsNull(&self, column: i32): boolean {
+      return __sqlite3_statement::sqlite3_column_type(self.stmt, column) == SQLITE_NULL;
+    }
+
+    /// Column `column` of the current row as an integer, coercing the way
+    /// SQLite does.
+    public columnInt(&self, column: i32): i64 {
+      return __sqlite3_statement::sqlite3_column_int64(self.stmt, column);
+    }
+
+    /// Column `column` of the current row as a float, coercing the way SQLite
+    /// does.
+    public columnReal(&self, column: i32): f64 {
+      return __sqlite3_statement::sqlite3_column_double(self.stmt, column);
+    }
+
+    /// Column `column` of the current row as an owned `String`, copied with
+    /// its exact byte length, interior NUL bytes included.
+    public columnText(&self, column: i32): String {
+      let pointer: *u8 = __sqlite3_statement::sqlite3_column_text(self.stmt, column);
+      let length: i64 = __sqlite3_statement::sqlite3_column_bytes(self.stmt, column) as i64;
+
+      return String::create(pointer as *mut u8, length as u64);
+    }
+
+    /// Column `column` of the current row as owned bytes, interior zero bytes
+    /// included.
+    public columnBlob(&self, column: i32): Vector<u8> {
+      let pointer: *void = __sqlite3_statement::sqlite3_column_blob(self.stmt, column);
+      let length: i64 = __sqlite3_statement::sqlite3_column_bytes(self.stmt, column) as i64;
+      let first: u64 = @integerFromPointer(pointer);
+
+      let mut bytes: Vector<u8> = Vector::new<u8>();
+      let mut index: i64 = 0;
+
+      while (index < length) {
+        let bytePointer: *u8 = @pointerFromInteger<*u8>(first + index as u64);
+        bytes.push(@read<u8>(bytePointer));
+        index = index + 1;
+      }
+
+      return bytes;
+    }
+
+    /// Rewinds the statement for another run. Bindings survive `reset`; bind
+    /// every parameter again before stepping.
+    public reset(&mut self): Result<void, Error> {
+      if (self.stmt == null) {
+        return Result::ERROR(Error {
+          code: SQLITE_MISUSE,
+          message: String::create("std::sqlite3: the statement is finalized"),
+        });
+      }
+
+      let result: i32 = __sqlite3_statement::sqlite3_reset(self.stmt);
+
+      if (result != 0) {
+        return Result::ERROR(Error::fromConnection(self.connection()));
+      }
+
+      return Result::OK(());
+    }
+
+    /// Finalizes the statement, releasing its memory. Idempotent: a second
+    /// `drop` sees the null handle.
+    drop(&mut self): void {
+      if (self.stmt != null) {
+        __sqlite3_statement::sqlite3_finalize(self.stmt);
+        self.stmt = null;
+      }
+    }
+
+    /// The connection's error surface for this statement's failures.
+    connection(&self): *mut void {
+      return __sqlite3_statement::sqlite3_db_handle(self.stmt);
+    }
+  }
+
+  /// Turns a `sqlite3_bind_*` result into a `Result`. An index SQLite rejects
+  /// (no such parameter) reports as misuse with the index in the message.
+  function bound(result: i32, statement: *mut void, index: i32): Result<void, Error> {
+    if (result == 0) {
+      return Result::OK(());
+    }
+
+    if (result == SQLITE_MISUSE) {
+      return Result::ERROR(bindIndexError(index));
+    }
+
+    return Result::ERROR(Error::fromConnection(statementConnection(statement)));
+  }
+
+  /// The connection a live statement handle belongs to.
+  function statementConnection(statement: *mut void): *mut void {
+    return __sqlite3_statement::sqlite3_db_handle(statement);
+  }
+}

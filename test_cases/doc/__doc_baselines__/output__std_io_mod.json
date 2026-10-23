@@ -263,6 +263,26 @@
       "name": "std::sort"
     },
     {
+      "name": "std::sqlite3",
+      "doc": "  \n# SQLite3  \n  \nA faithful SQLite binding: `std::sqlite3` wraps the C API's `sqlite3*` and  \n`sqlite3_stmt*` handles in RAII types and returns every failure as a  \n`Result`. The mapping layer (`std::orm`, planned) builds on it; programs  \nthat only want raw SQL never link anything else.  \n  \n## Exports  \n  \n| Export                | Description                                    |  \n|-----------------------|------------------------------------------------|  \n| `Sqlite3::Connection` | One database: `open`, `openInMemory`, `close`, `exec`, `prepare`, `lastInsertRowId`, `changes`, `busyTimeout`, `begin`. Closes on drop |  \n| `Sqlite3::Statement`  | One compiled statement: `bindNull`, `bindInt`, `bindReal`, `bindText`, `bindBlob`, `step`, `columnCount`, `columnIsNull`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `reset`. Finalizes on drop |  \n| `Sqlite3::Step`       | `ROW` or `DONE`, what `Statement::step` reports |  \n| `Sqlite3::Transaction`| A scoped transaction: `commit`, `rollback`; rolls back on drop |  \n| `Sqlite3::Error`      | `code` (extended result code) and `message`; `isConstraint()` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Sqlite3::Error>`; nothing in  \nthe module panics. `Error::code` is SQLite's extended result code and  \n`Error::isConstraint()` names the constraint family, which a service turns  \ninto 409/422. See `std::sqlite3::error`.  \n  \n## Linking  \n  \nThe module links `libsqlite3` and includes `sqlite3.h`  \n(`[linking.sqlite3]` in `std/manifest.toml`), so every machine that builds  \nthe compiler or the standard library needs the SQLite development headers  \ninstalled (`libsqlite3-dev` on Debian and Ubuntu, `pkgs.sqlite` in this  \nrepository's Nix dev shell).  \n  \n## Journal mode  \n  \n`Connection::open` runs `PRAGMA journal_mode=WAL` on file databases so  \nreaders do not block behind a writer; `\":memory:\"` databases skip the  \npragma, where WAL never applies. See `std::sqlite3::connection`.  \n  \n## Example  \n  \n```ignis  \nimport Sqlite3 from \"std::sqlite3\";  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  \n  connection.exec(\"CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL)\").unwrap();  \n  \n  let mut statement: Sqlite3::Statement =  \n    connection.prepare(\"INSERT INTO tasks (title) VALUES (?)\").unwrap();  \n  \n  statement.bindText(1, \"write the ORM\").unwrap();  \n  statement.step().unwrap();  \n  \n  return connection.lastInsertRowId() == 1 ? 0 : 1;  \n}  \n```  \n  \n## Statements  \n  \n`Connection::prepare` compiles only the first statement of its SQL;  \nanything after the first semicolon is not compiled and is silently  \ndropped. Run each statement on its own `prepare`, or hand multi-statement  \nscripts that need no parameters and read no rows to `Connection::exec`.  \n  \n## Transactions  \n  \n`Connection::begin` returns a `Sqlite3::Transaction` that commits on  \n`commit()` and rolls back on drop, so an early `return` cannot leave one  \nopen; the guard reads its connection's live handle on every use, so a  \ntransaction on a closed connection is refused with a misuse error instead  \nof touching freed memory. See `std::sqlite3::transaction`.  \n  \n## Non-goals  \n  \nThe binding is blocking and synchronous. There is no asynchronous API and  \nno query builder; the mapping layer is `std::orm` (planned), not this  \nmodule."
+    },
+    {
+      "name": "std::sqlite3::connection",
+      "doc": "  \n# Connection  \n  \n`Sqlite3::Connection`, one open SQLite database. Owns the `sqlite3*`  \nhandle and closes it on drop; `close()` does the same thing early and  \nreports the result.  \n  \n## Construction  \n  \n| Method           | Description                                       |  \n|------------------|---------------------------------------------------|  \n| `Connection::open(path)` | Opens (or creates) the database file `path` |  \n| `Connection::openInMemory()` | Opens a private `:memory:` database     |  \n  \nBoth run `PRAGMA journal_mode=WAL` on a file database so readers do not  \nblock behind a writer; SQLite silently keeps the previous journal mode  \nwhere the filesystem cannot support WAL, and `open` still succeeds. An  \nin-memory database skips the pragma: WAL never applies to `:memory:`, and  \nonly the exact path `\":memory:\"` is recognized as one.  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Sqlite3::Error>`. The error's  \n`code` is the extended result code and `message` is what `sqlite3_errmsg`  \nreports; see `std::sqlite3::error`.  \n  \n## Threading  \n  \nA SQLite handle is thread-bound, so a `Connection` is not `Send`. Share one  \nconnection behind a `Mutex` (`Shared<Sqlite3::Connection>`); SQLite  \nserializes writers, and WAL keeps readers concurrent."
+    },
+    {
+      "name": "std::sqlite3::error",
+      "doc": "  \n# Errors  \n  \n`Sqlite3::Error`, the error type every fallible operation of `std::sqlite3`  \nreturns. Nothing in the module panics: a failing SQLite call becomes an  \n`Error` value carrying the extended result code and the message that  \n`sqlite3_errmsg` reports for the connection.  \n  \n## Exports  \n  \n| Export          | Description                                    |  \n|-----------------|------------------------------------------------|  \n| `Sqlite3::Error` | `code` (extended result code) and `message`; `isConstraint()` |  \n  \n## Constraint violations  \n  \n`isConstraint()` answers whether the error is one of the `SQLITE_CONSTRAINT`  \nfamily (primary-key, unique, not-null, check, foreign-key). A service layer  \nturns those into HTTP 409/422; every other code is a 500. The check is on  \nthe extended code's primary part (`code & 0xff`), so any specific  \nconstraint code the engine reports matches."
+    },
+    {
+      "name": "std::sqlite3::statement",
+      "doc": "  \n# Statement  \n  \n`Sqlite3::Statement`, one compiled SQL statement. Wraps the `sqlite3_stmt*`  \nthat `Connection::prepare` produces, binds parameters, steps through rows  \nand reads columns; finalizes on drop.  \n  \n## Exports  \n  \n| Export          | Description                                          |  \n|-----------------|------------------------------------------------------|  \n| `Sqlite3::Statement` | `bindNull`, `bindInt`, `bindReal`, `bindText`, `bindBlob`, `step`, `columnCount`, `columnIsNull`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `reset` |  \n| `Sqlite3::Step` | `ROW` or `DONE`, what `step` reports                |  \n  \n## Binding and reading  \n  \nParameter indexes are 1-based, the way SQLite itself counts them in the C  \nAPI (`?1` is index 1). Column indexes are 0-based. `bindText` and  \n`bindBlob` pass `SQLITE_TRANSIENT` to SQLite, so the bound bytes are  \ncopied at bind time and the caller's buffer can go away before `step`.  \n`SQLITE_TRANSIENT` is SQLite's own documented sentinel — the  \n`sqlite3_bind_text` docs define it as \"a special destructor (...) which  \nmakes SQLite copy the bytes\" — spelled here as the pointer value `-1`  \nbecause the C header defines it as a cast of -1 to the destructor's  \nfunction-pointer type.  \n  \n`step()` returns `Result::OK(Step::ROW)` for each row and  \n`Result::OK(Step::DONE)` when the statement is finished; anything else is  \nan `Sqlite3::Error`. Column getters coerce the value the way SQLite does  \n(`columnInt` on a TEXT column parses a number); `columnIsNull` tells the  \ntwo cases apart that a coercion would blur. After an error the statement  \nis reset before reuse.  \n  \n## Reuse  \n  \n`reset()` rewinds the statement so it can run again with new bindings;  \nrebinding replaces every bound parameter. The statement stays compiled, so  \na query run many times prepares once."
+    },
+    {
+      "name": "std::sqlite3::transaction",
+      "doc": "  \n# Transaction  \n  \n`Sqlite3::Transaction`, the guard `Connection::begin` returns. `commit()`  \ncommits; dropping the transaction without `commit` rolls it back, so an  \nearly `return` or an error path cannot leave a transaction open.  \n  \n## Exports  \n  \n| Export               | Description                                |  \n|----------------------|--------------------------------------------|  \n| `Sqlite3::Transaction` | `commit`, `rollback`; rolls back on drop |  \n  \n## The Drop contract  \n  \nA `Transaction` that is dropped while still open runs `ROLLBACK` on its  \nconnection. Nothing can be reported at that point, so a rollback on drop  \nis silent and best effort: if the connection is already closed, the  \nrollback does nothing. Code that wants the outcome calls `commit` or  \n`rollback` and gets a `Result`; drop is the safety net, not the API.  \n  \nAfter `commit` or `rollback`, calling either method again is a misuse  \nerror, not a panic. A failed `commit` leaves the transaction unfinished,  \nso drop still cleans up.  \n  \n## Lifetime  \n  \nThe transaction does not own its connection: it holds the address of the  \n`Connection` that produced it and reads the connection's live handle on  \nevery use, so a transaction outliving a `close()` is refused with a misuse  \nerror instead of touching freed memory. What it cannot survive is the  \n`Connection` value itself being gone — the same contract a `MutexGuard`  \nhas with its mutex, and declaration order gives it in ordinary use: the  \nconnection declared first drops last, after every transaction and  \nstatement it produced."
+    },
+    {
       "name": "std::string",
       "doc": "  \n# String Module  \n  \nOwned, heap-backed UTF-8 byte string type and related utilities.  \n  \n## Overview  \n  \n`String` is a value-type record whose `data` buffer lives on the heap.  \nIt implements `Drop` so the buffer is freed automatically when the  \nowning binding goes out of scope, and `Clone` for explicit deep copies.  \nIts storage is an owned UTF-8 byte buffer with a byte-counted `len` field.  \n  \n`str` is the primitive immutable string-slice type (`const char*` in C).  \nIn v0.4 it remains a borrowed NUL-terminated UTF-8 byte view.  \nString literals have type `str`. Use `String::create(s)` to create an  \nowned copy from a `str`.  \n  \nInterior NUL bytes are preserved in owned storage.  \ntoStr() is a zero-copy interop view.  \nC-string consumers may stop at the first interior NUL.  \n  \n## Memory Layout  \n  \n```text  \n  String  \n  ┌──────────────┐  \n  │ data ────────┼──────► ┌───┬───┬───┬───┬───┬───┬───┬───┐  \n  │ len: 5       │        │ h │ e │ l │ l │ o │   │   │   │  \n  │ cap: 8       │        └───┴───┴───┴───┴───┴───┴───┴───┘  \n  └──────────────┘        ◄── used bytes ──►◄─ reserved ──►  \n```  \n  \nFields mirror the C runtime's `IgnisString` layout exactly:  \n- `data` — pointer to the backing byte buffer (or `null` before init)  \n- `len`  — number of bytes currently stored  \n- `cap`  — total bytes allocated  \n  \n## UTF-8 Scanning and Bytes  \n  \n`String` stays byte-backed. APIs that need parser or diagnostic offsets keep  \nthose byte positions internal to the caller while decoding `char` values at  \nexplicit byte boundaries.  \n  \n`charAt` and `pushChar` work with decoded `char` values, while `byteAt`,  \n`pushByte`, `forEachByte`, `findByte`, `trimWhere`, and `split` keep raw byte  \nbehavior explicit.  \n  \n## Higher-Order Iteration Methods  \n  \nString provides callback-based operations for char/byte iteration,  \nsearching, trimming, and splitting:  \n  \n| Method        | Callback signature   | Returns            | Description                        |  \n|---------------|----------------------|--------------------|------------------------------------|  \n| `forEach`     | `(char) -> void`     | `void`             | Iterate scalar `char` values       |  \n| `forEachByte` | `(u8) -> void`       | `void`             | Iterate over every byte            |  \n| `map`         | `(char) -> char`     | `String`           | Transform scalar `char` values     |  \n| `mapBytes`    | `(u8) -> u8`         | `String`           | Transform bytes directly           |  \n| `findByte`    | `(u8) -> boolean`    | `Option<u64>`      | Index of first matching byte       |  \n| `findLastByte`| `(u8) -> boolean`    | `Option<u64>`      | Index of last matching byte        |  \n| `trimWhere`   | `(u8) -> boolean`    | `String`           | Strip leading/trailing bytes       |  \n| `split`       | `(u8) -> boolean`    | `Vector<String>`   | Split into segments                |  \n  \nAll callbacks are `@noescape`: the closure must not outlive the method call.  \n  \n## Byte Conversion  \n  \n| Method    | Returns         | Description                        |  \n|-----------|-----------------|------------------------------------|  \n| `toBytes` | `Vector<u8>`    | Copy bytes into a byte vector      |  \n| `toChars` | `Vector<char>`  | Copy bytes into a char vector      |  \n  \n## Numeric Conversions  \n  \n`String::create` is overloaded for all numeric primitives (`i8` through  \n`f64`), plus `str`. Extension methods provide `.toString()` on every  \nprimitive type.  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \n  \nfunction main(): i32 {  \n  let greeting: String = String::create(\"hello\");  \n  let world: str = \" world\";  \n  let msg: String = greeting.concat(world);  \n  \n  Io::println(msg);  \n  \n  // Byte-level: trim whitespace and split on commas  \n  let csv: String = String::create(\"  a,b,c  \");  \n  let trimmed: String = csv.trimWhere((b: u8): boolean -> { return b == 32; });  \n  let parts: Vector<String> = trimmed.split((b: u8): boolean -> { return b == 44; });  \n  // parts: [\"a\", \"b\", \"c\"]  \n  \n  return 0;  \n}  \n```"
     },
@@ -15172,6 +15192,723 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function lexicalStringCompare(left: &String, right: &String): i32"
+    },
+    {
+      "module": "std::sqlite3",
+      "path": "std::sqlite3::Sqlite3",
+      "name": "Sqlite3",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Sqlite3"
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::PREPARE_TO_NUL",
+      "name": "PREPARE_TO_NUL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const PREPARE_TO_NUL: i32"
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::SQLITE_MISUSE",
+      "name": "SQLITE_MISUSE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_MISUSE: i32"
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::SQLITE_OK",
+      "name": "SQLITE_OK",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_OK: i32"
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::Sqlite3",
+      "name": "Sqlite3",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Sqlite3",
+      "doc": "One open SQLite database.  \n  \nThe handle is closed on drop. Because drop order is the reverse of  \ndeclaration order, declaring the connection before the statements and  \ntransactions it produces closes it last."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::Sqlite3::Connection",
+      "name": "Connection",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Connection",
+      "doc": "A single open SQLite database.",
+      "members": [
+        {
+          "name": "db",
+          "kind": "field",
+          "signature": "db: *mut void",
+          "doc": "The `sqlite3*` handle, or `null` after `close`."
+        },
+        {
+          "name": "open",
+          "kind": "method",
+          "signature": "static open(path: str): Result<Connection, Error>",
+          "doc": "Opens (or creates) the database file at `path`.  \n  \nOn failure the handle SQLite allocated for the message is closed and  \nthe error is returned. A file database gets `PRAGMA journal_mode=WAL`  \n(see the module docs); `\":memory:\"` skips it."
+        },
+        {
+          "name": "openInMemory",
+          "kind": "method",
+          "signature": "static openInMemory(): Result<Connection, Error>",
+          "doc": "Opens a private in-memory database. `close` or drop erases it."
+        },
+        {
+          "name": "begin",
+          "kind": "method",
+          "signature": "begin(&mut self): Result<Transaction, Error>",
+          "doc": "Begins a deferred transaction. Commit with `commit`; dropping the  \n`Transaction` first rolls it back, so an early `return` cannot leave  \none open."
+        },
+        {
+          "name": "busyTimeout",
+          "kind": "method",
+          "signature": "busyTimeout(&mut self, milliseconds: i32): Result<void, Error>",
+          "doc": "Sets how long a statement waits for a locked database before it fails  \nwith `SQLITE_BUSY`. Zero disables the wait."
+        },
+        {
+          "name": "changes",
+          "kind": "method",
+          "signature": "changes(&self): i32",
+          "doc": "How many rows the most recent statement on this connection changed."
+        },
+        {
+          "name": "close",
+          "kind": "method",
+          "signature": "close(&mut self): Result<void, Error>",
+          "doc": "Closes the database before drop. A second `close` (or any call after  \nit) is a misuse error, not a panic."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Closes the database. Statements prepared on it must already be gone;  \ndrop order (reverse of declaration) gives that in ordinary use."
+        },
+        {
+          "name": "exec",
+          "kind": "method",
+          "signature": "exec(&mut self, sql: str): Result<void, Error>",
+          "doc": "Runs one or more semicolon-separated statements; every result row is  \ndiscarded. Use `prepare` when values are bound or rows are read."
+        },
+        {
+          "name": "lastInsertRowId",
+          "kind": "method",
+          "signature": "lastInsertRowId(&self): i64",
+          "doc": "The rowid of the most recent successful insert on this connection."
+        },
+        {
+          "name": "prepare",
+          "kind": "method",
+          "signature": "prepare(&self, sql: str): Result<Statement, Error>",
+          "doc": "Compiles the first statement of `sql`. Any statements after the first  \nsemicolon are not compiled; run them in their own `prepare` or `exec`.  \nThe statement is finalized on drop; it must not outlive the connection."
+        }
+      ]
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection",
+      "name": "__sqlite3_connection",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace __sqlite3_connection"
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_busy_timeout",
+      "name": "sqlite3_busy_timeout",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_busy_timeout(db: *mut void, milliseconds: i32): i32",
+      "doc": "Sets the busy handler's timeout in milliseconds. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_changes",
+      "name": "sqlite3_changes",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_changes(db: *mut void): i32",
+      "doc": "How many rows the most recent statement changed. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_close_v2",
+      "name": "sqlite3_close_v2",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_close_v2(db: *mut void): i32",
+      "doc": "Closes `db`, deferring the deallocation while statements are live.  \nDeclared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_exec",
+      "name": "sqlite3_exec",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_exec(db: *mut void, sql: *u8, callback: *void, callbackArgument: *void, errorMessage: *mut *mut u8): i32",
+      "doc": "Runs one or more statements separated by semicolons. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_last_insert_rowid",
+      "name": "sqlite3_last_insert_rowid",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_last_insert_rowid(db: *mut void): i64",
+      "doc": "The rowid of the most recent successful insert. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_open",
+      "name": "sqlite3_open",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_open(filename: *u8, db: *mut *mut void): i32",
+      "doc": "Opens (or creates) the database `filename`. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_prepare_v2",
+      "name": "sqlite3_prepare_v2",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_prepare_v2(db: *mut void, sql: *u8, maximumBytes: i32, statement: *mut *mut void, tail: *mut *mut u8): i32",
+      "doc": "Compiles the first statement in `sql`. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::sqlite3ExecDirect",
+      "name": "sqlite3ExecDirect",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function sqlite3ExecDirect(db: *mut void, sql: str): Result<void, Error>",
+      "doc": "Runs `sql` on the raw handle. The plumbing `begin`, `exec` and  \n`Transaction` share; not part of the public API."
+    },
+    {
+      "module": "std::sqlite3::error",
+      "path": "std::sqlite3::error::EXTENDED_CODE_MASK",
+      "name": "EXTENDED_CODE_MASK",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EXTENDED_CODE_MASK: i32"
+    },
+    {
+      "module": "std::sqlite3::error",
+      "path": "std::sqlite3::error::SQLITE_CONSTRAINT",
+      "name": "SQLITE_CONSTRAINT",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_CONSTRAINT: i32"
+    },
+    {
+      "module": "std::sqlite3::error",
+      "path": "std::sqlite3::error::Sqlite3",
+      "name": "Sqlite3",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Sqlite3",
+      "doc": "Why a SQLite call failed.  \n  \nEvery fallible operation in `std::sqlite3` returns  \n`Result<T, Sqlite3::Error>`; no function in the module panics."
+    },
+    {
+      "module": "std::sqlite3::error",
+      "path": "std::sqlite3::error::Sqlite3::Error",
+      "name": "Error",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Error",
+      "doc": "A failed SQLite call.  \n  \n`code` is the extended result code, which names the specific condition  \n(`SQLITE_CONSTRAINT_UNIQUE`, `SQLITE_BUSY`, ...) where the engine has  \none. `message` is the connection's own human-readable message, copied  \nout of SQLite's buffer.",
+      "members": [
+        {
+          "name": "code",
+          "kind": "field",
+          "signature": "code: i32",
+          "doc": "The extended SQLite result code, as `sqlite3_extended_errcode` reports."
+        },
+        {
+          "name": "message",
+          "kind": "field",
+          "signature": "message: String",
+          "doc": "The message `sqlite3_errmsg` reports for the connection."
+        },
+        {
+          "name": "fromConnection",
+          "kind": "method",
+          "signature": "static fromConnection(db: *mut void): Error",
+          "doc": "Builds the error of the most recent failed call on `db`.  \n  \nPart of the binding's plumbing: call it right after a SQLite call  \nfails, before anything else touches the connection, because both  \n`sqlite3_errmsg` and `sqlite3_extended_errcode` report the most recent  \nresult, not a stored one."
+        },
+        {
+          "name": "isConstraint",
+          "kind": "method",
+          "signature": "isConstraint(&self): boolean",
+          "doc": "Whether the error is a constraint violation (`SQLITE_CONSTRAINT` or  \none of its extended codes). A service turns these into 409/422."
+        }
+      ]
+    },
+    {
+      "module": "std::sqlite3::error",
+      "path": "std::sqlite3::error::__sqlite3_error",
+      "name": "__sqlite3_error",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace __sqlite3_error"
+    },
+    {
+      "module": "std::sqlite3::error",
+      "path": "std::sqlite3::error::__sqlite3_error::sqlite3_errmsg",
+      "name": "sqlite3_errmsg",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_errmsg(db: *mut void): *u8",
+      "doc": "The error message of the most recent failed call on `db`, UTF-8,  \nNUL-terminated, owned by SQLite. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::error",
+      "path": "std::sqlite3::error::__sqlite3_error::sqlite3_extended_errcode",
+      "name": "sqlite3_extended_errcode",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_extended_errcode(db: *mut void): i32",
+      "doc": "The most recent extended result code of `db`. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::SQLITE_DONE",
+      "name": "SQLITE_DONE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_DONE: i32"
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::SQLITE_MISUSE",
+      "name": "SQLITE_MISUSE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_MISUSE: i32"
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::SQLITE_NULL",
+      "name": "SQLITE_NULL",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_NULL: i32"
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::SQLITE_ROW",
+      "name": "SQLITE_ROW",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_ROW: i32"
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::Sqlite3",
+      "name": "Sqlite3",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Sqlite3",
+      "doc": "One compiled SQL statement, finalized on drop.  \n  \nA statement borrows its connection: it must not outlive it, and it must  \nnot be used after the connection is closed. Because drop order is the  \nreverse of declaration order, declaring the connection before the  \nstatement finalizes the statement first."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::Sqlite3::Statement",
+      "name": "Statement",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Statement",
+      "doc": "One compiled SQL statement.",
+      "members": [
+        {
+          "name": "stmt",
+          "kind": "field",
+          "signature": "stmt: *mut void",
+          "doc": "The `sqlite3_stmt*` handle, or `null` after finalize."
+        },
+        {
+          "name": "bindBlob",
+          "kind": "method",
+          "signature": "bindBlob(&mut self, index: i32, bytes: &Vector<u8>): Result<void, Error>",
+          "doc": "Binds `bytes` to parameter `index` (1-based). SQLite copies the bytes,  \nso a zero byte inside is fine."
+        },
+        {
+          "name": "bindInt",
+          "kind": "method",
+          "signature": "bindInt(&mut self, index: i32, value: i64): Result<void, Error>",
+          "doc": "Binds a 64-bit integer to parameter `index` (1-based)."
+        },
+        {
+          "name": "bindNull",
+          "kind": "method",
+          "signature": "bindNull(&mut self, index: i32): Result<void, Error>",
+          "doc": "Binds NULL to parameter `index` (1-based)."
+        },
+        {
+          "name": "bindReal",
+          "kind": "method",
+          "signature": "bindReal(&mut self, index: i32, value: f64): Result<void, Error>",
+          "doc": "Binds a 64-bit float to parameter `index` (1-based)."
+        },
+        {
+          "name": "bindText",
+          "kind": "method",
+          "signature": "bindText(&mut self, index: i32, text: str): Result<void, Error>",
+          "doc": "Binds UTF-8 text to parameter `index` (1-based). SQLite copies the  \nbytes; interior NUL bytes are preserved and bound with the text."
+        },
+        {
+          "name": "columnBlob",
+          "kind": "method",
+          "signature": "columnBlob(&self, column: i32): Vector<u8>",
+          "doc": "Column `column` of the current row as owned bytes, interior zero bytes  \nincluded."
+        },
+        {
+          "name": "columnCount",
+          "kind": "method",
+          "signature": "columnCount(&self): i32",
+          "doc": "How many columns one row of this statement has."
+        },
+        {
+          "name": "columnInt",
+          "kind": "method",
+          "signature": "columnInt(&self, column: i32): i64",
+          "doc": "Column `column` of the current row as an integer, coercing the way  \nSQLite does."
+        },
+        {
+          "name": "columnIsNull",
+          "kind": "method",
+          "signature": "columnIsNull(&self, column: i32): boolean",
+          "doc": "Whether column `column` of the current row is NULL. A coercion would  \nreport both NULL and 0 as `columnInt() == 0`; this tells them apart."
+        },
+        {
+          "name": "columnReal",
+          "kind": "method",
+          "signature": "columnReal(&self, column: i32): f64",
+          "doc": "Column `column` of the current row as a float, coercing the way SQLite  \ndoes."
+        },
+        {
+          "name": "columnText",
+          "kind": "method",
+          "signature": "columnText(&self, column: i32): String",
+          "doc": "Column `column` of the current row as an owned `String`, copied with  \nits exact byte length, interior NUL bytes included."
+        },
+        {
+          "name": "connection",
+          "kind": "method",
+          "signature": "connection(&self): *mut void",
+          "doc": "The connection's error surface for this statement's failures."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Finalizes the statement, releasing its memory. Idempotent: a second  \n`drop` sees the null handle."
+        },
+        {
+          "name": "reset",
+          "kind": "method",
+          "signature": "reset(&mut self): Result<void, Error>",
+          "doc": "Rewinds the statement for another run. Bindings survive `reset`; bind  \nevery parameter again before stepping."
+        },
+        {
+          "name": "step",
+          "kind": "method",
+          "signature": "step(&mut self): Result<Step, Error>",
+          "doc": "Advances to the next row (`Step::ROW`) or finishes (`Step::DONE`).  \nAfter `DONE` the column getters are no longer meaningful until  \n`reset`."
+        }
+      ]
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::Sqlite3::Step",
+      "name": "Step",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum Step",
+      "doc": "What one call of `step` found.",
+      "members": [
+        {
+          "name": "ROW",
+          "kind": "variant",
+          "signature": "ROW"
+        },
+        {
+          "name": "DONE",
+          "kind": "variant",
+          "signature": "DONE"
+        }
+      ]
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::Sqlite3::bound",
+      "name": "bound",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function bound(result: i32, statement: *mut void, index: i32): Result<void, Error>",
+      "doc": "Turns a `sqlite3_bind_*` result into a `Result`. An index SQLite rejects  \n(no such parameter) reports as misuse with the index in the message."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::Sqlite3::statementConnection",
+      "name": "statementConnection",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function statementConnection(statement: *mut void): *mut void",
+      "doc": "The connection a live statement handle belongs to."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement",
+      "name": "__sqlite3_statement",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace __sqlite3_statement"
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_bind_blob",
+      "name": "sqlite3_bind_blob",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_bind_blob(statement: *mut void, index: i32, value: *void, length: i32, destructor: *void): i32",
+      "doc": "Binds `length` bytes of a blob. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_bind_double",
+      "name": "sqlite3_bind_double",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_bind_double(statement: *mut void, index: i32, value: f64): i32",
+      "doc": "Binds a 64-bit float. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_bind_int64",
+      "name": "sqlite3_bind_int64",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_bind_int64(statement: *mut void, index: i32, value: i64): i32",
+      "doc": "Binds a 64-bit integer. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_bind_null",
+      "name": "sqlite3_bind_null",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_bind_null(statement: *mut void, index: i32): i32",
+      "doc": "Binds an untyped value; the parameter stays NULL. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_bind_text",
+      "name": "sqlite3_bind_text",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_bind_text(statement: *mut void, index: i32, value: *u8, length: i32, destructor: *void): i32",
+      "doc": "Binds `length` bytes of UTF-8 text. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_column_blob",
+      "name": "sqlite3_column_blob",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_column_blob(statement: *mut void, column: i32): *void",
+      "doc": "Column `column` of the current row as bytes. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_column_bytes",
+      "name": "sqlite3_column_bytes",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_column_bytes(statement: *mut void, column: i32): i32",
+      "doc": "The byte length of column `column` of the current row. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_column_count",
+      "name": "sqlite3_column_count",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_column_count(statement: *mut void): i32",
+      "doc": "How many columns a row of `statement` has. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_column_double",
+      "name": "sqlite3_column_double",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_column_double(statement: *mut void, column: i32): f64",
+      "doc": "Column `column` of the current row as a float. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_column_int64",
+      "name": "sqlite3_column_int64",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_column_int64(statement: *mut void, column: i32): i64",
+      "doc": "Column `column` of the current row as an integer. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_column_text",
+      "name": "sqlite3_column_text",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_column_text(statement: *mut void, column: i32): *u8",
+      "doc": "Column `column` of the current row as UTF-8 text. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_column_type",
+      "name": "sqlite3_column_type",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_column_type(statement: *mut void, column: i32): i32",
+      "doc": "The storage class of column `column` of the current row. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_db_handle",
+      "name": "sqlite3_db_handle",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_db_handle(statement: *mut void): *mut void",
+      "doc": "The connection `statement` was prepared on. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_finalize",
+      "name": "sqlite3_finalize",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_finalize(statement: *mut void): i32",
+      "doc": "Destroys `statement` and releases its memory. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_reset",
+      "name": "sqlite3_reset",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_reset(statement: *mut void): i32",
+      "doc": "Rewinds `statement` for another run with new bindings. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::__sqlite3_statement::sqlite3_step",
+      "name": "sqlite3_step",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_step(statement: *mut void): i32",
+      "doc": "Advances `statement` to its next row or to completion. Declared in  \n`sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::bindIndexError",
+      "name": "bindIndexError",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function bindIndexError(index: i32): Error",
+      "doc": "A negative or out-of-range bind index."
+    },
+    {
+      "module": "std::sqlite3::statement",
+      "path": "std::sqlite3::statement::transientDestructor",
+      "name": "transientDestructor",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function transientDestructor(): *void",
+      "doc": "The destructor argument that makes SQLite copy the bound bytes:  \n`SQLITE_TRANSIENT`, the sentinel the `sqlite3_bind_text` documentation  \ndefines — \"`((sqlite3_destructor_type)-1)`, ... makes a private copy\" —  \nspelled as the pointer value -1."
+    },
+    {
+      "module": "std::sqlite3::transaction",
+      "path": "std::sqlite3::transaction::SQLITE_MISUSE",
+      "name": "SQLITE_MISUSE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_MISUSE: i32"
+    },
+    {
+      "module": "std::sqlite3::transaction",
+      "path": "std::sqlite3::transaction::Sqlite3",
+      "name": "Sqlite3",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Sqlite3",
+      "doc": "A scoped transaction: commit explicitly, roll back on drop."
+    },
+    {
+      "module": "std::sqlite3::transaction",
+      "path": "std::sqlite3::transaction::Sqlite3::Transaction",
+      "name": "Transaction",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Transaction",
+      "doc": "One open transaction on a `Connection`.",
+      "members": [
+        {
+          "name": "connection",
+          "kind": "field",
+          "signature": "connection: *mut Connection",
+          "doc": "The `Connection` this transaction belongs to. Read, never written:  \nthe live `sqlite3*` handle is the connection's own field, so a  \n`close()` before `commit` is visible here as a null handle."
+        },
+        {
+          "name": "finished",
+          "kind": "field",
+          "signature": "finished: boolean",
+          "doc": "Whether `commit` or `rollback` already ended it."
+        },
+        {
+          "name": "commit",
+          "kind": "method",
+          "signature": "commit(&mut self): Result<void, Error>",
+          "doc": "Commits the transaction. A transaction already ended by `commit` or  \n`rollback`, or one whose connection is closed, is a misuse error."
+        },
+        {
+          "name": "drop",
+          "kind": "method",
+          "signature": "drop(&mut self): void",
+          "doc": "Rolls the transaction back when it is still open and its connection  \nstill exists. Silent by contract: there is no caller to report to.  \nSee the module docs."
+        },
+        {
+          "name": "rollback",
+          "kind": "method",
+          "signature": "rollback(&mut self): Result<void, Error>",
+          "doc": "Rolls the transaction back now. The same thing drop does, with the  \noutcome reported."
+        }
+      ]
+    },
+    {
+      "module": "std::sqlite3::transaction",
+      "path": "std::sqlite3::transaction::Sqlite3::connectionHandle",
+      "name": "connectionHandle",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function connectionHandle(connection: *mut Connection): Result<*mut void, Error>",
+      "doc": "The connection's live `sqlite3*` handle, or a misuse error when the  \nconnection is gone — either the guard lost it (never in ordinary use)  \nor the connection was closed first."
+    },
+    {
+      "module": "std::sqlite3::transaction",
+      "path": "std::sqlite3::transaction::Sqlite3::finishedError",
+      "name": "finishedError",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function finishedError(operation: str): Error",
+      "doc": "The misuse error for an operation on a finished transaction."
     },
     {
       "module": "std::string",

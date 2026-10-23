@@ -1,0 +1,73 @@
+//!
+//! # Errors
+//!
+//! `Sqlite3::Error`, the error type every fallible operation of `std::sqlite3`
+//! returns. Nothing in the module panics: a failing SQLite call becomes an
+//! `Error` value carrying the extended result code and the message that
+//! `sqlite3_errmsg` reports for the connection.
+//!
+//! ## Exports
+//!
+//! | Export          | Description                                    |
+//! |-----------------|------------------------------------------------|
+//! | `Sqlite3::Error` | `code` (extended result code) and `message`; `isConstraint()` |
+//!
+//! ## Constraint violations
+//!
+//! `isConstraint()` answers whether the error is one of the `SQLITE_CONSTRAINT`
+//! family (primary-key, unique, not-null, check, foreign-key). A service layer
+//! turns those into HTTP 409/422; every other code is a 500. The check is on
+//! the extended code's primary part (`code & 0xff`), so any specific
+//! constraint code the engine reports matches.
+
+extern __sqlite3_error {
+  /// The error message of the most recent failed call on `db`, UTF-8,
+  /// NUL-terminated, owned by SQLite. Declared in `sqlite3.h`.
+  function sqlite3_errmsg(db: *mut void): *u8;
+  /// The most recent extended result code of `db`. Declared in `sqlite3.h`.
+  function sqlite3_extended_errcode(db: *mut void): i32;
+}
+
+/// The primary result code of the `SQLITE_CONSTRAINT` family.
+const SQLITE_CONSTRAINT: i32 = 19;
+
+/// The low byte that every extended result code keeps from its primary code.
+const EXTENDED_CODE_MASK: i32 = 0xff;
+
+/// Why a SQLite call failed.
+///
+/// Every fallible operation in `std::sqlite3` returns
+/// `Result<T, Sqlite3::Error>`; no function in the module panics.
+export namespace Sqlite3 {
+  /// A failed SQLite call.
+  ///
+  /// `code` is the extended result code, which names the specific condition
+  /// (`SQLITE_CONSTRAINT_UNIQUE`, `SQLITE_BUSY`, ...) where the engine has
+  /// one. `message` is the connection's own human-readable message, copied
+  /// out of SQLite's buffer.
+  record Error {
+    /// The extended SQLite result code, as `sqlite3_extended_errcode` reports.
+    public code: i32;
+    /// The message `sqlite3_errmsg` reports for the connection.
+    public message: String;
+
+    /// Builds the error of the most recent failed call on `db`.
+    ///
+    /// Part of the binding's plumbing: call it right after a SQLite call
+    /// fails, before anything else touches the connection, because both
+    /// `sqlite3_errmsg` and `sqlite3_extended_errcode` report the most recent
+    /// result, not a stored one.
+    public static fromConnection(db: *mut void): Error {
+      return Error {
+        code: __sqlite3_error::sqlite3_extended_errcode(db),
+        message: String::create(__sqlite3_error::sqlite3_errmsg(db) as str),
+      };
+    }
+
+    /// Whether the error is a constraint violation (`SQLITE_CONSTRAINT` or
+    /// one of its extended codes). A service turns these into 409/422.
+    public isConstraint(&self): boolean {
+      return (self.code & EXTENDED_CODE_MASK) == SQLITE_CONSTRAINT;
+    }
+  }
+}

@@ -1,0 +1,86 @@
+//!
+//! # SQLite3
+//!
+//! A faithful SQLite binding: `std::sqlite3` wraps the C API's `sqlite3*` and
+//! `sqlite3_stmt*` handles in RAII types and returns every failure as a
+//! `Result`. The mapping layer (`std::orm`, planned) builds on it; programs
+//! that only want raw SQL never link anything else.
+//!
+//! ## Exports
+//!
+//! | Export                | Description                                    |
+//! |-----------------------|------------------------------------------------|
+//! | `Sqlite3::Connection` | One database: `open`, `openInMemory`, `close`, `exec`, `prepare`, `lastInsertRowId`, `changes`, `busyTimeout`, `begin`. Closes on drop |
+//! | `Sqlite3::Statement`  | One compiled statement: `bindNull`, `bindInt`, `bindReal`, `bindText`, `bindBlob`, `step`, `columnCount`, `columnIsNull`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `reset`. Finalizes on drop |
+//! | `Sqlite3::Step`       | `ROW` or `DONE`, what `Statement::step` reports |
+//! | `Sqlite3::Transaction`| A scoped transaction: `commit`, `rollback`; rolls back on drop |
+//! | `Sqlite3::Error`      | `code` (extended result code) and `message`; `isConstraint()` |
+//!
+//! ## Errors
+//!
+//! Every fallible operation returns `Result<T, Sqlite3::Error>`; nothing in
+//! the module panics. `Error::code` is SQLite's extended result code and
+//! `Error::isConstraint()` names the constraint family, which a service turns
+//! into 409/422. See `std::sqlite3::error`.
+//!
+//! ## Linking
+//!
+//! The module links `libsqlite3` and includes `sqlite3.h`
+//! (`[linking.sqlite3]` in `std/manifest.toml`), so every machine that builds
+//! the compiler or the standard library needs the SQLite development headers
+//! installed (`libsqlite3-dev` on Debian and Ubuntu, `pkgs.sqlite` in this
+//! repository's Nix dev shell).
+//!
+//! ## Journal mode
+//!
+//! `Connection::open` runs `PRAGMA journal_mode=WAL` on file databases so
+//! readers do not block behind a writer; `":memory:"` databases skip the
+//! pragma, where WAL never applies. See `std::sqlite3::connection`.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Sqlite3 from "std::sqlite3";
+//!
+//! function main(): i32 {
+//!   let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();
+//!
+//!   connection.exec("CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL)").unwrap();
+//!
+//!   let mut statement: Sqlite3::Statement =
+//!     connection.prepare("INSERT INTO tasks (title) VALUES (?)").unwrap();
+//!
+//!   statement.bindText(1, "write the ORM").unwrap();
+//!   statement.step().unwrap();
+//!
+//!   return connection.lastInsertRowId() == 1 ? 0 : 1;
+//! }
+//! ```
+//!
+//! ## Statements
+//!
+//! `Connection::prepare` compiles only the first statement of its SQL;
+//! anything after the first semicolon is not compiled and is silently
+//! dropped. Run each statement on its own `prepare`, or hand multi-statement
+//! scripts that need no parameters and read no rows to `Connection::exec`.
+//!
+//! ## Transactions
+//!
+//! `Connection::begin` returns a `Sqlite3::Transaction` that commits on
+//! `commit()` and rolls back on drop, so an early `return` cannot leave one
+//! open; the guard reads its connection's live handle on every use, so a
+//! transaction on a closed connection is refused with a misuse error instead
+//! of touching freed memory. See `std::sqlite3::transaction`.
+//!
+//! ## Non-goals
+//!
+//! The binding is blocking and synchronous. There is no asynchronous API and
+//! no query builder; the mapping layer is `std::orm` (planned), not this
+//! module.
+
+import _ from "std::sqlite3::error";
+import _ from "std::sqlite3::connection";
+import _ from "std::sqlite3::statement";
+import _ from "std::sqlite3::transaction";
+
+export namespace Sqlite3 {}
