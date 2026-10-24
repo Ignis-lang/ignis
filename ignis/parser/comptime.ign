@@ -1,0 +1,1977 @@
+import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
+import
+  Diagnostic,
+  DiagnosticCode,
+  LabelKind,
+  Severity,
+  SourceSpan,
+  noFile,
+from "@compiler::diagnostics";
+
+import _ from "./expressions";
+import _ from "./shared";
+import _ from "./trait_defaults";
+
+/// Unrolls `comptime for (field of @fields<Self>()) { ... }` loops.
+///
+/// Runs once every trait default is copied onto its implementing types
+/// (`copyTraitDefaultsAcrossModules`), before binding, so a loop in a copied
+/// default unrolls over the fields of the type it was copied onto. Each loop
+/// becomes a block holding one copy of its body per field of `Self`, in
+/// declaration order, under fresh ids. In a copy, the descriptor is replaced:
+/// `field.name` by a `str` literal, `field.index` by an integer literal,
+/// `@field(value, field)` by the member access `value.<name>`,
+/// `@fieldType(field)` by a copy of the field's written type, and
+/// `@attribute<A>(field)` by `@attribute<A, Self, Option<A>>("<name>")`, which
+/// the typechecker types as `Option<A>` and HIR lowering builds from the
+/// constant values the attribute pass stores on the field: attributes are only
+/// evaluated after typechecking, so the value cannot be written as AST here.
+/// `@attribute<A>(Self)` becomes `@attribute<A, Self, Option<A>>()` the same
+/// way. A record initializer entry
+/// `comptime for (field of @fields<Self>()) @field(field): value` unrolls
+/// into one `<name>: value` entry per field.
+///
+/// The body of a trait default, checked once against the trait, unrolls over
+/// no field at all: `Self` has no known fields there. What the unrolling
+/// reports is kept on the module (`Ast::Module::comptimeDiagnostics`).
+export namespace ParserComptime {
+  enum OwnerKind {
+    NONE,
+    RECORD,
+    TRAIT,
+    ENUM,
+    OTHER,
+  }
+
+  /// The type a method body's `Self` names.
+  record Owner {
+    public kind: ParserComptime::OwnerKind;
+    public name: String;
+    /// The instance fields of a record `Self`, in declaration order.
+    public fields: Vector<Ast::PatternId>;
+    /// The type parameters in scope: the owner's and the method's.
+    public typeParameters: Vector<String>;
+    /// Whether the method is a trait default copied onto its type. Errors
+    /// in the body of a copy are the trait's, reported on the trait's body.
+    public inherited: boolean;
+  }
+
+  /// What one unrolled iteration stands for.
+  record Descriptor {
+    public binding: String;
+    public fieldName: String;
+    public index: i64;
+    public annotation: Option<Ast::TypeId>;
+  }
+
+  /// The ids of the direct children of one node.
+  record Children {
+    public statements: Vector<Ast::StatementId>;
+    public expressions: Vector<Ast::ExpressionId>;
+    public types: Vector<Ast::TypeId>;
+    public patterns: Vector<Ast::PatternId>;
+  }
+
+  /// The id counts of each arena of a module, taken before a copy so the
+  /// nodes the copy appends can be visited.
+  record ArenaMark {
+    public expressions: u64;
+    public types: u64;
+  }
+
+  function emptyChildren(): ParserComptime::Children {
+    return ParserComptime::Children {
+      statements: Vector::new<Ast::StatementId>(),
+      expressions: Vector::new<Ast::ExpressionId>(),
+      types: Vector::new<Ast::TypeId>(),
+      patterns: Vector::new<Ast::PatternId>(),
+    };
+  }
+
+  function copyNames(source: &Vector<String>): Vector<String> {
+    let mut copied: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(name) = source.get(index)) {
+        copied.push(name.clone());
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyPatternIds(source: &Vector<Ast::PatternId>): Vector<Ast::PatternId> {
+    let mut copied: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        copied.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyItemIds(source: &Vector<Ast::ItemId>): Vector<Ast::ItemId> {
+    let mut copied: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        copied.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyOwner(owner: &ParserComptime::Owner): ParserComptime::Owner {
+    return ParserComptime::Owner {
+      kind: owner.kind,
+      name: owner.name.clone(),
+      fields: ParserComptime::copyPatternIds(&owner.fields),
+      typeParameters: ParserComptime::copyNames(&owner.typeParameters),
+      inherited: owner.inherited,
+    };
+  }
+
+  function noOwner(): ParserComptime::Owner {
+    return ParserComptime::Owner {
+      kind: ParserComptime::OwnerKind::NONE,
+      name: String::new(),
+      fields: Vector::new<Ast::PatternId>(),
+      typeParameters: Vector::new<String>(),
+      inherited: false,
+    };
+  }
+
+  function genericNames(parameters: &Vector<Ast::GenericParam>): Vector<String> {
+    let mut names: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < parameters.length()) {
+      if (let Option::SOME(parameter) = parameters.get(index)) {
+        names.push(parameter.name.clone());
+      }
+
+      index += 1;
+    }
+
+    return names;
+  }
+
+  /// The instance fields of a record: a field written with `= value` is
+  /// static and belongs to no value of the record.
+  function instanceFields(
+    module: &Ast::Module,
+    fields: &Vector<Ast::PatternId>
+  ): Vector<Ast::PatternId> {
+    let mut kept: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    let mut index: u64 = 0;
+
+    while (index < fields.length()) {
+      if (let Option::SOME(fieldId) = fields.get(index)) {
+        if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*fieldId)) {
+          if (binding.initializer.isNone()) {
+            kept.push(*fieldId);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return kept;
+  }
+
+  /// The record node of `module` declared at the top level, or inside its
+  /// namespaces, under `name`. An extension block is not one.
+  function findRecord(
+    module: &Ast::Module,
+    items: &Vector<Ast::ItemId>,
+    name: &String
+  ): Option<Ast::ItemId> {
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(itemId) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      index += 1;
+
+      match (module.items.get(*itemId)) {
+        Option::SOME(Ast::Item::Node::Record(record_)) -> {
+          if (record_.name.equals(name.toStr()) && module.extensionTarget(*itemId).isNone()) {
+            return Option::SOME(*itemId);
+          }
+        },
+        Option::SOME(Ast::Item::Node::Export(export_)) -> {
+          if (let Option::SOME(declaration) = export_.declaration) {
+            let mut single: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+            single.push(declaration);
+
+            if (let Option::SOME(found) = ParserComptime::findRecord(module, &single, name)) {
+              return Option::SOME(found);
+            }
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    return Option::NONE;
+  }
+
+  /// The owner a method of the record, enum, trait or extension block
+  /// `itemId` sees as `Self`.
+  function ownerOf(module: &Ast::Module, itemId: Ast::ItemId): ParserComptime::Owner {
+    let mut owner: ParserComptime::Owner = ParserComptime::noOwner();
+
+    match (module.items.get(itemId)) {
+      Option::SOME(Ast::Item::Node::Record(record_)) -> {
+        owner.typeParameters = ParserComptime::genericNames(&record_.genericParameters);
+
+        let Option::SOME(targetType) = module.extensionTarget(itemId) else {
+          owner.kind = ParserComptime::OwnerKind::RECORD;
+          owner.name = record_.name.clone();
+          owner.fields = ParserComptime::instanceFields(module, &record_.fields);
+          return owner;
+        };
+
+        owner.kind = ParserComptime::OwnerKind::OTHER;
+        owner.name = record_.name.clone();
+
+        if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(targetType)) {
+          if (path.segments.length() == 1) {
+            if (let Option::SOME(segment) = path.segments.get(0)) {
+              if (let Option::SOME(recordId) = ParserComptime::findRecord(module, &module.roots, segment)) {
+                if (let Option::SOME(Ast::Item::Node::Record(target)) = module.items.get(recordId)) {
+                  owner.kind = ParserComptime::OwnerKind::RECORD;
+                  owner.fields = ParserComptime::instanceFields(module, &target.fields);
+                }
+              }
+            }
+          }
+        }
+
+        return owner;
+      },
+      Option::SOME(Ast::Item::Node::Enum(enum_)) -> {
+        owner.kind = ParserComptime::OwnerKind::ENUM;
+        owner.name = enum_.name.clone();
+        owner.typeParameters = ParserComptime::genericNames(&enum_.genericParameters);
+      },
+      Option::SOME(Ast::Item::Node::Trait(trait_)) -> {
+        owner.kind = ParserComptime::OwnerKind::TRAIT;
+        owner.name = trait_.name.clone();
+        owner.typeParameters = ParserComptime::genericNames(&trait_.genericParameters);
+      },
+      _ -> {},
+    };
+
+    return owner;
+  }
+
+  /// The methods of a record, enum or trait item.
+  function methodsOf(module: &Ast::Module, itemId: Ast::ItemId): Vector<Ast::ItemId> {
+    return match (module.items.get(itemId)) {
+      Option::SOME(Ast::Item::Node::Record(record_)) -> ParserComptime::copyItemIds(&record_.methods),
+      Option::SOME(Ast::Item::Node::Enum(enum_)) -> ParserComptime::copyItemIds(&enum_.methods),
+      Option::SOME(Ast::Item::Node::Trait(trait_)) -> ParserComptime::copyItemIds(&trait_.methods),
+      _ -> Vector::new<Ast::ItemId>(),
+    };
+  }
+
+  /// Unrolls every `comptime for` of `module` and reports the reflection
+  /// constructs written where they cannot be.
+  function expandModule(module: &mut Ast::Module): void {
+    let roots: Vector<Ast::ItemId> = ParserComptime::copyItemIds(&module.roots);
+    let none: ParserComptime::Owner = ParserComptime::noOwner();
+    ParserComptime::expandItems(module, &roots, &none);
+  }
+
+  function expandItems(
+    module: &mut Ast::Module,
+    items: &Vector<Ast::ItemId>,
+    owner: &ParserComptime::Owner
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      if (let Option::SOME(itemId) = items.get(index)) {
+        ParserComptime::expandItem(module, *itemId, owner);
+      }
+
+      index += 1;
+    }
+  }
+
+  function expandItem(
+    module: &mut Ast::Module,
+    itemId: Ast::ItemId,
+    owner: &ParserComptime::Owner
+  ): void {
+    let mut body: Option<Ast::StatementId> = Option::NONE;
+    let mut methodGenerics: Vector<String> = Vector::new<String>();
+    let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+    let mut ownsMethods: boolean = false;
+
+    match (module.items.get(itemId)) {
+      Option::SOME(Ast::Item::Node::Function(function_)) -> {
+        body = Option::SOME(function_.body);
+        methodGenerics = ParserComptime::genericNames(&function_.genericParameters);
+      },
+      Option::SOME(Ast::Item::Node::Record(_)) -> {
+        ownsMethods = true;
+      },
+      Option::SOME(Ast::Item::Node::Enum(_)) -> {
+        ownsMethods = true;
+      },
+      Option::SOME(Ast::Item::Node::Trait(_)) -> {
+        ownsMethods = true;
+      },
+      Option::SOME(Ast::Item::Node::Namespace(namespace_)) -> {
+        nested = ParserComptime::copyItemIds(&namespace_.items);
+      },
+      Option::SOME(Ast::Item::Node::Export(export_)) -> {
+        if (let Option::SOME(declaration) = export_.declaration) {
+          nested.push(declaration);
+        }
+      },
+      _ -> {},
+    };
+
+    if (ownsMethods) {
+      let methodOwner: ParserComptime::Owner = ParserComptime::ownerOf(&*module, itemId);
+      let methods: Vector<Ast::ItemId> = ParserComptime::methodsOf(&*module, itemId);
+      ParserComptime::expandItems(module, &methods, &methodOwner);
+      return;
+    }
+
+    if (nested.length() > 0) {
+      let none: ParserComptime::Owner = ParserComptime::noOwner();
+      ParserComptime::expandItems(module, &nested, &none);
+      return;
+    }
+
+    let Option::SOME(bodyId) = body else {
+      return;
+    };
+
+    let mut scope: ParserComptime::Owner = ParserComptime::copyOwner(owner);
+    scope.inherited = module.inheritedMethod(itemId).isSome();
+    let mut index: u64 = 0;
+
+    while (index < methodGenerics.length()) {
+      if (let Option::SOME(name) = methodGenerics.get(index)) {
+        scope.typeParameters.push(name.clone());
+      }
+
+      index += 1;
+    }
+
+    let reportedBefore: u64 = module.comptimeDiagnostics.length();
+    let hasComptime: boolean = ParserComptime::statementHasComptime(&*module, bodyId);
+    ParserComptime::walkStatement(module, &scope, bodyId);
+
+    // A loop that unrolled over no field, in a trait default or because it was
+    // rejected, leaves the locals only its body used looking unused.
+    if (hasComptime && (scope.kind != ParserComptime::OwnerKind::RECORD || module.comptimeDiagnostics.length() > reportedBefore)) {
+      ParserComptime::exemptBindings(module, bodyId);
+    }
+  }
+
+  /// Whether the subtree of `id` holds a `comptime for` statement or
+  /// record initializer entry.
+  function statementHasComptime(module: &Ast::Module, id: Ast::StatementId): boolean {
+    if (let Option::SOME(Ast::Statement::Node::ForOf(forOf)) = module.statements.get(id)) {
+      if (forOf.isComptime) {
+        return true;
+      }
+    }
+
+    let children: ParserComptime::Children = ParserComptime::statementChildren(module, id);
+    return ParserComptime::childrenHaveComptime(module, &children);
+  }
+
+  function expressionHasComptime(module: &Ast::Module, id: Ast::ExpressionId): boolean {
+    if (let Option::SOME(Ast::Expression::Node::RecordInit(recordInit)) = module.expressions.get(id)) {
+      let mut index: u64 = 0;
+
+      while (index < recordInit.fields.length()) {
+        if (let Option::SOME(field) = recordInit.fields.get(index)) {
+          if (field.loop.isSome()) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    let children: ParserComptime::Children = ParserComptime::expressionChildren(module, id);
+    return ParserComptime::childrenHaveComptime(module, &children);
+  }
+
+  function childrenHaveComptime(
+    module: &Ast::Module,
+    children: &ParserComptime::Children
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < children.statements.length()) {
+      if (let Option::SOME(id) = children.statements.get(index)) {
+        if (ParserComptime::statementHasComptime(module, *id)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.expressions.length()) {
+      if (let Option::SOME(id) = children.expressions.get(index)) {
+        if (ParserComptime::expressionHasComptime(module, *id)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Exempts every local binding in the subtree of `id` from the unused
+  /// lints: the body of a trait default unrolls its loops over no field, so
+  /// a local only a loop reads or mutates looks unused here.
+  function exemptBindings(module: &mut Ast::Module, id: Ast::StatementId): void {
+    let children: ParserComptime::Children = ParserComptime::statementChildren(&*module, id);
+    ParserComptime::exemptChildren(module, &children);
+  }
+
+  function exemptChildren(module: &mut Ast::Module, children: &ParserComptime::Children): void {
+    let mut index: u64 = 0;
+
+    while (index < children.statements.length()) {
+      if (let Option::SOME(id) = children.statements.get(index)) {
+        ParserComptime::exemptBindings(module, *id);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.expressions.length()) {
+      if (let Option::SOME(id) = children.expressions.get(index)) {
+        let nested: ParserComptime::Children = ParserComptime::expressionChildren(&*module, *id);
+        ParserComptime::exemptChildren(module, &nested);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.patterns.length()) {
+      if (let Option::SOME(id) = children.patterns.get(index)) {
+        module.exemptFromComptimeLints(*id);
+        let nested: ParserComptime::Children = ParserComptime::patternChildren(&*module, *id);
+        ParserComptime::exemptChildren(module, &nested);
+      }
+
+      index += 1;
+    }
+  }
+
+  // ===========================================================================
+  // Diagnostics
+  // ===========================================================================
+
+  function report(
+    module: &mut Ast::Module,
+    code: str,
+    message: str,
+    span: SourceSpan,
+    label: str
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < module.comptimeDiagnostics.length()) {
+      if (let Option::SOME(existing) = module.comptimeDiagnostics.get(index)) {
+        let sameSpan: boolean = existing.primarySpan.file.raw() == span.file.raw() && existing.primarySpan.start == span.start && existing.primarySpan.end == span.end;
+
+        if (sameSpan && existing.code.equals(code) && existing.message.equals(message)) {
+          return;
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, label);
+    module.comptimeDiagnostics.push(diagnostic);
+  }
+
+  function expressionSpan(
+    module: &Ast::Module,
+    id: Ast::ExpressionId,
+    fallback: SourceSpan
+  ): SourceSpan {
+    if (let Option::SOME(node) = module.expressions.get(id)) {
+      return Ast::Serializer::expressionSpan(node);
+    }
+
+    return fallback;
+  }
+
+  // ===========================================================================
+  // Children
+  // ===========================================================================
+
+  function pushOptionalExpression(
+    children: &mut ParserComptime::Children,
+    id: Option<Ast::ExpressionId>
+  ): void {
+    if (let Option::SOME(present) = id) {
+      children.expressions.push(present);
+    }
+  }
+
+  function pushOptionalStatement(
+    children: &mut ParserComptime::Children,
+    id: Option<Ast::StatementId>
+  ): void {
+    if (let Option::SOME(present) = id) {
+      children.statements.push(present);
+    }
+  }
+
+  function pushOptionalType(
+    children: &mut ParserComptime::Children,
+    id: Option<Ast::TypeId>
+  ): void {
+    if (let Option::SOME(present) = id) {
+      children.types.push(present);
+    }
+  }
+
+  function pushExpressions(
+    children: &mut ParserComptime::Children,
+    ids: &Vector<Ast::ExpressionId>
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        children.expressions.push(*id);
+      }
+
+      index += 1;
+    }
+  }
+
+  function pushStatements(
+    children: &mut ParserComptime::Children,
+    ids: &Vector<Ast::StatementId>
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        children.statements.push(*id);
+      }
+
+      index += 1;
+    }
+  }
+
+  function pushTypes(children: &mut ParserComptime::Children, ids: &Vector<Ast::TypeId>): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        children.types.push(*id);
+      }
+
+      index += 1;
+    }
+  }
+
+  function pushPatterns(
+    children: &mut ParserComptime::Children,
+    ids: &Vector<Ast::PatternId>
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        children.patterns.push(*id);
+      }
+
+      index += 1;
+    }
+  }
+
+  function statementChildren(module: &Ast::Module, id: Ast::StatementId): ParserComptime::Children {
+    let mut children: ParserComptime::Children = ParserComptime::emptyChildren();
+
+    let Option::SOME(statement) = module.statements.get(id) else {
+      return children;
+    };
+
+    match (statement) {
+      Ast::Statement::Node::Variable(node) -> {
+        children.patterns.push(node.pattern);
+        ParserComptime::pushOptionalType(&mut children, node.annotation);
+        ParserComptime::pushOptionalExpression(&mut children, node.value);
+      },
+      Ast::Statement::Node::Let(node) -> {
+        children.patterns.push(node.pattern);
+        ParserComptime::pushOptionalType(&mut children, node.annotation);
+        ParserComptime::pushOptionalExpression(&mut children, node.value);
+      },
+      Ast::Statement::Node::LetElse(node) -> {
+        children.patterns.push(node.pattern);
+        ParserComptime::pushOptionalType(&mut children, node.annotation);
+        children.expressions.push(node.value);
+        children.statements.push(node.elseBranch);
+      },
+      Ast::Statement::Node::Expression(node) -> {
+        children.expressions.push(node.expression);
+      },
+      Ast::Statement::Node::Block(node) -> {
+        ParserComptime::pushStatements(&mut children, &node.statements);
+        ParserComptime::pushOptionalExpression(&mut children, node.tail);
+      },
+      Ast::Statement::Node::If(node) -> {
+        children.expressions.push(node.condition);
+        children.statements.push(node.thenBranch);
+        ParserComptime::pushOptionalStatement(&mut children, node.elseBranch);
+      },
+      Ast::Statement::Node::While(node) -> {
+        children.expressions.push(node.condition);
+        children.statements.push(node.body);
+      },
+      Ast::Statement::Node::For(node) -> {
+        ParserComptime::pushOptionalStatement(&mut children, node.initializer);
+        ParserComptime::pushOptionalExpression(&mut children, node.condition);
+        ParserComptime::pushOptionalExpression(&mut children, node.update);
+        children.statements.push(node.body);
+      },
+      Ast::Statement::Node::ForOf(node) -> {
+        children.patterns.push(node.pattern);
+        children.expressions.push(node.iterable);
+        children.statements.push(node.body);
+      },
+      Ast::Statement::Node::Return(node) -> {
+        ParserComptime::pushOptionalExpression(&mut children, node.value);
+      },
+      Ast::Statement::Node::Break(node) -> {
+        ParserComptime::pushOptionalExpression(&mut children, node.value);
+      },
+      Ast::Statement::Node::Defer(node) -> {
+        children.statements.push(node.statement);
+      },
+      Ast::Statement::Node::Asm(node) -> {
+        ParserComptime::pushAsmChildren(&mut children, &node);
+      },
+      _ -> {},
+    };
+
+    return children;
+  }
+
+  function pushAsmChildren(
+    children: &mut ParserComptime::Children,
+    node: &Ast::Expression::Asm
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < node.inputs.length()) {
+      if (let Option::SOME(input) = node.inputs.get(index)) {
+        children.expressions.push(input.expression);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < node.outputs.length()) {
+      if (let Option::SOME(output) = node.outputs.get(index)) {
+        children.types.push(output.outputType);
+      }
+
+      index += 1;
+    }
+  }
+
+  function expressionChildren(
+    module: &Ast::Module,
+    id: Ast::ExpressionId
+  ): ParserComptime::Children {
+    let mut children: ParserComptime::Children = ParserComptime::emptyChildren();
+
+    let Option::SOME(expression) = module.expressions.get(id) else {
+      return children;
+    };
+
+    match (expression) {
+      Ast::Expression::Node::Assignment(node) -> {
+        children.expressions.push(node.target);
+        children.expressions.push(node.value);
+      },
+      Ast::Expression::Node::Ternary(node) -> {
+        children.expressions.push(node.condition);
+        children.expressions.push(node.thenBranch);
+        children.expressions.push(node.elseBranch);
+      },
+      Ast::Expression::Node::Cast(node) -> {
+        children.expressions.push(node.expression);
+        children.types.push(node.targetType);
+      },
+      Ast::Expression::Node::Call(node) -> {
+        children.expressions.push(node.callee);
+        ParserComptime::pushTypes(&mut children, &node.typeArguments);
+        ParserComptime::pushExpressions(&mut children, &node.arguments);
+      },
+      Ast::Expression::Node::Binary(node) -> {
+        children.expressions.push(node.left);
+        children.expressions.push(node.right);
+      },
+      Ast::Expression::Node::Dereference(node) -> {
+        children.expressions.push(node.operand);
+      },
+      Ast::Expression::Node::Grouped(node) -> {
+        children.expressions.push(node.expression);
+      },
+      Ast::Expression::Node::Tuple(node) -> {
+        ParserComptime::pushExpressions(&mut children, &node.elements);
+      },
+      Ast::Expression::Node::LetCondition(node) -> {
+        children.patterns.push(node.pattern);
+        children.expressions.push(node.value);
+      },
+      Ast::Expression::Node::Reference(node) -> {
+        children.expressions.push(node.target);
+      },
+      Ast::Expression::Node::Unary(node) -> {
+        children.expressions.push(node.operand);
+      },
+      Ast::Expression::Node::Block(node) -> {
+        ParserComptime::pushStatements(&mut children, &node.statements);
+        ParserComptime::pushOptionalExpression(&mut children, node.tail);
+      },
+      Ast::Expression::Node::If(node) -> {
+        children.expressions.push(node.condition);
+        children.statements.push(node.thenBranch);
+        ParserComptime::pushOptionalStatement(&mut children, node.elseBranch);
+      },
+      Ast::Expression::Node::Match(node) -> {
+        children.expressions.push(node.scrutinee);
+        let mut index: u64 = 0;
+
+        while (index < node.arms.length()) {
+          if (let Option::SOME(arm) = node.arms.get(index)) {
+            children.patterns.push(arm.pattern);
+            ParserComptime::pushOptionalExpression(&mut children, arm.guard);
+            children.expressions.push(arm.body);
+          }
+
+          index += 1;
+        }
+      },
+      Ast::Expression::Node::Vector(node) -> {
+        ParserComptime::pushExpressions(&mut children, &node.elements);
+      },
+      Ast::Expression::Node::VectorAccess(node) -> {
+        children.expressions.push(node.vector);
+        children.expressions.push(node.index);
+      },
+      Ast::Expression::Node::PostfixIncrement(node) -> {
+        children.expressions.push(node.operand);
+      },
+      Ast::Expression::Node::PostfixDecrement(node) -> {
+        children.expressions.push(node.operand);
+      },
+      Ast::Expression::Node::MemberAccess(node) -> {
+        children.expressions.push(node.object);
+      },
+      Ast::Expression::Node::RecordInit(node) -> {
+        children.expressions.push(node.path);
+        ParserComptime::pushTypes(&mut children, &node.typeArguments);
+        let mut index: u64 = 0;
+
+        while (index < node.fields.length()) {
+          if (let Option::SOME(field) = node.fields.get(index)) {
+            children.expressions.push(field.value);
+          }
+
+          index += 1;
+        }
+      },
+      Ast::Expression::Node::BuiltinCall(node) -> {
+        ParserComptime::pushTypes(&mut children, &node.typeArguments);
+        ParserComptime::pushExpressions(&mut children, &node.arguments);
+      },
+      Ast::Expression::Node::Lambda(node) -> {
+        ParserComptime::pushPatterns(&mut children, &node.parameters);
+        ParserComptime::pushOptionalType(&mut children, node.returnType);
+        children.statements.push(node.body);
+      },
+      Ast::Expression::Node::CaptureOverride(node) -> {
+        children.expressions.push(node.expression);
+      },
+      Ast::Expression::Node::Pipe(node) -> {
+        children.expressions.push(node.left);
+        children.expressions.push(node.right);
+      },
+      Ast::Expression::Node::Try(node) -> {
+        children.expressions.push(node.expression);
+      },
+      Ast::Expression::Node::Range(node) -> {
+        ParserComptime::pushOptionalExpression(&mut children, node.start);
+        ParserComptime::pushOptionalExpression(&mut children, node.end);
+      },
+      Ast::Expression::Node::Asm(node) -> {
+        ParserComptime::pushAsmChildren(&mut children, &node);
+      },
+      _ -> {},
+    };
+
+    return children;
+  }
+
+  function typeChildren(module: &Ast::Module, id: Ast::TypeId): Vector<Ast::TypeId> {
+    let mut children: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+
+    let Option::SOME(node) = module.types.get(id) else {
+      return children;
+    };
+
+    match (node) {
+      Ast::Type::Node::Pointer(pointer) -> {
+        children.push(pointer.pointee);
+      },
+      Ast::Type::Node::Reference(reference) -> {
+        children.push(reference.target);
+      },
+      Ast::Type::Node::Tuple(tuple) -> {
+        let mut index: u64 = 0;
+
+        while (index < tuple.elements.length()) {
+          if (let Option::SOME(element) = tuple.elements.get(index)) {
+            children.push(*element);
+          }
+
+          index += 1;
+        }
+      },
+      Ast::Type::Node::Function(function_) -> {
+        let mut index: u64 = 0;
+
+        while (index < function_.parameters.length()) {
+          if (let Option::SOME(parameter) = function_.parameters.get(index)) {
+            children.push(*parameter);
+          }
+
+          index += 1;
+        }
+
+        children.push(function_.returnType);
+      },
+      Ast::Type::Node::Slice(slice) -> {
+        children.push(slice.element);
+      },
+      Ast::Type::Node::FixedArray(array) -> {
+        children.push(array.element);
+      },
+      Ast::Type::Node::Generic(generic) -> {
+        children.push(generic.base);
+        let mut index: u64 = 0;
+
+        while (index < generic.arguments.length()) {
+          if (let Option::SOME(argument) = generic.arguments.get(index)) {
+            children.push(*argument);
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+
+    return children;
+  }
+
+  function patternChildren(module: &Ast::Module, id: Ast::PatternId): ParserComptime::Children {
+    let mut children: ParserComptime::Children = ParserComptime::emptyChildren();
+
+    let Option::SOME(pattern) = module.patterns.get(id) else {
+      return children;
+    };
+
+    match (pattern) {
+      Ast::Pattern::Node::Binding(binding) -> {
+        ParserComptime::pushOptionalType(&mut children, binding.annotation);
+        ParserComptime::pushOptionalExpression(&mut children, binding.initializer);
+      },
+      Ast::Pattern::Node::Literal(literal) -> {
+        children.expressions.push(literal.expression);
+      },
+      Ast::Pattern::Node::Path(path) -> {
+        ParserComptime::pushPatterns(&mut children, &path.arguments);
+      },
+      Ast::Pattern::Node::Tuple(tuple) -> {
+        ParserComptime::pushPatterns(&mut children, &tuple.elements);
+      },
+      Ast::Pattern::Node::Or(orPattern) -> {
+        ParserComptime::pushPatterns(&mut children, &orPattern.alternatives);
+      },
+      _ -> {},
+    };
+
+    return children;
+  }
+
+  function walkChildren(
+    module: &mut Ast::Module,
+    owner: &ParserComptime::Owner,
+    children: &ParserComptime::Children
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < children.statements.length()) {
+      if (let Option::SOME(id) = children.statements.get(index)) {
+        ParserComptime::walkStatement(module, owner, *id);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.expressions.length()) {
+      if (let Option::SOME(id) = children.expressions.get(index)) {
+        ParserComptime::walkExpression(module, owner, *id);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.types.length()) {
+      if (let Option::SOME(id) = children.types.get(index)) {
+        ParserComptime::walkType(module, *id);
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.patterns.length()) {
+      if (let Option::SOME(id) = children.patterns.get(index)) {
+        let patternChildren: ParserComptime::Children = ParserComptime::patternChildren(&*module, *id);
+        ParserComptime::walkChildren(module, owner, &patternChildren);
+      }
+
+      index += 1;
+    }
+  }
+
+  // ===========================================================================
+  // Walk
+  // ===========================================================================
+
+  function walkStatement(
+    module: &mut Ast::Module,
+    owner: &ParserComptime::Owner,
+    id: Ast::StatementId
+  ): void {
+    let mut isComptimeLoop: boolean = false;
+
+    if (let Option::SOME(Ast::Statement::Node::ForOf(forOf)) = module.statements.get(id)) {
+      isComptimeLoop = forOf.isComptime;
+    }
+
+    if (isComptimeLoop) {
+      ParserComptime::expandLoop(module, owner, id);
+    }
+
+    let children: ParserComptime::Children = ParserComptime::statementChildren(&*module, id);
+    ParserComptime::walkChildren(module, owner, &children);
+  }
+
+  function walkExpression(
+    module: &mut Ast::Module,
+    owner: &ParserComptime::Owner,
+    id: Ast::ExpressionId
+  ): void {
+    let mut hasLoopEntry: boolean = false;
+
+    if (let Option::SOME(Ast::Expression::Node::RecordInit(recordInit)) = module.expressions.get(id)) {
+      let mut index: u64 = 0;
+
+      while (index < recordInit.fields.length()) {
+        if (let Option::SOME(field) = recordInit.fields.get(index)) {
+          if (field.loop.isSome()) {
+            hasLoopEntry = true;
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    if (hasLoopEntry) {
+      ParserComptime::expandRecordInitLoops(module, owner, id);
+    }
+
+    ParserComptime::checkLeftoverBuiltin(module, id);
+
+    let children: ParserComptime::Children = ParserComptime::expressionChildren(&*module, id);
+    ParserComptime::walkChildren(module, owner, &children);
+  }
+
+  function walkType(module: &mut Ast::Module, id: Ast::TypeId): void {
+    let mut leftover: Option<SourceSpan> = Option::NONE;
+
+    if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(id)) {
+      if (let Option::SOME(segment) = path.segments.get(0)) {
+        if (segment.startsWith("@")) {
+          leftover = Option::SOME(path.span);
+        }
+      }
+    }
+
+    if (let Option::SOME(span) = leftover) {
+      ParserComptime::report(
+        module,
+        DiagnosticCode::COMPTIME_DESCRIPTOR_OUTSIDE_LOOP,
+        "'@fieldType' names a field descriptor outside its 'comptime for'",
+        span,
+        "only valid inside the body of the 'comptime for' that declares the descriptor",
+      );
+
+      if (let Option::SOME(node) = module.types.getMut(id)) {
+        *node = Ast::Type::Node::Tuple(Ast::Type::Tuple { span: span, elements: Vector::new<Ast::TypeId>() });
+      }
+
+      return;
+    }
+
+    let children: Vector<Ast::TypeId> = ParserComptime::typeChildren(&*module, id);
+    let mut index: u64 = 0;
+
+    while (index < children.length()) {
+      if (let Option::SOME(child) = children.get(index)) {
+        ParserComptime::walkType(module, *child);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Reports a reflection builtin left where no loop replaced it, and turns
+  /// `@attribute<A>(Self)` into the form the typechecker reads.
+  function checkLeftoverBuiltin(module: &mut Ast::Module, id: Ast::ExpressionId): void {
+    let mut name: String = String::new();
+    let mut span: SourceSpan = SourceSpan::new(noFile(), 0, 0);
+    let mut typeArgumentCount: u64 = 0;
+    let mut argumentCount: u64 = 0;
+    let mut attributeType: Option<Ast::TypeId> = Option::NONE;
+    let mut argumentIsSelf: boolean = false;
+
+    let Option::SOME(Ast::Expression::Node::BuiltinCall(call)) = module.expressions.get(id) else {
+      return;
+    };
+
+    name = call.name.clone();
+    span = call.span;
+    typeArgumentCount = call.typeArguments.length();
+    argumentCount = call.arguments.length();
+
+    if (let Option::SOME(typeId) = call.typeArguments.get(0)) {
+      attributeType = Option::SOME(*typeId);
+    }
+
+    if (let Option::SOME(argument) = call.arguments.get(0)) {
+      argumentIsSelf = ParserComptime::isSelfExpression(&*module, *argument);
+    }
+
+    if (name.equals("fields")) {
+      ParserComptime::report(
+        module,
+        DiagnosticCode::COMPTIME_DESCRIPTOR_OUTSIDE_LOOP,
+        "'@fields' is only valid as the iterable of a 'comptime for'",
+        span,
+        "write 'comptime for (field of @fields<Self>()) { ... }'",
+      );
+      return;
+    }
+
+    if (name.equals("field")) {
+      ParserComptime::report(
+        module,
+        DiagnosticCode::COMPTIME_DESCRIPTOR_OUTSIDE_LOOP,
+        "'@field' names a field descriptor outside its 'comptime for'",
+        span,
+        "only valid inside the body of the 'comptime for' that declares the descriptor",
+      );
+      ParserComptime::dropArguments(module, id);
+      return;
+    }
+
+    if (!name.equals("attribute") || typeArgumentCount != 1 || argumentCount != 1) {
+      return;
+    }
+
+    if (!argumentIsSelf) {
+      ParserComptime::report(
+        module,
+        DiagnosticCode::COMPTIME_DESCRIPTOR_OUTSIDE_LOOP,
+        "'@attribute' takes 'Self' or a field descriptor of an enclosing 'comptime for'",
+        span,
+        "no 'comptime for' declares this descriptor",
+      );
+      ParserComptime::dropArguments(module, id);
+      return;
+    }
+
+    let Option::SOME(attribute) = attributeType else {
+      return;
+    };
+
+    let typeArguments: Vector<Ast::TypeId> = ParserComptime::attributeTypeArguments(module, attribute, span);
+
+    let Option::SOME(node) = module.expressions.getMut(id) else {
+      return;
+    };
+
+    *node = Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
+      span: span,
+      name: String::create("attribute"),
+      typeArguments: typeArguments,
+      arguments: Vector::new<Ast::ExpressionId>(),
+    });
+  }
+
+  /// `<A, Self, Option<A>>`: the attribute, the record it is read from, and
+  /// the result type, spelled so the typechecker resolves `Option` like any
+  /// written type instead of knowing the prelude enum.
+  function attributeTypeArguments(
+    module: &mut Ast::Module,
+    attribute: Ast::TypeId,
+    span: SourceSpan
+  ): Vector<Ast::TypeId> {
+    let selfType: Ast::TypeId = ParserComptime::addSelfType(module, span);
+    let attributeCopy: Ast::TypeId = ParserComptime::cloneTypeInPlace(module, attribute);
+    let mut optionSegments: Vector<String> = Vector::new<String>();
+    optionSegments.push(String::create("Option"));
+    let optionBase: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path { span: span, segments: optionSegments }));
+    let mut optionArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+    optionArguments.push(attributeCopy);
+    let optionType: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+      span: span,
+      base: optionBase,
+      arguments: optionArguments,
+    }));
+    let mut typeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+    typeArguments.push(attribute);
+    typeArguments.push(selfType);
+    typeArguments.push(optionType);
+    return typeArguments;
+  }
+
+  /// Empties the argument list of the builtin call `id`, reported as misplaced,
+  /// so its descriptor is not also reported as an undeclared variable. The
+  /// typechecker leaves such a call untyped without a report of its own.
+  function dropArguments(module: &mut Ast::Module, id: Ast::ExpressionId): void {
+    let Option::SOME(Ast::Expression::Node::BuiltinCall(call)) = module.expressions.get(id) else {
+      return;
+    };
+
+    let span: SourceSpan = call.span;
+    let name: String = call.name.clone();
+    let typeArguments: Vector<Ast::TypeId> = ParserComptime::copyTypeIds(&call.typeArguments);
+
+    let Option::SOME(slot) = module.expressions.getMut(id) else {
+      return;
+    };
+
+    *slot = Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
+      span: span,
+      name: name,
+      typeArguments: typeArguments,
+      arguments: Vector::new<Ast::ExpressionId>(),
+    });
+  }
+
+  function addSelfType(module: &mut Ast::Module, span: SourceSpan): Ast::TypeId {
+    let mut segments: Vector<String> = Vector::new<String>();
+    segments.push(String::create("Self"));
+    return module.addType(Ast::Type::Node::Path(Ast::Type::Path { span: span, segments: segments }));
+  }
+
+  function isSelfExpression(module: &Ast::Module, id: Ast::ExpressionId): boolean {
+    return match (module.expressions.get(id)) {
+      Option::SOME(Ast::Expression::Node::Variable(variable)) -> variable.name.equals("Self"),
+      Option::SOME(Ast::Expression::Node::Path(path)) -> path.segments.length() == 1 && ParserComptime::firstSegmentIs(&path.segments, "Self"),
+      _ -> false,
+    };
+  }
+
+  function firstSegmentIs(segments: &Vector<String>, text: str): boolean {
+    if (let Option::SOME(first) = segments.get(0)) {
+      return first.equals(text);
+    }
+
+    return false;
+  }
+
+  /// The name `id` reads when it is a bare name: a variable or a
+  /// one-segment path.
+  function bareName(module: &Ast::Module, id: Ast::ExpressionId): Option<String> {
+    return match (module.expressions.get(id)) {
+      Option::SOME(Ast::Expression::Node::Variable(variable)) -> Option::SOME(variable.name.clone()),
+      Option::SOME(Ast::Expression::Node::Path(path)) -> {
+        if (path.segments.length() != 1) {
+          return Option::NONE;
+        }
+
+        return match (path.segments.get(0)) {
+          Option::SOME(segment) -> Option::SOME(segment.clone()),
+          Option::NONE -> Option::NONE,
+        };
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  function namesBinding(module: &Ast::Module, id: Ast::ExpressionId, binding: &String): boolean {
+    if (let Option::SOME(name) = ParserComptime::bareName(module, id)) {
+      return name.equals(binding.toStr());
+    }
+
+    return false;
+  }
+
+  // ===========================================================================
+  // Loop headers
+  // ===========================================================================
+
+  /// Whether the loop over `iterable` can unroll over `owner`'s fields;
+  /// reports why not. A trait's `Self` passes with no field to unroll over.
+  function checkFieldsTarget(
+    module: &mut Ast::Module,
+    owner: &ParserComptime::Owner,
+    iterable: Ast::ExpressionId,
+    loopSpan: SourceSpan
+  ): boolean {
+    let span: SourceSpan = ParserComptime::expressionSpan(&*module, iterable, loopSpan);
+
+    if (owner.kind == ParserComptime::OwnerKind::NONE) {
+      ParserComptime::report(
+        module,
+        DiagnosticCode::COMPTIME_FOR_OUTSIDE_METHOD,
+        "'comptime for' is only valid inside a method, where 'Self' names the record whose fields it walks",
+        span,
+        "this function is not a method",
+      );
+      return false;
+    }
+
+    let mut targetName: Option<String> = Option::NONE;
+    let mut wellFormed: boolean = false;
+
+    if (let Option::SOME(Ast::Expression::Node::BuiltinCall(call)) = module.expressions.get(iterable)) {
+      if (call.name.equals("fields") && call.typeArguments.length() == 1 && call.arguments.length() == 0) {
+        wellFormed = true;
+
+        if (let Option::SOME(typeId) = call.typeArguments.get(0)) {
+          if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(*typeId)) {
+            if (path.segments.length() == 1) {
+              if (let Option::SOME(segment) = path.segments.get(0)) {
+                targetName = Option::SOME(segment.clone());
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (!wellFormed) {
+      ParserComptime::report(
+        module,
+        DiagnosticCode::COMPTIME_FIELDS_TARGET,
+        "the iterable of a 'comptime for' must be '@fields<Self>()'",
+        span,
+        "expected '@fields<Self>()'",
+      );
+      return false;
+    }
+
+    let Option::SOME(target) = targetName else {
+      ParserComptime::report(
+        module,
+        DiagnosticCode::COMPTIME_FIELDS_TARGET,
+        "'@fields' walks the fields of the record 'Self'",
+        span,
+        "this type is not 'Self'",
+      );
+      return false;
+    };
+
+    let namesSelf: boolean = target.equals("Self") || target.equals(owner.name.toStr());
+
+    if (!namesSelf) {
+      let mut isParameter: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index < owner.typeParameters.length()) {
+        if (let Option::SOME(parameter) = owner.typeParameters.get(index)) {
+          if (parameter.equals(target.toStr())) {
+            isParameter = true;
+          }
+        }
+
+        index += 1;
+      }
+
+      if (isParameter) {
+        let message: String = `'@fields' cannot walk the type parameter '${target.toStr()}': its fields are not known`;
+        ParserComptime::report(module, DiagnosticCode::COMPTIME_FIELDS_TARGET, message.toStr(), span, "only 'Self' of a record has known fields");
+        return false;
+      }
+
+      let message: String = `'@fields' walks the fields of 'Self', and '${target.toStr()}' is not the record this method belongs to`;
+      ParserComptime::report(module, DiagnosticCode::COMPTIME_FIELDS_TARGET, message.toStr(), span, "write '@fields<Self>()'");
+      return false;
+    }
+
+    if (owner.kind == ParserComptime::OwnerKind::RECORD || owner.kind == ParserComptime::OwnerKind::TRAIT) {
+      return true;
+    }
+
+    let mut kindName: str = "type";
+
+    if (owner.kind == ParserComptime::OwnerKind::ENUM) {
+      kindName = "enum";
+    }
+
+    let message: String = `'@fields' needs a record, and 'Self' is the ${kindName} '${owner.name.toStr()}'`;
+    ParserComptime::report(module, DiagnosticCode::COMPTIME_FIELDS_TARGET, message.toStr(), span, "only the fields of a record can be walked");
+    return false;
+  }
+
+  function bindingName(module: &Ast::Module, pattern: Ast::PatternId): String {
+    return match (module.patterns.get(pattern)) {
+      Option::SOME(Ast::Pattern::Node::Binding(binding)) -> binding.name.clone(),
+      _ -> String::create("_"),
+    };
+  }
+
+  // ===========================================================================
+  // Body checks
+  // ===========================================================================
+
+  /// Whether the body of a loop over `binding` uses the descriptor only as
+  /// `binding.name`, `binding.index` or a reflection builtin argument, and
+  /// leaves no `break` or `continue` that would cross the unrolled loop.
+  /// Reports what it finds unless `quiet`.
+  function checkBody(
+    module: &mut Ast::Module,
+    binding: &String,
+    statement: Ast::StatementId,
+    quiet: boolean
+  ): boolean {
+    return ParserComptime::checkStatement(module, binding, statement, 0, quiet);
+  }
+
+  function checkStatement(
+    module: &mut Ast::Module,
+    binding: &String,
+    id: Ast::StatementId,
+    loopDepth: u64,
+    quiet: boolean
+  ): boolean {
+    let mut valid: boolean = true;
+    let mut depth: u64 = loopDepth;
+    let mut escape: Option<SourceSpan> = Option::NONE;
+    let mut escapeKind: str = "break";
+
+    match (module.statements.get(id)) {
+      Option::SOME(Ast::Statement::Node::Break(node)) -> {
+        escape = Option::SOME(node.span);
+      },
+      Option::SOME(Ast::Statement::Node::Continue(node)) -> {
+        escape = Option::SOME(node.span);
+        escapeKind = "continue";
+      },
+      Option::SOME(Ast::Statement::Node::While(_)) -> {
+        depth += 1;
+      },
+      Option::SOME(Ast::Statement::Node::For(_)) -> {
+        depth += 1;
+      },
+      Option::SOME(Ast::Statement::Node::ForOf(node)) -> {
+        if (!node.isComptime) {
+          depth += 1;
+        }
+      },
+      _ -> {},
+    };
+
+    if (let Option::SOME(span) = escape) {
+      if (loopDepth == 0) {
+        if (!quiet) {
+          let message: String = `'${escapeKind}' cannot cross a 'comptime for': the loop is unrolled at compile time, not run`;
+          ParserComptime::report(module, DiagnosticCode::COMPTIME_FOR_CONTROL_FLOW, message.toStr(), span, "inside an unrolled 'comptime for'");
+        }
+
+        valid = false;
+      }
+    }
+
+    let children: ParserComptime::Children = ParserComptime::statementChildren(&*module, id);
+
+    if (!ParserComptime::checkChildren(module, binding, &children, depth, quiet)) {
+      valid = false;
+    }
+
+    return valid;
+  }
+
+  function checkChildren(
+    module: &mut Ast::Module,
+    binding: &String,
+    children: &ParserComptime::Children,
+    loopDepth: u64,
+    quiet: boolean
+  ): boolean {
+    let mut valid: boolean = true;
+    let mut index: u64 = 0;
+
+    while (index < children.statements.length()) {
+      if (let Option::SOME(id) = children.statements.get(index)) {
+        if (!ParserComptime::checkStatement(module, binding, *id, loopDepth, quiet)) {
+          valid = false;
+        }
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.expressions.length()) {
+      if (let Option::SOME(id) = children.expressions.get(index)) {
+        if (!ParserComptime::checkExpression(module, binding, *id, loopDepth, quiet)) {
+          valid = false;
+        }
+      }
+
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < children.patterns.length()) {
+      if (let Option::SOME(id) = children.patterns.get(index)) {
+        let patternChildren: ParserComptime::Children = ParserComptime::patternChildren(&*module, *id);
+
+        if (!ParserComptime::checkChildren(module, binding, &patternChildren, loopDepth, quiet)) {
+          valid = false;
+        }
+      }
+
+      index += 1;
+    }
+
+    return valid;
+  }
+
+  function checkExpression(
+    module: &mut Ast::Module,
+    binding: &String,
+    id: Ast::ExpressionId,
+    loopDepth: u64,
+    quiet: boolean
+  ): boolean {
+    let mut children: ParserComptime::Children = ParserComptime::emptyChildren();
+    let mut misuse: Option<SourceSpan> = Option::NONE;
+    let mut misuseMessage: String = String::new();
+    let mut depth: u64 = loopDepth;
+
+    match (module.expressions.get(id)) {
+      Option::SOME(Ast::Expression::Node::MemberAccess(access)) -> {
+        if (ParserComptime::namesBinding(&*module, access.object, binding)) {
+          if (!access.member.equals("name") && !access.member.equals("index")) {
+            misuse = Option::SOME(access.span);
+            misuseMessage = `a field descriptor has no member '${access.member.toStr()}': it has 'name' and 'index'`;
+          }
+        } else {
+          children.expressions.push(access.object);
+        }
+      },
+      Option::SOME(Ast::Expression::Node::BuiltinCall(call)) -> {
+        let isField: boolean = call.name.equals("field") && call.arguments.length() == 2;
+        let isAttribute: boolean = call.name.equals("attribute") && call.arguments.length() == 1;
+        let mut index: u64 = 0;
+
+        while (index < call.arguments.length()) {
+          if (let Option::SOME(argument) = call.arguments.get(index)) {
+            let descriptorPosition: boolean = (isField && index == 1) || isAttribute;
+
+            if (!(descriptorPosition && ParserComptime::namesBinding(&*module, *argument, binding))) {
+              children.expressions.push(*argument);
+            }
+          }
+
+          index += 1;
+        }
+      },
+      Option::SOME(Ast::Expression::Node::Variable(variable)) -> {
+        if (variable.name.equals(binding.toStr())) {
+          misuse = Option::SOME(variable.span);
+          misuseMessage = String::create("a field descriptor is not a value: use 'name', 'index' or a reflection builtin");
+        }
+      },
+      Option::SOME(Ast::Expression::Node::Path(path)) -> {
+        if (path.segments.length() == 1 && ParserComptime::firstSegmentIs(&path.segments, binding.toStr())) {
+          misuse = Option::SOME(path.span);
+          misuseMessage = String::create("a field descriptor is not a value: use 'name', 'index' or a reflection builtin");
+        }
+      },
+      Option::SOME(Ast::Expression::Node::Lambda(_)) -> {
+        // A `break` in a closure body belongs to the closure's own loops.
+        depth += 1;
+        children = ParserComptime::expressionChildren(&*module, id);
+      },
+      _ -> {
+        children = ParserComptime::expressionChildren(&*module, id);
+      },
+    };
+
+    if (let Option::SOME(span) = misuse) {
+      if (!quiet) {
+        ParserComptime::report(module, DiagnosticCode::COMPTIME_DESCRIPTOR_MEMBER, misuseMessage.toStr(), span, "field descriptor misused");
+      }
+
+      return false;
+    }
+
+    return ParserComptime::checkChildren(module, binding, &children, depth, quiet);
+  }
+
+  // ===========================================================================
+  // Unrolling
+  // ===========================================================================
+
+  function descriptorFor(
+    module: &Ast::Module,
+    binding: &String,
+    fieldId: Ast::PatternId,
+    index: u64
+  ): ParserComptime::Descriptor {
+    let mut descriptor: ParserComptime::Descriptor = ParserComptime::Descriptor {
+      binding: binding.clone(),
+      fieldName: String::new(),
+      index: index as i64,
+      annotation: Option::NONE,
+    };
+
+    if (let Option::SOME(Ast::Pattern::Node::Binding(field)) = module.patterns.get(fieldId)) {
+      descriptor.fieldName = field.name.clone();
+      descriptor.annotation = field.annotation;
+    }
+
+    return descriptor;
+  }
+
+  function markArenas(module: &Ast::Module): ParserComptime::ArenaMark {
+    return ParserComptime::ArenaMark {
+      expressions: module.expressions.length(),
+      types: module.types.length(),
+    };
+  }
+
+  /// Copies the statement `id` of `module` back into `module` under fresh ids,
+  /// through a scratch module.
+  function cloneStatementInPlace(module: &mut Ast::Module, id: Ast::StatementId): Ast::StatementId {
+    let mut scratch: Ast::Module = Ast::Module::init();
+    let scratchId: Ast::StatementId = ParserTraitDefaults::cloneStatement(&*module, &mut scratch, id);
+    return ParserTraitDefaults::cloneStatement(&scratch, module, scratchId);
+  }
+
+  function cloneExpressionInPlace(
+    module: &mut Ast::Module,
+    id: Ast::ExpressionId
+  ): Ast::ExpressionId {
+    let mut scratch: Ast::Module = Ast::Module::init();
+    let scratchId: Ast::ExpressionId = ParserTraitDefaults::cloneExpression(&*module, &mut scratch, id);
+    return ParserTraitDefaults::cloneExpression(&scratch, module, scratchId);
+  }
+
+  function cloneTypeInPlace(module: &mut Ast::Module, id: Ast::TypeId): Ast::TypeId {
+    let mut scratch: Ast::Module = Ast::Module::init();
+    let scratchId: Ast::TypeId = ParserTraitDefaults::cloneType(&*module, &mut scratch, id);
+    return ParserTraitDefaults::cloneType(&scratch, module, scratchId);
+  }
+
+  /// A copy of the node `id` whose children are the same ids.
+  function shallowType(module: &Ast::Module, id: Ast::TypeId): Option<Ast::Type::Node> {
+    let Option::SOME(node) = module.types.get(id) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(match (node) {
+      Ast::Type::Node::Path(path) -> Ast::Type::Node::Path(Ast::Type::Path {
+        span: path.span,
+        segments: ParserComptime::copyNames(&path.segments),
+      }),
+      Ast::Type::Node::Pointer(pointer) -> Ast::Type::Node::Pointer(Ast::Type::Pointer {
+        span: pointer.span,
+        mutable: pointer.mutable,
+        pointee: pointer.pointee,
+      }),
+      Ast::Type::Node::Reference(reference) -> Ast::Type::Node::Reference(Ast::Type::Reference {
+        span: reference.span,
+        mutable: reference.mutable,
+        target: reference.target,
+      }),
+      Ast::Type::Node::Tuple(tuple) -> Ast::Type::Node::Tuple(Ast::Type::Tuple {
+        span: tuple.span,
+        elements: ParserComptime::copyTypeIds(&tuple.elements),
+      }),
+      Ast::Type::Node::Function(function_) -> Ast::Type::Node::Function(Ast::Type::Function {
+        span: function_.span,
+        parameters: ParserComptime::copyTypeIds(&function_.parameters),
+        returnType: function_.returnType,
+        pointer: function_.pointer,
+      }),
+      Ast::Type::Node::Slice(slice) -> Ast::Type::Node::Slice(Ast::Type::Slice { span: slice.span, element: slice.element }),
+      Ast::Type::Node::FixedArray(array) -> Ast::Type::Node::FixedArray(Ast::Type::FixedArray {
+        span: array.span,
+        element: array.element,
+        size: array.size,
+      }),
+      Ast::Type::Node::Generic(generic) -> Ast::Type::Node::Generic(Ast::Type::Generic {
+        span: generic.span,
+        base: generic.base,
+        arguments: ParserComptime::copyTypeIds(&generic.arguments),
+      }),
+    });
+  }
+
+  function copyTypeIds(source: &Vector<Ast::TypeId>): Vector<Ast::TypeId> {
+    let mut copied: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        copied.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  /// Replaces the descriptor in every node a copy appended since `mark`.
+  function substitute(
+    module: &mut Ast::Module,
+    mark: &ParserComptime::ArenaMark,
+    descriptor: &ParserComptime::Descriptor
+  ): void {
+    let expressionEnd: u64 = module.expressions.length();
+    let typeEnd: u64 = module.types.length();
+    let mut raw: u64 = mark.expressions;
+
+    while (raw < expressionEnd) {
+      ParserComptime::substituteExpression(module, Id::fromRaw<Ast::ExpressionTag>(raw as u32), descriptor);
+      raw += 1;
+    }
+
+    raw = mark.types;
+
+    while (raw < typeEnd) {
+      ParserComptime::substituteType(module, Id::fromRaw<Ast::TypeTag>(raw as u32), descriptor);
+      raw += 1;
+    }
+  }
+
+  function substituteType(
+    module: &mut Ast::Module,
+    id: Ast::TypeId,
+    descriptor: &ParserComptime::Descriptor
+  ): void {
+    let written: String = `@fieldType(${descriptor.binding.toStr()})`;
+    let mut matches: boolean = false;
+
+    if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(id)) {
+      if (path.segments.length() == 1 && ParserComptime::firstSegmentIs(&path.segments, written.toStr())) {
+        matches = true;
+      }
+    }
+
+    if (!matches) {
+      return;
+    }
+
+    let Option::SOME(annotation) = descriptor.annotation else {
+      return;
+    };
+
+    let copy: Ast::TypeId = ParserComptime::cloneTypeInPlace(module, annotation);
+    let Option::SOME(replacement) = ParserComptime::shallowType(&*module, copy) else {
+      return;
+    };
+
+    let Option::SOME(node) = module.types.getMut(id) else {
+      return;
+    };
+
+    *node = replacement;
+  }
+
+  function substituteExpression(
+    module: &mut Ast::Module,
+    id: Ast::ExpressionId,
+    descriptor: &ParserComptime::Descriptor
+  ): void {
+    let mut replacement: Option<Ast::Expression::Node> = Option::NONE;
+    let mut attributeType: Option<Ast::TypeId> = Option::NONE;
+    let mut attributeSpan: SourceSpan = SourceSpan::new(noFile(), 0, 0);
+
+    match (module.expressions.get(id)) {
+      Option::SOME(Ast::Expression::Node::MemberAccess(access)) -> {
+        if (ParserComptime::namesBinding(&*module, access.object, &descriptor.binding)) {
+          if (access.member.equals("name")) {
+            replacement = Option::SOME(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+              span: access.span,
+              value: Ast::Expression::LiteralValue::String(descriptor.fieldName.clone()),
+            }));
+          } else if (access.member.equals("index")) {
+            replacement = Option::SOME(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+              span: access.span,
+              value: Ast::Expression::LiteralValue::Int(descriptor.index),
+            }));
+          }
+        }
+      },
+      Option::SOME(Ast::Expression::Node::BuiltinCall(call)) -> {
+        if (call.name.equals("field") && call.arguments.length() == 2) {
+          if (let Option::SOME(descriptorArgument) = call.arguments.get(1)) {
+            if (ParserComptime::namesBinding(&*module, *descriptorArgument, &descriptor.binding)) {
+              if (let Option::SOME(value) = call.arguments.get(0)) {
+                replacement = Option::SOME(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
+                  span: call.span,
+                  object: *value,
+                  operator: Ast::Expression::AccessOperator::Dot,
+                  member: descriptor.fieldName.clone(),
+                }));
+              }
+            }
+          }
+        }
+
+        if (call.name.equals("attribute") && call.typeArguments.length() == 1 && call.arguments.length() == 1) {
+          if (let Option::SOME(argument) = call.arguments.get(0)) {
+            if (ParserComptime::namesBinding(&*module, *argument, &descriptor.binding)) {
+              if (let Option::SOME(typeId) = call.typeArguments.get(0)) {
+                attributeType = Option::SOME(*typeId);
+                attributeSpan = call.span;
+              }
+            }
+          }
+        }
+      },
+      _ -> {},
+    };
+
+    if (let Option::SOME(attribute) = attributeType) {
+      let nameLiteral: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+        span: attributeSpan,
+        value: Ast::Expression::LiteralValue::String(descriptor.fieldName.clone()),
+      }));
+      let typeArguments: Vector<Ast::TypeId> = ParserComptime::attributeTypeArguments(module, attribute, attributeSpan);
+      let mut arguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+      arguments.push(nameLiteral);
+      replacement = Option::SOME(Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
+        span: attributeSpan,
+        name: String::create("attribute"),
+        typeArguments: typeArguments,
+        arguments: arguments,
+      }));
+    }
+
+    let Option::SOME(node) = replacement else {
+      return;
+    };
+
+    let Option::SOME(slot) = module.expressions.getMut(id) else {
+      return;
+    };
+
+    *slot = node;
+  }
+
+  function iterationNote(
+    owner: &ParserComptime::Owner,
+    descriptor: &ParserComptime::Descriptor
+  ): String {
+    return `in the 'comptime for' iteration over field '${descriptor.fieldName.toStr()}' of '${owner.name.toStr()}'`;
+  }
+
+  /// Replaces the `comptime for` statement `id` by a block holding one copy
+  /// of its body per field of `Self`, or by an empty block when it cannot
+  /// unroll.
+  function expandLoop(
+    module: &mut Ast::Module,
+    owner: &ParserComptime::Owner,
+    id: Ast::StatementId
+  ): void {
+    let Option::SOME(Ast::Statement::Node::ForOf(forOf)) = module.statements.get(id) else {
+      return;
+    };
+
+    let span: SourceSpan = forOf.span;
+    let pattern: Ast::PatternId = forOf.pattern;
+    let iterable: Ast::ExpressionId = forOf.iterable;
+    let body: Ast::StatementId = forOf.body;
+    let binding: String = ParserComptime::bindingName(&*module, pattern);
+    let mut iterations: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+
+    let targetValid: boolean = ParserComptime::checkFieldsTarget(module, owner, iterable, span);
+    let bodyValid: boolean = ParserComptime::checkBody(module, &binding, body, owner.inherited);
+
+    if (targetValid && bodyValid && owner.kind == ParserComptime::OwnerKind::RECORD) {
+      let mut index: u64 = 0;
+
+      while (index < owner.fields.length()) {
+        if (let Option::SOME(fieldId) = owner.fields.get(index)) {
+          let descriptor: ParserComptime::Descriptor = ParserComptime::descriptorFor(&*module, &binding, *fieldId, index);
+          let mark: ParserComptime::ArenaMark = ParserComptime::markArenas(&*module);
+          let copy: Ast::StatementId = ParserComptime::cloneStatementInPlace(module, body);
+          ParserComptime::substitute(module, &mark, &descriptor);
+          module.setComptimeIterationNote(copy, ParserComptime::iterationNote(owner, &descriptor));
+          iterations.push(copy);
+        }
+
+        index += 1;
+      }
+    }
+
+    let Option::SOME(slot) = module.statements.getMut(id) else {
+      return;
+    };
+
+    *slot = Ast::Statement::Node::Block(Ast::Statement::Block {
+      span: span,
+      statements: iterations,
+      tail: Option::NONE,
+    });
+  }
+
+  /// Unrolls every `comptime for` entry of the record initializer `id` into
+  /// one `<name>: value` entry per field of `Self`.
+  function expandRecordInitLoops(
+    module: &mut Ast::Module,
+    owner: &ParserComptime::Owner,
+    id: Ast::ExpressionId
+  ): void {
+    let Option::SOME(Ast::Expression::Node::RecordInit(recordInit)) = module.expressions.get(id) else {
+      return;
+    };
+
+    let span: SourceSpan = recordInit.span;
+    let path: Ast::ExpressionId = recordInit.path;
+    let typeArguments: Vector<Ast::TypeId> = ParserComptime::copyTypeIds(&recordInit.typeArguments);
+    let entries: Vector<Ast::Expression::RecordInitField> = ParserExpressions::copyRecordInitFields(&recordInit.fields);
+    let mut expanded: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+    let mut entryIndex: u64 = 0;
+
+    while (entryIndex < entries.length()) {
+      let Option::SOME(entry) = entries.get(entryIndex) else {
+        entryIndex += 1;
+        continue;
+      };
+
+      entryIndex += 1;
+
+      let Option::SOME(header) = &entry.loop else {
+        expanded.push(Ast::Expression::RecordInitField { name: entry.name.clone(), value: entry.value, loop: Option::NONE });
+        continue;
+      };
+
+      let binding: String = ParserComptime::bindingName(&*module, header.pattern);
+      let targetValid: boolean = ParserComptime::checkFieldsTarget(module, owner, header.iterable, header.span);
+      let mut nameValid: boolean = false;
+
+      if (let Option::SOME(Ast::Expression::Node::BuiltinCall(call)) = module.expressions.get(header.name)) {
+        if (call.name.equals("field") && call.arguments.length() == 1) {
+          if (let Option::SOME(argument) = call.arguments.get(0)) {
+            nameValid = ParserComptime::namesBinding(&*module, *argument, &binding);
+          }
+        }
+      }
+
+      if (!nameValid && !owner.inherited) {
+        let nameSpan: SourceSpan = ParserComptime::expressionSpan(&*module, header.name, header.span);
+        let message: String = `a 'comptime for' entry names its field with '@field(${binding.toStr()})'`;
+        ParserComptime::report(module, DiagnosticCode::COMPTIME_DESCRIPTOR_MEMBER, message.toStr(), nameSpan, "expected '@field(<descriptor>)'");
+      }
+
+      let valueValid: boolean = ParserComptime::checkExpression(module, &binding, entry.value, 1, owner.inherited);
+
+      if (!targetValid || !nameValid || !valueValid || owner.kind != ParserComptime::OwnerKind::RECORD) {
+        continue;
+      }
+
+      let mut fieldIndex: u64 = 0;
+
+      while (fieldIndex < owner.fields.length()) {
+        if (let Option::SOME(fieldId) = owner.fields.get(fieldIndex)) {
+          let descriptor: ParserComptime::Descriptor = ParserComptime::descriptorFor(&*module, &binding, *fieldId, fieldIndex);
+          let mark: ParserComptime::ArenaMark = ParserComptime::markArenas(&*module);
+          let copy: Ast::ExpressionId = ParserComptime::cloneExpressionInPlace(module, entry.value);
+          ParserComptime::substitute(module, &mark, &descriptor);
+          expanded.push(Ast::Expression::RecordInitField { name: descriptor.fieldName.clone(), value: copy, loop: Option::NONE });
+        }
+
+        fieldIndex += 1;
+      }
+    }
+
+    let Option::SOME(slot) = module.expressions.getMut(id) else {
+      return;
+    };
+
+    *slot = Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
+      span: span,
+      path: path,
+      typeArguments: typeArguments,
+      fields: expanded,
+    });
+  }
+}

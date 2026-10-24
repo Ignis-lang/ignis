@@ -1087,6 +1087,18 @@ count is `A0118`; a disallowed target `A0281`; a capitalized name that is not an
 `A0282`; an argument that does not fit `A0283` or is not constant `A0284`; invalid
 `@attribute(...)` targets `A0290`. The record stays an ordinary record usable as a value.
 
+### Field reflection
+
+Inside a method whose `Self` is a record, `comptime for (field of @fields<Self>()) { ... }` is
+unrolled before name resolution into one block per field, in declaration order. `field.name` is a
+`str`, `field.index` an `i32`, `@field(value, field)` the place `value.<name>`, `@fieldType(field)`
+the field's written type, and `@attribute<A>(field)` / `@attribute<A>(Self)` an `Option<A>` with the
+attribute's constant values. A record initializer accepts
+`comptime for (field of @fields<Self>()) @field(field): <expression>` to set every field. `comptime`
+is a keyword. Diagnostics: `A0292` (`break`/`continue` across the loop), `A0293` (`@fields` not over
+a record `Self`), `A0294` (outside a method), `A0295` (descriptor builtin outside its loop), `A0296`
+(unknown descriptor member). See `docs/TRAITS.md`, "Field Reflection".
+
 ### Parameter attributes
 
 - `@takes` -- marks an extern function parameter as ownership-consuming

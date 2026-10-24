@@ -590,6 +590,32 @@ Use `@trap()` when you want a safe, debuggable crash. Use `@unreachable()` only 
 
 ---
 
+### Reflection: `@fields`, `@field`, `@fieldType`, `@attribute`
+
+Valid only inside `comptime for (field of @fields<Self>()) { ... }` in a method whose `Self` is a
+record; the loop is unrolled before name resolution, one copy per field (see `docs/TRAITS.md`,
+"Field Reflection").
+
+- `@fields<Self>()`: the loop's iterable. Over a type parameter, an enum or another type it is
+  `A0293`; anywhere else `A0295`.
+- `@field(value, field)`: becomes `value.<name>`, a place usable like the field. In a record
+  initializer, `@field(field)` names the field of a `comptime for` entry:
+  `Self { comptime for (field of @fields<Self>()) @field(field): value }`.
+- `@fieldType(field)`: the field's written type, in any type position.
+- `@attribute<A>(field)` / `@attribute<A>(Self)`: `Option<A>` holding the constant values of the
+  declarable attribute `A` written on the field or the record, `NONE` when absent. `A` must be a
+  record marked `@attribute(...)` (`A0282`).
+
+```ignis
+comptime for (field of @fields<Self>()) {
+  let value: @fieldType(field) = @field(self, field);
+
+  if (let Option::SOME(column) = @attribute<Column>(field)) {
+    text.pushStr(column.name);
+  }
+}
+```
+
 ## Comparison: `@panic` vs `@trap` vs `@unreachable`
 
 | Builtin | Emits code | Predictable crash | UB if reached | Use case |
@@ -687,6 +713,10 @@ identifier as a value, and no form that puts a type where a type is expected.
 | `@panic("msg")` | 1 string literal | `Never` | Yes (fprintf + exit) |
 | `@trap()` | none | `Never` | Yes (`__builtin_trap`) |
 | `@unreachable()` | none | `Never` | No (`__builtin_unreachable`) |
+| `@fields<Self>()` | 1 type arg, `comptime for` iterable only | — | No (unrolled) |
+| `@field(value, field)` | 1 expr + descriptor | field type | No (field access) |
+| `@fieldType(field)` | descriptor, type position | — | No (written type) |
+| `@attribute<A>(field)` / `@attribute<A>(Self)` | 1 type arg + descriptor or `Self` | `Option<A>` | Yes (constant value) |
 
 ### Function Builtins
 
