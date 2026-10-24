@@ -198,6 +198,10 @@ function qbeRunExpectedLinked(
   }
   link.arg("-o");
   link.arg(executable.asStr());
+
+  // A float remainder calls libm's `fmod`, which the C backend's hosted link
+  // pulls in as well.
+  link.arg("-lm");
   let Result::OK(linked) = link.output() else {
     Test::fail();
     return;
@@ -286,14 +290,14 @@ function qbeFailsClosedOnUnsupportedRecordLayouts(): void {
 
 @test
 function qbeReportsAnUnsupportedInstructionAtItsFunction(): void {
-  let source: str = "function main(): i32 { return (half(4.0) as i32) - 2; }\nfunction half(value: f64): f64 { return value / 2.0; }";
+  let source: str = "function main(): i32 { return helper(4) - 2; }\nfunction helper(value: i32): i32 { @trap(); return value; }";
   let emission: QbeEmission = qbeEmit(source);
   Test::assert(emission.error.isSome());
   let Option::SOME(span) = emission.errorSpan else {
     Test::fail();
     return;
   };
-  let bodyStart: u64 = 87;
+  let bodyStart: u64 = 80;
   Test::assertEq<u64>(span.start, bodyStart);
 }
 
@@ -409,7 +413,7 @@ function qbeEmitsMainWrapper(): void {
 /// module or the corpus shifts the ids.
 @test
 function qbeNamesTheFailingFunctionWithoutADefinitionId(): void {
-  let emission: QbeEmission = qbeEmit("function scale(value: f64): f64 { return value; } function main(): i32 { return scale(1.5) as i32; }");
+  let emission: QbeEmission = qbeEmit("function scale(value: Range<i32>): i32 { return value.start; } function main(): i32 { return scale(1..5); }");
   let Option::SOME(error) = &emission.error else {
     Test::fail();
     return;
@@ -491,14 +495,135 @@ function qbeEmitsFixedArrayPayloadEnums(): void {
 }
 
 @test
-function qbeFailsClosedOnFloats(): void {
-  let emission: QbeEmission = qbeEmit("function main(): i32 { let x: f64 = 1.5; return x as i32; }");
+function qbeEmitsFloatLocalsAndCasts(): void {
+  let source: str = "function main(): i32 { let x: f64 = 1.5; let y: f32 = x as f32; return (y * 2.0) as i32 + x as i32; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "loadd"));
+  Test::assert(qbeContains(&emission.source, "truncd"));
+  qbeRunExpected(source, 4);
+}
+
+/// Float constants are their IEEE bit patterns, so 0.1 is the double nearest
+/// to it and not a decimal QBE would have to round again.
+@test
+function qbeEmitsFloatConstantsAsBitPatterns(): void {
+  let source: str = "function main(): i32 { let tenth: f64 = 0.1; let narrow: f32 = 0.1; if (@bitCast<u64>(tenth) != 4591870180066957722) { return 1; } if (@bitCast<u32>(narrow) != 1036831949) { return 2; } return 0; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "4591870180066957722"));
+  Test::assert(qbeContains(&emission.source, "1036831949"));
+  qbeRunExpected(source, 0);
+}
+
+@test
+function qbeEmitsFloatBounds(): void {
+  qbeRunExpected("function main(): i32 { if (@bitCast<u64>(@maxOf<f64>()) != 9218868437227405311 || @bitCast<u64>(@minOf<f64>()) != 18442240474082181119) { return 1; } if (@bitCast<u32>(@maxOf<f32>()) != 2139095039 || @bitCast<u32>(@minOf<f32>()) != 4286578687) { return 2; } return 0; }", 0);
+}
+
+/// `-x` on a float flips the sign bit: negating +0 gives -0, which `sub 0, x`
+/// would not.
+@test
+function qbeNegatesFloatsWithTheSignBit(): void {
+  let source: str = "function negate(value: f64): f64 { return -value; } function main(): i32 { return @bitCast<u64>(negate(0.0)) == 9223372036854775808 ? 0 : 1; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, " neg "));
+  qbeRunExpected(source, 0);
+}
+
+@test
+function qbeComparesNanLikeC(): void {
+  qbeRunExpected("function nan(): f64 { let zero: f64 = 0.0; return zero / zero; } function main(): i32 { let value: f64 = nan(); if (value == value || value < 1.0 || value >= 1.0) { return 1; } if (!(value != value)) { return 2; } return 0; }", 0);
+}
+
+@test
+function qbeConvertsUnsignedIntegersAndFloats(): void {
+  qbeRunExpected("function up(value: u64): f64 { return value as f64; } function down(value: f64): u64 { return value as u64; } function narrow(value: f32): u32 { return value as u32; } function main(): i32 { if (up(18446744073709551615) != 18446744073709551616.0) { return 1; } if (down(10000000000000000000.0) != 10000000000000000000) { return 2; } if (narrow(4000000000.0) != 4000000000) { return 3; } return 0; }", 0);
+}
+
+@test
+function qbeComputesFloatRemainderWithFmod(): void {
+  let source: str = "function rem(left: f64, right: f64): f64 { return left % right; } function main(): i32 { return rem(-7.5, 2.0) == -1.5 ? 0 : 1; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, "call $fmod("));
+  qbeRunExpectedLinked(source, 0, "", "", "");
+}
+
+/// A double through a variadic C function travels in a vector register with
+/// the register count in `%al`, the convention `snprintf`-style calls need.
+@test
+function qbePassesDoublesToVariadicExterns(): void {
+  let source: str = "extern Native { @externName(\"dprintf\") function printValue(descriptor: i32, format: str, value: f64): i32; } function main(): i32 { Native::printValue(2, \"value: %.3f\\n\", 2.5); return 0; }";
+  qbeRunExpectedLinked(source, 0, "", "", "value: 2.500\n");
+}
+
+/// Float record fields are `s`/`d` items, so the record crosses into C in the
+/// SSE registers its C struct is classified into, and a float mixed with an
+/// integer in one eightbyte stays INTEGER as C merges it.
+@test
+function qbePassesFloatRecordsByTheCAbi(): void {
+  let source: str = "record Point { public x: f64; public y: f64; } record Mixed { public ratio: f32; public count: i32; } extern Native { function sumPoint(point: Point): f64; function scaleMixed(mixed: Mixed): Mixed; } function main(): i32 { if (Native::sumPoint(Point { x: 1.5, y: 2.25 }) != 3.75) { return 1; } let scaled: Mixed = Native::scaleMixed(Mixed { ratio: 0.5, count: 20 }); if (scaled.ratio != 1.0 || scaled.count != 21) { return 2; } return 0; }";
+  let native: str = "typedef struct { double x; double y; } Point; typedef struct { float ratio; int count; } Mixed; double sumPoint(Point point) { return point.x + point.y; } Mixed scaleMixed(Mixed mixed) { Mixed result = { mixed.ratio * 2.0f, mixed.count + 1 }; return result; }\n";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, "{ d, d }"));
+  Test::assert(qbeContains(&emission.source, "{ s, w }"));
+  qbeRunExpectedLinked(source, 0, native, "", "");
+}
+
+/// An enum of at most sixteen bytes whose payload eightbyte is float in every
+/// variant is SSE in its second eightbyte, as the C struct with its union is.
+@test
+function qbeClassifiesFloatEnumPayloadsAsSse(): void {
+  let source: str = "enum Tail { VALUE(f64), NOTHING } extern Native { function readTail(tail: Tail): f64; function makeTail(value: f64): Tail; } function main(): i32 { if (Native::readTail(Tail::VALUE(2.5)) != 2.5) { return 1; } if (let Tail::VALUE(value) = Native::makeTail(4.0)) { return value == 4.0 ? 0 : 2; } return 3; }";
+  let native: str = "typedef struct { unsigned tag; union { struct { double value; } v; } payload; } Tail; double readTail(Tail tail) { return tail.tag == 0 ? tail.payload.v.value : -1.0; } Tail makeTail(double value) { Tail tail; tail.tag = 0; tail.payload.v.value = value; return tail; }\n";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, "{ w, b 4, d }"));
+  qbeRunExpectedLinked(source, 0, native, "", "");
+}
+
+/// A float payload sharing its eightbyte with an integer payload of another
+/// variant merges into INTEGER, so the enum keeps its byte blob.
+@test
+function qbeKeepsMixedEnumPayloadsInteger(): void {
+  let emission: QbeEmission = qbeEmit("enum Number { INT(i64), FLOAT(f64) } function half(number: Number): f64 { return match (number) { Number::INT(value) -> value as f64 / 2.0, Number::FLOAT(value) -> value / 2.0 }; } function main(): i32 { return half(Number::FLOAT(8.0)) as i32; }");
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "{ w, b 4, b 8 }"));
+}
+
+/// A layout failure names the type it could not lay out.
+@test
+function qbeNamesTheTypeOfALayoutFailure(): void {
+  let emission: QbeEmission = qbeEmit("function main(): i32 { return spanOf(); }\nfunction spanOf(): i32 { let span: Range<i32> = 1..5; return span.start; }");
   let Option::SOME(error) = &emission.error else {
     Test::fail();
     return;
   };
-  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
-  Test::assertEq<u64>(emission.source.length(), 0);
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: SizeOf(Range<i32>)");
+  let Option::SOME(span) = emission.errorSpan else {
+    Test::fail();
+    return;
+  };
+  let bodyStart: u64 = 65;
+  Test::assertEq<u64>(span.start, bodyStart);
+}
+
+/// A type declaration this emitter cannot write is reported at the function
+/// whose local needs it, not at the start of the unit, even though the
+/// declarations are written before any function body.
+@test
+function qbeReportsATypeDeclarationFailureAtTheFunctionThatNeedsIt(): void {
+  let emission: QbeEmission = qbeEmit("function main(): i32 { return helper(); }\nfunction helper(): i32 { let value: Wide = Wide { x: 42 }; return value.x; }\n@aligned(32) record Wide { public x: i32; }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: OveralignedRecord");
+  let Option::SOME(span) = emission.errorSpan else {
+    Test::fail();
+    return;
+  };
+  let bodyStart: u64 = 65;
+  Test::assertEq<u64>(span.start, bodyStart);
 }
 
 @test
@@ -527,14 +652,12 @@ function qbeReviewF21EmitsRecordGlobals(): void {
 }
 
 @test
-function qbeReviewF24RejectsFloatGlobal(): void {
-  let emission: QbeEmission = qbeEmit("extern Native { function readScale(pointer: *f64): i32; } const SCALE: f64 = 2.5; function main(): i32 { return Native::readScale(&SCALE as *f64); }");
-  let Option::SOME(error) = &emission.error else {
-    Test::fail();
-    return;
-  };
-  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
-  Test::assertEq<u64>(emission.source.length(), 0);
+function qbeReviewF24EmitsFloatGlobal(): void {
+  let source: str = "extern Native { function readScale(pointer: *f64): i32; } const SCALE: f64 = 2.5; function main(): i32 { return Native::readScale(&SCALE as *f64); }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "d 4612811918334230528"));
+  qbeRunExpectedLinked(source, 0, "int readScale(const double *pointer) { return *pointer == 2.5 ? 0 : 1; }\n", "", "");
 }
 
 @test
