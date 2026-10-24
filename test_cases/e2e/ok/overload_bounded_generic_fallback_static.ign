@@ -1,0 +1,55 @@
+// e2e: std
+// The bounded generic fallback written as a namespace's functions and as a
+// record's static methods. An `i32`, which only widens to the concrete
+// `i64` candidate, takes it because `i32` does not satisfy the generic
+// candidate's bound; a record implementing the bound takes the namespace's
+// generic function.
+import Io from "std::io";
+
+trait Describe {
+  describe(&self): String;
+}
+
+@implements(Describe)
+record Point {
+  public x: i32;
+
+  describe(&self): String {
+    return `point ${self.x}`;
+  }
+}
+
+namespace Binding {
+  function bind(value: i64): String {
+    return `namespace number ${value}`;
+  }
+
+  function bind<T: Describe>(value: T): String {
+    let described: String = value.describe();
+    return `namespace described ${described.toStr()}`;
+  }
+}
+
+record Binder {
+  static bind(value: i64): String {
+    return `static number ${value}`;
+  }
+
+  static bind<T: Describe>(value: T): String {
+    let described: String = value.describe();
+    return `static described ${described.toStr()}`;
+  }
+}
+
+function main(): i32 {
+  let narrow: i32 = 3;
+  let point: Point = Point { x: 4 };
+  let namespaceNarrow: String = Binding::bind(narrow);
+  let namespacePoint: String = Binding::bind(point);
+  let staticNarrow: String = Binder::bind(narrow);
+  Io::println(namespaceNarrow.toStr());
+  Io::println(namespacePoint.toStr());
+  Io::println(staticNarrow.toStr());
+
+  return 0;
+}
