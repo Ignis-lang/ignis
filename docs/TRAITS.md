@@ -353,6 +353,11 @@ a function, a method, a record or an enum:
   type `T` stands for, or to the trait's default when the type does not declare it. Only the bounds
   of `T` are searched: a static method of the same name on an unrelated record is never picked,
   and a name no bound declares as static is an error (A0278).
+- Inside a trait's default body, static or instance, `Self::name(args)` calls the trait's static
+  method `name` on the implementing type, the way `T::name(args)` does on a bounded type
+  parameter: an implementer that inherits the default reaches its own `name`, or the trait's
+  default for `name` when it declares none. Inside a record or enum, `Self::name` means what the
+  owner's own name does; outside a record, enum or trait it is an error (A0280).
 - A static trait method is not callable through a value (`value.make()`), neither on a type
   parameter nor on the implementing type, and `Trait::make()` names no implementing type, so it is
   an error (A0279).
@@ -676,3 +681,4 @@ record or enum it reports, which overrides the module level for that declaration
 | A0277 | Static method does not match the static trait method's signature, `Self` read as the implementing type | Error |
 | A0278 | `T::name(args)` where no bound of `T` declares a static method `name` | Error |
 | A0279 | `Trait::name(args)` calls a static trait method without an implementing type | Error |
+| A0280 | `Self::name` written outside a record, enum or trait | Error |

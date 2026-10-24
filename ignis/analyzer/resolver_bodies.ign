@@ -2165,6 +2165,62 @@ export namespace Analyzer {
       @panic("unreachable: resolvePathTailTypeFallback match did not return");
     }
 
+    /// The record, enum or trait whose method the walk is in: what `Self`
+    /// names as a path owner. `NONE` outside any method.
+    function selfPathOwner(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+    ): Option<Analyzer::DefinitionId> {
+      let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(state.currentFunction) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(method.owner);
+    }
+
+    /// Reports `Self::member` written where no record, enum or trait encloses it.
+    function emitSelfPathOutsideOwner(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      span: SourceSpan
+    ): void {
+      let message: str = "'Self' exists only inside a record, enum or trait";
+      let mut diag: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::SELF_PATH_OUTSIDE_OWNER, message, span);
+      diag.addLabel(LabelKind::PRIMARY, span, "'Self' used outside the methods of a record, enum or trait");
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// `resolvePathTailForOwner` for `Self::member` inside a record or enum.
+    ///
+    /// Only the owner's own members answer: the record branch's namespace and
+    /// member-only fallbacks would bind `Self::Other` to an unrelated top-level
+    /// declaration named `Other`.
+    function resolveSelfPathTail(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ownerDefId: Analyzer::DefinitionId,
+      memberName: str,
+      segments: &Vector<String>,
+      segCount: u64,
+    ): Analyzer::ResolverBodies::PathTailLookup {
+      let lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::resolvePathTailForOwner(
+        state,
+        defStore,
+        symbols,
+        ownerDefId,
+        memberName,
+        segments,
+        segCount,
+      );
+
+      return match (lookup) {
+        Analyzer::ResolverBodies::PathTailLookup::TypeFallback(_) -> Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord,
+        Analyzer::ResolverBodies::PathTailLookup::NamespaceMember(_) -> Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord,
+        _ -> lookup,
+      };
+    }
+
     /// Resolve the last two segments of a multi-segment path (`owner::member`;
     /// for N>=3 segments, `owner`/`member` are the last two — the segments
     /// before them are validated beforehand by callers via
@@ -2928,6 +2984,35 @@ export namespace Analyzer {
           &p.segments,
           segCount,
         );
+      } else if (ownerStr.equals("Self")) {
+        let Option::SOME(selfOwnerId) = Analyzer::ResolverBodies::selfPathOwner(state, defStore) else {
+          Analyzer::ResolverBodies::emitSelfPathOutsideOwner(state, p.span);
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
+          );
+          return;
+        };
+
+        // Inside a trait, `Self` is the implementing type, read like a type
+        // parameter bounded by the trait: `Self::name` is `T::name`.
+        if (Analyzer::ResolverBodies::isTraitDef(defStore, selfOwnerId)) {
+          let mut symbolsSelfRef: &mut Analyzer::SymbolTable = symbols;
+          let selfSymbol: Analyzer::SymbolId = symbolsSelfRef.intern("Self");
+          Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::TypeParam(selfSymbol));
+          return;
+        }
+
+        lookup = Analyzer::ResolverBodies::resolveSelfPathTail(
+          state,
+          defStore,
+          symbols,
+          selfOwnerId,
+          memberStr.toStr(),
+          &p.segments,
+          segCount,
+        );
       } else {
         // `T::name` on a type parameter names a static method of one of its
         // bounds, which the typechecker picks. This runs before the flat
@@ -3357,6 +3442,30 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::emitUnknownVariantPattern(state, p);
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         }
+      }
+
+      if (!ownerResolved && ownerStr.equals("Self")) {
+        let Option::SOME(selfOwnerId) = Analyzer::ResolverBodies::selfPathOwner(state, defStore) else {
+          Analyzer::ResolverBodies::emitSelfPathOutsideOwner(state, p.span);
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        };
+
+        // A trait declares no variants, and its implementing type is unknown here.
+        if (Analyzer::ResolverBodies::isTraitDef(defStore, selfOwnerId)) {
+          Analyzer::ResolverBodies::emitUnknownVariantPattern(state, p);
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        }
+
+        lookup = Analyzer::ResolverBodies::resolveSelfPathTail(
+          state,
+          defStore,
+          symbols,
+          selfOwnerId,
+          memberStr.toStr(),
+          &p.segments,
+          segCount,
+        );
+        ownerResolved = true;
       }
 
       if (!ownerResolved) {

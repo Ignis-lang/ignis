@@ -1019,6 +1019,30 @@ export namespace Analyzer {
             return Option::NONE;
           };
 
+          // `Self` inside a generic owner is the owner with its own parameters:
+          // `Self::make(x)` in `Wrap<U>` calls `Wrap::make<U>(x)`.
+          if (call.typeArguments.length() == 0 && Analyzer::Typecheck::isSelfOwnedPath(module, call.callee)) {
+            if (Analyzer::Typecheck::calleeTypeParamSymbols(defStore, staticDefId).length() == 0) {
+              let ownerSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, staticDefId);
+
+              if (ownerSymbols.length() > 0) {
+                let mut ownerParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+                let mut ownerIndex: u64 = 0;
+
+                while (ownerIndex < ownerSymbols.length()) {
+                  if (let Option::SOME(ownerSymbol) = ownerSymbols.get(ownerIndex)) {
+                    let mut typeStoreOwnerRef: &mut Analyzer::TypeStore = typeStore;
+                    ownerParams.push(typeStoreOwnerRef.param(*ownerSymbol));
+                  }
+
+                  ownerIndex += 1;
+                }
+
+                Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &ownerParams);
+              }
+            }
+          }
+
           if (call.typeArguments.length() > 0) {
             let staticParamTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(
               defStore,
@@ -2114,6 +2138,23 @@ export namespace Analyzer {
     /// as `T`. The trait's method is recorded as the call target; lowering keeps
     /// `T` on the call so monomorphization reaches the implementing type's
     /// method once `T` is concrete.
+    /// Whether `exprId` is a two-segment path whose owner segment is `Self`.
+    function isSelfOwnedPath(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      if (path.segments.length() != 2) {
+        return false;
+      }
+
+      let Option::SOME(owner) = path.segments.get(0) else {
+        return false;
+      };
+
+      return owner.equals("Self");
+    }
+
     function checkBoundStaticMethodCall(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,

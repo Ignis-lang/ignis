@@ -1,0 +1,57 @@
+// e2e: std
+// In a trait default body, `Self::name` calls the trait's static method on the
+// implementing type: an inherited default reaches the implementer's own
+// static, an overridden sibling wins over the trait's default, and an instance
+// default reaches a static the same way.
+import Io from "std::io";
+
+trait Seeded {
+  static seed(): i32;
+
+  static step(): i32 {
+    return 1;
+  }
+
+  static next(): i32 {
+    return Self::seed() + Self::step();
+  }
+
+  describe(&self): i32 {
+    return Self::next() * 10;
+  }
+}
+
+@implements(Seeded)
+record Plain {
+  public unused: i32;
+
+  static seed(): i32 {
+    return 3;
+  }
+}
+
+@implements(Seeded)
+enum Custom {
+  ONLY,
+
+  static seed(): i32 {
+    return 5;
+  }
+
+  static step(): i32 {
+    return 100;
+  }
+}
+
+function nextOf<T: Seeded>(): i32 {
+  return T::next();
+}
+
+function main(): i32 {
+  let plain: Plain = Plain { unused: 0 };
+  let custom: Custom = Custom::ONLY;
+  Io::println(`plain ${Plain::next()} ${nextOf<Plain>()} ${plain.describe()}`.toStr());
+  Io::println(`custom ${Custom::next()} ${nextOf<Custom>()} ${custom.describe()}`.toStr());
+
+  return 0;
+}

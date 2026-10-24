@@ -392,6 +392,8 @@ record Config {
 let max = Config::MAX_SIZE;
 ```
 
+Inside the methods of a record or enum, static or instance, `Self::name` means what the owner's own name does: `Self::default()` calls a static method, `Self::MAX_SIZE` reads a static field, and in an enum `Self::HIGH` or `Self::SOME(x)` builds or matches a variant. In a generic owner `Self` is the owner with its own type parameters, so `Self::create(value)` inside `Wrap<U>` calls `Wrap::create<U>(value)`. `Self::name` reaches only the owner's members: a name the owner does not declare is an error even when a top-level declaration has that name. Outside a record, enum or trait, `Self::name` is an error (A0280).
+
 A `static mut` field is one global storage location, so its initializer must be a constant expression: a literal, a constant, an expression of those, or an array or record literal whose elements and fields are constant expressions. Any other initializer is an error (A0230).
 
 ```ignis
@@ -522,7 +524,7 @@ record Item {
 }
 ```
 
-A trait may declare `static` methods, required or with a default body; `Self` in their signatures is the implementing type. A record or enum implements them with `static` methods of the same signature (A0276, A0277), and a generic calls them through a bounded type parameter as `T::name(args)` (A0278), which reaches the implementing type's method after monomorphization. A static trait method is not callable through a value or as `Trait::name(args)` (A0279). See `docs/TRAITS.md`.
+A trait may declare `static` methods, required or with a default body; `Self` in their signatures is the implementing type. A record or enum implements them with `static` methods of the same signature (A0276, A0277), and a generic calls them through a bounded type parameter as `T::name(args)` (A0278), which reaches the implementing type's method after monomorphization. A static trait method is not callable through a value or as `Trait::name(args)` (A0279). Inside a trait's default body, static or instance, `Self::name(args)` calls the trait's static method on the implementing type, as `T::name(args)` does. See `docs/TRAITS.md`.
 
 ### 4.9 Namespaces
 
