@@ -248,6 +248,7 @@ spelled (see the reserved list).
   | <record>
   | <enum>
   | <trait>
+  | <extension>
   | <type-alias>
   | <extern>
   | <namespace>
@@ -445,6 +446,18 @@ spelled (see the reserved list).
 //   trait Make {
 //     static make(seed: i32): Self;
 //   }
+
+// `extension` is a contextual keyword: it starts an item only when a type or
+// `<` follows it, and stays an ordinary identifier everywhere else. The block
+// implements the traits its `@implements` names for an existing type (a
+// primitive, `str`, a record or an enum); it declares methods only, no fields.
+// A generic block extends an instance over exactly its own type parameters.
+<extension> ::= <directive-attrs> "extension" <generic-type>? <type>
+                "{" <method>* "}"
+//   @implements(Describe)
+//   extension<T: Describe> Option<T> { describe(&self): i64 { ... } }
+// A primitive type name followed by `::` starts a path expression, so a static
+// method an extension block declares is called as `i64::read(raw)`.
 
 <statement> ::= <declaration>
   | <if>

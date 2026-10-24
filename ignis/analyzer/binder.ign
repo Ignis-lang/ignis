@@ -544,7 +544,20 @@ export namespace Analyzer {
       if (let Option::SOME(node) = nodeOpt) {
         match (node) {
           Ast::Item::Node::Record(r) -> {
-            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &r.name, r.span, scopeKey, false);
+            // An extension block declares no name of its own: nothing can
+            // refer to it, and two blocks for the same type are reported as a
+            // duplicate implementation once their traits resolve.
+            if (ast.extensionTarget(itemId).isSome()) {
+              let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+              let sym: Analyzer::SymbolId = symbolsRef.intern(r.name.toStr());
+              let defId: Analyzer::DefinitionId = allocateRecordPlaceholder(defStore, typeStore, sym);
+              let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+              stateRef.nodeIds.push(itemId.raw());
+              stateRef.defIds.push(defId);
+              stateRef.declScopeKeys.push(scopeKey);
+            } else {
+              predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &r.name, r.span, scopeKey, false);
+            }
           },
           Ast::Item::Node::Enum(e) -> {
             predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &e.name, e.span, scopeKey, true);
@@ -1420,6 +1433,10 @@ export namespace Analyzer {
 
       if (targetName.equals("record")) {
         return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang") || name.equals("cLayout");
+      }
+
+      if (targetName.equals("extension")) {
+        return name.equals("implements");
       }
 
       if (targetName.equals("field")) {
@@ -2679,7 +2696,25 @@ export namespace Analyzer {
       scopeKey: u64,
       pass1: &Analyzer::Binder::BinderOutput,
     ): void {
-      Analyzer::Binder::validateAttributes(state, &rec.metadata, "record");
+      let isExtension: boolean = ast.extensionTarget(itemId).isSome();
+
+      if (isExtension) {
+        Analyzer::Binder::validateAttributes(state, &rec.metadata, "extension");
+
+        if (Analyzer::Binder::implementedTraitNames(&rec.metadata).length() == 0) {
+          let mut diag: Diagnostic = Diagnostic::new(
+            Severity::ERROR,
+            DiagnosticCode::EXTENSION_WITHOUT_TRAIT,
+            "an extension block has to name the trait it implements in @implements",
+            rec.span,
+          );
+          diag.addLabel(LabelKind::PRIMARY, rec.span, "write @implements(Trait) before 'extension'");
+          let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+          stateRef.diagnostics.push(diag);
+        }
+      } else {
+        Analyzer::Binder::validateAttributes(state, &rec.metadata, "record");
+      }
 
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
       let Option::SOME(defId) = defIdOpt else {
@@ -2741,8 +2776,8 @@ export namespace Analyzer {
         staticMethods: methods.staticMethods,
         staticFields: fieldTables.staticFields,
         typeId: realTypeId,
-        implementsCopy: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
-        implementsDrop: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
+        implementsCopy: !isExtension && Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
+        implementsDrop: !isExtension && Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
         implementedTraits: Analyzer::Binder::implementedTraitNames(&rec.metadata),
         packed: Analyzer::Binder::packedAttribute(&rec.metadata),
         alignment: Analyzer::Binder::alignmentAttribute(&rec.metadata),

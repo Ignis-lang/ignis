@@ -1,3 +1,4 @@
+import SourceSpan from "@compiler::diagnostics";
 import IndexVec from "@compiler::indexing";
 import Id from "@compiler::ids";
 import HashMap from "std::collections";
@@ -196,6 +197,17 @@ export namespace Analyzer {
     /// `@threadLocal` on a `static mut` field: every thread gets its own copy
     /// of the global. False for every other variable.
     public threadLocal: boolean;
+  }
+
+  /// What an `extension` block extends: the resolved type, and how a path
+  /// names it, by the record or enum it is or instantiates, or by the
+  /// primitive's written name.
+  record ExtensionTarget {
+    public target: Analyzer::TypeId;
+    /// The block's declaration, which diagnostics about it point at.
+    public span: SourceSpan;
+    public headDef: Option<Analyzer::DefinitionId>;
+    public primitiveName: Option<String>;
   }
 
   /// Payload wrapper for the `Definition::Function` variant.
@@ -520,6 +532,13 @@ export namespace Analyzer {
     /// For each method copied from a trait default onto an implementing type,
     /// keyed by raw definition id, the note that names where it comes from.
     inheritedNotes: HashMap<u32, String>;
+    /// The type each `extension` block extends, keyed by the raw id of the
+    /// record definition the block binds to. Filled by the resolver once the
+    /// target resolves.
+    extensionTargets: HashMap<u32, Analyzer::ExtensionTarget>;
+    /// Every extension block with a resolved target, in the order they were
+    /// resolved: imported modules before the modules that import them.
+    extensionDefs: Vector<Analyzer::DefinitionId>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -543,7 +562,117 @@ export namespace Analyzer {
         closureFunctions: HashMap::new<u32, boolean>(),
         traitReferences: HashMap::new<u32, Vector<Option<Analyzer::DefinitionId>>>(),
         inheritedNotes: HashMap::new<u32, String>(),
+        extensionTargets: HashMap::new<u32, Analyzer::ExtensionTarget>(),
+        extensionDefs: Vector::new<Analyzer::DefinitionId>(),
       };
+    }
+
+    /// Record that the record definition `id` is an extension block of
+    /// `target`.
+    public registerExtension(
+      &mut self,
+      id: Analyzer::DefinitionId,
+      target: Analyzer::ExtensionTarget
+    ): void {
+      let raw: u32 = id.raw();
+
+      if (self.extensionTargets.get(&raw).isNone()) {
+        self.extensionDefs.push(id);
+      }
+
+      self.extensionTargets.insert(raw, target);
+    }
+
+    /// The type the extension block `id` extends, or `NONE` when `id` is not
+    /// an extension block with a resolved target.
+    public extensionTargetOf(&self, id: Analyzer::DefinitionId): Option<Analyzer::TypeId> {
+      let raw: u32 = id.raw();
+
+      if (let Option::SOME(entry) = self.extensionTargets.get(&raw)) {
+        return Option::SOME(entry.target);
+      }
+
+      return Option::NONE;
+    }
+
+    /// Where the extension block `id` is declared.
+    public extensionSpanOf(&self, id: Analyzer::DefinitionId): Option<SourceSpan> {
+      let raw: u32 = id.raw();
+
+      if (let Option::SOME(entry) = self.extensionTargets.get(&raw)) {
+        return Option::SOME(entry.span);
+      }
+
+      return Option::NONE;
+    }
+
+    /// The record or enum the extension block `id` extends, itself or an
+    /// instance of it; `NONE` for a primitive.
+    public extensionHeadOf(&self, id: Analyzer::DefinitionId): Option<Analyzer::DefinitionId> {
+      let raw: u32 = id.raw();
+
+      if (let Option::SOME(entry) = self.extensionTargets.get(&raw)) {
+        return entry.headDef;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The extension blocks whose target is the record or enum `headDef`,
+    /// itself or an instance of it.
+    public extensionsOfDefinition(
+      &self,
+      headDef: Analyzer::DefinitionId
+    ): Vector<Analyzer::DefinitionId> {
+      let mut found: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < self.extensionDefs.length()) {
+        if (let Option::SOME(extension) = self.extensionDefs.get(index)) {
+          let raw: u32 = extension.raw();
+
+          if (let Option::SOME(entry) = self.extensionTargets.get(&raw)) {
+            if (let Option::SOME(head) = entry.headDef) {
+              if (head.raw() == headDef.raw()) {
+                found.push(*extension);
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return found;
+    }
+
+    /// The extension blocks whose target is the primitive written `name`.
+    public extensionsOfPrimitive(&self, name: str): Vector<Analyzer::DefinitionId> {
+      let mut found: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < self.extensionDefs.length()) {
+        if (let Option::SOME(extension) = self.extensionDefs.get(index)) {
+          let raw: u32 = extension.raw();
+
+          if (let Option::SOME(entry) = self.extensionTargets.get(&raw)) {
+            if (let Option::SOME(primitive) = &entry.primitiveName) {
+              if (primitive.equals(name)) {
+                found.push(*extension);
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return found;
+    }
+
+    /// Every extension block with a resolved target.
+    public extensionBlocks(&self): Vector<Analyzer::DefinitionId> {
+      return Analyzer::copyDefIdBucket(Option::SOME(&self.extensionDefs));
     }
 
     /// Record the traits the names written on `id` resolve to, replacing any

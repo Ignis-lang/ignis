@@ -3920,6 +3920,117 @@ export namespace Analyzer {
       @panic("unreachable: requireMethodOwner match did not return");
     }
 
+    /// The extension block that answers `value.name(args)` for a receiver of
+    /// `receiverType`, as the owner the call is checked against: its methods,
+    /// and for a generic block its own type parameters bound to the
+    /// receiver's arguments. `NONE` when the receiver's own record or enum
+    /// declares a method of that name, which wins, or when no extension block
+    /// for the type declares one. A generic block counts only where the
+    /// receiver satisfies its bounds, judged from inside `enclosing`.
+    function extensionMethodOwner(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      enclosing: Analyzer::DefinitionId,
+      receiverType: Analyzer::TypeId,
+      name: str,
+    ): Option<Analyzer::Typecheck::RequiredMethodOwner> {
+      let matches: Vector<Analyzer::TypeBounds::ExtensionMatch> = Analyzer::TypeBounds::extensionsFor(defStore, typeStore, receiverType);
+
+      if (matches.length() == 0) {
+        return Option::NONE;
+      }
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, receiverType);
+      let mut nativeOwner: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(node) = typeStore.get(resolved.typeId)) {
+        match (node) {
+          Analyzer::Type::Record(defId) -> {
+            nativeOwner = Option::SOME(defId);
+          },
+          Analyzer::Type::Enum(defId) -> {
+            nativeOwner = Option::SOME(defId);
+          },
+          Analyzer::Type::Instance(instance) -> {
+            nativeOwner = Option::SOME(instance.definition);
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(ownerDefId) = nativeOwner) {
+        let mut nativeMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+        let mut nativeStatics: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        match (defStore.get(ownerDefId)) {
+          Option::SOME(Analyzer::Definition::Record(record_)) -> {
+            nativeMethods = Analyzer::Typecheck::copyDefinitionIdVector(&record_.instanceMethods);
+            nativeStatics = Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticMethods);
+          },
+          Option::SOME(Analyzer::Definition::Enum(enum_)) -> {
+            nativeMethods = Analyzer::Typecheck::copyDefinitionIdVector(&enum_.instanceMethods);
+            nativeStatics = Analyzer::Typecheck::copyDefinitionIdVector(&enum_.staticMethods);
+          },
+          _ -> {},
+        };
+
+        if (Analyzer::ResolverBodies::lookupMethodInTable(defStore, &nativeMethods, name, symbols).isSome()) {
+          return Option::NONE;
+        }
+
+        if (Analyzer::ResolverBodies::lookupMethodInTable(defStore, &nativeStatics, name, symbols).isSome()) {
+          return Option::NONE;
+        }
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < matches.length()) {
+        let Option::SOME(entry) = matches.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        // A generic block applies only where the receiver's arguments satisfy
+        // the bounds of the block's own type parameters.
+        if (!Analyzer::TypeBounds::extensionArgumentsSatisfy(defStore, typeStore, symbols, enclosing, entry)) {
+          index += 1;
+          continue;
+        }
+
+        let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+        let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+        let mut typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(entry.extension)) {
+          instanceMethods = Analyzer::Typecheck::copyDefinitionIdVector(&record_.instanceMethods);
+          staticMethods = Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticMethods);
+          typeParams = Analyzer::Typecheck::copyDefinitionIdVector(&record_.typeParams);
+        }
+
+        let declaresInstance: boolean = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &instanceMethods, name, symbols).isSome();
+        let declaresStatic: boolean = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &staticMethods, name, symbols).isSome();
+
+        if (declaresInstance || declaresStatic) {
+          let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &typeParams);
+
+          return Option::SOME(Analyzer::Typecheck::RequiredMethodOwner {
+            defId: entry.extension,
+            typeId: resolved.typeId,
+            instanceMethods: instanceMethods,
+            staticMethods: staticMethods,
+            typeParamSymbols: typeParamSymbols,
+            typeArguments: Analyzer::Typecheck::copyVariantPayloadTypeIds(&entry.typeArguments),
+          });
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
     /// The type-parameter definitions nameable inside `enclosing`: the callable's
     /// own parameters first, then those of the record, enum or trait declaring it,
     /// so an inner parameter shadows an outer one written with the same name. A
