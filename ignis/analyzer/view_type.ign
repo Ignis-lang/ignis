@@ -172,6 +172,134 @@ export namespace Analyzer::ViewType {
     return false;
   }
 
+  /// Whether a value of `typeId` lets the code it is handed to write into a
+  /// place it does not own: a `&mut T`, a raw pointer whatever its pointee
+  /// (it can be cast back), a closure value (its captures are invisible in
+  /// the type), an unresolved `Param` (any of these once substituted), or a
+  /// record, enum, tuple, fixed array, slice, instance or alias containing
+  /// one, followed through `&T` as well. A capture-free `fn(A) -> R` reaches
+  /// nothing. The borrow check keeps a view's borrow to the end of the scope
+  /// when the view is handed to a call next to such an operand, since the
+  /// callee can store the view there. Recursion is guarded on the instance,
+  /// as in `isView`.
+  public function canReachMutablePlace(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, &mut visiting);
+  }
+
+  function canReachMutablePlaceInner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    visiting: &mut Vector<Vector<u32>>,
+  ): boolean {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return true;
+    };
+
+    let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isEnum: boolean = false;
+    let mut hasTypeArguments: boolean = false;
+
+    match (type_) {
+      Analyzer::Type::Reference(referenceType) -> {
+        if (referenceType.mutable) {
+          return true;
+        }
+
+        components.push(referenceType.referent);
+      },
+      Analyzer::Type::Pointer(_) | Analyzer::Type::Function(_) | Analyzer::Type::Param(_) -> {
+        return true;
+      },
+      Analyzer::Type::Slice(element) -> {
+        components.push(element);
+      },
+      Analyzer::Type::FixedArray(element, _) -> {
+        components.push(element);
+      },
+      Analyzer::Type::Tuple(tuple) -> {
+        components = ViewType::copyTypeIds(&tuple.elements);
+      },
+      Analyzer::Type::Record(defId) -> {
+        nominal = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominal = Option::SOME(defId);
+        isEnum = true;
+      },
+      Analyzer::Type::Instance(instance) -> {
+        nominal = Option::SOME(instance.definition);
+        components = ViewType::copyTypeIds(&instance.typeArguments);
+        isEnum = ViewType::isEnumDefinition(defStore, instance.definition);
+        hasTypeArguments = true;
+      },
+      Analyzer::Type::Alias(aliasDefId) -> {
+        let Option::SOME(target) = ViewType::aliasedTypeOf(defStore, aliasDefId) else {
+          return true;
+        };
+
+        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, visiting);
+      },
+      _ -> {},
+    };
+
+    if (let Option::SOME(defId) = nominal) {
+      let key: Vector<u32> = ViewType::visitKey(defId.raw(), &components);
+
+      if (ViewType::containsKey(&*visiting, &key)) {
+        return false;
+      }
+
+      let mut visitingRef: &mut Vector<Vector<u32>> = visiting;
+      visitingRef.push(key);
+
+      let mut members: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      if (isEnum) {
+        members = ViewType::enumPayloadTypes(defStore, defId);
+      } else {
+        members = ViewType::recordFieldTypes(defStore, defId);
+      }
+
+      let paramSymbols: Vector<Analyzer::SymbolId> = ViewType::typeParamSymbols(defStore, defId);
+      let arguments: Vector<Analyzer::TypeId> = ViewType::copyTypeIds(&components);
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < members.length()) {
+        if (let Option::SOME(member) = members.get(memberIndex)) {
+          if (hasTypeArguments) {
+            let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+            components.push(typeStoreRef.substitute(*member, &paramSymbols, &arguments));
+          } else {
+            components.push(*member);
+          }
+        }
+
+        memberIndex += 1;
+      }
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < components.length()) {
+      if (let Option::SOME(component) = components.get(index)) {
+        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, visiting)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
     let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
     let mut index: u64 = 0;

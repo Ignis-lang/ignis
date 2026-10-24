@@ -1,0 +1,41 @@
+// e2e: err
+//
+// A closure value is an operand whose captures the type does not show: a view
+// handed next to one, even to a `@noescape` parameter, keeps its borrow to the
+// end of the scope, since the closure can store the view in what it captured.
+function apply(@noescape f: (str) -> void, text: str): void {
+  f(text);
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function literal(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  apply((t: str): void -> {
+    slot = t;
+  }, text);
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function bound(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let put = (t: str): void -> {
+    slot = t;
+  };
+  let text: str = owned.toStr();
+  apply(put, text);
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function main(): i32 {
+  literal();
+  bound();
+  return 0;
+}

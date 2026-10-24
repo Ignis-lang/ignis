@@ -8333,12 +8333,13 @@ export namespace Borrowck {
   /// Whether `nodeId` hands a view one of `carriers` holds somewhere it can
   /// outlive the statement — the sink rule. The borrow stays to the end of
   /// the scope when the view is assigned into a place whose type can carry
-  /// it, handed to a call that also receives a mutable destination whose
-  /// referent can carry it (a record field through a `&mut` parameter, a
-  /// `&mut self` receiver of a view-carrying record), handed through a raw
-  /// pointer or to a volatile, `@write` or atomic sink, or handed to a
-  /// closure call. A view consumed where the view rules already follow it —
-  /// a binding, a plain call operand — does not keep the borrow here; the
+  /// it, handed to a call (function, method or closure call) any other
+  /// operand of which can reach a mutable place — a `&mut`, a raw pointer, a
+  /// closure value, or an aggregate or `&T` holding one — handed through a
+  /// raw pointer, or handed to a volatile, `@write` or atomic sink. A view
+  /// consumed where the view rules already follow it — a binding, a call
+  /// whose other operands reach nothing mutable — does not keep the borrow
+  /// here; the
   /// view rules reject every container, static and thread boundary a view
   /// could dangle out of.
   function nodeStoresView(
@@ -8365,23 +8366,21 @@ export namespace Borrowck {
         return Borrowck::typeCanCarryView(defStore, typeStore, slotType);
       },
       Hir::HirKind::CallClosure(callNode) -> {
-        return Borrowck::anyMentions(hir, &callNode.args, carriers);
+        let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
+        operands.push(callNode.callee);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, carriers);
       },
       Hir::HirKind::Call(callNode) -> {
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, Option::NONE, carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, carriers);
       },
       Hir::HirKind::MethodCall(callNode) -> {
-        if (Borrowck::methodSelfMutable(defStore, callNode.method)) {
-          return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, callNode.receiver, carriers);
-        }
-
         let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
 
         if (let Option::SOME(receiver) = callNode.receiver) {
           operands.push(receiver);
         }
 
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::NONE, carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, carriers);
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         return Borrowck::mentionsAny(hir, storeNode.value, carriers);
@@ -8395,70 +8394,36 @@ export namespace Borrowck {
     };
   }
 
-  /// The call-level sink test: one operand mentions a carrier and the call
-  /// also receives a mutable destination whose referent can carry a view —
-  /// a `&mut` or pointer argument next to it, or the `&mut self` receiver —
-  /// or any view-carrying operand reaches the callee through a type that
-  /// touches a raw pointer.
+  /// The call-level sink test: one operand mentions a carrier, and either
+  /// another operand — the receiver and a closure callee included — can reach
+  /// a mutable place (`Analyzer::ViewType::canReachMutablePlace`), where the
+  /// callee could store the view, or the view-carrying operand itself reaches
+  /// the callee through a type that touches a raw pointer.
   function callHandsViewToSink(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hir: &Hir::HirStore,
-    args: &Vector<Hir::HirId>,
-    mutableReceiver: Option<Hir::HirId>,
+    operands: &Vector<Hir::HirId>,
     carriers: &Vector<u32>,
   ): boolean {
-    let mut viewOperand: boolean = false;
+    if (!Borrowck::anyMentions(hir, operands, carriers)) {
+      return false;
+    }
+
     let mut index: u64 = 0;
 
-    while (index < args.length()) {
-      if (let Option::SOME(arg) = args.get(index)) {
-        if (Borrowck::mentionsAny(hir, *arg, carriers)) {
-          viewOperand = true;
-        }
-      }
+    while (index < operands.length()) {
+      if (let Option::SOME(operand) = operands.get(index)) {
+        let Option::SOME(operandType) = Borrowck::nodeTypeOf(hir, *operand) else {
+          return true;
+        };
 
-      index += 1;
-    }
-
-    if (!viewOperand) {
-      if (let Option::SOME(receiver) = mutableReceiver) {
-        if (!Borrowck::mentionsAny(hir, receiver, carriers)) {
-          return false;
-        }
-      } else {
-        return false;
-      }
-    }
-
-    if (let Option::SOME(receiver) = mutableReceiver) {
-      if (!Borrowck::mentionsAny(hir, receiver, carriers)) {
-        if (let Option::SOME(receiverType) = Borrowck::nodeTypeOf(hir, receiver)) {
-          let slotType: Analyzer::TypeId = Borrowck::referentTypeOf(typeStore, receiverType);
-
-          if (Borrowck::typeCanCarryView(defStore, typeStore, slotType)) {
+        if (Borrowck::mentionsAny(hir, *operand, carriers)) {
+          if (Borrowck::typeTouchesRawPointer(defStore, typeStore, operandType)) {
             return true;
           }
-        }
-      }
-    }
-
-    index = 0;
-
-    while (index < args.length()) {
-      if (let Option::SOME(arg) = args.get(index)) {
-        if (Borrowck::mentionsAny(hir, *arg, carriers)) {
-          if (let Option::SOME(argType) = Borrowck::nodeTypeOf(hir, *arg)) {
-            if (Borrowck::typeTouchesRawPointer(defStore, typeStore, argType)) {
-              return true;
-            }
-          }
-        } else if (let Option::SOME(argType) = Borrowck::nodeTypeOf(hir, *arg)) {
-          if (let Option::SOME(destination) = Borrowck::mutableDestinationOf(typeStore, argType)) {
-            if (Borrowck::typeCanCarryView(defStore, typeStore, destination)) {
-              return true;
-            }
-          }
+        } else if (Analyzer::ViewType::canReachMutablePlace(defStore, typeStore, operandType)) {
+          return true;
         }
       }
 
@@ -8466,32 +8431,6 @@ export namespace Borrowck {
     }
 
     return false;
-  }
-
-  /// The type a `&mut T` or pointer argument lets the callee write to.
-  function mutableDestinationOf(
-    typeStore: &mut Analyzer::TypeStore,
-    typeId: Analyzer::TypeId
-  ): Option<Analyzer::TypeId> {
-    let Option::SOME(type_) = typeStore.get(typeId) else {
-      return Option::NONE;
-    };
-
-    let mut destination: Option<Analyzer::TypeId> = Option::NONE;
-
-    match (type_) {
-      Analyzer::Type::Reference(referenceType) -> {
-        if (referenceType.mutable) {
-          destination = Option::SOME(referenceType.referent);
-        }
-      },
-      Analyzer::Type::Pointer(pointerType) -> {
-        destination = Option::SOME(pointerType.pointee);
-      },
-      _ -> {},
-    };
-
-    return destination;
   }
 
   /// Whether the local `defRaw` can hold a view taken from another binding.

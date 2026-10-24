@@ -1,0 +1,26 @@
+// e2e: err
+//
+// A shared reference to a record holding a `&mut` field still reaches a mutable
+// place: a view handed next to it keeps its borrow to the end of the scope.
+record Out {
+  public slot: &mut str;
+}
+
+function store(out: &Out, text: str): void {
+  *out.slot = text;
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function main(): i32 {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let out: Out = Out { slot: &mut slot };
+  let text: str = owned.toStr();
+  store(&out, text);
+  owned.pushChar('d');
+  consume(slot);
+  return 0;
+}

@@ -1,0 +1,26 @@
+// e2e: err
+//
+// A record holding a raw pointer reaches a mutable place whatever the pointee:
+// a view handed next to it keeps its borrow to the end of the scope.
+record RawOut {
+  public place: *mut str;
+}
+
+function store(text: str, out: RawOut): void {
+  @write<str>(out.place, text);
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function main(): i32 {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let out: RawOut = RawOut { place: (&mut slot) as *mut str };
+  let text: str = owned.toStr();
+  store(text, out);
+  owned.pushChar('d');
+  consume(slot);
+  return 0;
+}

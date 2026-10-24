@@ -167,9 +167,14 @@ A view must not outlive its owner:
   pattern binding destructured from it, or a closure capturing it. Granularity is the whole
   statement: a use inside a loop body keeps the borrow for every iteration, a use in the
   block's tail or in a `defer` body keeps it to the end of the block, and so does a view handed
-  somewhere it can outlive its statement — into a place whose type can carry a view, to a call
-  that also receives a mutable destination whose referent can carry a view, through a raw
-  pointer or into a volatile, `@write` or atomic sink, or to a closure call.
+  somewhere it can outlive its statement — into a place whose type can carry a view, through a
+  raw pointer or into a volatile, `@write` or atomic sink, or to a call (function, method or
+  closure call) any other operand of which, the receiver and a closure callee included, can
+  reach a mutable place. An operand reaches a mutable place when its type is `&mut T`, any raw
+  pointer whatever its pointee, or a closure type `(A) -> R` (a capture-free `fn(A) -> R`
+  reaches nothing), or is a record, enum, tuple, fixed array, generic instance, alias or `&T`
+  that contains one. A callee that writes the view through a raw pointer it reads from a
+  `static` is not seen by this rule: raw pointers are the programmer's responsibility.
 - A view taken through a view local that holds such a borrow borrows that local, not its
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
   borrows `store`, so views derived from `store` only conflict with each other, while `guard`

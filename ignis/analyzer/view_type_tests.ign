@@ -787,6 +787,319 @@ function viewTypeMutuallyRecursiveInstancesTerminate(): void {
   Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, store.recordType(idA)));
 }
 
+// ─── Reaching a mutable place ─────────────────────────────────────────────────
+
+/// Scenario: `&mut T` reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachMutableReferenceReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = idMutRef;
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&i32` reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachSharedReferenceToPrimitiveDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.reference(idI32);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `str` reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachStrDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a raw pointer reaches a mutable place whatever its pointee: `*u8` can be cast back.
+/// Spec: S3, L15.
+@test
+function reachRawPointerReachesWhateverThePointee(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a closure value type reaches a mutable place: its captures are invisible in the type.
+/// Spec: S3, L15.
+@test
+function reachClosureTypeReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a capture-free `fn(A) -> R` reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachRawFunctionTypeDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an unresolved `Param` reaches a mutable place: it may be substituted by one.
+/// Spec: S3, L15.
+@test
+function reachParamReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let id: Analyzer::TypeId = store.param(syms.intern("T"));
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a `&mut` field reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachRecordWithMutableReferenceFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idMutRef);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Out", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&Out` reaches the mutable place its record's `&mut` field points to.
+/// Spec: S3, L15.
+@test
+function reachSharedReferenceToRecordWithMutableFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idMutRef);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Out", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = store.reference(idRecord);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record of primitives reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachRecordWithPrimitiveFieldsDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Plain", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record holding a raw pointer reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachRecordWithPointerFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idI32));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "RawOut", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum with a `&mut` payload reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachEnumWithMutableReferencePayloadReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(idMutRef);
+
+  let mut variants: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  variants.push(Vector::new<Analyzer::TypeId>());
+  variants.push(payload);
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Slot", variants);
+  let id: Analyzer::TypeId = store.enumType(defId);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a generic instance with a `&mut` argument reaches a mutable place (`Option<&mut str>`).
+/// Spec: S3, L15.
+@test
+function reachInstanceWithMutableReferenceArgumentReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idMutRef);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a generic instance of primitives with no mutable member reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachInstanceWithPrimitiveArgumentDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a tuple with a `&mut` element reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachTupleWithMutableReferenceReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  elements.push(idMutRef);
+
+  let id: Analyzer::TypeId = store.tuple(elements);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a fixed array of `&mut` reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachFixedArrayOfMutableReferencesReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = store.fixedArray(idMutRef, 2);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias is transparent: an alias to `&mut T` reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachAliasToMutableReferenceReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "Place", idMutRef);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record holding a shared reference to itself and nothing mutable terminates and reaches nothing.
+/// Spec: S3, L15.
+@test
+function reachRecursiveRecordTerminates(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "SelfView", Vector::new<Analyzer::TypeId>());
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.reference(idRecord));
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "SelfView", defId, fields);
+
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
 // ─── Closure values ───────────────────────────────────────────────────────────
 
 /// Builds a closure value with the given captures.

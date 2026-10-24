@@ -1,0 +1,41 @@
+// e2e: err
+//
+// A `&self` method on a record holding a `&mut` field can write a view argument
+// through that field, so the receiver keeps the view's borrow to the end of the
+// scope.
+record Writer {
+  public slot: &mut str;
+
+  public put(&self, text: str): void {
+    *self.slot = text;
+  }
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function bound(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let writer: Writer = Writer { slot: &mut slot };
+  let text: str = owned.toStr();
+  writer.put(text);
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function temporary(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  Writer { slot: &mut slot }.put(text);
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function main(): i32 {
+  bound();
+  temporary();
+  return 0;
+}

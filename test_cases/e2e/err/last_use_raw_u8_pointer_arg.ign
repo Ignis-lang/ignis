@@ -1,0 +1,22 @@
+// e2e: err
+//
+// A raw pointer argument reaches a mutable place whatever its pointee: the
+// callee can cast a `*mut u8` back and write the view through it.
+function store(text: str, place: *mut u8): void {
+  @write<str>(@pointerCast<*mut str>(place), text);
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function main(): i32 {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let place: *mut u8 = @pointerCast<*mut u8>((&mut slot) as *mut str);
+  let text: str = owned.toStr();
+  store(text, place);
+  owned.pushChar('d');
+  consume(slot);
+  return 0;
+}
