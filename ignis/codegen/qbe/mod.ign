@@ -3339,6 +3339,17 @@ export namespace CodegenQbe {
       return;
     }
 
+    if (node.op == Hir::BinaryOperation::Add || node.op == Hir::BinaryOperation::Sub) {
+      let Option::SOME(rightType) = CodegenQbe::operandType(defStore, function_, &node.right) else {
+        CodegenQbe::failNamed(emitter, "BinOp");
+        return;
+      };
+
+      if (CodegenQbe::qbeEmitPointerArithmetic(emitter, defStore, typeStore, &node, leftType, rightType, &left, &right)) {
+        return;
+      }
+    }
+
     let dest: String = `%t${node.dest.raw()}`;
     let mut isCompare: boolean = false;
 
@@ -3421,6 +3432,108 @@ export namespace CodegenQbe {
     emitter.out.pushStr(line.toStr());
 
     CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, destType, &dest);
+  }
+
+  /// The element stride of pointer arithmetic over `ty`, or `NONE` when `ty`
+  /// is not a pointer. A `void` pointee steps one byte, as GCC's `void *`
+  /// arithmetic in the C backend does.
+  function qbePointerStride(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Option<u64> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+    let Option::SOME(Analyzer::Type::Pointer(pointer)) = typeStore.get(resolved) else {
+      return Option::NONE;
+    };
+
+    let pointee: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, pointer.pointee);
+
+    if (let Option::SOME(Analyzer::Type::VOID) = typeStore.get(pointee)) {
+      return Option::SOME(1);
+    }
+
+    return Option::SOME(CodegenQbe::typeSize(emitter, defStore, typeStore, pointee));
+  }
+
+  /// Emits `pointer +/- integer` scaled by the pointee size and
+  /// `pointer - pointer` divided by it, as C pointer arithmetic does. Returns
+  /// false when neither operand is a pointer, leaving the plain integer
+  /// operation to the caller.
+  function qbeEmitPointerArithmetic(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    node: &Lir::InstrBinOp,
+    leftType: Analyzer::TypeId,
+    rightType: Analyzer::TypeId,
+    left: &String,
+    right: &String,
+  ): boolean {
+    let leftStride: Option<u64> = CodegenQbe::qbePointerStride(emitter, defStore, typeStore, leftType);
+    let rightStride: Option<u64> = CodegenQbe::qbePointerStride(emitter, defStore, typeStore, rightType);
+
+    if (emitter.error.isSome()) {
+      return true;
+    }
+
+    let dest: String = `%t${node.dest.raw()}`;
+    let mut arith: str = "add";
+
+    if (node.op == Hir::BinaryOperation::Sub) {
+      arith = "sub";
+    }
+
+    if (let Option::SOME(stride) = leftStride) {
+      if (rightStride.isSome()) {
+        if (stride <= 1) {
+          emitter.out.pushStr(`    ${dest.toStr()} =l sub ${left.toStr()}, ${right.toStr()}\n`.toStr());
+          return true;
+        }
+
+        let difference: String = CodegenQbe::freshTemp(emitter);
+
+        emitter.out.pushStr(`    ${difference.toStr()} =l sub ${left.toStr()}, ${right.toStr()}\n`.toStr());
+        emitter.out.pushStr(`    ${dest.toStr()} =l div ${difference.toStr()}, ${stride}\n`.toStr());
+        return true;
+      }
+
+      let offset: String = CodegenQbe::qbeScaledOffset(emitter, defStore, typeStore, rightType, right, stride);
+
+      emitter.out.pushStr(`    ${dest.toStr()} =l ${arith} ${left.toStr()}, ${offset.toStr()}\n`.toStr());
+      return true;
+    }
+
+    if (let Option::SOME(stride) = rightStride) {
+      let offset: String = CodegenQbe::qbeScaledOffset(emitter, defStore, typeStore, leftType, left, stride);
+
+      emitter.out.pushStr(`    ${dest.toStr()} =l ${arith} ${offset.toStr()}, ${right.toStr()}\n`.toStr());
+      return true;
+    }
+
+    return false;
+  }
+
+  /// An integer operand widened to `l` and multiplied by `stride`.
+  function qbeScaledOffset(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    value: &String,
+    stride: u64,
+  ): String {
+    let widened: String = CodegenQbe::qbeWidenToLong(emitter, defStore, typeStore, ty, value);
+
+    if (stride == 1) {
+      return widened;
+    }
+
+    let scaled: String = CodegenQbe::freshTemp(emitter);
+
+    emitter.out.pushStr(`    ${scaled.toStr()} =l mul ${widened.toStr()}, ${stride}\n`.toStr());
+    return scaled;
   }
 
   /// Masks a shift count to the width of the shifted value, matching the
