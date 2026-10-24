@@ -172,6 +172,31 @@ export namespace Analyzer::ViewType {
     return false;
   }
 
+  /// Whether a value of `typeId` can carry a view another value holds: the
+  /// view predicate (`isView`), widened for the types whose view-ness is
+  /// decided at the value level, not the type level: a function type (a
+  /// closure's captures are a property of the value, `closureIsView`), an
+  /// unresolved `Param` (a monomorphized instance may carry a view, and the
+  /// borrow check runs before monomorphization) and an unknown type id.
+  public function canCarryView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return true;
+    };
+
+    match (type_) {
+      Analyzer::Type::Function(_) | Analyzer::Type::RawFunction(_) | Analyzer::Type::Param(_) -> {
+        return true;
+      },
+      _ -> {},
+    };
+
+    return ViewType::isView(defStore, typeStore, typeId);
+  }
+
   /// Whether a value of `typeId` lets the code it is handed to write into a
   /// place it does not own: a `&mut T`, a raw pointer whatever its pointee
   /// (it can be cast back), a closure value (its captures are invisible in
@@ -188,13 +213,30 @@ export namespace Analyzer::ViewType {
     typeId: Analyzer::TypeId,
   ): boolean {
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, false, &mut visiting);
+  }
+
+  /// `canReachMutablePlace` narrowed to places that can hold a view, for the
+  /// operand that carries the view itself: a `&mut T` counts only when `T`
+  /// can carry a view (`canCarryView`), and a raw pointer only when its
+  /// pointee can, so `&mut String` and the `*mut u8` inside a `String` reach
+  /// nothing a view could be stored in, while `&mut str`, a `*mut str` field
+  /// or a function-typed field next to the view do. Both are followed into
+  /// otherwise, as are aggregates, `&T`, instances and aliases.
+  public function canReachViewHoldingPlace(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, true, &mut visiting);
   }
 
   function canReachMutablePlaceInner(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
+    viewHolding: boolean,
     visiting: &mut Vector<Vector<u32>>,
   ): boolean {
     let Option::SOME(type_) = typeStore.get(typeId) else {
@@ -209,12 +251,21 @@ export namespace Analyzer::ViewType {
     match (type_) {
       Analyzer::Type::Reference(referenceType) -> {
         if (referenceType.mutable) {
-          return true;
+          if (!viewHolding || ViewType::canCarryView(defStore, typeStore, referenceType.referent)) {
+            return true;
+          }
         }
 
         components.push(referenceType.referent);
       },
-      Analyzer::Type::Pointer(_) | Analyzer::Type::Function(_) | Analyzer::Type::Param(_) -> {
+      Analyzer::Type::Pointer(pointerType) -> {
+        if (!viewHolding || ViewType::canCarryView(defStore, typeStore, pointerType.pointee)) {
+          return true;
+        }
+
+        components.push(pointerType.pointee);
+      },
+      Analyzer::Type::Function(_) | Analyzer::Type::Param(_) -> {
         return true;
       },
       Analyzer::Type::Slice(element) -> {
@@ -244,7 +295,7 @@ export namespace Analyzer::ViewType {
           return true;
         };
 
-        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, visiting);
+        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, viewHolding, visiting);
       },
       _ -> {},
     };
@@ -289,7 +340,7 @@ export namespace Analyzer::ViewType {
 
     while (index < components.length()) {
       if (let Option::SOME(component) = components.get(index)) {
-        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, visiting)) {
+        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, viewHolding, visiting)) {
           return true;
         }
       }

@@ -8368,10 +8368,10 @@ export namespace Borrowck {
       Hir::HirKind::CallClosure(callNode) -> {
         let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
         operands.push(callNode.callee);
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::SOME(callNode.callee), carriers);
       },
       Hir::HirKind::Call(callNode) -> {
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, Option::NONE, carriers);
       },
       Hir::HirKind::MethodCall(callNode) -> {
         let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
@@ -8380,7 +8380,7 @@ export namespace Borrowck {
           operands.push(receiver);
         }
 
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::NONE, carriers);
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         return Borrowck::mentionsAny(hir, storeNode.value, carriers);
@@ -8394,16 +8394,23 @@ export namespace Borrowck {
     };
   }
 
-  /// The call-level sink test: one operand mentions a carrier, and either
-  /// another operand — the receiver and a closure callee included — can reach
-  /// a mutable place (`Analyzer::ViewType::canReachMutablePlace`), where the
-  /// callee could store the view, or the view-carrying operand itself reaches
-  /// the callee through a type that touches a raw pointer.
+  /// The call-level sink test: one operand mentions a carrier, and some
+  /// operand gives the callee a place the view could be stored in. An
+  /// operand that does not carry the view counts when it can reach any
+  /// mutable place (`Analyzer::ViewType::canReachMutablePlace`): the
+  /// receiver, a closure callee, a `&mut` or raw pointer argument. An operand
+  /// that carries the view counts only when it reaches a place that can hold
+  /// one (`Analyzer::ViewType::canReachViewHoldingPlace`), so the view and a
+  /// `&mut str` travelling in one value (`Pair { text: text, slot: &mut
+  /// slot }`, or two fields of one holder) keep the borrow while a `&mut
+  /// String` view used as a receiver does not. A closure callee that carries
+  /// the view is skipped: capture analysis already tracks its captures.
   function callHandsViewToSink(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hir: &Hir::HirStore,
     operands: &Vector<Hir::HirId>,
+    closureCallee: Option<Hir::HirId>,
     carriers: &Vector<u32>,
   ): boolean {
     if (!Borrowck::anyMentions(hir, operands, carriers)) {
@@ -8419,7 +8426,13 @@ export namespace Borrowck {
         };
 
         if (Borrowck::mentionsAny(hir, *operand, carriers)) {
-          if (Borrowck::typeTouchesRawPointer(defStore, typeStore, operandType)) {
+          let mut isCallee: boolean = false;
+
+          if (let Option::SOME(callee) = closureCallee) {
+            isCallee = callee.raw() == operand.raw();
+          }
+
+          if (!isCallee && Analyzer::ViewType::canReachViewHoldingPlace(defStore, typeStore, operandType)) {
             return true;
           }
         } else if (Analyzer::ViewType::canReachMutablePlace(defStore, typeStore, operandType)) {
@@ -8446,127 +8459,14 @@ export namespace Borrowck {
     return Borrowck::typeCanCarryView(defStore, typeStore, typeId);
   }
 
-  /// Whether a value of `typeId` can carry a view another binding holds:
-  /// the second-class view predicate (`Analyzer::ViewType::isView`), widened
-  /// for the types whose view-ness is decided at the value level, not the
-  /// type level: a function type (a closure's captures are a property of
-  /// the value, `Analyzer::ViewType::closureIsView`) and an unresolved
-  /// `Param` (a monomorphized instance may carry a view, and the borrow
-  /// check runs before monomorphization).
+  /// Whether a value of `typeId` can carry a view another binding holds
+  /// (`Analyzer::ViewType::canCarryView`).
   function typeCanCarryView(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
   ): boolean {
-    let Option::SOME(type_) = typeStore.get(typeId) else {
-      return true;
-    };
-
-    match (type_) {
-      Analyzer::Type::Function(_) -> {
-        return true;
-      },
-      Analyzer::Type::RawFunction(_) -> {
-        return true;
-      },
-      Analyzer::Type::Param(_) -> {
-        return true;
-      },
-      _ -> {},
-    };
-
-    return Analyzer::ViewType::isView(defStore, typeStore, typeId);
-  }
-
-  /// Whether a raw pointer is reachable from `typeId`: a pointer type, or an
-  /// aggregate, instance or alias holding one. Raw pointers are the
-  /// unchecked boundary, so a view handed to a call next to — or through —
-  /// storage reachable only through them keeps its borrow to the end of the
-  /// scope.
-  function typeTouchesRawPointer(
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    typeId: Analyzer::TypeId,
-  ): boolean {
-    let mut visiting: Vector<u32> = Vector::new<u32>();
-    return Borrowck::typeTouchesRawPointerInner(defStore, typeStore, typeId, &mut visiting);
-  }
-
-  function typeTouchesRawPointerInner(
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    typeId: Analyzer::TypeId,
-    visiting: &mut Vector<u32>,
-  ): boolean {
-    if (Borrowck::containsRaw(visiting, typeId.raw())) {
-      return false;
-    }
-
-    let Option::SOME(type_) = typeStore.get(typeId) else {
-      return false;
-    };
-
-    let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
-    let mut touches: boolean = false;
-
-    match (type_) {
-      Analyzer::Type::Pointer(_) -> {
-        touches = true;
-      },
-      Analyzer::Type::FixedArray(element, _) -> {
-        components.push(element);
-      },
-      Analyzer::Type::Tuple(tupleNode) -> {
-        components = Borrowck::copyTypeIds(&tupleNode.elements);
-      },
-      Analyzer::Type::Record(defId) -> {
-        components = Borrowck::recordFieldTypes(defStore, defId);
-      },
-      Analyzer::Type::Enum(defId) -> {
-        components = Borrowck::enumPayloadTypes(defStore, defId);
-      },
-      Analyzer::Type::Instance(instance) -> {
-        components = Borrowck::copyTypeIds(&instance.typeArguments);
-
-        let fields: Vector<Analyzer::TypeId> = Borrowck::recordFieldTypes(defStore, instance.definition);
-        let mut fieldIndex: u64 = 0;
-
-        while (fieldIndex < fields.length()) {
-          if (let Option::SOME(field) = fields.get(fieldIndex)) {
-            components.push(*field);
-          }
-
-          fieldIndex += 1;
-        }
-      },
-      Analyzer::Type::Alias(aliasDefId) -> {
-        if (let Option::SOME(target) = Borrowck::aliasedTypeOf(defStore, aliasDefId)) {
-          components.push(target);
-        }
-      },
-      _ -> {},
-    };
-
-    if (touches) {
-      return true;
-    }
-
-    let mut visitingRef: &mut Vector<u32> = visiting;
-    visitingRef.push(typeId.raw());
-
-    let mut index: u64 = 0;
-
-    while (index < components.length()) {
-      if (let Option::SOME(component) = components.get(index)) {
-        if (Borrowck::typeTouchesRawPointerInner(defStore, typeStore, *component, visiting)) {
-          return true;
-        }
-      }
-
-      index += 1;
-    }
-
-    return false;
+    return Analyzer::ViewType::canCarryView(defStore, typeStore, typeId);
   }
 
   function checkBlockOwning(

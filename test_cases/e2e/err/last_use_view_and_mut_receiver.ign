@@ -1,0 +1,41 @@
+// e2e: err
+//
+// A receiver carrying both a view and a `&mut` place can store one through the
+// other, so the borrow lasts to the end of the scope.
+record Pair {
+  public text: str;
+  public slot: &mut str;
+
+  public flush(&self): void {
+    *self.slot = self.text;
+  }
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function bound(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  let pair: Pair = Pair { text: text, slot: &mut slot };
+  pair.flush();
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function temporary(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  Pair { text: text, slot: &mut slot }.flush();
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function main(): i32 {
+  bound();
+  temporary();
+  return 0;
+}

@@ -1100,6 +1100,316 @@ function reachRecursiveRecordTerminates(): void {
   Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
 }
 
+// ─── Reaching a place that can hold a view ────────────────────────────────────
+
+/// Scenario: `&mut str` can hold a view.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = idMutStr;
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&mut String` cannot hold a view: its `*mut u8` buffer is not followed as a view-holding place.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToOwnedBufferDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut stringFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  stringFields.push(store.pointer(idU8));
+
+  let stringDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Text", stringFields);
+  let idString: Analyzer::TypeId = store.recordType(stringDefId);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idString,
+    mutable: true,
+  }));
+  Test::assert(!Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `*mut u8` cannot hold a view.
+/// Spec: S3, L19.
+@test
+function holdingPointerToByteDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(!Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `*mut str` can hold a view.
+/// Spec: S3, L19.
+@test
+function holdingPointerToStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = store.pointer(idStr);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record carrying a view next to a `&mut str` field reaches a view-holding place.
+/// Spec: S3, L19.
+@test
+function holdingRecordWithViewAndMutableStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut pairFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  pairFields.push(idStr);
+  pairFields.push(idMutStr);
+
+  let pairDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Pair", pairFields);
+  let idPair: Analyzer::TypeId = store.recordType(pairDefId);
+  let id: Analyzer::TypeId = idPair;
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&Pair` reaches the `&mut str` of its record.
+/// Spec: S3, L19.
+@test
+function holdingSharedReferenceToPairReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut pairFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  pairFields.push(idStr);
+  pairFields.push(idMutStr);
+
+  let pairDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Pair", pairFields);
+  let idPair: Analyzer::TypeId = store.recordType(pairDefId);
+  let id: Analyzer::TypeId = store.reference(idPair);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an instance with a `Pair` argument reaches its `&mut str` (`Option<Pair>`).
+/// Spec: S3, L19.
+@test
+function holdingInstanceOfPairReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut pairFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  pairFields.push(idStr);
+  pairFields.push(idMutStr);
+
+  let pairDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Pair", pairFields);
+  let idPair: Analyzer::TypeId = store.recordType(pairDefId);
+
+  let boxDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idPair);
+
+  let id: Analyzer::TypeId = store.instance(boxDefId, args);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum payload `(str, &mut str)` reaches a view-holding place.
+/// Spec: S3, L19.
+@test
+function holdingEnumPayloadWithMutableStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(idStr);
+  payload.push(idMutStr);
+
+  let mut variants: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  variants.push(payload);
+  variants.push(Vector::new<Analyzer::TypeId>());
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Msg", variants);
+  let id: Analyzer::TypeId = store.enumType(defId);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a function-typed field next to the view reaches a view-holding place: the callee can call it with the view.
+/// Spec: S3, L19.
+@test
+function holdingRecordWithFunctionFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params.push(idStr);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idStr);
+  fields.push(store.functionType(params, idU8));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Job", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record holding only a view reaches nothing mutable.
+/// Spec: S3, L19.
+@test
+function holdingRecordWithOnlyViewDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idStr);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(!Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&mut T` with an unresolved `T` reaches a view-holding place: `T` may be a view.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToParamReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let idParam: Analyzer::TypeId = store.param(syms.intern("T"));
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idParam,
+    mutable: true,
+  }));
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias to `&mut str` is transparent.
+/// Spec: S3, L19.
+@test
+function holdingAliasToMutableStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "Place", idMutStr);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&mut RawOut` with a `*mut str` field is followed into its referent.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToRecordWithPointerToStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idStr));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "RawOut", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idRecord,
+    mutable: true,
+  }));
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
 // ─── Closure values ───────────────────────────────────────────────────────────
 
 /// Builds a closure value with the given captures.

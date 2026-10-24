@@ -169,12 +169,16 @@ A view must not outlive its owner:
   block's tail or in a `defer` body keeps it to the end of the block, and so does a view handed
   somewhere it can outlive its statement — into a place whose type can carry a view, through a
   raw pointer or into a volatile, `@write` or atomic sink, or to a call (function, method or
-  closure call) any other operand of which, the receiver and a closure callee included, can
-  reach a mutable place. An operand reaches a mutable place when its type is `&mut T`, any raw
+  closure call) one of whose operands gives the callee a place the view could be stored in. An operand reaches a mutable place when its type is `&mut T`, any raw
   pointer whatever its pointee, or a closure type `(A) -> R` (a capture-free `fn(A) -> R`
   reaches nothing), or is a record, enum, tuple, fixed array, generic instance, alias or `&T`
-  that contains one. A callee that writes the view through a raw pointer it reads from a
-  `static` is not seen by this rule: raw pointers are the programmer's responsibility.
+  that contains one; this holds for every operand that does not carry the view, the receiver
+  and a closure callee included. The operand carrying the view counts only through a place
+  that can hold a view — a `&mut T` or raw pointer whose referent can carry one (`&mut str`, a
+  `*mut str` field) or a function-typed field next to the view — so a `&mut String` view used
+  as a receiver, or a by-reference closure being called, does not keep the borrow. A raw pointer the callee obtains itself, read from a `static` or cast from
+  a reference it received (`slot as *mut Slot`), is outside this rule: raw pointers are the
+  programmer's responsibility.
 - A view taken through a view local that holds such a borrow borrows that local, not its
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
   borrows `store`, so views derived from `store` only conflict with each other, while `guard`
