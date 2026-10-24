@@ -74,6 +74,7 @@ scripts/bootstrap.sh gate-g6                   # G6: stage2 parse verdicts vs co
 scripts/bootstrap.sh gate-g6-baselines [bin]   # regenerate test_cases/__parse_verdicts__ (review the diff)
 scripts/bootstrap.sh gate-g7                   # G7: stage2 drop schedules vs committed baselines
 scripts/bootstrap.sh gate-g7-baselines [bin]   # regenerate test_cases/e2e/ok/__drop_schedules__ (review the diff)
+scripts/bootstrap.sh gate-qbe-selfhost [bin]   # build the compiler with --target qbe, then require that build to emit stage1's C (needs qbe)
 scripts/bootstrap.sh stages                    # stage1 -> stage2 -> gate-g4 -> stage3 (the nightly's ladder job)
 scripts/bootstrap.sh gates                     # every stage and gate (G1, G3, G4, G6, G7), then report
 scripts/bootstrap.sh seal-gates                # write a skipped placeholder for every gate that has no result yet
@@ -191,6 +192,10 @@ Build (ignis/build/)
   → archive.ign      ar → archives (build-std)
   → linker.ign       gcc link → executable
 ```
+
+### Backends
+
+A target is done only when the compiler builds with it and the target-built compiler passes the cross G1: compiling `ignis/` with the C target, it emits C identical to stage1's. A build error with the target means the target is not finished. `scripts/bootstrap.sh gate-qbe-selfhost` checks this for QBE; CI runs it on pull requests that touch `ignis/codegen/`, `ignis/build/`, `ignis/lir/` or `std/`, and in the nightly. A new backend gets the same gate. See BOOTSTRAP.md, "Every backend builds the compiler".
 
 ## Extending the Compiler
 
