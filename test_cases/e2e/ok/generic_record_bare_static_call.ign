@@ -1,0 +1,45 @@
+// e2e: std
+// Inside a generic record `Wrap<U>`, a bare `Wrap::wrap(value)` names the
+// enclosing record's own instantiation, as `Self::wrap(value)` does: from the
+// argument's type, or, with no argument to infer from, as `Self` would.
+import Io from "std::io";
+
+record Wrap<U> {
+  public value: U;
+  public count: i32;
+
+  static wrap(value: U): Wrap<U> {
+    return Wrap { value: value, count: 1 };
+  }
+
+  static counted(value: U, count: i32): Wrap<U> {
+    return Wrap { value: value, count: count };
+  }
+
+  static defaultCount(): i32 {
+    return 5;
+  }
+
+  static rewrap(value: U): Wrap<U> {
+    return Wrap::wrap(value);
+  }
+
+  static rewrapSelf(value: U): Wrap<U> {
+    return Self::wrap(value);
+  }
+
+  static withDefault(value: U): Wrap<U> {
+    return Wrap::counted(value, Wrap::defaultCount());
+  }
+}
+
+function main(): i32 {
+  let bare: Wrap<i32> = Wrap::rewrap<i32>(3);
+  let viaSelf: Wrap<i32> = Wrap::rewrapSelf<i32>(4);
+  let defaulted: Wrap<str> = Wrap::withDefault<str>("word");
+  Io::println(`bare ${bare.value} ${bare.count}`);
+  Io::println(`self ${viaSelf.value} ${viaSelf.count}`);
+  Io::println(`default ${defaulted.value} ${defaulted.count}`);
+
+  return 0;
+}

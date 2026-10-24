@@ -1,0 +1,55 @@
+// e2e: std
+// A record's static generic method infers its type parameter from the
+// arguments, as free and namespace functions do: from a reference argument,
+// from a value argument, through a bound, and on a generic record whose
+// own type argument is written while the method's is inferred.
+import Io from "std::io";
+
+trait Describe {
+  describe(&self): i64;
+}
+
+@implements(Describe)
+record Point {
+  public x: i64;
+
+  describe(&self): i64 {
+    return self.x * 10;
+  }
+}
+
+record Binder {
+  static bind<T: Describe>(value: &T): i64 {
+    return value.describe();
+  }
+
+  static take<T>(value: T): T {
+    return value;
+  }
+
+  static describeOwned<T: Describe>(value: T): i64 {
+    return value.describe() + 1;
+  }
+}
+
+record Box<U> {
+  public item: U;
+
+  static make<T>(item: U, tag: T): Box<U> {
+    return Box { item: item };
+  }
+}
+
+function main(): i32 {
+  let point: Point = Point { x: 4 };
+  let fromReference: i64 = Binder::bind(&point);
+  let fromValue: i32 = Binder::take(7);
+  let bounded: i64 = Binder::describeOwned(Point { x: 5 });
+  let boxed: Box<i32> = Box::make(9, true);
+  Io::println(`reference ${fromReference}`);
+  Io::println(`value ${fromValue}`);
+  Io::println(`bounded ${bounded}`);
+  Io::println(`generic record ${boxed.item}`);
+
+  return 0;
+}
