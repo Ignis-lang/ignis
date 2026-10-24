@@ -217,7 +217,11 @@
     },
     {
       "name": "std::orm",
-      "doc": "  \n# ORM  \n  \nA small mapping layer on `std::sqlite3`: table descriptors that emit their  \nSQL, typed row reads that report NULL and bad values as errors, and  \nordered migrations applied in one transaction. Every value goes to SQLite  \nas a bound parameter; no statement interpolates one.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |  \n| `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |  \n| `Orm::Migration`  | One versioned schema step                        |  \n| `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |  \n| `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |  \n| `Orm::ErrorKind`  | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Orm::Error>`; nothing in the  \nmodule panics. A SQLite failure keeps its extended code in `Error::code`,  \nand `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),  \n`CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.  \n  \n## Linking  \n  \nThe module adds no linking of its own: it builds on `std::sqlite3`, which  \nlinks `libsqlite3`.  \n  \n## Example  \n  \n```ignis  \nimport Orm from \"std::orm\";  \nimport Sqlite3 from \"std::sqlite3\";  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  let table: Orm::Table = Orm::Table::create(\"tasks\")  \n    .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n    .autoIncrement()  \n    .columnText(\"title\", Orm::ColumnKey::NONE)  \n    .notNull();  \n  \n  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();  \n  migrations.push(Orm::Migration::create(1, table.createTableSql().unwrap().toStr()));  \n  Orm::migrate(&mut connection, &migrations).unwrap();  \n  \n  let mut insert: Sqlite3::Statement = connection.prepare(table.insertSql().unwrap().toStr()).unwrap();  \n  insert.bindText(1, \"write the ORM\").unwrap();  \n  insert.step().unwrap();  \n  \n  return connection.lastInsertRowId() == 1 ? 0 : 1;  \n}  \n```  \n  \n## Non-goals  \n  \nThere is no query builder and no entity mapping yet: a repository over  \n`Orm::Table` and `Orm::Row` comes later."
+      "doc": "  \n# ORM  \n  \nA small mapping layer on `std::sqlite3`: table descriptors that emit their  \nSQL, typed row reads that report NULL and bad values as errors, ordered  \nmigrations applied in one transaction, and a repository that stores a  \nrecord implementing `Orm::Entity` and `Orm::FromRow`. Every value goes to SQLite  \nas a bound parameter; no statement interpolates one.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |  \n| `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |  \n| `Orm::Entity`     | A stored record: `static table()`, `id()`, `bindValues(statement)` |  \n| `Orm::FromRow`    | `static fromRow(row)`: a record from a row       |  \n| `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |  \n| `Orm::Value`      | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |  \n| `Orm::Migration`  | One versioned schema step                        |  \n| `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |  \n| `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |  \n| `Orm::ErrorKind`  | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Orm::Error>`; nothing in the  \nmodule panics. A SQLite failure keeps its extended code in `Error::code`,  \nand `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),  \n`CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.  \n  \n## Linking  \n  \nThe module adds no linking of its own: it builds on `std::sqlite3`, which  \nlinks `libsqlite3`.  \n  \n## Example  \n  \n```ignis  \nimport Orm from \"std::orm\";  \nimport Sqlite3 from \"std::sqlite3\";  \n  \n@implements(Orm::Entity, Orm::FromRow)  \nrecord Task {  \n  public id: Option<i64>;  \n  public title: String;  \n  \n  static table(): Orm::Table {  \n    return Orm::Table::create(\"tasks\")  \n      .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n      .autoIncrement()  \n      .columnText(\"title\", Orm::ColumnKey::NONE)  \n      .notNull();  \n  }  \n  \n  static fromRow(row: &Orm::Row): Result<Task, Orm::Error> {  \n    return Result::OK(Task { id: Option::SOME(row.readInt(0)!), title: row.readText(1)! });  \n  }  \n  \n  id(&self): Option<i64> {  \n    return self.id;  \n  }  \n  \n  bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Orm::Error> {  \n    return match (statement.bindText(1, self.title.toStr())) {  \n      Result::OK(_) -> Result::OK(()),  \n      Result::ERROR(error) -> Result::ERROR(Orm::Error::fromSqlite(error)),  \n    };  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();  \n  migrations.push(Orm::Migration::create(1, Task::table().createTableSql().unwrap().toStr()));  \n  Orm::migrate(&mut connection, &migrations).unwrap();  \n  \n  let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();  \n  let task: Task = Task { id: Option::NONE, title: String::create(\"write the ORM\") };  \n  let id: i64 = tasks.insert(&mut connection, &task).unwrap();  \n  \n  return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;  \n}  \n```  \n  \n## Non-goals  \n  \nThere is no query builder: the generated SQL covers single-table CRUD,  \nand `Repository::findWhere` takes a raw `WHERE` clause with bound  \n`Orm::Value` parameters for everything else. There are no relationships."
+    },
+    {
+      "name": "std::orm::entity",
+      "doc": "  \n# Entity  \n  \n`Orm::Entity` and `Orm::FromRow`, the two traits a record implements by  \nhand so an `Orm::Repository` can store it: one describes the table and  \nbinds the record's values, the other builds a record from a row.  \n  \n## Exports  \n  \n| Export         | Description                                        |  \n|----------------|----------------------------------------------------|  \n| `Orm::Entity`  | `static table()`, `id(&self)`, `bindValues(&self, statement)` |  \n| `Orm::FromRow` | `static fromRow(row)`                              |  \n  \n## Contract  \n  \n- `table()` returns the same descriptor on every call. A repository needs  \n  an `INTEGER` primary key.  \n- `id()` is the key: `NONE` for a record not stored yet.  \n- `bindValues` binds every non-key column, in declaration order, to the  \n  parameters `1..n`. The repository binds the key itself, after them,  \n  when a statement needs it.  \n- `fromRow` reads every column in declaration order: column 0 is the  \n  first column of `table()`."
     },
     {
       "name": "std::orm::error",
@@ -225,7 +229,11 @@
     },
     {
       "name": "std::orm::migration",
-      "doc": "  \n# Migrations  \n  \n`Orm::Migration` and `Orm::migrate`, ordered schema steps applied once.  \nEach step is a version and the SQL that moves the schema to it; the  \nversions already applied are recorded in a `schema_migrations` table.  \n  \n## Exports  \n  \n| Export           | Description                                       |  \n|------------------|---------------------------------------------------|  \n| `Orm::Migration` | `create(version, sql)`: one versioned step        |  \n| `Orm::migrate`   | Applies the pending steps in one transaction and returns how many it applied |  \n  \n## Contract  \n  \n`migrate` checks the list before touching the database: every version is  \npositive and the versions strictly increase, or the call fails with a  \n`SCHEMA` error and nothing runs. Then, in one transaction, it creates  \n`schema_migrations (version INTEGER PRIMARY KEY)` when it is missing,  \napplies in order every step above the highest recorded version and  \nrecords each one. A failing step rolls back the whole call, the  \n`schema_migrations` table included, and is returned as a `SQLITE` error.  \n  \nA step's SQL runs through `Connection::exec`, so it may hold several  \nstatements separated by semicolons; it takes no parameters."
+      "doc": "  \n# Migrations  \n  \n`Orm::Migration` and `Orm::migrate`, ordered schema steps applied once.  \nEach step is a version and the SQL that moves the schema to it; the  \nversions already applied are recorded in a `schema_migrations` table.  \n  \n## Exports  \n  \n| Export           | Description                                       |  \n|------------------|---------------------------------------------------|  \n| `Orm::Migration` | `create(version, sql)`: one versioned step        |  \n| `Orm::migrate`   | Applies the pending steps in one transaction and returns how many it applied |  \n  \n## Contract  \n  \n`migrate` checks the list before touching the database: every version is  \npositive and the versions strictly increase, or the call fails with a  \n`SCHEMA` error and nothing runs. Then, in one transaction, it creates  \n`schema_migrations (version INTEGER PRIMARY KEY)` when it is missing,  \napplies in order every step above the highest recorded version and  \nrecords each one. A failing step rolls back the whole call, the  \n`schema_migrations` table included, and is returned as a `SQLITE` error.  \n  \nA step's SQL runs through `Connection::exec`, so it may hold several  \nstatements separated by semicolons; it takes no parameters.  \n  \nA step's SQL must not contain its own `BEGIN`, `COMMIT`, `END` (as a  \ntransaction statement) or `ROLLBACK`: `migrate` already runs every step  \ninside one transaction, and a nested one either fails or ends the outer  \ntransaction early, so later steps would no longer roll back with it. The  \nSQL is not scanned for them, because a text match cannot tell a  \ntransaction statement from the `BEGIN ... END` body of a `CREATE TRIGGER`  \nor from a string literal; the rule is the caller's to keep."
+    },
+    {
+      "name": "std::orm::repository",
+      "doc": "  \n# Repository  \n  \n`Orm::Repository<T>`, single-table CRUD for a record that implements  \n`Orm::Entity` and `Orm::FromRow`. The repository builds its SQL once from  \n`T::table()` and binds every value; it never interpolates one.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` |  \n  \n## Contract  \n  \n- `create()` validates `T::table()`: an invalid descriptor, a table  \n  without a key or a key that is not `INTEGER` is a `SCHEMA` error.  \n- `findById`, `update` and `deleteById` report a missing row as  \n  `NOT_FOUND`; `update` of a record whose `id()` is `NONE` is `SCHEMA`.  \n- `insert` returns the key SQLite stored: the assigned one for an  \n  `AUTOINCREMENT` key, otherwise the bound `id()` (or the assigned rowid  \n  when it is `NONE`).  \n- `all` returns rows in key order. `findWhere` appends `WHERE <whereSql>`  \n  to the select and binds `params` to its `?` in order; `whereSql` is SQL  \n  text, so only `params` may carry caller data.  \n- SQLite failures go through `Error::fromSqlite`, so a unique violation  \n  is `CONFLICT`.  \n  \nEvery method takes the connection, so a caller holding a lock on it  \ndecides how long it is held."
     },
     {
       "name": "std::orm::row",
@@ -233,7 +241,11 @@
     },
     {
       "name": "std::orm::table",
-      "doc": "  \n# Table  \n  \n`Orm::Table`, the descriptor of one table: its name and its columns, in  \norder. The descriptor emits the SQL of its `CREATE TABLE` and of the  \nstatements a repository runs; every value in those statements is a `?`  \nparameter, never interpolated text.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |  \n  \n## Building a descriptor  \n  \nThe builder methods take the table by value and return it, so a  \ndescriptor is one expression. `autoIncrement()` and `notNull()` apply to  \nthe column added last:  \n  \n```ignis  \nlet table: Orm::Table = Orm::Table::create(\"tasks\")  \n  .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n  .autoIncrement()  \n  .columnText(\"title\", Orm::ColumnKey::NONE)  \n  .notNull();  \n```  \n  \n## Validation  \n  \nEvery emitter validates the descriptor first and returns an `Orm::Error`  \nof kind `SCHEMA` when the table or a column name is not a plain identifier  \n(`[A-Za-z_][A-Za-z0-9_]*`, so a name never needs quoting), when there are  \nno columns, when a column name repeats, when more than one column is a  \nprimary key, or when `autoIncrement()` marks a column that is not an  \nINTEGER primary key. The by-id statements also need a key.  \n  \n## Bind order  \n  \nEach emitter documents the order of its `?` parameters; a repository binds  \nvalues in exactly that order."
+      "doc": "  \n# Table  \n  \n`Orm::Table`, the descriptor of one table: its name and its columns, in  \norder. The descriptor emits the SQL of its `CREATE TABLE` and of the  \nstatements a repository runs; every value in those statements is a `?`  \nparameter, never interpolated text.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |  \n  \n## Building a descriptor  \n  \nThe builder methods take the table by value and return it, so a  \ndescriptor is one expression. `autoIncrement()` and `notNull()` apply to  \nthe column added last:  \n  \n```ignis  \nlet table: Orm::Table = Orm::Table::create(\"tasks\")  \n  .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n  .autoIncrement()  \n  .columnText(\"title\", Orm::ColumnKey::NONE)  \n  .notNull();  \n```  \n  \n## Validation  \n  \nEvery emitter validates the descriptor first and returns an `Orm::Error`  \nof kind `SCHEMA` when the table or a column name is not a plain identifier  \n(`[A-Za-z_][A-Za-z0-9_]*`, so a name never needs quoting), when there are  \nno columns, when a column name repeats, when more than one column is a  \nprimary key, or when `autoIncrement()` marks a column that is not an  \nINTEGER primary key. The by-id statements also need a key.  \n  \n## Bind order  \n  \nEach emitter documents the order of its `?` parameters; a repository binds  \nvalues in exactly that order."
+    },
+    {
+      "name": "std::orm::value",
+      "doc": "  \n# Value  \n  \n`Orm::Value`, one SQL parameter of a raw query such as  \n`Repository::findWhere`. A value always reaches SQLite through a `bind*`  \ncall, never as text in the statement.  \n  \n## Exports  \n  \n| Export       | Description                                          |  \n|--------------|------------------------------------------------------|  \n| `Orm::Value` | `NULL`, `INT`, `REAL`, `TEXT`, `BLOB`; `bind` binds it to a `?` |"
     },
     {
       "name": "std::path",
@@ -13512,6 +13524,61 @@
       "signature": "namespace Orm"
     },
     {
+      "module": "std::orm::entity",
+      "path": "std::orm::entity::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "The traits a stored record implements."
+    },
+    {
+      "module": "std::orm::entity",
+      "path": "std::orm::entity::Orm::Entity",
+      "name": "Entity",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait Entity",
+      "doc": "A record stored as one row of `table()`.",
+      "members": [
+        {
+          "name": "id",
+          "kind": "method",
+          "signature": "id(&self): Option<i64>",
+          "doc": "The record's key, or `NONE` before it is inserted."
+        },
+        {
+          "name": "bindValues",
+          "kind": "method",
+          "signature": "bindValues(&self): Result<void, Error>",
+          "doc": "Binds every non-key column, in declaration order, from parameter 1."
+        },
+        {
+          "name": "table",
+          "kind": "method",
+          "signature": "static table(): Table",
+          "doc": "The descriptor of the record's table."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::entity",
+      "path": "std::orm::entity::Orm::FromRow",
+      "name": "FromRow",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait FromRow",
+      "doc": "A record built from a row whose columns follow its table's order.",
+      "members": [
+        {
+          "name": "fromRow",
+          "kind": "method",
+          "signature": "static fromRow(row: &Row): Result<Self, Error>",
+          "doc": "The record in `row`, or a `DECODE` error when a column does not fit."
+        }
+      ]
+    },
+    {
       "module": "std::orm::error",
       "path": "std::orm::error::Orm",
       "name": "Orm",
@@ -13663,7 +13730,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function migrate(connection: &mut Connection, migrations: &Vector<Migration>): Result<i64, Error>",
-      "doc": "Applies the steps of `migrations` that are above the highest version  \nrecorded in `schema_migrations`, in order, in one transaction, and  \nreturns how many it applied. See the module docs for the contract."
+      "doc": "Applies the steps of `migrations` that are above the highest version  \nrecorded in `schema_migrations`, in order, in one transaction, and  \nreturns how many it applied. A step's SQL must not open, commit or roll  \nback a transaction of its own. See the module docs for the contract."
     },
     {
       "module": "std::orm::migration",
@@ -13691,6 +13758,152 @@
       "visibility": "private",
       "signature": "function validateMigrations(migrations: &Vector<Migration>): Result<void, Error>",
       "doc": "Succeeds when every version is positive and the versions strictly  \nincrease; a `SCHEMA` error otherwise."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Single-table CRUD over an entity."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::Repository",
+      "name": "Repository",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Repository<T>",
+      "doc": "The statements of one entity's table, built once by `create`.",
+      "members": [
+        {
+          "name": "insertStatement",
+          "kind": "field",
+          "signature": "insertStatement: String",
+          "doc": "`Table::insertSql`."
+        },
+        {
+          "name": "selectStatement",
+          "kind": "field",
+          "signature": "selectStatement: String",
+          "doc": "`Table::selectSql`."
+        },
+        {
+          "name": "selectByIdStatement",
+          "kind": "field",
+          "signature": "selectByIdStatement: String",
+          "doc": "`Table::selectByIdSql`."
+        },
+        {
+          "name": "selectAllStatement",
+          "kind": "field",
+          "signature": "selectAllStatement: String",
+          "doc": "`Table::selectAllSql`."
+        },
+        {
+          "name": "updateStatement",
+          "kind": "field",
+          "signature": "updateStatement: String",
+          "doc": "`Table::updateByIdSql`."
+        },
+        {
+          "name": "deleteStatement",
+          "kind": "field",
+          "signature": "deleteStatement: String",
+          "doc": "`Table::deleteByIdSql`."
+        },
+        {
+          "name": "valueCount",
+          "kind": "field",
+          "signature": "valueCount: i32",
+          "doc": "How many parameters `Entity::bindValues` binds: the non-key columns."
+        },
+        {
+          "name": "insertBindsKey",
+          "kind": "field",
+          "signature": "insertBindsKey: boolean",
+          "doc": "Whether the insert binds the key after the values (not `AUTOINCREMENT`)."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(): Result<Repository<T>, Error>",
+          "doc": "The repository of `T`, or a `SCHEMA` error when `T::table()` is  \ninvalid or its key is missing or not `INTEGER`."
+        },
+        {
+          "name": "all",
+          "kind": "method",
+          "signature": "all(&self, connection: &mut Connection): Result<Vector<T>, Error>",
+          "doc": "Every row, in key order."
+        },
+        {
+          "name": "deleteById",
+          "kind": "method",
+          "signature": "deleteById(&self, connection: &mut Connection, id: i64): Result<void, Error>",
+          "doc": "Deletes the row with key `id`, or reports `NOT_FOUND`."
+        },
+        {
+          "name": "findById",
+          "kind": "method",
+          "signature": "findById(&self, connection: &mut Connection, id: i64): Result<T, Error>",
+          "doc": "The row with key `id`, or `NOT_FOUND`."
+        },
+        {
+          "name": "findWhere",
+          "kind": "method",
+          "signature": "findWhere(&self, connection: &mut Connection, whereSql: str, params: &Vector<Value>): Result<Vector<T>, Error>",
+          "doc": "The rows of `SELECT columns FROM table WHERE <whereSql>`, with  \n`params` bound to its `?` in order. `whereSql` may end with its own  \n`ORDER BY` or `LIMIT`; without one the order is SQLite's."
+        },
+        {
+          "name": "insert",
+          "kind": "method",
+          "signature": "insert(&self, connection: &mut Connection, entity: &T): Result<i64, Error>",
+          "doc": "Inserts `entity` and returns its key. See the module docs for which  \nkey that is."
+        },
+        {
+          "name": "update",
+          "kind": "method",
+          "signature": "update(&self, connection: &mut Connection, entity: &T): Result<void, Error>",
+          "doc": "Writes every non-key column of `entity` to the row with its key. An  \n`id()` of `NONE` is `SCHEMA`; no row with that key is `NOT_FOUND`."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::collectRows",
+      "name": "collectRows",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function collectRows<T>(statement: &mut Statement): Result<Vector<T>, Error>",
+      "doc": "Steps `statement` to the end, decoding each row with `T::fromRow`."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::notFound",
+      "name": "notFound",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function notFound(id: i64): Error",
+      "doc": "The `NOT_FOUND` error for key `id`."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::sqliteResult",
+      "name": "sqliteResult",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqliteResult<V>(result: Result<V, Error>): Result<V, Error>",
+      "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::sqliteUnit",
+      "name": "sqliteUnit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqliteUnit(result: Result<void, Error>): Result<void, Error>",
+      "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`.  \n`sqliteResult<void>` is not used: rewrapping a `void` payload through  \nthe type parameter emits C that does not compile."
     },
     {
       "module": "std::orm::row",
@@ -13997,7 +14210,7 @@
           "name": "insertSql",
           "kind": "method",
           "signature": "insertSql(&self): Result<String, Error>",
-          "doc": "`INSERT INTO name (columns) VALUES (?, ...)`. Binds every column in  \ndeclaration order, except an `AUTOINCREMENT` key, which SQLite assigns."
+          "doc": "`INSERT INTO name (columns) VALUES (?, ...)`. Binds every non-key  \ncolumn in declaration order, then the key unless it is  \n`AUTOINCREMENT` (SQLite assigns that one). Non-key columns come first,  \nas in `updateByIdSql`, so one `Entity::bindValues` serves both."
         },
         {
           "name": "keyIndex",
@@ -14036,6 +14249,12 @@
           "doc": "`SELECT columns FROM name`, every column in declaration order."
         },
         {
+          "name": "selectSql",
+          "kind": "method",
+          "signature": "selectSql(&self): Result<String, Error>",
+          "doc": "`SELECT columns FROM name`. No parameters. The selected columns are  \nevery column in declaration order; a caller appends its own clauses."
+        },
+        {
           "name": "updateByIdSql",
           "kind": "method",
           "signature": "updateByIdSql(&self): Result<String, Error>",
@@ -14063,6 +14282,15 @@
     },
     {
       "module": "std::orm::table",
+      "path": "std::orm::table::Orm::appendInsertColumn",
+      "name": "appendInsertColumn",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function appendInsertColumn(names: &mut String, placeholders: &mut String, name: &String): void",
+      "doc": "Appends `name` to an insert's column list and a `?` to its values."
+    },
+    {
+      "module": "std::orm::table",
       "path": "std::orm::table::Orm::declaredType",
       "name": "declaredType",
       "kind": "function",
@@ -14087,6 +14315,57 @@
       "visibility": "private",
       "signature": "function schemaError(before: str, name: &String, after: str): Error",
       "doc": "A `SCHEMA` error whose message is `before`, `name` and `after`."
+    },
+    {
+      "module": "std::orm::value",
+      "path": "std::orm::value::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Raw SQL parameters."
+    },
+    {
+      "module": "std::orm::value",
+      "path": "std::orm::value::Orm::Value",
+      "name": "Value",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum Value",
+      "doc": "One parameter of a raw query.",
+      "members": [
+        {
+          "name": "NULL",
+          "kind": "variant",
+          "signature": "NULL"
+        },
+        {
+          "name": "INT",
+          "kind": "variant",
+          "signature": "INT(i64)"
+        },
+        {
+          "name": "REAL",
+          "kind": "variant",
+          "signature": "REAL(f64)"
+        },
+        {
+          "name": "TEXT",
+          "kind": "variant",
+          "signature": "TEXT(String)"
+        },
+        {
+          "name": "BLOB",
+          "kind": "variant",
+          "signature": "BLOB(Vector<u8>)"
+        },
+        {
+          "name": "bind",
+          "kind": "method",
+          "signature": "bind(&self, statement: &mut Statement, index: i32): Result<void, Error>",
+          "doc": "Binds the value to the 1-based parameter `index` of `statement`."
+        }
+      ]
     },
     {
       "module": "std::path",

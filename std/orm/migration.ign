@@ -24,6 +24,14 @@
 //!
 //! A step's SQL runs through `Connection::exec`, so it may hold several
 //! statements separated by semicolons; it takes no parameters.
+//!
+//! A step's SQL must not contain its own `BEGIN`, `COMMIT`, `END` (as a
+//! transaction statement) or `ROLLBACK`: `migrate` already runs every step
+//! inside one transaction, and a nested one either fails or ends the outer
+//! transaction early, so later steps would no longer roll back with it. The
+//! SQL is not scanned for them, because a text match cannot tell a
+//! transaction statement from the `BEGIN ... END` body of a `CREATE TRIGGER`
+//! or from a string literal; the rule is the caller's to keep.
 
 import Sqlite3 from "std::sqlite3";
 import Error, ErrorKind from "std::orm::error";
@@ -45,7 +53,8 @@ export namespace Orm {
 
   /// Applies the steps of `migrations` that are above the highest version
   /// recorded in `schema_migrations`, in order, in one transaction, and
-  /// returns how many it applied. See the module docs for the contract.
+  /// returns how many it applied. A step's SQL must not open, commit or roll
+  /// back a transaction of its own. See the module docs for the contract.
   function migrate(
     connection: &mut Sqlite3::Connection,
     migrations: &Vector<Migration>
