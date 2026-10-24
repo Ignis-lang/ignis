@@ -207,6 +207,26 @@ export namespace Analyzer::ViewType {
     return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 2, &mut visiting);
   }
 
+  /// Whether a value of `typeId` can hold something derived from a view, so
+  /// a binding or place of this type written by a statement that uses the
+  /// view carries it (`canCarryView`, plus a raw pointer at any depth,
+  /// whatever its pointee: `text as *u8` points into the view). The raw
+  /// pointers an owning type with a `Drop` implementation keeps in its
+  /// fields (`String`, `Vector`) point to its own allocation and do not
+  /// count; its type arguments still do (`Vector<*u8>`).
+  public function canHoldDerived(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    if (ViewType::canCarryView(defStore, typeStore, typeId)) {
+      return true;
+    }
+
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 3, &mut visiting);
+  }
+
   /// Whether a value of `typeId` lets the code it is handed to write into a
   /// place it does not own: a `&mut T`, a raw pointer whatever its pointee
   /// (it can be cast back), a closure value (its captures are invisible in
@@ -245,7 +265,9 @@ export namespace Analyzer::ViewType {
   /// The shared walker. `mode` 0 answers `canReachMutablePlace`, 1
   /// `canReachViewHoldingPlace`, and 2 the nested part of `canCarryView`,
   /// where a function type, a `Param` or a raw pointer to a view counts, and
-  /// raw pointers are followed to their pointee.
+  /// raw pointers are followed to their pointee; 3 the nested part of
+  /// `canHoldDerived`, where any raw pointer counts and the fields of a type
+  /// with a `Drop` implementation are skipped.
   function canReachMutablePlaceInner(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -264,7 +286,7 @@ export namespace Analyzer::ViewType {
 
     match (type_) {
       Analyzer::Type::Reference(referenceType) -> {
-        if (referenceType.mutable && mode != 2) {
+        if (referenceType.mutable && mode != 2 && mode != 3) {
           if (mode == 0 || ViewType::canCarryView(defStore, typeStore, referenceType.referent)) {
             return true;
           }
@@ -273,6 +295,10 @@ export namespace Analyzer::ViewType {
         components.push(referenceType.referent);
       },
       Analyzer::Type::Pointer(pointerType) -> {
+        if (mode == 3) {
+          return true;
+        }
+
         if (mode == 2) {
           if (ViewType::isView(defStore, typeStore, pointerType.pointee)) {
             return true;
@@ -330,7 +356,9 @@ export namespace Analyzer::ViewType {
 
       let mut members: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
 
-      if (isEnum) {
+      if (mode == 3 && ViewType::implementsDrop(defStore, defId)) {
+        // An owning type's own pointers point to its allocation.
+      } else if (isEnum) {
         members = ViewType::enumPayloadTypes(defStore, defId);
       } else {
         members = ViewType::recordFieldTypes(defStore, defId);
@@ -446,6 +474,17 @@ export namespace Analyzer::ViewType {
     }
 
     return types;
+  }
+
+  function implementsDrop(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    return match (defStore.get(defId)) {
+      Option::SOME(Analyzer::Definition::Record(recordDef)) -> recordDef.implementsDrop,
+      Option::SOME(Analyzer::Definition::Enum(enumDef)) -> enumDef.implementsDrop,
+      _ -> false,
+    };
   }
 
   function isEnumDefinition(

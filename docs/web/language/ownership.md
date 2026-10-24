@@ -164,8 +164,11 @@ A view must not outlive its owner:
   is reported. A binding typed `&mut T` borrows its owner mutably, so even reading the owner is
   reported. The borrow ends after the last statement of the binding's block that uses the
   binding or anything carrying its view — a copy, an aggregate or field initialized from it, a
-  pattern binding destructured from it, a closure capturing it, or a raw pointer derived from
-  it by a cast or returned by a call that received it (`text as *u8`, whatever the pointee).
+  pattern binding destructured from it, a closure capturing it, or any binding declared or
+  place assigned (a local, a field, `*reference`, an element) by a statement that uses it,
+  when that type can hold a view, a closure or a raw pointer at any depth (`text as *u8`, a
+  `CArgs { name: *u8 }` returned by a call that received the view; not the buffer a `Drop`
+  type such as `String` owns).
   Granularity is the whole
   statement: a use inside a loop body keeps the borrow for every iteration, a use in the
   block's tail or in a `defer` body keeps it to the end of the block, and so does a view handed

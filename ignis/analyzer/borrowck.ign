@@ -8095,15 +8095,13 @@ export namespace Borrowck {
     let mut usedSet: HashMap<u64, u32> = HashMap::new<u64, u32>();
     let mut usedInDefer: boolean = false;
 
-    // Transitive carriers, as a worklist over the use index: a binding whose
-    // value mentions a carrier — a copy, an aggregate or field initialized
-    // from one, a match or `let else` binding destructured from one, a
-    // closure capturing one — keeps the borrow as long as that carrier
-    // lives, and so does a binding a statement using a carrier derives a raw
-    // pointer for (a cast or a call result of raw pointer type: the pointer
-    // may point into the view whatever its pointee). A statement using a
-    // carrier anywhere joins all its reached bindings, which
-    // over-approximates the source alone and errs toward keeping the borrow.
+    // Transitive carriers, as a worklist over the use index: when a statement
+    // uses a carrier, every binding it declares and every place it writes,
+    // nested blocks included, joins the carriers if its type can hold
+    // something derived from the view (`Analyzer::ViewType::canHoldDerived`):
+    // a copy, an aggregate, a pattern binding, a closure, a raw pointer cast
+    // from the view or returned inside a call result. This over-approximates
+    // the source and errs toward keeping the borrow.
     let mut carrierIndex: u64 = 0;
 
     while (carrierIndex < carriers.length()) {
@@ -8147,38 +8145,27 @@ export namespace Borrowck {
 
         let start: u64 = state.planStatementStart(plan, statementOfNode);
         let end: u64 = state.planStatementStart(plan, statementOfNode + 1);
-        let derivesPointer: boolean = Borrowck::statementDerivesPointer(defStore, typeStore, hir, state, plan, start, end);
-        let mut reachedIndex: u64 = start;
+        let mut targets: Vector<u32> = Vector::new<u32>();
 
-        while (reachedIndex < end) {
-          if (state.planNodeInDeferAt(plan, reachedIndex)) {
-            reachedIndex += 1;
-            continue;
-          }
+        if (!Borrowck::collectDerivedTargets(defStore, typeStore, hir, state, block, plan, start, end, &mut targets)) {
+          // A written place whose root binding cannot be resolved keeps the
+          // view's borrow to the end of the scope.
+          return Borrowck::NO_LAST_STATEMENT;
+        }
 
-          let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, reachedIndex));
-          let mut reached: Vector<u32> = Vector::new<u32>();
+        let mut targetIndex: u64 = 0;
 
-          if (Borrowck::bindingsReachedBy(hir, nodeId, &mut reached)) {
-            let mut bindingIndex: u64 = 0;
+        while (targetIndex < targets.length()) {
+          if (let Option::SOME(target) = targets.get(targetIndex)) {
+            let key: u64 = *target as u64;
 
-            while (bindingIndex < reached.length()) {
-              if (let Option::SOME(binding) = reached.get(bindingIndex)) {
-                let key: u64 = *binding as u64;
-
-                if (!carrierSet.containsKey(&key)) {
-                  if (derivesPointer || Borrowck::bindingCanCarryView(defStore, typeStore, *binding)) {
-                    carriers.push(*binding);
-                    carrierSet.insert(key, 1);
-                  }
-                }
-              }
-
-              bindingIndex += 1;
+            if (!carrierSet.containsKey(&key)) {
+              carriers.push(*target);
+              carrierSet.insert(key, 1);
             }
           }
 
-          reachedIndex += 1;
+          targetIndex += 1;
         }
       }
     }
@@ -8241,39 +8228,60 @@ export namespace Borrowck {
     return last;
   }
 
-  /// Whether the nodes `start` to `end` of plan `plan` derive a raw pointer
-  /// outside a `defer` body: a cast or call whose result has a raw pointer
-  /// type. Integer and `@bitCast` laundering are the documented boundary.
-  function statementDerivesPointer(
+  /// Collects into `output` the carriers a statement — the nodes `start` to
+  /// `end` of plan `plan`, outside `defer` bodies — makes: each binding it
+  /// declares and the root binding of each place it assigns, when that
+  /// binding's or place's type can hold something derived from a view. A
+  /// place reached through a `&mut` binding resolves to the binding the
+  /// reference was taken from (`slot.name` with `slot = &mut holder` makes
+  /// `holder` a carrier). Returns false when such a place's root cannot be
+  /// resolved, which keeps the borrow to the end of the scope.
+  function collectDerivedTargets(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
+    block: &Hir::HirBlock,
     plan: u64,
     start: u64,
     end: u64,
+    output: &mut Vector<u32>,
   ): boolean {
     let mut index: u64 = start;
 
     while (index < end) {
-      if (!state.planNodeInDeferAt(plan, index)) {
-        let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, index));
+      if (state.planNodeInDeferAt(plan, index)) {
+        index += 1;
+        continue;
+      }
 
-        if (let Option::SOME(node) = hir.get(nodeId)) {
-          let derives: boolean = match (&node.kind) {
-            Hir::HirKind::Cast(_) -> true,
-            Hir::HirKind::Call(_) -> true,
-            Hir::HirKind::MethodCall(_) -> true,
-            Hir::HirKind::CallClosure(_) -> true,
-            _ -> false,
-          };
+      let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, index));
+      let mut reached: Vector<u32> = Vector::new<u32>();
 
-          if (derives) {
-            if (let Option::SOME(typeId) = Borrowck::nodeTypeOf(hir, nodeId)) {
-              if (Borrowck::typeIsRawPointer(defStore, typeStore, typeId)) {
-                return true;
-              }
+      if (Borrowck::bindingsReachedBy(hir, nodeId, &mut reached)) {
+        let mut bindingIndex: u64 = 0;
+
+        while (bindingIndex < reached.length()) {
+          if (let Option::SOME(binding) = reached.get(bindingIndex)) {
+            if (Borrowck::bindingCanHoldDerived(defStore, typeStore, *binding)) {
+              Borrowck::pushRaw(output, *binding);
             }
+          }
+
+          bindingIndex += 1;
+        }
+      }
+
+      if (let Option::SOME(node) = hir.get(nodeId)) {
+        if (let Hir::HirKind::Assign(assignNode) = &node.kind) {
+          let mut qualifies: boolean = true;
+
+          if (let Option::SOME(targetType) = Borrowck::nodeTypeOf(hir, assignNode.target)) {
+            qualifies = Analyzer::ViewType::canHoldDerived(defStore, typeStore, targetType);
+          }
+
+          if (qualifies && !Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, assignNode.target, output)) {
+            return false;
           }
         }
       }
@@ -8281,16 +8289,33 @@ export namespace Borrowck {
       index += 1;
     }
 
-    return false;
+    return true;
   }
 
-  /// Whether `typeId` is a raw pointer, through aliases.
-  function typeIsRawPointer(
+  /// Pushes the binding the place `target` writes into: its root variable,
+  /// or, when the root is a reference, the binding a `let` of this block
+  /// took the reference from. Returns false when it cannot be resolved: a
+  /// root that is not a variable, a reference not taken by a `let` of this
+  /// block, or a projection through a raw pointer.
+  function pushPlaceRoot(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
-    typeId: Analyzer::TypeId,
+    hir: &Hir::HirStore,
+    block: &Hir::HirBlock,
+    target: Hir::HirId,
+    output: &mut Vector<u32>,
   ): boolean {
-    let mut current: Analyzer::TypeId = typeId;
+    let Option::SOME(root) = Borrowck::extractRootVariable(hir, target) else {
+      return false;
+    };
+
+    Borrowck::pushRaw(output, root.raw());
+
+    let Option::SOME(rootType) = Borrowck::variableTypeOf(defStore, root) else {
+      return false;
+    };
+
+    let mut current: Analyzer::TypeId = rootType;
     let mut depth: u32 = 0;
 
     while (depth < 64) {
@@ -8299,18 +8324,26 @@ export namespace Borrowck {
       };
 
       match (type_) {
-        Analyzer::Type::Pointer(_) -> {
-          return true;
-        },
-        Analyzer::Type::Alias(aliasDefId) -> {
-          let Option::SOME(target) = Borrowck::aliasedTypeOf(defStore, aliasDefId) else {
+        Analyzer::Type::Reference(_) -> {
+          let Option::SOME(source) = Borrowck::referenceSourceOf(hir, block, root.raw()) else {
             return false;
           };
 
-          current = target;
+          Borrowck::pushRaw(output, source);
+          return true;
+        },
+        Analyzer::Type::Pointer(_) -> {
+          return Borrowck::isVariableNode(hir, target);
+        },
+        Analyzer::Type::Alias(aliasDefId) -> {
+          let Option::SOME(aliased) = Borrowck::aliasedTypeOf(defStore, aliasDefId) else {
+            return false;
+          };
+
+          current = aliased;
         },
         _ -> {
-          return false;
+          return true;
         },
       };
 
@@ -8318,6 +8351,58 @@ export namespace Borrowck {
     }
 
     return false;
+  }
+
+  /// The root binding of the place a top-level `let binding = &place;` or
+  /// `&mut place` of `block` takes its reference from.
+  function referenceSourceOf(
+    hir: &Hir::HirStore,
+    block: &Hir::HirBlock,
+    binding: u32
+  ): Option<u32> {
+    let mut index: u64 = 0;
+
+    while (index < block.statements.length()) {
+      if (let Option::SOME(statement) = block.statements.get(index)) {
+        if (let Option::SOME(node) = hir.get(*statement)) {
+          if (let Hir::HirKind::Let(letNode) = &node.kind) {
+            if (letNode.name.raw() == binding) {
+              let Option::SOME(value) = letNode.value else {
+                return Option::NONE;
+              };
+
+              let Option::SOME(reference) = Borrowck::referenceParts(hir, value) else {
+                return Option::NONE;
+              };
+
+              let Option::SOME(source) = Borrowck::extractRootVariable(hir, reference.expression) else {
+                return Option::NONE;
+              };
+
+              return Option::SOME(source.raw());
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Whether the local `defRaw` can hold something derived from a view
+  /// (`Analyzer::ViewType::canHoldDerived`); an untyped one can.
+  function bindingCanHoldDerived(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    defRaw: u32,
+  ): boolean {
+    let Option::SOME(typeId) = Borrowck::variableTypeOf(defStore, Id::fromRaw<Analyzer::DefinitionTag>(defRaw)) else {
+      return true;
+    };
+
+    return Analyzer::ViewType::canHoldDerived(defStore, typeStore, typeId);
   }
 
   /// Appends `nodeIndex` to the uses of the binding `key`.
