@@ -384,10 +384,177 @@ export namespace Analyzer {
       }
 
       if (let Option::SOME(definition) = nominal) {
-        return Analyzer::TypeBounds::declaresImplements(defStore, definition, bound.toStr(), boundTrait);
+        if (Analyzer::TypeBounds::declaresImplements(defStore, definition, bound.toStr(), boundTrait)) {
+          return true;
+        }
+      }
+
+      let Option::SOME(traitId) = boundTrait else {
+        return false;
+      };
+
+      return Analyzer::TypeBounds::extensionImplements(defStore, typeStore, symbols, enclosing, resolved.typeId, traitId);
+    }
+
+    /// One extension block that applies to a type, with what the block's own
+    /// type parameters stand for in it.
+    record ExtensionMatch {
+      public extension: Analyzer::DefinitionId;
+      public typeArguments: Vector<Analyzer::TypeId>;
+    }
+
+    /// Every extension block whose target is `typeId`: the same primitive,
+    /// record or enum, or, for a generic block, an instance of the same
+    /// declaration, whose arguments the block's parameters then stand for. A
+    /// `static str` takes the blocks of `str`, which it converts to.
+    function extensionsFor(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Vector<Analyzer::TypeBounds::ExtensionMatch> {
+      let mut matches: Vector<Analyzer::TypeBounds::ExtensionMatch> = Vector::new<Analyzer::TypeBounds::ExtensionMatch>();
+      let blocks: Vector<Analyzer::DefinitionId> = defStore.extensionBlocks();
+
+      if (blocks.length() == 0) {
+        return matches;
+      }
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      let mut wanted: Analyzer::TypeId = resolved.typeId;
+      let mut instanceDef: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut instanceArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut isStaticStr: boolean = false;
+
+      if (let Option::SOME(node) = typeStore.get(wanted)) {
+        match (node) {
+          Analyzer::Type::Instance(instance) -> {
+            instanceDef = Option::SOME(instance.definition);
+            instanceArguments = Analyzer::TypeBounds::copyTypeIds(&instance.typeArguments);
+          },
+          Analyzer::Type::STATIC_STR -> {
+            isStaticStr = true;
+          },
+          _ -> {},
+        };
+      }
+
+      if (isStaticStr) {
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        wanted = typeStoreRef.intern(Analyzer::Type::STR);
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < blocks.length()) {
+        let Option::SOME(block) = blocks.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(target) = defStore.extensionTargetOf(*block) else {
+          index += 1;
+          continue;
+        };
+
+        if (target.raw() == wanted.raw()) {
+          matches.push(Analyzer::TypeBounds::ExtensionMatch {
+            extension: *block,
+            typeArguments: Vector::new<Analyzer::TypeId>(),
+          });
+        } else if (let Option::SOME(definition) = instanceDef) {
+          if (let Option::SOME(Analyzer::Type::Instance(targetInstance)) = typeStore.get(target)) {
+            if (targetInstance.definition.raw() == definition.raw() && targetInstance.typeArguments.length() == instanceArguments.length()) {
+              matches.push(Analyzer::TypeBounds::ExtensionMatch {
+                extension: *block,
+                typeArguments: Analyzer::TypeBounds::copyTypeIds(&instanceArguments),
+              });
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return matches;
+    }
+
+    /// Whether an extension block implements the trait `traitId` for
+    /// `typeId`. A generic block applies only where its arguments satisfy the
+    /// bounds of its own type parameters.
+    function extensionImplements(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      enclosing: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+      traitId: Analyzer::DefinitionId,
+    ): boolean {
+      let matches: Vector<Analyzer::TypeBounds::ExtensionMatch> = Analyzer::TypeBounds::extensionsFor(defStore, typeStore, typeId);
+      let mut index: u64 = 0;
+
+      while (index < matches.length()) {
+        let Option::SOME(entry) = matches.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (defStore.refersToTrait(entry.extension, traitId) && Analyzer::TypeBounds::extensionArgumentsSatisfy(defStore, typeStore, symbols, enclosing, entry)) {
+          return true;
+        }
+
+        index += 1;
       }
 
       return false;
+    }
+
+    /// Whether the arguments a generic extension block is matched with
+    /// satisfy the bounds its type parameters declare.
+    function extensionArgumentsSatisfy(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      enclosing: Analyzer::DefinitionId,
+      entry: &Analyzer::TypeBounds::ExtensionMatch,
+    ): boolean {
+      let parameters: Vector<Analyzer::DefinitionId> = Analyzer::TypeBounds::declaredTypeParams(defStore, entry.extension);
+      let mut index: u64 = 0;
+
+      while (index < parameters.length()) {
+        let Option::SOME(parameter) = parameters.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(argument) = entry.typeArguments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut bounds: Vector<String> = Vector::new<String>();
+
+        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*parameter)) {
+          bounds = Analyzer::TypeBounds::copyStrings(&typeParam.bounds);
+        }
+
+        let references: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(*parameter);
+        let mut boundIndex: u64 = 0;
+
+        while (boundIndex < bounds.length()) {
+          if (let Option::SOME(bound) = bounds.get(boundIndex)) {
+            let boundTrait: Option<Analyzer::DefinitionId> = Analyzer::TypeBounds::traitAt(&references, boundIndex);
+
+            if (!Analyzer::TypeBounds::satisfies(defStore, typeStore, symbols, enclosing, *argument, bound, boundTrait, false)) {
+              return false;
+            }
+          }
+
+          boundIndex += 1;
+        }
+
+        index += 1;
+      }
+
+      return true;
     }
 
     /// Whether the type parameter named `symbol` in scope at `enclosing`

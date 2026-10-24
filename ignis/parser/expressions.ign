@@ -729,7 +729,16 @@ export namespace ParserExpressions {
     parserRef.skipTrivia();
     let token: Token = parserRef.current();
 
-    if (token.kindValue() != TokenKind::IDENTIFIER && !(token.kindValue() == TokenKind::KEYWORD && (token.keywordValue() == Keyword::SELF_ || token.keywordValue() == Keyword::THIS))) {
+    // `i64::read(raw)` names a static method an extension block declares on
+    // the primitive, so a primitive type name starts a path when `::` follows.
+    let mut primitiveOwner: boolean = false;
+
+    if (ParserTypes::isPrimitiveTypeKeyword(&token)) {
+      let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+      primitiveOwner = next.kindValue() == TokenKind::PUNCTUATION && next.punctuationValue() == Punctuation::DOUBLE_COLON;
+    }
+
+    if (!primitiveOwner && token.kindValue() != TokenKind::IDENTIFIER && !(token.kindValue() == TokenKind::KEYWORD && (token.keywordValue() == Keyword::SELF_ || token.keywordValue() == Keyword::THIS))) {
       return Option::NONE;
     }
 

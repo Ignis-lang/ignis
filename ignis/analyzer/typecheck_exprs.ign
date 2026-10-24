@@ -2326,13 +2326,33 @@ export namespace Analyzer {
       // of type `T`, including the primitives no record or enum owns. Owner
       // methods win: the lookup only runs when the receiver has no owner able
       // to carry the name.
-      if (let Option::SOME(extensionDefId) = Analyzer::Typecheck::lookupExtensionFunction(
+      let extensionFunctionOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::lookupExtensionFunction(
         defStore,
         typeStore,
         symbols,
         receiverType,
         ma.member.toStr(),
-      )) {
+      );
+
+      // An extension block implementing a trait for the receiver's type
+      // answers a name neither the type's own declaration nor an
+      // `@extension(T)` function does.
+      let mut extensionOwnerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Option::NONE;
+
+      if (extensionFunctionOpt.isNone()) {
+        extensionOwnerOpt = Analyzer::Typecheck::extensionMethodOwner(
+          defStore,
+          typeStore,
+          symbols,
+          state.currentFunction,
+          receiverType,
+          ma.member.toStr(),
+        );
+      }
+
+      let throughExtensionBlock: boolean = extensionOwnerOpt.isSome();
+
+      if (let Option::SOME(extensionDefId) = extensionFunctionOpt) {
         return Analyzer::Typecheck::checkExtensionMethodCall(
           state,
           defStore,
@@ -2349,22 +2369,27 @@ export namespace Analyzer {
         );
       }
 
-      if (Analyzer::Typecheck::sliceElementType(defStore, typeStore, receiverType).isSome()) {
+      if (!throughExtensionBlock && Analyzer::Typecheck::sliceElementType(defStore, typeStore, receiverType).isSome()) {
         let sliceName: String = typeStore.nameOfResolved(receiverType, &*defStore, &*symbols);
         Analyzer::Typecheck::emitFieldNotFound(state, ma.span, ma.member.toStr(), sliceName.toStr(), "a slice has only the methods length() and asPtr()");
         return Option::NONE;
       }
 
-      let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireMethodOwner(
-        state,
-        defStore,
-        typeStore,
-        symbols,
-        ma.span,
-        receiverType,
-        "method call target must be a non-generic record or enum",
-        "typecheck does not support generic method receivers",
-      );
+      let mut ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = extensionOwnerOpt;
+
+      if (!throughExtensionBlock) {
+        ownerOpt = Analyzer::Typecheck::requireMethodOwner(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          ma.span,
+          receiverType,
+          "method call target must be a non-generic record or enum",
+          "typecheck does not support generic method receivers",
+        );
+      }
+
       let Option::SOME(owner) = ownerOpt else {
         return Option::NONE;
       };
@@ -2406,10 +2431,12 @@ export namespace Analyzer {
       } else if (let Option::SOME(single) = candidateSet.get(0)) {
         instanceOpt = Option::SOME(*single);
 
-        // A method reached through a trait bound is not in the receiver type's
-        // own method table, so lowering cannot find it by name. Recording the
-        // target is the only way it reaches the HIR.
+        // A method reached through a trait bound or an extension block is not
+        // in the receiver type's own method table, so lowering cannot find it
+        // by name. Recording the target is the only way it reaches the HIR.
         if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(owner.defId)) {
+          Analyzer::Typecheck::recordCallTarget(state, callExprId, *single);
+        } else if (throughExtensionBlock) {
           Analyzer::Typecheck::recordCallTarget(state, callExprId, *single);
         }
       }

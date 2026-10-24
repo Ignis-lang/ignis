@@ -1876,6 +1876,192 @@ export namespace Mono {
     return Option::NONE;
   }
 
+  /// Where a call to a method an extension block declares, or a trait method
+  /// it implements, goes for a concrete type: the extension's method, and for
+  /// a generic block the arguments its own type parameters stand for.
+  record ExtensionDispatch {
+    public method: Analyzer::DefinitionId;
+    public extension: Analyzer::DefinitionId;
+    public typeArguments: Vector<Analyzer::TypeId>;
+  }
+
+  /// The extension blocks that apply to the concrete type `concreteType`,
+  /// read through references and pointers like a receiver, each with what
+  /// its own type parameters stand for.
+  function extensionMatches(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut MonoState,
+    concreteType: Analyzer::TypeId,
+  ): Vector<Analyzer::TypeBounds::ExtensionMatch> {
+    let mut matches: Vector<Analyzer::TypeBounds::ExtensionMatch> = Vector::new<Analyzer::TypeBounds::ExtensionMatch>();
+    let blocks: Vector<Analyzer::DefinitionId> = defStore.extensionBlocks();
+
+    if (blocks.length() == 0) {
+      return matches;
+    }
+
+    let mut baseType: Analyzer::TypeId = concreteType;
+    let mut guard: u64 = 0;
+
+    while (guard < 16) {
+      let mut next: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(baseType)) {
+        match (typeNode) {
+          Analyzer::Type::Reference(referenceType) -> {
+            next = Option::SOME(referenceType.referent);
+          },
+          Analyzer::Type::Pointer(pointerType) -> {
+            next = Option::SOME(pointerType.pointee);
+          },
+          Analyzer::Type::STATIC_STR -> {
+            let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+            next = Option::SOME(typeStoreRef.intern(Analyzer::Type::STR));
+          },
+          _ -> {},
+        };
+      }
+
+      let Option::SOME(inner) = next else {
+        break;
+      };
+
+      baseType = inner;
+      guard += 1;
+    }
+
+    let instance: Option<Analyzer::InstanceType> = Mono::receiverInstance(defStore, typeStore, state, baseType);
+    let nominal: Option<Analyzer::DefinitionId> = Mono::receiverNominalDef(defStore, typeStore, baseType);
+    let mut index: u64 = 0;
+
+    while (index < blocks.length()) {
+      let Option::SOME(block) = blocks.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(target) = defStore.extensionTargetOf(*block) else {
+        index += 1;
+        continue;
+      };
+
+      if (target.raw() == baseType.raw()) {
+        matches.push(Analyzer::TypeBounds::ExtensionMatch { extension: *block, typeArguments: Vector::new<Analyzer::TypeId>() });
+        index += 1;
+        continue;
+      }
+
+      let mut targetDef: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut targetGeneric: boolean = false;
+
+      if (let Option::SOME(targetNode) = typeStore.get(target)) {
+        match (targetNode) {
+          Analyzer::Type::Instance(targetInstance) -> {
+            targetDef = Option::SOME(targetInstance.definition);
+            targetGeneric = true;
+          },
+          Analyzer::Type::Record(definition) -> {
+            targetDef = Option::SOME(definition);
+          },
+          Analyzer::Type::Enum(definition) -> {
+            targetDef = Option::SOME(definition);
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(definition) = targetDef) {
+        if (targetGeneric) {
+          if (let Option::SOME(receiver) = &instance) {
+            if (receiver.definition.raw() == definition.raw()) {
+              matches.push(Analyzer::TypeBounds::ExtensionMatch {
+                extension: *block,
+                typeArguments: Mono::copyTypeIds(&receiver.typeArguments),
+              });
+            }
+          }
+        } else if (let Option::SOME(receiverDef) = nominal) {
+          if (receiverDef.raw() == definition.raw()) {
+            matches.push(Analyzer::TypeBounds::ExtensionMatch { extension: *block, typeArguments: Vector::new<Analyzer::TypeId>() });
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return matches;
+  }
+
+  /// The method of an extension block that implements the trait method
+  /// `traitMethodDef` for `concreteType`, or NONE when no block implementing
+  /// the method's trait applies to the type.
+  function extensionImplementation(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut MonoState,
+    concreteType: Analyzer::TypeId,
+    traitMethodDef: Analyzer::DefinitionId,
+  ): Option<Mono::ExtensionDispatch> {
+    let mut traitId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Method(traitMethod)) = defStore.get(traitMethodDef)) {
+      if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(traitMethod.owner)) {
+        traitId = Option::SOME(traitMethod.owner);
+      }
+    }
+
+    let Option::SOME(trait_) = traitId else {
+      return Option::NONE;
+    };
+
+    let matches: Vector<Analyzer::TypeBounds::ExtensionMatch> = Mono::extensionMatches(defStore, typeStore, state, concreteType);
+    let mut index: u64 = 0;
+
+    while (index < matches.length()) {
+      if (let Option::SOME(entry) = matches.get(index)) {
+        if (defStore.refersToTrait(entry.extension, trait_)) {
+          if (let Option::SOME(implementation) = Mono::traitImplementationMethod(defStore, entry.extension, traitMethodDef)) {
+            return Option::SOME(Mono::ExtensionDispatch {
+              method: implementation,
+              extension: entry.extension,
+              typeArguments: Mono::copyTypeIds(&entry.typeArguments),
+            });
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The instance an extension block's method is instantiated through: the
+  /// block itself over the arguments its parameters stand for, or NONE for a
+  /// block with no type parameters, whose methods are not generic.
+  function extensionOwnerInstance(
+    defStore: &mut Analyzer::DefinitionStore,
+    extension: Analyzer::DefinitionId,
+    typeArguments: &Vector<Analyzer::TypeId>,
+  ): Option<Analyzer::InstanceType> {
+    let mut generic: boolean = false;
+
+    if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(extension)) {
+      generic = record_.typeParams.length() > 0;
+    }
+
+    if (!generic) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(Analyzer::InstanceType {
+      definition: extension,
+      typeArguments: Mono::copyTypeIds(typeArguments),
+    });
+  }
+
   function receiverInstance(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2481,6 +2667,16 @@ export namespace Mono {
                 selfType = Option::NONE;
               }
             }
+
+            // A type implementing the trait through an extension block, a
+            // primitive among them, answers with the block's method.
+            if (selfType.isSome()) {
+              if (let Option::SOME(dispatch) = Mono::extensionImplementation(defStore, typeStore, state, concreteSelf, method)) {
+                method = dispatch.method;
+                selfType = Option::NONE;
+                ownerInstance = Mono::extensionOwnerInstance(defStore, dispatch.extension, &dispatch.typeArguments);
+              }
+            }
           }
 
           if (let Option::SOME(receiverId) = receiver) {
@@ -2504,9 +2700,41 @@ export namespace Mono {
               implementer = Option::SOME(instance.definition);
             }
 
+            let mut redirected: boolean = false;
+
             if (let Option::SOME(nominalDef) = implementer) {
               if (let Option::SOME(implementation) = Mono::traitImplementationMethod(defStore, nominalDef, method)) {
                 method = implementation;
+                redirected = true;
+              }
+            }
+
+            if (!redirected) {
+              if (let Option::SOME(dispatch) = Mono::extensionImplementation(defStore, typeStore, state, receiverType, method)) {
+                method = dispatch.method;
+              }
+            }
+
+            // A method an extension block declares is instantiated through
+            // the block, whose own parameters its signature names, not
+            // through the receiver's declaration.
+            if (let Option::SOME(Analyzer::Definition::Method(calledDef)) = defStore.get(method)) {
+              let calledOwner: Analyzer::DefinitionId = calledDef.owner;
+
+              if (defStore.extensionTargetOf(calledOwner).isSome()) {
+                let matches: Vector<Analyzer::TypeBounds::ExtensionMatch> = Mono::extensionMatches(defStore, typeStore, state, receiverType);
+                ownerInstance = Option::NONE;
+                let mut matchIndex: u64 = 0;
+
+                while (matchIndex < matches.length()) {
+                  if (let Option::SOME(entry) = matches.get(matchIndex)) {
+                    if (entry.extension.raw() == calledOwner.raw()) {
+                      ownerInstance = Mono::extensionOwnerInstance(defStore, calledOwner, &entry.typeArguments);
+                    }
+                  }
+
+                  matchIndex += 1;
+                }
               }
             }
           }

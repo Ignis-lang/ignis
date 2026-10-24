@@ -1198,8 +1198,15 @@ export namespace ParserTraitDefaults {
     return ParserTraitDefaults::cloneMethodItem(&scratch, module, scratchItemId);
   }
 
-  /// The declared name of a record or enum item.
+  /// The declared name of a record or enum item, or the type an extension
+  /// block extends.
   function typeItemName(module: &Ast::Module, itemId: Ast::ItemId): String {
+    // An extension block's node is named after its traits; the type it
+    // inherits for is the one it extends.
+    if (let Option::SOME(target) = module.extensionTarget(itemId)) {
+      return Ast::extensionTypeText(module, target);
+    }
+
     return match (module.items.get(itemId)) {
       Option::SOME(Ast::Item::Node::Record(record_)) -> record_.name.clone(),
       Option::SOME(Ast::Item::Node::Enum(enum_)) -> enum_.name.clone(),

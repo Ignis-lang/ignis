@@ -2052,6 +2052,36 @@ export namespace Analyzer {
       return out;
     }
 
+    /// The first static method named `name` among the extension blocks
+    /// `extensions`, the way `Type::name` reaches a static method an
+    /// extension block declares for `Type`.
+    function lookupExtensionStatic(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      extensions: &Vector<Analyzer::DefinitionId>,
+      name: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < extensions.length()) {
+        let mut statics: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        if (let Option::SOME(extension) = extensions.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(*extension)) {
+            statics = Analyzer::copyDefIdBucket(Option::SOME(&record_.staticMethods));
+          }
+        }
+
+        if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &statics, name, symbols)) {
+          return Option::SOME(methodDefId);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function lookupMethodInTable(
       defStore: &mut Analyzer::DefinitionStore,
       table: &Vector<Analyzer::DefinitionId>,
@@ -2248,6 +2278,14 @@ export namespace Analyzer {
       };
 
       let Option::SOME(ownerDefId) = ownerOpt else {
+        // `i64::read(raw)`: a primitive owner has only the static methods its
+        // extension blocks declare.
+        let primitiveExtensions: Vector<Analyzer::DefinitionId> = defStore.extensionsOfPrimitive(ownerName);
+
+        if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupExtensionStatic(defStore, symbols, &primitiveExtensions, memberName)) {
+          return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
+        }
+
         let fallback: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::resolvePathTailTypeFallback(
           state,
           defStore,
@@ -2320,6 +2358,12 @@ export namespace Analyzer {
             return Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(methodDefId);
           }
 
+          let enumExtensions: Vector<Analyzer::DefinitionId> = defStore.extensionsOfDefinition(ownerDefId);
+
+          if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupExtensionStatic(defStore, symbols, &enumExtensions, memberName)) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
+          }
+
           return Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum;
         },
         Analyzer::Definition::Record(rec) -> {
@@ -2354,6 +2398,12 @@ export namespace Analyzer {
 
           if (let Option::SOME(methodDefId) = instanceOpt) {
             return Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(methodDefId);
+          }
+
+          let recordExtensions: Vector<Analyzer::DefinitionId> = defStore.extensionsOfDefinition(ownerDefId);
+
+          if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupExtensionStatic(defStore, symbols, &recordExtensions, memberName)) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
           }
 
           // The chain-aware reading goes first: `Ast::Type::Path` must find

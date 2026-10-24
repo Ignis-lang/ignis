@@ -548,6 +548,8 @@ record Item {
 
 A trait may declare `static` methods, required or with a default body; `Self` in their signatures is the implementing type. A record or enum implements them with `static` methods of the same signature (A0276, A0277), and a generic calls them through a bounded type parameter as `T::name(args)` (A0278), which reaches the implementing type's method after monomorphization. A static trait method is not callable through a value or as `Trait::name(args)` (A0279). Inside a trait's default body, static or instance, `Self::name(args)` calls the trait's static method on the implementing type, as `T::name(args)` does. See `docs/TRAITS.md`.
 
+An existing type, a primitive, `str` or a record or enum including the standard library's, implements a trait through an extension block: `@implements(Describe) extension i64 { describe(&self): i64 { ... } }`, or generically `@implements(Describe) extension<T: Describe> Option<T> { ... }`. Its methods follow record-method rules, are checked against the trait like a record's, inherit the trait's defaults, and are callable on the type itself (`value.describe()`, `i64::read(raw)`) and through bounds (`T::read` with `T = i64`); the type then satisfies `T: Describe`. A block is allowed only in the module that declares the trait or the one that declares the type, only the trait's for a primitive (A0286); a second implementation for the same type is an error naming both (A0287); a block has to name a trait (A0285), cannot implement a language trait or the canonical `Eq` and `Hash` (A0288), and extends only the types listed above (A0289). See `docs/TRAITS.md`.
+
 ### 4.9 Namespaces
 
 ```ignis
@@ -1851,7 +1853,7 @@ Common directive builtins:
 - `@implements(Drop)` types are automatically dropped at scope exit; double-drop is a compile-time error.
 - The pipe operator `|>` desugars to a function call with the LHS as the first argument. It supports bare functions, namespace paths, calls with extra args, generic calls, lambdas, and instance method calls. The `_` placeholder controls argument insertion position.
 - The try operator `expr!` unwraps a try-capable enum (marked with `@lang(try)`) or performs early return with the error variant. The function return type must be compatible.
-- User-defined trait checks currently target records.
+- User-defined trait checks target records, enums and extension blocks.
 - `a..b` and `a..=b` are values of `Range<T>` and `RangeInclusive<T>`; `for (i of a..b)` is a counted loop and `[a..b]` over literal bounds is an array of the values.
 - `T[]` is the slice type: a pointer-and-length view over elements of `T`. A fixed array coerces to a slice of the same element type. Callers must keep the backing storage valid; the current selfhost borrow checker does not track slice-view lifetimes. Dynamic vectors come from `std::vector::Vector<T>`, not from type syntax.
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.

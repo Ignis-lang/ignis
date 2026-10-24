@@ -364,6 +364,11 @@ a function, a method, a record or an enum:
 - A type parameter satisfies a bound only when it declares the same bound itself.
 - `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
   by every Copy type, since primitives have no declaration to write `@implements` on.
+- Any other trait is satisfied by a primitive, `str` or a type declared elsewhere through an
+  extension block that implements it (see [Implementing a Trait for an Existing
+  Type](#implementing-a-trait-for-an-existing-type)). A generic block satisfies the bound only for
+  type arguments that satisfy its own bounds: `extension<T: Describe> Option<T>` makes
+  `Option<i64>` a `Describe` when `i64` is one, and leaves `Option<boolean>` without it.
 - `Send` and `Sync` are judged from the type's structure, or taken from an `@implements(Send)` /
   `@implements(Sync)` declaration. A closure bound to a `Send` or `Sync` parameter is judged by
   what it captures (A0252); any other function value is rejected (A0253).
@@ -381,6 +386,75 @@ miss a bound is set aside before the overloads are ranked, so the call picks ano
 instead of reporting the bound or a tie. Only when every matching overload misses a bound is the
 lowest-cost one selected, and the call reports the bound it misses (A0247). See the language
 reference, section 4.1, for how overloads are ranked.
+
+### Implementing a Trait for an Existing Type
+
+A type that cannot carry `@implements` itself, a primitive, `str`, or a record or enum declared
+elsewhere such as the standard library's `String` or `Option`, implements a trait through an
+extension block:
+
+```ignis
+trait Describe {
+  describe(&self): i64;
+
+  static read(raw: i64): Self;
+
+  twice(&self): i64 {
+    return self.describe() * 2;
+  }
+}
+
+@implements(Describe)
+extension i64 {
+  describe(&self): i64 {
+    return *self;
+  }
+
+  static read(raw: i64): i64 {
+    return raw + 1;
+  }
+}
+
+@implements(Describe)
+extension<T: Describe> Option<T> {
+  describe(&self): i64 {
+    return match (self) {
+      Option::SOME(inner) -> inner.describe(),
+      Option::NONE -> -1,
+    };
+  }
+
+  static read(raw: i64): Option<T> {
+    return Option::SOME(T::read(raw));
+  }
+}
+```
+
+Rules:
+
+- The block declares methods only, following record-method rules: an instance method takes
+  `&self` or `&mut self`, a static one is marked `static`. `Self` is the extended type.
+- The methods are checked against the trait like a record's (A0140, A0276, A0277), and the
+  trait's defaults are inherited, from another module too.
+- They are called on the type itself, `value.describe()` and `(5 as i64).describe()`, and a
+  static one by the type's path, `i64::read(3)`. A method the type declares itself wins over one
+  of the same name in a block, and an `@extension(T)` function wins over a block too.
+- The type satisfies the trait as a bound, and `T::read` with `T = i64` reaches the block's static
+  method after monomorphization.
+- A generic block extends an instance over exactly its own type parameters, in order. It applies
+  only where the type arguments satisfy its bounds; elsewhere the method is not found (A0054) and
+  the bound is not met (A0247).
+- `extension` is a contextual keyword: an identifier named `extension` keeps working.
+
+| Code | Condition |
+|------|-----------|
+| A0285 | The block names no trait in `@implements` |
+| A0286 | The block is declared outside the module of the trait and of the type; a primitive is extended only in the trait's module |
+| A0287 | The type implements the trait twice: two blocks, or a block and the type's own `@implements`. Both spans are named |
+| A0288 | The block names a lang trait (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) or the canonical `Eq` or `Hash`, which the compiler answers from the type itself |
+| A0289 | The target is not a primitive, `str`, a record or an enum, or a generic instance not over the block's own parameters |
+
+Per-function `@extension(type)` (below) is unchanged.
 
 ### Current Limit
 
@@ -688,3 +762,8 @@ record or enum it reports, which overrides the module level for that declaration
 | A0278 | `T::name(args)` where no bound of `T` declares a static method `name` | Error |
 | A0279 | `Trait::name(args)` calls a static trait method without an implementing type | Error |
 | A0280 | `Self::name` written outside a record, enum or trait | Error |
+| A0285 | `extension` block without a trait in `@implements` | Error |
+| A0286 | `extension` block outside the module of its trait and of its type | Error |
+| A0287 | A type implements the same trait twice | Error |
+| A0288 | `extension` block implementing a lang trait or canonical `Eq`/`Hash` | Error |
+| A0289 | Invalid `extension` target type | Error |

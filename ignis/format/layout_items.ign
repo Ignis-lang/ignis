@@ -1543,9 +1543,12 @@ export namespace Format {
     return Format::formatFieldBinding(module, *patternId, source, config, indentLevel);
   }
 
+  /// A record declaration, or an `extension` block when `extensionTarget`
+  /// names the type the block extends.
   function formatRecord(
     module: &Ast::Module,
     recordItem: &Ast::Item::Record,
+    extensionTarget: Option<Ast::TypeId>,
     source: &String,
     config: &FormatterConfig,
     indentLevel: u64
@@ -1565,12 +1568,26 @@ export namespace Format {
     let indentText: String = config.indentString(indentLevel);
     result.push(&indentText);
     result.push(&modifierKeywords);
-    result.pushStr("record ");
-    result.push(&recordItem.name);
 
-    if (recordItem.genericParameters.length() > 0) {
-      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&recordItem.genericParameters, source);
-      result.push(&genericParamsText);
+    if (let Option::SOME(target) = extensionTarget) {
+      result.pushStr("extension");
+
+      if (recordItem.genericParameters.length() > 0) {
+        let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&recordItem.genericParameters, source);
+        result.push(&genericParamsText);
+      }
+
+      result.pushStr(" ");
+      let targetText: String = Format::formatType(module, target, source);
+      result.push(&targetText);
+    } else {
+      result.pushStr("record ");
+      result.push(&recordItem.name);
+
+      if (recordItem.genericParameters.length() > 0) {
+        let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&recordItem.genericParameters, source);
+        result.push(&genericParamsText);
+      }
     }
 
     let Option::SOME(bodyRange) = Format::bracedBodyBounds(source, &recordItem.span) else {
@@ -2055,7 +2072,7 @@ export namespace Format {
     }
 
     if (let Ast::Item::Node::Record(recordItem) = node) {
-      return Format::formatRecord(module, &recordItem, source, config, indentLevel);
+      return Format::formatRecord(module, &recordItem, module.extensionTarget(itemId), source, config, indentLevel);
     }
 
     if (let Ast::Item::Node::Enum(enumItem) = node) {

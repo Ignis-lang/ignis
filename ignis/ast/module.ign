@@ -30,6 +30,56 @@ export namespace Ast {
     public namespaces: Vector<String>;
   }
 
+  /// The written text of an extension block's target type, which names the
+  /// record node the block is parsed into.
+  function extensionTypeText(module: &Ast::Module, typeId: Ast::TypeId): String {
+    let mut text: String = String::new();
+
+    if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(typeId)) {
+      let mut index: u64 = 0;
+
+      while (index < path.segments.length()) {
+        if (let Option::SOME(segment) = path.segments.get(index)) {
+          if (index > 0) {
+            text.pushStr("::");
+          }
+
+          text.push(segment);
+        }
+
+        index += 1;
+      }
+
+      return text;
+    }
+
+    if (let Option::SOME(Ast::Type::Node::Generic(generic)) = module.types.get(typeId)) {
+      let baseText: String = Ast::extensionTypeText(module, generic.base);
+      text.push(&baseText);
+      text.pushStr("<");
+      let mut index: u64 = 0;
+
+      while (index < generic.arguments.length()) {
+        if (let Option::SOME(argument) = generic.arguments.get(index)) {
+          if (index > 0) {
+            text.pushStr(", ");
+          }
+
+          let argumentText: String = Ast::extensionTypeText(module, *argument);
+          text.push(&argumentText);
+        }
+
+        index += 1;
+      }
+
+      text.pushStr(">");
+      return text;
+    }
+
+    text.pushStr("?");
+    return text;
+  }
+
   /// The note that names where an inherited method comes from, attached to
   /// a diagnostic only that type's copy of the default produces.
   function inheritedMethodNote(inherited: &Ast::InheritedMethod): String {
@@ -68,6 +118,10 @@ export namespace Ast {
     /// Methods copied from a trait default onto an implementing type, keyed by
     /// the copy's raw item id.
     public inheritedMethods: HashMap<u32, Ast::InheritedMethod>;
+    /// The type each `extension Type { ... }` block extends, keyed by the raw
+    /// item id of the record node the block is parsed into. A record with an
+    /// entry here is an extension block, not a record declaration.
+    public extensionTargets: HashMap<u32, Ast::TypeId>;
     /// The resolved paths of the modules whose trait defaults were copied
     /// into this one, each once, in copy order. Those copies depend on that
     /// module's text, so a parse that holds one cannot be reused once that
@@ -88,6 +142,7 @@ export namespace Ast {
         variantAttributeLists: HashMap::new<u32, Vector<Ast::Attribute>>(),
         namespaceInnerDocs: HashMap::new<u32, String>(),
         inheritedMethods: HashMap::new<u32, Ast::InheritedMethod>(),
+        extensionTargets: HashMap::new<u32, Ast::TypeId>(),
         crossModuleSources: Vector::new<String>(),
       };
     }
@@ -191,6 +246,22 @@ export namespace Ast {
       }
 
       return Option::SOME(Ast::InheritedScope { sourceModule: sourceModule, namespaces: namespaces });
+    }
+
+    public setExtensionTarget(&mut self, id: Ast::ItemId, target: Ast::TypeId): void {
+      self.extensionTargets.insert(id.raw(), target);
+    }
+
+    /// The type the extension block `id` extends, or `NONE` when `id` is not
+    /// an extension block.
+    public extensionTarget(&self, id: Ast::ItemId): Option<Ast::TypeId> {
+      let raw: u32 = id.raw();
+
+      if (let Option::SOME(target) = self.extensionTargets.get(&raw)) {
+        return Option::SOME(*target);
+      }
+
+      return Option::NONE;
     }
 
     public inheritedMethod(&self, id: Ast::ItemId): Option<&Ast::InheritedMethod> {
