@@ -95,6 +95,88 @@ jobs:
           path: build/qbe-ci-tools/
           if-no-files-found: error
 
+  # S1 and S2 of the backend rule (BOOTSTRAP.md, "Every backend builds the
+  # compiler"): stage1 builds the compiler with --target qbe, and that
+  # QBE-built compiler has to emit, for ignis/, the same C stage1 emits.
+  # Pull requests run it only when they touch code that can change what the
+  # QBE build of the compiler does; every push to main runs it.
+  selfhost:
+    name: Compiler built with QBE (cross G1)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether the change is backend-relevant
+        id: relevant
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE_SHA...HEAD")
+          if echo "$CHANGED" | grep -Eq '^(ignis/(codegen|build|lir)/|std/|\.github/workflows/qbe\.yml$|scripts/bootstrap\.sh$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skipped: no backend-relevant change"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            mkdir -p build/bootstrap/gates
+            printf '{"gate": "QBE-SELFHOST", "status": "skipped", "summary": "skipped: no backend-relevant change", "details": {}}\n' \
+              > build/bootstrap/gates/QBE-SELFHOST.json
+          fi
+
+      - name: Download the stage1 compiler
+        if: steps.relevant.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: qbe-stage1-compiler
+          path: build/qbe-ci-downloads/qbe-stage1-compiler
+
+      - name: Download the runner and QBE binaries
+        if: steps.relevant.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: qbe-ci-tools
+          path: build/qbe-ci-downloads/qbe-ci-tools
+
+      - name: Make the binaries executable
+        if: steps.relevant.outputs.run == 'true'
+        run: |
+          chmod +x build/qbe-ci-downloads/qbe-stage1-compiler/ignis
+          chmod +x build/qbe-ci-downloads/qbe-ci-tools/qbe
+
+      # Both compiler builds compile std, whose sqlite3 module includes sqlite3.h.
+      - name: Install libsqlite3-dev for the std::sqlite3 linking requirement
+        if: steps.relevant.outputs.run == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
+      - name: Build the compiler with QBE and compare its C output with stage1's
+        if: steps.relevant.outputs.run == 'true'
+        run: |
+          PATH="$GITHUB_WORKSPACE/build/qbe-ci-downloads/qbe-ci-tools:$PATH" \
+            scripts/bootstrap.sh gate-qbe-selfhost build/qbe-ci-downloads/qbe-stage1-compiler/ignis
+
+      - name: Upload the gate result and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qbe-selfhost-gate
+          path: |
+            build/bootstrap/gates/QBE-SELFHOST.json
+            build/bootstrap/qbe-selfhost/*/log.txt
+          if-no-files-found: ignore
+
   # Four independent shards, zero-based, assigned by deterministic case index
   # modulo the shard count. Each shard runs the inventory pass and the normal
   # differential pass over its slice and uploads both report directories;
