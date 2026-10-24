@@ -285,6 +285,13 @@ spelled (see the reserved list).
 <directive-attrs> ::= (<directive-attr>)+
 
 <directive-attr> ::= "@" <qualified-identifier> <attribute-args>?
+  | "@" <declarable-attribute-name> <declarable-attribute-args>?
+
+// A declarable attribute is one whose last name segment starts with an
+// uppercase letter (`@Table`, `@Orm::Column`). Its arguments are expressions,
+// checked later against the fields of the record marked `@attribute` it names.
+<declarable-attribute-name> ::= <qualified-identifier>
+<declarable-attribute-args> ::= "(" (<expression> ("," <expression>)* ","?)? ")"
 
 <attribute-args> ::= "(" (<attribute-arg-item> ("," <attribute-arg-item>)* ","?)? ")"
 <attribute-arg-item> ::= <attribute-arg> | <identifier> ":" <attribute-arg>
@@ -313,6 +320,9 @@ spelled (see the reserved list).
   | "@" "takes"
   | "@" "noescape"
   | "@" ("allow" | "warn" | "deny") "(" <identifier> ")"
+  | "@" "attribute" "(" <attribute-target> ("," <attribute-target>)* ")"
+
+<attribute-target> ::= "record" | "enum" | "field" | "function" | "variant"
 
 // `@extension(T)` and `@extension(T, mut)` apply to a free function whose first
 // parameter is the receiver; the `mut` form allows a mutable receiver.

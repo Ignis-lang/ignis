@@ -1,0 +1,145 @@
+import Test from "std::test";
+
+import DiagnosticBag, SourceFile, SourceMap from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
+
+/// The stores an analyzed source leaves behind, which the attribute queries
+/// read.
+record AttributeTestRun {
+  public defStore: Analyzer::DefinitionStore;
+  public symbols: Analyzer::SymbolTable;
+  public diagnostics: DiagnosticBag;
+}
+
+function analyzeAttributeSource(source: str): AttributeTestRun {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "attributes_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  return AttributeTestRun {
+    defStore: defStore,
+    symbols: symbols,
+    diagnostics: output.diagnostics,
+  };
+}
+
+/// The only definition named `name` of the given variant tag (2 record, 5
+/// field).
+function definitionNamed(
+  run: &mut AttributeTestRun,
+  name: str,
+  variantTag: u32
+): Analyzer::DefinitionId {
+  let mut runRef: &mut AttributeTestRun = run;
+  let sym: Analyzer::SymbolId = runRef.symbols.intern(name);
+  let candidates: Vector<Analyzer::DefinitionId> = runRef.defStore.definitionsNamed(sym);
+  let mut index: u64 = 0;
+
+  while (index < candidates.length()) {
+    if (let Option::SOME(candidate) = candidates.get(index)) {
+      if (let Option::SOME(definition) = runRef.defStore.get(*candidate)) {
+        if (definition.variantTag() == variantTag) {
+          return *candidate;
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  @panic("no definition of that name and kind");
+}
+
+function attributeText(values: &Vector<Analyzer::AttributeValue>, index: u64): String {
+  let Option::SOME(value) = values.get(index) else {
+    return String::create("<missing>");
+  };
+
+  return match (value) {
+    Analyzer::AttributeValue::Str(text) -> text.clone(),
+    _ -> String::create("<not a string>"),
+  };
+}
+
+function attributeInteger(values: &Vector<Analyzer::AttributeValue>, index: u64): i64 {
+  let Option::SOME(value) = values.get(index) else {
+    return 9999;
+  };
+
+  return match (value) {
+    Analyzer::AttributeValue::Int(number) -> number,
+    _ -> 9999,
+  };
+}
+
+@test
+function attributeValuesAreStoredOnTheAnnotatedDeclaration(): void {
+  let mut run: AttributeTestRun = analyzeAttributeSource(
+    "const VERSION: i32 = 4;\n@attribute(record)\nrecord Table {\n  public name: str;\n  public version: i32;\n  public offset: i64;\n}\n@attribute(field)\nrecord Key {}\n@Table(\"tasks\", VERSION, -2)\nrecord Task {\n  @Key\n  public id: i64;\n}\nrecord Plain {\n  public id: i64;\n}\n",
+  );
+
+  Test::assertEq<u64>(run.diagnostics.length(), 0);
+
+  let tableId: Analyzer::DefinitionId = definitionNamed(&mut run, "Table", 2);
+  let keyId: Analyzer::DefinitionId = definitionNamed(&mut run, "Key", 2);
+  let taskId: Analyzer::DefinitionId = definitionNamed(&mut run, "Task", 2);
+  let plainId: Analyzer::DefinitionId = definitionNamed(&mut run, "Plain", 2);
+
+  Test::assertEq<u32>(run.defStore.attributeTargetsOf(tableId).unwrapOr(0), 1);
+  Test::assert(run.defStore.attributeTargetsOf(taskId).isNone());
+
+  let Option::SOME(table) = run.defStore.attributeOn(taskId, tableId) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(table.values.length(), 3);
+
+  Test::assertEq<str>(attributeText(&table.values, 0).toStr(), "tasks");
+  Test::assertEq<i64>(attributeInteger(&table.values, 1), 4);
+  Test::assertEq<i64>(attributeInteger(&table.values, 2), -2);
+
+  Test::assert(run.defStore.attributeOn(taskId, keyId).isNone());
+  Test::assert(run.defStore.attributesOn(plainId).isNone());
+}
+
+@test
+function attributeOnAFieldIsStoredOnTheField(): void {
+  let mut run: AttributeTestRun = analyzeAttributeSource(
+    "@attribute(field)\nrecord Key {}\nrecord Task {\n  public name: str;\n  @Key\n  public identifier: i64;\n}\n",
+  );
+
+  Test::assertEq<u64>(run.diagnostics.length(), 0);
+
+  let keyId: Analyzer::DefinitionId = definitionNamed(&mut run, "Key", 2);
+  let identifierId: Analyzer::DefinitionId = definitionNamed(&mut run, "identifier", 5);
+  let nameId: Analyzer::DefinitionId = definitionNamed(&mut run, "name", 5);
+
+  let Option::SOME(key) = run.defStore.attributeOn(identifierId, keyId) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(key.values.length(), 0);
+  Test::assert(run.defStore.attributesOn(nameId).isNone());
+}
+
+@test
+function attributeImportPathIsRelativeToTheImportingFile(): void {
+  let importer: String = String::create("/project/src/app.ign");
+  let sibling: String = String::create("/project/src/orm.ign");
+  let nested: String = String::create("/project/src/db/orm.ign");
+  let outside: String = String::create("/project/lib/orm.ign");
+
+  Test::assertEq<str>(Analyzer::Attributes::relativeImportPath(&importer, &sibling).toStr(), "./orm");
+  Test::assertEq<str>(Analyzer::Attributes::relativeImportPath(&importer, &nested).toStr(), "./db/orm");
+  Test::assertEq<str>(Analyzer::Attributes::relativeImportPath(&importer, &outside).toStr(), "../lib/orm");
+}

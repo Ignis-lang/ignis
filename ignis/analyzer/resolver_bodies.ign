@@ -136,6 +136,9 @@ export namespace Analyzer {
       public diagnostics: DiagnosticBag;
       public bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap;
       public captures: Analyzer::ResolverBodies::LambdaCaptureMap;
+      /// The declarable attributes whose name, target and argument count
+      /// check, with their argument names resolved, waiting for their values.
+      public attributes: Vector<Analyzer::Attributes::PendingAttribute>;
     }
 
     /// Lexical local scope stack. Parallel vectors per binder ADR-1.
@@ -4881,10 +4884,21 @@ export namespace Analyzer {
         i += 1;
       }
 
+      let attributes: Vector<Analyzer::Attributes::PendingAttribute> = Analyzer::Attributes::collectModule(
+        &mut state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+      );
+
       return Analyzer::ResolverBodies::ResolverBodiesOutput {
         diagnostics: state.diagnostics,
         bodyResolution: state.bodyResolution,
         captures: state.captures,
+        attributes: attributes,
       };
     }
   }

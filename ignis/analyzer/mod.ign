@@ -8,6 +8,7 @@ import _ from "./resolver_bodies";
 import _ from "./type_bounds";
 import _ from "./typecheck";
 import _ from "./const_eval";
+import _ from "./attributes";
 import _ from "./checks";
 import _ from "./lint";
 import _ from "./imports";
@@ -1714,13 +1715,23 @@ export namespace Analyzer {
       &resolvedBodies,
     );
 
-    let constValues: Analyzer::ConstEval::ConstEvalOutput = Analyzer::ConstEval::evalModule(
+    let mut constValues: Analyzer::ConstEval::ConstEvalOutput = Analyzer::ConstEval::evalModule(
       defStore,
       typeStore,
       symbols,
       module,
       &pass1,
       &pass2,
+      &resolvedBodies,
+      &typecheck,
+    );
+
+    let attributeDiagnostics: DiagnosticBag = Analyzer::Attributes::checkModule(
+      &mut constValues.values,
+      defStore,
+      typeStore,
+      symbols,
+      module,
       &resolvedBodies,
       &typecheck,
     );
@@ -1760,6 +1771,7 @@ export namespace Analyzer {
     Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &resolvedBodies.diagnostics, module);
     Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &typecheck.diagnostics, module);
     Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &constValues.diagnostics, module);
+    Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &attributeDiagnostics, module);
     Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &checks.diagnostics, module);
     Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &lints.diagnostics, module);
 
@@ -2257,6 +2269,16 @@ export namespace Analyzer {
         &programStorageIds,
       );
 
+      let attributeDiagnostics: DiagnosticBag = Analyzer::Attributes::checkModule(
+        &mut programValues,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &resolvedBodies,
+        &typecheck,
+      );
+
       let checks: Analyzer::Checks::ChecksOutput = Analyzer::Checks::checkModule(
         defStore,
         typeStore,
@@ -2289,6 +2311,7 @@ export namespace Analyzer {
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &resolvedBodies.diagnostics, module);
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &typecheck.diagnostics, module);
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &constValues.diagnostics, module);
+      Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &attributeDiagnostics, module);
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &checks.diagnostics, module);
       Analyzer::appendCollapsingInheritedRepeats(&mut diagnostics, &lints.diagnostics, module);
       diagnostics = Analyzer::dropForeignInheritedRepeats(&diagnostics, module, &records, infos);

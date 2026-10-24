@@ -165,6 +165,19 @@ export namespace ParserDeclarations {
         span: span,
         name: attributeName.name.clone(),
         arguments: Vector::new<String>(),
+        expressions: Vector::new<Ast::ExpressionId>(),
+      });
+    }
+
+    if (Ast::isDeclarableAttributeName(&attributeName.name)) {
+      let expressions = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_PAREN)!;
+      let closing = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' to close attribute arguments")!;
+
+      return Option::SOME(Ast::Attribute {
+        span: ParserShared::mergeSpans(span, closing.span),
+        name: attributeName.name.clone(),
+        arguments: Vector::new<String>(),
+        expressions: expressions,
       });
     }
 
@@ -179,6 +192,7 @@ export namespace ParserDeclarations {
       span: span,
       name: attributeName.name.clone(),
       arguments: Ast::copyAttributeArguments(&parsedArguments),
+      expressions: Vector::new<Ast::ExpressionId>(),
     });
   }
 

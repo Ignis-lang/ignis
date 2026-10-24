@@ -1055,6 +1055,37 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@lang(try)` -- mark an enum as try-capable for use with the `!` operator
 - `@test` -- mark a top-level function as a native test case
 - `@panicHandler`, `@allocHandler`, `@freeHandler` -- runtime handlers of a freestanding (`std = false`) build, which replace libc for panics and escaping closure environments (see `docs/PROJECT.md`)
+- `@attribute(targets)` -- mark a record as a declarable attribute (see below)
+
+### Declarable attributes
+
+A record marked `@attribute(<targets>)` is an attribute the program declares. `<targets>` lists
+where it applies, among `record`, `enum`, `field`, `function` (methods included) and `variant`.
+It is written with its capitalized name, resolved as a type name is (namespaces, imports,
+qualified paths), and takes one argument per field in declaration order; a record without fields
+is written without parentheses.
+
+```ignis
+@attribute(field)
+record Column {
+  public name: str;
+  public width: i32;
+}
+
+const WIDTH: i32 = 12;
+
+record Task {
+  @Column("title", WIDTH)
+  public title: str;
+}
+```
+
+Arguments are expressions that must be compile-time constants (literals, constants, negation,
+anything constant evaluation folds) and fit their field. An unknown or out-of-scope attribute is
+`A0117`, whose message names the import to add when another module declares it; a wrong argument
+count is `A0118`; a disallowed target `A0281`; a capitalized name that is not an attribute record
+`A0282`; an argument that does not fit `A0283` or is not constant `A0284`; invalid
+`@attribute(...)` targets `A0290`. The record stays an ordinary record usable as a value.
 
 ### Parameter attributes
 

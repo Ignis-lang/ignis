@@ -38,11 +38,13 @@ export namespace Format {
   }
 
   /// Formats one `@name(arg1, arg2)` attribute, each on its own line at
-  /// `indentLevel`. Attribute arguments are already plain strings on the
-  /// selfhost AST (`Ast::Attribute::arguments: Vector<String>`), unlike the
-  /// host, which slices them from source; both land on the same text.
+  /// `indentLevel`. A built-in attribute's arguments are plain strings on the
+  /// selfhost AST (`Ast::Attribute::arguments`); a declarable attribute's are
+  /// expressions, laid out like any other expression.
   function formatAttributes(
+    module: &Ast::Module,
     attributes: &Vector<Ast::Attribute>,
+    source: &String,
     config: &FormatterConfig,
     indentLevel: u64
   ): String {
@@ -59,18 +61,58 @@ export namespace Format {
       result.push(&prefix);
       result.pushStr("@");
       result.push(&attribute.name);
-
-      if (attribute.arguments.length() > 0) {
-        let argsText: String = Format::joinSegments(&attribute.arguments, ", ");
-        result.pushStr("(");
-        result.push(&argsText);
-        result.pushStr(")");
-      }
-
+      let argumentsText: String = Format::formatAttributeArguments(module, attribute, source, config, indentLevel);
+      result.push(&argumentsText);
       result.pushChar('\n');
       index += 1;
     }
 
+    return result;
+  }
+
+  /// The parenthesized argument list of `attribute`, or nothing when it has
+  /// no arguments.
+  function formatAttributeArguments(
+    module: &Ast::Module,
+    attribute: &Ast::Attribute,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    if (attribute.arguments.length() > 0) {
+      let argumentsText: String = Format::joinSegments(&attribute.arguments, ", ");
+      return `(${argumentsText.toStr()})`;
+    }
+
+    if (attribute.expressions.length() == 0) {
+      return String::new();
+    }
+
+    let mut result: String = String::create("(");
+    let mut index: u64 = 0;
+
+    while (index < attribute.expressions.length()) {
+      if (index > 0) {
+        result.pushStr(", ");
+      }
+
+      if (let Option::SOME(expressionId) = attribute.expressions.get(index)) {
+        if (let Option::SOME(node) = module.expressions.get(*expressionId)) {
+          match (Format::formatExpression(module, node, 0, source, config, indentLevel)) {
+            Result::OK(text) -> result.push(&text),
+            Result::ERROR(_) -> {
+              let span: SourceSpan = Ast::Serializer::expressionSpan(node);
+              let text: String = Format::sliceSpanText(source, &span).trimAsciiWhitespace();
+              result.push(&text);
+            },
+          };
+        }
+      }
+
+      index += 1;
+    }
+
+    result.pushStr(")");
     return result;
   }
 
@@ -80,11 +122,13 @@ export namespace Format {
   /// and renders as keywords in `formatModifierKeywords` below, so `export
   /// inline function` keeps its written order.
   function formatDeclarationPrefix(
+    module: &Ast::Module,
     metadata: &Ast::Metadata,
+    source: &String,
     config: &FormatterConfig,
     indentLevel: u64
   ): String {
-    return Format::formatAttributes(&metadata.attributes, config, indentLevel);
+    return Format::formatAttributes(module, &metadata.attributes, source, config, indentLevel);
   }
 
   function formatModifierKeywords(modifiers: &Vector<Ast::Modifier>): String {
@@ -855,7 +899,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let prefix: String = Format::formatDeclarationPrefix(&constant.metadata, config, indentLevel);
+    let prefix: String = Format::formatDeclarationPrefix(module, &constant.metadata, source, config, indentLevel);
     let modifierKeywords: String = Format::formatModifierKeywords(&constant.metadata.modifiers);
 
     let mut result: String = prefix;
@@ -895,7 +939,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): String {
-    let prefix: String = Format::formatDeclarationPrefix(&constant.metadata, config, indentLevel);
+    let prefix: String = Format::formatDeclarationPrefix(module, &constant.metadata, source, config, indentLevel);
     let modifierKeywords: String = Format::formatModifierKeywords(&constant.metadata.modifiers);
 
     let mut result: String = prefix;
@@ -922,7 +966,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): String {
-    let prefix: String = Format::formatDeclarationPrefix(&typeAlias.metadata, config, indentLevel);
+    let prefix: String = Format::formatDeclarationPrefix(module, &typeAlias.metadata, source, config, indentLevel);
     let modifierKeywords: String = Format::formatModifierKeywords(&typeAlias.metadata.modifiers);
 
     let mut result: String = prefix;
@@ -1136,7 +1180,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let mut prefix: String = Format::formatDeclarationPrefix(&functionItem.metadata, config, indentLevel);
+    let mut prefix: String = Format::formatDeclarationPrefix(module, &functionItem.metadata, source, config, indentLevel);
     Format::renderCommentGapAfterAttributes(
       &mut prefix,
       source,
@@ -1193,7 +1237,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let prefix: String = Format::formatDeclarationPrefix(&methodItem.metadata, config, indentLevel);
+    let prefix: String = Format::formatDeclarationPrefix(module, &methodItem.metadata, source, config, indentLevel);
     let modifierKeywords: String = Format::formatModifierKeywords(&methodItem.metadata.modifiers);
 
     let mut header: String = config.indentString(indentLevel);
@@ -1252,7 +1296,7 @@ export namespace Format {
       return Result::OK(fallback);
     };
 
-    let mut result: String = Format::formatDeclarationPrefix(&binding.metadata, config, indentLevel);
+    let mut result: String = Format::formatDeclarationPrefix(module, &binding.metadata, source, config, indentLevel);
     Format::renderCommentGapAfterAttributes(
       &mut result,
       source,
@@ -1305,7 +1349,7 @@ export namespace Format {
     let mut result: String = String::new();
 
     if (let Option::SOME(attributes) = module.variantAttributes(patternId)) {
-      let prefix: String = Format::formatAttributes(attributes, config, indentLevel);
+      let prefix: String = Format::formatAttributes(module, attributes, source, config, indentLevel);
       result.push(&prefix);
       Format::renderCommentGapAfterAttributes(&mut result, source, attributes, path.span.start, config, indentLevel)!;
     }
@@ -1553,7 +1597,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let mut result: String = Format::formatDeclarationPrefix(&recordItem.metadata, config, indentLevel);
+    let mut result: String = Format::formatDeclarationPrefix(module, &recordItem.metadata, source, config, indentLevel);
     Format::renderCommentGapAfterAttributes(
       &mut result,
       source,
@@ -1663,7 +1707,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let mut result: String = Format::formatDeclarationPrefix(&enumItem.metadata, config, indentLevel);
+    let mut result: String = Format::formatDeclarationPrefix(module, &enumItem.metadata, source, config, indentLevel);
     let modifierKeywords: String = Format::formatModifierKeywords(&enumItem.metadata.modifiers);
 
     let indentText: String = config.indentString(indentLevel);
@@ -1771,7 +1815,7 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let mut result: String = Format::formatDeclarationPrefix(&traitItem.metadata, config, indentLevel);
+    let mut result: String = Format::formatDeclarationPrefix(module, &traitItem.metadata, source, config, indentLevel);
     let modifierKeywords: String = Format::formatModifierKeywords(&traitItem.metadata.modifiers);
 
     let indentText: String = config.indentString(indentLevel);
@@ -1880,7 +1924,7 @@ export namespace Format {
       return Result::OK(Format::sliceSpanText(source, &namespaceItem.span).trimAsciiWhitespace());
     }
 
-    let mut result: String = Format::formatDeclarationPrefix(&namespaceItem.metadata, config, indentLevel);
+    let mut result: String = Format::formatDeclarationPrefix(module, &namespaceItem.metadata, source, config, indentLevel);
     let modifierKeywords: String = Format::formatModifierKeywords(&namespaceItem.metadata.modifiers);
 
     let indentText: String = config.indentString(indentLevel);
@@ -1914,7 +1958,7 @@ export namespace Format {
       return Result::ERROR(FormatError::unsupported("expected braced body in formatter span"));
     };
 
-    let prefix: String = Format::formatDeclarationPrefix(&externItem.metadata, config, indentLevel);
+    let prefix: String = Format::formatDeclarationPrefix(module, &externItem.metadata, source, config, indentLevel);
 
     if (Format::regionContainsRawDirective(source, bodyRange.start, bodyRange.end)) {
       let mut verbatim: String = prefix;

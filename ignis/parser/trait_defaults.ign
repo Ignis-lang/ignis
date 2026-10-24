@@ -709,6 +709,35 @@ export namespace ParserTraitDefaults {
     return cloned;
   }
 
+  /// Copies `metadata` from `source` into `target`, cloning the argument
+  /// expressions of every declarable attribute so they live in `target`'s
+  /// expression arena.
+  function cloneMetadata(
+    source: &Ast::Module,
+    target: &mut Ast::Module,
+    metadata: &Ast::Metadata,
+  ): Ast::Metadata {
+    let mut copied: Ast::Metadata = Ast::copyMetadata(metadata);
+    let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+    let mut index: u64 = 0;
+
+    while (index < metadata.attributes.length()) {
+      if (let Option::SOME(attribute) = metadata.attributes.get(index)) {
+        attributes.push(Ast::Attribute {
+          span: attribute.span,
+          name: attribute.name.clone(),
+          arguments: Ast::copyAttributeArguments(&attribute.arguments),
+          expressions: ParserTraitDefaults::cloneExpressionList(source, target, &attribute.expressions),
+        });
+      }
+
+      index += 1;
+    }
+
+    copied.attributes = attributes;
+    return copied;
+  }
+
   function cloneOptionalExpression(
     source: &Ast::Module,
     target: &mut Ast::Module,
@@ -794,7 +823,7 @@ export namespace ParserTraitDefaults {
         name: binding.name.clone(),
         annotation: ParserTraitDefaults::cloneOptionalType(source, target, binding.annotation),
         initializer: ParserTraitDefaults::cloneOptionalExpression(source, target, binding.initializer),
-        metadata: Ast::copyMetadata(&binding.metadata),
+        metadata: ParserTraitDefaults::cloneMetadata(source, target, &binding.metadata),
       }),
       Ast::Pattern::Node::Literal(literal) -> Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
         span: literal.span,
@@ -1179,7 +1208,7 @@ export namespace ParserTraitDefaults {
       parameters: clonedParameters,
       returnType: clonedReturnType,
       body: clonedBody,
-      metadata: Ast::copyMetadata(&method.metadata),
+      metadata: ParserTraitDefaults::cloneMetadata(source, target, &method.metadata),
     })));
   }
 
