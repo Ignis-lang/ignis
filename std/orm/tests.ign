@@ -1,0 +1,448 @@
+//!
+//! Unit tests for `std::orm`, all against `:memory:` databases: no files, no
+//! network.
+
+import Orm from "std::orm";
+import Sqlite3 from "std::sqlite3";
+
+import Test from "std::test";
+
+/// Opens an in-memory database or fails the test.
+function ormTestConnection(): Sqlite3::Connection {
+  return Sqlite3::Connection::openInMemory().unwrap();
+}
+
+/// The descriptor most tests share.
+function ormTestTasksTable(): Orm::Table {
+  return Orm::Table::create("tasks")
+    .columnInt("id", Orm::ColumnKey::PRIMARY)
+    .autoIncrement()
+    .columnText("title", Orm::ColumnKey::NONE)
+    .notNull()
+    .columnBoolean("done", Orm::ColumnKey::NONE)
+    .columnInt("priority", Orm::ColumnKey::NONE);
+}
+
+/// The SQL text of `result`, or the empty string after failing the test.
+function ormTestSql(result: Result<String, Orm::Error>): String {
+  return match (result) {
+    Result::OK(sql) -> sql,
+    Result::ERROR(_) -> {
+      Test::fail();
+      String::create("")
+    },
+  };
+}
+
+/// The kind of the error in `result`, failing the test when it succeeded.
+function ormTestErrorKind(result: Result<String, Orm::Error>): Orm::ErrorKind {
+  return match (result) {
+    Result::OK(_) -> {
+      Test::fail();
+      Orm::ErrorKind::SQLITE
+    },
+    Result::ERROR(error) -> error.kind,
+  };
+}
+
+/// Fails the test when `result` is an error.
+function ormTestOk(result: Result<void, Sqlite3::Error>): void {
+  match (result) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+/// Fails the test when `result` is an error, returning the applied count.
+function ormTestMigrated(result: Result<i64, Orm::Error>): i64 {
+  return match (result) {
+    Result::OK(applied) -> applied,
+    Result::ERROR(_) -> {
+      Test::fail();
+      -1
+    },
+  };
+}
+
+/// How many rows `sql` (a `SELECT COUNT(*) ...`) counts.
+function ormTestCount(connection: &mut Sqlite3::Connection, sql: str): i64 {
+  let mut statement: Sqlite3::Statement = connection.prepare(sql).unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return -1;
+  };
+
+  return statement.columnInt(0);
+}
+
+/// Whether a table named `name` exists.
+function ormTestTableExists(connection: &mut Sqlite3::Connection, name: str): boolean {
+  let mut statement: Sqlite3::Statement = connection.prepare("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?").unwrap();
+  ormTestOk(statement.bindText(1, name));
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return false;
+  };
+
+  return statement.columnInt(0) == 1;
+}
+
+@test
+function ormTableEmitsCreateTable(): void {
+  let table: Orm::Table = ormTestTasksTable();
+  let sql: String = ormTestSql(table.createTableSql());
+
+  Test::assertEq<String>(
+    sql,
+    String::create(
+      "CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER, priority INTEGER)",
+    ),
+  );
+}
+
+@test
+function ormTableEmitsTheRepositoryStatements(): void {
+  let table: Orm::Table = ormTestTasksTable();
+
+  Test::assertEq<String>(
+    ormTestSql(table.insertSql()),
+    String::create("INSERT INTO tasks (title, done, priority) VALUES (?, ?, ?)"),
+  );
+  Test::assertEq<String>(
+    ormTestSql(table.selectByIdSql()),
+    String::create("SELECT id, title, done, priority FROM tasks WHERE id = ?"),
+  );
+  Test::assertEq<String>(
+    ormTestSql(table.selectAllSql()),
+    String::create("SELECT id, title, done, priority FROM tasks ORDER BY id"),
+  );
+  Test::assertEq<String>(
+    ormTestSql(table.updateByIdSql()),
+    String::create("UPDATE tasks SET title = ?, done = ?, priority = ? WHERE id = ?"),
+  );
+  Test::assertEq<String>(
+    ormTestSql(table.deleteByIdSql()),
+    String::create("DELETE FROM tasks WHERE id = ?"),
+  );
+}
+
+@test
+function ormTableInsertKeepsAKeyThatIsNotAutoIncrement(): void {
+  let table: Orm::Table = Orm::Table::create("tags")
+    .columnText("slug", Orm::ColumnKey::PRIMARY)
+    .columnReal("weight", Orm::ColumnKey::NONE)
+    .columnBlob("icon", Orm::ColumnKey::NONE);
+
+  Test::assertEq<String>(
+    ormTestSql(table.createTableSql()),
+    String::create("CREATE TABLE tags (slug TEXT PRIMARY KEY, weight REAL, icon BLOB)"),
+  );
+  Test::assertEq<String>(
+    ormTestSql(table.insertSql()),
+    String::create("INSERT INTO tags (slug, weight, icon) VALUES (?, ?, ?)"),
+  );
+}
+
+@test
+function ormTableCreatesItsSchemaInTheDatabase(): void {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+  let table: Orm::Table = ormTestTasksTable();
+
+  ormTestOk(connection.exec(ormTestSql(table.createTableSql()).toStr()));
+
+  let mut insert: Sqlite3::Statement = connection.prepare(ormTestSql(table.insertSql()).toStr()).unwrap();
+  ormTestOk(insert.bindText(1, "write the ORM"));
+  ormTestOk(insert.bindInt(2, 0));
+  ormTestOk(insert.bindInt(3, 2));
+  let Result::OK(Sqlite3::Step::DONE) = insert.step() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i64>(connection.lastInsertRowId(), 1);
+}
+
+@test
+function ormTableRejectsAnIdentifierThatIsNotPlain(): void {
+  let badTable: Orm::Table = Orm::Table::create("tasks; DROP TABLE users").columnInt("id", Orm::ColumnKey::PRIMARY);
+  let badColumn: Orm::Table = Orm::Table::create("tasks").columnText("title\"", Orm::ColumnKey::NONE);
+  let digitFirst: Orm::Table = Orm::Table::create("1tasks").columnInt("id", Orm::ColumnKey::PRIMARY);
+  let empty: Orm::Table = Orm::Table::create("").columnInt("id", Orm::ColumnKey::PRIMARY);
+
+  Test::assert(ormTestErrorKind(badTable.createTableSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(badColumn.insertSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(digitFirst.selectAllSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(empty.deleteByIdSql()) == Orm::ErrorKind::SCHEMA);
+}
+
+@test
+function ormTableRejectsAnInconsistentDescriptor(): void {
+  let noColumns: Orm::Table = Orm::Table::create("tasks");
+  let duplicate: Orm::Table = Orm::Table::create("tasks")
+    .columnInt("id", Orm::ColumnKey::PRIMARY)
+    .columnText("id", Orm::ColumnKey::NONE);
+  let twoKeys: Orm::Table = Orm::Table::create("tasks")
+    .columnInt("id", Orm::ColumnKey::PRIMARY)
+    .columnInt("other", Orm::ColumnKey::PRIMARY);
+  let textAutoIncrement: Orm::Table = Orm::Table::create("tasks").columnText("id", Orm::ColumnKey::PRIMARY).autoIncrement();
+  let noKey: Orm::Table = Orm::Table::create("tasks").columnText("title", Orm::ColumnKey::NONE);
+
+  Test::assert(ormTestErrorKind(noColumns.createTableSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(duplicate.createTableSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(twoKeys.createTableSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(textAutoIncrement.createTableSql()) == Orm::ErrorKind::SCHEMA);
+
+  // A table without a key can be created and listed, but not addressed by id.
+  Test::assertEq<String>(
+    ormTestSql(noKey.createTableSql()),
+    String::create("CREATE TABLE tasks (title TEXT)"),
+  );
+  Test::assertEq<String>(ormTestSql(noKey.selectAllSql()), String::create("SELECT title FROM tasks"));
+  Test::assert(ormTestErrorKind(noKey.selectByIdSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(noKey.updateByIdSql()) == Orm::ErrorKind::SCHEMA);
+  Test::assert(ormTestErrorKind(noKey.deleteByIdSql()) == Orm::ErrorKind::SCHEMA);
+}
+
+@test
+function ormRowReadsTypedColumns(): void {
+  let connection: Sqlite3::Connection = ormTestConnection();
+
+  let mut statement: Sqlite3::Statement = connection.prepare("SELECT 42, 2.5, 'title', x'00ff', 1").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  let row: Orm::Row = Orm::Row::create(&statement);
+
+  Test::assertEq<i32>(row.columnCount(), 5);
+  Test::assertEq<i64>(row.readInt(0).unwrap(), 42);
+  Test::assert(row.readReal(1).unwrap() == 2.5);
+  Test::assertEq<String>(row.readText(2).unwrap(), String::create("title"));
+
+  let blob: Vector<u8> = row.readBlob(3).unwrap();
+  Test::assertEq<u64>(blob.length(), 2);
+  Test::assertEq<u8>(*blob.get(0).unwrap(), 0);
+  Test::assertEq<u8>(*blob.get(1).unwrap(), 255);
+
+  Test::assert(row.readBoolean(4).unwrap());
+}
+
+@test
+function ormRowRejectsNullInARequiredRead(): void {
+  let connection: Sqlite3::Connection = ormTestConnection();
+
+  let mut statement: Sqlite3::Statement = connection.prepare("SELECT NULL").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  let row: Orm::Row = Orm::Row::create(&statement);
+
+  match (row.readInt(0)) {
+    Result::OK(_) -> {
+      Test::fail();
+    },
+    Result::ERROR(error) -> {
+      Test::assert(error.kind == Orm::ErrorKind::DECODE);
+      Test::assert(error.message.length() > 0);
+    },
+  };
+
+  Test::assert(row.readText(0).isError());
+  Test::assert(row.readReal(0).isError());
+  Test::assert(row.readBlob(0).isError());
+  Test::assert(row.readBoolean(0).isError());
+}
+
+@test
+function ormRowReadsNullAsNoneInAnOptionalRead(): void {
+  let connection: Sqlite3::Connection = ormTestConnection();
+
+  let mut statement: Sqlite3::Statement = connection.prepare("SELECT NULL, 7, 'x', 0.5, 0").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  let row: Orm::Row = Orm::Row::create(&statement);
+
+  Test::assert(row.readOptionalInt(0).unwrap().isNone());
+  Test::assert(row.readOptionalText(0).unwrap().isNone());
+  Test::assert(row.readOptionalReal(0).unwrap().isNone());
+  Test::assert(row.readOptionalBlob(0).unwrap().isNone());
+  Test::assert(row.readOptionalBoolean(0).unwrap().isNone());
+
+  Test::assertEq<i64>(row.readOptionalInt(1).unwrap().unwrap(), 7);
+  Test::assertEq<String>(row.readOptionalText(2).unwrap().unwrap(), String::create("x"));
+  Test::assert(row.readOptionalReal(3).unwrap().unwrap() == 0.5);
+  Test::assert(!row.readOptionalBoolean(4).unwrap().unwrap());
+}
+
+@test
+function ormRowRejectsAColumnOutOfRange(): void {
+  let connection: Sqlite3::Connection = ormTestConnection();
+
+  let mut statement: Sqlite3::Statement = connection.prepare("SELECT 1").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  let row: Orm::Row = Orm::Row::create(&statement);
+
+  Test::assert(row.readInt(1).isError());
+  Test::assert(row.readInt(-1).isError());
+  Test::assert(row.readOptionalInt(1).isError());
+
+  match (row.readText(5)) {
+    Result::OK(_) -> {
+      Test::fail();
+    },
+    Result::ERROR(error) -> {
+      Test::assert(error.kind == Orm::ErrorKind::DECODE);
+    },
+  };
+}
+
+@test
+function ormRowRejectsABooleanThatIsNotZeroOrOne(): void {
+  let connection: Sqlite3::Connection = ormTestConnection();
+
+  let mut statement: Sqlite3::Statement = connection.prepare("SELECT 2").unwrap();
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    Test::fail();
+    return;
+  };
+
+  let row: Orm::Row = Orm::Row::create(&statement);
+
+  Test::assert(row.readBoolean(0).isError());
+}
+
+@test
+function ormErrorMapsSqliteConstraintFamilies(): void {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+
+  ormTestOk(connection.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)"));
+  ormTestOk(connection.exec("INSERT INTO items (id, name) VALUES (1, 'a')"));
+
+  let Result::ERROR(unique) = connection.exec("INSERT INTO items (id, name) VALUES (2, 'a')") else {
+    Test::fail();
+    return;
+  };
+  let Result::ERROR(primary) = connection.exec("INSERT INTO items (id, name) VALUES (1, 'b')") else {
+    Test::fail();
+    return;
+  };
+  let Result::ERROR(notNull) = connection.exec("INSERT INTO items (id, name) VALUES (3, NULL)") else {
+    Test::fail();
+    return;
+  };
+  let Result::ERROR(syntax) = connection.exec("INSERT INTO") else {
+    Test::fail();
+    return;
+  };
+
+  let uniqueCode: i32 = unique.code;
+  let mapped: Orm::Error = Orm::Error::fromSqlite(unique);
+
+  Test::assert(mapped.kind == Orm::ErrorKind::CONFLICT);
+  Test::assertEq<i32>(mapped.code, uniqueCode);
+  Test::assert(mapped.message.length() > 0);
+  Test::assert(Orm::Error::fromSqlite(primary).kind == Orm::ErrorKind::CONFLICT);
+  Test::assert(Orm::Error::fromSqlite(notNull).kind == Orm::ErrorKind::CONSTRAINT);
+  Test::assert(Orm::Error::fromSqlite(syntax).kind == Orm::ErrorKind::SQLITE);
+}
+
+@test
+function ormMigrateAppliesPendingStepsInOrderAndRecordsThem(): void {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
+
+  migrations.push(Orm::Migration::create(1, "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL)"));
+  migrations.push(Orm::Migration::create(2, "ALTER TABLE tasks ADD COLUMN done INTEGER NOT NULL DEFAULT 0"));
+
+  Test::assertEq<i64>(ormTestMigrated(Orm::migrate(&mut connection, &migrations)), 2);
+  Test::assertEq<i64>(ormTestCount(&mut connection, "SELECT COUNT(*) FROM schema_migrations"), 2);
+  Test::assertEq<i64>(ormTestCount(&mut connection, "SELECT MAX(version) FROM schema_migrations"), 2);
+
+  // The second step ran after the first: the column it adds exists.
+  ormTestOk(connection.exec("INSERT INTO tasks (title, done) VALUES ('a', 1)"));
+}
+
+@test
+function ormMigrateRunsNothingTheSecondTime(): void {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
+
+  migrations.push(Orm::Migration::create(1, "CREATE TABLE tasks (id INTEGER PRIMARY KEY)"));
+
+  Test::assertEq<i64>(ormTestMigrated(Orm::migrate(&mut connection, &migrations)), 1);
+  Test::assertEq<i64>(ormTestMigrated(Orm::migrate(&mut connection, &migrations)), 0);
+  Test::assertEq<i64>(ormTestCount(&mut connection, "SELECT COUNT(*) FROM schema_migrations"), 1);
+
+  // A later step on top of applied ones applies alone.
+  migrations.push(Orm::Migration::create(2, "CREATE TABLE tags (id INTEGER PRIMARY KEY)"));
+
+  Test::assertEq<i64>(ormTestMigrated(Orm::migrate(&mut connection, &migrations)), 1);
+  Test::assert(ormTestTableExists(&mut connection, "tags"));
+}
+
+@test
+function ormMigrateRollsBackEveryStepWhenOneFails(): void {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
+
+  migrations.push(Orm::Migration::create(1, "CREATE TABLE tasks (id INTEGER PRIMARY KEY)"));
+  migrations.push(Orm::Migration::create(2, "CREATE TABLE broken ("));
+
+  match (Orm::migrate(&mut connection, &migrations)) {
+    Result::OK(_) -> {
+      Test::fail();
+    },
+    Result::ERROR(error) -> {
+      Test::assert(error.kind == Orm::ErrorKind::SQLITE);
+    },
+  };
+
+  Test::assert(!ormTestTableExists(&mut connection, "tasks"));
+  Test::assert(!ormTestTableExists(&mut connection, "schema_migrations"));
+}
+
+@test
+function ormMigrateRejectsVersionsThatDoNotIncrease(): void {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+  let mut repeated: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
+
+  repeated.push(Orm::Migration::create(1, "CREATE TABLE a (id INTEGER PRIMARY KEY)"));
+  repeated.push(Orm::Migration::create(1, "CREATE TABLE b (id INTEGER PRIMARY KEY)"));
+
+  let mut decreasing: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
+
+  decreasing.push(Orm::Migration::create(2, "CREATE TABLE a (id INTEGER PRIMARY KEY)"));
+  decreasing.push(Orm::Migration::create(1, "CREATE TABLE b (id INTEGER PRIMARY KEY)"));
+
+  let mut zero: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
+
+  zero.push(Orm::Migration::create(0, "CREATE TABLE a (id INTEGER PRIMARY KEY)"));
+
+  match (Orm::migrate(&mut connection, &repeated)) {
+    Result::OK(_) -> {
+      Test::fail();
+    },
+    Result::ERROR(error) -> {
+      Test::assert(error.kind == Orm::ErrorKind::SCHEMA);
+    },
+  };
+
+  Test::assert(Orm::migrate(&mut connection, &decreasing).isError());
+  Test::assert(Orm::migrate(&mut connection, &zero).isError());
+
+  // A rejected list touches nothing.
+  Test::assert(!ormTestTableExists(&mut connection, "a"));
+  Test::assert(!ormTestTableExists(&mut connection, "schema_migrations"));
+}

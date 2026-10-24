@@ -1,0 +1,70 @@
+//!
+//! # ORM
+//!
+//! A small mapping layer on `std::sqlite3`: table descriptors that emit their
+//! SQL, typed row reads that report NULL and bad values as errors, and
+//! ordered migrations applied in one transaction. Every value goes to SQLite
+//! as a bound parameter; no statement interpolates one.
+//!
+//! ## Exports
+//!
+//! | Export            | Description                                      |
+//! |-------------------|--------------------------------------------------|
+//! | `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |
+//! | `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |
+//! | `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |
+//! | `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |
+//! | `Orm::Migration`  | One versioned schema step                        |
+//! | `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |
+//! | `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |
+//! | `Orm::ErrorKind`  | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |
+//!
+//! ## Errors
+//!
+//! Every fallible operation returns `Result<T, Orm::Error>`; nothing in the
+//! module panics. A SQLite failure keeps its extended code in `Error::code`,
+//! and `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),
+//! `CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.
+//!
+//! ## Linking
+//!
+//! The module adds no linking of its own: it builds on `std::sqlite3`, which
+//! links `libsqlite3`.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Orm from "std::orm";
+//! import Sqlite3 from "std::sqlite3";
+//!
+//! function main(): i32 {
+//!   let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();
+//!   let table: Orm::Table = Orm::Table::create("tasks")
+//!     .columnInt("id", Orm::ColumnKey::PRIMARY)
+//!     .autoIncrement()
+//!     .columnText("title", Orm::ColumnKey::NONE)
+//!     .notNull();
+//!
+//!   let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
+//!   migrations.push(Orm::Migration::create(1, table.createTableSql().unwrap().toStr()));
+//!   Orm::migrate(&mut connection, &migrations).unwrap();
+//!
+//!   let mut insert: Sqlite3::Statement = connection.prepare(table.insertSql().unwrap().toStr()).unwrap();
+//!   insert.bindText(1, "write the ORM").unwrap();
+//!   insert.step().unwrap();
+//!
+//!   return connection.lastInsertRowId() == 1 ? 0 : 1;
+//! }
+//! ```
+//!
+//! ## Non-goals
+//!
+//! There is no query builder and no entity mapping yet: a repository over
+//! `Orm::Table` and `Orm::Row` comes later.
+
+import _ from "std::orm::error";
+import _ from "std::orm::table";
+import _ from "std::orm::row";
+import _ from "std::orm::migration";
+
+export namespace Orm {}
