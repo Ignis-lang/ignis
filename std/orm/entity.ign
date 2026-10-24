@@ -1,0 +1,50 @@
+//!
+//! # Entity
+//!
+//! `Orm::Entity` and `Orm::FromRow`, the two traits a record implements by
+//! hand so an `Orm::Repository` can store it: one describes the table and
+//! binds the record's values, the other builds a record from a row.
+//!
+//! ## Exports
+//!
+//! | Export         | Description                                        |
+//! |----------------|----------------------------------------------------|
+//! | `Orm::Entity`  | `static table()`, `id(&self)`, `bindValues(&self, statement)` |
+//! | `Orm::FromRow` | `static fromRow(row)`                              |
+//!
+//! ## Contract
+//!
+//! - `table()` returns the same descriptor on every call. A repository needs
+//!   an `INTEGER` primary key.
+//! - `id()` is the key: `NONE` for a record not stored yet.
+//! - `bindValues` binds every non-key column, in declaration order, to the
+//!   parameters `1..n`. The repository binds the key itself, after them,
+//!   when a statement needs it.
+//! - `fromRow` reads every column in declaration order: column 0 is the
+//!   first column of `table()`.
+
+import Sqlite3 from "std::sqlite3";
+import Error from "std::orm::error";
+import Table from "std::orm::table";
+import Row from "std::orm::row";
+
+/// The traits a stored record implements.
+export namespace Orm {
+  /// A record stored as one row of `table()`.
+  trait Entity {
+    /// The descriptor of the record's table.
+    static table(): Table;
+
+    /// The record's key, or `NONE` before it is inserted.
+    id(&self): Option<i64>;
+
+    /// Binds every non-key column, in declaration order, from parameter 1.
+    bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Error>;
+  }
+
+  /// A record built from a row whose columns follow its table's order.
+  trait FromRow {
+    /// The record in `row`, or a `DECODE` error when a column does not fit.
+    static fromRow(row: &Row): Result<Self, Error>;
+  }
+}

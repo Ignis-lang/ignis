@@ -1,0 +1,252 @@
+//!
+//! # Repository
+//!
+//! `Orm::Repository<T>`, single-table CRUD for a record that implements
+//! `Orm::Entity` and `Orm::FromRow`. The repository builds its SQL once from
+//! `T::table()` and binds every value; it never interpolates one.
+//!
+//! ## Exports
+//!
+//! | Export            | Description                                      |
+//! |-------------------|--------------------------------------------------|
+//! | `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` |
+//!
+//! ## Contract
+//!
+//! - `create()` validates `T::table()`: an invalid descriptor, a table
+//!   without a key or a key that is not `INTEGER` is a `SCHEMA` error.
+//! - `findById`, `update` and `deleteById` report a missing row as
+//!   `NOT_FOUND`; `update` of a record whose `id()` is `NONE` is `SCHEMA`.
+//! - `insert` returns the key SQLite stored: the assigned one for an
+//!   `AUTOINCREMENT` key, otherwise the bound `id()` (or the assigned rowid
+//!   when it is `NONE`).
+//! - `all` returns rows in key order. `findWhere` appends `WHERE <whereSql>`
+//!   to the select and binds `params` to its `?` in order; `whereSql` is SQL
+//!   text, so only `params` may carry caller data.
+//! - SQLite failures go through `Error::fromSqlite`, so a unique violation
+//!   is `CONFLICT`.
+//!
+//! Every method takes the connection, so a caller holding a lock on it
+//! decides how long it is held.
+
+import Sqlite3 from "std::sqlite3";
+import Error, ErrorKind from "std::orm::error";
+import Table, Column, ColumnKey, ColumnType from "std::orm::table";
+import Row from "std::orm::row";
+import Value from "std::orm::value";
+import Entity, FromRow from "std::orm::entity";
+
+/// Single-table CRUD over an entity.
+export namespace Orm {
+  /// The statements of one entity's table, built once by `create`.
+  record Repository<T: Entity & FromRow> {
+    /// `Table::insertSql`.
+    insertStatement: String;
+    /// `Table::selectSql`.
+    selectStatement: String;
+    /// `Table::selectByIdSql`.
+    selectByIdStatement: String;
+    /// `Table::selectAllSql`.
+    selectAllStatement: String;
+    /// `Table::updateByIdSql`.
+    updateStatement: String;
+    /// `Table::deleteByIdSql`.
+    deleteStatement: String;
+    /// How many parameters `Entity::bindValues` binds: the non-key columns.
+    valueCount: i32;
+    /// Whether the insert binds the key after the values (not `AUTOINCREMENT`).
+    insertBindsKey: boolean;
+
+    /// The repository of `T`, or a `SCHEMA` error when `T::table()` is
+    /// invalid or its key is missing or not `INTEGER`.
+    public static create(): Result<Repository<T>, Error> {
+      let table: Table = T::table();
+      let selectByIdStatement: String = table.selectByIdSql()!;
+      let mut valueCount: i32 = 0;
+      let mut insertBindsKey: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index < table.columns.length()) {
+        let column: &Column = table.columns.get(index).unwrap();
+
+        if (column.key == ColumnKey::PRIMARY) {
+          if (column.columnType != ColumnType::INTEGER) {
+            let mut message: String = String::create("std::orm: the key of table ");
+            message.push(&table.name);
+            message.pushStr(" is not INTEGER");
+
+            return Result::ERROR(Error::create(ErrorKind::SCHEMA, message));
+          }
+
+          insertBindsKey = !column.autoIncrement;
+        } else {
+          valueCount = valueCount + 1;
+        }
+
+        index = index + 1;
+      }
+
+      return Result::OK(Repository {
+        insertStatement: table.insertSql()!,
+        selectStatement: table.selectSql()!,
+        selectByIdStatement: selectByIdStatement,
+        selectAllStatement: table.selectAllSql()!,
+        updateStatement: table.updateByIdSql()!,
+        deleteStatement: table.deleteByIdSql()!,
+        valueCount: valueCount,
+        insertBindsKey: insertBindsKey,
+      });
+    }
+
+    /// The row with key `id`, or `NOT_FOUND`.
+    public findById(&self, connection: &mut Sqlite3::Connection, id: i64): Result<T, Error> {
+      let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(
+        self.selectByIdStatement.toStr(),
+      ))!;
+      sqliteUnit(statement.bindInt(1, id))!;
+
+      if (sqliteResult<Sqlite3::Step>(statement.step())! == Sqlite3::Step::DONE) {
+        return Result::ERROR(notFound(id));
+      }
+
+      let row: Row = Row::create(&statement);
+
+      return T::fromRow(&row);
+    }
+
+    /// Every row, in key order.
+    public all(&self, connection: &mut Sqlite3::Connection): Result<Vector<T>, Error> {
+      let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(
+        self.selectAllStatement.toStr(),
+      ))!;
+
+      return collectRows<T>(&mut statement);
+    }
+
+    /// Inserts `entity` and returns its key. See the module docs for which
+    /// key that is.
+    public insert(&self, connection: &mut Sqlite3::Connection, entity: &T): Result<i64, Error> {
+      let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(
+        self.insertStatement.toStr(),
+      ))!;
+      entity.bindValues(&mut statement)!;
+
+      if (self.insertBindsKey) {
+        let keyIndex: i32 = self.valueCount + 1;
+
+        match (entity.id()) {
+          Option::SOME(id) -> {
+            sqliteUnit(statement.bindInt(keyIndex, id))!;
+          },
+          Option::NONE -> {
+            sqliteUnit(statement.bindNull(keyIndex))!;
+          },
+        };
+      }
+
+      sqliteResult<Sqlite3::Step>(statement.step())!;
+
+      return Result::OK(connection.lastInsertRowId());
+    }
+
+    /// Writes every non-key column of `entity` to the row with its key. An
+    /// `id()` of `NONE` is `SCHEMA`; no row with that key is `NOT_FOUND`.
+    public update(&self, connection: &mut Sqlite3::Connection, entity: &T): Result<void, Error> {
+      let Option::SOME(id) = entity.id() else {
+        return Result::ERROR(Error::create(
+          ErrorKind::SCHEMA,
+          String::create("std::orm: cannot update a record without an id"),
+        ));
+      };
+
+      let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(
+        self.updateStatement.toStr(),
+      ))!;
+      entity.bindValues(&mut statement)!;
+      sqliteUnit(statement.bindInt(self.valueCount + 1, id))!;
+      sqliteResult<Sqlite3::Step>(statement.step())!;
+
+      if (connection.changes() == 0) {
+        return Result::ERROR(notFound(id));
+      }
+
+      return Result::OK(());
+    }
+
+    /// Deletes the row with key `id`, or reports `NOT_FOUND`.
+    public deleteById(&self, connection: &mut Sqlite3::Connection, id: i64): Result<void, Error> {
+      let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(
+        self.deleteStatement.toStr(),
+      ))!;
+      sqliteUnit(statement.bindInt(1, id))!;
+      sqliteResult<Sqlite3::Step>(statement.step())!;
+
+      if (connection.changes() == 0) {
+        return Result::ERROR(notFound(id));
+      }
+
+      return Result::OK(());
+    }
+
+    /// The rows of `SELECT columns FROM table WHERE <whereSql>`, with
+    /// `params` bound to its `?` in order. `whereSql` may end with its own
+    /// `ORDER BY` or `LIMIT`; without one the order is SQLite's.
+    public findWhere(
+      &self,
+      connection: &mut Sqlite3::Connection,
+      whereSql: str,
+      params: &Vector<Value>
+    ): Result<Vector<T>, Error> {
+      let mut sql: String = self.selectStatement.clone();
+      sql.pushStr(" WHERE ");
+      sql.pushStr(whereSql);
+
+      let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(sql.toStr()))!;
+      let mut index: u64 = 0;
+
+      while (index < params.length()) {
+        params.get(index).unwrap().bind(&mut statement, (index + 1) as i32)!;
+        index = index + 1;
+      }
+
+      return collectRows<T>(&mut statement);
+    }
+  }
+
+  /// Steps `statement` to the end, decoding each row with `T::fromRow`.
+  function collectRows<T: FromRow>(statement: &mut Sqlite3::Statement): Result<Vector<T>, Error> {
+    let mut rows: Vector<T> = Vector::new<T>();
+
+    while (sqliteResult<Sqlite3::Step>(statement.step())! == Sqlite3::Step::ROW) {
+      let row: Row = Row::create(&*statement);
+      rows.push(T::fromRow(&row)!);
+    }
+
+    return Result::OK(rows);
+  }
+
+  /// `result` with its SQLite error mapped by `Error::fromSqlite`.
+  function sqliteResult<V>(result: Result<V, Sqlite3::Error>): Result<V, Error> {
+    return match (result) {
+      Result::OK(value) -> Result::OK(value),
+      Result::ERROR(error) -> Result::ERROR(Error::fromSqlite(error)),
+    };
+  }
+
+  /// `result` with its SQLite error mapped by `Error::fromSqlite`.
+  /// `sqliteResult<void>` is not used: rewrapping a `void` payload through
+  /// the type parameter emits C that does not compile.
+  function sqliteUnit(result: Result<void, Sqlite3::Error>): Result<void, Error> {
+    return match (result) {
+      Result::OK(_) -> Result::OK(()),
+      Result::ERROR(error) -> Result::ERROR(Error::fromSqlite(error)),
+    };
+  }
+
+  /// The `NOT_FOUND` error for key `id`.
+  function notFound(id: i64): Error {
+    let idText: String = String::create(id);
+
+    return Error::create(ErrorKind::NOT_FOUND, `std::orm: no row with id ${idText}`);
+  }
+}

@@ -10,7 +10,7 @@
 //!
 //! | Export            | Description                                      |
 //! |-------------------|--------------------------------------------------|
-//! | `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |
+//! | `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |
 //! | `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |
 //! | `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |
 //!
@@ -189,8 +189,10 @@ export namespace Orm {
       return Result::OK(sql);
     }
 
-    /// `INSERT INTO name (columns) VALUES (?, ...)`. Binds every column in
-    /// declaration order, except an `AUTOINCREMENT` key, which SQLite assigns.
+    /// `INSERT INTO name (columns) VALUES (?, ...)`. Binds every non-key
+    /// column in declaration order, then the key unless it is
+    /// `AUTOINCREMENT` (SQLite assigns that one). Non-key columns come first,
+    /// as in `updateByIdSql`, so one `Entity::bindValues` serves both.
     public insertSql(&self): Result<String, Error> {
       match (self.validate()) {
         Result::OK(_) -> {},
@@ -206,17 +208,19 @@ export namespace Orm {
       while (index < self.columns.length()) {
         let column: &Column = self.columns.get(index).unwrap();
 
-        if (!column.autoIncrement) {
-          if (names.length() > 0) {
-            names.pushStr(", ");
-            placeholders.pushStr(", ");
-          }
-
-          names.push(&column.name);
-          placeholders.pushStr("?");
+        if (column.key != ColumnKey::PRIMARY) {
+          appendInsertColumn(&mut names, &mut placeholders, &column.name);
         }
 
         index = index + 1;
+      }
+
+      if (let Option::SOME(keyIndex) = self.keyIndex()) {
+        let key: &Column = self.columns.get(keyIndex).unwrap();
+
+        if (!key.autoIncrement) {
+          appendInsertColumn(&mut names, &mut placeholders, &key.name);
+        }
       }
 
       let mut sql: String = String::create("INSERT INTO ");
@@ -228,6 +232,19 @@ export namespace Orm {
       sql.pushStr(")");
 
       return Result::OK(sql);
+    }
+
+    /// `SELECT columns FROM name`. No parameters. The selected columns are
+    /// every column in declaration order; a caller appends its own clauses.
+    public selectSql(&self): Result<String, Error> {
+      match (self.validate()) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(self.selectPrefix());
     }
 
     /// `SELECT columns FROM name WHERE key = ?`. Binds the key. The selected
@@ -458,6 +475,17 @@ export namespace Orm {
 
       return Result::OK(());
     }
+  }
+
+  /// Appends `name` to an insert's column list and a `?` to its values.
+  function appendInsertColumn(names: &mut String, placeholders: &mut String, name: &String): void {
+    if (names.length() > 0) {
+      names.pushStr(", ");
+      placeholders.pushStr(", ");
+    }
+
+    names.push(name);
+    placeholders.pushStr("?");
   }
 
   /// The SQL type a column is declared with.
