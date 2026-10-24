@@ -775,6 +775,71 @@ record Task {
 | A0284 | Attribute argument is not a compile-time constant | Error |
 | A0290 | `@attribute` without targets, or naming an unknown target | Error |
 
+## Field Reflection: `comptime for`
+
+A method whose `Self` is a concrete record walks that record's fields with a compile-time loop.
+The loop is unrolled before name resolution: one copy of its body per instance field, in declaration
+order, so each copy is analyzed with the field's concrete type. A trait default that uses it unrolls
+on each implementing record its copy lands on, hand-written record methods and methods of an
+`extension` block whose target is a record of the same module unroll over that record.
+
+```ignis
+trait Describe {
+  describe(&self): String {
+    let mut text: String = String::new();
+
+    comptime for (field of @fields<Self>()) {
+      if (field.index > 0) {
+        text.pushStr(", ");
+      }
+
+      text.pushStr(field.name);
+      text.pushStr(": ");
+      let shown: String = show(@field(self, field));
+      text.push(&shown);
+    }
+
+    return text;
+  }
+}
+```
+
+Inside the body, `field` is a descriptor, not a value:
+
+| Form | Meaning |
+|------|---------|
+| `field.name` | The field's name, a `str` literal |
+| `field.index` | Its position, an `i32` literal starting at 0 |
+| `@field(value, field)` | `value.<name>`: a place, readable, assignable and borrowable |
+| `@fieldType(field)` | The field's written type, valid wherever a type is |
+| `@attribute<A>(field)` | `Option<A>`: the constant values of declarable attribute `A` on the field, or `NONE` |
+| `@attribute<A>(Self)` | The same for the record itself |
+
+A record initializer builds `Self` field by field with one `comptime for` entry, which unrolls into
+one `<name>: <value>` entry per field:
+
+```ignis
+trait Seeded {
+  static seeded(seed: i32): Self {
+    return Self {
+      comptime for (field of @fields<Self>()) @field(field): (seed + field.index) as @fieldType(field),
+    };
+  }
+}
+```
+
+Per-field-type behavior comes from overloads: each copy calls the overload for its field's type, and
+a field type with no matching overload is reported at its place in the loop body with a note naming
+the field. In the trait's own body `Self` has no known fields, so the loop unrolls over none there.
+
+| Code | Message | Severity |
+|------|---------|----------|
+| A0292 | `break` or `continue` that would cross a `comptime for` | Error |
+| A0293 | `@fields<T>()` over something other than a record `Self`: a type parameter, an enum, another type | Error |
+| A0294 | `comptime for` outside a method | Error |
+| A0295 | `@field`, `@fieldType`, `@attribute<A>(field)` or `@fields` outside the loop that declares the descriptor | Error |
+| A0296 | Unknown descriptor member, or the descriptor used as a value | Error |
+
 ## Diagnostics
 
 | Code | Message | Severity |
@@ -813,3 +878,8 @@ record Task {
 | A0287 | A type implements the same trait twice | Error |
 | A0288 | `extension` block implementing a lang trait or canonical `Eq`/`Hash` | Error |
 | A0289 | Invalid `extension` target type | Error |
+| A0292 | `break` or `continue` crossing a `comptime for` | Error |
+| A0293 | `@fields` over a type that is not the record `Self` | Error |
+| A0294 | `comptime for` outside a method | Error |
+| A0295 | Field descriptor builtin outside its `comptime for` | Error |
+| A0296 | Unknown descriptor member or descriptor used as a value | Error |

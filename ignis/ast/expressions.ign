@@ -210,9 +210,36 @@ export namespace Ast {
       public member: String;
     }
 
+    /// The header of a `comptime for (field of @fields<Self>()) @field(field): value`
+    /// entry of a record initializer. `name` is the `@field(field)` call that
+    /// stands where a field name goes.
+    record RecordInitLoop {
+      public span: SourceSpan;
+      public pattern: Ast::PatternId;
+      public iterable: Ast::ExpressionId;
+      public name: Ast::ExpressionId;
+    }
+
+    /// A copy of a record initializer entry's `comptime for` header.
+    function copyRecordInitLoop(source: &Option<RecordInitLoop>): Option<RecordInitLoop> {
+      let Option::SOME(header) = source else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(RecordInitLoop {
+        span: header.span,
+        pattern: header.pattern,
+        iterable: header.iterable,
+        name: header.name,
+      });
+    }
+
     record RecordInitField {
+      /// Empty for a `comptime for` entry, which names no field until it is
+      /// unrolled into one entry per field.
       public name: String;
       public value: Ast::ExpressionId;
+      public loop: Option<RecordInitLoop>;
     }
 
     record RecordInit {

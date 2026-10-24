@@ -4874,6 +4874,26 @@ export namespace Analyzer {
       value: &Ast::Expression::RecordInit,
       expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
+      // `Self { ... }` in the body of a trait default, which is checked once
+      // against the trait: its fields are only known on each implementing
+      // type, where the copy of the default names the record itself.
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::TypeParam(selfSymbol)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, value.path)) {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < value.fields.length()) {
+          if (let Option::SOME(field) = value.fields.get(fieldIndex)) {
+            let _fieldType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, field.value);
+          }
+
+          fieldIndex += 1;
+        }
+
+        let mut typeStoreSelfRef: &mut Analyzer::TypeStore = typeStore;
+        let selfType: Analyzer::TypeId = typeStoreSelfRef.param(selfSymbol);
+        Analyzer::Typecheck::recordExprType(state, exprId, selfType);
+        return Option::SOME(selfType);
+      }
+
       let pathTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
         state,
         defStore,
@@ -6213,6 +6233,23 @@ export namespace Analyzer {
           );
         },
         Ast::Expression::Node::BuiltinCall(value) -> {
+          if (value.name.equals("attribute")) {
+            let Option::SOME(attributeType) = Analyzer::Typecheck::checkBuiltinAttribute(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              exprId,
+              &value,
+            ) else {
+              return Option::NONE;
+            };
+
+            Analyzer::Typecheck::recordExprType(state, exprId, attributeType);
+            return Option::SOME(attributeType);
+          }
+
           let Option::SOME(builtinType) = Analyzer::Typecheck::checkBuiltinCall(
             state,
             defStore,
@@ -8652,6 +8689,12 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinSplat(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
 
+      // A reflection builtin that reaches here stood where no `comptime for`
+      // could replace it, which unrolling already reported.
+      if (name.equals("fields") || name.equals("field")) {
+        return Option::NONE;
+      }
+
       if (Analyzer::Typecheck::isKnownBuiltinName(name)) {
         let detail: String = `the \`@${name.toStr()}\` builtin`;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
@@ -8660,6 +8703,122 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::emitUnknownBuiltin(state, call.span, name.toStr());
       return Option::NONE;
+    }
+
+    /// `@attribute<A, Self, Option<A>>("field")` or `@attribute<A, Self, Option<A>>()`,
+    /// what unrolling a `comptime for` makes of `@attribute<A>(field)` and
+    /// `@attribute<A>(Self)` (`ParserComptime`). Its type is the third type
+    /// argument, `Option<A>`. The record `Self` names, or its field, is
+    /// recorded as the call target: HIR lowering reads the values of `A` on it
+    /// once attributes are evaluated. Inside a trait, `Self` has no fields and
+    /// no attributes, so nothing is recorded.
+    function checkBuiltinAttribute(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      // `@attribute<A>(...)` left as written stood where unrolling could not
+      // rewrite it, and unrolling reported it.
+      if (call.typeArguments.length() == 1) {
+        return Option::NONE;
+      }
+
+      if (call.typeArguments.length() != 3) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      let Option::SOME(attributeTypeId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+      let Option::SOME(resultTypeId) = call.typeArguments.get(2) else {
+        return Option::NONE;
+      };
+      let enclosing: Option<Analyzer::DefinitionId> = Option::SOME(state.currentFunction);
+
+      let Option::SOME(attributeType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *attributeTypeId, enclosing) else {
+        return Option::NONE;
+      };
+
+      let mut attributeDef: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Type::Record(recordDefId)) = typeStore.get(attributeType)) {
+        if (defStore.attributeTargetsOf(recordDefId).isSome()) {
+          attributeDef = Option::SOME(recordDefId);
+        }
+      }
+
+      if (attributeDef.isNone()) {
+        let typeName: String = typeStore.nameOfResolved(attributeType, &*defStore, &*symbols);
+        let message: String = `'${typeName.toStr()}' is not an attribute: '@attribute<A>' needs a record marked '@attribute(...)'`;
+        Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::NOT_AN_ATTRIBUTE, message.toStr());
+        return Option::NONE;
+      }
+
+      let Option::SOME(resultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *resultTypeId, enclosing) else {
+        return Option::NONE;
+      };
+
+      // `Self` is the owner of the method being checked: read it from the
+      // method rather than resolving the written `Self`.
+      let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(state.currentFunction)) {
+        if (let Option::SOME(Analyzer::Definition::Record(_)) = defStore.get(method.owner)) {
+          recordDefId = Option::SOME(method.owner);
+        }
+      }
+
+      let Option::SOME(recordDef) = recordDefId else {
+        return Option::SOME(resultType);
+      };
+
+      let mut target: Analyzer::DefinitionId = recordDef;
+
+      if (let Option::SOME(argumentId) = call.arguments.get(0)) {
+        let Option::SOME(Ast::Expression::Node::Literal(literal)) = module.expressions.get(*argumentId) else {
+          return Option::SOME(resultType);
+        };
+        let Ast::Expression::LiteralValue::String(fieldName) = &literal.value else {
+          return Option::SOME(resultType);
+        };
+        let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(recordDef)) {
+          let mut fieldIndex: u64 = 0;
+
+          while (fieldIndex < record_.fields.length()) {
+            if (let Option::SOME(fieldId) = record_.fields.get(fieldIndex)) {
+              fields.push(*fieldId);
+            }
+
+            fieldIndex += 1;
+          }
+        }
+
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < fields.length()) {
+          if (let Option::SOME(fieldId) = fields.get(fieldIndex)) {
+            if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+              if (let Option::SOME(text) = symbols.resolve(fieldDef.name)) {
+                if (fieldName.equals(text)) {
+                  target = *fieldId;
+                }
+              }
+            }
+          }
+
+          fieldIndex += 1;
+        }
+      }
+
+      Analyzer::Typecheck::recordCallTarget(state, exprId, target);
+      return Option::SOME(resultType);
     }
 
     /// Whether `name` is a builtin the language defines, typed here or not.
@@ -12416,6 +12575,7 @@ export namespace Analyzer {
           }
         },
         Ast::Statement::Node::Block(blockStmt) -> {
+          let start: u64 = state.diagnostics.length();
           let _blockType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(
             state,
             defStore,
@@ -12427,6 +12587,21 @@ export namespace Analyzer {
             blockStmt.tail,
             Option::NONE,
           );
+
+          // One iteration of an unrolled `comptime for`: every copy points at
+          // the same place in the loop body, so the note names the field.
+          if (let Option::SOME(note) = module.comptimeIterationNote(stmtId)) {
+            let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+            let mut index: u64 = start;
+
+            while (index < stateRef.diagnostics.length()) {
+              if (let Option::SOME(diagnostic) = stateRef.diagnostics.getMut(index)) {
+                diagnostic.addNote(note.toStr());
+              }
+
+              index += 1;
+            }
+          }
         },
         Ast::Statement::Node::Return(returnStmt) -> {
           if (let Option::SOME(valueExprId) = returnStmt.value) {

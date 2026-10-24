@@ -1,0 +1,74 @@
+// e2e: std
+// A trait default walks the fields of each implementing record with
+// `comptime for`: the name, the index and the value of every field, in
+// declaration order, each value shown through the overload for its type.
+import Io from "std::io";
+
+function show(value: i32): String {
+  return `${value}`;
+}
+
+function show(value: str): String {
+  return String::create(value);
+}
+
+function show(value: boolean): String {
+  if (value) {
+    return String::create("yes");
+  }
+
+  return String::create("no");
+}
+
+trait Describe {
+  label(&self): str;
+
+  describe(&self): String {
+    let mut text: String = String::create(self.label());
+    text.pushStr(" {");
+
+    comptime for (field of @fields<Self>()) {
+      if (field.index > 0) {
+        text.pushStr(",");
+      }
+
+      text.pushStr(" ");
+      text.pushStr(field.name);
+      text.pushStr(": ");
+      let shown: String = show(@field(self, field));
+      text.push(&shown);
+    }
+
+    text.pushStr(" }");
+    return text;
+  }
+}
+
+@implements(Describe)
+record Pair {
+  public a: i32;
+  public b: str;
+
+  label(&self): str {
+    return "Pair";
+  }
+}
+
+@implements(Describe)
+record Settings {
+  public enabled: boolean;
+  public level: i32;
+  public mode: str;
+
+  label(&self): str {
+    return "Settings";
+  }
+}
+
+function main(): i32 {
+  let pair: Pair = Pair { a: 1, b: "x" };
+  let settings: Settings = Settings { enabled: true, level: 3, mode: "fast" };
+  Io::println(pair.describe().toStr());
+  Io::println(settings.describe().toStr());
+  return 0;
+}

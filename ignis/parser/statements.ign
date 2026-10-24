@@ -362,6 +362,29 @@ export namespace ParserStatements {
       pattern: pattern,
       iterable: iterable.id,
       body: body,
+      isComptime: false,
+    })));
+  }
+
+  /// `comptime for (field of @fields<Self>()) { ... }`. The binding takes no
+  /// `let`: it names a compile-time field descriptor, not a variable.
+  function parseComptimeForStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let keyword = parserRef.expectKeyword(Keyword::COMPTIME, "expected 'comptime'")!;
+    let header = ParserExpressions::parseComptimeForHeader(parserRef)!;
+    let bodyResult: Option<Ast::StatementId> = ParserStatements::parseBlockStatement(parserRef);
+    let body = bodyResult!;
+    let endSpan: SourceSpan = match (parserRef.module.statements.get(body)) {
+      Option::SOME(node) -> Ast::Serializer::statementSpan(node),
+      Option::NONE -> keyword.span,
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::ForOf(Ast::Statement::ForOf {
+      span: ParserShared::mergeSpans(keyword.span, endSpan),
+      pattern: header.pattern,
+      iterable: header.iterable,
+      body: body,
+      isComptime: true,
     })));
   }
 
@@ -403,6 +426,10 @@ export namespace ParserStatements {
 
     if (parserRef.atKeyword(Keyword::FOR)) {
       return ParserStatements::parseForStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::COMPTIME)) {
+      return ParserStatements::parseComptimeForStatement(parserRef);
     }
 
     if (parserRef.atKeyword(Keyword::RETURN)) {

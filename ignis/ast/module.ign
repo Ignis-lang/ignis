@@ -1,4 +1,5 @@
 import HashMap from "std::collections";
+import DiagnosticBag from "@compiler::diagnostics";
 
 import _ from "./expressions";
 import _ from "./items";
@@ -127,6 +128,15 @@ export namespace Ast {
     /// module's text, so a parse that holds one cannot be reused once that
     /// module changes.
     public crossModuleSources: Vector<String>;
+    /// The note naming the field each unrolled iteration of a `comptime for`
+    /// stands for, keyed by the raw statement id of the iteration's block.
+    public comptimeIterationNotes: HashMap<u32, String>;
+    /// What unrolling the `comptime for` loops of this module reported.
+    public comptimeDiagnostics: DiagnosticBag;
+    /// Raw ids of the local bindings of trait default bodies whose
+    /// `comptime for` loops unrolled over no field: their uses live in the
+    /// copies on each implementing type, so the unused lints skip them here.
+    public comptimeLintExemptions: HashMap<u32, boolean>;
 
     public static init(): Module {
       return Module {
@@ -144,6 +154,9 @@ export namespace Ast {
         inheritedMethods: HashMap::new<u32, Ast::InheritedMethod>(),
         extensionTargets: HashMap::new<u32, Ast::TypeId>(),
         crossModuleSources: Vector::new<String>(),
+        comptimeIterationNotes: HashMap::new<u32, String>(),
+        comptimeDiagnostics: DiagnosticBag::init(),
+        comptimeLintExemptions: HashMap::new<u32, boolean>(),
       };
     }
 
@@ -246,6 +259,25 @@ export namespace Ast {
       }
 
       return Option::SOME(Ast::InheritedScope { sourceModule: sourceModule, namespaces: namespaces });
+    }
+
+    public setComptimeIterationNote(&mut self, id: Ast::StatementId, note: String): void {
+      self.comptimeIterationNotes.insert(id.raw(), note);
+    }
+
+    /// The note naming the field the block `id` was unrolled for, when `id`
+    /// is one iteration of a `comptime for`.
+    public comptimeIterationNote(&self, id: Ast::StatementId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.comptimeIterationNotes.get(&raw);
+    }
+
+    public exemptFromComptimeLints(&mut self, id: Ast::PatternId): void {
+      self.comptimeLintExemptions.insert(id.raw(), true);
+    }
+
+    public isComptimeLintExempt(&self, raw: u32): boolean {
+      return self.comptimeLintExemptions.get(&raw).isSome();
     }
 
     public setExtensionTarget(&mut self, id: Ast::ItemId, target: Ast::TypeId): void {

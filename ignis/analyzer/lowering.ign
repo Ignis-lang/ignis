@@ -1626,6 +1626,10 @@ export namespace Lowering {
         return Lowering::lowerRecordInit(defStore, typeStore, symbols, module, output, locals, hir, exprId, &recordInit);
       },
       Ast::Expression::Node::BuiltinCall(builtinCall) -> {
+        if (builtinCall.name.equals("attribute")) {
+          return Lowering::lowerBuiltinAttribute(defStore, typeStore, symbols, output, hir, exprId, builtinCall.span);
+        }
+
         return Lowering::lowerBuiltinCall(defStore, typeStore, symbols, module, output, locals, hir, &builtinCall);
       },
       Ast::Expression::Node::Lambda(lambda) -> {
@@ -3619,6 +3623,181 @@ export namespace Lowering {
       }),
       span: lambda.span,
       typeId: fnType,
+    });
+  }
+
+  /// `@attribute<A, Self, Option<A>>(...)`: `Option::SOME(A { ... })` built
+  /// from the constant values of `A` stored on the definition typecheck
+  /// recorded as the call target, or `Option::NONE` when it does not carry
+  /// `A`.
+  function lowerBuiltinAttribute(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &Analyzer::AnalyzerOutput,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    span: SourceSpan,
+  ): Hir::HirId {
+    let optionType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+    let optionArguments: Vector<Analyzer::TypeId> = Lowering::instanceTypeArguments(defStore, typeStore, optionType);
+
+    let Option::SOME(Analyzer::Type::Instance(instance)) = typeStore.get(optionType) else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+
+    let optionDef: Analyzer::DefinitionId = instance.definition;
+    let Option::SOME(attributeType) = optionArguments.get(0) else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+    let Option::SOME(Analyzer::Type::Record(attributeDef)) = typeStore.get(*attributeType) else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+
+    let mut values: Option<Vector<Analyzer::AttributeValue>> = Option::NONE;
+
+    if (let Option::SOME(target) = Lowering::lookupCallTarget(&output.typecheck, exprId)) {
+      if (let Option::SOME(attributeUse) = defStore.attributeOn(target, attributeDef)) {
+        let mut copied: Vector<Analyzer::AttributeValue> = Vector::new<Analyzer::AttributeValue>();
+        let mut index: u64 = 0;
+
+        while (index < attributeUse.values.length()) {
+          if (let Option::SOME(value) = attributeUse.values.get(index)) {
+            copied.push(Lowering::copyAttributeValue(value));
+          }
+
+          index += 1;
+        }
+
+        values = Option::SOME(copied);
+      }
+    }
+
+    let mut variantName: str = "NONE";
+    let mut payload: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    if (let Option::SOME(fieldValues) = values) {
+      variantName = "SOME";
+      payload.push(Lowering::attributeRecordNode(defStore, typeStore, hir, attributeDef, *attributeType, &fieldValues, span));
+    }
+
+    let mut tag: u32 = 0;
+
+    if (let Option::SOME(Analyzer::Definition::Enum(enumDef)) = defStore.get(optionDef)) {
+      let mut index: u64 = 0;
+
+      while (index < enumDef.variants.length()) {
+        if (let Option::SOME(variantId) = enumDef.variants.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Variant(variant)) = defStore.get(*variantId)) {
+            if (let Option::SOME(text) = symbols.resolve(variant.name)) {
+              if (String::create(text).equals(variantName)) {
+                tag = variant.tagValue;
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    let mut variantHirRef: &mut Hir::HirStore = hir;
+    return variantHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::EnumVariant(Hir::HirEnumVariant {
+        enumDef: optionDef,
+        typeArgs: optionArguments,
+        variantTag: tag,
+        payload: payload,
+      }),
+      span: span,
+      typeId: optionType,
+    });
+  }
+
+  function copyAttributeValue(value: &Analyzer::AttributeValue): Analyzer::AttributeValue {
+    return match (value) {
+      Analyzer::AttributeValue::Int(number) -> Analyzer::AttributeValue::Int(number),
+      Analyzer::AttributeValue::Float(number) -> Analyzer::AttributeValue::Float(number),
+      Analyzer::AttributeValue::Bool(flag) -> Analyzer::AttributeValue::Bool(flag),
+      Analyzer::AttributeValue::Char(character) -> Analyzer::AttributeValue::Char(character),
+      Analyzer::AttributeValue::Str(text) -> Analyzer::AttributeValue::Str(text.clone()),
+    };
+  }
+
+  /// The attribute record `attributeDef` initialized with `values`, one per
+  /// field in declaration order.
+  function attributeRecordNode(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    attributeDef: Analyzer::DefinitionId,
+    attributeType: Analyzer::TypeId,
+    values: &Vector<Analyzer::AttributeValue>,
+    span: SourceSpan,
+  ): Hir::HirId {
+    let mut fieldIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(attributeDef)) {
+      let mut index: u64 = 0;
+
+      while (index < record_.fields.length()) {
+        if (let Option::SOME(fieldId) = record_.fields.get(index)) {
+          fieldIds.push(*fieldId);
+        }
+
+        index += 1;
+      }
+    }
+
+    let mut fields: Vector<Hir::HirRecordField> = Vector::new<Hir::HirRecordField>();
+    let mut index: u64 = 0;
+
+    while (index < fieldIds.length()) {
+      let Option::SOME(fieldId) = fieldIds.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(value) = values.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut fieldType: Analyzer::TypeId = Lowering::voidType(typeStore);
+      let mut fieldIndex: u32 = index as u32;
+
+      if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+        fieldType = fieldDef.fieldType;
+        fieldIndex = fieldDef.index;
+      }
+
+      let literal: Hir::LiteralValue = match (value) {
+        Analyzer::AttributeValue::Int(number) -> Lowering::intLiteralKind(typeStore, number, fieldType),
+        Analyzer::AttributeValue::Float(number) -> Lowering::floatLiteralKind(typeStore, number, fieldType),
+        Analyzer::AttributeValue::Bool(flag) -> Hir::LiteralValue::Boolean(flag),
+        Analyzer::AttributeValue::Char(character) -> Hir::LiteralValue::Char(character as u32),
+        Analyzer::AttributeValue::Str(text) -> Hir::LiteralValue::String(text.clone()),
+      };
+
+      let mut literalHirRef: &mut Hir::HirStore = hir;
+      let valueNode: Hir::HirId = literalHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Literal(literal),
+        span: span,
+        typeId: fieldType,
+      });
+
+      fields.push(Hir::HirRecordField { fieldIndex: fieldIndex, value: valueNode });
+      index += 1;
+    }
+
+    let mut recordHirRef: &mut Hir::HirStore = hir;
+    return recordHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::RecordInit(Hir::HirRecordInit {
+        recordDef: attributeDef,
+        typeArgs: Vector::new<Analyzer::TypeId>(),
+        fields: fields,
+      }),
+      span: span,
+      typeId: attributeType,
     });
   }
 

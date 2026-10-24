@@ -2608,6 +2608,45 @@ export namespace Analyzer {
     ///
     /// Returns false when nothing chain-scoped answers, and the ordinary
     /// expression walk resolves the path instead.
+    /// `Self { ... }` in a method: the record the method belongs to, or, inside
+    /// a trait, the implementing type, read like a type parameter. This is how
+    /// a static trait default builds `Self` field by field.
+    function resolveSelfRecordInitPath(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pathExprId: Ast::ExpressionId,
+    ): boolean {
+      let isSelf: boolean = match (module.expressions.get(pathExprId)) {
+        Option::SOME(Ast::Expression::Node::Variable(variable)) -> variable.name.equals("Self"),
+        Option::SOME(Ast::Expression::Node::Path(path)) -> path.segments.length() == 1 && Analyzer::ResolverBodies::joinPathSegments(&path.segments, 1).equals("Self"),
+        _ -> false,
+      };
+
+      if (!isSelf) {
+        return false;
+      }
+
+      let Option::SOME(ownerId) = Analyzer::ResolverBodies::selfPathOwner(state, defStore) else {
+        return false;
+      };
+
+      if (Analyzer::ResolverBodies::isTraitDef(defStore, ownerId)) {
+        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+        let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+        Analyzer::ResolverBodies::recordExprRef(state, pathExprId, Analyzer::ResolverBodies::ResolvedRef::TypeParam(selfSymbol));
+        return true;
+      }
+
+      let Option::SOME(Analyzer::Definition::Record(_)) = defStore.get(ownerId) else {
+        return false;
+      };
+
+      Analyzer::ResolverBodies::recordExprRef(state, pathExprId, Analyzer::ResolverBodies::ResolvedRef::Definition(ownerId));
+      return true;
+    }
+
     function resolveRecordInitPathAsType(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2615,6 +2654,10 @@ export namespace Analyzer {
       module: &Ast::Module,
       pathExprId: Ast::ExpressionId,
     ): boolean {
+      if (Analyzer::ResolverBodies::resolveSelfRecordInitPath(state, defStore, symbols, module, pathExprId)) {
+        return true;
+      }
+
       if (state.namespaceChain.length() == 0) {
         return false;
       }

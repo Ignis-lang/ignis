@@ -1,0 +1,64 @@
+// e2e: std
+// `@attribute<A>(field)` reads the constant values of a declarable attribute
+// written on each field, and `@attribute<A>(Self)` the one on the record:
+// `SOME` when it is written, `NONE` when it is not.
+import Io from "std::io";
+
+@attribute(field)
+record Column {
+  public name: str;
+}
+
+@attribute(record)
+record Table {
+  public name: str;
+}
+
+trait Columns {
+  columns(&self): String {
+    let mut text: String = String::new();
+
+    if (let Option::SOME(table) = @attribute<Table>(Self)) {
+      text.pushStr(table.name);
+    } else {
+      text.pushStr("(no table)");
+    }
+
+    text.pushStr(":");
+
+    comptime for (field of @fields<Self>()) {
+      text.pushStr(" ");
+      let column: Option<Column> = @attribute<Column>(field);
+
+      if (let Option::SOME(renamed) = column) {
+        text.pushStr(renamed.name);
+      } else {
+        text.pushStr(field.name);
+      }
+    }
+
+    return text;
+  }
+}
+
+@Table("tasks")
+@implements(Columns)
+record Task {
+  public id: i64;
+
+  @Column("task_title")
+  public title: str;
+}
+
+@implements(Columns)
+record Note {
+  public body: str;
+}
+
+function main(): i32 {
+  let task: Task = Task { id: 1, title: "write" };
+  let note: Note = Note { body: "text" };
+  Io::println(task.columns().toStr());
+  Io::println(note.columns().toStr());
+  return 0;
+}

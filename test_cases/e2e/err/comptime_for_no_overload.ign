@@ -1,0 +1,33 @@
+// e2e: err
+// The copy of the loop body for a field whose type has no matching overload
+// reports the error at its place in the body, with a note naming the field.
+function show(value: i32): i32 {
+  return value;
+}
+
+function show(value: boolean): i32 {
+  return 1;
+}
+
+trait Total {
+  total(&self): i32 {
+    let mut sum: i32 = 0;
+
+    comptime for (field of @fields<Self>()) {
+      sum += show(@field(self, field));
+    }
+
+    return sum;
+  }
+}
+
+@implements(Total)
+record Mixed {
+  public count: i32;
+  public label: str;
+}
+
+function main(): i32 {
+  let mixed: Mixed = Mixed { count: 1, label: "x" };
+  return mixed.total();
+}

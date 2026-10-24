@@ -8,6 +8,7 @@ import _ from "./patterns";
 import _ from "./recovery";
 import _ from "./trait_defaults";
 import _ from "./cross_module_defaults";
+import _ from "./comptime";
 
 import Ast from "@compiler::ast";
 import Diagnostic, DiagnosticBag, DiagnosticNote, SourceFile from "@compiler::diagnostics";
@@ -89,6 +90,21 @@ export namespace Parser {
     preludePaths: &Vector<String>,
   ): void {
     ParserCrossModuleDefaults::materialize(modules, moduleSources, preludePaths);
+  }
+
+  /// Unrolls the `comptime for` loops of every module. Runs after
+  /// `materializeCrossModuleDefaults`, so a loop in a copied default unrolls
+  /// over the fields of the type it was copied onto.
+  function expandComptime(modules: &mut Vector<Ast::Module>): void {
+    let mut index: u64 = 0;
+
+    while (index < modules.length()) {
+      if (let Option::SOME(module) = modules.getMut(index)) {
+        ParserComptime::expandModule(module);
+      }
+
+      index += 1;
+    }
   }
 
   /// Parses with the configuration of the machine this compiler runs on. Use

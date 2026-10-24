@@ -79,6 +79,7 @@ spelled (see the reserved list).
   | <if>
   | <for>
   | <for-of>
+  | <comptime-for>
   | <while>
   | <return>
   | <break>
@@ -178,6 +179,9 @@ spelled (see the reserved list).
 <tuple> ::= "(" <expression> ("," <expression>)+ ")"
 
 <type> ::= <type-modifier>? <type-core> <type-suffix>*
+  | <reflection-type>
+
+<reflection-type> ::= "@fieldType" "(" <identifier> ")"
 
 <type-core> ::= <primitive>
   | <type-path>
@@ -509,6 +513,14 @@ spelled (see the reserved list).
 // `for (let x of arr)` binds by value, `for (let x: &i32 of arr)` binds a shared
 // reference and `for (let x: &mut i32 of arr)` binds a mutable one.
 
+<comptime-for> ::= "comptime" "for" "(" <identifier> "of" "@fields" "<" <type> ">" "(" ")" ")" <block>
+
+// Valid only in a method whose `Self` is a record, and unrolled before name
+// resolution into one copy of the block per field. `comptime` is a keyword. In
+// the body, the identifier is a field descriptor: `field.name`, `field.index`,
+// `@field(value, field)`, `@attribute<A>(field)`, and `@fieldType(field)` in
+// type position (see <reflection-type>). `break` and `continue` cannot cross it.
+
 <while> ::= "while" "(" <condition> ")" <block>
 
 <return> ::= "return" <expression>? ";"
@@ -684,6 +696,11 @@ spelled (see the reserved list).
 <record-init> ::= <type-path> "{" <record-init-fields>? "}"
 <record-init-fields> ::= <record-init-field> ("," <record-init-field>)* ","?
 <record-init-field> ::= <identifier> ":" <expression>
+  | "comptime" "for" "(" <identifier> "of" "@fields" "<" <type> ">" "(" ")" ")"
+    "@field" "(" <identifier> ")" ":" <expression>
+
+// The `comptime for` entry unrolls into one `<name>: <expression>` entry per
+// field of `Self`, the descriptor substituted in each copy of the expression.
 
 <type-path> ::= <qualified-identifier> <generic-args>?
 

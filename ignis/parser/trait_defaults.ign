@@ -871,6 +871,23 @@ export namespace ParserTraitDefaults {
     return cloned;
   }
 
+  function cloneRecordInitLoop(
+    source: &Ast::Module,
+    target: &mut Ast::Module,
+    header: &Option<Ast::Expression::RecordInitLoop>,
+  ): Option<Ast::Expression::RecordInitLoop> {
+    let Option::SOME(present) = header else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(Ast::Expression::RecordInitLoop {
+      span: present.span,
+      pattern: ParserTraitDefaults::clonePattern(source, target, present.pattern),
+      iterable: ParserTraitDefaults::cloneExpression(source, target, present.iterable),
+      name: ParserTraitDefaults::cloneExpression(source, target, present.name),
+    });
+  }
+
   function cloneRecordInitFields(
     source: &Ast::Module,
     target: &mut Ast::Module,
@@ -884,6 +901,7 @@ export namespace ParserTraitDefaults {
         cloned.push(Ast::Expression::RecordInitField {
           name: field.name.clone(),
           value: ParserTraitDefaults::cloneExpression(source, target, field.value),
+          loop: ParserTraitDefaults::cloneRecordInitLoop(source, target, &field.loop),
         });
       }
 
@@ -1134,6 +1152,7 @@ export namespace ParserTraitDefaults {
         pattern: ParserTraitDefaults::clonePattern(source, target, node.pattern),
         iterable: ParserTraitDefaults::cloneExpression(source, target, node.iterable),
         body: ParserTraitDefaults::cloneStatement(source, target, node.body),
+        isComptime: node.isComptime,
       }),
       Ast::Statement::Node::Return(node) -> Ast::Statement::Node::Return(Ast::Statement::Return {
         span: node.span,
