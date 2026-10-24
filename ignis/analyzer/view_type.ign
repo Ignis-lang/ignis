@@ -174,8 +174,11 @@ export namespace Analyzer::ViewType {
 
   /// Whether a value of `typeId` can carry a view another value holds: the
   /// view predicate (`isView`), widened for the types whose view-ness is
-  /// decided at the value level, not the type level: a function type (a
-  /// closure's captures are a property of the value, `closureIsView`), an
+  /// decided at the value level, not the type level: a function type at any
+  /// depth (a closure's captures are a property of the value,
+  /// `closureIsView`, so a record, enum, tuple, array, instance or alias
+  /// holding one, or a `&T` to it, can carry the closure's view; a nested
+  /// capture-free `fn(A) -> R` cannot), an
   /// unresolved `Param` (a monomorphized instance may carry a view, and the
   /// borrow check runs before monomorphization) and an unknown type id.
   public function canCarryView(
@@ -194,7 +197,12 @@ export namespace Analyzer::ViewType {
       _ -> {},
     };
 
-    return ViewType::isView(defStore, typeStore, typeId);
+    if (ViewType::isView(defStore, typeStore, typeId)) {
+      return true;
+    }
+
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 2, &mut visiting);
   }
 
   /// Whether a value of `typeId` lets the code it is handed to write into a
@@ -213,7 +221,7 @@ export namespace Analyzer::ViewType {
     typeId: Analyzer::TypeId,
   ): boolean {
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, false, &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 0, &mut visiting);
   }
 
   /// `canReachMutablePlace` narrowed to places that can hold a view, for the
@@ -229,14 +237,17 @@ export namespace Analyzer::ViewType {
     typeId: Analyzer::TypeId,
   ): boolean {
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, true, &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 1, &mut visiting);
   }
 
+  /// The shared walker. `mode` 0 answers `canReachMutablePlace`, 1
+  /// `canReachViewHoldingPlace`, and 2 `holdsClosure`, where only a
+  /// function type or `Param` counts and raw pointers are not followed.
   function canReachMutablePlaceInner(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
-    viewHolding: boolean,
+    mode: u8,
     visiting: &mut Vector<Vector<u32>>,
   ): boolean {
     let Option::SOME(type_) = typeStore.get(typeId) else {
@@ -250,8 +261,8 @@ export namespace Analyzer::ViewType {
 
     match (type_) {
       Analyzer::Type::Reference(referenceType) -> {
-        if (referenceType.mutable) {
-          if (!viewHolding || ViewType::canCarryView(defStore, typeStore, referenceType.referent)) {
+        if (referenceType.mutable && mode != 2) {
+          if (mode == 0 || ViewType::canCarryView(defStore, typeStore, referenceType.referent)) {
             return true;
           }
         }
@@ -259,7 +270,11 @@ export namespace Analyzer::ViewType {
         components.push(referenceType.referent);
       },
       Analyzer::Type::Pointer(pointerType) -> {
-        if (!viewHolding || ViewType::canCarryView(defStore, typeStore, pointerType.pointee)) {
+        if (mode == 2) {
+          return false;
+        }
+
+        if (mode == 0 || ViewType::canCarryView(defStore, typeStore, pointerType.pointee)) {
           return true;
         }
 
@@ -295,7 +310,7 @@ export namespace Analyzer::ViewType {
           return true;
         };
 
-        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, viewHolding, visiting);
+        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, mode, visiting);
       },
       _ -> {},
     };
@@ -340,7 +355,7 @@ export namespace Analyzer::ViewType {
 
     while (index < components.length()) {
       if (let Option::SOME(component) = components.get(index)) {
-        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, viewHolding, visiting)) {
+        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, mode, visiting)) {
           return true;
         }
       }

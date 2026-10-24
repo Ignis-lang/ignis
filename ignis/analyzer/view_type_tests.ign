@@ -1410,6 +1410,278 @@ function holdingMutableReferenceToRecordWithPointerToStrReaches(): void {
   Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
 }
 
+// ─── Carrying a closure ───────────────────────────────────────────────────────
+
+/// Scenario: a closure type can carry the view its captures hold.
+/// Spec: S3, L23.
+@test
+function carryClosureTypeCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let id: Analyzer::TypeId = idClosure;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordWithClosureFieldCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record nesting a record with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryNestedRecordWithClosureFieldCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+
+  let mut outerFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerFields.push(idRecord);
+
+  let outerDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Outer", outerFields);
+  let id: Analyzer::TypeId = store.recordType(outerDefId);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&Holder` with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carrySharedReferenceToClosureRecordCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = store.reference(idRecord);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `Option<() -> T>` can carry a view.
+/// Spec: S3, L23.
+@test
+function carryInstanceWithClosureArgumentCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idClosure);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum with a closure payload can carry a view.
+/// Spec: S3, L23.
+@test
+function carryEnumWithClosurePayloadCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(idClosure);
+
+  let mut variants: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  variants.push(payload);
+  variants.push(Vector::new<Analyzer::TypeId>());
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Job", variants);
+  let id: Analyzer::TypeId = store.enumType(defId);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a tuple with a closure element can carry a view.
+/// Spec: S3, L23.
+@test
+function carryTupleWithClosureCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  elements.push(idClosure);
+
+  let id: Analyzer::TypeId = store.tuple(elements);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a fixed array of closures can carry a view.
+/// Spec: S3, L23.
+@test
+function carryFixedArrayOfClosuresCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let id: Analyzer::TypeId = store.fixedArray(idClosure, 2);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias to a record with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryAliasToClosureRecordCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "Task", idRecord);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with an unresolved `Param` field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordWithParamFieldCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.param(syms.intern("T")));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Generic", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a capture-free `fn(A) -> R` field cannot carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordWithRawFunctionFieldDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idRawFunction);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Callback", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: raw pointers are not followed: a record with a `*mut (() -> T)` field cannot carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordWithPointerToClosureDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idClosure));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "RawHolder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record of primitives cannot carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordOfPrimitivesDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Plain", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
 // ─── Closure values ───────────────────────────────────────────────────────────
 
 /// Builds a closure value with the given captures.

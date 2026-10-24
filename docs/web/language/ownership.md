@@ -167,7 +167,7 @@ A view must not outlive its owner:
   pattern binding destructured from it, or a closure capturing it. Granularity is the whole
   statement: a use inside a loop body keeps the borrow for every iteration, a use in the
   block's tail or in a `defer` body keeps it to the end of the block, and so does a view handed
-  somewhere it can outlive its statement — into a place whose type can carry a view, through a
+  somewhere it can outlive its statement — into a place whose type can carry a view (a view, or anything holding a closure value, which may capture one), through a
   raw pointer or into a volatile, `@write` or atomic sink, or to a call (function, method or
   closure call) one of whose operands gives the callee a place the view could be stored in. An operand reaches a mutable place when its type is `&mut T`, any raw
   pointer whatever its pointee, or a closure type `(A) -> R` (a capture-free `fn(A) -> R`
