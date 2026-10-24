@@ -133,8 +133,10 @@ Rules:
 - Trait methods use the same style as record/enum methods: `name(...)` (no `function` required).
 - A method ending with `;` is required (no body).
 - A method with `{ ... }` is a default method.
-- Trait methods must be instance methods (`&self` or `&mut self`).
-- Static methods are not allowed in traits.
+- An instance method takes `&self` or `&mut self` (A0144 otherwise).
+- A method marked `static` takes no receiver and belongs to the implementing type. It can be
+  required (`static name(...): R;`) or have a default body. `Self` in its parameter and return
+  types stands for the implementing type.
 - Fields are not allowed in traits.
 - Traits are allowed at top level and inside `namespace` blocks.
 - Traits are not allowed inside `extern` blocks.
@@ -168,6 +170,18 @@ found by its bare name, even when it is the only trait of that name. A name that
 trait, or to a declaration that is not a trait, is an error (A0142). The language traits are the
 exception: the lang traits (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) and `Eq` and `Hash` need no
 declaration in scope and are recognized by name.
+
+A static trait method is declared with `static`:
+
+```ignis
+trait Make {
+    static make(seed: i32): Self;
+
+    static label(): i32 {
+        return 0;
+    }
+}
+```
 
 ### Default Methods
 
@@ -204,16 +218,23 @@ still at the trait's line, with a note that names the trait, the method and the 
 
 ### Signature Validation
 
-When a record method implements a trait method, the signature must match exactly:
+When a record or enum names a trait in `@implements`, the compiler checks each trait method:
 
-- `&self` vs `&mut self`
-- Number of explicit parameters
-- Parameter types
-- Return type
+- A required method has to be declared on the type. If it is missing, compilation fails (A0140),
+  whether the trait is named bare or by its path. A method with a default body in the trait is not
+  required: the type inherits the default, static defaults included.
+- The method has to be declared with the same kind: a static trait method by a `static` method, an
+  instance trait method by a method with a `self` parameter (A0276 otherwise).
+- A static method has to match the trait's signature: the same number of parameters, the same
+  parameter types and the same return type, with `Self` in the trait's signature read as the
+  implementing type (A0277). For a generic trait the static signature is not compared.
 
-If a required trait method is missing, compilation fails (A0140), whether the trait is named bare or
-by its path. A method with a default body in the trait is not required. Each named trait is checked
-on its own, so a complete `A::Named` does not excuse a missing method of `B::Named`.
+Instance method signatures are not compared yet: an instance method that implements a trait method
+only has to have the same name and take a `self` parameter. A different parameter list or return
+type is not reported at the declaration.
+
+Each named trait is checked on its own, so a complete `A::Named` does not excuse a missing method
+of `B::Named`.
 
 ### `Send` and `Sync`
 
@@ -326,6 +347,15 @@ a function, a method, a record or an enum:
   unresolved bound is an error (A0142), whether or not the generic is used.
 - A type parameter answers the methods of every trait it is bounded by, including their default
   methods. A method declared by more than one of its bounds is ambiguous (A0262).
+- `T::name(args)` calls a static method that a bound of `T` declares. `Self` in that method's
+  signature reads as `T`, so a trait method returning `Result<Self, Error>` returns
+  `Result<T, Error>` at the call. After monomorphization the call goes to the static method of the
+  type `T` stands for, or to the trait's default when the type does not declare it. Only the bounds
+  of `T` are searched: a static method of the same name on an unrelated record is never picked,
+  and a name no bound declares as static is an error (A0278).
+- A static trait method is not callable through a value (`value.make()`), neither on a type
+  parameter nor on the implementing type, and `Trait::make()` names no implementing type, so it is
+  an error (A0279).
 - A type parameter satisfies a bound only when it declares the same bound itself.
 - `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
   by every Copy type, since primitives have no declaration to write `@implements` on.
@@ -630,12 +660,10 @@ record or enum it reports, which overrides the module level for that declaration
 | A0138 | Cannot call extension method on literal | Error |
 | A0139 | Cannot call extension method on temporary | Error |
 | A0140 | Record or enum names a trait in `@implements` but does not declare one of its required methods | Error |
-| A0141 | Method signature does not match trait definition | Error |
 | A0142 | Unknown trait in `@implements(...)` or a generic bound | Error |
 | A0143 | Traits cannot be declared in `extern` blocks | Error |
-| A0144 | Trait method must have `&self` or `&mut self` | Error |
+| A0144 | Trait instance method must have `&self` or `&mut self` | Error |
 | A0145 | Fields are not allowed in trait declarations | Error |
-| A0146 | Static methods are not allowed in trait declarations | Error |
 | A0148 | Type declares `@implements(Copy)` but a record field is non-Copy | Error |
 | A0149 | Type declares `@implements(Copy)` but an enum payload is non-Copy | Error |
 | A0247 | Type argument does not satisfy a bound of its type parameter | Error |
@@ -644,3 +672,7 @@ record or enum it reports, which overrides the module level for that declaration
 | A0254 | `@implements(Send)` / `@implements(Sync)` on a type whose structure does not support it (`thread_safety` lint) | Warning |
 | A0255 | `@sendable` on a parameter that is not of function type | Error |
 | A0262 | Method called on a type parameter is declared by more than one of its bounds | Error |
+| A0276 | Trait method implemented with the other kind (static for instance, or instance for static) | Error |
+| A0277 | Static method does not match the static trait method's signature, `Self` read as the implementing type | Error |
+| A0278 | `T::name(args)` where no bound of `T` declares a static method `name` | Error |
+| A0279 | `Trait::name(args)` calls a static trait method without an implementing type | Error |

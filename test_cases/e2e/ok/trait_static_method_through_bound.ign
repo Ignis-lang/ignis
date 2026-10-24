@@ -1,0 +1,57 @@
+// e2e: std
+// `T::make(seed)` inside a generic bounded by a trait with a required static
+// method calls the static method of the record or enum the generic is
+// instantiated with, and `Self` in the trait signature becomes that type.
+import Io from "std::io";
+
+trait Make {
+  static make(seed: i32): Self;
+
+  value(&self): i32;
+}
+
+@implements(Make)
+record Box {
+  public content: i32;
+
+  static make(seed: i32): Box {
+    return Box { content: seed * 10 };
+  }
+
+  value(&self): i32 {
+    return self.content;
+  }
+}
+
+@implements(Make)
+enum Coin {
+  HEADS,
+  TAILS,
+
+  static make(seed: i32): Coin {
+    if (seed > 0) {
+      return Coin::HEADS;
+    }
+
+    return Coin::TAILS;
+  }
+
+  value(&self): i32 {
+    return match (self) {
+      Coin::HEADS -> 1,
+      Coin::TAILS -> 2,
+    };
+  }
+}
+
+function build<T: Make>(seed: i32): i32 {
+  let made: T = T::make(seed);
+  return made.value();
+}
+
+function main(): i32 {
+  Io::println(`box ${build<Box>(4)}`.toStr());
+  Io::println(`coin ${build<Coin>(1)} ${build<Coin>(0)}`.toStr());
+
+  return 0;
+}

@@ -108,7 +108,11 @@ export namespace Analyzer {
     }
 
     /// Every required method (one without a default body) of each user trait
-    /// the record or enum names in `@implements` has to be declared on it.
+    /// the record or enum names in `@implements` has to be declared on it, with
+    /// the same kind: a static trait method by a static method and an instance
+    /// one by an instance method. A static method also has to match the trait's
+    /// signature, with `Self` read as the implementing type. Instance method
+    /// signatures are not compared.
     ///
     /// Each name is checked against the trait the resolver resolved it to, so
     /// two traits sharing a name in different namespaces are checked apart. A
@@ -117,6 +121,7 @@ export namespace Analyzer {
     function checkImplementedTraitMethods(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
       defId: Analyzer::DefinitionId,
       span: SourceSpan,
@@ -125,36 +130,36 @@ export namespace Analyzer {
       let mut typeName: String = String::create("");
       let mut traitNames: Vector<String> = Vector::new<String>();
       let mut declared: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut declaredStatics: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut ownerTypeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut ownerTypeId: Option<Analyzer::TypeId> = Option::NONE;
 
       match (defStore.get(defId)) {
         Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
           typeName = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, recordDef.name);
           traitNames = Analyzer::Typecheck::copyStringVector(&recordDef.implementedTraits);
           declared = Analyzer::TypeBounds::copyDefinitionIds(&recordDef.instanceMethods);
+          declaredStatics = Analyzer::TypeBounds::copyDefinitionIds(&recordDef.staticMethods);
+          ownerTypeParams = Analyzer::TypeBounds::copyDefinitionIds(&recordDef.typeParams);
+          ownerTypeId = Option::SOME(recordDef.typeId);
         },
         Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
           kindName = "enum";
           typeName = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, enumDef.name);
           traitNames = Analyzer::Typecheck::copyStringVector(&enumDef.implementedTraits);
           declared = Analyzer::TypeBounds::copyDefinitionIds(&enumDef.instanceMethods);
+          declaredStatics = Analyzer::TypeBounds::copyDefinitionIds(&enumDef.staticMethods);
+          ownerTypeParams = Analyzer::TypeBounds::copyDefinitionIds(&enumDef.typeParams);
+          ownerTypeId = Option::SOME(enumDef.typeId);
         },
         _ -> {},
       };
 
+      let Option::SOME(ownerType) = ownerTypeId else {
+        return;
+      };
+      let selfType: Analyzer::TypeId = Analyzer::Typecheck::implementingSelfType(defStore, typeStore, defId, &ownerTypeParams, ownerType);
       let traitIds: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(defId);
-      let mut declaredNames: Vector<u32> = Vector::new<u32>();
-      let mut declaredIndex: u64 = 0;
-
-      while (declaredIndex < declared.length()) {
-        if (let Option::SOME(methodId) = declared.get(declaredIndex)) {
-          if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(*methodId)) {
-            declaredNames.push(methodDef.name.raw());
-          }
-        }
-
-        declaredIndex += 1;
-      }
-
       let mut traitIndex: u64 = 0;
 
       while (traitIndex < traitNames.length()) {
@@ -174,18 +179,76 @@ export namespace Analyzer {
         }
 
         let mut required: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+        let mut traitIsGeneric: boolean = false;
 
         if (let Option::SOME(Analyzer::Definition::Trait(traitDef)) = defStore.get(traitId)) {
           required = Analyzer::TypeBounds::copyDefinitionIds(&traitDef.methods);
+          traitIsGeneric = traitDef.typeParams.length() > 0;
         }
 
         let traitText: String = Analyzer::TypeBounds::traitDisplayName(defStore, traitName, Option::SOME(traitId));
-        let missing: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::missingTraitMethods(defStore, &required, &declaredNames);
-        let mut missingIndex: u64 = 0;
+        let mut requiredIndex: u64 = 0;
 
-        while (missingIndex < missing.length()) {
-          if (let Option::SOME(methodName) = missing.get(missingIndex)) {
-            let methodText: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, *methodName);
+        while (requiredIndex < required.length()) {
+          let Option::SOME(traitMethodId) = required.get(requiredIndex) else {
+            requiredIndex += 1;
+            continue;
+          };
+
+          let mut methodNameOpt: Option<Analyzer::SymbolId> = Option::NONE;
+          let mut traitMethodIsStatic: boolean = false;
+
+          if (let Option::SOME(Analyzer::Definition::Method(traitMethod)) = defStore.get(*traitMethodId)) {
+            methodNameOpt = Option::SOME(traitMethod.name);
+            traitMethodIsStatic = traitMethod.isStatic;
+          }
+
+          let Option::SOME(methodName) = methodNameOpt else {
+            requiredIndex += 1;
+            continue;
+          };
+
+          let declaredInstance: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::methodNamed(defStore, &declared, methodName);
+          let declaredStatic: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::methodNamed(defStore, &declaredStatics, methodName);
+          let sameKind: Option<Analyzer::DefinitionId> = traitMethodIsStatic ? declaredStatic : declaredInstance;
+          let otherKind: Option<Analyzer::DefinitionId> = traitMethodIsStatic ? declaredInstance : declaredStatic;
+          let methodText: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, methodName);
+
+          if (let Option::SOME(implementation) = sameKind) {
+            if (traitMethodIsStatic && !traitIsGeneric) {
+              Analyzer::Typecheck::checkStaticTraitMethodSignature(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                *traitMethodId,
+                implementation,
+                selfType,
+                kindName,
+                &typeName,
+                &traitText,
+                &methodText,
+                span,
+              );
+            }
+          } else if (otherKind.isSome()) {
+            let declaredKind: str = traitMethodIsStatic ? "an instance method" : "a static method";
+            let expectedKind: str = traitMethodIsStatic ? "static" : "an instance method";
+            let message: String = `${kindName} '${typeName.toStr()}' declares '${methodText.toStr()}' as ${declaredKind}, but @implements(${traitText.toStr()}) requires it to be ${expectedKind}`;
+            let mut label: String = `declare '${methodText.toStr()}' with a self parameter and without 'static'`;
+
+            if (traitMethodIsStatic) {
+              label = `declare '${methodText.toStr()}' with 'static' and without a self parameter`;
+            }
+
+            Analyzer::Typecheck::emitDiagnosticLabeled(
+              state,
+              span,
+              DiagnosticCode::TRAIT_METHOD_KIND_MISMATCH,
+              message.toStr(),
+              label.toStr(),
+            );
+          } else {
             let message: String = `${kindName} '${typeName.toStr()}' declares @implements(${traitText.toStr()}) but does not define the required method '${methodText.toStr()}'`;
             let label: String = `add '${methodText.toStr()}' to '${typeName.toStr()}' or give it a default body in '${traitText.toStr()}'`;
 
@@ -198,41 +261,57 @@ export namespace Analyzer {
             );
           }
 
-          missingIndex += 1;
+          requiredIndex += 1;
         }
 
         traitIndex += 1;
       }
     }
 
-    /// The names of the methods in `required` whose name is not in `declared`.
-    function missingTraitMethods(
+    /// The type `Self` names inside the methods of the record or enum `defId`:
+    /// the type itself, or its instance over its own type parameters.
+    function implementingSelfType(
       defStore: &mut Analyzer::DefinitionStore,
-      required: &Vector<Analyzer::DefinitionId>,
-      declared: &Vector<u32>,
-    ): Vector<Analyzer::SymbolId> {
-      let mut missing: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      typeStore: &mut Analyzer::TypeStore,
+      defId: Analyzer::DefinitionId,
+      typeParams: &Vector<Analyzer::DefinitionId>,
+      ownerTypeId: Analyzer::TypeId,
+    ): Analyzer::TypeId {
+      if (typeParams.length() == 0) {
+        return ownerTypeId;
+      }
+
+      let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut index: u64 = 0;
 
-      while (index < required.length()) {
-        if (let Option::SOME(methodId) = required.get(index)) {
+      while (index < typeParams.length()) {
+        if (let Option::SOME(paramDefId) = typeParams.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+            let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+            arguments.push(typeStoreParamRef.param(typeParam.name));
+          }
+        }
+
+        index += 1;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return typeStoreRef.instance(defId, arguments);
+    }
+
+    /// The first method in `methods` named `name`.
+    function methodNamed(
+      defStore: &mut Analyzer::DefinitionStore,
+      methods: &Vector<Analyzer::DefinitionId>,
+      name: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < methods.length()) {
+        if (let Option::SOME(methodId) = methods.get(index)) {
           if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(*methodId)) {
-            let name: Analyzer::SymbolId = methodDef.name;
-            let mut found: boolean = false;
-            let mut declaredIndex: u64 = 0;
-
-            while (declaredIndex < declared.length()) {
-              if (let Option::SOME(raw) = declared.get(declaredIndex)) {
-                if (*raw == name.raw()) {
-                  found = true;
-                }
-              }
-
-              declaredIndex += 1;
-            }
-
-            if (!found) {
-              missing.push(name);
+            if (methodDef.name.raw() == name.raw()) {
+              return Option::SOME(*methodId);
             }
           }
         }
@@ -240,7 +319,90 @@ export namespace Analyzer {
         index += 1;
       }
 
-      return missing;
+      return Option::NONE;
+    }
+
+    /// Reports a static method that implements a static trait method with a
+    /// different signature: another parameter count, parameter type or return
+    /// type, once `Self` in the trait's signature is read as `selfType`.
+    function checkStaticTraitMethodSignature(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      traitMethodId: Analyzer::DefinitionId,
+      implementationId: Analyzer::DefinitionId,
+      selfType: Analyzer::TypeId,
+      kindName: str,
+      typeName: &String,
+      traitText: &String,
+      methodText: &String,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(traitSignature) = Analyzer::Typecheck::extractFunctionSignature(defStore, traitMethodId) else {
+        return;
+      };
+      let Option::SOME(implementationSignature) = Analyzer::Typecheck::extractFunctionSignature(defStore, implementationId) else {
+        return;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+      let mut selfSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      selfSymbols.push(selfSymbol);
+      let mut selfArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      selfArguments.push(selfType);
+
+      let declaredParams: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &traitSignature, true);
+      let implementedParams: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &implementationSignature, true);
+      let mut expectedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < declaredParams.length()) {
+        if (let Option::SOME(declared) = declaredParams.get(index)) {
+          let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+          expectedParams.push(typeStoreParamRef.substitute(*declared, &selfSymbols, &selfArguments));
+        }
+
+        index += 1;
+      }
+
+      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+      let expectedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(traitSignature.returnType, &selfSymbols, &selfArguments);
+      let sameArity: boolean = expectedParams.length() == implementedParams.length();
+      let mut matches: boolean = sameArity && expectedReturn.raw() == implementationSignature.returnType.raw();
+      index = 0;
+
+      while (matches && index < expectedParams.length()) {
+        if (let Option::SOME(expected) = expectedParams.get(index)) {
+          if (let Option::SOME(implemented) = implementedParams.get(index)) {
+            if (expected.raw() != implemented.raw()) {
+              matches = false;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      if (matches) {
+        return;
+      }
+
+      let expectedType: Analyzer::TypeId = typeStoreReturnRef.functionType(expectedParams, expectedReturn);
+      let foundType: Analyzer::TypeId = typeStoreReturnRef.functionType(implementedParams, implementationSignature.returnType);
+      let expectedText: String = typeStore.nameOfResolved(expectedType, &*defStore, &*symbols);
+      let foundText: String = typeStore.nameOfResolved(foundType, &*defStore, &*symbols);
+      let message: String = `static method '${methodText.toStr()}' of ${kindName} '${typeName.toStr()}' does not match @implements(${traitText.toStr()}): expected '${expectedText.toStr()}', found '${foundText.toStr()}'`;
+      let label: String = `declare '${methodText.toStr()}' with the trait's parameter and return types, reading 'Self' as '${typeName.toStr()}'`;
+
+      Analyzer::Typecheck::emitDiagnosticLabeled(
+        state,
+        span,
+        DiagnosticCode::TRAIT_STATIC_METHOD_SIGNATURE_MISMATCH,
+        message.toStr(),
+        label.toStr(),
+      );
     }
 
     /// Whether `name` is a lang trait, which `@implements` accepts without a
@@ -1389,7 +1551,7 @@ export namespace Analyzer {
               record_.span,
             );
 
-            Analyzer::Typecheck::checkImplementedTraitMethods(state, defStore, symbols, recordDefId, record_.span);
+            Analyzer::Typecheck::checkImplementedTraitMethods(state, defStore, typeStore, symbols, recordDefId, record_.span);
 
             Analyzer::Typecheck::checkRecordFieldBounds(state, defStore, typeStore, symbols, module, recordDefId, &record_);
 
@@ -1428,7 +1590,7 @@ export namespace Analyzer {
               enum_.span,
             );
 
-            Analyzer::Typecheck::checkImplementedTraitMethods(state, defStore, symbols, enumDefId, enum_.span);
+            Analyzer::Typecheck::checkImplementedTraitMethods(state, defStore, typeStore, symbols, enumDefId, enum_.span);
 
             Analyzer::Typecheck::checkEnumMemberBounds(state, defStore, typeStore, symbols, module, enumDefId, &enum_);
 

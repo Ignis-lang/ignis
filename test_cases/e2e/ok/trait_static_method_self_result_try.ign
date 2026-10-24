@@ -1,0 +1,49 @@
+// `Self` in the return type of a static trait method becomes the bound type
+// parameter at the call site, so `T::parse(code)` types as `Result<T, i32>`
+// and both `!` and a match on it work inside the generic. The generic calls a
+// second generic with the same bound, so the redispatch survives two levels.
+@lang(try)
+enum Result<T, E> {
+  OK(T),
+  ERROR(E),
+}
+
+trait Parse {
+  static parse(code: i32): Result<Self, i32>;
+
+  weight(&self): i32;
+}
+
+@implements(Parse)
+record Digit {
+  public digit: i32;
+
+  static parse(code: i32): Result<Digit, i32> {
+    if (code < 10) {
+      return Result::OK(Digit { digit: code });
+    }
+
+    return Result::ERROR(code);
+  }
+
+  weight(&self): i32 {
+    return self.digit;
+  }
+}
+
+function parseInner<T: Parse>(code: i32): Result<T, i32> {
+  let parsed: T = T::parse(code)!;
+  return Result::OK(parsed);
+}
+
+function parseOuter<T: Parse>(code: i32): i32 {
+  return match (parseInner<T>(code)) {
+    Result::OK(value) -> value.weight(),
+    Result::ERROR(failed) -> -failed,
+  };
+}
+
+function main(): i32 {
+  // 7 parses, 12 fails with -12: 7 + 12 + 23 = 42.
+  return parseOuter<Digit>(7) - parseOuter<Digit>(12) + 23;
+}
