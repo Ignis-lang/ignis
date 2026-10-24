@@ -1,0 +1,155 @@
+// Floats inside aggregates: record fields, enum payloads and globals, passed
+// to and returned from functions by value. Each shape is classified by the
+// platform ABI the way its C struct is.
+
+record Point {
+  public x: f64;
+  public y: f64;
+}
+
+record Pair {
+  public first: f32;
+  public second: f32;
+}
+
+record Mixed {
+  public ratio: f32;
+  public count: i32;
+  public scale: f64;
+}
+
+record Wide {
+  public a: f64;
+  public b: f64;
+  public c: f64;
+}
+
+enum Number {
+  Int(i64),
+  Float(f64),
+}
+
+enum Shape {
+  Circle(f64),
+  Rectangle(f64, f64),
+  Empty,
+}
+
+enum Narrow {
+  Single(f64),
+  None,
+}
+
+const ORIGIN: Point = Point { x: 0.25, y: -0.5 };
+const SCALE: f64 = 2.5;
+
+function midpoint(left: Point, right: Point): Point {
+  return Point { x: (left.x + right.x) / 2.0, y: (left.y + right.y) / 2.0 };
+}
+
+function swap(pair: Pair): Pair {
+  return Pair { first: pair.second, second: pair.first };
+}
+
+function grow(mixed: Mixed): Mixed {
+  return Mixed {
+    ratio: mixed.ratio * 2.0,
+    count: mixed.count + 1,
+    scale: mixed.scale * (mixed.ratio as f64),
+  };
+}
+
+function sum(wide: Wide): f64 {
+  return wide.a + wide.b + wide.c;
+}
+
+function half(number: Number): Number {
+  return match (number) {
+    Number::Int(value) -> Number::Float(value as f64 / 2.0),
+    Number::Float(value) -> Number::Float(value / 2.0),
+  };
+}
+
+function area(shape: Shape): f64 {
+  return match (shape) {
+    Shape::Circle(radius) -> 3.0 * radius * radius,
+    Shape::Rectangle(width, height) -> width * height,
+    Shape::Empty -> 0.0,
+  };
+}
+
+function scaled(narrow: Narrow, factor: f64): Narrow {
+  return match (narrow) {
+    Narrow::Single(value) -> Narrow::Single(value * factor),
+    Narrow::None -> Narrow::None,
+  };
+}
+
+function main(): i32 {
+  let middle: Point = midpoint(Point { x: 1.0, y: 2.0 }, Point { x: 3.0, y: 6.0 });
+
+  if (middle.x != 2.0 || middle.y != 4.0) {
+    return 1;
+  }
+
+  let swapped: Pair = swap(Pair { first: 1.5, second: -2.5 });
+
+  if (swapped.first != -2.5 || swapped.second != 1.5) {
+    return 2;
+  }
+
+  let grown: Mixed = grow(Mixed { ratio: 0.5, count: 41, scale: 8.0 });
+
+  if (grown.ratio != 1.0 || grown.count != 42 || grown.scale != 4.0) {
+    return 3;
+  }
+
+  if (sum(Wide { a: 0.5, b: 0.25, c: 0.125 }) != 0.875) {
+    return 4;
+  }
+
+  let fromInt: Number = half(Number::Int(5));
+  let fromFloat: Number = half(Number::Float(5.0));
+
+  if (let Number::Float(value) = fromInt) {
+    if (value != 2.5) {
+      return 5;
+    }
+  } else {
+    return 6;
+  }
+
+  if (let Number::Float(value) = fromFloat) {
+    if (value != 2.5) {
+      return 7;
+    }
+  } else {
+    return 8;
+  }
+
+  if (area(Shape::Circle(2.0)) != 12.0 || area(Shape::Rectangle(1.5, 4.0)) != 6.0 || area(Shape::Empty) != 0.0) {
+    return 9;
+  }
+
+  if (let Narrow::Single(value) = scaled(Narrow::Single(1.25), 4.0)) {
+    if (value != 5.0) {
+      return 10;
+    }
+  } else {
+    return 11;
+  }
+
+  if (ORIGIN.x != 0.25 || ORIGIN.y != -0.5 || SCALE * 2.0 != 5.0) {
+    return 12;
+  }
+
+  let mut moved: Point = ORIGIN;
+
+  moved.y = moved.y + 7.75;
+
+  if (moved.x + moved.y != 7.5) {
+    return 13;
+  }
+
+  return 0;
+}

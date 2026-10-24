@@ -18,8 +18,9 @@ import Diagnostic, DiagnosticCode, LabelKind, Severity, SourceSpan from "@compil
 /// same mangled names, same reserved-word guard, same linkage rule.
 ///
 /// Value representation. Scalars live in QBE temporaries of class `w` (every
-/// integer up to 32 bits, boolean, char, atom) or `l` (64-bit integers, str,
-/// every pointer), and always hold their declared width: a producer of a
+/// integer up to 32 bits, boolean, char, atom), `l` (64-bit integers, str,
+/// every pointer), `s` (f32) or `d` (f64), and integers always hold their
+/// declared width: a producer of a
 /// narrow temp normalizes the result with `extsb`/`extub`/`extsh`/`extuh`,
 /// so consumers never see garbage in the unused bits. Aggregates -- records,
 /// fieldless enums' storage, fixed arrays, slices -- live only in stack slots
@@ -48,7 +49,7 @@ import Diagnostic, DiagnosticCode, LabelKind, Severity, SourceSpan from "@compil
 ///
 /// Out of scope for the first slice (each fails closed): closures and their
 /// drop glue, drop glue of any kind, enums with payloads, inline asm,
-/// freestanding mode, floating point, runtime type ids.
+/// freestanding mode, runtime type ids.
 export namespace CodegenQbe {
   /// The emitted IL plus what the run measured. An error carries the exact
   /// unsupported-instruction message and leaves `source` empty.
@@ -195,9 +196,9 @@ export namespace CodegenQbe {
   }
 
   /// The QBE class of a scalar temporary: `w` for everything up to 32 bits,
-  /// `l` for 64-bit integers, str and every pointer. Aggregates, void and
-  /// floats answer NONE: aggregates travel as addresses, void has no value,
-  /// and floats are out of scope.
+  /// `l` for 64-bit integers, str and every pointer, `s` for f32 and `d` for
+  /// f64. Aggregates and void answer NONE: aggregates travel as addresses and
+  /// void has no value.
   function scalarClass(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -218,6 +219,8 @@ export namespace CodegenQbe {
       Analyzer::Type::U16 -> Option::SOME("w"),
       Analyzer::Type::U32 -> Option::SOME("w"),
       Analyzer::Type::U64 -> Option::SOME("l"),
+      Analyzer::Type::F32 -> Option::SOME("s"),
+      Analyzer::Type::F64 -> Option::SOME("d"),
       Analyzer::Type::BOOLEAN -> Option::SOME("w"),
       Analyzer::Type::CHAR -> Option::SOME("w"),
       Analyzer::Type::ATOM -> Option::SOME("w"),
@@ -354,6 +357,45 @@ export namespace CodegenQbe {
     };
   }
 
+  /// Whether `ty` is `f32` or `f64`. Arithmetic, comparisons and casts over
+  /// one take their floating-point form.
+  function isFloatType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    return match (typeStore.get(resolved)) {
+      Option::SOME(Analyzer::Type::F32) -> true,
+      Option::SOME(Analyzer::Type::F64) -> true,
+      _ -> false,
+    };
+  }
+
+  /// The IEEE bit pattern of a float constant of type `ty`, spelled as the
+  /// integer immediate QBE reads as those bits in an `s` or `d` position or
+  /// data item. The value is exact, NaN and negative zero included, where a
+  /// decimal spelling would need a round trip. An `f32` constant is the `f64`
+  /// the LIR carries rounded to nearest, the conversion the C backend's
+  /// literal gets from its C compiler.
+  function floatBitsText(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    value: f64,
+    ty: Analyzer::TypeId,
+  ): String {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    if (let Option::SOME(Analyzer::Type::F32) = typeStore.get(resolved)) {
+      let narrowed: f32 = value as f32;
+
+      return `${@bitCast<u32>(narrowed)}`;
+    }
+
+    return `${@bitCast<u64>(value)}`;
+  }
+
   /// Whether `ty` is one of the aggregates: record, enum storage, fixed
   /// array, slice. Such a value is the address of its storage. A fieldless
   /// enum is its tag, a scalar, so it does not count.
@@ -478,6 +520,8 @@ export namespace CodegenQbe {
       Analyzer::Type::ATOM -> {},
       Analyzer::Type::I64 -> {},
       Analyzer::Type::U64 -> {},
+      Analyzer::Type::F32 -> {},
+      Analyzer::Type::F64 -> {},
       Analyzer::Type::STR -> {},
       Analyzer::Type::STATIC_STR -> {},
       Analyzer::Type::Pointer(_) -> {},
@@ -499,7 +543,8 @@ export namespace CodegenQbe {
         return CodegenQbe::recordLayout(emitter, defStore, typeStore, recordDef);
       },
       _ -> {
-        CodegenQbe::failNamed(emitter, "SizeOf");
+        let construct: String = `SizeOf(${typeStore.nameOf(resolved).toStr()})`;
+        CodegenQbe::failNamed(emitter, construct.toStr());
       },
     };
 
@@ -740,12 +785,19 @@ export namespace CodegenQbe {
   }
 
   /// The QBE immediate for a scalar constant. A str constant is the data
-  /// symbol its bytes were interned under. Aggregates and floats answer NONE:
-  /// their callers fail the unit closed or handle the zero case themselves.
-  function constText(emitter: &mut CodegenQbe::Emitter, value: &Lir::ConstValue): Option<String> {
+  /// symbol its bytes were interned under, a float constant its bit pattern.
+  /// Aggregates answer NONE: their callers fail the unit closed or handle the
+  /// zero case themselves.
+  function constText(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    value: &Lir::ConstValue,
+  ): Option<String> {
     return match (value) {
       Lir::ConstValue::Int(number, _) -> Option::SOME(`${number}`),
       Lir::ConstValue::UInt(number, _) -> Option::SOME(`${number}`),
+      Lir::ConstValue::Float(number, ty) -> Option::SOME(CodegenQbe::floatBitsText(defStore, typeStore, number, ty)),
       Lir::ConstValue::Bool(flag, _) -> {
         if (flag) {
           return Option::SOME(String::create("1"));
@@ -790,7 +842,7 @@ export namespace CodegenQbe {
       return Option::NONE;
     }
 
-    return CodegenQbe::constText(emitter, &value);
+    return CodegenQbe::constText(emitter, defStore, typeStore, &value);
   }
 
   /// A fresh temporary name, `%vN`, for the emitter's own values.
@@ -1060,6 +1112,8 @@ export namespace CodegenQbe {
       Analyzer::Type::ATOM -> Option::SOME(String::create("loaduw")),
       Analyzer::Type::I64 -> Option::SOME(String::create("loadl")),
       Analyzer::Type::U64 -> Option::SOME(String::create("loadl")),
+      Analyzer::Type::F32 -> Option::SOME(String::create("loads")),
+      Analyzer::Type::F64 -> Option::SOME(String::create("loadd")),
       Analyzer::Type::STR -> Option::SOME(String::create("loadl")),
       Analyzer::Type::STATIC_STR -> Option::SOME(String::create("loadl")),
       Analyzer::Type::Pointer(_) -> Option::SOME(String::create("loadl")),
@@ -1100,6 +1154,8 @@ export namespace CodegenQbe {
       Analyzer::Type::ATOM -> Option::SOME(String::create("storew")),
       Analyzer::Type::I64 -> Option::SOME(String::create("storel")),
       Analyzer::Type::U64 -> Option::SOME(String::create("storel")),
+      Analyzer::Type::F32 -> Option::SOME(String::create("stores")),
+      Analyzer::Type::F64 -> Option::SOME(String::create("stored")),
       Analyzer::Type::STR -> Option::SOME(String::create("storel")),
       Analyzer::Type::STATIC_STR -> Option::SOME(String::create("storel")),
       Analyzer::Type::Pointer(_) -> Option::SOME(String::create("storel")),
@@ -1163,8 +1219,8 @@ export namespace CodegenQbe {
   }
 
   /// The QBE value class letter for a scalar: `w` for everything up to 32
-  /// bits, `l` for 64-bit values and pointers. Aggregates and floats answer
-  /// NONE, and their callers fail the unit closed.
+  /// bits, `l` for 64-bit values and pointers, `s` and `d` for f32 and f64.
+  /// Aggregates answer NONE, and their callers fail the unit closed.
   function qbeClass(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1188,6 +1244,8 @@ export namespace CodegenQbe {
       Analyzer::Type::ATOM -> Option::SOME(String::create("w")),
       Analyzer::Type::I64 -> Option::SOME(String::create("l")),
       Analyzer::Type::U64 -> Option::SOME(String::create("l")),
+      Analyzer::Type::F32 -> Option::SOME(String::create("s")),
+      Analyzer::Type::F64 -> Option::SOME(String::create("d")),
       Analyzer::Type::STR -> Option::SOME(String::create("l")),
       Analyzer::Type::STATIC_STR -> Option::SOME(String::create("l")),
       Analyzer::Type::Pointer(_) -> Option::SOME(String::create("l")),
@@ -1205,7 +1263,9 @@ export namespace CodegenQbe {
   }
 
   /// The QBE data-item letter for a scalar of `ty`, by byte width: `b` for
-  /// one-byte values, `h` for two, `w` for four, `l` for eight.
+  /// one-byte values, `h` for two, `w` for four, `l` for eight. Floats are
+  /// `s` and `d`, which is what puts a float field of an aggregate in the
+  /// SSE class the C struct's field gets.
   function qbeItemLetter(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1229,6 +1289,8 @@ export namespace CodegenQbe {
       Analyzer::Type::ATOM -> Option::SOME(String::create("w")),
       Analyzer::Type::I64 -> Option::SOME(String::create("l")),
       Analyzer::Type::U64 -> Option::SOME(String::create("l")),
+      Analyzer::Type::F32 -> Option::SOME(String::create("s")),
+      Analyzer::Type::F64 -> Option::SOME(String::create("d")),
       Analyzer::Type::STR -> Option::SOME(String::create("l")),
       Analyzer::Type::STATIC_STR -> Option::SOME(String::create("l")),
       Analyzer::Type::Pointer(_) -> Option::SOME(String::create("l")),
@@ -1243,6 +1305,23 @@ export namespace CodegenQbe {
       },
       _ -> Option::NONE,
     };
+  }
+
+  /// The byte width of a data item spelled with `letter`.
+  function qbeItemLetterSize(letter: &String): u64 {
+    if (letter.equals("b")) {
+      return 1;
+    }
+
+    if (letter.equals("h")) {
+      return 2;
+    }
+
+    if (letter.equals("w") || letter.equals("s")) {
+      return 4;
+    }
+
+    return 8;
   }
 
   /// The sign-extension op that re-normalizes a `w`-class value of `ty`, or
@@ -1467,12 +1546,189 @@ export namespace CodegenQbe {
     }
   }
 
+  /// The SysV class of the eightbyte at `start` inside a value of `ty` placed
+  /// at `base`: 0 when no byte of the value lands in it, 1 when only float
+  /// bytes do (SSE), 2 when any other byte does (INTEGER). A union merges its
+  /// members the same way, so an enum answers the merge over its tag, its
+  /// drop-state byte and every variant's payload.
+  function qbeEightbyteClass(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+    base: u64,
+    start: u64,
+  ): u32 {
+    if (emitter.error.isSome() || Abi::isVoid(defStore, typeStore, ty)) {
+      return 0;
+    }
+
+    let layout: CodegenQbe::TypeLayout = CodegenQbe::typeLayout(emitter, defStore, typeStore, ty);
+
+    if (emitter.error.isSome() || base >= start + 8 || base + layout.size <= start) {
+      return 0;
+    }
+
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    let Option::SOME(typeNode) = typeStore.get(resolved) else {
+      return 2;
+    };
+
+    let mut merged: u32 = 0;
+
+    match (typeNode) {
+      Analyzer::Type::F32 -> {
+        merged = 1;
+      },
+      Analyzer::Type::F64 -> {
+        merged = 1;
+      },
+      Analyzer::Type::Record(recordDef) -> {
+        let mut fieldTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+        if (let Option::SOME(Analyzer::Definition::Record(recordData)) = defStore.get(recordDef)) {
+          let mut index: u64 = 0;
+
+          while (index < recordData.fields.length()) {
+            if (let Option::SOME(fieldId) = recordData.fields.get(index)) {
+              if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+                fieldTypes.push(Hir::recordFieldStorageType(defStore, typeStore, recordDef, fieldDef.fieldType));
+              }
+            }
+
+            index += 1;
+          }
+        }
+
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < fieldTypes.length()) {
+          if (let Option::SOME(fieldType) = fieldTypes.get(fieldIndex)) {
+            let offset: u64 = CodegenQbe::fieldOffset(emitter, defStore, typeStore, recordDef, fieldIndex);
+            let fieldClass: u32 = CodegenQbe::qbeEightbyteClass(emitter, defStore, typeStore, *fieldType, base + offset, start);
+
+            merged = fieldClass > merged ? fieldClass : merged;
+          }
+
+          fieldIndex += 1;
+        }
+
+        if (let Result::OK(recordLayout) = Abi::recordLayout(defStore, typeStore, recordDef)) {
+          if (let Option::SOME(dropState) = recordLayout.dropStateOffset) {
+            if (base + dropState >= start && base + dropState < start + 8) {
+              merged = 2;
+            }
+          }
+        }
+      },
+      Analyzer::Type::FixedArray(element, count) -> {
+        let elementSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, element);
+        let mut index: u64 = 0;
+
+        while (index < count && elementSize > 0 && base + index * elementSize < start + 8) {
+          let elementClass: u32 = CodegenQbe::qbeEightbyteClass(emitter, defStore, typeStore, element, base + index * elementSize, start);
+
+          merged = elementClass > merged ? elementClass : merged;
+          index += 1;
+        }
+      },
+      Analyzer::Type::Enum(enumDef) -> {
+        if (CodegenQbe::enumIsScalar(defStore, enumDef)) {
+          return 2;
+        }
+
+        let enumLayout: Abi::EnumLayout = match (Abi::enumLayout(defStore, typeStore, enumDef)) {
+          Result::OK(value) -> value,
+          Result::ERROR(_) -> {
+            return 2;
+          },
+        };
+
+        if (base < start + 8 && base + Abi::ENUM_TAG_SIZE > start) {
+          merged = 2;
+        }
+
+        if (let Option::SOME(dropState) = enumLayout.dropStateOffset) {
+          if (base + dropState >= start && base + dropState < start + 8) {
+            merged = 2;
+          }
+        }
+
+        let mut variantIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        if (let Option::SOME(Analyzer::Definition::Enum(enumData)) = defStore.get(enumDef)) {
+          let mut copyIndex: u64 = 0;
+
+          while (copyIndex < enumData.variants.length()) {
+            if (let Option::SOME(variantId) = enumData.variants.get(copyIndex)) {
+              variantIds.push(*variantId);
+            }
+
+            copyIndex += 1;
+          }
+        }
+
+        let mut variantIndex: u64 = 0;
+
+        while (variantIndex < variantIds.length()) {
+          let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+          if (let Option::SOME(variantId) = variantIds.get(variantIndex)) {
+            if (let Option::SOME(Analyzer::Definition::Variant(variantDef)) = defStore.get(*variantId)) {
+              let mut payloadIndex: u64 = 0;
+
+              while (payloadIndex < variantDef.payload.length()) {
+                if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+                  if (!Abi::isVoid(defStore, typeStore, *payloadType)) {
+                    payload.push(*payloadType);
+                  }
+                }
+
+                payloadIndex += 1;
+              }
+            }
+          }
+
+          // `fieldOffsets` counts only the non-void payloads, as `payload` does.
+          if (let Option::SOME(variantLayout) = enumLayout.variants.get(variantIndex)) {
+            let mut fieldIndex: u64 = 0;
+
+            while (fieldIndex < payload.length()) {
+              if (let Option::SOME(payloadType) = payload.get(fieldIndex)) {
+                if (let Option::SOME(offset) = variantLayout.fieldOffsets.get(fieldIndex)) {
+                  let payloadClass: u32 = CodegenQbe::qbeEightbyteClass(emitter, defStore, typeStore, *payloadType, base + *offset, start);
+
+                  merged = payloadClass > merged ? payloadClass : merged;
+                }
+              }
+
+              fieldIndex += 1;
+            }
+          }
+
+          variantIndex += 1;
+        }
+      },
+      _ -> {
+        merged = 2;
+      },
+    };
+
+    return merged;
+  }
+
   /// The `type :name = align A { w, ... }` declaration of one payload enum.
   /// The `u32` tag sits at offset 0 and the payload union follows at its
   /// ABI-aligned offset, spelled as one opaque byte blob: QBE has no union,
   /// and an integer blob keeps the aggregate in the register classes the C
   /// struct's union classifies into. Size and alignment are exactly
   /// `Abi::enumLayout`'s, so both backends agree on the storage.
+  ///
+  /// The one exception is a value of at most sixteen bytes whose second
+  /// eightbyte holds only float bytes in every variant: the C union puts it
+  /// in an SSE register, so that eightbyte is spelled as a float item. The
+  /// first eightbyte always holds the integer tag.
   function qbeEmitEnumDeclaration(
     emitter: &mut CodegenQbe::Emitter,
     defStore: &mut Analyzer::DefinitionStore,
@@ -1490,13 +1746,31 @@ export namespace CodegenQbe {
 
     let name: String = CodegenQbe::qbeAggregateTypeName(defStore, symbols, defId);
     let mut items: String = String::create("w");
+    let mut floatTail: boolean = false;
 
-    if (layout.payloadOffset > 4) {
-      items.pushStr(`, b ${layout.payloadOffset - 4}`.toStr());
+    if (layout.layout.size > 8 && layout.layout.size <= 16) {
+      let enumType: Analyzer::TypeId = typeStore.enumType(defId);
+
+      floatTail = CodegenQbe::qbeEightbyteClass(emitter, defStore, typeStore, enumType, 0, 8) == 1;
+
+      if (emitter.error.isSome()) {
+        return;
+      }
     }
 
-    if (layout.layout.size > layout.payloadOffset) {
-      items.pushStr(`, b ${layout.layout.size - layout.payloadOffset}`.toStr());
+    if (floatTail) {
+      // The tag's eightbyte stays integer bytes; the tail is one `d`, or one
+      // `s` when only four bytes of it exist.
+      items.pushStr(", b 4");
+      items.pushStr(layout.layout.size - 8 > 4 ? ", d" : ", s");
+    } else {
+      if (layout.payloadOffset > 4) {
+        items.pushStr(`, b ${layout.payloadOffset - 4}`.toStr());
+      }
+
+      if (layout.layout.size > layout.payloadOffset) {
+        items.pushStr(`, b ${layout.layout.size - layout.payloadOffset}`.toStr());
+      }
     }
 
     let line: String = `type :${name.toStr()} = align ${layout.layout.alignment} { ${items.toStr()} }\n`;
@@ -1805,7 +2079,7 @@ export namespace CodegenQbe {
             return;
           };
 
-          let Option::SOME(text) = CodegenQbe::constText(emitter, &constValue) else {
+          let Option::SOME(text) = CodegenQbe::constText(emitter, defStore, typeStore, &constValue) else {
             return;
           };
 
@@ -1872,16 +2146,7 @@ export namespace CodegenQbe {
     let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
 
     if (let Option::SOME(letter) = CodegenQbe::qbeItemLetter(defStore, typeStore, resolved)) {
-      return match (letter.equals("b")) {
-        true -> 1,
-        false -> match (letter.equals("h")) {
-          true -> 2,
-          false -> match (letter.equals("w")) {
-            true -> 4,
-            false -> 8,
-          },
-        },
-      };
+      return CodegenQbe::qbeItemLetterSize(&letter);
     }
 
     return CodegenQbe::typeSize(emitter, defStore, typeStore, resolved);
@@ -2483,10 +2748,10 @@ export namespace CodegenQbe {
         CodegenQbe::failFor(emitter, instruction);
       },
       Lir::Instr::Cast(node) -> {
-        CodegenQbe::qbeEmitCast(emitter, defStore, typeStore, symbols, function_, &node);
+        CodegenQbe::qbeEmitCast(emitter, defStore, typeStore, symbols, function_, &node, false);
       },
       Lir::Instr::BitCast(node) -> {
-        CodegenQbe::qbeEmitCast(emitter, defStore, typeStore, symbols, function_, &node);
+        CodegenQbe::qbeEmitCast(emitter, defStore, typeStore, symbols, function_, &node, true);
       },
       Lir::Instr::AddrOfLocal(node) -> {
         let line: String = `    %t${node.dest.raw()} =l copy %l${node.local.raw()}\n`;
@@ -2802,6 +3067,25 @@ export namespace CodegenQbe {
       return String::create("ceqw");
     };
 
+    // QBE's float comparisons are the ones C has: every ordered one is false
+    // on a NaN operand and `cne` is true, so no extra `co`/`cuo` is needed.
+    if (CodegenQbe::isFloatType(defStore, typeStore, ty)) {
+      let stem: str = match (op) {
+        Hir::BinaryOperation::Equal -> "eq",
+        Hir::BinaryOperation::NotEqual -> "ne",
+        Hir::BinaryOperation::LessThan -> "lt",
+        Hir::BinaryOperation::LessEqual -> "le",
+        Hir::BinaryOperation::GreaterThan -> "gt",
+        Hir::BinaryOperation::GreaterEqual -> "ge",
+        _ -> {
+          CodegenQbe::failNamed(emitter, "BinOp");
+          "eq"
+        },
+      };
+
+      return `c${stem}${cls.toStr()}`;
+    }
+
     let signed: boolean = CodegenQbe::isSignedInteger(defStore, typeStore, ty);
     let mut stem: String = String::create("eq");
 
@@ -2858,13 +3142,14 @@ export namespace CodegenQbe {
     ty: Analyzer::TypeId,
   ): String {
     let signed: boolean = CodegenQbe::isSignedInteger(defStore, typeStore, ty);
+    let float: boolean = CodegenQbe::isFloatType(defStore, typeStore, ty);
 
     return match (op) {
       Hir::BinaryOperation::Add -> String::create("add"),
       Hir::BinaryOperation::Sub -> String::create("sub"),
       Hir::BinaryOperation::Mul -> String::create("mul"),
       Hir::BinaryOperation::Div -> {
-        if (signed) {
+        if (signed || float) {
           return String::create("div");
         }
 
@@ -3036,6 +3321,19 @@ export namespace CodegenQbe {
       return;
     }
 
+    // QBE has no float remainder. The C backend's `%` on floats is the
+    // truncated `fmod`, and libm's is the same function.
+    if (node.op == Hir::BinaryOperation::Mod && CodegenQbe::isFloatType(defStore, typeStore, destType)) {
+      let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, destType) else {
+        CodegenQbe::failNamed(emitter, "BinOp");
+        return;
+      };
+      let callee: str = cls.equals("s") ? "fmodf" : "fmod";
+
+      emitter.out.pushStr(`    ${dest.toStr()} =${cls.toStr()} call $${callee}(${cls.toStr()} ${left.toStr()}, ${cls.toStr()} ${right.toStr()})\n`.toStr());
+      return;
+    }
+
     let arith: String = CodegenQbe::qbeArithOp(emitter, defStore, typeStore, &node.op, leftType);
 
     if (arith.length() == 0) {
@@ -3159,6 +3457,13 @@ export namespace CodegenQbe {
         emitter.out.pushStr(line.toStr());
       },
       Hir::UnaryOperation::Neg -> {
+        // `sub 0, x` would turn a float +0 into +0 instead of -0; `neg` flips
+        // the sign bit as C's unary minus does.
+        if (CodegenQbe::isFloatType(defStore, typeStore, destType)) {
+          emitter.out.pushStr(`    ${dest.toStr()} =${cls.toStr()} neg ${value.toStr()}\n`.toStr());
+          return;
+        }
+
         let line: String = `    ${dest.toStr()} =${cls.toStr()} sub 0, ${value.toStr()}\n`;
 
         emitter.out.pushStr(line.toStr());
@@ -3377,6 +3682,12 @@ export namespace CodegenQbe {
       return;
     }
 
+    // The sized libatomic entry points take integers; a float would travel in
+    // the wrong register class.
+    if (CodegenQbe::isFloatType(defStore, typeStore, node.ty)) {
+      CodegenQbe::failNamed(emitter, "Atomic");
+      return;
+    }
     let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, node.ty) else {
       CodegenQbe::failNamed(emitter, "Atomic");
       return;
@@ -3385,16 +3696,7 @@ export namespace CodegenQbe {
       CodegenQbe::failNamed(emitter, "Atomic");
       return;
     };
-    let size: u64 = match (letter.equals("b")) {
-      true -> 1,
-      false -> match (letter.equals("h")) {
-        true -> 2,
-        false -> match (letter.equals("w")) {
-          true -> 4,
-          false -> 8,
-        },
-      },
-    };
+    let size: u64 = CodegenQbe::qbeItemLetterSize(&letter);
     let name: String = `${CodegenQbe::qbeAtomicFunction(node.operation)}_${size}`;
 
     let Option::SOME(pointerOperand) = node.operands.get(0) else {
@@ -3488,6 +3790,7 @@ export namespace CodegenQbe {
     symbols: &mut Analyzer::SymbolTable,
     function_: &Lir::FunctionLir,
     node: &Lir::InstrCast,
+    bitwise: boolean,
   ): void {
     let Option::SOME(sourceType) = CodegenQbe::operandType(defStore, function_, &node.source) else {
       CodegenQbe::failNamed(emitter, "Cast");
@@ -3531,7 +3834,7 @@ export namespace CodegenQbe {
     };
 
     if (sourceIsFloat || targetIsFloat) {
-      CodegenQbe::failNamed(emitter, "Cast");
+      CodegenQbe::qbeEmitFloatCast(emitter, defStore, typeStore, symbols, function_, node, sourceResolved, targetResolved, bitwise);
       return;
     }
 
@@ -3632,6 +3935,84 @@ export namespace CodegenQbe {
     let line: String = `    ${dest.toStr()} =l copy ${value.toStr()}\n`;
 
     emitter.out.pushStr(line.toStr());
+  }
+
+  /// A cast with a float on either side. `@bitCast` reinterprets the bits
+  /// with QBE's `cast` between the float and the integer class of one width;
+  /// `as` converts the value the way C's cast does: truncation toward zero
+  /// into an integer, signed or unsigned by the integer type, rounding to
+  /// nearest into a float, and `!= 0` into a boolean.
+  function qbeEmitFloatCast(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrCast,
+    sourceType: Analyzer::TypeId,
+    targetType: Analyzer::TypeId,
+    bitwise: boolean,
+  ): void {
+    let Option::SOME(sourceCls) = CodegenQbe::qbeClass(defStore, typeStore, sourceType) else {
+      CodegenQbe::failNamed(emitter, "Cast");
+      return;
+    };
+
+    let Option::SOME(targetCls) = CodegenQbe::qbeClass(defStore, typeStore, targetType) else {
+      CodegenQbe::failNamed(emitter, "Cast");
+      return;
+    };
+
+    let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.source) else {
+      return;
+    };
+
+    let dest: String = `%t${node.dest.raw()}`;
+    let sourceFloat: boolean = CodegenQbe::isFloatType(defStore, typeStore, sourceType);
+    let targetFloat: boolean = CodegenQbe::isFloatType(defStore, typeStore, targetType);
+
+    if (sourceCls.equals(&targetCls)) {
+      emitter.out.pushStr(`    ${dest.toStr()} =${targetCls.toStr()} copy ${value.toStr()}\n`.toStr());
+      return;
+    }
+
+    if (bitwise) {
+      let sameWidth: boolean = (sourceCls.equals("s") && targetCls.equals("w")) || (sourceCls.equals("w") && targetCls.equals("s")) || (sourceCls.equals("d") && targetCls.equals("l")) || (sourceCls.equals("l") && targetCls.equals("d"));
+
+      if (!sameWidth) {
+        CodegenQbe::failNamed(emitter, "BitCast");
+        return;
+      }
+
+      emitter.out.pushStr(`    ${dest.toStr()} =${targetCls.toStr()} cast ${value.toStr()}\n`.toStr());
+      return;
+    }
+
+    if (sourceFloat && targetFloat) {
+      let operation: str = sourceCls.equals("s") ? "exts" : "truncd";
+
+      emitter.out.pushStr(`    ${dest.toStr()} =${targetCls.toStr()} ${operation} ${value.toStr()}\n`.toStr());
+      return;
+    }
+
+    if (sourceFloat) {
+      if (let Option::SOME(Analyzer::Type::BOOLEAN) = typeStore.get(targetType)) {
+        emitter.out.pushStr(`    ${dest.toStr()} =w cne${sourceCls.toStr()} ${value.toStr()}, 0\n`.toStr());
+        return;
+      }
+
+      let direction: str = CodegenQbe::isSignedInteger(defStore, typeStore, targetType) ? "tosi" : "toui";
+
+      emitter.out.pushStr(`    ${dest.toStr()} =${targetCls.toStr()} ${sourceCls.toStr()}${direction} ${value.toStr()}\n`.toStr());
+      CodegenQbe::qbeNormalizeInPlace(emitter, defStore, typeStore, targetType, &dest);
+      return;
+    }
+
+    // Narrow integers are already extended to their class by their
+    // signedness, so the class-wide conversion reads the declared value.
+    let signedness: str = CodegenQbe::isSignedInteger(defStore, typeStore, sourceType) ? "s" : "u";
+
+    emitter.out.pushStr(`    ${dest.toStr()} =${targetCls.toStr()} ${signedness}${sourceCls.toStr()}tof ${value.toStr()}\n`.toStr());
   }
 
   function qbeEmitGetElementPtr(
@@ -3869,6 +4250,14 @@ export namespace CodegenQbe {
       },
       Analyzer::Type::U64 -> {
         text = String::create(isMax ? "18446744073709551615" : "0");
+      },
+      // The bit patterns of `FLT_MAX`/`DBL_MAX` and their negations, the
+      // bounds the C backend spells.
+      Analyzer::Type::F32 -> {
+        text = String::create(isMax ? "2139095039" : "4286578687");
+      },
+      Analyzer::Type::F64 -> {
+        text = String::create(isMax ? "9218868437227405311" : "18442240474082181119");
       },
       _ -> {
         CodegenQbe::failNamed(emitter, "MaxOf");
@@ -6658,6 +7047,15 @@ export namespace CodegenQbe {
           CodegenQbe::qbeEmitTypeDeclarations(&mut emitter, defStore, typeStore, symbols, &mut emittedTypes, temp.ty);
         }
         tempIndex += 1;
+      }
+
+      // A type this emitter cannot lay out is reported at the function whose
+      // return, local or temporary needs it, not at the start of the unit.
+      if (emitter.error.isSome()) {
+        if (emitter.errorSpan.isNone()) {
+          emitter.errorSpan = Option::SOME(function_.span);
+        }
+        break;
       }
       typeIndex += 1;
     }
