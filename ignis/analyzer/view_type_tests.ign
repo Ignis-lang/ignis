@@ -1851,7 +1851,7 @@ function derivedPointerToByteHolds(): void {
   let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
   let id: Analyzer::TypeId = store.pointer(idU8);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
 /// Scenario: a record with a `*u8` field can hold a derived pointer.
@@ -1871,7 +1871,7 @@ function derivedRecordWithPointerFieldHolds(): void {
   let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "CArgs", fields);
   let idRecord: Analyzer::TypeId = store.recordType(defId);
   let id: Analyzer::TypeId = idRecord;
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
 /// Scenario: `Option<*u8>` can hold a derived pointer.
@@ -1891,7 +1891,7 @@ function derivedInstanceWithPointerArgumentHolds(): void {
   args.push(store.pointer(idU8));
 
   let id: Analyzer::TypeId = store.instance(defId, args);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
 /// Scenario: an enum with a `*u8` payload can hold a derived pointer.
@@ -1914,7 +1914,7 @@ function derivedEnumWithPointerPayloadHolds(): void {
 
   let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Slot", variants);
   let id: Analyzer::TypeId = store.enumType(defId);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
 /// Scenario: `&mut *u8` can hold a derived pointer.
@@ -1931,13 +1931,14 @@ function derivedMutableReferenceToPointerHolds(): void {
     referent: store.pointer(idU8),
     mutable: true,
   }));
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
-/// Scenario: a record with a `Drop` implementation holding only its own `*mut u8` buffer (like `String`) cannot hold a derived pointer.
-/// Spec: S3, L30.
+/// Scenario: `String`, whose only pointer is its own `*mut u8` buffer,
+/// cannot hold a derived pointer.
+/// Spec: S3, L30, L34.
 @test
-function derivedOwningRecordDoesNot(): void {
+function derivedStringDoesNot(): void {
   let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -1948,12 +1949,12 @@ function derivedOwningRecordDoesNot(): void {
   let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
   fields.push(store.pointer(idU8));
 
-  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Text", fields);
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "String", fields);
   let mut ownedFields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
   ownedFields.push(Id::fromRaw<Analyzer::DefinitionTag>(defId.raw() - 1));
 
   let _replaced: boolean = defs.replace(defId, Analyzer::Definition::Record(Analyzer::RecordDef {
-    name: syms.intern("Text"),
+    name: syms.intern("String"),
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     fields: ownedFields,
@@ -1971,7 +1972,7 @@ function derivedOwningRecordDoesNot(): void {
   }));
 
   let id: Analyzer::TypeId = store.recordType(defId);
-  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
 /// Scenario: a record of primitives cannot hold a derived pointer.
@@ -1991,7 +1992,7 @@ function derivedRecordOfPrimitivesDoesNot(): void {
   let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Plain", fields);
   let idRecord: Analyzer::TypeId = store.recordType(defId);
   let id: Analyzer::TypeId = idRecord;
-  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
 /// Scenario: a record with a capture-free `fn(A) -> R` field cannot hold a
@@ -2012,7 +2013,246 @@ function derivedRecordWithRawFunctionFieldDoesNot(): void {
   let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Callback", fields);
   let id: Analyzer::TypeId = store.recordType(defId);
 
-  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id));
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Creates a record definition with the given field types, type parameters
+/// and `Drop` implementation flag.
+function viewTestNominalRecord(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+  fieldTypes: Vector<Analyzer::TypeId>,
+  typeParams: Vector<Analyzer::DefinitionId>,
+  implementsDrop: boolean,
+): Analyzer::DefinitionId {
+  let fieldCount: u64 = fieldTypes.length();
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(syms, defs, store, name, fieldTypes);
+  let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut index: u64 = 0;
+
+  while (index < fieldCount) {
+    fields.push(Id::fromRaw<Analyzer::DefinitionTag>(defId.raw() - (fieldCount - index) as u32));
+
+    index += 1;
+  }
+
+  let _replaced: boolean = defs.replace(defId, Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: syms.intern(name),
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: typeParams,
+    fields: fields,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: store.recordType(defId),
+    implementsCopy: false,
+    implementsDrop: implementsDrop,
+    implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
+    cLayout: false,
+    isExtern: false,
+  }));
+
+  return defId;
+}
+
+/// Creates a type parameter `T`, `@owns` when `owns` is set.
+function viewTestTypeParam(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  owns: boolean
+): Vector<Analyzer::DefinitionId> {
+  let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  params.push(defs.push(Analyzer::Definition::TypeParam(Analyzer::TypeParamDef {
+    name: syms.intern("T"),
+    owner: Id::fromRaw<Analyzer::DefinitionTag>(0),
+    index: 0,
+    bounds: Vector::new<String>(),
+    ownsStorage: owns,
+  })));
+  return params;
+}
+
+/// The post-monomorphization shell of `generic<argument>`: a plain record with
+/// the substituted `*mut argument` field and `Drop`, whose instance origin
+/// names the generic and the argument.
+function viewTestOwningShell(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  owns: boolean,
+  argument: Analyzer::TypeId,
+): Analyzer::TypeId {
+  let params: Vector<Analyzer::DefinitionId> = viewTestTypeParam(syms, defs, owns);
+  let mut genericFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  genericFields.push(store.pointer(store.param(syms.intern("T"))));
+  let genericId: Analyzer::DefinitionId = viewTestNominalRecord(syms, defs, store, "Storage", genericFields, params, true);
+
+  let mut shellFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  shellFields.push(store.pointer(argument));
+  let shellId: Analyzer::DefinitionId = viewTestNominalRecord(syms, defs, store, "StorageShell", shellFields, Vector::new<Analyzer::DefinitionId>(), true);
+
+  let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  arguments.push(argument);
+  defs.setSymbolOrigin(shellId, Analyzer::SymbolOrigin::Instance(Analyzer::InstanceOrigin {
+    generic: genericId,
+    owner: Option::NONE,
+    ownerArgs: Vector::new<Analyzer::TypeId>(),
+    methodArgs: arguments,
+  }));
+
+  return store.recordType(shellId);
+}
+
+/// Scenario: a user type with a `Drop` implementation and a `*u8` field is walked like any record and can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedUserDropRecordHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut dropFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  dropFields.push(store.pointer(idU8));
+  let dropId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "D", dropFields, Vector::new<Analyzer::DefinitionId>(), true);
+  let idDrop: Analyzer::TypeId = store.recordType(dropId);
+  let id: Analyzer::TypeId = idDrop;
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Scenario: a non-`Drop` record nesting a user `Drop` type with a `*u8` field can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedRecordOfUserDropHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut dropFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  dropFields.push(store.pointer(idU8));
+  let dropId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "D", dropFields, Vector::new<Analyzer::DefinitionId>(), true);
+  let idDrop: Analyzer::TypeId = store.recordType(dropId);
+
+  let mut outerFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerFields.push(idDrop);
+  let outerId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Outer", outerFields);
+  let id: Analyzer::TypeId = store.recordType(outerId);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Scenario: `Option<D>` with a user `Drop` type `D { p: *u8 }` can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedInstanceOfUserDropHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut dropFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  dropFields.push(store.pointer(idU8));
+  let dropId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "D", dropFields, Vector::new<Analyzer::DefinitionId>(), true);
+  let idDrop: Analyzer::TypeId = store.recordType(dropId);
+
+  let boxId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idDrop);
+
+  let id: Analyzer::TypeId = store.instance(boxId, args);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Scenario: a `Drop` instance of an `@owns` generic with a `*u8` argument (`Vector<*u8>` before monomorphization) can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedOwningInstanceWithPointerArgumentHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let params: Vector<Analyzer::DefinitionId> = viewTestTypeParam(&mut syms, &mut defs, true);
+  let genericId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "Storage", Vector::new<Analyzer::TypeId>(), params, true);
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.pointer(idU8));
+
+  let id: Analyzer::TypeId = store.instance(genericId, args);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Scenario: the post-monomorphization shell of an `@owns` generic with a `*u8` argument (`Vector<*u8>` as the borrow check sees it) can hold a derived pointer through its instance origin.
+/// Spec: S3, L34.
+@test
+function derivedOwningShellWithPointerArgumentHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.pointer(idU8));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Scenario: the shell of an `@owns` generic over `H { p: *u8 }` (`Rc<H>`) can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedOwningShellOfRecordWithPointerHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut holderFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  holderFields.push(store.pointer(idU8));
+  let holderId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "H", holderFields);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.recordType(holderId));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Scenario: the shell of an `@owns` generic over `i32` (`Vector<i32>`) cannot hold a derived pointer: its own `*mut i32` buffer is skipped.
+/// Spec: S3, L34.
+@test
+function derivedOwningShellWithPrimitiveArgumentDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+}
+
+/// Scenario: the shell of a user `Drop` generic without `@owns` (`Boxed<i32>` with a `*mut i32` field) is walked through its fields.
+/// Spec: S3, L34.
+@test
+function derivedUserDropShellWithPrimitiveArgumentHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, false, idI32);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
 }
 
 // ─── Closure values ───────────────────────────────────────────────────────────

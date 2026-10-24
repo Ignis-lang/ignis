@@ -12,6 +12,7 @@ import Output from "@compiler::output";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import HashMap from "std::collections";
+import Symbol from "@compiler::symbols";
 
 import _ from "./ownership_report";
 
@@ -237,6 +238,10 @@ export namespace Borrowck {
     /// The binding a `let` is recording held borrows for, `NO_HOLDER`
     /// outside one.
     currentHolder: u32;
+
+    /// The interned name of `String`, the owned buffer whose own pointer
+    /// `Analyzer::ViewType::canHoldDerived` does not count.
+    public ownedBufferName: Analyzer::SymbolId;
 
     /// Last statement each holder was planned to be used in, by holder;
     /// `NO_LAST_STATEMENT` keeps its borrows to the end of the scope. The
@@ -483,6 +488,7 @@ export namespace Borrowck {
         heldRecorded: Vector::new<u32>(),
         heldHolders: Vector::new<u32>(),
         currentHolder: Borrowck::NO_HOLDER,
+        ownedBufferName: Symbol::fromRaw(4294967295),
         plannedHolders: Vector::new<u32>(),
         plannedLastStatements: Vector::new<u64>(),
         planBlocks: Vector::new<u32>(),
@@ -829,6 +835,10 @@ export namespace Borrowck {
       self.reportEvents = Vector::new<Borrowck::OwnershipEvent>();
 
       return taken;
+    }
+
+    public setOwnedBufferName(&mut self, name: Analyzer::SymbolId): void {
+      self.ownedBufferName = name;
     }
 
     public setCurrentFunction(&mut self, defId: Analyzer::DefinitionId): void {
@@ -8263,7 +8273,7 @@ export namespace Borrowck {
 
         while (bindingIndex < reached.length()) {
           if (let Option::SOME(binding) = reached.get(bindingIndex)) {
-            if (Borrowck::bindingCanHoldDerived(defStore, typeStore, *binding)) {
+            if (Borrowck::bindingCanHoldDerived(defStore, typeStore, state.ownedBufferName, *binding)) {
               Borrowck::pushRaw(output, *binding);
             }
           }
@@ -8277,10 +8287,10 @@ export namespace Borrowck {
           let mut qualifies: boolean = true;
 
           if (let Option::SOME(targetType) = Borrowck::nodeTypeOf(hir, assignNode.target)) {
-            qualifies = Analyzer::ViewType::canHoldDerived(defStore, typeStore, targetType);
+            qualifies = Analyzer::ViewType::canHoldDerived(defStore, typeStore, targetType, state.ownedBufferName);
           }
 
-          if (qualifies && !Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, assignNode.target, output)) {
+          if (qualifies && !Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, assignNode.target, 0, output)) {
             return false;
           }
         }
@@ -8292,74 +8302,151 @@ export namespace Borrowck {
     return true;
   }
 
-  /// Pushes the binding the place `target` writes into: its root variable,
-  /// or, when the root is a reference, the binding a `let` of this block
-  /// took the reference from. Returns false when it cannot be resolved: a
-  /// root that is not a variable, a reference not taken by a `let` of this
-  /// block, or a projection through a raw pointer.
+  /// Pushes the bindings that own the storage the place `target` writes:
+  /// the variable a direct place names, and through a dereference — explicit
+  /// (`*slot`) or implied by projecting through a reference or raw pointer
+  /// (`slot.name`) — the binding the reference was taken from by a `let` of
+  /// this block (`let slot = &mut holder`), following reborrows
+  /// (`&mut *slot`, `&mut holder.inner`) to the owner. Returns false when
+  /// the storage cannot be resolved to a local: a static, a reference or
+  /// pointer held inside another value (`wrapper.r.p`), a parameter, or a
+  /// pointer not taken by a `let` of this block.
   function pushPlaceRoot(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hir: &Hir::HirStore,
     block: &Hir::HirBlock,
     target: Hir::HirId,
+    depth: u32,
     output: &mut Vector<u32>,
   ): boolean {
-    let Option::SOME(root) = Borrowck::extractRootVariable(hir, target) else {
+    if (depth > 32) {
+      return false;
+    }
+
+    let Option::SOME(node) = hir.get(target) else {
       return false;
     };
 
-    Borrowck::pushRaw(output, root.raw());
+    match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> {
+        Borrowck::pushRaw(output, defId.raw());
+        return true;
+      },
+      Hir::HirKind::FieldAccess(access) -> {
+        return Borrowck::pushProjectionBase(defStore, typeStore, hir, block, access.base, depth, output);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        return Borrowck::pushProjectionBase(defStore, typeStore, hir, block, indexNode.base, depth, output);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        return Borrowck::pushReferenceOwner(defStore, typeStore, hir, block, inner, depth + 1, output);
+      },
+      _ -> {
+        return false;
+      },
+    };
+  }
 
-    let Option::SOME(rootType) = Borrowck::variableTypeOf(defStore, root) else {
+  /// The owner of a projection's base: the base place itself, or, when the
+  /// base is a reference, raw pointer or slice the projection reads through,
+  /// the owner of what it points to.
+  function pushProjectionBase(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    block: &Hir::HirBlock,
+    base: Hir::HirId,
+    depth: u32,
+    output: &mut Vector<u32>,
+  ): boolean {
+    let Option::SOME(baseType) = Borrowck::nodeTypeOf(hir, base) else {
       return false;
     };
 
-    let mut current: Analyzer::TypeId = rootType;
+    if (Borrowck::typePointsElsewhere(defStore, typeStore, baseType)) {
+      return Borrowck::pushReferenceOwner(defStore, typeStore, hir, block, base, depth + 1, output);
+    }
+
+    return Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, base, depth + 1, output);
+  }
+
+  /// The owner of the storage the reference or pointer `reference` points
+  /// to: only a local whose `let` in this block takes it as `&place` or
+  /// `&mut place` resolves, to the owner of that place.
+  function pushReferenceOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    block: &Hir::HirBlock,
+    reference: Hir::HirId,
+    depth: u32,
+    output: &mut Vector<u32>,
+  ): boolean {
+    if (depth > 32) {
+      return false;
+    }
+
+    let Option::SOME(node) = hir.get(reference) else {
+      return false;
+    };
+
+    let Hir::HirKind::Variable(defId) = &node.kind else {
+      return false;
+    };
+
+    let Option::SOME(source) = Borrowck::referenceSourceOf(hir, block, defId.raw()) else {
+      return false;
+    };
+
+    Borrowck::pushRaw(output, defId.raw());
+    return Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, source, depth + 1, output);
+  }
+
+  /// Whether a value of `typeId` addresses storage it does not hold: a
+  /// reference, a raw pointer or a slice, through aliases.
+  function typePointsElsewhere(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut current: Analyzer::TypeId = typeId;
     let mut depth: u32 = 0;
 
     while (depth < 64) {
       let Option::SOME(type_) = typeStore.get(current) else {
-        return false;
+        return true;
       };
 
       match (type_) {
-        Analyzer::Type::Reference(_) -> {
-          let Option::SOME(source) = Borrowck::referenceSourceOf(hir, block, root.raw()) else {
-            return false;
-          };
-
-          Borrowck::pushRaw(output, source);
+        Analyzer::Type::Reference(_) | Analyzer::Type::Pointer(_) | Analyzer::Type::Slice(_) -> {
           return true;
-        },
-        Analyzer::Type::Pointer(_) -> {
-          return Borrowck::isVariableNode(hir, target);
         },
         Analyzer::Type::Alias(aliasDefId) -> {
           let Option::SOME(aliased) = Borrowck::aliasedTypeOf(defStore, aliasDefId) else {
-            return false;
+            return true;
           };
 
           current = aliased;
         },
         _ -> {
-          return true;
+          return false;
         },
       };
 
       depth += 1;
     }
 
-    return false;
+    return true;
   }
 
-  /// The root binding of the place a top-level `let binding = &place;` or
-  /// `&mut place` of `block` takes its reference from.
+  /// The place a top-level `let binding = &place;` or `&mut place` of
+  /// `block` takes its reference from.
   function referenceSourceOf(
     hir: &Hir::HirStore,
     block: &Hir::HirBlock,
     binding: u32
-  ): Option<u32> {
+  ): Option<Hir::HirId> {
     let mut index: u64 = 0;
 
     while (index < block.statements.length()) {
@@ -8375,11 +8462,7 @@ export namespace Borrowck {
                 return Option::NONE;
               };
 
-              let Option::SOME(source) = Borrowck::extractRootVariable(hir, reference.expression) else {
-                return Option::NONE;
-              };
-
-              return Option::SOME(source.raw());
+              return Option::SOME(reference.expression);
             }
           }
         }
@@ -8396,13 +8479,14 @@ export namespace Borrowck {
   function bindingCanHoldDerived(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    ownedBufferName: Analyzer::SymbolId,
     defRaw: u32,
   ): boolean {
     let Option::SOME(typeId) = Borrowck::variableTypeOf(defStore, Id::fromRaw<Analyzer::DefinitionTag>(defRaw)) else {
       return true;
     };
 
-    return Analyzer::ViewType::canHoldDerived(defStore, typeStore, typeId);
+    return Analyzer::ViewType::canHoldDerived(defStore, typeStore, typeId, ownedBufferName);
   }
 
   /// Appends `nodeIndex` to the uses of the binding `key`.
@@ -10461,6 +10545,7 @@ export namespace Borrowck {
     state.pushScopeEnding(0, false, false, Borrowck::closingSpanOf(hir, bodyId));
     state.setInDropMethod(Borrowck::isInstanceDropMethod(defStore, symbols, functionId));
     state.setCurrentFunction(functionId);
+    state.setOwnedBufferName(symbols.intern("String"));
 
     let mut captureIndex: u64 = 0;
 

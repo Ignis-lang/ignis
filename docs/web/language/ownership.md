@@ -167,8 +167,12 @@ A view must not outlive its owner:
   pattern binding destructured from it, a closure capturing it, or any binding declared or
   place assigned (a local, a field, `*reference`, an element) by a statement that uses it,
   when that type can hold a view, a closure or a raw pointer at any depth (`text as *u8`, a
-  `CArgs { name: *u8 }` returned by a call that received the view; not the buffer a `Drop`
-  type such as `String` owns).
+  `CArgs { name: *u8 }` returned by a call that received the view). Only the buffers of
+  `String` and of types with an `@owns` type parameter (`Vector`, `Rc`, ...) do not count;
+  their type arguments do (`Vector<*u8>`), and a user `Drop` type counts through its fields.
+  A place whose storage does not resolve to a local of the block — a static, or a place
+  reached through a reference or pointer held inside another value (`wrapper.r.p`) — keeps
+  the borrow to the end of the block.
   Granularity is the whole
   statement: a use inside a loop body keeps the borrow for every iteration, a use in the
   block's tail or in a `defer` body keeps it to the end of the block, and so does a view handed
