@@ -3867,20 +3867,35 @@ export namespace Analyzer {
 
           let ownerDefId: Analyzer::DefinitionId = *traitDefId;
           let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
           let mut traitIndex: u64 = 0;
 
           while (traitIndex < boundTraits.length()) {
             if (let Option::SOME(boundTrait) = boundTraits.get(traitIndex)) {
-              if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(*boundTrait)) {
-                let mut methodIndex: u64 = 0;
+              let mut traitMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
 
-                while (methodIndex < trait_.methods.length()) {
-                  if (let Option::SOME(methodId) = trait_.methods.get(methodIndex)) {
-                    methods.push(*methodId);
+              if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(*boundTrait)) {
+                traitMethods = Analyzer::Typecheck::copyDefinitionIdVector(&trait_.methods);
+              }
+
+              let mut methodIndex: u64 = 0;
+
+              while (methodIndex < traitMethods.length()) {
+                if (let Option::SOME(methodId) = traitMethods.get(methodIndex)) {
+                  let mut isStatic: boolean = false;
+
+                  if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(*methodId)) {
+                    isStatic = methodDef.isStatic;
                   }
 
-                  methodIndex += 1;
+                  if (isStatic) {
+                    staticMethods.push(*methodId);
+                  } else {
+                    methods.push(*methodId);
+                  }
                 }
+
+                methodIndex += 1;
               }
             }
 
@@ -3891,7 +3906,7 @@ export namespace Analyzer {
             defId: ownerDefId,
             typeId: resolvedType.typeId,
             instanceMethods: methods,
-            staticMethods: Vector::new<Analyzer::DefinitionId>(),
+            staticMethods: staticMethods,
             typeParamSymbols: Vector::new<Analyzer::SymbolId>(),
             typeArguments: Vector::new<Analyzer::TypeId>(),
           });

@@ -1819,11 +1819,12 @@ export namespace Mono {
     return Option::NONE;
   }
 
-  /// The instance method on `ownerDef` implementing `traitMethodDef`, or NONE
-  /// when the call does not go through a trait at all.
+  /// The method on `ownerDef` implementing `traitMethodDef`, or NONE when the
+  /// call does not go through a trait at all.
   ///
   /// The implementation is matched by name and by how many parameters it takes,
-  /// which is what separates two overloads of the same trait method name.
+  /// which is what separates two overloads of the same trait method name. A
+  /// static trait method is looked up among the owner's static methods.
   function traitImplementationMethod(
     defStore: &mut Analyzer::DefinitionStore,
     ownerDef: Analyzer::DefinitionId,
@@ -1839,16 +1840,17 @@ export namespace Mono {
 
     let traitMethodName: Analyzer::SymbolId = traitMethod.name;
     let traitMethodArity: u64 = traitMethod.params.length();
+    let traitMethodIsStatic: boolean = traitMethod.isStatic;
 
     let mut candidates: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
 
     if (let Option::SOME(definition) = defStore.get(ownerDef)) {
       match (definition) {
         Analyzer::Definition::Record(recordDef) -> {
-          candidates = Mono::copyDefinitionIds(&recordDef.instanceMethods);
+          candidates = traitMethodIsStatic ? Mono::copyDefinitionIds(&recordDef.staticMethods) : Mono::copyDefinitionIds(&recordDef.instanceMethods);
         },
         Analyzer::Definition::Enum(enumDef) -> {
-          candidates = Mono::copyDefinitionIds(&enumDef.instanceMethods);
+          candidates = traitMethodIsStatic ? Mono::copyDefinitionIds(&enumDef.staticMethods) : Mono::copyDefinitionIds(&enumDef.instanceMethods);
         },
         _ -> {},
       };
@@ -2457,6 +2459,29 @@ export namespace Mono {
           let mut rewritten: boolean = false;
 
           let mut ownerInstance: Option<Analyzer::InstanceType> = Option::NONE;
+          let mut selfType: Option<Analyzer::TypeId> = Option::NONE;
+
+          // `T::name(args)` names a static trait method. With `T` substituted
+          // the call goes to the implementing type's static method, the same
+          // way a bound call with a receiver does below.
+          if (let Option::SOME(boundSelf) = methodNode.selfType) {
+            let concreteSelf: Analyzer::TypeId = Mono::substituteType(defStore, typeStore, symbols, state, subst, boundSelf);
+            selfType = Option::SOME(concreteSelf);
+            ownerInstance = Mono::receiverInstance(defStore, typeStore, state, concreteSelf);
+
+            let mut implementer: Option<Analyzer::DefinitionId> = Mono::receiverNominalDef(defStore, typeStore, concreteSelf);
+
+            if (let Option::SOME(instance) = &ownerInstance) {
+              implementer = Option::SOME(instance.definition);
+            }
+
+            if (let Option::SOME(nominalDef) = implementer) {
+              if (let Option::SOME(implementation) = Mono::traitImplementationMethod(defStore, nominalDef, method)) {
+                method = implementation;
+                selfType = Option::NONE;
+              }
+            }
+          }
 
           if (let Option::SOME(receiverId) = receiver) {
             let mut receiverType: Analyzer::TypeId = nodeType;
@@ -2545,6 +2570,7 @@ export namespace Mono {
             method: method,
             typeArgs: typeArgs,
             args: args,
+            selfType: selfType,
           });
         },
         Hir::HirKind::CallClosure(closureCall) -> {

@@ -522,6 +522,8 @@ record Item {
 }
 ```
 
+A trait may declare `static` methods, required or with a default body; `Self` in their signatures is the implementing type. A record or enum implements them with `static` methods of the same signature (A0276, A0277), and a generic calls them through a bounded type parameter as `T::name(args)` (A0278), which reaches the implementing type's method after monomorphization. A static trait method is not callable through a value or as `Trait::name(args)` (A0279). See `docs/TRAITS.md`.
+
 ### 4.9 Namespaces
 
 ```ignis

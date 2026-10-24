@@ -440,6 +440,11 @@ spelled (see the reserved list).
 //     greet(&self): i32 { return self.name() + 1; }
 //   }
 // An omitted return type means `void`.
+// A `static` trait method takes no receiver; `Self` in its signature is the
+// implementing type, and a bounded type parameter calls it as `T::name(args)`:
+//   trait Make {
+//     static make(seed: i32): Self;
+//   }
 
 <statement> ::= <declaration>
   | <if>

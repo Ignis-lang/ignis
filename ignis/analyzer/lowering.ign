@@ -2079,6 +2079,7 @@ export namespace Lowering {
 
     let mut localCallee: boolean = false;
     let mut calleeDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut boundSelfType: Option<Analyzer::TypeId> = Option::NONE;
 
     if (let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
       &output.resolvedBodies.bodyResolution,
@@ -2090,6 +2091,12 @@ export namespace Lowering {
         },
         Analyzer::ResolverBodies::ResolvedRef::Definition(resolvedDef) -> {
           calleeDefOpt = Option::SOME(resolvedDef);
+        },
+        // `T::name(args)`: the typechecker recorded the bound's static method
+        // as the call target, read below.
+        Analyzer::ResolverBodies::ResolvedRef::TypeParam(paramSymbol) -> {
+          let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+          boundSelfType = Option::SOME(typeStoreParamRef.param(paramSymbol));
         },
         _ -> {},
       };
@@ -2158,6 +2165,7 @@ export namespace Lowering {
           method: calleeDef,
           typeArgs: callTypeArgs,
           args: staticArgs,
+          selfType: boundSelfType,
         }),
         span: call.span,
         typeId: staticType,
@@ -2886,6 +2894,7 @@ export namespace Lowering {
         method: methodDefId,
         typeArgs: callTypeArgs,
         args: args,
+        selfType: Option::NONE,
       }),
       span: call.span,
       typeId: callType,
@@ -4669,6 +4678,7 @@ export namespace Lowering {
           method: calleeDef,
           typeArgs: staticTypeArgs,
           args: staticArgs,
+          selfType: Option::NONE,
         }),
         span: pipe.span,
         typeId: staticType,

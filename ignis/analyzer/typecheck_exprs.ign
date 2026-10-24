@@ -1076,6 +1076,31 @@ export namespace Analyzer {
         }
       }
 
+      // Branch 2a: `T::name(args)` on a type parameter calls a static method
+      // one of its bounds declares.
+      let paramResolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, call.callee);
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::TypeParam(paramSymbol)) = paramResolvedOpt) {
+        let mut isMemberPath: boolean = false;
+
+        if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(call.callee)) {
+          isMemberPath = path.segments.length() >= 2;
+        }
+
+        if (isMemberPath) {
+          return Analyzer::Typecheck::checkBoundStaticMethodCall(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            callExprId,
+            call,
+            paramSymbol,
+          );
+        }
+      }
+
       // Branch 2b: `Enum::Variant(args)` — a constructor, not a callee. Handled
       // before `checkExpr(callee)` so the bare-variant guard in
       // `checkResolvedValueExpr` never sees an applied constructor.
@@ -2082,6 +2107,137 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
       return Option::SOME(signature.returnType);
+    }
+
+    /// Typechecks `T::name(args)` where `T` is a type parameter: `name` is a
+    /// static method of one of `T`'s bounds, and `Self` in its signature reads
+    /// as `T`. The trait's method is recorded as the call target; lowering keeps
+    /// `T` on the call so monomorphization reaches the implementing type's
+    /// method once `T` is concrete.
+    function checkBoundStaticMethodCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      paramSymbol: Analyzer::SymbolId,
+    ): Option<Analyzer::TypeId> {
+      let mut memberName: String = String::create("");
+
+      if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(call.callee)) {
+        if (let Option::SOME(last) = path.segments.get(path.segments.length() - 1)) {
+          memberName = last.clone();
+        }
+      }
+
+      let paramName: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, paramSymbol);
+      let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+      let paramType: Analyzer::TypeId = typeStoreParamRef.param(paramSymbol);
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+      let boundTraits: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::traitBoundsFor(defStore, state.currentFunction, paramSymbol, selfSymbol);
+
+      let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (boundTraits.length() > 0) {
+        let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireMethodOwner(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          call.span,
+          paramType,
+          "static method call target must be a bounded type parameter",
+          "typecheck does not support generic method receivers",
+        );
+        let Option::SOME(owner) = ownerOpt else {
+          return Option::NONE;
+        };
+
+        let candidates: Vector<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(
+          defStore,
+          &owner.staticMethods,
+          memberName.toStr(),
+          symbols,
+        );
+
+        if (Analyzer::Typecheck::rejectMethodInSeveralBounds(state, defStore, symbols, &owner, &candidates, memberName.toStr(), call.span)) {
+          return Option::NONE;
+        }
+
+        staticMethods = candidates;
+        instanceMethods = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(
+          defStore,
+          &owner.instanceMethods,
+          memberName.toStr(),
+          symbols,
+        );
+      }
+
+      let Option::SOME(methodDefId) = staticMethods.get(0) else {
+        let message: String = `no bound of type parameter '${paramName.toStr()}' declares a static method '${memberName.toStr()}'`;
+        let mut label: String = `a static method reached through '${paramName.toStr()}' has to be declared by one of its bounds`;
+
+        if (instanceMethods.length() > 0) {
+          label = `'${memberName.toStr()}' is an instance method: call it through a value of type '${paramName.toStr()}'`;
+        }
+
+        Analyzer::Typecheck::emitDiagnosticLabeled(state, call.span, DiagnosticCode::BOUND_STATIC_METHOD_NOT_FOUND, message.toStr(), label.toStr());
+        return Option::NONE;
+      };
+      let traitMethodId: Analyzer::DefinitionId = *methodDefId;
+
+      if (call.typeArguments.length() > 0 || Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, traitMethodId).length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "generic static methods called through a type parameter");
+        return Option::NONE;
+      }
+
+      let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, traitMethodId) else {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through non-function definitions");
+        return Option::NONE;
+      };
+
+      let declaredParams: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, true);
+      let mut selfSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      selfSymbols.push(selfSymbol);
+      let mut selfArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      selfArguments.push(paramType);
+
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < declaredParams.length()) {
+        if (let Option::SOME(declared) = declaredParams.get(index)) {
+          let mut typeStoreSubstituteRef: &mut Analyzer::TypeStore = typeStore;
+          paramTypes.push(typeStoreSubstituteRef.substitute(*declared, &selfSymbols, &selfArguments));
+        }
+
+        index += 1;
+      }
+
+      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+      let returnType: Analyzer::TypeId = typeStoreReturnRef.substitute(signature.returnType, &selfSymbols, &selfArguments);
+      let calleeType: Analyzer::TypeId = typeStoreReturnRef.functionType(Analyzer::Typecheck::copyTypeIdVector(&paramTypes), returnType);
+
+      Analyzer::Typecheck::recordExprType(state, call.callee, calleeType);
+      Analyzer::Typecheck::recordCallTarget(state, callExprId, traitMethodId);
+
+      return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &paramTypes,
+        returnType,
+      );
     }
 
     /// Typechecks `expr.method(args)` where `call.callee` is a `MemberAccess`

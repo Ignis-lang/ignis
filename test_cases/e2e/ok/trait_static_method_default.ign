@@ -1,0 +1,49 @@
+// e2e: std
+// A static trait method with a body is a default: an implementer that does not
+// declare it gets the trait's body, and one that declares it keeps its own.
+import Io from "std::io";
+
+trait Seeded {
+  static seed(): i32;
+
+  static doubledSeed(): i32 {
+    return 40;
+  }
+}
+
+@implements(Seeded)
+record Plain {
+  public unused: i32;
+
+  static seed(): i32 {
+    return 3;
+  }
+}
+
+@implements(Seeded)
+enum Custom {
+  ONLY,
+
+  static seed(): i32 {
+    return 5;
+  }
+
+  static doubledSeed(): i32 {
+    return 100;
+  }
+}
+
+function doubled<T: Seeded>(): i32 {
+  return T::doubledSeed();
+}
+
+function seedOf<T: Seeded>(): i32 {
+  return T::seed();
+}
+
+function main(): i32 {
+  Io::println(`plain ${doubled<Plain>()} ${Plain::doubledSeed()} ${seedOf<Plain>()}`.toStr());
+  Io::println(`custom ${doubled<Custom>()} ${Custom::doubledSeed()} ${seedOf<Custom>()}`.toStr());
+
+  return 0;
+}
