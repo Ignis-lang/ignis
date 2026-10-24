@@ -2559,7 +2559,8 @@ export namespace CodegenC {
 
   /// The C expression for the largest value a numeric type holds. A
   /// non-numeric type cannot reach `@maxOf`, so the fallback only keeps the
-  /// emitter total.
+  /// emitter total. The float bounds are exact hex literals rather than
+  /// `FLT_MAX`/`DBL_MAX`, which would need `<float.h>` in every unit.
   function typeMaxValue(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): str {
     let Option::SOME(typeNode) = typeStore.get(typeId) else {
       return "0";
@@ -2574,8 +2575,8 @@ export namespace CodegenC {
       Analyzer::Type::U16 -> "UINT16_MAX",
       Analyzer::Type::U32 -> "UINT32_MAX",
       Analyzer::Type::U64 -> "UINT64_MAX",
-      Analyzer::Type::F32 -> "FLT_MAX",
-      Analyzer::Type::F64 -> "DBL_MAX",
+      Analyzer::Type::F32 -> "0x1.fffffep+127f",
+      Analyzer::Type::F64 -> "0x1.fffffffffffffp+1023",
       _ -> "0",
     };
   }
@@ -2595,8 +2596,8 @@ export namespace CodegenC {
       Analyzer::Type::U16 -> "((u16)0)",
       Analyzer::Type::U32 -> "((u32)0)",
       Analyzer::Type::U64 -> "((u64)0)",
-      Analyzer::Type::F32 -> "(-FLT_MAX)",
-      Analyzer::Type::F64 -> "(-DBL_MAX)",
+      Analyzer::Type::F32 -> "(-0x1.fffffep+127f)",
+      Analyzer::Type::F64 -> "(-0x1.fffffffffffffp+1023)",
       _ -> "0",
     };
   }

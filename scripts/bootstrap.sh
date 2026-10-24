@@ -133,6 +133,11 @@ Commands:
            stage2's binary). A deliberate developer step: the new dumps land in
            the pull request's diff, where a reviewer reads them as the
            semantic change they are.
+  gate-qbe-selfhost [stage1-bin]
+           Build the compiler with --target qbe using stage1 (default: the
+           ladder's stage1), have that QBE-built compiler compile ignis/ with
+           the C target, and require its C to be identical to stage1's
+           -> gates/QBE-SELFHOST.json. Needs qbe on PATH. Reported, not a promotion gate.
   gates    Run every stage and gate in order, then write the promotion report.
   seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
@@ -1054,6 +1059,101 @@ run_gate_g3() {
   run_gate_g3_compare
 }
 
+# QBE-SELFHOST: a backend is done only when the compiler builds with it and
+# the compiler it built is correct (BOOTSTRAP.md, "Every backend builds the
+# compiler"). stage1 builds ignis/ with `--target qbe`; that QBE-built
+# compiler then compiles ignis/ with the C target, and its C has to be
+# identical to the C stage1 emits for the same tree, a G1 across backends.
+# The reference is stage2's selfhost_emit.c when stage2 is current against
+# this stage1 (stage2 is exactly stage1's C build of the tree), so a ladder
+# that already ran pays for no third compile. Never part of the promotion
+# verdict: the report lists QBE-SELFHOST.json as informational.
+#
+#   $1  stage1 binary (optional, default: stage1 built by the ladder)
+qbe_selfhost_compile() {
+  local label="$1" compiler="$2" dir="$3"
+  shift 3
+
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  info "gate-qbe-selfhost: ${label}: ${compiler} $*"
+  (cd "$dir" && "$compiler" "$PROJECT_ROOT" "$@" --out-dir "$dir/out" -o "$dir/ignis") >"$dir/log.txt" 2>&1
+}
+
+run_gate_qbe_selfhost() {
+  local gate_id="QBE-SELFHOST"
+  local stage1_bin="${1-}"
+  local root="${BOOTSTRAP_ROOT}/qbe-selfhost"
+
+  if [[ -z "$stage1_bin" ]]; then
+    ensure_stage stage1
+    stage1_bin="$(stage_bin stage1)"
+  fi
+  stage1_bin="$(readlink -f "$stage1_bin")"
+  [[ -x "$stage1_bin" ]] || fail "gate-qbe-selfhost: no executable stage1 at ${stage1_bin}"
+
+  mkdir -p "$GATES_DIR"
+  rm -f "${GATES_DIR}/${gate_id}.json"
+
+  if ! command -v qbe >/dev/null 2>&1; then
+    write_gate "$gate_id" fail "qbe is not on PATH"
+    return 1
+  fi
+
+  local qbe_dir="${root}/qbe-build"
+  local cross_dir="${root}/cross"
+  if ! qbe_selfhost_compile "stage1 --target qbe" "$stage1_bin" "$qbe_dir" --target qbe ||
+    [[ ! -x "$qbe_dir/ignis" ]]; then
+    tail -n 20 "$qbe_dir/log.txt" >&2 || true
+    write_gate "$gate_id" fail "the compiler does not build with --target qbe" \
+      "$(json_object log "$qbe_dir/log.txt" first_error "$(first_error_line "$qbe_dir/log.txt")")"
+    return 1
+  fi
+
+  local reference_c
+  if [[ -f "$(stage_dir stage2)/selfhost_emit.c" &&
+    "$(stage_bin stage1)" -ef "$stage1_bin" &&
+    -z "$(stage_stale_reason stage2 "$stage1_bin")" ]]; then
+    reference_c="$(stage_dir stage2)/selfhost_emit.c"
+    info "gate-qbe-selfhost: reusing stage2's C as the reference (${reference_c})"
+  else
+    local reference_dir="${root}/reference"
+    if ! qbe_selfhost_compile "stage1 C reference" "$stage1_bin" "$reference_dir"; then
+      write_gate "$gate_id" fail "stage1 did not build the C reference" \
+        "$(json_object log "$reference_dir/log.txt")"
+      return 1
+    fi
+    reference_c="$reference_dir/out/user/src/ignis.c"
+  fi
+
+  local cross_c="$cross_dir/out/user/src/ignis.c"
+  if ! qbe_selfhost_compile "QBE-built compiler, C target" "$qbe_dir/ignis" "$cross_dir" ||
+    [[ ! -f "$cross_c" ]]; then
+    tail -n 20 "$cross_dir/log.txt" >&2 || true
+    write_gate "$gate_id" fail "the QBE-built compiler did not compile ignis/" \
+      "$(json_object log "$cross_dir/log.txt" first_error "$(first_error_line "$cross_dir/log.txt")")"
+    return 1
+  fi
+
+  local reference_md5 cross_md5
+  reference_md5="$(file_md5 "$reference_c")"
+  cross_md5="$(file_md5 "$cross_c")"
+  local details
+  details="$(json_object reference_c "$reference_c" cross_c "$cross_c" \
+    reference_md5 "$reference_md5" cross_md5 "$cross_md5")"
+
+  if [[ -n "$reference_md5" && "$reference_md5" == "$cross_md5" ]]; then
+    write_gate "$gate_id" pass "the QBE-built compiler emits stage1's C (${cross_md5})" "$details"
+    return 0
+  fi
+
+  local changed
+  changed="$(diff "$reference_c" "$cross_c" | grep -c '^[<>]' || true)"
+  diff "$reference_c" "$cross_c" | head -n 20 >&2 || true
+  write_gate "$gate_id" fail "the QBE-built compiler's C differs from stage1's (${changed} lines)" "$details"
+  return 1
+}
+
 run_report() {
   mkdir -p "$GATES_DIR"
 
@@ -1684,6 +1784,7 @@ main() {
     gate-g3-stage2) run_gate_g3_stage2 ;;
     gate-g3-compare) run_gate_g3_compare ;;
     gate-g3-stage1) run_gate_g3_stage1 ;;
+    gate-qbe-selfhost) run_gate_qbe_selfhost "${2-}" ;;
     gates) run_gates ;;
     seal-gates) seal_missing_gates ;;
     report) run_report ;;

@@ -463,6 +463,12 @@ jobs:
           - gate: G3-stage1
             command: gate-g3-stage1
             result: G3-STAGE1.json
+          # The compiler built with --target qbe has to reproduce stage1's C
+          # (BOOTSTRAP.md, "Every backend builds the compiler"). It reuses
+          # stage2's emitted C as the reference. Not a promotion gate.
+          - gate: QBE-selfhost
+            command: gate-qbe-selfhost
+            result: QBE-SELFHOST.json
 
     steps:
       - name: Checkout repository
@@ -509,8 +515,8 @@ jobs:
             echo "superseded=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install QBE 1.2 for executable backend tests
-        if: steps.head.outputs.superseded != 'true' && (matrix.gate == 'G3-stage1' || matrix.gate == 'G3-stage2')
+      - name: Install QBE 1.2 for executable backend tests and the QBE build
+        if: steps.head.outputs.superseded != 'true' && (matrix.gate == 'G3-stage1' || matrix.gate == 'G3-stage2' || matrix.gate == 'QBE-selfhost')
         run: |
           curl -fsSL https://c9x.me/compile/release/qbe-1.2.tar.xz -o "$RUNNER_TEMP/qbe-1.2.tar.xz"
           echo "a6d50eb952525a234bf76ba151861f73b7a382ac952d985f2b9af1df5368225d  $RUNNER_TEMP/qbe-1.2.tar.xz" | sha256sum --check
@@ -523,8 +529,14 @@ jobs:
       - name: Run ${{ matrix.gate }}
         if: steps.head.outputs.superseded != 'true'
         run: |
-          scripts/bootstrap.sh ${{ matrix.command }} ||
-            echo "${{ matrix.command }} exited non-zero; the gate file holds the verdict"
+          # QBE-SELFHOST decides no promotion, so its job is what turns the
+          # nightly red on a failure.
+          if [ "${{ matrix.gate }}" = "QBE-selfhost" ]; then
+            scripts/bootstrap.sh ${{ matrix.command }}
+          else
+            scripts/bootstrap.sh ${{ matrix.command }} ||
+              echo "${{ matrix.command }} exited non-zero; the gate file holds the verdict"
+          fi
 
       # upload-artifact roots an artifact at the common ancestor of the files it
       # finds, which moves when a gate writes no report. Staging a fixed tree
@@ -547,6 +559,13 @@ jobs:
               mkdir -p "upload/${TESTS}"
               cp "build/bootstrap/${TESTS}"/log*.txt "upload/${TESTS}/" || true
               cp "build/bootstrap/${TESTS}"/status-*.json "upload/${TESTS}/" || true
+            fi
+          done
+
+          for BUILD in build/bootstrap/qbe-selfhost/*/; do
+            if [ -f "${BUILD}log.txt" ]; then
+              mkdir -p "upload/qbe-selfhost/$(basename "$BUILD")"
+              cp "${BUILD}log.txt" "upload/qbe-selfhost/$(basename "$BUILD")/"
             fi
           done
 

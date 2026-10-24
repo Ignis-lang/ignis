@@ -36,7 +36,9 @@ GATE_IDS = ("G1", "G3")
 # correctness property; G6 (parse verdicts) and G7 (drop schedules) are
 # content checks pull-request CI runs against stage1 next to G3, so a nightly
 # run has no result for them and a skipped informational row never blocks.
-INFORMATIONAL_GATE_IDS = ("G4", "G6", "G7")
+# QBE-SELFHOST (the QBE-built compiler reproduces stage1's C) blocks pull
+# requests and fails its own nightly job, so the report only lists it.
+INFORMATIONAL_GATE_IDS = ("G4", "G6", "G7", "QBE-SELFHOST")
 
 REPORTED_GATE_IDS = GATE_IDS + INFORMATIONAL_GATE_IDS
 
@@ -46,6 +48,7 @@ GATE_TITLES = {
   "G4": "Resource budget within 1.25x of stage1",
   "G6": "Parse verdicts match the committed baselines",
   "G7": "Drop schedules match the committed baselines",
+  "QBE-SELFHOST": "Compiler built with QBE emits stage1's C",
 }
 
 STATUS_PASS = "pass"
