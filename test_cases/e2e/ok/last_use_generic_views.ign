@@ -1,0 +1,173 @@
+// e2e: std
+//
+// A view handed to generic code ends its borrow at its last use like any other
+// view: the owner can be mutated after it.
+import Io from "std::io";
+
+record Holder<T> {
+  public value: T;
+
+  public get(&self): &T {
+    return &self.value;
+  }
+}
+
+function wrap<T>(value: T): Holder<T> {
+  return Holder<T> { value: value };
+}
+
+function show<T>(value: T): void {
+  return;
+}
+
+function pick<T>(first: T, second: T): T {
+  return first;
+}
+
+function measure<T>(holder: &Holder<T>, text: str): boolean {
+  return text == "abc";
+}
+
+function report(text: str, holder: Holder<i32>): i32 {
+  return holder.value;
+}
+
+function empty(): str {
+  return "";
+}
+
+function heldView(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let holder: Holder<str> = Holder<str> { value: text };
+  Io::println(holder.value);
+  owned.pushChar('d');
+  Io::println(owned.toStr());
+}
+
+function heldBoolean(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let holder: Holder<boolean> = Holder<boolean> { value: text == "abc" };
+  owned.pushChar('d');
+  if (holder.value) {
+    Io::println("equal");
+  }
+}
+
+function wrapped(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let holder: Holder<str> = wrap<str>(text);
+  Io::println(holder.value);
+  owned.pushChar('d');
+}
+
+function shown(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  show<str>(text);
+  owned.pushChar('d');
+}
+
+function unwrapOr(): void {
+  let mut owned: String = String::create("abc");
+  let maybe: Option<str> = Option::SOME(owned.toStr());
+  Io::println(maybe.unwrapOr(""));
+  owned.pushChar('d');
+}
+
+function isSome(): void {
+  let mut owned: String = String::create("abc");
+  let maybe: Option<str> = Option::SOME(owned.toStr());
+  let present: boolean = maybe.isSome();
+  owned.pushChar('d');
+  if (present) {
+    Io::println("present");
+  }
+}
+
+function vectorElement(): void {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("Ada"));
+  let first: &String = names.get(0).unwrap();
+  Io::println(first.toStr());
+  names.push(String::create("Grace"));
+  let count: u64 = names.length();
+  Io::println(count.toString().toStr());
+}
+
+function ownedField(): void {
+  let mut holder: Holder<String> = Holder<String> { value: String::create("Ada") };
+  let label: &String = holder.get();
+  Io::println(label.toStr());
+  holder.value.pushStr(" Lovelace");
+  Io::println(holder.value.toStr());
+}
+
+function closureDeclaredBefore(): void {
+  let mut owned: String = String::create("abc");
+  let holder: Holder<() -> str> = Holder<() -> str> { value: empty };
+  let text: str = owned.toStr();
+  Io::println(text);
+  owned.pushChar('d');
+  Io::println((holder.value)());
+}
+
+function reported(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let value: i32 = report(text, Holder<i32> { value: 7 });
+  owned.pushChar('d');
+  Io::println(value.toString().toStr());
+}
+
+function picked(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  Io::println(pick<str>(text, "x"));
+  owned.pushChar('d');
+}
+
+function measured(): void {
+  let mut owned: String = String::create("abc");
+  let holder: Holder<i32> = Holder<i32> { value: 1 };
+  let text: str = owned.toStr();
+  let matched: boolean = measure<i32>(&holder, text);
+  owned.pushChar('d');
+  if (matched) {
+    Io::println("matched");
+  }
+}
+
+function unwrapped(): void {
+  let mut owned: String = String::create("abc");
+  let maybe: Option<str> = Option::SOME(owned.toStr());
+  Io::println(maybe.unwrap());
+  owned.pushChar('d');
+}
+
+function mutableField(): void {
+  let mut owner: Holder<String> = Holder<String> { value: String::create("Ada") };
+  let label: &mut String = &mut owner.value;
+  label.pushStr(" Lovelace");
+  Io::println(owner.get().toStr());
+}
+
+function main(): i32 {
+  heldView();
+  heldBoolean();
+  wrapped();
+  shown();
+  unwrapOr();
+  isSome();
+  vectorElement();
+  ownedField();
+  closureDeclaredBefore();
+  reported();
+  picked();
+  measured();
+  unwrapped();
+  mutableField();
+  return 0;
+}

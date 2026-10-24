@@ -178,7 +178,9 @@ export namespace Analyzer::ViewType {
   /// depth (a closure's captures are a property of the value,
   /// `closureIsView`, so a record, enum, tuple, array, instance or alias
   /// holding one, or a `&T` to it, can carry the closure's view; a nested
-  /// capture-free `fn(A) -> R` cannot), an
+  /// capture-free `fn(A) -> R` cannot), a raw pointer whose pointee can carry
+  /// a view (`*str`, `*mut str`, a pointer to a record holding a view or a
+  /// closure; not `*u8` or `*mut String`), an
   /// unresolved `Param` (a monomorphized instance may carry a view, and the
   /// borrow check runs before monomorphization) and an unknown type id.
   public function canCarryView(
@@ -241,8 +243,9 @@ export namespace Analyzer::ViewType {
   }
 
   /// The shared walker. `mode` 0 answers `canReachMutablePlace`, 1
-  /// `canReachViewHoldingPlace`, and 2 `holdsClosure`, where only a
-  /// function type or `Param` counts and raw pointers are not followed.
+  /// `canReachViewHoldingPlace`, and 2 the nested part of `canCarryView`,
+  /// where a function type, a `Param` or a raw pointer to a view counts, and
+  /// raw pointers are followed to their pointee.
   function canReachMutablePlaceInner(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -271,10 +274,10 @@ export namespace Analyzer::ViewType {
       },
       Analyzer::Type::Pointer(pointerType) -> {
         if (mode == 2) {
-          return false;
-        }
-
-        if (mode == 0 || ViewType::canCarryView(defStore, typeStore, pointerType.pointee)) {
+          if (ViewType::isView(defStore, typeStore, pointerType.pointee)) {
+            return true;
+          }
+        } else if (mode == 0 || ViewType::canCarryView(defStore, typeStore, pointerType.pointee)) {
           return true;
         }
 
