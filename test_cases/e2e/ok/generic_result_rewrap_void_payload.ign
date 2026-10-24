@@ -1,0 +1,49 @@
+// e2e: std
+// A generic function re-wraps `Result<V, i32>` into `Result<V, i64>`. With
+// `V = void` the payload binding carries no value and the rebuilt `OK` writes
+// no field; with `V = i32` the value goes through unchanged.
+import Io from "std::io";
+
+function rewrap<V>(result: Result<V, i32>): Result<V, i64> {
+  return match (result) {
+    Result::OK(value) -> Result::OK(value),
+    Result::ERROR(code) -> Result::ERROR(code as i64),
+  };
+}
+
+function unitOk(): Result<void, i32> {
+  return Result::OK(());
+}
+
+function unitError(): Result<void, i32> {
+  return Result::ERROR(7);
+}
+
+function main(): i32 {
+  let mut total: i64 = 0;
+
+  match (rewrap<void>(unitOk())) {
+    Result::OK(_) -> Io::println("void ok"),
+    Result::ERROR(_) -> Io::println("void ok lost"),
+  };
+
+  match (rewrap(unitError())) {
+    Result::OK(_) -> Io::println("void error lost"),
+    Result::ERROR(code) -> {
+      Io::println("void error");
+      total = total + code;
+    },
+  };
+
+  let number: Result<i32, i32> = Result::OK(30);
+
+  match (rewrap(number)) {
+    Result::OK(value) -> {
+      Io::println("i32 ok");
+      total = total + (value as i64);
+    },
+    Result::ERROR(_) -> Io::println("i32 ok lost"),
+  };
+
+  return total as i32;
+}

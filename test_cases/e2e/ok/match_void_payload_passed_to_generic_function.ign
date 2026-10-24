@@ -1,0 +1,29 @@
+// e2e: std
+// A match binds a `void` payload and passes the binding to a generic function
+// taking `V`, which forwards it into a new `Result<V, i32>`.
+import Io from "std::io";
+
+function accept<V>(value: V): Result<V, i32> {
+  return Result::OK(value);
+}
+
+function forward<V>(result: Result<V, i32>): i32 {
+  return match (result) {
+    Result::OK(value) -> match (accept(value)) {
+      Result::OK(_) -> 1,
+      Result::ERROR(code) -> code,
+    },
+    Result::ERROR(code) -> code,
+  };
+}
+
+function main(): i32 {
+  let unit: Result<void, i32> = Result::OK(());
+  let failed: Result<void, i32> = Result::ERROR(5);
+  let number: Result<i32, i32> = Result::OK(9);
+  let total: i32 = forward(unit) + forward(failed) + forward(number);
+
+  Io::println(String::create(total));
+
+  return total;
+}
