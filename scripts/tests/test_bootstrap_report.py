@@ -76,7 +76,7 @@ from selfhost_drop_schedule_parity import (  # noqa: E402
 DECIDING_GATE_IDS = ("G1", "G3")
 
 # Reported but never deciding: the informational rows the report marks.
-NON_DECIDING_GATE_IDS = ("G4", "G6", "G7")
+NON_DECIDING_GATE_IDS = ("G4", "G6", "G7", "QBE-SELFHOST")
 
 # Gates removed with their wiring (S3): no report row, no verdict say.
 REMOVED_GATE_IDS = ("G2", "G5")
@@ -274,7 +274,7 @@ class BootstrapReportCandidateTests(unittest.TestCase):
 
     _promotion, report_md = run_report(self.bootstrap_root)
 
-    self.assertIn("Gates marked informational (G4, G6, G7) are reported", report_md)
+    self.assertIn("Gates marked informational (G4, G6, G7, QBE-SELFHOST) are reported", report_md)
     # One informational marker per non-deciding row, none on G1/G3.
     self.assertEqual(report_md.count("(informational)"), len(NON_DECIDING_GATE_IDS))
     for gate_id in NON_DECIDING_GATE_IDS:

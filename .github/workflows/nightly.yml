@@ -529,8 +529,14 @@ jobs:
       - name: Run ${{ matrix.gate }}
         if: steps.head.outputs.superseded != 'true'
         run: |
-          scripts/bootstrap.sh ${{ matrix.command }} ||
-            echo "${{ matrix.command }} exited non-zero; the gate file holds the verdict"
+          # QBE-SELFHOST decides no promotion, so its job is what turns the
+          # nightly red on a failure.
+          if [ "${{ matrix.gate }}" = "QBE-selfhost" ]; then
+            scripts/bootstrap.sh ${{ matrix.command }}
+          else
+            scripts/bootstrap.sh ${{ matrix.command }} ||
+              echo "${{ matrix.command }} exited non-zero; the gate file holds the verdict"
+          fi
 
       # upload-artifact roots an artifact at the common ancestor of the files it
       # finds, which moves when a gate writes no report. Staging a fixed tree

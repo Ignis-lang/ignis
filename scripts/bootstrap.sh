@@ -137,7 +137,7 @@ Commands:
            Build the compiler with --target qbe using stage1 (default: the
            ladder's stage1), have that QBE-built compiler compile ignis/ with
            the C target, and require its C to be identical to stage1's
-           -> gates/QBE-SELFHOST.json. Needs qbe on PATH. Not a promotion gate.
+           -> gates/QBE-SELFHOST.json. Needs qbe on PATH. Reported, not a promotion gate.
   gates    Run every stage and gate in order, then write the promotion report.
   seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
@@ -1067,7 +1067,7 @@ run_gate_g3() {
 # The reference is stage2's selfhost_emit.c when stage2 is current against
 # this stage1 (stage2 is exactly stage1's C build of the tree), so a ladder
 # that already ran pays for no third compile. Never part of the promotion
-# verdict: the report does not read QBE-SELFHOST.json.
+# verdict: the report lists QBE-SELFHOST.json as informational.
 #
 #   $1  stage1 binary (optional, default: stage1 built by the ladder)
 qbe_selfhost_compile() {

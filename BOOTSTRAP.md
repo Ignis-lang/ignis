@@ -191,11 +191,12 @@ future backend:
 needs `qbe` on PATH) and writes `gates/QBE-SELFHOST.json`. It reuses stage2's
 `selfhost_emit.c` as the reference when stage2 is current against that
 stage1, since stage2 is stage1's C build of the tree. `qbe.yml` runs it on
-every push to main and on pull requests that touch `ignis/codegen/`,
-`ignis/build/`, `ignis/lir/`, `std/`, the workflow or `scripts/bootstrap.sh`
+every push to main and on pull requests that touch `ignis/`, `std/`,
+the workflow or `scripts/bootstrap.sh`
 (other pull requests record `skipped: no backend-relevant change`); the
-nightly runs it in its gate matrix. It is not a promotion gate: the report
-does not read it, and a failure blocks the pull request instead.
+nightly runs it in its gate matrix, where a failure fails the run. The report
+lists it as an informational row: it does not decide promotion, a failure
+blocks the pull request instead.
 
 ## Parse-verdict baselines (G6)
 

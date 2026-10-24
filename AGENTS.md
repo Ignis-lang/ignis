@@ -195,7 +195,7 @@ Build (ignis/build/)
 
 ### Backends
 
-A target is done only when the compiler builds with it and the target-built compiler passes the cross G1: compiling `ignis/` with the C target, it emits C identical to stage1's. A build error with the target means the target is not finished. `scripts/bootstrap.sh gate-qbe-selfhost` checks this for QBE; CI runs it on pull requests that touch `ignis/codegen/`, `ignis/build/`, `ignis/lir/` or `std/`, and in the nightly. A new backend gets the same gate. See BOOTSTRAP.md, "Every backend builds the compiler".
+A target is done only when the compiler builds with it and the target-built compiler passes the cross G1: compiling `ignis/` with the C target, it emits C identical to stage1's. A build error with the target means the target is not finished. `scripts/bootstrap.sh gate-qbe-selfhost` checks this for QBE; CI runs it on pull requests that touch `ignis/` or `std/`, and in the nightly. A new backend gets the same gate. See BOOTSTRAP.md, "Every backend builds the compiler".
 
 ## Extending the Compiler
 
