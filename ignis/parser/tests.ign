@@ -230,6 +230,67 @@ function parserParsesAnOwnsAttributeOnAGenericParameter(): void {
 }
 
 @test
+function parserParsesDeclarableAttributeArgumentsAsExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_declarable_attribute.ign",
+    "@Orm::Table(\"tasks\", -1, WIDTH)\n@Marker\n@implements(Copy)\nrecord Task { id: i64; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let expectedRenderedNeedle: String = String::create("@Orm::Table(expression#0, expression#2, expression#3)");
+  Test::assert(rendered.contains(&expectedRenderedNeedle));
+
+  match (expectItem(&module, match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing declarable attribute record root"),
+  })) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.metadata.attributes.length(), 3);
+
+      let table: &Ast::Attribute = match (recordItem.metadata.attributes.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing declarable attribute"),
+      };
+      let marker: &Ast::Attribute = match (recordItem.metadata.attributes.get(1)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing argumentless declarable attribute"),
+      };
+      let implements: &Ast::Attribute = match (recordItem.metadata.attributes.get(2)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing built-in attribute"),
+      };
+
+      Test::assertEq<str>(table.name.toStr(), "Orm::Table");
+      Test::assertEq<u64>(table.expressions.length(), 3);
+      Test::assertEq<u64>(table.arguments.length(), 0);
+
+      match (module.expressions.get(match (table.expressions.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing negative argument"),
+      })) {
+        Option::SOME(expression) -> match (expression) {
+          Ast::Expression::Node::Unary(_) -> {},
+          _ -> @panic("expected a unary negation argument"),
+        },
+        Option::NONE -> @panic("missing negative argument expression"),
+      };
+
+      Test::assertEq<u64>(marker.expressions.length(), 0);
+      Test::assertEq<u64>(implements.expressions.length(), 0);
+      Test::assertEq<u64>(implements.arguments.length(), 1);
+    },
+    _ -> @panic("expected declarable attribute record root"),
+  };
+}
+
+@test
 function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
   let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(

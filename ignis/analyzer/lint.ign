@@ -553,10 +553,11 @@ export namespace Analyzer {
       return false;
     }
 
-    /// Whether `name` appears as an attribute argument, such as the `Eq` of
-    /// `@implements(Copy, Eq, Display)`. Attribute arguments are stored as the
-    /// raw lexemes the parser saw and resolve to no definition, so an import
-    /// used only there would otherwise read as unused.
+    /// Whether `name` appears in an attribute: as a built-in attribute's
+    /// argument, such as the `Eq` of `@implements(Copy, Eq, Display)`, or as
+    /// the head of a declarable attribute's name, such as `@Table` or
+    /// `@Orm::Column`. Neither resolves through the body resolution map, so an
+    /// import used only there would otherwise read as unused.
     function nameUsedInAttributeArgument(module: &Ast::Module, name: str): boolean {
       let mut index: u64 = 0;
 
@@ -604,6 +605,37 @@ export namespace Analyzer {
         index += 1;
       }
 
+      // Fields and parameters carry their attributes on the binding pattern,
+      // enum variants beside it.
+      let mut patternIndex: u64 = 0;
+
+      while (patternIndex < module.patterns.length()) {
+        let patternId: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(patternIndex as u32);
+        patternIndex += 1;
+
+        if (let Option::SOME(pattern) = module.patterns.get(patternId)) {
+          if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+            if (Analyzer::Lint::metadataMentions(&binding.metadata, name)) {
+              return true;
+            }
+          }
+        }
+
+        if (let Option::SOME(attributes) = module.variantAttributes(patternId)) {
+          let mut attributeIndex: u64 = 0;
+
+          while (attributeIndex < attributes.length()) {
+            if (let Option::SOME(attribute) = attributes.get(attributeIndex)) {
+              if (Analyzer::Lint::attributeMentions(attribute, name)) {
+                return true;
+              }
+            }
+
+            attributeIndex += 1;
+          }
+        }
+      }
+
       return false;
     }
 
@@ -616,22 +648,39 @@ export namespace Analyzer {
           continue;
         };
 
-        let mut argumentIndex: u64 = 0;
-
-        while (argumentIndex < attribute.arguments.length()) {
-          if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
-            // `@implements(Shapes::Measured)` uses the imported `Shapes`.
-            let prefix: String = `${name}::`;
-
-            if (argument.equals(name) || argument.trimAsciiWhitespace().startsWith(prefix.toStr())) {
-              return true;
-            }
-          }
-
-          argumentIndex += 1;
+        if (Analyzer::Lint::attributeMentions(attribute, name)) {
+          return true;
         }
 
         attributeIndex += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether `attribute` names `name`: a declarable attribute written as
+    /// `@Name` or `@Name::Member`, or a built-in one with `name` among its
+    /// arguments.
+    function attributeMentions(attribute: &Ast::Attribute, name: str): boolean {
+      let prefix: String = `${name}::`;
+
+      if (Ast::isDeclarableAttributeName(&attribute.name)) {
+        if (attribute.name.equals(name) || attribute.name.startsWith(prefix.toStr())) {
+          return true;
+        }
+      }
+
+      let mut argumentIndex: u64 = 0;
+
+      while (argumentIndex < attribute.arguments.length()) {
+        if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+          // `@implements(Shapes::Measured)` uses the imported `Shapes`.
+          if (argument.equals(name) || argument.trimAsciiWhitespace().startsWith(prefix.toStr())) {
+            return true;
+          }
+        }
+
+        argumentIndex += 1;
       }
 
       return false;

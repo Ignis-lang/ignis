@@ -1425,6 +1425,12 @@ export namespace Analyzer {
     /// parser does not gate — where it survives as an ordinary attribute — is
     /// not also reported as an unknown attribute.
     function attributeIsKnownFor(name: &String, target: str): boolean {
+      // A declarable attribute resolves by name later, against the records
+      // marked `@attribute`; `Analyzer::Attributes` reports what it rejects.
+      if (Ast::isDeclarableAttributeName(name)) {
+        return true;
+      }
+
       if (name.equals("allow") || name.equals("warn") || name.equals("deny") || name.equals("configFlag")) {
         return true;
       }
@@ -1432,7 +1438,7 @@ export namespace Analyzer {
       let targetName: String = String::create(target);
 
       if (targetName.equals("record")) {
-        return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang") || name.equals("cLayout");
+        return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang") || name.equals("cLayout") || name.equals("attribute");
       }
 
       if (targetName.equals("extension")) {
@@ -2721,6 +2727,19 @@ export namespace Analyzer {
         return;
       };
 
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+
+      // `@attribute` on an extension block is already reported as unknown
+      // there; the block is no record a program can use as an attribute.
+      if (!isExtension) {
+        if (let Option::SOME(targets) = Analyzer::Attributes::declaredTargets(&mut stateRef.diagnostics, &rec.metadata)) {
+          if (targets != 0) {
+            let mut targetsRef: &mut Analyzer::DefinitionStore = defStore;
+            targetsRef.setAttributeTargets(defId, targets);
+          }
+        }
+      }
+
       // Read name and visibility from the placeholder before allocating sub-defs.
       // This scopes the immutable borrow of defStore so it ends before replace.
       let defOpt: Option<&Analyzer::Definition> = defStore.get(defId);
@@ -2810,6 +2829,11 @@ export namespace Analyzer {
       if (let Option::SOME(cLayoutSpan) = Analyzer::Binder::attributeSpanNamed(&en.metadata, "cLayout")) {
         let cLayoutName: String = String::create("cLayout");
         Analyzer::Binder::emitUnknownAttribute(state, &cLayoutName, "enum", cLayoutSpan);
+      }
+
+      if (let Option::SOME(attributeSpan) = Analyzer::Binder::attributeSpanNamed(&en.metadata, "attribute")) {
+        let attributeName: String = String::create("attribute");
+        Analyzer::Binder::emitUnknownAttribute(state, &attributeName, "enum", attributeSpan);
       }
 
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());

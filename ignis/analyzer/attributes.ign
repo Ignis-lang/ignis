@@ -1,0 +1,1135 @@
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticCode,
+  LabelKind,
+  Severity,
+  SourceSpan,
+from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+
+/// Declarable attributes: records marked `@attribute(<targets>)`, written on a
+/// declaration with a capitalized name (`@Table("tasks")`, `@Orm::PrimaryKey`).
+///
+/// The binder records which records are attributes and where they apply
+/// (`DefinitionStore::setAttributeTargets`). The body resolver calls
+/// `collectModule`, which resolves each written attribute name the way a type
+/// name resolves, checks the target and the argument count, and resolves the
+/// argument expressions like a constant initializer. After constant evaluation,
+/// `checkModule` folds each argument, checks it against its field and stores
+/// the values on the annotated definition (`DefinitionStore::attributeOn`).
+export namespace Analyzer {
+  namespace Attributes {
+    const TARGET_RECORD: u32 = 1;
+    const TARGET_ENUM: u32 = 2;
+    const TARGET_FIELD: u32 = 4;
+    const TARGET_FUNCTION: u32 = 8;
+    const TARGET_VARIANT: u32 = 16;
+
+    /// A declarable attribute whose name, target and argument count are
+    /// valid, waiting for its arguments to be evaluated.
+    record PendingAttribute {
+      public annotated: Analyzer::DefinitionId;
+      public attribute: Analyzer::DefinitionId;
+      public expressions: Vector<Ast::ExpressionId>;
+      public span: SourceSpan;
+    }
+
+    function copyPendingAttributes(
+      source: &Vector<Analyzer::Attributes::PendingAttribute>
+    ): Vector<Analyzer::Attributes::PendingAttribute> {
+      let mut copied: Vector<Analyzer::Attributes::PendingAttribute> = Vector::new<Analyzer::Attributes::PendingAttribute>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        if (let Option::SOME(pending) = source.get(index)) {
+          copied.push(Analyzer::Attributes::PendingAttribute {
+            annotated: pending.annotated,
+            attribute: pending.attribute,
+            expressions: Ast::copyAttributeExpressions(&pending.expressions),
+            span: pending.span,
+          });
+        }
+
+        index += 1;
+      }
+
+      return copied;
+    }
+
+    /// The target bit `name` stands for in `@attribute(...)`.
+    function targetBit(name: &String): Option<u32> {
+      if (name.equals("record")) {
+        return Option::SOME(Analyzer::Attributes::TARGET_RECORD);
+      }
+
+      if (name.equals("enum")) {
+        return Option::SOME(Analyzer::Attributes::TARGET_ENUM);
+      }
+
+      if (name.equals("field")) {
+        return Option::SOME(Analyzer::Attributes::TARGET_FIELD);
+      }
+
+      if (name.equals("function")) {
+        return Option::SOME(Analyzer::Attributes::TARGET_FUNCTION);
+      }
+
+      if (name.equals("variant")) {
+        return Option::SOME(Analyzer::Attributes::TARGET_VARIANT);
+      }
+
+      return Option::NONE;
+    }
+
+    /// The target names in `targets`, comma separated, in the order
+    /// `@attribute(...)` documents them.
+    function targetNames(targets: u32): String {
+      let mut names: String = String::new();
+      Analyzer::Attributes::appendTargetName(&mut names, targets, Analyzer::Attributes::TARGET_RECORD, "record");
+      Analyzer::Attributes::appendTargetName(&mut names, targets, Analyzer::Attributes::TARGET_ENUM, "enum");
+      Analyzer::Attributes::appendTargetName(&mut names, targets, Analyzer::Attributes::TARGET_FIELD, "field");
+      Analyzer::Attributes::appendTargetName(&mut names, targets, Analyzer::Attributes::TARGET_FUNCTION, "function");
+      Analyzer::Attributes::appendTargetName(&mut names, targets, Analyzer::Attributes::TARGET_VARIANT, "variant");
+      return names;
+    }
+
+    function appendTargetName(names: &mut String, targets: u32, bit: u32, label: str): void {
+      if ((targets & bit) == 0) {
+        return;
+      }
+
+      let mut namesRef: &mut String = names;
+
+      if (namesRef.length() > 0) {
+        namesRef.pushStr(", ");
+      }
+
+      namesRef.pushStr(label);
+    }
+
+    /// The target mask an `@attribute(...)` attribute declares, reporting
+    /// A0290 for a missing list and for each name that is not a target.
+    /// `NONE` when `metadata` carries no `@attribute`.
+    function declaredTargets(
+      diagnostics: &mut DiagnosticBag,
+      metadata: &Ast::Metadata,
+    ): Option<u32> {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!attribute.name.equals("attribute")) {
+          index += 1;
+          continue;
+        }
+
+        if (attribute.arguments.isEmpty()) {
+          Analyzer::Attributes::report(
+            diagnostics,
+            DiagnosticCode::INVALID_ATTRIBUTE_TARGETS,
+            "'@attribute' needs at least one target: record, enum, field, function or variant",
+            attribute.span,
+          );
+          return Option::SOME(0);
+        }
+
+        let mut targets: u32 = 0;
+        let mut argumentIndex: u64 = 0;
+
+        while (argumentIndex < attribute.arguments.length()) {
+          if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+            if (let Option::SOME(bit) = Analyzer::Attributes::targetBit(argument)) {
+              targets = targets | bit;
+            } else {
+              let message: String = `unknown attribute target '${argument.toStr()}': expected record, enum, field, function or variant`;
+              Analyzer::Attributes::report(diagnostics, DiagnosticCode::INVALID_ATTRIBUTE_TARGETS, message.toStr(), attribute.span);
+            }
+          }
+
+          argumentIndex += 1;
+        }
+
+        return Option::SOME(targets);
+      }
+
+      return Option::NONE;
+    }
+
+    function report(
+      diagnostics: &mut DiagnosticBag,
+      code: str,
+      message: str,
+      span: SourceSpan
+    ): void {
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, message);
+      let mut diagnosticsRef: &mut DiagnosticBag = diagnostics;
+      diagnosticsRef.push(diagnostic);
+    }
+
+    // =========================================================================
+    // Collection, during body resolution
+    // =========================================================================
+
+    /// Resolve every declarable attribute `module` writes on a record, enum,
+    /// field, function, method or variant, and the names in its arguments.
+    /// A capitalized attribute anywhere else is reported as not applicable.
+    function collectModule(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+    ): Vector<Analyzer::Attributes::PendingAttribute> {
+      let mut pending: Vector<Analyzer::Attributes::PendingAttribute> = Vector::new<Analyzer::Attributes::PendingAttribute>();
+      let mut index: u64 = 0;
+
+      while (index < module.roots.length()) {
+        if (let Option::SOME(itemId) = module.roots.get(index)) {
+          Analyzer::Attributes::collectItem(state, defStore, typeStore, symbols, module, pass1, pass2, *itemId, &mut pending);
+        }
+
+        index += 1;
+      }
+
+      return pending;
+    }
+
+    function collectItem(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      pending: &mut Vector<Analyzer::Attributes::PendingAttribute>,
+    ): void {
+      let Option::SOME(node) = module.items.get(itemId) else {
+        return;
+      };
+
+      let annotated: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupDef(pass1, pass2, itemId.raw());
+
+      match (node) {
+        Ast::Item::Node::Function(function_) -> {
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &function_.metadata, annotated, Analyzer::Attributes::TARGET_FUNCTION, "function", pending);
+          Analyzer::Attributes::rejectOnParameters(state, defStore, typeStore, symbols, module, &function_.parameters, pending);
+        },
+        Ast::Item::Node::Record(record_) -> {
+          if (module.extensionTarget(itemId).isSome()) {
+            Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &record_.metadata, Option::NONE, 0, "extension block", pending);
+          } else {
+            Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &record_.metadata, annotated, Analyzer::Attributes::TARGET_RECORD, "record", pending);
+          }
+
+          if (let Option::SOME(recordId) = annotated) {
+            Analyzer::Attributes::collectFields(state, defStore, typeStore, symbols, module, &record_.fields, recordId, pending);
+          }
+
+          Analyzer::Attributes::collectMethods(state, defStore, typeStore, symbols, module, pass1, pass2, &record_.methods, pending);
+        },
+        Ast::Item::Node::Enum(enum_) -> {
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &enum_.metadata, annotated, Analyzer::Attributes::TARGET_ENUM, "enum", pending);
+
+          if (let Option::SOME(enumId) = annotated) {
+            Analyzer::Attributes::collectVariants(state, defStore, typeStore, symbols, module, &enum_.variants, enumId, pending);
+          }
+
+          Analyzer::Attributes::collectMethods(state, defStore, typeStore, symbols, module, pass1, pass2, &enum_.methods, pending);
+        },
+        Ast::Item::Node::Namespace(namespace_) -> {
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &namespace_.metadata, Option::NONE, 0, "namespace", pending);
+
+          let mut enterRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+          enterRef.namespaceChain.push(namespace_.name.clone());
+
+          let mut childIndex: u64 = 0;
+
+          while (childIndex < namespace_.items.length()) {
+            if (let Option::SOME(childId) = namespace_.items.get(childIndex)) {
+              Analyzer::Attributes::collectItem(state, defStore, typeStore, symbols, module, pass1, pass2, *childId, pending);
+            }
+
+            childIndex += 1;
+          }
+
+          let mut leaveRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+          let _left: Option<String> = leaveRef.namespaceChain.pop();
+        },
+        Ast::Item::Node::Export(export_) -> {
+          if (let Option::SOME(innerId) = export_.declaration) {
+            Analyzer::Attributes::collectItem(state, defStore, typeStore, symbols, module, pass1, pass2, innerId, pending);
+          }
+        },
+        Ast::Item::Node::Constant(constant) -> {
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &constant.metadata, Option::NONE, 0, "constant", pending);
+        },
+        Ast::Item::Node::TypeAlias(typeAlias) -> {
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &typeAlias.metadata, Option::NONE, 0, "type alias", pending);
+        },
+        Ast::Item::Node::Trait(trait_) -> {
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &trait_.metadata, Option::NONE, 0, "trait", pending);
+        },
+        Ast::Item::Node::Extern(extern_) -> {
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &extern_.metadata, Option::NONE, 0, "extern block", pending);
+        },
+        Ast::Item::Node::Import(_) -> {},
+      };
+    }
+
+    /// The methods of a record or enum. A copy of a trait default resolves
+    /// its names in the module that declares the trait, as its body does.
+    function collectMethods(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      methodItemIds: &Vector<Ast::ItemId>,
+      pending: &mut Vector<Analyzer::Attributes::PendingAttribute>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < methodItemIds.length()) {
+        let Option::SOME(methodItemId) = methodItemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(methodItem) = module.items.get(*methodItemId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Item::Node::Function(method) = methodItem) {
+          let restore: Option<Analyzer::ResolverBodies::InheritedRestore> = Analyzer::ResolverBodies::enterInheritedScope(
+            state,
+            module,
+            *methodItemId,
+          );
+          let annotated: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupDef(pass1, pass2, methodItemId.raw());
+
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &method.metadata, annotated, Analyzer::Attributes::TARGET_FUNCTION, "function", pending);
+          Analyzer::Attributes::rejectOnParameters(state, defStore, typeStore, symbols, module, &method.parameters, pending);
+          Analyzer::ResolverBodies::leaveInheritedScope(state, restore);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// The fields of a record, matched to their definitions the way the
+    /// binder allocates them: instance fields in order into `fields`, static
+    /// ones into `staticFields`.
+    function collectFields(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      fieldPatternIds: &Vector<Ast::PatternId>,
+      recordId: Analyzer::DefinitionId,
+      pending: &mut Vector<Analyzer::Attributes::PendingAttribute>,
+    ): void {
+      let instanceFields: Vector<Analyzer::DefinitionId> = Analyzer::Attributes::memberIds(defStore, recordId, false);
+      let staticFields: Vector<Analyzer::DefinitionId> = Analyzer::Attributes::memberIds(defStore, recordId, true);
+
+      let mut instanceIndex: u64 = 0;
+      let mut staticIndex: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < fieldPatternIds.length()) {
+        let Option::SOME(patternId) = fieldPatternIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(fieldPattern) = module.patterns.get(*patternId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Pattern::Node::Binding(binding) = fieldPattern) {
+          let mut annotated: Option<Analyzer::DefinitionId> = Option::NONE;
+
+          if (Analyzer::Binder::fieldBindingIsStatic(&binding)) {
+            if (let Option::SOME(fieldId) = staticFields.get(staticIndex)) {
+              annotated = Option::SOME(*fieldId);
+            }
+
+            staticIndex += 1;
+          } else {
+            if (let Option::SOME(fieldId) = instanceFields.get(instanceIndex)) {
+              annotated = Option::SOME(*fieldId);
+            }
+
+            instanceIndex += 1;
+          }
+
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &binding.metadata, annotated, Analyzer::Attributes::TARGET_FIELD, "field", pending);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// The variants of an enum, whose attributes the parser keeps beside the
+    /// pattern, matched to their definitions in binder order: a member with a
+    /// value is a static field, every other one a variant.
+    function collectVariants(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      variantPatternIds: &Vector<Ast::PatternId>,
+      enumId: Analyzer::DefinitionId,
+      pending: &mut Vector<Analyzer::Attributes::PendingAttribute>,
+    ): void {
+      let variants: Vector<Analyzer::DefinitionId> = Analyzer::Attributes::memberIds(defStore, enumId, false);
+      let staticFields: Vector<Analyzer::DefinitionId> = Analyzer::Attributes::memberIds(defStore, enumId, true);
+
+      let mut variantIndex: u64 = 0;
+      let mut staticIndex: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < variantPatternIds.length()) {
+        let Option::SOME(patternId) = variantPatternIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut isStatic: boolean = false;
+        let mut memberMetadata: Ast::Metadata = Ast::emptyMetadata();
+
+        if (let Option::SOME(variantPattern) = module.patterns.get(*patternId)) {
+          if (let Ast::Pattern::Node::Binding(binding) = variantPattern) {
+            isStatic = binding.initializer.isSome();
+            memberMetadata = Ast::copyMetadata(&binding.metadata);
+          }
+        }
+
+        if (let Option::SOME(attributes) = module.variantAttributes(*patternId)) {
+          let mut attributeIndex: u64 = 0;
+
+          while (attributeIndex < attributes.length()) {
+            if (let Option::SOME(attribute) = attributes.get(attributeIndex)) {
+              memberMetadata.attributes.push(Ast::copyAttribute(attribute));
+            }
+
+            attributeIndex += 1;
+          }
+        }
+
+        let mut annotated: Option<Analyzer::DefinitionId> = Option::NONE;
+
+        if (isStatic) {
+          if (let Option::SOME(fieldId) = staticFields.get(staticIndex)) {
+            annotated = Option::SOME(*fieldId);
+          }
+
+          staticIndex += 1;
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &memberMetadata, annotated, Analyzer::Attributes::TARGET_FIELD, "field", pending);
+        } else {
+          if (let Option::SOME(variantId) = variants.get(variantIndex)) {
+            annotated = Option::SOME(*variantId);
+          }
+
+          variantIndex += 1;
+          Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &memberMetadata, annotated, Analyzer::Attributes::TARGET_VARIANT, "variant", pending);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// No declarable attribute applies to a parameter.
+    function rejectOnParameters(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      parameterPatternIds: &Vector<Ast::PatternId>,
+      pending: &mut Vector<Analyzer::Attributes::PendingAttribute>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < parameterPatternIds.length()) {
+        if (let Option::SOME(patternId) = parameterPatternIds.get(index)) {
+          if (let Option::SOME(parameterPattern) = module.patterns.get(*patternId)) {
+            if (let Ast::Pattern::Node::Binding(binding) = parameterPattern) {
+              Analyzer::Attributes::collectOn(state, defStore, typeStore, symbols, module, &binding.metadata, Option::NONE, 0, "parameter", pending);
+            }
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Check every declarable attribute in `metadata`, written on `annotated`
+    /// whose kind is `targetBit` (0 for a declaration no attribute applies to,
+    /// named `targetName`), and queue the valid ones.
+    function collectOn(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      metadata: &Ast::Metadata,
+      annotated: Option<Analyzer::DefinitionId>,
+      targetBit: u32,
+      targetName: str,
+      pending: &mut Vector<Analyzer::Attributes::PendingAttribute>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        index += 1;
+
+        if (!Ast::isDeclarableAttributeName(&attribute.name)) {
+          continue;
+        }
+
+        let Option::SOME(attributeId) = Analyzer::Attributes::resolveAttributeName(state, defStore, typeStore, symbols, &attribute.name) else {
+          Analyzer::Attributes::reportUnknown(state, defStore, symbols, attribute, targetName);
+          continue;
+        };
+
+        let Option::SOME(targets) = defStore.attributeTargetsOf(attributeId) else {
+          let message: String = `'${attribute.name.toStr()}' is not an attribute: only a record marked '@attribute(...)' can be used as one`;
+          Analyzer::Attributes::report(&mut state.diagnostics, DiagnosticCode::NOT_AN_ATTRIBUTE, message.toStr(), attribute.span);
+          continue;
+        };
+
+        if ((targets & targetBit) == 0) {
+          let message: String = `attribute '@${attribute.name.toStr()}' cannot be used on this ${targetName}; it applies to: ${Analyzer::Attributes::targetNames(targets).toStr()}`;
+          Analyzer::Attributes::report(&mut state.diagnostics, DiagnosticCode::ATTRIBUTE_TARGET_NOT_ALLOWED, message.toStr(), attribute.span);
+          continue;
+        }
+
+        let fieldCount: u64 = Analyzer::Attributes::fieldCountOf(defStore, attributeId);
+
+        if (fieldCount != attribute.expressions.length()) {
+          let message: String = `@${attribute.name.toStr()} expects ${fieldCount} argument(s), got ${attribute.expressions.length()}`;
+          Analyzer::Attributes::report(&mut state.diagnostics, DiagnosticCode::ATTRIBUTE_ARG_COUNT, message.toStr(), attribute.span);
+          continue;
+        }
+
+        let Option::SOME(annotatedId) = annotated else {
+          continue;
+        };
+
+        let mut expressionIndex: u64 = 0;
+
+        while (expressionIndex < attribute.expressions.length()) {
+          if (let Option::SOME(expressionId) = attribute.expressions.get(expressionIndex)) {
+            Analyzer::Attributes::resolveArgument(state, defStore, symbols, module, annotatedId, *expressionId);
+          }
+
+          expressionIndex += 1;
+        }
+
+        let mut pendingRef: &mut Vector<Analyzer::Attributes::PendingAttribute> = pending;
+        pendingRef.push(Analyzer::Attributes::PendingAttribute {
+          annotated: annotatedId,
+          attribute: attributeId,
+          expressions: Ast::copyAttributeExpressions(&attribute.expressions),
+          span: attribute.span,
+        });
+      }
+    }
+
+    /// Resolve the names in one argument expression as a constant
+    /// initializer's are: no locals, no type parameters.
+    function resolveArgument(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      annotated: Analyzer::DefinitionId,
+      expressionId: Ast::ExpressionId,
+    ): void {
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.currentFunction = annotated;
+      stateRef.localStack = Analyzer::ResolverBodies::LocalStack {
+        scopeStarts: Vector::new<u64>(),
+        names: Vector::new<Analyzer::SymbolId>(),
+        locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+      };
+      stateRef.typeParamScope = Analyzer::Resolver::TypeParamScope {
+        syms: Vector::new<Analyzer::SymbolId>(),
+        typeIds: Vector::new<Analyzer::TypeId>(),
+      };
+
+      Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, expressionId);
+    }
+
+    function fieldCountOf(
+      defStore: &mut Analyzer::DefinitionStore,
+      recordId: Analyzer::DefinitionId
+    ): u64 {
+      return Analyzer::Attributes::memberIds(defStore, recordId, false).length();
+    }
+
+    /// The instance fields of a record or the variants of an enum, or with
+    /// `statics` set the static fields of either.
+    function memberIds(
+      defStore: &mut Analyzer::DefinitionStore,
+      ownerId: Analyzer::DefinitionId,
+      statics: boolean,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(definition) = defStore.get(ownerId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          if (statics) {
+            return Analyzer::Resolver::copyDefinitionIdVector(&recordDef.staticFields);
+          }
+
+          return Analyzer::Resolver::copyDefinitionIdVector(&recordDef.fields);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          if (statics) {
+            return Analyzer::Resolver::copyDefinitionIdVector(&enumDef.staticFields);
+          }
+
+          return Analyzer::Resolver::copyDefinitionIdVector(&enumDef.variants);
+        },
+        _ -> {},
+      };
+
+      return Vector::new<Analyzer::DefinitionId>();
+    }
+
+    /// The type the alias `aliasId` names, or `NONE` when `aliasId` is not an
+    /// alias.
+    function aliasedTypeOf(
+      defStore: &mut Analyzer::DefinitionStore,
+      aliasId: Analyzer::DefinitionId
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(definition) = defStore.get(aliasId) else {
+        return Option::NONE;
+      };
+
+      return match (definition) {
+        Analyzer::Definition::TypeAlias(alias) -> Option::SOME(alias.aliasedType),
+        _ -> Option::NONE,
+      };
+    }
+
+    /// The record a written attribute name refers to, resolved as a type name
+    /// is: a bare name through the enclosing namespaces, the module's own
+    /// declarations and its imports; a qualified one by its namespace path. A
+    /// type alias stands for the record it names.
+    function resolveAttributeName(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      name: &String,
+    ): Option<Analyzer::DefinitionId> {
+      let segments: Vector<String> = Analyzer::Attributes::pathSegments(name);
+      let Option::SOME(lastName) = segments.get(segments.length() - 1) else {
+        return Option::NONE;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(lastName.toStr());
+      let mut found: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (segments.length() == 1) {
+        found = Analyzer::ResolverBodies::namespaceScopedTypeLookup(state, defStore, sym, lastName.toStr());
+
+        if (found.isNone()) {
+          if (let Option::SOME(candidate) = Analyzer::ResolverBodies::bodyBareCandidate(state, sym)) {
+            if (candidate.reachable) {
+              found = Option::SOME(candidate.defId);
+            }
+          }
+        }
+      } else {
+        found = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(state, defStore, symbols, &segments, segments.length());
+      }
+
+      let Option::SOME(defId) = found else {
+        return Option::NONE;
+      };
+
+      if (let Option::SOME(aliasedType) = Analyzer::Attributes::aliasedTypeOf(defStore, defId)) {
+        let target: Analyzer::TypeId = Analyzer::Attributes::followAliases(defStore, typeStore, aliasedType);
+
+        if (let Option::SOME(targetType) = typeStore.get(target)) {
+          if (let Analyzer::Type::Record(recordId) = targetType) {
+            return Option::SOME(recordId);
+          }
+        }
+      }
+
+      return Option::SOME(defId);
+    }
+
+    function pathSegments(name: &String): Vector<String> {
+      let mut segments: Vector<String> = Vector::new<String>();
+      let mut start: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < name.length()) {
+        let mut separator: boolean = false;
+
+        if (let Option::SOME(byte) = name.byteAt(index)) {
+          if (let Option::SOME(next) = name.byteAt(index + 1)) {
+            separator = byte == ':' as u8 && next == ':' as u8;
+          }
+        }
+
+        if (separator) {
+          segments.push(name.substringBytes(start, index));
+          index += 2;
+          start = index;
+          continue;
+        }
+
+        index += 1;
+      }
+
+      segments.push(name.substringBytes(start, name.length()));
+      return segments;
+    }
+
+    function followAliases(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Analyzer::TypeId {
+      let mut current: Analyzer::TypeId = typeId;
+      let mut depth: u64 = 0;
+
+      while (depth < 64) {
+        let Option::SOME(currentType) = typeStore.get(current) else {
+          return current;
+        };
+
+        let Analyzer::Type::Alias(aliasId) = currentType else {
+          return current;
+        };
+
+        let Option::SOME(aliasedType) = Analyzer::Attributes::aliasedTypeOf(defStore, aliasId) else {
+          return current;
+        };
+
+        current = aliasedType;
+        depth += 1;
+      }
+
+      return current;
+    }
+
+    /// Report a capitalized attribute that names nothing in scope. When some
+    /// module declares an attribute record of that name, the message names
+    /// the import that brings it into scope.
+    function reportUnknown(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      attribute: &Ast::Attribute,
+      targetName: str,
+    ): void {
+      let segments: Vector<String> = Analyzer::Attributes::pathSegments(&attribute.name);
+      let mut message: String = `unknown attribute '@${attribute.name.toStr()}' on ${targetName}`;
+
+      if (segments.length() == 1) {
+        if (let Option::SOME(lastName) = segments.get(0)) {
+          if (let Option::SOME(importText) = Analyzer::Attributes::importHint(defStore, symbols, lastName)) {
+            let hint: String = `; add '${importText.toStr()}'`;
+            message.pushStr(hint.toStr());
+          }
+        }
+      }
+
+      Analyzer::Attributes::report(&mut state.diagnostics, DiagnosticCode::UNKNOWN_ATTRIBUTE, message.toStr(), attribute.span);
+    }
+
+    /// The import declaration that brings the attribute record `name` declared
+    /// in another module into the module being analyzed.
+    function importHint(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      name: &String,
+    ): Option<String> {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(sym);
+      let activeModule: u64 = defStore.activeModuleIndex();
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        let Option::SOME(candidate) = candidates.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        index += 1;
+
+        if (defStore.attributeTargetsOf(*candidate).isNone()) {
+          continue;
+        }
+
+        let Option::SOME(moduleIndex) = defStore.defModuleOf(*candidate) else {
+          continue;
+        };
+
+        if (moduleIndex == activeModule) {
+          continue;
+        }
+
+        let mut source: String = String::new();
+
+        if (let Option::SOME(displayName) = defStore.moduleDisplayNameOf(moduleIndex)) {
+          if (displayName.startsWith("std::")) {
+            source = displayName.clone();
+          }
+        }
+
+        if (source.length() == 0) {
+          let Option::SOME(targetPath) = defStore.modulePathOf(moduleIndex) else {
+            continue;
+          };
+          let Option::SOME(currentPath) = defStore.modulePathOf(activeModule) else {
+            continue;
+          };
+
+          source = Analyzer::Attributes::relativeImportPath(currentPath, targetPath);
+        }
+
+        let mut qualified: String = name.clone();
+
+        if (let Option::SOME(qualifiedName) = defStore.qualifiedNameOf(*candidate)) {
+          qualified = qualifiedName.clone();
+        }
+
+        let segments: Vector<String> = Analyzer::Attributes::pathSegments(&qualified);
+        let Option::SOME(imported) = segments.get(0) else {
+          continue;
+        };
+
+        return Option::SOME(`import ${imported.toStr()} from "${source.toStr()}";`);
+      }
+
+      return Option::NONE;
+    }
+
+    /// The path an `import` in the file `fromPath` writes to name the module
+    /// file `toPath`: relative to the importing file's directory, without the
+    /// `.ign` extension.
+    function relativeImportPath(fromPath: &String, toPath: &String): String {
+      let fromParts: Vector<String> = Analyzer::Attributes::slashSegments(fromPath);
+      let toParts: Vector<String> = Analyzer::Attributes::slashSegments(toPath);
+      let mut fromDirectories: u64 = 0;
+
+      if (fromParts.length() > 0) {
+        fromDirectories = fromParts.length() - 1;
+      }
+      let mut common: u64 = 0;
+
+      while (common < fromDirectories && common + 1 < toParts.length()) {
+        let Option::SOME(left) = fromParts.get(common) else {
+          break;
+        };
+        let Option::SOME(right) = toParts.get(common) else {
+          break;
+        };
+
+        if (!left.equals(right.toStr())) {
+          break;
+        }
+
+        common += 1;
+      }
+
+      let mut result: String = String::new();
+      let mut up: u64 = common;
+
+      while (up < fromDirectories) {
+        result.pushStr("../");
+        up += 1;
+      }
+
+      if (result.length() == 0) {
+        result.pushStr("./");
+      }
+
+      let mut index: u64 = common;
+
+      while (index < toParts.length()) {
+        if (let Option::SOME(part) = toParts.get(index)) {
+          if (index > common) {
+            result.pushStr("/");
+          }
+
+          result.pushStr(part.toStr());
+        }
+
+        index += 1;
+      }
+
+      if (result.endsWith(".ign")) {
+        return result.substringBytes(0, result.length() - 4);
+      }
+
+      return result;
+    }
+
+    function slashSegments(path: &String): Vector<String> {
+      let mut parts: Vector<String> = Vector::new<String>();
+      let mut start: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index <= path.length()) {
+        let mut boundary: boolean = index == path.length();
+
+        if (!boundary) {
+          if (let Option::SOME(byte) = path.byteAt(index)) {
+            boundary = byte == '/' as u8;
+          }
+        }
+
+        if (boundary) {
+          if (index > start) {
+            let part: String = path.substringBytes(start, index);
+
+            if (!part.equals(".")) {
+              parts.push(part.clone());
+            }
+          }
+
+          start = index + 1;
+        }
+
+        index += 1;
+      }
+
+      return parts;
+    }
+
+    // =========================================================================
+    // Evaluation, after constant evaluation
+    // =========================================================================
+
+    /// Fold every queued attribute argument of `module`, check it against its
+    /// field and store the values on the annotated definition.
+    function checkModule(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    ): DiagnosticBag {
+      let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+      let mut index: u64 = 0;
+
+      while (index < resolvedBodies.attributes.length()) {
+        let Option::SOME(pending) = resolvedBodies.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        index += 1;
+
+        let fields: Vector<Analyzer::DefinitionId> = Analyzer::Attributes::memberIds(defStore, pending.attribute, false);
+
+        let mut attributeValues: Vector<Analyzer::AttributeValue> = Vector::new<Analyzer::AttributeValue>();
+        let mut valid: boolean = true;
+        let mut argumentIndex: u64 = 0;
+
+        while (argumentIndex < pending.expressions.length()) {
+          let Option::SOME(expressionId) = pending.expressions.get(argumentIndex) else {
+            argumentIndex += 1;
+            continue;
+          };
+          let Option::SOME(fieldId) = fields.get(argumentIndex) else {
+            argumentIndex += 1;
+            continue;
+          };
+
+          argumentIndex += 1;
+
+          let mut fieldName: String = String::create("?");
+          let mut fieldType: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+          if (let Option::SOME(fieldDefinition) = defStore.get(*fieldId)) {
+            if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
+              if (let Option::SOME(text) = symbols.resolve(fieldDef.name)) {
+                fieldName = String::create(text);
+              }
+
+              fieldType = fieldDef.fieldType;
+            }
+          }
+
+          fieldType = Analyzer::Attributes::followAliases(defStore, typeStore, fieldType);
+
+          let span: SourceSpan = Analyzer::Attributes::expressionSpan(module, *expressionId, pending.span);
+          let folded: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
+            values,
+            defStore,
+            typeStore,
+            module,
+            resolvedBodies,
+            typecheck,
+            *expressionId,
+            Option::SOME(fieldType),
+          );
+
+          let Option::SOME(constValue) = folded else {
+            let message: String = `argument for field '${fieldName.toStr()}' is not a compile-time constant`;
+            Analyzer::Attributes::report(&mut diagnostics, DiagnosticCode::ATTRIBUTE_ARGUMENT_NOT_CONSTANT, message.toStr(), span);
+            valid = false;
+            continue;
+          };
+
+          let Option::SOME(attributeValue) = Analyzer::Attributes::valueForField(typeStore, &constValue, fieldType) else {
+            let typeName: String = typeStore.nameOfResolved(fieldType, &*defStore, &*symbols);
+            let message: String = `argument for field '${fieldName.toStr()}' expects ${typeName.toStr()}, got ${Analyzer::Attributes::valueKindName(&constValue)}`;
+            Analyzer::Attributes::report(&mut diagnostics, DiagnosticCode::ATTRIBUTE_ARGUMENT_TYPE, message.toStr(), span);
+            valid = false;
+            continue;
+          };
+
+          attributeValues.push(attributeValue);
+        }
+
+        if (!valid) {
+          continue;
+        }
+
+        let mut storeRef: &mut Analyzer::DefinitionStore = defStore;
+        storeRef.addAttributeUse(pending.annotated, Analyzer::AttributeUse {
+          attribute: pending.attribute,
+          values: attributeValues,
+          span: pending.span,
+        });
+      }
+
+      return diagnostics;
+    }
+
+    function expressionSpan(
+      module: &Ast::Module,
+      expressionId: Ast::ExpressionId,
+      fallback: SourceSpan
+    ): SourceSpan {
+      if (let Option::SOME(node) = module.expressions.get(expressionId)) {
+        return Ast::Serializer::expressionSpan(node);
+      }
+
+      return fallback;
+    }
+
+    /// `value` as the value of a field of type `fieldType`, or `NONE` when it
+    /// does not fit: an integer must be in the field type's range, a float
+    /// needs a float field, and a string a `str` one.
+    function valueForField(
+      typeStore: &mut Analyzer::TypeStore,
+      value: &Analyzer::ConstEval::ConstValue,
+      fieldType: Analyzer::TypeId,
+    ): Option<Analyzer::AttributeValue> {
+      let Option::SOME(type_) = typeStore.get(fieldType) else {
+        return Option::NONE;
+      };
+
+      match (value) {
+        Analyzer::ConstEval::ConstValue::Int(number) -> {
+          if (Analyzer::Attributes::integerFits(type_, number)) {
+            return Option::SOME(Analyzer::AttributeValue::Int(number));
+          }
+        },
+        Analyzer::ConstEval::ConstValue::Float(number) -> {
+          if (Analyzer::Attributes::isFloatType(type_)) {
+            return Option::SOME(Analyzer::AttributeValue::Float(number));
+          }
+        },
+        Analyzer::ConstEval::ConstValue::Bool(flag) -> {
+          if (let Analyzer::Type::BOOLEAN = type_) {
+            return Option::SOME(Analyzer::AttributeValue::Bool(flag));
+          }
+        },
+        Analyzer::ConstEval::ConstValue::Char(character) -> {
+          if (let Analyzer::Type::CHAR = type_) {
+            return Option::SOME(Analyzer::AttributeValue::Char(character));
+          }
+        },
+        Analyzer::ConstEval::ConstValue::Str(text) -> {
+          if (Analyzer::Attributes::isStringType(type_)) {
+            return Option::SOME(Analyzer::AttributeValue::Str(text.clone()));
+          }
+        },
+        Analyzer::ConstEval::ConstValue::Null -> {},
+      };
+
+      return Option::NONE;
+    }
+
+    function isFloatType(type_: &Analyzer::Type): boolean {
+      return match (type_) {
+        Analyzer::Type::F32 -> true,
+        Analyzer::Type::F64 -> true,
+        _ -> false,
+      };
+    }
+
+    function isStringType(type_: &Analyzer::Type): boolean {
+      return match (type_) {
+        Analyzer::Type::STR -> true,
+        Analyzer::Type::STATIC_STR -> true,
+        _ -> false,
+      };
+    }
+
+    function integerFits(type_: &Analyzer::Type, value: i64): boolean {
+      return match (type_) {
+        Analyzer::Type::I8 -> value >= -128 && value <= 127,
+        Analyzer::Type::I16 -> value >= -32768 && value <= 32767,
+        Analyzer::Type::I32 -> value >= -2147483648 && value <= 2147483647,
+        Analyzer::Type::I64 -> true,
+        Analyzer::Type::U8 -> value >= 0 && value <= 255,
+        Analyzer::Type::U16 -> value >= 0 && value <= 65535,
+        Analyzer::Type::U32 -> value >= 0 && value <= 4294967295,
+        Analyzer::Type::U64 -> value >= 0,
+        _ -> false,
+      };
+    }
+
+    function valueKindName(value: &Analyzer::ConstEval::ConstValue): str {
+      return match (value) {
+        Analyzer::ConstEval::ConstValue::Int(_) -> "an integer",
+        Analyzer::ConstEval::ConstValue::Float(_) -> "a float",
+        Analyzer::ConstEval::ConstValue::Bool(_) -> "a boolean",
+        Analyzer::ConstEval::ConstValue::Char(_) -> "a char",
+        Analyzer::ConstEval::ConstValue::Str(_) -> "a string",
+        Analyzer::ConstEval::ConstValue::Null -> "null",
+      };
+    }
+  }
+}

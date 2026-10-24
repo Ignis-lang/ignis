@@ -1,0 +1,60 @@
+// Declarable attributes on every target they can name, with constant
+// arguments, and an attribute record used as an ordinary value.
+const BASE_WEIGHT: i32 = 3;
+
+@attribute(record, enum, field, function, variant)
+record Label {
+  public text: str;
+  public weight: i32;
+}
+
+@attribute(record, field)
+record Marker {}
+
+@attribute(function)
+record Limits {
+  public low: i64;
+  public high: f64;
+  public enabled: boolean;
+  public symbol: char;
+}
+
+@Label("point", BASE_WEIGHT)
+@Marker
+record Point {
+  @Label("x", -1)
+  public x: i32;
+
+  @Marker
+  public y: i32;
+
+  @Label("sum", 2)
+  public sum(&self): i32 {
+    return self.x + self.y;
+  }
+}
+
+@Label("color", 0)
+enum Color {
+  @Label("red", 1)
+  RED,
+  GREEN,
+}
+
+@Limits(-40, 2.5, true, 'z')
+function weightOf(label: Label): i32 {
+  return label.weight;
+}
+
+function main(): i32 {
+  let point: Point = Point { x: 2, y: 3 };
+  let label: Label = Label { text: "value", weight: 4 };
+  let color: Color = Color::GREEN;
+  let mut shade: i32 = 0;
+
+  if (color == Color::GREEN) {
+    shade = 1;
+  }
+
+  return point.sum() + weightOf(label) + shade;
+}

@@ -422,6 +422,23 @@ export namespace Analyzer {
     }
   }
 
+  /// The compile-time value of one declarable attribute argument.
+  enum AttributeValue {
+    Int(i64),
+    Float(f64),
+    Bool(boolean),
+    Char(char),
+    Str(String),
+  }
+
+  /// One declarable attribute written on a declaration: the attribute record
+  /// it names and the value of each of its fields, in declaration order.
+  record AttributeUse {
+    public attribute: Analyzer::DefinitionId;
+    public values: Vector<Analyzer::AttributeValue>;
+    public span: SourceSpan;
+  }
+
   /// The generic definition and the type arguments a monomorphized definition
   /// was created from. `owner` is the generic record, enum or trait a method
   /// instance belongs to; `ownerArgs` instantiate the owner and `methodArgs`
@@ -540,6 +557,15 @@ export namespace Analyzer {
     /// resolved: imported modules before the modules that import them.
     extensionDefs: Vector<Analyzer::DefinitionId>;
 
+    /// The targets of each record marked `@attribute(...)`, keyed by raw
+    /// definition id, as a mask of `Analyzer::Attributes` target bits. A record
+    /// without an entry is not an attribute.
+    attributeTargets: HashMap<u32, u32>;
+    /// The declarable attributes written on each declaration, keyed by the raw
+    /// id of the record, enum, field, function, method or variant they annotate,
+    /// in written order. Filled by `Analyzer::Attributes::checkModule`.
+    attributeUses: HashMap<u32, Vector<Analyzer::AttributeUse>>;
+
     public static init(): DefinitionStore {
       return DefinitionStore {
         definitions: IndexVec::new<Analyzer::DefinitionTag, Analyzer::Definition>(),
@@ -564,7 +590,93 @@ export namespace Analyzer {
         inheritedNotes: HashMap::new<u32, String>(),
         extensionTargets: HashMap::new<u32, Analyzer::ExtensionTarget>(),
         extensionDefs: Vector::new<Analyzer::DefinitionId>(),
+        attributeTargets: HashMap::new<u32, u32>(),
+        attributeUses: HashMap::new<u32, Vector<Analyzer::AttributeUse>>(),
       };
+    }
+
+    /// Record that the record `id` is an attribute applicable to `targets`.
+    public setAttributeTargets(&mut self, id: Analyzer::DefinitionId, targets: u32): void {
+      self.attributeTargets.insert(id.raw(), targets);
+    }
+
+    /// The targets of the attribute record `id`, or `NONE` when `id` is not
+    /// marked `@attribute`.
+    public attributeTargetsOf(&self, id: Analyzer::DefinitionId): Option<u32> {
+      let raw: u32 = id.raw();
+
+      if (let Option::SOME(targets) = self.attributeTargets.get(&raw)) {
+        return Option::SOME(*targets);
+      }
+
+      return Option::NONE;
+    }
+
+    /// Append a declarable attribute written on `annotated`.
+    public addAttributeUse(
+      &mut self,
+      annotated: Analyzer::DefinitionId,
+      attributeUse: Analyzer::AttributeUse
+    ): void {
+      let raw: u32 = annotated.raw();
+
+      if (let Option::SOME(uses) = self.attributeUses.getMut(&raw)) {
+        uses.push(attributeUse);
+        return;
+      }
+
+      let mut uses: Vector<Analyzer::AttributeUse> = Vector::new<Analyzer::AttributeUse>();
+      uses.push(attributeUse);
+      self.attributeUses.insert(raw, uses);
+    }
+
+    /// Every declarable attribute written on `annotated`, in written order, or
+    /// `NONE` when it carries none.
+    public attributesOn(
+      &self,
+      annotated: Analyzer::DefinitionId
+    ): Option<&Vector<Analyzer::AttributeUse>> {
+      let raw: u32 = annotated.raw();
+      return self.attributeUses.get(&raw);
+    }
+
+    /// The attribute `attribute` written on `annotated`, with its field values,
+    /// or `NONE` when `annotated` does not carry it. The first one wins when it
+    /// is written more than once.
+    public attributeOn(
+      &self,
+      annotated: Analyzer::DefinitionId,
+      attribute: Analyzer::DefinitionId
+    ): Option<&Analyzer::AttributeUse> {
+      let raw: u32 = annotated.raw();
+
+      let Option::SOME(uses) = self.attributeUses.get(&raw) else {
+        return Option::NONE;
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < uses.length()) {
+        if (let Option::SOME(attributeUse) = uses.get(index)) {
+          if (attributeUse.attribute.raw() == attribute.raw()) {
+            return Option::SOME(attributeUse);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The resolved path of module `moduleIndex`, when recorded.
+    public modulePathOf(&self, moduleIndex: u64): Option<&String> {
+      return self.modulePaths.get(&moduleIndex);
+    }
+
+    /// The index of the module being analyzed.
+    public activeModuleIndex(&self): u64 {
+      return self.activeModule;
     }
 
     /// Record that the record definition `id` is an extension block of

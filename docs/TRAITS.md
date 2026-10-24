@@ -729,6 +729,52 @@ record or enum it reports, which overrides the module level for that declaration
 |-----------|-------------|
 | `@aligned(N)` | Set minimum alignment for this field |
 
+### Declarable Attributes
+
+A program declares its own attributes as records marked `@attribute(<targets>)`. A declarable
+attribute is written with a capitalized name and resolves like a type name: through the enclosing
+namespaces, the module's own declarations and its imports, or by a qualified path.
+
+```ignis
+@attribute(record)
+export record Table {
+  public name: str;
+}
+
+export namespace Orm {
+  @attribute(field)
+  export record PrimaryKey {}
+}
+```
+
+```ignis
+import Table, Orm from "./orm";
+
+@Table("tasks")
+record Task {
+  @Orm::PrimaryKey
+  public id: i64;
+}
+```
+
+| Rule | Detail |
+|------|--------|
+| Targets | One or more of `record`, `enum`, `field`, `function` (a method counts) and `variant`. |
+| Arguments | One per field of the record, in declaration order. A record with no fields is written without parentheses. |
+| Argument values | Compile-time constants: literals, constants, negation and what constant evaluation folds. Each must fit its field: an integer in the field type's range, a float in `f32`/`f64`, a string in `str`, plus `boolean` and `char`. |
+| Ordinary use | An attribute record is an ordinary record: it can be constructed and passed like any other. |
+| Built-ins | Lowercase attributes (`@packed`, `@implements(...)`, ...) keep their meaning and are not records. |
+
+| Code | Message | Severity |
+|------|---------|----------|
+| A0117 | Unknown attribute; for a declarable one in another module, the message names the import to add | Error |
+| A0118 | Wrong number of attribute arguments | Error |
+| A0281 | Declarable attribute used on a target its `@attribute(...)` does not list | Error |
+| A0282 | Capitalized attribute names something other than a record marked `@attribute` | Error |
+| A0283 | Attribute argument does not fit its field | Error |
+| A0284 | Attribute argument is not a compile-time constant | Error |
+| A0290 | `@attribute` without targets, or naming an unknown target | Error |
+
 ## Diagnostics
 
 | Code | Message | Severity |
