@@ -1,0 +1,55 @@
+// e2e: std
+// In a generic record, `Self` is the record with its own type parameters:
+// `Self::wrap(value)` inside `Wrap<U>` builds a `Wrap<U>`, and `Self::SOME(value)`
+// inside `Maybe<T>` builds a `Maybe<T>`.
+import Io from "std::io";
+
+record Wrap<U> {
+  public content: U;
+
+  static wrap(content: U): Wrap<U> {
+    return Wrap<U> { content: content };
+  }
+
+  static twice(content: U): Wrap<U> {
+    return Self::wrap(content);
+  }
+
+  rewrap(&self, content: U): Wrap<U> {
+    return Self::wrap(content);
+  }
+}
+
+enum Maybe<T> {
+  SOME(T),
+  NONE,
+
+  static holding(value: T): Maybe<T> {
+    return Self::SOME(value);
+  }
+
+  static empty(): Maybe<T> {
+    return Self::NONE;
+  }
+}
+
+function valueOr(maybe: Maybe<i32>, fallback: i32): i32 {
+  match (maybe) {
+    Maybe::SOME(value) -> {
+      return value;
+    },
+    Maybe::NONE -> {
+      return fallback;
+    },
+  };
+}
+
+function main(): i32 {
+  let first: Wrap<i32> = Wrap::twice<i32>(4);
+  let second: Wrap<i32> = first.rewrap(9);
+  let text: Wrap<str> = Wrap::twice<str>("word");
+  Io::println(`wrap ${first.content} ${second.content} ${text.content}`.toStr());
+  Io::println(`maybe ${valueOr(Maybe::holding<i32>(5), 0)} ${valueOr(Maybe::empty<i32>(), 8)}`.toStr());
+
+  return 0;
+}
