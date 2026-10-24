@@ -11,6 +11,7 @@ import Id from "@compiler::ids";
 import Output from "@compiler::output";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
+import HashMap from "std::collections";
 
 import _ from "./ownership_report";
 
@@ -163,6 +164,9 @@ export namespace Borrowck {
   /// `heldHolders` entry of a borrow its holder already released.
   const RELEASED_HOLDER: u32 = 4294967294;
 
+  /// `heldRecorded` value of a granted borrow whose release is not reported.
+  const HELD_UNREPORTED: u32 = 2;
+
   /// Planned last statement of a holder whose borrows stay to scope end.
   const NO_LAST_STATEMENT: u64 = 18446744073709551615;
 
@@ -216,9 +220,12 @@ export namespace Borrowck {
     heldTargets: Vector<u32>;
     heldMutable: Vector<u32>;
 
-    /// Whether each held borrow was reported as opened. A borrow the walk
-    /// takes twice for one `&x` in the source is one logical borrow, so only
-    /// the visit that reported the open reports the release.
+    /// Whether each held borrow was granted and reported as opened: 1 granted
+    /// and reported, `HELD_UNREPORTED` granted but not reported (a `&x`
+    /// argument inside a `defer` body), 0 refused. A borrow the walk takes
+    /// twice for one `&x` in the source is one logical borrow, so only the
+    /// visit that reported the open reports the release; every granted
+    /// borrow is released.
     heldRecorded: Vector<u32>;
 
     /// The binding each held borrow is kept for, or `NO_HOLDER` when no
@@ -247,11 +254,16 @@ export namespace Borrowck {
     /// use in a `defer` body is not a use at statement granularity: the body
     /// runs at scope end, so it keeps the borrow to the end of the scope
     /// instead. Memoized so planning several holders of a block walks the
-    /// block once.
+    /// block once. `planStatementStarts[i]` is the index of each statement's
+    /// first node (one more entry closes the tail), and `planUses[i]` maps a
+    /// binding's raw id to the nodes that name it, so planning a holder only
+    /// visits the statements that use it or its carriers.
     planBlocks: Vector<u32>;
     planStatementNodes: Vector<Vector<u32>>;
     planStatementOfNode: Vector<Vector<u64>>;
     planNodeInDefer: Vector<Vector<u32>>;
+    planStatementStarts: Vector<Vector<u64>>;
+    planUses: Vector<HashMap<u64, Vector<u64>>>;
 
     scopeStarts: Vector<u64>;
 
@@ -477,6 +489,8 @@ export namespace Borrowck {
         planStatementNodes: Vector::new<Vector<u32>>(),
         planStatementOfNode: Vector::new<Vector<u64>>(),
         planNodeInDefer: Vector::new<Vector<u32>>(),
+        planStatementStarts: Vector::new<Vector<u64>>(),
+        planUses: Vector::new<HashMap<u64, Vector<u64>>>(),
         scopeStarts: Vector::new<u64>(),
         scopeBlocks: Vector::new<u32>(),
         scopeHasBlock: Vector::new<u32>(),
@@ -1495,9 +1509,28 @@ export namespace Borrowck {
     }
 
     public recordHeldBorrow(&mut self, target: u32, mutable: boolean, recorded: boolean): void {
+      self.pushHeldEntry(target, mutable, Borrowck::boolAsFlag(recorded));
+    }
+
+    /// Holds a granted borrow to the end of the scope without reporting its
+    /// release; a refused one is held as refused.
+    public recordUnreportedHeldBorrow(
+      &mut self,
+      target: u32,
+      mutable: boolean,
+      granted: boolean
+    ): void {
+      if (granted) {
+        self.pushHeldEntry(target, mutable, Borrowck::HELD_UNREPORTED);
+      } else {
+        self.pushHeldEntry(target, mutable, 0);
+      }
+    }
+
+    public pushHeldEntry(&mut self, target: u32, mutable: boolean, recorded: u32): void {
       self.heldTargets.push(target);
       self.heldMutable.push(Borrowck::boolAsFlag(mutable));
-      self.heldRecorded.push(Borrowck::boolAsFlag(recorded));
+      self.heldRecorded.push(recorded);
       self.heldHolders.push(self.currentHolder);
     }
 
@@ -1594,7 +1627,7 @@ export namespace Borrowck {
             recorded = *value;
           }
 
-          self.releaseHeldEntry(target, flag == 1, recorded == 1, self.ownedStarts.length(), span);
+          self.releaseHeldEntry(target, flag == 1, recorded, self.ownedStarts.length(), span);
           let _marked: boolean = self.heldHolders.set(index, Borrowck::RELEASED_HOLDER);
         }
 
@@ -1607,20 +1640,21 @@ export namespace Borrowck {
     /// last-use release report the same shape. A borrow that was never
     /// granted — a refused borrow, already reported when it was attempted —
     /// is neither released nor reported: releasing it would clear a borrow
-    /// someone else still holds.
+    /// someone else still holds. A granted borrow held unreported
+    /// (`HELD_UNREPORTED`) is released without an event.
     public releaseHeldEntry(
       &mut self,
       target: u32,
       mutable: boolean,
-      recorded: boolean,
+      recorded: u32,
       depth: u64,
       span: SourceSpan
     ): void {
-      if (!recorded) {
+      if (recorded == 0) {
         return;
       }
 
-      if (self.isRecordingReport()) {
+      if (recorded == 1 && self.isRecordingReport()) {
         self.reportEvents.push(Borrowck::OwnershipEvent {
           kind: Borrowck::OwnershipReport::EVENT_BORROW_RELEASE,
           functionRaw: self.currentFunction.raw(),
@@ -1670,10 +1704,14 @@ export namespace Borrowck {
       let mut nodes: Vector<u32> = Vector::new<u32>();
       let mut nodeStatements: Vector<u64> = Vector::new<u64>();
       let mut nodeInDefer: Vector<u32> = Vector::new<u32>();
+      let mut starts: Vector<u64> = Vector::new<u64>();
+      let mut uses: HashMap<u64, Vector<u64>> = HashMap::new<u64, Vector<u64>>();
 
       let mut statementIndex: u64 = 0;
 
       while (statementIndex <= statementCount) {
+        starts.push(nodes.length());
+
         let mut root: Option<Hir::HirId> = Option::NONE;
 
         if (statementIndex < statementCount) {
@@ -1697,6 +1735,7 @@ export namespace Borrowck {
               inDefer = flag;
             }
 
+            let nodeIndex: u64 = nodes.length();
             nodes.push(current.raw());
             nodeStatements.push(statementIndex);
             nodeInDefer.push(inDefer);
@@ -1707,6 +1746,20 @@ export namespace Borrowck {
               match (&node.kind) {
                 Hir::HirKind::Defer(_) -> {
                   childInDefer = 1;
+                },
+                Hir::HirKind::Variable(defId) -> {
+                  Borrowck::addPlanUse(&mut uses, defId.raw() as u64, nodeIndex);
+                },
+                Hir::HirKind::Closure(closureNode) -> {
+                  let mut captureIndex: u64 = 0;
+
+                  while (captureIndex < closureNode.captures.length()) {
+                    if (let Option::SOME(capture) = closureNode.captures.get(captureIndex)) {
+                      Borrowck::addPlanUse(&mut uses, capture.sourceDef.raw() as u64, nodeIndex);
+                    }
+
+                    captureIndex += 1;
+                  }
                 },
                 _ -> {},
               };
@@ -1729,7 +1782,11 @@ export namespace Borrowck {
         statementIndex += 1;
       }
 
+      starts.push(nodes.length());
+
       self.planBlocks.push(blockRaw);
+      self.planStatementStarts.push(starts);
+      self.planUses.push(uses);
       self.planStatementNodes.push(nodes);
       self.planStatementOfNode.push(nodeStatements);
       self.planNodeInDefer.push(nodeInDefer);
@@ -1737,12 +1794,44 @@ export namespace Borrowck {
       return self.planBlocks.length() - 1;
     }
 
-    public planNodeCount(&self, plan: u64): u64 {
-      let Option::SOME(nodes) = self.planStatementNodes.get(plan) else {
+    /// The index of the first node of `statement` in plan `plan`; the entry
+    /// past the tail is the node count.
+    public planStatementStart(&self, plan: u64, statement: u64): u64 {
+      let Option::SOME(starts) = self.planStatementStarts.get(plan) else {
         return 0;
       };
 
-      return nodes.length();
+      let Option::SOME(entry) = starts.get(statement) else {
+        return 0;
+      };
+
+      return *entry;
+    }
+
+    /// The nodes of plan `plan` that name the binding `binding`, in walk
+    /// order.
+    public planUsesOf(&self, plan: u64, binding: u32): Vector<u64> {
+      let mut result: Vector<u64> = Vector::new<u64>();
+
+      let Option::SOME(uses) = self.planUses.get(plan) else {
+        return result;
+      };
+
+      let key: u64 = binding as u64;
+
+      if (let Option::SOME(list) = uses.get(&key)) {
+        let mut index: u64 = 0;
+
+        while (index < list.length()) {
+          if (let Option::SOME(entry) = list.get(index)) {
+            result.push(*entry);
+          }
+
+          index += 1;
+        }
+      }
+
+      return result;
     }
 
     public planStatementOfNodeAt(&self, plan: u64, nodeIndex: u64): u64 {
@@ -1840,7 +1929,7 @@ export namespace Borrowck {
         // A scope-held borrow is released by the scope, not by an expression,
         // so it is reported at the brace that closes the scope; the scope
         // depth is what pairs it with its open.
-        self.releaseHeldEntry(target, flag == 1, recorded == 1, closingDepth, closingSpan);
+        self.releaseHeldEntry(target, flag == 1, recorded, closingDepth, closingSpan);
       }
     }
 
@@ -7324,11 +7413,11 @@ export namespace Borrowck {
       return;
     };
 
-    let _granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, reference.mutable, span, false);
+    let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, reference.mutable, span, false);
 
     if (state.inDefer) {
       let mut heldRef: &mut Borrowck::State = state;
-      heldRef.recordHeldBorrow(target.raw(), reference.mutable, false);
+      heldRef.recordUnreportedHeldBorrow(target.raw(), reference.mutable, granted);
       return;
     }
 
@@ -7996,180 +8085,254 @@ export namespace Borrowck {
     let statementCount: u64 = block.statements.length();
     let plan: u64 = state.blockPlanIndex(hir, blockId.raw(), &block.statements, block.expression);
     let mut carriers: Vector<u32> = Vector::new<u32>();
+    let mut carrierSet: HashMap<u64, u32> = HashMap::new<u64, u32>();
     carriers.push(holder);
+    carrierSet.insert(holder as u64, 1);
 
-    // Which statements use a carrier, outside and inside `defer` bodies. A
-    // node belongs to exactly one statement, so one pass over the memoized
-    // node list answers this for every statement at once.
-    let mut used: Vector<u32> = Vector::new<u32>();
+    // The statements, from the declaration on, that use a carrier outside a
+    // `defer` body, each once.
+    let mut usedStatements: Vector<u64> = Vector::new<u64>();
+    let mut usedSet: HashMap<u64, u32> = HashMap::new<u64, u32>();
+    let mut usedInDefer: boolean = false;
 
-    let mut fillIndex: u64 = 0;
+    // Transitive carriers, as a worklist over the use index: a binding whose
+    // value mentions a carrier — a copy, an aggregate or field initialized
+    // from one, a match or `let else` binding destructured from one, a
+    // closure capturing one — keeps the borrow as long as that carrier
+    // lives, and so does a binding a statement using a carrier derives a raw
+    // pointer for (a cast or a call result of raw pointer type: the pointer
+    // may point into the view whatever its pointee). A statement using a
+    // carrier anywhere joins all its reached bindings, which
+    // over-approximates the source alone and errs toward keeping the borrow.
+    let mut carrierIndex: u64 = 0;
 
-    while (fillIndex <= statementCount) {
-      used.push(0);
+    while (carrierIndex < carriers.length()) {
+      let mut carrier: u32 = 0;
 
-      fillIndex += 1;
-    }
-
-    // Transitive carriers: a binding whose value mentions a carrier — a
-    // copy, an aggregate or field initialized from one, a match or `let
-    // else` binding destructured from one, a closure capturing one — keeps
-    // the borrow as long as that carrier lives. Candidates come from the
-    // statements from the declaration on, and a statement using a carrier
-    // anywhere joins its reached bindings, which over-approximates the
-    // source alone and errs toward keeping the borrow.
-    let mut changed: boolean = true;
-
-    while (changed) {
-      changed = false;
-
-      // Refill the per-statement use marks: the carrier set grew.
-      let mut clearIndex: u64 = 0;
-
-      while (clearIndex <= statementCount) {
-        let _cleared: boolean = used.set(clearIndex, 0);
-
-        clearIndex += 1;
+      if (let Option::SOME(entry) = carriers.get(carrierIndex)) {
+        carrier = *entry;
       }
 
-      let mut nodeIndex: u64 = 0;
+      carrierIndex += 1;
 
-      while (nodeIndex < state.planNodeCount(plan)) {
+      let uses: Vector<u64> = state.planUsesOf(plan, carrier);
+      let mut useIndex: u64 = 0;
+
+      while (useIndex < uses.length()) {
+        let mut nodeIndex: u64 = 0;
+
+        if (let Option::SOME(entry) = uses.get(useIndex)) {
+          nodeIndex = *entry;
+        }
+
+        useIndex += 1;
+
         let statementOfNode: u64 = state.planStatementOfNodeAt(plan, nodeIndex);
 
-        if (statementOfNode < declaredAt || state.planNodeInDeferAt(plan, nodeIndex)) {
-          nodeIndex += 1;
+        if (statementOfNode < declaredAt) {
           continue;
         }
 
-        let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, nodeIndex));
-
-        if (Borrowck::nodeUsesAny(hir, nodeId, &carriers)) {
-          let _marked: boolean = used.set(statementOfNode, 1);
-        }
-
-        nodeIndex += 1;
-      }
-
-      let mut reachedIndex: u64 = 0;
-
-      while (reachedIndex < state.planNodeCount(plan)) {
-        let statementOfNode: u64 = state.planStatementOfNodeAt(plan, reachedIndex);
-
-        if (statementOfNode < declaredAt || state.planNodeInDeferAt(plan, reachedIndex)) {
-          reachedIndex += 1;
+        if (state.planNodeInDeferAt(plan, nodeIndex)) {
+          usedInDefer = true;
           continue;
         }
 
-        let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, reachedIndex));
-        let mut reached: Vector<u32> = Vector::new<u32>();
+        if (usedSet.containsKey(&statementOfNode)) {
+          continue;
+        }
 
-        if (Borrowck::bindingsReachedBy(hir, nodeId, &mut reached)) {
-          let mut statementUsed: boolean = false;
+        usedSet.insert(statementOfNode, 1);
+        usedStatements.push(statementOfNode);
 
-          if (let Option::SOME(mark) = used.get(statementOfNode)) {
-            statementUsed = *mark == 1;
+        let start: u64 = state.planStatementStart(plan, statementOfNode);
+        let end: u64 = state.planStatementStart(plan, statementOfNode + 1);
+        let derivesPointer: boolean = Borrowck::statementDerivesPointer(defStore, typeStore, hir, state, plan, start, end);
+        let mut reachedIndex: u64 = start;
+
+        while (reachedIndex < end) {
+          if (state.planNodeInDeferAt(plan, reachedIndex)) {
+            reachedIndex += 1;
+            continue;
           }
 
-          if (statementUsed) {
+          let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, reachedIndex));
+          let mut reached: Vector<u32> = Vector::new<u32>();
+
+          if (Borrowck::bindingsReachedBy(hir, nodeId, &mut reached)) {
             let mut bindingIndex: u64 = 0;
 
             while (bindingIndex < reached.length()) {
               if (let Option::SOME(binding) = reached.get(bindingIndex)) {
-                if (!Borrowck::vectorHasRaw(&carriers, *binding) && Borrowck::bindingCanCarryView(defStore, typeStore, *binding)) {
-                  carriers.push(*binding);
-                  changed = true;
+                let key: u64 = *binding as u64;
+
+                if (!carrierSet.containsKey(&key)) {
+                  if (derivesPointer || Borrowck::bindingCanCarryView(defStore, typeStore, *binding)) {
+                    carriers.push(*binding);
+                    carrierSet.insert(key, 1);
+                  }
                 }
               }
 
               bindingIndex += 1;
             }
           }
-        }
 
-        reachedIndex += 1;
+          reachedIndex += 1;
+        }
       }
     }
 
     // A carrier that needs a drop lives to the end of its scope, and the
     // view it carries with it.
-    let mut carrierIndex: u64 = 0;
+    let mut dropIndex: u64 = 0;
 
-    while (carrierIndex < carriers.length()) {
-      if (let Option::SOME(carrier) = carriers.get(carrierIndex)) {
+    while (dropIndex < carriers.length()) {
+      if (let Option::SOME(carrier) = carriers.get(dropIndex)) {
         if (Borrowck::definitionNeedsDrop(defStore, typeStore, Id::fromRaw<Analyzer::DefinitionTag>(*carrier))) {
           return Borrowck::NO_LAST_STATEMENT;
         }
       }
 
-      carrierIndex += 1;
+      dropIndex += 1;
+    }
+
+    // A use in a `defer` body runs at scope end, so it keeps the borrow to
+    // the end of the scope.
+    if (usedInDefer) {
+      return Borrowck::NO_LAST_STATEMENT;
     }
 
     let mut last: u64 = declaredAt;
-    let mut statementIndex: u64 = declaredAt;
+    let mut statementIndex: u64 = 0;
 
-    while (statementIndex <= statementCount) {
-      let mut statementUsed: boolean = false;
-
-      if (let Option::SOME(mark) = used.get(statementIndex)) {
-        statementUsed = *mark == 1;
-      }
-
-      if (statementUsed) {
-        if (statementIndex == statementCount) {
+    while (statementIndex < usedStatements.length()) {
+      if (let Option::SOME(used) = usedStatements.get(statementIndex)) {
+        if (*used == statementCount) {
           // A use in the block's tail keeps the borrow to block end.
           return Borrowck::NO_LAST_STATEMENT;
         }
 
-        if (statementIndex > last) {
-          last = statementIndex;
+        if (*used > last) {
+          last = *used;
+        }
+
+        // The sink rule: a view handed somewhere it can outlive the
+        // statement keeps its borrow to the end of the scope. A sink names a
+        // carrier, so only the statements that use one can hold it.
+        let start: u64 = state.planStatementStart(plan, *used);
+        let end: u64 = state.planStatementStart(plan, *used + 1);
+        let mut sinkIndex: u64 = start;
+
+        while (sinkIndex < end) {
+          let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, sinkIndex));
+
+          if (Borrowck::nodeStoresView(defStore, typeStore, hir, nodeId, &carriers)) {
+            return Borrowck::NO_LAST_STATEMENT;
+          }
+
+          sinkIndex += 1;
         }
       }
 
       statementIndex += 1;
     }
 
-    // A use in a `defer` body runs at scope end, so it keeps the borrow to
-    // the end of the scope.
-    let mut deferIndex: u64 = 0;
+    return last;
+  }
 
-    while (deferIndex < state.planNodeCount(plan)) {
-      if (state.planStatementOfNodeAt(plan, deferIndex) < declaredAt) {
-        deferIndex += 1;
-        continue;
-      }
+  /// Whether the nodes `start` to `end` of plan `plan` derive a raw pointer
+  /// outside a `defer` body: a cast or call whose result has a raw pointer
+  /// type. Integer and `@bitCast` laundering are the documented boundary.
+  function statementDerivesPointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    plan: u64,
+    start: u64,
+    end: u64,
+  ): boolean {
+    let mut index: u64 = start;
 
-      if (state.planNodeInDeferAt(plan, deferIndex)) {
-        let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, deferIndex));
+    while (index < end) {
+      if (!state.planNodeInDeferAt(plan, index)) {
+        let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, index));
 
-        if (Borrowck::nodeUsesAny(hir, nodeId, &carriers)) {
-          return Borrowck::NO_LAST_STATEMENT;
+        if (let Option::SOME(node) = hir.get(nodeId)) {
+          let derives: boolean = match (&node.kind) {
+            Hir::HirKind::Cast(_) -> true,
+            Hir::HirKind::Call(_) -> true,
+            Hir::HirKind::MethodCall(_) -> true,
+            Hir::HirKind::CallClosure(_) -> true,
+            _ -> false,
+          };
+
+          if (derives) {
+            if (let Option::SOME(typeId) = Borrowck::nodeTypeOf(hir, nodeId)) {
+              if (Borrowck::typeIsRawPointer(defStore, typeStore, typeId)) {
+                return true;
+              }
+            }
+          }
         }
       }
 
-      deferIndex += 1;
+      index += 1;
     }
 
-    // The sink rule: a view handed somewhere it can outlive the statement
-    // keeps its borrow to the end of the scope.
-    let mut sinkIndex: u64 = 0;
+    return false;
+  }
 
-    while (sinkIndex < state.planNodeCount(plan)) {
-      if (state.planStatementOfNodeAt(plan, sinkIndex) < declaredAt) {
-        sinkIndex += 1;
-        continue;
-      }
+  /// Whether `typeId` is a raw pointer, through aliases.
+  function typeIsRawPointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut current: Analyzer::TypeId = typeId;
+    let mut depth: u32 = 0;
 
-      let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, sinkIndex));
+    while (depth < 64) {
+      let Option::SOME(type_) = typeStore.get(current) else {
+        return false;
+      };
 
-      if (Borrowck::nodeStoresView(defStore, typeStore, hir, nodeId, &carriers)) {
-        return Borrowck::NO_LAST_STATEMENT;
-      }
+      match (type_) {
+        Analyzer::Type::Pointer(_) -> {
+          return true;
+        },
+        Analyzer::Type::Alias(aliasDefId) -> {
+          let Option::SOME(target) = Borrowck::aliasedTypeOf(defStore, aliasDefId) else {
+            return false;
+          };
 
-      sinkIndex += 1;
+          current = target;
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      depth += 1;
     }
 
-    return last;
+    return false;
+  }
+
+  /// Appends `nodeIndex` to the uses of the binding `key`.
+  function addPlanUse(uses: &mut HashMap<u64, Vector<u64>>, key: u64, nodeIndex: u64): void {
+    let mut usesRef: &mut HashMap<u64, Vector<u64>> = uses;
+
+    if (let Option::SOME(list) = usesRef.getMut(&key)) {
+      let mut listRef: &mut Vector<u64> = list;
+      listRef.push(nodeIndex);
+      return;
+    }
+
+    let mut list: Vector<u64> = Vector::new<u64>();
+    list.push(nodeIndex);
+    usesRef.insert(key, list);
   }
 
   /// The bindings a `let`, `let else` or `match` statement at `nodeId`
