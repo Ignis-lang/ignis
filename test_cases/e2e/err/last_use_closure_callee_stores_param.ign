@@ -1,0 +1,59 @@
+// e2e: err
+//
+// A closure that captures the view and is also called with it can store its
+// parameter into a captured place, so the call keeps the borrow to the end of
+// the scope even though the callee itself carries the view.
+record Note {
+  public value: str;
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function direct(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  let f = (t: str): void -> {
+    consume(text);
+    slot = t;
+  };
+  f(text);
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function rawPointer(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let place: *mut str = (&mut slot) as *mut str;
+  let text: str = owned.toStr();
+  let f = (t: str): void -> {
+    consume(text);
+    @write<str>(place, t);
+  };
+  f(text);
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function wrapped(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  let f = (note: Note): void -> {
+    consume(text);
+    slot = note.value;
+  };
+  f(Note { value: text });
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function main(): i32 {
+  direct();
+  rawPointer();
+  wrapped();
+  return 0;
+}

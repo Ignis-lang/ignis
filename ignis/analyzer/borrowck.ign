@@ -8404,7 +8404,10 @@ export namespace Borrowck {
   /// `&mut str` travelling in one value (`Pair { text: text, slot: &mut
   /// slot }`, or two fields of one holder) keep the borrow while a `&mut
   /// String` view used as a receiver does not. A closure callee that carries
-  /// the view is skipped: capture analysis already tracks its captures.
+  /// the view is skipped only when no argument carries it too: capture
+  /// analysis tracks what its body stores from its captures, but not what it
+  /// stores from its parameters, so a callee also handed the view counts as
+  /// any other operand (`canReachMutablePlace`, true for a closure type).
   function callHandsViewToSink(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -8417,6 +8420,27 @@ export namespace Borrowck {
       return false;
     }
 
+    let mut exemptCallee: Option<Hir::HirId> = Option::NONE;
+
+    if (let Option::SOME(callee) = closureCallee) {
+      let mut argumentCarries: boolean = false;
+      let mut argumentIndex: u64 = 0;
+
+      while (argumentIndex < operands.length()) {
+        if (let Option::SOME(operand) = operands.get(argumentIndex)) {
+          if (operand.raw() != callee.raw() && Borrowck::mentionsAny(hir, *operand, carriers)) {
+            argumentCarries = true;
+          }
+        }
+
+        argumentIndex += 1;
+      }
+
+      if (!argumentCarries) {
+        exemptCallee = Option::SOME(callee);
+      }
+    }
+
     let mut index: u64 = 0;
 
     while (index < operands.length()) {
@@ -8425,13 +8449,23 @@ export namespace Borrowck {
           return true;
         };
 
-        if (Borrowck::mentionsAny(hir, *operand, carriers)) {
-          let mut isCallee: boolean = false;
+        let mut isCallee: boolean = false;
 
-          if (let Option::SOME(callee) = closureCallee) {
-            isCallee = callee.raw() == operand.raw();
+        if (let Option::SOME(callee) = closureCallee) {
+          isCallee = callee.raw() == operand.raw();
+        }
+
+        let mut isExempt: boolean = false;
+
+        if (let Option::SOME(callee) = exemptCallee) {
+          isExempt = callee.raw() == operand.raw();
+        }
+
+        if (isCallee && !isExempt) {
+          if (Analyzer::ViewType::canReachMutablePlace(defStore, typeStore, operandType)) {
+            return true;
           }
-
+        } else if (Borrowck::mentionsAny(hir, *operand, carriers)) {
           if (!isCallee && Analyzer::ViewType::canReachViewHoldingPlace(defStore, typeStore, operandType)) {
             return true;
           }

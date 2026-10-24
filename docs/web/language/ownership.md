@@ -176,7 +176,8 @@ A view must not outlive its owner:
   and a closure callee included. The operand carrying the view counts only through a place
   that can hold a view — a `&mut T` or raw pointer whose referent can carry one (`&mut str`, a
   `*mut str` field) or a function-typed field next to the view — so a `&mut String` view used
-  as a receiver, or a by-reference closure being called, does not keep the borrow. A raw pointer the callee obtains itself, read from a `static` or cast from
+  as a receiver, or a by-reference closure being called without the view among its
+  arguments, does not keep the borrow. A raw pointer the callee obtains itself, read from a `static` or cast from
   a reference it received (`slot as *mut Slot`), is outside this rule: raw pointers are the
   programmer's responsibility.
 - A view taken through a view local that holds such a borrow borrows that local, not its
