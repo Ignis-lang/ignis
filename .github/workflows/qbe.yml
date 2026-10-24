@@ -125,7 +125,9 @@ jobs:
             exit 0
           fi
           CHANGED=$(git diff --name-only "$BASE_SHA...HEAD")
-          if echo "$CHANGED" | grep -Eq '^(ignis/|std/|\.github/workflows/qbe\.yml$|scripts/bootstrap\.sh$)'; then
+          # A here-string, not a pipe: under pipefail, `grep -q` exiting on the
+          # first match can SIGPIPE the writer and turn a match into a skip.
+          if grep -Eq '^(ignis/|std/|\.github/workflows/qbe\.yml$|scripts/bootstrap\.sh$)' <<<"$CHANGED"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "skipped: no backend-relevant change"
