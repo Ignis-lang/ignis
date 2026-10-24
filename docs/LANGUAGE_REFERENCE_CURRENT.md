@@ -267,7 +267,29 @@ let x = identity(42);       // T inferred as i32
 let y = identity<i64>(42);  // T explicitly i64
 ```
 
-Function overloading is supported by signature differences.
+Function overloading is supported by signature differences. Functions with the same name in the
+same scope, a type's static methods with the same name, and a type's instance methods with the same
+name each form an overload set, and a call picks one from its argument types:
+
+- An overload is ranked by its parameters: an argument of exactly the parameter's type costs
+  nothing, an argument that only converts to it (integer widening, `static str` to `str`, a fixed
+  array to a slice, a function pointer to a closure) costs more, and any other argument rules the
+  overload out.
+- A generic overload, one that infers a type parameter from an argument, ranks below every
+  non-generic overload that accepts the call, even one that needs conversions. An `i32` argument
+  picks `f(value: i64)` over `f<T>(value: T)`.
+- A generic overload whose inferred type arguments miss a bound of its type parameters is set aside
+  first. Only when no other overload matches is it selected, and the call reports the bound (A0247).
+- The lowest-ranked overload wins. A tie is ambiguous (A0101), and no matching overload is an error
+  (A0100).
+
+```ignis
+function bind(value: i64): String { ... }
+function bind<T: Describe>(value: T): String { ... }
+
+bind(3 as i32);              // the i64 overload: i32 does not satisfy Describe
+bind(Point { x: 1 });        // the generic overload, when Point implements Describe
+```
 
 ### 4.2 Variables and Constants
 

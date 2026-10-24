@@ -1,0 +1,47 @@
+// e2e: std
+// The bounded generic fallback of an instance-method overload set: an `i64`
+// takes the concrete method, a record implementing the bound the generic
+// one, and an `i32` the concrete one, since `i32` does not implement
+// `Describe`.
+import Io from "std::io";
+
+trait Describe {
+  describe(&self): String;
+}
+
+@implements(Describe)
+record Point {
+  public x: i32;
+
+  describe(&self): String {
+    return `point ${self.x}`;
+  }
+}
+
+record Statement {
+  public label: i32;
+
+  bind(&self, value: i64): String {
+    return `${self.label} number ${value}`;
+  }
+
+  bind<T: Describe>(&self, value: T): String {
+    let described: String = value.describe();
+    return `${self.label} described ${described.toStr()}`;
+  }
+}
+
+function main(): i32 {
+  let wide: i64 = 7;
+  let narrow: i32 = 3;
+  let point: Point = Point { x: 5 };
+  let statement: Statement = Statement { label: 1 };
+  let byWide: String = statement.bind(wide);
+  let byNarrow: String = statement.bind(narrow);
+  let byPoint: String = statement.bind(point);
+  Io::println(byWide.toStr());
+  Io::println(byNarrow.toStr());
+  Io::println(byPoint.toStr());
+
+  return 0;
+}
