@@ -2,18 +2,23 @@
 //! # ORM
 //!
 //! A small mapping layer on `std::sqlite3`: table descriptors that emit their
-//! SQL, typed row reads that report NULL and bad values as errors, and
-//! ordered migrations applied in one transaction. Every value goes to SQLite
+//! SQL, typed row reads that report NULL and bad values as errors, ordered
+//! migrations applied in one transaction, and a repository that stores a
+//! record implementing `Orm::Entity` and `Orm::FromRow`. Every value goes to SQLite
 //! as a bound parameter; no statement interpolates one.
 //!
 //! ## Exports
 //!
 //! | Export            | Description                                      |
 //! |-------------------|--------------------------------------------------|
-//! | `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |
+//! | `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |
 //! | `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |
 //! | `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |
 //! | `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |
+//! | `Orm::Entity`     | A stored record: `static table()`, `id()`, `bindValues(statement)` |
+//! | `Orm::FromRow`    | `static fromRow(row)`: a record from a row       |
+//! | `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |
+//! | `Orm::Value`      | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |
 //! | `Orm::Migration`  | One versioned schema step                        |
 //! | `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |
 //! | `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |
@@ -37,34 +42,61 @@
 //! import Orm from "std::orm";
 //! import Sqlite3 from "std::sqlite3";
 //!
+//! @implements(Orm::Entity, Orm::FromRow)
+//! record Task {
+//!   public id: Option<i64>;
+//!   public title: String;
+//!
+//!   static table(): Orm::Table {
+//!     return Orm::Table::create("tasks")
+//!       .columnInt("id", Orm::ColumnKey::PRIMARY)
+//!       .autoIncrement()
+//!       .columnText("title", Orm::ColumnKey::NONE)
+//!       .notNull();
+//!   }
+//!
+//!   static fromRow(row: &Orm::Row): Result<Task, Orm::Error> {
+//!     return Result::OK(Task { id: Option::SOME(row.readInt(0)!), title: row.readText(1)! });
+//!   }
+//!
+//!   id(&self): Option<i64> {
+//!     return self.id;
+//!   }
+//!
+//!   bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Orm::Error> {
+//!     return match (statement.bindText(1, self.title.toStr())) {
+//!       Result::OK(_) -> Result::OK(()),
+//!       Result::ERROR(error) -> Result::ERROR(Orm::Error::fromSqlite(error)),
+//!     };
+//!   }
+//! }
+//!
 //! function main(): i32 {
 //!   let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();
-//!   let table: Orm::Table = Orm::Table::create("tasks")
-//!     .columnInt("id", Orm::ColumnKey::PRIMARY)
-//!     .autoIncrement()
-//!     .columnText("title", Orm::ColumnKey::NONE)
-//!     .notNull();
-//!
 //!   let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();
-//!   migrations.push(Orm::Migration::create(1, table.createTableSql().unwrap().toStr()));
+//!   migrations.push(Orm::Migration::create(1, Task::table().createTableSql().unwrap().toStr()));
 //!   Orm::migrate(&mut connection, &migrations).unwrap();
 //!
-//!   let mut insert: Sqlite3::Statement = connection.prepare(table.insertSql().unwrap().toStr()).unwrap();
-//!   insert.bindText(1, "write the ORM").unwrap();
-//!   insert.step().unwrap();
+//!   let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();
+//!   let task: Task = Task { id: Option::NONE, title: String::create("write the ORM") };
+//!   let id: i64 = tasks.insert(&mut connection, &task).unwrap();
 //!
-//!   return connection.lastInsertRowId() == 1 ? 0 : 1;
+//!   return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;
 //! }
 //! ```
 //!
 //! ## Non-goals
 //!
-//! There is no query builder and no entity mapping yet: a repository over
-//! `Orm::Table` and `Orm::Row` comes later.
+//! There is no query builder: the generated SQL covers single-table CRUD,
+//! and `Repository::findWhere` takes a raw `WHERE` clause with bound
+//! `Orm::Value` parameters for everything else. There are no relationships.
 
 import _ from "std::orm::error";
 import _ from "std::orm::table";
 import _ from "std::orm::row";
 import _ from "std::orm::migration";
+import _ from "std::orm::value";
+import _ from "std::orm::entity";
+import _ from "std::orm::repository";
 
 export namespace Orm {}

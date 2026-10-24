@@ -1,0 +1,48 @@
+//!
+//! # Value
+//!
+//! `Orm::Value`, one SQL parameter of a raw query such as
+//! `Repository::findWhere`. A value always reaches SQLite through a `bind*`
+//! call, never as text in the statement.
+//!
+//! ## Exports
+//!
+//! | Export       | Description                                          |
+//! |--------------|------------------------------------------------------|
+//! | `Orm::Value` | `NULL`, `INT`, `REAL`, `TEXT`, `BLOB`; `bind` binds it to a `?` |
+
+import Sqlite3 from "std::sqlite3";
+import Error from "std::orm::error";
+
+/// Raw SQL parameters.
+export namespace Orm {
+  /// One parameter of a raw query.
+  export enum Value {
+    /// SQL `NULL`.
+    NULL,
+    /// An `INTEGER`.
+    INT(i64),
+    /// A `REAL`.
+    REAL(f64),
+    /// `TEXT`, bound as UTF-8.
+    TEXT(String),
+    /// A `BLOB`.
+    BLOB(Vector<u8>),
+
+    /// Binds the value to the 1-based parameter `index` of `statement`.
+    public bind(&self, statement: &mut Sqlite3::Statement, index: i32): Result<void, Error> {
+      let bound: Result<void, Sqlite3::Error> = match (self) {
+        Value::NULL -> statement.bindNull(index),
+        Value::INT(value) -> statement.bindInt(index, value),
+        Value::REAL(value) -> statement.bindReal(index, value),
+        Value::TEXT(text) -> statement.bindText(index, text.toStr()),
+        Value::BLOB(bytes) -> statement.bindBlob(index, &bytes),
+      };
+
+      return match (bound) {
+        Result::OK(_) -> Result::OK(()),
+        Result::ERROR(error) -> Result::ERROR(Error::fromSqlite(error)),
+      };
+    }
+  }
+}

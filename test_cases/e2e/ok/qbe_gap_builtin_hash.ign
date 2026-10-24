@@ -1,0 +1,105 @@
+// e2e: std
+// `@hash` over every primitive the hasher writes directly, a record and an
+// enum with their own `hash` method. The printed hash
+// values pin the exact FNV-1a states, so both backends must agree on them.
+import Eq, Hash, HashMap from "std::collections";
+import Hasher from "std::hash";
+import Io from "std::io";
+
+@implements(Hash, Eq)
+record Point {
+  public x: i32;
+  public y: i32;
+
+  hash(&self, hasher: &mut Hasher): void {
+    hasher.writeI32(self.x);
+    hasher.writeI32(self.y);
+  }
+
+  equals(&self, other: &Point): boolean {
+    return self.x == other.x && self.y == other.y;
+  }
+}
+
+@implements(Hash, Eq)
+enum Color {
+  RED,
+  GREEN,
+
+  hash(&self, hasher: &mut Hasher): void {
+    hasher.writeBoolean(self.equals(&Color::RED));
+  }
+
+  equals(&self, other: &Color): boolean {
+    return match (self) {
+      Color::RED -> match (other) {
+        Color::RED -> true,
+        Color::GREEN -> false,
+      },
+      Color::GREEN -> match (other) {
+        Color::RED -> false,
+        Color::GREEN -> true,
+      },
+    };
+  }
+}
+
+function hashOf<T: Hash>(value: &T): u64 {
+  let mut hasher: Hasher = Hasher::new();
+  @hash<T>(value, (&mut hasher) as &mut Hasher);
+
+  return hasher.finish();
+}
+
+function main(): i32 {
+  let flag: boolean = true;
+  let letter: char = 'z';
+  let tiny: i8 = -3;
+  let short: i16 = -300;
+  let word: i32 = -70000;
+  let long: i64 = -5000000000;
+  let byte: u8 = 200;
+  let half: u16 = 60000;
+  let unsigned: u32 = 4000000000;
+  let wide: u64 = 18000000000000000000;
+  let view: str = "view";
+  let point: Point = Point { x: 3, y: -4 };
+  let color: Color = Color::GREEN;
+
+  Io::println(`boolean ${hashOf<boolean>(&flag)}`);
+  Io::println(`char ${hashOf<char>(&letter)}`);
+  Io::println(`i8 ${hashOf<i8>(&tiny)}`);
+  Io::println(`i16 ${hashOf<i16>(&short)}`);
+  Io::println(`i32 ${hashOf<i32>(&word)}`);
+  Io::println(`i64 ${hashOf<i64>(&long)}`);
+  Io::println(`u8 ${hashOf<u8>(&byte)}`);
+  Io::println(`u16 ${hashOf<u16>(&half)}`);
+  Io::println(`u32 ${hashOf<u32>(&unsigned)}`);
+  Io::println(`u64 ${hashOf<u64>(&wide)}`);
+  Io::println(`str ${hashOf<str>(&view)}`);
+  Io::println(`record ${hashOf<Point>(&point)}`);
+  Io::println(`enum ${hashOf<Color>(&color)}`);
+
+  let mut byName: HashMap<static str, i32> = HashMap::new<static str, i32>();
+  byName.insert("one", 1);
+  byName.insert("two", 2);
+  let mut byPoint: HashMap<Point, i32> = HashMap::new<Point, i32>();
+  byPoint.insert(Point { x: 1, y: 2 }, 10);
+  byPoint.insert(Point { x: 2, y: 1 }, 20);
+
+  let two: static str = "two";
+  let key: Point = Point { x: 2, y: 1 };
+  let mut total: i32 = 0;
+
+  if (let Option::SOME(value) = byName.get(&two)) {
+    total += *value;
+  }
+
+  if (let Option::SOME(value) = byPoint.get(&key)) {
+    total += *value;
+  }
+
+  Io::println(`total ${total} names ${byName.length()} points ${byPoint.length()}`);
+
+  return 0;
+}

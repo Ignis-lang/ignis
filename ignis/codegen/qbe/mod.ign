@@ -132,6 +132,9 @@ export namespace CodegenQbe {
   /// temporaries, both far below it.
   const MAX_IDENTIFIER_LENGTH: u64 = 79;
 
+  /// The largest `align` QBE 1.2 honors on a `data` definition.
+  const MAX_DATA_ALIGNMENT: u64 = 64;
+
   /// Every global identifier this backend emits passes through here, so a
   /// definition and its references can never disagree. The stable symbols
   /// `SymbolNames` builds are already capped at the QBE limit, but names
@@ -418,6 +421,22 @@ export namespace CodegenQbe {
       Analyzer::Type::Function(_) -> true,
       _ -> false,
     };
+  }
+
+  /// Whether `ty` is a fixed array, whose value is the address of its first
+  /// element.
+  function isFixedArrayType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+
+    if (let Option::SOME(Analyzer::Type::FixedArray(_, _)) = typeStore.get(resolved)) {
+      return true;
+    }
+
+    return false;
   }
 
   /// Whether a value of `ty` needs drop glue. Closures and droppable nominals
@@ -1801,16 +1820,20 @@ export namespace CodegenQbe {
       return;
     }
 
-    if (layout.size == 0) {
-      CodegenQbe::failNamed(emitter, "ZeroSizedRecord");
-      return;
-    }
     if (layout.alignment > 16) {
       CodegenQbe::failNamed(emitter, "OveralignedRecord");
       return;
     }
 
     let name: String = CodegenQbe::qbeAggregateTypeName(defStore, symbols, defId);
+
+    // A record without storage is the C backend's empty struct: zero bytes,
+    // which an opaque zero-byte type also is, so as a parameter it takes no
+    // register or stack slot in either backend.
+    if (layout.size == 0) {
+      emitter.data.pushStr(`type :${name.toStr()} = align ${layout.alignment} { 0 }\n`.toStr());
+      return;
+    }
 
     let mut unaligned: boolean = false;
     let mut fieldIndex: u64 = 0;
@@ -2130,6 +2153,13 @@ export namespace CodegenQbe {
     }
 
     let alignment: u64 = layout.alignment > declaredAlignment ? layout.alignment : declaredAlignment;
+
+    // QBE 1.2 keeps a data alignment in a signed byte: 128 is emitted as
+    // `.balign -128` and anything larger is dropped without a word.
+    if (alignment > CodegenQbe::MAX_DATA_ALIGNMENT) {
+      CodegenQbe::failNamed(emitter, "OveralignedGlobal");
+      return;
+    }
     let line: String = `${linkage}data $${name.toStr()} = align ${alignment} { ${items.toStr()} }\n`;
 
     emitter.data.pushStr(line.toStr());
@@ -2306,7 +2336,14 @@ export namespace CodegenQbe {
         if (let Option::SOME(dest) = aggregateLoad) {
           let destOperand: Lir::Operand = Lir::Operand::Temp(dest);
           if (let Option::SOME(destType) = CodegenQbe::operandType(defStore, function_, &destOperand)) {
-            if (CodegenQbe::isAggregateType(defStore, typeStore, destType)) {
+            // A pointee array is aliased, not copied, so it needs no slot.
+            let readsPointee: boolean = match (instruction) {
+              Lir::Instr::EnumGetPayloadField(_) -> false,
+              _ -> true,
+            };
+            let aliasesArray: boolean = readsPointee && CodegenQbe::isFixedArrayType(defStore, typeStore, destType);
+
+            if (CodegenQbe::isAggregateType(defStore, typeStore, destType) && !aliasesArray) {
               let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, destType);
               let slot: String = CodegenQbe::freshTemp(emitter);
               emitter.out.pushStr(`    ${slot.toStr()} =l alloc16 ${size}\n`.toStr());
@@ -2776,6 +2813,12 @@ export namespace CodegenQbe {
       Lir::Instr::InitSplat(node) -> {
         CodegenQbe::qbeEmitInitSplat(emitter, defStore, typeStore, symbols, function_, &node);
       },
+      Lir::Instr::InitVector(node) -> {
+        CodegenQbe::qbeEmitInitVector(emitter, defStore, typeStore, symbols, function_, &node);
+      },
+      Lir::Instr::BuiltinHash(node) -> {
+        CodegenQbe::qbeEmitBuiltinHash(emitter, defStore, typeStore, symbols, function_, &node);
+      },
       Lir::Instr::SizeOf(node) -> {
         let size: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.ty);
         let line: String = `    %t${node.dest.raw()} =l copy ${size}\n`;
@@ -2945,6 +2988,14 @@ export namespace CodegenQbe {
     let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.ptr) else {
       return;
     };
+
+    // An array value is the address of its first element, which is what the
+    // pointer to the array already holds; the C backend aliases it the same
+    // way, so a write through the loaded array reaches the pointee.
+    if (CodegenQbe::isFixedArrayType(defStore, typeStore, destType)) {
+      emitter.out.pushStr(`    %t${node.dest.raw()} =l copy ${pointer.toStr()}\n`.toStr());
+      return;
+    }
 
     if (CodegenQbe::isAggregateType(defStore, typeStore, destType)) {
       let Option::SOME(slot) = context.slotFor(node.dest.raw()) else {
@@ -3488,7 +3539,7 @@ export namespace CodegenQbe {
     function_: &Lir::FunctionLir,
     argument: &Lir::Operand,
   ): String {
-    let Option::SOME(argumentType) = CodegenC::operandType(function_, argument) else {
+    let Option::SOME(argumentType) = CodegenQbe::operandType(defStore, function_, argument) else {
       CodegenQbe::failNamed(emitter, "Call");
       return String::create("");
     };
@@ -4191,6 +4242,127 @@ export namespace CodegenQbe {
       CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, node.elementType, &value, &target);
       index += 1;
     }
+  }
+
+  /// An array literal: element `index` is stored at `index * size` past the
+  /// element pointer, a scalar with its typed store and an aggregate, which
+  /// is the address of its storage, with `memcpy`.
+  function qbeEmitInitVector(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrInitVector,
+  ): void {
+    let Option::SOME(pointer) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.destPtr) else {
+      return;
+    };
+
+    let elementSize: u64 = CodegenQbe::typeSize(emitter, defStore, typeStore, node.elementType);
+
+    if (emitter.error.isSome()) {
+      return;
+    }
+
+    let aggregate: boolean = CodegenQbe::isAggregateType(defStore, typeStore, node.elementType);
+    let mut index: u64 = 0;
+
+    while (index < node.elements.length()) {
+      if (let Option::SOME(element) = node.elements.get(index)) {
+        let Option::SOME(value) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, element) else {
+          return;
+        };
+        let target: String = CodegenQbe::qbeAddressOffset(emitter, &pointer, index * elementSize);
+
+        if (aggregate) {
+          CodegenQbe::qbeMemcpy(emitter, &target, &value, elementSize);
+        } else {
+          CodegenQbe::qbeStoreScalarAt(emitter, defStore, typeStore, node.elementType, &value, &target);
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The method `@hash<T>` calls, chosen as the C backend chooses it: the
+  /// `Hasher::write*` method of a primitive, otherwise the nominal's own
+  /// `hash`. NONE when `ty` has neither.
+  function qbeHashMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    ty: Analyzer::TypeId,
+  ): Option<Analyzer::DefinitionId> {
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, ty);
+    let writeMethod: str = CodegenC::hasherWriteMethod(typeStore, resolved);
+
+    if (String::create(writeMethod).length() > 0) {
+      let Option::SOME(hasherDef) = CodegenC::findHasherDef(defStore, symbols) else {
+        return Option::NONE;
+      };
+
+      return CodegenC::findNamedInstanceMethod(defStore, symbols, hasherDef, writeMethod);
+    }
+
+    return match (typeStore.get(resolved)) {
+      Option::SOME(Analyzer::Type::Record(defId)) -> CodegenC::findNamedInstanceMethod(defStore, symbols, defId, "hash"),
+      Option::SOME(Analyzer::Type::Enum(defId)) -> CodegenC::findNamedInstanceMethod(defStore, symbols, defId, "hash"),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// `@hash<T>(value, hasher)`, where `value` is the address of a `T`. A
+  /// primitive is loaded and passed to its `Hasher::write*` method; a
+  /// nominal's `hash(&self, hasher)` takes the address itself. The calls are
+  /// the C backend's, so both backends produce the same hash.
+  function qbeEmitBuiltinHash(
+    emitter: &mut CodegenQbe::Emitter,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+    node: &Lir::InstrBuiltinHash,
+  ): void {
+    let Option::SOME(method) = CodegenQbe::qbeHashMethod(defStore, typeStore, symbols, node.ty) else {
+      CodegenQbe::failNamed(emitter, "BuiltinHash");
+      return;
+    };
+
+    let Option::SOME(address) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.value) else {
+      return;
+    };
+    let Option::SOME(hasher) = CodegenQbe::valueOperand(emitter, defStore, typeStore, symbols, function_, &node.hasher) else {
+      return;
+    };
+
+    let name: String = CodegenQbe::qbeMangledName(defStore, symbols, method);
+    let mut args: Vector<String> = Vector::new<String>();
+    let resolved: Analyzer::TypeId = CodegenQbe::resolveType(defStore, typeStore, node.ty);
+
+    if (String::create(CodegenC::hasherWriteMethod(typeStore, resolved)).length() > 0) {
+      let Option::SOME(load) = CodegenQbe::loadOp(defStore, typeStore, resolved) else {
+        CodegenQbe::failNamed(emitter, "BuiltinHash");
+        return;
+      };
+      let Option::SOME(cls) = CodegenQbe::qbeClass(defStore, typeStore, resolved) else {
+        CodegenQbe::failNamed(emitter, "BuiltinHash");
+        return;
+      };
+      let loaded: String = CodegenQbe::freshTemp(emitter);
+
+      emitter.out.pushStr(`    ${loaded.toStr()} =${cls.toStr()} ${load.toStr()} ${address.toStr()}\n`.toStr());
+      args.push(`l ${hasher.toStr()}`);
+      args.push(`${cls.toStr()} ${loaded.toStr()}`);
+    } else {
+      args.push(`l ${address.toStr()}`);
+      args.push(`l ${hasher.toStr()}`);
+    }
+
+    let noPrefix: String = String::create("");
+
+    CodegenQbe::qbeCallLine(emitter, defStore, typeStore, symbols, &name, &args, &noPrefix);
   }
 
   /// `@maxOf(T)` / `@minOf(T)`: the integer bounds, spelled as immediates in
@@ -6838,8 +7010,23 @@ export namespace CodegenQbe {
     }
   }
 
-  function addInstructionFunctions(reachable: &mut Vector<u32>, instruction: &Lir::Instr): void {
+  function addInstructionFunctions(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    reachable: &mut Vector<u32>,
+    instruction: &Lir::Instr,
+  ): void {
     match (instruction) {
+      Lir::Instr::BuiltinHash(node) -> {
+        CodegenQbe::addOperandFunction(reachable, &node.value);
+        CodegenQbe::addOperandFunction(reachable, &node.hasher);
+
+        // The method `@hash` dispatches to is called only through it.
+        if (let Option::SOME(method) = CodegenQbe::qbeHashMethod(defStore, typeStore, symbols, node.ty)) {
+          CodegenQbe::addReachable(reachable, method);
+        }
+      },
       Lir::Instr::Call(node) -> {
         CodegenQbe::addReachable(reachable, node.callee);
         CodegenQbe::addOperandFunctions(reachable, &node.args);
@@ -6898,6 +7085,8 @@ export namespace CodegenQbe {
   // their dependencies; a library without an entry keeps all of its definitions.
   function reachableFunctions(
     defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
     foreignDefinitions: &Vector<u32>,
@@ -6956,7 +7145,7 @@ export namespace CodegenQbe {
             let mut instructionIndex: u64 = 0;
             while (instructionIndex < block.instructions.length()) {
               if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
-                CodegenQbe::addInstructionFunctions(&mut reachable, instruction);
+                CodegenQbe::addInstructionFunctions(defStore, typeStore, symbols, &mut reachable, instruction);
               }
               instructionIndex += 1;
             }
@@ -7019,7 +7208,7 @@ export namespace CodegenQbe {
 
     CodegenQbe::qbeCollectDropHelpers(defStore, typeStore, symbols, program, &mut glueTypes, &mut markTypes, &mut guardTypes, &mut glueMethods);
 
-    let reachable: Vector<u32> = CodegenQbe::reachableFunctions(defStore, program, externalSymbols, foreignDefinitions, &glueMethods);
+    let reachable: Vector<u32> = CodegenQbe::reachableFunctions(defStore, typeStore, symbols, program, externalSymbols, foreignDefinitions, &glueMethods);
 
     // Type declarations first: aggregate signatures and aggregate call
     // results reference them by name.

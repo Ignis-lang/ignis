@@ -1,4 +1,4 @@
-import SourceSpan, DiagnosticCode from "@compiler::diagnostics";
+import SourceSpan, DiagnosticBag, DiagnosticCode from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
 
@@ -3032,20 +3032,28 @@ export namespace Analyzer {
     ///
     /// An exact parameter match is free, a value-satisfies match costs two, and a
     /// candidate that declares type parameters may instead bind them structurally
-    /// against the argument — a candidate that binds anything pays one flat unit,
-    /// so a concrete signature always outranks a generic one that would accept the
-    /// same call. `NONE` disqualifies the candidate. Written type arguments are not
+    /// against the argument. A candidate that binds anything pays more than two
+    /// units per argument, so a concrete signature outranks a generic one that
+    /// would accept the same call even when every argument only value-satisfies
+    /// it. `NONE` disqualifies the candidate. Written type arguments are not
     /// consulted here: unification reaches the same specialization from the
     /// arguments, and the selected callee resolves them again when it instantiates.
+    ///
+    /// `boundsHold` is set to whether the type arguments the candidate binds
+    /// satisfy its type parameters' bounds, judged by the check the call runs
+    /// once it is selected.
     function overloadCandidateMatchCost(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       candidateDefId: Analyzer::DefinitionId,
       paramTypes: &Vector<Analyzer::TypeId>,
       argTypes: &Vector<Analyzer::TypeId>,
+      boundsHold: &mut boolean,
     ): Option<u64> {
+      *boundsHold = true;
       let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, candidateDefId);
 
       let mut bindings: Vector<Option<Analyzer::TypeId>> = Vector::new<Option<Analyzer::TypeId>>();
@@ -3101,19 +3109,109 @@ export namespace Analyzer {
         index += 1;
       }
 
+      let typeParams: Vector<Analyzer::DefinitionId> = match (defStore.get(candidateDefId)) {
+        Option::SOME(Analyzer::Definition::Function(function_)) -> Analyzer::Typecheck::copyDefinitionIdVector(&function_.typeParams),
+        Option::SOME(Analyzer::Definition::Method(method)) -> Analyzer::Typecheck::copyDefinitionIdVector(&method.typeParams),
+        _ -> Vector::new<Analyzer::DefinitionId>(),
+      };
+      let mut boundParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut boundTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut boundIndex: u64 = 0;
 
       while (boundIndex < bindings.length()) {
-        if (let Option::SOME(binding) = bindings.get(boundIndex)) {
-          if (binding.isSome()) {
-            return Option::SOME(cost + 1);
+        if (let Option::SOME(Option::SOME(binding)) = bindings.get(boundIndex)) {
+          if (let Option::SOME(typeParam) = typeParams.get(boundIndex)) {
+            boundParams.push(*typeParam);
+            boundTypes.push(binding);
           }
         }
 
         boundIndex += 1;
       }
 
-      return Option::SOME(cost);
+      if (boundParams.length() == 0) {
+        return Option::SOME(cost);
+      }
+
+      // A parameter left unbound has no type argument to judge yet; the call
+      // reports what it cannot infer once the candidate is selected.
+      let mut boundDiagnostics: DiagnosticBag = DiagnosticBag::init();
+      Analyzer::TypeBounds::checkArguments(
+        defStore,
+        typeStore,
+        symbols,
+        state.currentFunction,
+        candidateDefId,
+        &boundParams,
+        &boundTypes,
+        true,
+        span,
+        &mut boundDiagnostics,
+      );
+      *boundsHold = boundDiagnostics.length() == 0;
+
+      return Option::SOME(cost + (2 * argTypes.length()) + 1);
+    }
+
+    /// Keeps `candidateDefId` among the lowest-cost candidates seen so far.
+    function rankOverloadCandidate(
+      best: &mut Vector<Analyzer::DefinitionId>,
+      bestCost: &mut u64,
+      candidateDefId: Analyzer::DefinitionId,
+      cost: u64,
+    ): void {
+      if (best.length() == 0 || cost < *bestCost) {
+        *best = Vector::new<Analyzer::DefinitionId>();
+        best.push(candidateDefId);
+        *bestCost = cost;
+      } else if (cost == *bestCost) {
+        best.push(candidateDefId);
+      }
+    }
+
+    /// The single overload among the lowest-cost candidates, preferring those
+    /// whose bounds hold. When every matching candidate fails its bounds, the
+    /// lowest-cost one is still selected so the call reports the bound it
+    /// fails. `NONE` once nothing matches or several tie, which is reported here.
+    function finishOverloadSelection(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      candidates: &Vector<Analyzer::DefinitionId>,
+      satisfied: &Vector<Analyzer::DefinitionId>,
+      unsatisfied: &Vector<Analyzer::DefinitionId>,
+      argTypes: &Vector<Analyzer::TypeId>,
+      span: SourceSpan,
+      memberName: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut bestDefIds: &Vector<Analyzer::DefinitionId> = unsatisfied;
+
+      if (satisfied.length() > 0) {
+        bestDefIds = satisfied;
+      }
+
+      if (bestDefIds.length() == 0) {
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
+        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
+        return Option::NONE;
+      }
+
+      if (bestDefIds.length() > 1) {
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, bestDefIds);
+        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
+        return Option::NONE;
+      }
+
+      let Option::SOME(winner) = bestDefIds.get(0) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*winner);
     }
 
     /// Pick one static method among same-name candidates by arity and
@@ -3176,8 +3274,10 @@ export namespace Analyzer {
       span: SourceSpan,
       memberName: str,
     ): Option<Analyzer::DefinitionId> {
-      let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-      let mut bestCost: u64 = 0;
+      let mut satisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut satisfiedCost: u64 = 0;
+      let mut unsatisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut unsatisfiedCost: u64 = 0;
       let mut candidateIndex: u64 = 0;
 
       while (candidateIndex < candidates.length()) {
@@ -3197,50 +3297,42 @@ export namespace Analyzer {
           continue;
         }
 
+        let mut boundsHold: boolean = true;
         let costOpt: Option<u64> = Analyzer::Typecheck::overloadCandidateMatchCost(
           state,
           defStore,
           typeStore,
+          symbols,
           span,
           *candidateDefId,
           &paramTypes,
           argTypes,
+          &mut boundsHold,
         );
 
         if (let Option::SOME(cost) = costOpt) {
-          if (bestDefIds.length() == 0 || cost < bestCost) {
-            bestDefIds = Vector::new<Analyzer::DefinitionId>();
-            bestDefIds.push(*candidateDefId);
-            bestCost = cost;
-          } else if (cost == bestCost) {
-            bestDefIds.push(*candidateDefId);
+          if (boundsHold) {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut satisfied, &mut satisfiedCost, *candidateDefId, cost);
+          } else {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut unsatisfied, &mut unsatisfiedCost, *candidateDefId, cost);
           }
         }
 
         candidateIndex += 1;
       }
 
-      if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
-        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
-        return Option::NONE;
-      }
-
-      if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
-        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
-        return Option::NONE;
-      }
-
-      let Option::SOME(winner) = bestDefIds.get(0) else {
-        return Option::NONE;
-      };
-
-      return Option::SOME(*winner);
+      return Analyzer::Typecheck::finishOverloadSelection(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        candidates,
+        &satisfied,
+        &unsatisfied,
+        argTypes,
+        span,
+        memberName,
+      );
     }
 
     /// The overload a pipe's path callee names, given the piped value and the
@@ -3313,10 +3405,10 @@ export namespace Analyzer {
     }
 
     /// Pick one method among same-name candidates by arity and argument types,
-    /// mirroring the host's `resolve_overload`: an exact type match costs 0, a
-    /// value-satisfies match costs 1, anything else disqualifies. A unique
-    /// lowest cost wins; a tie is ambiguous (A0101) and no survivor is a
-    /// no-match (A0100). Arguments are typed once with no expectation — a
+    /// with the costs of `overloadCandidateMatchCost`. A generic candidate whose
+    /// bounds the arguments do not satisfy is ranked only when no other
+    /// candidate matches. A unique lowest cost wins; a tie is ambiguous (A0101)
+    /// and no survivor is a no-match (A0100). Arguments are typed once with no expectation — a
     /// failing argument has already reported itself, so the call just bails.
     function selectMethodOverload(
       state: &mut Analyzer::Typecheck::TypecheckState,
@@ -3378,8 +3470,10 @@ export namespace Analyzer {
       span: SourceSpan,
       memberName: str,
     ): Option<Analyzer::DefinitionId> {
-      let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-      let mut bestCost: u64 = 0;
+      let mut satisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut satisfiedCost: u64 = 0;
+      let mut unsatisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut unsatisfiedCost: u64 = 0;
       let mut candidateIndex: u64 = 0;
 
       while (candidateIndex < candidates.length()) {
@@ -3399,50 +3493,42 @@ export namespace Analyzer {
           continue;
         }
 
+        let mut boundsHold: boolean = true;
         let costOpt: Option<u64> = Analyzer::Typecheck::overloadCandidateMatchCost(
           state,
           defStore,
           typeStore,
+          symbols,
           span,
           *candidateDefId,
           &paramTypes,
           argTypes,
+          &mut boundsHold,
         );
 
         if (let Option::SOME(cost) = costOpt) {
-          if (bestDefIds.length() == 0 || cost < bestCost) {
-            bestDefIds = Vector::new<Analyzer::DefinitionId>();
-            bestDefIds.push(*candidateDefId);
-            bestCost = cost;
-          } else if (cost == bestCost) {
-            bestDefIds.push(*candidateDefId);
+          if (boundsHold) {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut satisfied, &mut satisfiedCost, *candidateDefId, cost);
+          } else {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut unsatisfied, &mut unsatisfiedCost, *candidateDefId, cost);
           }
         }
 
         candidateIndex += 1;
       }
 
-      if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
-        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
-        return Option::NONE;
-      }
-
-      if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
-        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
-        return Option::NONE;
-      }
-
-      let Option::SOME(winner) = bestDefIds.get(0) else {
-        return Option::NONE;
-      };
-
-      return Option::SOME(*winner);
+      return Analyzer::Typecheck::finishOverloadSelection(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        candidates,
+        &satisfied,
+        &unsatisfied,
+        argTypes,
+        span,
+        memberName,
+      );
     }
 
     /// The `@extension` function that answers `name` for a receiver of

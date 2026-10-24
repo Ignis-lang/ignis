@@ -381,6 +381,12 @@ when no expression has them: record and static field types, enum payload types, 
 and return types of every function and method, called or not. A generic record or enum's own
 type parameter used there satisfies a bound only when it declares the bound itself.
 
+Overload resolution takes bounds into account. A generic overload whose inferred type arguments
+miss a bound is set aside before the overloads are ranked, so the call picks another overload
+instead of reporting the bound or a tie. Only when every matching overload misses a bound is the
+lowest-cost one selected, and the call reports the bound it misses (A0247). See the language
+reference, section 4.1, for how overloads are ranked.
+
 ### Implementing a Trait for an Existing Type
 
 A type that cannot carry `@implements` itself, a primitive, `str`, or a record or enum declared

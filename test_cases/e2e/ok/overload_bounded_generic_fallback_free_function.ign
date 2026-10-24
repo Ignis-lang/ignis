@@ -1,0 +1,44 @@
+// e2e: std
+// A free overload set with a concrete `i64` candidate and a bounded generic
+// one. An `i64` takes the concrete candidate exactly and a record
+// implementing the bound takes the generic one. An `i32` only widens to
+// `i64`, and the generic candidate would bind it exactly, but `i32` does not
+// implement `Describe`: the generic candidate is dropped before scoring, so
+// the concrete one is chosen instead of the bound being reported.
+import Io from "std::io";
+
+trait Describe {
+  describe(&self): String;
+}
+
+@implements(Describe)
+record Point {
+  public x: i32;
+
+  describe(&self): String {
+    return `point ${self.x}`;
+  }
+}
+
+function bind(value: i64): String {
+  return `number ${value}`;
+}
+
+function bind<T: Describe>(value: T): String {
+  let described: String = value.describe();
+  return `described ${described.toStr()}`;
+}
+
+function main(): i32 {
+  let wide: i64 = 7;
+  let narrow: i32 = 3;
+  let point: Point = Point { x: 2 };
+  let byWide: String = bind(wide);
+  let byNarrow: String = bind(narrow);
+  let byPoint: String = bind(point);
+  Io::println(byWide.toStr());
+  Io::println(byNarrow.toStr());
+  Io::println(byPoint.toStr());
+
+  return 0;
+}
