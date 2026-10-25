@@ -267,6 +267,12 @@ let x = identity(42);       // T inferred as i32
 let y = identity<i64>(42);  // T explicitly i64
 ```
 
+A static method infers the same way, both its own type parameters and those of a generic owner:
+`Binder::bind(&point)` infers `T` of `static bind<T: Describe>(value: &T)`, and
+`Box::make(9, true)` on `record Box<U> { static make<T>(item: U, tag: T): Box<U> }` infers `U` as
+`i32` and `T` as `boolean`. When no single argument binds every parameter, each parameter is taken
+from the first argument whose type mentions it alone.
+
 Function overloading is supported by signature differences. Functions with the same name in the
 same scope, a type's static methods with the same name, and a type's instance methods with the same
 name each form an overload set, and a call picks one from its argument types:
@@ -414,7 +420,7 @@ record Config {
 let max = Config::MAX_SIZE;
 ```
 
-Inside the methods of a record or enum, static or instance, `Self::name` means what the owner's own name does: `Self::default()` calls a static method, `Self::MAX_SIZE` reads a static field, and in an enum `Self::HIGH` or `Self::SOME(x)` builds or matches a variant. In a generic owner `Self` is the owner with its own type parameters, so `Self::create(value)` inside `Wrap<U>` calls `Wrap::create<U>(value)`. `Self::name` reaches only the owner's members: a name the owner does not declare is an error even when a top-level declaration has that name. Outside a record, enum or trait, `Self::name` is an error (A0280).
+Inside the methods of a record or enum, static or instance, `Self::name` means what the owner's own name does: `Self::default()` calls a static method, `Self::MAX_SIZE` reads a static field, and in an enum `Self::HIGH` or `Self::SOME(x)` builds or matches a variant. In a generic owner `Self` is the owner with its own type parameters, so `Self::create(value)` inside `Wrap<U>` calls `Wrap::create<U>(value)`. A bare `Wrap::create(value)` inside `Wrap<U>` infers `U` from its arguments; with nothing to infer from, it means `Self::create(...)`. `Self::name` reaches only the owner's members: a name the owner does not declare is an error even when a top-level declaration has that name. Outside a record, enum or trait, `Self::name` is an error (A0280).
 
 A `static mut` field is one global storage location, so its initializer must be a constant expression: a literal, a constant, an expression of those, or an array or record literal whose elements and fields are constant expressions. Any other initializer is an error (A0230).
 

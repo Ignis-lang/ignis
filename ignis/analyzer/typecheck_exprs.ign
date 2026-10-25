@@ -1022,24 +1022,68 @@ export namespace Analyzer {
           // `Self` inside a generic owner is the owner with its own parameters:
           // `Self::make(x)` in `Wrap<U>` calls `Wrap::make<U>(x)`.
           if (call.typeArguments.length() == 0 && Analyzer::Typecheck::isSelfOwnedPath(module, call.callee)) {
-            if (Analyzer::Typecheck::calleeTypeParamSymbols(defStore, staticDefId).length() == 0) {
-              let ownerSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, staticDefId);
+            Analyzer::Typecheck::recordEnclosingOwnerTypeArgs(state, defStore, typeStore, callExprId, staticDefId);
+          }
 
-              if (ownerSymbols.length() > 0) {
-                let mut ownerParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
-                let mut ownerIndex: u64 = 0;
+          // With nothing written, the owner's and the method's type parameters are
+          // inferred from the arguments, as a free function's are, so
+          // `Binder::bind(&point)` and a bare `Wrap::wrap(value)` inside `Wrap<U>`
+          // both reach monomorphization with every parameter bound.
+          if (call.typeArguments.length() == 0 && !Analyzer::Typecheck::isSelfOwnedPath(module, call.callee)) {
+            let inferSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::staticCallInferenceSymbols(defStore, staticDefId);
 
-                while (ownerIndex < ownerSymbols.length()) {
-                  if (let Option::SOME(ownerSymbol) = ownerSymbols.get(ownerIndex)) {
-                    let mut typeStoreOwnerRef: &mut Analyzer::TypeStore = typeStore;
-                    ownerParams.push(typeStoreOwnerRef.param(*ownerSymbol));
+            if (inferSymbols.length() > 0 && call.arguments.length() > 0) {
+              let declaredParams: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &staticSignature, true);
+              let inferredOpt: Option<Vector<Analyzer::TypeId>> = Analyzer::Typecheck::inferStaticCallTypeArguments(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                module,
+                resolvedBodies,
+                call,
+                &inferSymbols,
+                &declaredParams,
+              );
+
+              if (let Option::SOME(inferredArgs) = inferredOpt) {
+                let mut inferredParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+                let mut inferredIndex: u64 = 0;
+
+                while (inferredIndex < declaredParams.length()) {
+                  if (let Option::SOME(paramType) = declaredParams.get(inferredIndex)) {
+                    let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+                    inferredParams.push(typeStoreParamRef.substitute(*paramType, &inferSymbols, &inferredArgs));
                   }
 
-                  ownerIndex += 1;
+                  inferredIndex += 1;
                 }
 
-                Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &ownerParams);
+                let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+                let inferredReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(staticSignature.returnType, &inferSymbols, &inferredArgs);
+
+                Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &inferredArgs);
+
+                return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+                  state,
+                  defStore,
+                  typeStore,
+                  symbols,
+                  module,
+                  resolvedBodies,
+                  callExprId,
+                  call,
+                  &inferredParams,
+                  inferredReturn,
+                );
               }
+            }
+
+            // Nothing to infer from, but the path names the record or enum the
+            // calling method belongs to: it means what `Self` would, instead of
+            // reaching monomorphization with the owner's parameters unbound.
+            if (Analyzer::Typecheck::staticCallNamesEnclosingOwner(state, defStore, staticDefId)) {
+              Analyzer::Typecheck::recordEnclosingOwnerTypeArgs(state, defStore, typeStore, callExprId, staticDefId);
             }
           }
 
@@ -1859,6 +1903,166 @@ export namespace Analyzer {
       }
 
       return Option::NONE;
+    }
+
+    /// Record a static call on the enclosing generic owner as a call on that owner
+    /// with its own type parameters, which is what `Self::make(x)` inside `Wrap<U>`
+    /// means. A method with type parameters of its own is left alone.
+    function recordEnclosingOwnerTypeArgs(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      callExprId: Ast::ExpressionId,
+      staticDefId: Analyzer::DefinitionId,
+    ): void {
+      if (Analyzer::Typecheck::calleeTypeParamSymbols(defStore, staticDefId).length() > 0) {
+        return;
+      }
+
+      let ownerSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, staticDefId);
+
+      if (ownerSymbols.length() == 0) {
+        return;
+      }
+
+      let mut ownerParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut ownerIndex: u64 = 0;
+
+      while (ownerIndex < ownerSymbols.length()) {
+        if (let Option::SOME(ownerSymbol) = ownerSymbols.get(ownerIndex)) {
+          let mut typeStoreOwnerRef: &mut Analyzer::TypeStore = typeStore;
+          ownerParams.push(typeStoreOwnerRef.param(*ownerSymbol));
+        }
+
+        ownerIndex += 1;
+      }
+
+      Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &ownerParams);
+    }
+
+    /// Whether a static method belongs to the same record or enum as the method
+    /// being checked.
+    function staticCallNamesEnclosingOwner(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      staticDefId: Analyzer::DefinitionId,
+    ): boolean {
+      let Option::SOME(Analyzer::Definition::Method(enclosing)) = defStore.get(state.currentFunction) else {
+        return false;
+      };
+      let Option::SOME(Analyzer::Definition::Method(called)) = defStore.get(staticDefId) else {
+        return false;
+      };
+
+      return enclosing.owner.raw() == called.owner.raw();
+    }
+
+    /// The type parameters a static method call infers when none are written: the
+    /// owner's, then the method's own, which is the order monomorphization splits a
+    /// static method's instantiation back into.
+    function staticCallInferenceSymbols(
+      defStore: &mut Analyzer::DefinitionStore,
+      methodDefId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::SymbolId> {
+      let mut inferSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+
+      if (let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(methodDefId)) {
+        let ownerTypeParams: Vector<Analyzer::DefinitionId> = match (defStore.get(method.owner)) {
+          Option::SOME(Analyzer::Definition::Record(record_)) -> Analyzer::Typecheck::copyDefinitionIdVector(&record_.typeParams),
+          Option::SOME(Analyzer::Definition::Enum(enum_)) -> Analyzer::Typecheck::copyDefinitionIdVector(&enum_.typeParams),
+          _ -> Vector::new<Analyzer::DefinitionId>(),
+        };
+        let ownerSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &ownerTypeParams);
+        let mut ownerIndex: u64 = 0;
+
+        while (ownerIndex < ownerSymbols.length()) {
+          if (let Option::SOME(ownerSymbol) = ownerSymbols.get(ownerIndex)) {
+            inferSymbols.push(*ownerSymbol);
+          }
+
+          ownerIndex += 1;
+        }
+      }
+
+      let ownSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, methodDefId);
+      let mut ownIndex: u64 = 0;
+
+      while (ownIndex < ownSymbols.length()) {
+        if (let Option::SOME(ownSymbol) = ownSymbols.get(ownIndex)) {
+          inferSymbols.push(*ownSymbol);
+        }
+
+        ownIndex += 1;
+      }
+
+      return inferSymbols;
+    }
+
+    /// Infer a static method call's type arguments. The rule a free function follows
+    /// comes first; when no single argument binds every parameter, as in
+    /// `Box::make(item, tag)` binding the owner's `U` and the method's `T` from
+    /// different arguments, each parameter takes the first argument whose declared
+    /// type mentions it alone.
+    function inferStaticCallTypeArguments(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      call: &Ast::Expression::Call,
+      paramSymbols: &Vector<Analyzer::SymbolId>,
+      declaredParams: &Vector<Analyzer::TypeId>,
+    ): Option<Vector<Analyzer::TypeId>> {
+      let wholeOpt: Option<Vector<Analyzer::TypeId>> = Analyzer::Typecheck::inferCallTypeArguments(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        call,
+        paramSymbols,
+        declaredParams,
+      );
+
+      if (wholeOpt.isSome() || paramSymbols.length() < 2) {
+        return wholeOpt;
+      }
+
+      let mut inferred: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut symbolIndex: u64 = 0;
+
+      while (symbolIndex < paramSymbols.length()) {
+        let Option::SOME(paramSymbol) = paramSymbols.get(symbolIndex) else {
+          return Option::NONE;
+        };
+
+        let mut single: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+        single.push(*paramSymbol);
+
+        let Option::SOME(bound) = Analyzer::Typecheck::inferCallTypeArguments(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          call,
+          &single,
+          declaredParams,
+        ) else {
+          return Option::NONE;
+        };
+        let Option::SOME(boundType) = bound.get(0) else {
+          return Option::NONE;
+        };
+
+        inferred.push(*boundType);
+        symbolIndex += 1;
+      }
+
+      return Option::SOME(inferred);
     }
 
     /// Typecheck a direct call to a resolved function, specializing its signature first

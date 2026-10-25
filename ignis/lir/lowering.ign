@@ -1968,6 +1968,13 @@ export namespace LirLowering {
           return Lir::Operand::Temp(dest);
         }
 
+        // A `void` binding, such as a payload bound through a type parameter
+        // instantiated with `void`, never gets a slot; it reads as no value,
+        // like `()`, so a constructor or call taking it writes nothing.
+        if (LirLowering::isVoidType(typeStore, nodeType)) {
+          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        }
+
         // A `static mut` field reads from its storage, never from its seed.
         if (LirLowering::isMutableStatic(defStore, defId)) {
           return Lir::Operand::GlobalRef(defId);

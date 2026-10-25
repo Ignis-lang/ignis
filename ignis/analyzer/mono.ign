@@ -1851,22 +1851,34 @@ export namespace Mono {
       }
     }
 
-    if (ownParams == 0) {
-      if (let Option::SOME(owner) = ownerId) {
-        let mut ownerParams: u64 = 0;
+    if (let Option::SOME(owner) = ownerId) {
+      let mut ownerParams: u64 = 0;
 
-        if (let Option::SOME(ownerDefinition) = defStore.get(owner)) {
-          match (ownerDefinition) {
-            Analyzer::Definition::Record(recordDef) -> {
-              ownerParams = recordDef.typeParams.length();
-            },
-            Analyzer::Definition::Enum(enumDef) -> {
-              ownerParams = enumDef.typeParams.length();
-            },
-            _ -> {},
-          };
-        }
+      if (let Option::SOME(ownerDefinition) = defStore.get(owner)) {
+        match (ownerDefinition) {
+          Analyzer::Definition::Record(recordDef) -> {
+            ownerParams = recordDef.typeParams.length();
+          },
+          Analyzer::Definition::Enum(enumDef) -> {
+            ownerParams = enumDef.typeParams.length();
+          },
+          _ -> {},
+        };
+      }
 
+      // A static call that inferred both the owner's and the method's own
+      // parameters carries the owner's in front, the order the typechecker
+      // records them in.
+      if (ownParams > 0 && ownerParams > 0 && ownerParams + ownParams == concreteArgs.length()) {
+        return Mono::InstanceKey {
+          primaryDef: calleeDef,
+          ownerDef: Option::SOME(owner),
+          ownerArgs: Mono::takeTypeIds(concreteArgs, 0, ownerParams),
+          methodArgs: Mono::takeTypeIds(concreteArgs, ownerParams, concreteArgs.length()),
+        };
+      }
+
+      if (ownParams == 0) {
         if (ownerParams > 0 && ownerParams == concreteArgs.length()) {
           return Mono::InstanceKey {
             primaryDef: calleeDef,
