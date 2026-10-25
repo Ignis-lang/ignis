@@ -1104,7 +1104,10 @@ attribute's constant values. A record initializer accepts
 is a keyword. Diagnostics: `A0292` (`break`/`continue` across the loop), `A0293` (`@fields` not over
 a record `Self`), `A0294` (outside a method), `A0295` (descriptor builtin outside its loop), `A0296`
 (unknown descriptor member). `@attribute<A>(Self)` reads the attribute on the record or enum `Self` is
-and requires `A` to be declared for that kind (`A0297`). See `docs/TRAITS.md`, "Field
+and requires `A` to be declared for that kind (`A0297`). Every error reported from one unrolled copy,
+bound failures on generic calls included, carries a note naming the field of that iteration. A
+method call on a type that is not a record or enum, naming a method of a trait the type has no
+extension block for, reports the missing implementation (`A0298`). See `docs/TRAITS.md`, "Field
 Reflection".
 
 ### Parameter attributes

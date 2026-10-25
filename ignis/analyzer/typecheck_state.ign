@@ -4031,6 +4031,85 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// Reports `value.name(args)` on a receiver that is neither a record nor an
+    /// enum when a trait declaring `name` is implemented by an extension block
+    /// for some other type: the receiver's type misses that implementation,
+    /// which says more than "not a record or enum". `false` when no such trait
+    /// exists and nothing was reported.
+    function reportTraitNotImplemented(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      span: SourceSpan,
+      receiverType: Analyzer::TypeId,
+      name: str,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, receiverType);
+
+      if (resolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let Option::SOME(node) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      let ownerKind: boolean = match (node) {
+        Analyzer::Type::Record(_) | Analyzer::Type::Enum(_) | Analyzer::Type::Instance(_) | Analyzer::Type::Param(_) -> true,
+        _ -> false,
+      };
+
+      if (ownerKind) {
+        return false;
+      }
+
+      let blocks: Vector<Analyzer::DefinitionId> = defStore.extensionBlocks();
+      let mut index: u64 = 0;
+
+      while (index < blocks.length()) {
+        let Option::SOME(block) = blocks.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let references: Vector<Option<Analyzer::DefinitionId>> = defStore.traitReferencesOf(*block);
+        let mut referenceIndex: u64 = 0;
+
+        while (referenceIndex < references.length()) {
+          if (let Option::SOME(Option::SOME(traitId)) = references.get(referenceIndex)) {
+            let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+            let mut traitName: str = "?";
+
+            if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(traitId)) {
+              methods = Analyzer::Typecheck::copyDefinitionIdVector(&trait_.methods);
+
+              if (let Option::SOME(resolvedName) = symbols.resolve(trait_.name)) {
+                traitName = resolvedName;
+              }
+            }
+
+            if (Analyzer::ResolverBodies::lookupMethodInTable(defStore, &methods, name, symbols).isSome()) {
+              let typeName: String = typeStore.nameOfResolved(receiverType, &*defStore, &*symbols);
+              let message: String = `type '${typeName.toStr()}' does not implement trait '${traitName}', which declares method '${name}'`;
+              let label: String = `no extension block implements '${traitName}' for '${typeName.toStr()}'`;
+              let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TRAIT_NOT_IMPLEMENTED, message.toStr(), span);
+              diagnostic.addLabel(LabelKind::PRIMARY, span, label.toStr());
+              let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+              stateRef.diagnostics.push(diagnostic);
+              return true;
+            }
+          }
+
+          referenceIndex += 1;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// The type-parameter definitions nameable inside `enclosing`: the callable's
     /// own parameters first, then those of the record, enum or trait declaring it,
     /// so an inner parameter shadows an outer one written with the same name. A

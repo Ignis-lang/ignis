@@ -1,6 +1,7 @@
 import SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 import Analyzer from "@compiler::analyzer";
+import HashMap from "std::collections";
 
 import _ from "./ids";
 import _ from "./value";
@@ -1205,6 +1206,10 @@ export namespace Hir {
     public constantInits: Hir::HirDefMap;
     public items: Vector<Analyzer::DefinitionId>;
     public entryPoint: Option<Analyzer::DefinitionId>;
+    /// The note naming the field each unrolled iteration of a `comptime for`
+    /// stands for, keyed by the raw id of the iteration's lowered block, for
+    /// the checks that run on HIR rather than on the AST.
+    public comptimeIterationNotes: HashMap<u32, String>;
 
     public static init(): HirStore {
       return HirStore {
@@ -1214,7 +1219,19 @@ export namespace Hir {
         constantInits: Hir::HirDefMap::init(),
         items: Vector::new<Analyzer::DefinitionId>(),
         entryPoint: Option::NONE,
+        comptimeIterationNotes: HashMap::new<u32, String>(),
       };
+    }
+
+    public setComptimeIterationNote(&mut self, id: Hir::HirId, note: String): void {
+      self.comptimeIterationNotes.insert(id.raw(), note);
+    }
+
+    /// The note naming the field the block `id` was unrolled for, when `id`
+    /// is one iteration of a `comptime for`.
+    public comptimeIterationNote(&self, id: Hir::HirId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.comptimeIterationNotes.get(&raw);
     }
 
     public alloc(&mut self, node: Hir::HirNode): Hir::HirId {

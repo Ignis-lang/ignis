@@ -217,11 +217,19 @@
     },
     {
       "name": "std::orm",
-      "doc": "  \n# ORM  \n  \nA small mapping layer on `std::sqlite3`: table descriptors that emit their  \nSQL, typed row reads that report NULL and bad values as errors, ordered  \nmigrations applied in one transaction, and a repository that stores a  \nrecord implementing `Orm::Entity` and `Orm::FromRow`. Every value goes to SQLite  \nas a bound parameter; no statement interpolates one.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |  \n| `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |  \n| `Orm::Entity`     | A stored record: `static table()`, `id()`, `bindValues(statement)` |  \n| `Orm::FromRow`    | `static fromRow(row)`: a record from a row       |  \n| `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |  \n| `Orm::Value`      | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |  \n| `Orm::Migration`  | One versioned schema step                        |  \n| `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |  \n| `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |  \n| `Orm::ErrorKind`  | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Orm::Error>`; nothing in the  \nmodule panics. A SQLite failure keeps its extended code in `Error::code`,  \nand `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),  \n`CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.  \n  \n## Linking  \n  \nThe module adds no linking of its own: it builds on `std::sqlite3`, which  \nlinks `libsqlite3`.  \n  \n## Example  \n  \n```ignis  \nimport Orm from \"std::orm\";  \nimport Sqlite3 from \"std::sqlite3\";  \n  \n@implements(Orm::Entity, Orm::FromRow)  \nrecord Task {  \n  public id: Option<i64>;  \n  public title: String;  \n  \n  static table(): Orm::Table {  \n    return Orm::Table::create(\"tasks\")  \n      .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n      .autoIncrement()  \n      .columnText(\"title\", Orm::ColumnKey::NONE)  \n      .notNull();  \n  }  \n  \n  static fromRow(row: &Orm::Row): Result<Task, Orm::Error> {  \n    return Result::OK(Task { id: Option::SOME(row.readInt(0)!), title: row.readText(1)! });  \n  }  \n  \n  id(&self): Option<i64> {  \n    return self.id;  \n  }  \n  \n  bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Orm::Error> {  \n    return match (statement.bindText(1, self.title.toStr())) {  \n      Result::OK(_) -> Result::OK(()),  \n      Result::ERROR(error) -> Result::ERROR(Orm::Error::fromSqlite(error)),  \n    };  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();  \n  migrations.push(Orm::Migration::create(1, Task::table().createTableSql().unwrap().toStr()));  \n  Orm::migrate(&mut connection, &migrations).unwrap();  \n  \n  let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();  \n  let task: Task = Task { id: Option::NONE, title: String::create(\"write the ORM\") };  \n  let id: i64 = tasks.insert(&mut connection, &task).unwrap();  \n  \n  return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;  \n}  \n```  \n  \n## Non-goals  \n  \nThere is no query builder: the generated SQL covers single-table CRUD,  \nand `Repository::findWhere` takes a raw `WHERE` clause with bound  \n`Orm::Value` parameters for everything else. There are no relationships."
+      "doc": "  \n# ORM  \n  \nA small mapping layer on `std::sqlite3`: table descriptors that emit their  \nSQL, typed row reads that report NULL and bad values as errors, ordered  \nmigrations applied in one transaction, and a repository that stores a  \nrecord implementing `Orm::Entity` and `Orm::FromRow`. A record described by  \nthe `Orm::Table`, `Orm::PrimaryKey`, `Orm::AutoIncrement` and `Orm::Column`  \nattributes gets both traits' methods from defaults that reflect over its  \nfields; a hand-written method replaces the default. Every value goes to  \nSQLite as a bound parameter; no statement interpolates one.  \n  \n## Exports  \n  \n| Export               | Description                                   |  \n|----------------------|-----------------------------------------------|  \n| `Orm::Table`         | `@Orm::Table(\"name\")`: the table of a record  |  \n| `Orm::PrimaryKey`    | `@Orm::PrimaryKey`: the field that is the key |  \n| `Orm::AutoIncrement` | `@Orm::AutoIncrement`: SQLite assigns the key |  \n| `Orm::Column`        | `@Orm::Column(\"name\")`: a column name other than the field's |  \n| `Orm::ColumnValue`   | A storable field type: integers, `f32`, `f64`, `boolean`, `String`, `Vector<u8>` and `Option` of each |  \n| `Orm::Schema`        | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |  \n| `Orm::SchemaColumn`  | One column of an `Orm::Schema`                |  \n| `Orm::ColumnKey`     | `NONE` or `PRIMARY`                           |  \n| `Orm::ColumnType`    | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`  |  \n| `Orm::Row`           | A typed view of a statement's current row: `read*`, `readOptional*`, `isNull` |  \n| `Orm::Entity`        | A stored record: `static table()`, `id()`, `bindValues(statement)` |  \n| `Orm::FromRow`       | `static fromRow(row)`: a record from a row    |  \n| `Orm::Repository`    | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |  \n| `Orm::Value`         | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |  \n| `Orm::Migration`     | One versioned schema step                     |  \n| `Orm::migrate`       | Applies pending migrations and records them in `schema_migrations` |  \n| `Orm::Error`         | `kind`, `message` and `code`; `fromSqlite`    |  \n| `Orm::ErrorKind`     | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n  \n## Reflective entities  \n  \nWith `@implements(Orm::Entity, Orm::FromRow)` and no methods, a record is  \nstored as one column per field, in declaration order. The column is named  \nby `@Orm::Column` or by the field, typed by the field's `Orm::ColumnValue`,  \nand `NOT NULL` unless the field is an `Option`. An integer field narrower  \nthan `i64` reads a stored value outside its range as `DECODE`. A field type  \nwithout an `Orm::ColumnValue` is a compile error inside the default, with  \na note naming the field. See `std::orm::entity` and `std::orm::column`.  \n  \nThe compiler cannot reject a reflective record that lacks `@Orm::Table`:  \nits `table()` has no name, and `Repository::create` and every emitter  \nreport `SCHEMA` with the message  \n`std::orm: the table has no name; add @Orm::Table(\"name\") to the record`.  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Orm::Error>`; nothing in the  \nmodule panics. A SQLite failure keeps its extended code in `Error::code`,  \nand `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),  \n`CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.  \n  \n## Linking  \n  \nThe module adds no linking of its own: it builds on `std::sqlite3`, which  \nlinks `libsqlite3`.  \n  \n## Example  \n  \n```ignis  \nimport Orm from \"std::orm\";  \nimport Sqlite3 from \"std::sqlite3\";  \n  \n@Orm::Table(\"tasks\")  \n@implements(Orm::Entity, Orm::FromRow)  \nrecord Task {  \n  @Orm::PrimaryKey  \n  @Orm::AutoIncrement  \n  public id: Option<i64>;  \n  public title: String;  \n  @Orm::Column(\"is_done\")  \n  public done: boolean;  \n  public note: Option<String>;  \n}  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();  \n  migrations.push(Orm::Migration::create(1, Task::table().createTableSql().unwrap().toStr()));  \n  Orm::migrate(&mut connection, &migrations).unwrap();  \n  \n  let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();  \n  let task: Task = Task {  \n    id: Option::NONE,  \n    title: String::create(\"write the ORM\"),  \n    done: false,  \n    note: Option::NONE,  \n  };  \n  let id: i64 = tasks.insert(&mut connection, &task).unwrap();  \n  \n  return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;  \n}  \n```  \n  \n## Non-goals  \n  \nThere is no query builder: the generated SQL covers single-table CRUD,  \nand `Repository::findWhere` takes a raw `WHERE` clause with bound  \n`Orm::Value` parameters for everything else. There are no relationships."
+    },
+    {
+      "name": "std::orm::attributes",
+      "doc": "  \n# Attributes  \n  \nThe declarable attributes that describe a record to the `Orm::Entity`  \nand `Orm::FromRow` defaults. A record written with them needs no  \nhand-written `table()`, `id()`, `bindValues` or `fromRow`.  \n  \n## Exports  \n  \n| Export               | Description                                   |  \n|----------------------|-----------------------------------------------|  \n| `Orm::Table`         | `@Orm::Table(\"name\")` on a record: its table name |  \n| `Orm::PrimaryKey`    | `@Orm::PrimaryKey` on a field: the key column |  \n| `Orm::AutoIncrement` | `@Orm::AutoIncrement` on the key: SQLite assigns it |  \n| `Orm::Column`        | `@Orm::Column(\"name\")` on a field: a column name other than the field's |"
+    },
+    {
+      "name": "std::orm::column",
+      "doc": "  \n# Column values  \n  \n`Orm::ColumnValue`, what a field type contributes to the reflective  \n`Orm::Entity` and `Orm::FromRow` defaults: the SQL type of its column,  \nwhether the column is nullable, how to read it from an `Orm::Row` and how  \nto bind it. A field of a type without an implementation is a compile error  \ninside the default, with a note naming the field.  \n  \n## Exports  \n  \n| Export             | Description                                     |  \n|--------------------|-------------------------------------------------|  \n| `Orm::ColumnValue` | `columnType`, `columnNullable`, `readColumn`, `toColumnValue`, `bindColumn`, `columnKey` |  \n| `Orm::BlobByte`    | The element type of a `BLOB` field: only `u8`   |  \n  \n## Implementations  \n  \n| Field type | Column | Read |  \n|------------|--------|------|  \n| `i8`, `i16`, `i32`, `u8`, `u16`, `u32` | `INTEGER NOT NULL` | `readInt`, a value outside the type's range is `DECODE` |  \n| `i64` | `INTEGER NOT NULL` | `readInt` |  \n| `f32`, `f64` | `REAL NOT NULL` | `readReal` |  \n| `boolean` | `INTEGER NOT NULL` | `readBoolean`: 0 or 1 |  \n| `String` | `TEXT NOT NULL` | `readText` |  \n| `Vector<u8>` | `BLOB NOT NULL` | `readBlob` |  \n| `Option<T>` | `T`'s column, nullable | NULL is `NONE` |  \n  \n`Vector<u8>` is implemented as `Vector<T: Orm::BlobByte>`, because an  \nextension block extends a generic type only over its own parameters;  \n`u8` is the one `BlobByte`."
     },
     {
       "name": "std::orm::entity",
-      "doc": "  \n# Entity  \n  \n`Orm::Entity` and `Orm::FromRow`, the two traits a record implements by  \nhand so an `Orm::Repository` can store it: one describes the table and  \nbinds the record's values, the other builds a record from a row.  \n  \n## Exports  \n  \n| Export         | Description                                        |  \n|----------------|----------------------------------------------------|  \n| `Orm::Entity`  | `static table()`, `id(&self)`, `bindValues(&self, statement)` |  \n| `Orm::FromRow` | `static fromRow(row)`                              |  \n  \n## Contract  \n  \n- `table()` returns the same descriptor on every call. A repository needs  \n  an `INTEGER` primary key.  \n- `id()` is the key: `NONE` for a record not stored yet.  \n- `bindValues` binds every non-key column, in declaration order, to the  \n  parameters `1..n`. The repository binds the key itself, after them,  \n  when a statement needs it.  \n- `fromRow` reads every column in declaration order: column 0 is the  \n  first column of `table()`."
+      "doc": "  \n# Entity  \n  \n`Orm::Entity` and `Orm::FromRow`, the two traits a record implements so an  \n`Orm::Repository` can store it: one describes the table and binds the  \nrecord's values, the other builds a record from a row.  \n  \nEvery method has a default that reflects over the record's fields with  \n`comptime for`, so a record described by the `std::orm::attributes`  \nattributes needs no method of its own. A method the record writes itself  \nreplaces the default.  \n  \n## Exports  \n  \n| Export         | Description                                        |  \n|----------------|----------------------------------------------------|  \n| `Orm::Entity`  | `static table()`, `id(&self)`, `bindValues(&self, statement)` |  \n| `Orm::FromRow` | `static fromRow(row)`                              |  \n  \n## Contract  \n  \n- `table()` returns the same descriptor on every call. A repository needs  \n  an `INTEGER` primary key.  \n- `id()` is the key: `NONE` for a record not stored yet.  \n- `bindValues` binds every non-key column, in declaration order, to the  \n  parameters `1..n`. The repository binds the key itself, after them,  \n  when a statement needs it.  \n- `fromRow` reads every column in declaration order: column 0 is the  \n  first column of `table()`.  \n  \n## Defaults  \n  \n- `table()`: the name from `@Orm::Table`; one column per field, in  \n  declaration order, named by `@Orm::Column` or else by the field, typed  \n  by the field type's `Orm::ColumnValue`; `PRIMARY KEY` for the field  \n  marked `@Orm::PrimaryKey`, `AUTOINCREMENT` for one marked  \n  `@Orm::AutoIncrement`; `NOT NULL` unless the field type is an `Option`.  \n  A record without `@Orm::Table` gets a descriptor without a name, which  \n  the emitters and `Repository::create` report as `SCHEMA`.  \n- `id()`: the `@Orm::PrimaryKey` field as an integer, `NONE` when it is an  \n  empty `Option` or the record has no key.  \n- `bindValues`: every field not marked `@Orm::PrimaryKey`, in order.  \n- `fromRow`: field `n` from column `n`."
     },
     {
       "name": "std::orm::error",
@@ -237,11 +245,11 @@
     },
     {
       "name": "std::orm::row",
-      "doc": "  \n# Row  \n  \n`Orm::Row`, a typed view of the current row of a `Sqlite3::Statement`.  \nEvery getter checks what the binding's coercing getters cannot: the column  \nexists, it is not NULL where a value is required, and a boolean is 0 or 1.  \n  \n## Exports  \n  \n| Export     | Description                                             |  \n|------------|---------------------------------------------------------|  \n| `Orm::Row` | `create`, `columnCount`, `readInt`, `readReal`, `readText`, `readBlob`, `readBoolean` and their `readOptional*` forms |  \n  \n## Decoding  \n  \nColumn indexes are 0-based. A negative or out-of-range index is a  \n`DECODE` error in every getter. `read*` reports NULL as `DECODE`;  \n`readOptional*` reports it as `Option::NONE`. Values are otherwise read  \nwith SQLite's own coercion, so `readInt` on a TEXT column parses a number.  \n  \n## Lifetime  \n  \nA `Row` borrows its statement and reads the row the statement is on now:  \nuse it between a `step()` that returned `Step::ROW` and the next `step()`."
+      "doc": "  \n# Row  \n  \n`Orm::Row`, a typed view of the current row of a `Sqlite3::Statement`.  \nEvery getter checks what the binding's coercing getters cannot: the column  \nexists, it is not NULL where a value is required, and a boolean is 0 or 1.  \n  \n## Exports  \n  \n| Export     | Description                                             |  \n|------------|---------------------------------------------------------|  \n| `Orm::Row` | `create`, `columnCount`, `readInt`, `readReal`, `readText`, `readBlob`, `readBoolean`, their `readOptional*` forms, `isNull` |  \n  \n## Decoding  \n  \nColumn indexes are 0-based. A negative or out-of-range index is a  \n`DECODE` error in every getter. `read*` reports NULL as `DECODE`;  \n`readOptional*` reports it as `Option::NONE`. Values are otherwise read  \nwith SQLite's own coercion, so `readInt` on a TEXT column parses a number.  \n  \n## Lifetime  \n  \nA `Row` borrows its statement and reads the row the statement is on now:  \nuse it between a `step()` that returned `Step::ROW` and the next `step()`."
     },
     {
       "name": "std::orm::table",
-      "doc": "  \n# Table  \n  \n`Orm::Table`, the descriptor of one table: its name and its columns, in  \norder. The descriptor emits the SQL of its `CREATE TABLE` and of the  \nstatements a repository runs; every value in those statements is a `?`  \nparameter, never interpolated text.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |  \n  \n## Building a descriptor  \n  \nThe builder methods take the table by value and return it, so a  \ndescriptor is one expression. `autoIncrement()` and `notNull()` apply to  \nthe column added last:  \n  \n```ignis  \nlet table: Orm::Table = Orm::Table::create(\"tasks\")  \n  .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n  .autoIncrement()  \n  .columnText(\"title\", Orm::ColumnKey::NONE)  \n  .notNull();  \n```  \n  \n## Validation  \n  \nEvery emitter validates the descriptor first and returns an `Orm::Error`  \nof kind `SCHEMA` when the table or a column name is not a plain identifier  \n(`[A-Za-z_][A-Za-z0-9_]*`, so a name never needs quoting), when there are  \nno columns, when a column name repeats, when more than one column is a  \nprimary key, or when `autoIncrement()` marks a column that is not an  \nINTEGER primary key. The by-id statements also need a key.  \n  \n## Bind order  \n  \nEach emitter documents the order of its `?` parameters; a repository binds  \nvalues in exactly that order."
+      "doc": "  \n# Schema  \n  \n`Orm::Schema`, the descriptor of one table: its name and its columns, in  \norder. The descriptor emits the SQL of its `CREATE TABLE` and of the  \nstatements a repository runs; every value in those statements is a `?`  \nparameter, never interpolated text.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Schema`     | `create`, `column`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |  \n  \n## Building a descriptor  \n  \nThe builder methods take the table by value and return it, so a  \ndescriptor is one expression. `autoIncrement()` and `notNull()` apply to  \nthe column added last:  \n  \n```ignis  \nlet table: Orm::Schema = Orm::Schema::create(\"tasks\")  \n  .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n  .autoIncrement()  \n  .columnText(\"title\", Orm::ColumnKey::NONE)  \n  .notNull();  \n```  \n  \n## Validation  \n  \nEvery emitter validates the descriptor first and returns an `Orm::Error`  \nof kind `SCHEMA` when the table has no name (the message asks for  \n`@Orm::Table`, which a reflective entity takes its name from), when the  \ntable or a column name is not a plain identifier (`[A-Za-z_][A-Za-z0-9_]*`,  \nso a name never needs quoting), when there are no columns, when a column  \nname repeats, when more than one column is a primary key, or when  \n`autoIncrement()` marks a column that is not an INTEGER primary key. The  \nby-id statements also need a key.  \n  \n## Bind order  \n  \nEach emitter documents the order of its `?` parameters; a repository binds  \nvalues in exactly that order."
     },
     {
       "name": "std::orm::value",
@@ -13524,6 +13532,200 @@
       "signature": "namespace Orm"
     },
     {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "The attributes the reflective `Entity` defaults read."
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::AutoIncrement",
+      "name": "AutoIncrement",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record AutoIncrement",
+      "doc": "Marks the primary key `AUTOINCREMENT`: inserts leave it out and SQLite  \nassigns it. Only an `INTEGER` key accepts it."
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::Column",
+      "name": "Column",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Column",
+      "doc": "The column a field is stored in, when it differs from the field name.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: str",
+          "doc": "The column name, a plain identifier."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::PrimaryKey",
+      "name": "PrimaryKey",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record PrimaryKey",
+      "doc": "Marks the field that is the table's primary key."
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::Table",
+      "name": "Table",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Table",
+      "doc": "The table a record is stored in. A record that relies on the default  \n`table()` and lacks it gets a descriptor without a name, which every  \nemitter and `Repository::create` report as `SCHEMA`.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: str",
+          "doc": "The table name, a plain identifier."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Field types the reflective defaults can store."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::BlobByte",
+      "name": "BlobByte",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait BlobByte",
+      "doc": "The element type of a `BLOB` field. `u8` is the only implementation.",
+      "members": [
+        {
+          "name": "toBlobByte",
+          "kind": "method",
+          "signature": "toBlobByte(&self): u8",
+          "doc": "The stored byte of the element."
+        },
+        {
+          "name": "fromBlobByte",
+          "kind": "method",
+          "signature": "static fromBlobByte(byte: u8): Self",
+          "doc": "The element for a stored byte."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::ColumnValue",
+      "name": "ColumnValue",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait ColumnValue",
+      "doc": "A type a field can have in a reflective entity.",
+      "members": [
+        {
+          "name": "toColumnValue",
+          "kind": "method",
+          "signature": "toColumnValue(&self): Value",
+          "doc": "The value as a raw parameter."
+        },
+        {
+          "name": "bindColumn",
+          "kind": "method",
+          "signature": "bindColumn(&self, index: i32): Result<void, Error>",
+          "doc": "Binds the value to the 1-based parameter `index` of `statement`."
+        },
+        {
+          "name": "columnKey",
+          "kind": "method",
+          "signature": "columnKey(&self): Option<i64>",
+          "doc": "The value as a repository key: an integer, or `NONE`."
+        },
+        {
+          "name": "columnType",
+          "kind": "method",
+          "signature": "static columnType(): ColumnType",
+          "doc": "The SQL type of the column."
+        },
+        {
+          "name": "columnNullable",
+          "kind": "method",
+          "signature": "static columnNullable(): boolean",
+          "doc": "Whether the column accepts NULL; only `Option` does."
+        },
+        {
+          "name": "readColumn",
+          "kind": "method",
+          "signature": "static readColumn(row: &Row, column: i32): Result<Self, Error>",
+          "doc": "The value of `column` in `row`, or a `DECODE` error."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::bindColumnOf",
+      "name": "bindColumnOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function bindColumnOf<T>(value: &T, statement: &mut Statement, index: i32): Result<void, Error>",
+      "doc": "`value.bindColumn(statement, index)`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::columnKeyOf",
+      "name": "columnKeyOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function columnKeyOf<T>(value: &T): Option<i64>",
+      "doc": "`value.columnKey()`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::columnNullableOf",
+      "name": "columnNullableOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function columnNullableOf<T>(): boolean",
+      "doc": "`T::columnNullable()`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::columnTypeOf",
+      "name": "columnTypeOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function columnTypeOf<T>(): ColumnType",
+      "doc": "`T::columnType()`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::readColumnOf",
+      "name": "readColumnOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function readColumnOf<T>(row: &Row, column: i32): Result<T, Error>",
+      "doc": "`T::readColumn(row, column)`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::readIntegerInRange",
+      "name": "readIntegerInRange",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function readIntegerInRange(row: &Row, column: i32, minimum: i64, maximum: i64, typeName: str): Result<i64, Error>",
+      "doc": "Column `column` as an integer in `minimum..=maximum`; a value outside  \nis a `DECODE` error naming `typeName`."
+    },
+    {
       "module": "std::orm::entity",
       "path": "std::orm::entity::Orm",
       "name": "Orm",
@@ -13556,7 +13758,7 @@
         {
           "name": "table",
           "kind": "method",
-          "signature": "static table(): Table",
+          "signature": "static table(): Schema",
           "doc": "The descriptor of the record's table."
         }
       ]
@@ -13781,37 +13983,37 @@
           "name": "insertStatement",
           "kind": "field",
           "signature": "insertStatement: String",
-          "doc": "`Table::insertSql`."
+          "doc": "`Schema::insertSql`."
         },
         {
           "name": "selectStatement",
           "kind": "field",
           "signature": "selectStatement: String",
-          "doc": "`Table::selectSql`."
+          "doc": "`Schema::selectSql`."
         },
         {
           "name": "selectByIdStatement",
           "kind": "field",
           "signature": "selectByIdStatement: String",
-          "doc": "`Table::selectByIdSql`."
+          "doc": "`Schema::selectByIdSql`."
         },
         {
           "name": "selectAllStatement",
           "kind": "field",
           "signature": "selectAllStatement: String",
-          "doc": "`Table::selectAllSql`."
+          "doc": "`Schema::selectAllSql`."
         },
         {
           "name": "updateStatement",
           "kind": "field",
           "signature": "updateStatement: String",
-          "doc": "`Table::updateByIdSql`."
+          "doc": "`Schema::updateByIdSql`."
         },
         {
           "name": "deleteStatement",
           "kind": "field",
           "signature": "deleteStatement: String",
-          "doc": "`Table::deleteByIdSql`."
+          "doc": "`Schema::deleteByIdSql`."
         },
         {
           "name": "valueCount",
@@ -13942,6 +14144,12 @@
           "doc": "How many columns the row has."
         },
         {
+          "name": "isNull",
+          "kind": "method",
+          "signature": "isNull(&self, column: i32): Result<boolean, Error>",
+          "doc": "Whether column `column` is NULL; an index outside the row is a  \n`DECODE` error."
+        },
+        {
           "name": "present",
           "kind": "method",
           "signature": "present(&self, column: i32): Result<boolean, Error>",
@@ -14035,47 +14243,6 @@
     },
     {
       "module": "std::orm::table",
-      "path": "std::orm::table::Orm::Column",
-      "name": "Column",
-      "kind": "record",
-      "visibility": "private",
-      "signature": "record Column",
-      "doc": "One column of a table descriptor.",
-      "members": [
-        {
-          "name": "name",
-          "kind": "field",
-          "signature": "name: String",
-          "doc": "The column name."
-        },
-        {
-          "name": "columnType",
-          "kind": "field",
-          "signature": "columnType: ColumnType",
-          "doc": "The declared type."
-        },
-        {
-          "name": "key",
-          "kind": "field",
-          "signature": "key: ColumnKey",
-          "doc": "Whether the column is the primary key."
-        },
-        {
-          "name": "autoIncrement",
-          "kind": "field",
-          "signature": "autoIncrement: boolean",
-          "doc": "Whether the key is `AUTOINCREMENT` (and so left out of inserts)."
-        },
-        {
-          "name": "notNull",
-          "kind": "field",
-          "signature": "notNull: boolean",
-          "doc": "Whether the column is `NOT NULL`."
-        }
-      ]
-    },
-    {
-      "module": "std::orm::table",
       "path": "std::orm::table::Orm::ColumnKey",
       "name": "ColumnKey",
       "kind": "enum",
@@ -14133,11 +14300,11 @@
     },
     {
       "module": "std::orm::table",
-      "path": "std::orm::table::Orm::Table",
-      "name": "Table",
+      "path": "std::orm::table::Orm::Schema",
+      "name": "Schema",
       "kind": "record",
       "visibility": "private",
-      "signature": "record Table",
+      "signature": "record Schema",
       "doc": "The descriptor of one table: its name and its columns, in order.",
       "members": [
         {
@@ -14149,49 +14316,55 @@
         {
           "name": "columns",
           "kind": "field",
-          "signature": "columns: Vector<Column>",
+          "signature": "columns: Vector<SchemaColumn>",
           "doc": "The columns, in declaration order."
         },
         {
           "name": "create",
           "kind": "method",
-          "signature": "static create(name: str): Table",
+          "signature": "static create(name: str): Schema",
           "doc": "An empty descriptor for the table `name`."
         },
         {
           "name": "autoIncrement",
           "kind": "method",
-          "signature": "autoIncrement(self): Table",
+          "signature": "autoIncrement(self): Schema",
           "doc": "Marks the column added last `AUTOINCREMENT`. Only an `INTEGER` primary  \nkey accepts it; the emitters report any other column as `SCHEMA`."
+        },
+        {
+          "name": "column",
+          "kind": "method",
+          "signature": "column(self, name: str, columnType: ColumnType, key: ColumnKey): Schema",
+          "doc": "Adds a column of type `columnType`."
         },
         {
           "name": "columnBlob",
           "kind": "method",
-          "signature": "columnBlob(self, name: str, key: ColumnKey): Table",
+          "signature": "columnBlob(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a `BLOB` column."
         },
         {
           "name": "columnBoolean",
           "kind": "method",
-          "signature": "columnBoolean(self, name: str, key: ColumnKey): Table",
+          "signature": "columnBoolean(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a boolean column, stored as `INTEGER` 0 or 1."
         },
         {
           "name": "columnInt",
           "kind": "method",
-          "signature": "columnInt(self, name: str, key: ColumnKey): Table",
+          "signature": "columnInt(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds an `INTEGER` column."
         },
         {
           "name": "columnReal",
           "kind": "method",
-          "signature": "columnReal(self, name: str, key: ColumnKey): Table",
+          "signature": "columnReal(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a `REAL` column."
         },
         {
           "name": "columnText",
           "kind": "method",
-          "signature": "columnText(self, name: str, key: ColumnKey): Table",
+          "signature": "columnText(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a `TEXT` column."
         },
         {
@@ -14221,13 +14394,13 @@
         {
           "name": "lastColumn",
           "kind": "method",
-          "signature": "lastColumn(&mut self): Option<&mut Column>",
+          "signature": "lastColumn(&mut self): Option<&mut SchemaColumn>",
           "doc": "The column added last, when there is one."
         },
         {
           "name": "notNull",
           "kind": "method",
-          "signature": "notNull(self): Table",
+          "signature": "notNull(self): Schema",
           "doc": "Marks the column added last `NOT NULL`."
         },
         {
@@ -14275,8 +14448,49 @@
         {
           "name": "withColumn",
           "kind": "method",
-          "signature": "withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Table",
+          "signature": "withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Schema",
           "doc": "The descriptor with one more column."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::SchemaColumn",
+      "name": "SchemaColumn",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record SchemaColumn",
+      "doc": "One column of a table descriptor.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String",
+          "doc": "The column name."
+        },
+        {
+          "name": "columnType",
+          "kind": "field",
+          "signature": "columnType: ColumnType",
+          "doc": "The declared type."
+        },
+        {
+          "name": "key",
+          "kind": "field",
+          "signature": "key: ColumnKey",
+          "doc": "Whether the column is the primary key."
+        },
+        {
+          "name": "autoIncrement",
+          "kind": "field",
+          "signature": "autoIncrement: boolean",
+          "doc": "Whether the key is `AUTOINCREMENT` (and so left out of inserts)."
+        },
+        {
+          "name": "notNull",
+          "kind": "field",
+          "signature": "notNull: boolean",
+          "doc": "Whether the column is `NOT NULL`."
         }
       ]
     },
