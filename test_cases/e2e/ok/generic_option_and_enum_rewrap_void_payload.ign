@@ -1,0 +1,66 @@
+// e2e: std
+// The same re-wrap shape over `Option<V>` and a user generic enum with a `V`
+// payload, instantiated with `V = void` and `V = i32`.
+import Io from "std::io";
+
+enum Slot<V> {
+  FULL(V),
+  EMPTY,
+}
+
+function rewrapOption<V>(option: Option<V>): Option<V> {
+  return match (option) {
+    Option::SOME(value) -> Option::SOME(value),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function toSlot<V>(option: Option<V>): Slot<V> {
+  return match (option) {
+    Option::SOME(value) -> Slot::FULL(value),
+    Option::NONE -> Slot::EMPTY,
+  };
+}
+
+function rewrapSlot<V>(slot: Slot<V>): Slot<V> {
+  return match (slot) {
+    Slot::FULL(value) -> Slot::FULL(value),
+    Slot::EMPTY -> Slot::EMPTY,
+  };
+}
+
+function main(): i32 {
+  let mut total: i32 = 0;
+  let unit: Option<void> = Option::SOME(());
+
+  match (rewrapOption(unit)) {
+    Option::SOME(_) -> Io::println("option void some"),
+    Option::NONE -> Io::println("option void lost"),
+  };
+
+  match (rewrapSlot(toSlot(unit))) {
+    Slot::FULL(_) -> Io::println("slot void full"),
+    Slot::EMPTY -> Io::println("slot void lost"),
+  };
+
+  let missing: Option<void> = Option::NONE;
+
+  match (rewrapSlot(toSlot(missing))) {
+    Slot::FULL(_) -> Io::println("slot void found"),
+    Slot::EMPTY -> Io::println("slot void empty"),
+  };
+
+  let number: Option<i32> = Option::SOME(12);
+
+  match (rewrapOption(number)) {
+    Option::SOME(value) -> total = total + value,
+    Option::NONE -> Io::println("option i32 lost"),
+  };
+
+  match (rewrapSlot(toSlot(number))) {
+    Slot::FULL(value) -> total = total + value,
+    Slot::EMPTY -> Io::println("slot i32 lost"),
+  };
+
+  return total;
+}
