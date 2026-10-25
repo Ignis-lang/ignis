@@ -1,7 +1,7 @@
 //!
-//! # Table
+//! # Schema
 //!
-//! `Orm::Table`, the descriptor of one table: its name and its columns, in
+//! `Orm::Schema`, the descriptor of one table: its name and its columns, in
 //! order. The descriptor emits the SQL of its `CREATE TABLE` and of the
 //! statements a repository runs; every value in those statements is a `?`
 //! parameter, never interpolated text.
@@ -10,7 +10,7 @@
 //!
 //! | Export            | Description                                      |
 //! |-------------------|--------------------------------------------------|
-//! | `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |
+//! | `Orm::Schema`     | `create`, `column`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |
 //! | `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |
 //! | `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |
 //!
@@ -21,7 +21,7 @@
 //! the column added last:
 //!
 //! ```ignis
-//! let table: Orm::Table = Orm::Table::create("tasks")
+//! let table: Orm::Schema = Orm::Schema::create("tasks")
 //!   .columnInt("id", Orm::ColumnKey::PRIMARY)
 //!   .autoIncrement()
 //!   .columnText("title", Orm::ColumnKey::NONE)
@@ -31,11 +31,13 @@
 //! ## Validation
 //!
 //! Every emitter validates the descriptor first and returns an `Orm::Error`
-//! of kind `SCHEMA` when the table or a column name is not a plain identifier
-//! (`[A-Za-z_][A-Za-z0-9_]*`, so a name never needs quoting), when there are
-//! no columns, when a column name repeats, when more than one column is a
-//! primary key, or when `autoIncrement()` marks a column that is not an
-//! INTEGER primary key. The by-id statements also need a key.
+//! of kind `SCHEMA` when the table has no name (the message asks for
+//! `@Orm::Table`, which a reflective entity takes its name from), when the
+//! table or a column name is not a plain identifier (`[A-Za-z_][A-Za-z0-9_]*`,
+//! so a name never needs quoting), when there are no columns, when a column
+//! name repeats, when more than one column is a primary key, or when
+//! `autoIncrement()` marks a column that is not an INTEGER primary key. The
+//! by-id statements also need a key.
 //!
 //! ## Bind order
 //!
@@ -69,7 +71,7 @@ export namespace Orm {
   }
 
   /// One column of a table descriptor.
-  record Column {
+  record SchemaColumn {
     /// The column name.
     public name: String;
     /// The declared type.
@@ -83,46 +85,51 @@ export namespace Orm {
   }
 
   /// The descriptor of one table: its name and its columns, in order.
-  record Table {
+  record Schema {
     /// The table name.
     public name: String;
     /// The columns, in declaration order.
-    public columns: Vector<Column>;
+    public columns: Vector<SchemaColumn>;
 
     /// An empty descriptor for the table `name`.
-    public static create(name: str): Table {
-      return Table { name: String::create(name), columns: Vector::new<Column>() };
+    public static create(name: str): Schema {
+      return Schema { name: String::create(name), columns: Vector::new<SchemaColumn>() };
+    }
+
+    /// Adds a column of type `columnType`.
+    public column(self, name: str, columnType: ColumnType, key: ColumnKey): Schema {
+      return self.withColumn(name, columnType, key);
     }
 
     /// Adds an `INTEGER` column.
-    public columnInt(self, name: str, key: ColumnKey): Table {
+    public columnInt(self, name: str, key: ColumnKey): Schema {
       return self.withColumn(name, ColumnType::INTEGER, key);
     }
 
     /// Adds a `REAL` column.
-    public columnReal(self, name: str, key: ColumnKey): Table {
+    public columnReal(self, name: str, key: ColumnKey): Schema {
       return self.withColumn(name, ColumnType::REAL, key);
     }
 
     /// Adds a `TEXT` column.
-    public columnText(self, name: str, key: ColumnKey): Table {
+    public columnText(self, name: str, key: ColumnKey): Schema {
       return self.withColumn(name, ColumnType::TEXT, key);
     }
 
     /// Adds a `BLOB` column.
-    public columnBlob(self, name: str, key: ColumnKey): Table {
+    public columnBlob(self, name: str, key: ColumnKey): Schema {
       return self.withColumn(name, ColumnType::BLOB, key);
     }
 
     /// Adds a boolean column, stored as `INTEGER` 0 or 1.
-    public columnBoolean(self, name: str, key: ColumnKey): Table {
+    public columnBoolean(self, name: str, key: ColumnKey): Schema {
       return self.withColumn(name, ColumnType::BOOLEAN, key);
     }
 
     /// Marks the column added last `AUTOINCREMENT`. Only an `INTEGER` primary
     /// key accepts it; the emitters report any other column as `SCHEMA`.
-    public autoIncrement(self): Table {
-      let mut table: Table = self;
+    public autoIncrement(self): Schema {
+      let mut table: Schema = self;
 
       if (let Option::SOME(column) = table.lastColumn()) {
         column.autoIncrement = true;
@@ -132,8 +139,8 @@ export namespace Orm {
     }
 
     /// Marks the column added last `NOT NULL`.
-    public notNull(self): Table {
-      let mut table: Table = self;
+    public notNull(self): Schema {
+      let mut table: Schema = self;
 
       if (let Option::SOME(column) = table.lastColumn()) {
         column.notNull = true;
@@ -159,7 +166,7 @@ export namespace Orm {
       let mut index: u64 = 0;
 
       while (index < self.columns.length()) {
-        let column: &Column = self.columns.get(index).unwrap();
+        let column: &SchemaColumn = self.columns.get(index).unwrap();
 
         if (index > 0) {
           sql.pushStr(", ");
@@ -206,7 +213,7 @@ export namespace Orm {
       let mut index: u64 = 0;
 
       while (index < self.columns.length()) {
-        let column: &Column = self.columns.get(index).unwrap();
+        let column: &SchemaColumn = self.columns.get(index).unwrap();
 
         if (column.key != ColumnKey::PRIMARY) {
           appendInsertColumn(&mut names, &mut placeholders, &column.name);
@@ -216,7 +223,7 @@ export namespace Orm {
       }
 
       if (let Option::SOME(keyIndex) = self.keyIndex()) {
-        let key: &Column = self.columns.get(keyIndex).unwrap();
+        let key: &SchemaColumn = self.columns.get(keyIndex).unwrap();
 
         if (!key.autoIncrement) {
           appendInsertColumn(&mut names, &mut placeholders, &key.name);
@@ -306,7 +313,7 @@ export namespace Orm {
       let mut index: u64 = 0;
 
       while (index < self.columns.length()) {
-        let column: &Column = self.columns.get(index).unwrap();
+        let column: &SchemaColumn = self.columns.get(index).unwrap();
 
         if (column.key != ColumnKey::PRIMARY) {
           if (!first) {
@@ -348,10 +355,10 @@ export namespace Orm {
     }
 
     /// The descriptor with one more column.
-    withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Table {
-      let mut table: Table = self;
+    withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Schema {
+      let mut table: Schema = self;
 
-      table.columns.push(Column {
+      table.columns.push(SchemaColumn {
         name: String::create(name),
         columnType: columnType,
         key: key,
@@ -363,7 +370,7 @@ export namespace Orm {
     }
 
     /// The column added last, when there is one.
-    lastColumn(&mut self): Option<&mut Column> {
+    lastColumn(&mut self): Option<&mut SchemaColumn> {
       let length: u64 = self.columns.length();
 
       if (length == 0) {
@@ -426,6 +433,13 @@ export namespace Orm {
 
     /// Checks every rule in the module docs' "Validation" section.
     validate(&self): Result<void, Error> {
+      if (self.name.length() == 0) {
+        return Result::ERROR(Error::create(
+          ErrorKind::SCHEMA,
+          String::create("std::orm: the table has no name; add @Orm::Table(\"name\") to the record"),
+        ));
+      }
+
       if (!isPlainIdentifier(&self.name)) {
         return Result::ERROR(schemaError("std::orm: table name '", &self.name, "' is not a plain identifier"));
       }
@@ -438,7 +452,7 @@ export namespace Orm {
       let mut index: u64 = 0;
 
       while (index < self.columns.length()) {
-        let column: &Column = self.columns.get(index).unwrap();
+        let column: &SchemaColumn = self.columns.get(index).unwrap();
 
         if (!isPlainIdentifier(&column.name)) {
           return Result::ERROR(schemaError("std::orm: column name '", &column.name, "' is not a plain identifier"));
