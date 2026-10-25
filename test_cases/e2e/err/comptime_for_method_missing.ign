@@ -1,0 +1,37 @@
+// e2e: err
+// A method call on a field whose type has no extension block implementing
+// the trait that declares the method reports the missing implementation,
+// with a note naming the field.
+trait Describe {
+  describe(&self): i32;
+}
+
+@implements(Describe)
+extension i32 {
+  describe(&self): i32 {
+    return *self;
+  }
+}
+
+trait Summary {
+  summary(&self): i32 {
+    let mut sum: i32 = 0;
+
+    comptime for (field of @fields<Self>()) {
+      sum += @field(self, field).describe();
+    }
+
+    return sum;
+  }
+}
+
+@implements(Summary)
+record Item {
+  public count: i32;
+  public flag: boolean;
+}
+
+function main(): i32 {
+  let item: Item = Item { count: 1, flag: true };
+  return item.summary();
+}

@@ -831,7 +831,12 @@ trait Seeded {
 
 Per-field-type behavior comes from overloads: each copy calls the overload for its field's type, and
 a field type with no matching overload is reported at its place in the loop body with a note naming
-the field. In the trait's own body `Self` has no known fields, so the loop unrolls over none there.
+the field. The same note marks every other error a copy produces, including a bound a field type
+misses on a generic call (`describe<@fieldType(field)>()` or `describe(&@field(self, field))` with
+`describe<T: Describe>`, `A0247`) and a method call on a field whose type is not a record or enum and
+has no extension block implementing the trait that declares the method (`A0298`, naming the trait
+and the type). In the trait's own body `Self` has no known fields, so the loop unrolls over none
+there.
 
 | Code | Message | Severity |
 |------|---------|----------|
@@ -841,6 +846,7 @@ the field. In the trait's own body `Self` has no known fields, so the loop unrol
 | A0295 | `@field`, `@fieldType`, `@attribute<A>(field)` or `@fields` outside the loop that declares the descriptor | Error |
 | A0296 | Unknown descriptor member, or the descriptor used as a value | Error |
 | A0297 | `@attribute<A>(Self)` with an `A` not declared for the kind of `Self` (record or enum) | Error |
+| A0298 | Method call on a type that is not a record or enum, naming a method of a trait the type does not implement | Error |
 
 ## Diagnostics
 
@@ -886,3 +892,4 @@ the field. In the trait's own body `Self` has no known fields, so the loop unrol
 | A0295 | Field descriptor builtin outside its `comptime for` | Error |
 | A0296 | Unknown descriptor member or descriptor used as a value | Error |
 | A0297 | `@attribute<A>(Self)` with an attribute not declared for the kind of `Self` | Error |
+| A0298 | `value.method()` on a primitive or `str` with no extension block implementing the trait that declares `method` | Error |

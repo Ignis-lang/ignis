@@ -62,11 +62,30 @@ export namespace Bounds {
         continue;
       };
 
+      let start: u64 = diagnostics.length();
       Bounds::checkBody(defStore, typeStore, symbols, hir, enclosing, bodyId, &mut diagnostics);
+
+      if (let Option::SOME(note) = defStore.inheritedNoteOf(enclosing)) {
+        Bounds::addNoteFrom(&mut diagnostics, start, note.toStr());
+      }
+
       index += 1;
     }
 
     return diagnostics;
+  }
+
+  function addNoteFrom(diagnostics: &mut DiagnosticBag, start: u64, note: str): void {
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    let mut index: u64 = start;
+
+    while (index < bag.length()) {
+      if (let Option::SOME(diagnostic) = bag.getMut(index)) {
+        diagnostic.addNote(note);
+      }
+
+      index += 1;
+    }
   }
 
   /// Checks the closures passed where a type parameter bounded by `Send` or
@@ -546,15 +565,32 @@ export namespace Bounds {
   ): void {
     let mut checkedTypes: HashSet<u32> = HashSet::new<u32>();
     let mut pending: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    // The block of the unrolled `comptime for` iteration each pending node
+    // sits in, or the body itself outside any: every copy of the loop body
+    // shares one span, so only this note tells which field failed.
+    let mut iterations: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     pending.push(bodyId);
+    iterations.push(bodyId);
 
     while (pending.length() > 0) {
       let Option::SOME(nodeId) = pending.pop() else {
         break;
       };
+      let Option::SOME(enclosingIteration) = iterations.pop() else {
+        break;
+      };
       let Option::SOME(node) = hir.get(nodeId) else {
         continue;
       };
+
+      let mut iteration: Hir::HirId = enclosingIteration;
+
+      if (hir.comptimeIterationNote(nodeId).isSome()) {
+        iteration = nodeId;
+      }
+
+      let start: u64 = diagnostics.length();
 
       let span: SourceSpan = node.span;
       let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
@@ -588,6 +624,7 @@ export namespace Bounds {
 
         if (let Option::SOME(child) = children.get(childIndex)) {
           pending.push(*child);
+          iterations.push(iteration);
         }
       }
 
@@ -605,6 +642,10 @@ export namespace Bounds {
         }
 
         typeIndex += 1;
+      }
+
+      if (let Option::SOME(note) = hir.comptimeIterationNote(iteration)) {
+        Bounds::addNoteFrom(diagnostics, start, note.toStr());
       }
     }
   }
