@@ -245,6 +245,22 @@ export namespace Analyzer::ViewType {
     return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 3, ownedBuffer, &mut visiting);
   }
 
+  /// Whether a raw pointer is reachable from a value of `typeId` at any
+  /// depth, through aggregates, instances, aliases and references, skipping
+  /// the buffers of the standard owning storage as `canHoldDerived` does
+  /// (closures and unresolved `Param`s count too, since they can hold one).
+  /// A callee handed such a value can store the pointer anywhere, a static
+  /// included, so a view it was derived from stays borrowed.
+  public function holdsRawPointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    ownedBuffer: u32,
+  ): boolean {
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 3, ownedBuffer, &mut visiting);
+  }
+
   /// Whether a value of `typeId` lets the code it is handed to write into a
   /// place it does not own: a `&mut T`, a raw pointer whatever its pointee
   /// (it can be cast back), a closure value (its captures are invisible in

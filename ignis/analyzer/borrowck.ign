@@ -8307,7 +8307,7 @@ export namespace Borrowck {
         while (sinkIndex < end) {
           let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, sinkIndex));
 
-          if (Borrowck::nodeStoresView(defStore, typeStore, hir, nodeId, &carriers)) {
+          if (Borrowck::nodeStoresView(defStore, typeStore, hir, nodeId, &carriers, state.ownedBuffer)) {
             return Borrowck::NO_LAST_STATEMENT;
           }
 
@@ -8803,6 +8803,7 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     nodeId: Hir::HirId,
     carriers: &Vector<u32>,
+    ownedBuffer: u32,
   ): boolean {
     let Option::SOME(node) = hir.get(nodeId) else {
       return false;
@@ -8823,10 +8824,10 @@ export namespace Borrowck {
       Hir::HirKind::CallClosure(callNode) -> {
         let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
         operands.push(callNode.callee);
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::SOME(callNode.callee), carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::SOME(callNode.callee), carriers, ownedBuffer);
       },
       Hir::HirKind::Call(callNode) -> {
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, Option::NONE, carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, Option::NONE, carriers, ownedBuffer);
       },
       Hir::HirKind::MethodCall(callNode) -> {
         let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
@@ -8835,7 +8836,7 @@ export namespace Borrowck {
           operands.push(receiver);
         }
 
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::NONE, carriers);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::NONE, carriers, ownedBuffer);
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         return Borrowck::mentionsAny(hir, storeNode.value, carriers);
@@ -8870,6 +8871,7 @@ export namespace Borrowck {
     operands: &Vector<Hir::HirId>,
     closureCallee: Option<Hir::HirId>,
     carriers: &Vector<u32>,
+    ownedBuffer: u32,
   ): boolean {
     if (!Borrowck::anyMentions(hir, operands, carriers)) {
       return false;
@@ -8922,6 +8924,12 @@ export namespace Borrowck {
           }
         } else if (Borrowck::mentionsAny(hir, *operand, carriers)) {
           if (!isCallee && Analyzer::ViewType::canReachViewHoldingPlace(defStore, typeStore, operandType)) {
+            return true;
+          }
+
+          // A carrier holding a raw pointer can be stored by the callee
+          // anywhere, a static included, whatever its other operands.
+          if (!isCallee && Analyzer::ViewType::holdsRawPointer(defStore, typeStore, operandType, ownedBuffer)) {
             return true;
           }
         } else if (Analyzer::ViewType::canReachMutablePlace(defStore, typeStore, operandType)) {

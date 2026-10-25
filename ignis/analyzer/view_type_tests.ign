@@ -2280,6 +2280,66 @@ function derivedUserRecordNamedStringHolds(): void {
   Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, stdId.raw()));
 }
 
+/// Scenario: `str` holds no raw pointer, so `consume(text)` still releases at last use.
+/// Spec: S3, L47.
+@test
+function rawPointerStrDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  Test::assert(!Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: `*u8` holds a raw pointer.
+/// Spec: S3, L47.
+@test
+function rawPointerBytePointerHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a record with a `*u8` field holds a raw pointer.
+/// Spec: S3, L47.
+@test
+function rawPointerRecordFieldHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idU8));
+  let defId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "CArgs", fields, Vector::new<Analyzer::DefinitionId>(), false);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the standard `String`, whose only pointer is its own buffer, holds none.
+/// Spec: S3, L47.
+@test
+function rawPointerOwnedBufferDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idU8));
+  let defId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "String", fields, Vector::new<Analyzer::DefinitionId>(), true);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(!Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, defId.raw()));
+}
+
 // ─── Closure values ───────────────────────────────────────────────────────────
 
 /// Builds a closure value with the given captures.
