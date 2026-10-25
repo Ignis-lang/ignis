@@ -40,6 +40,57 @@ export namespace Mono {
     return result;
   }
 
+  /// Whether two type lists name the same types in the same order. A
+  /// substituted instance can be a separate entry from the written one, so
+  /// instances compare by declaration and arguments.
+  function sameTypeIds(
+    typeStore: &Analyzer::TypeStore,
+    left: &Vector<Analyzer::TypeId>,
+    right: &Vector<Analyzer::TypeId>,
+  ): boolean {
+    if (left.length() != right.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.length()) {
+      let Option::SOME(leftId) = left.get(index) else {
+        return false;
+      };
+      let Option::SOME(rightId) = right.get(index) else {
+        return false;
+      };
+
+      if (!Mono::sameType(typeStore, *leftId, *rightId)) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  function sameType(
+    typeStore: &Analyzer::TypeStore,
+    left: Analyzer::TypeId,
+    right: Analyzer::TypeId
+  ): boolean {
+    if (left.raw() == right.raw()) {
+      return true;
+    }
+
+    let Option::SOME(Analyzer::Type::Instance(leftInstance)) = typeStore.get(left) else {
+      return false;
+    };
+    let Option::SOME(Analyzer::Type::Instance(rightInstance)) = typeStore.get(right) else {
+      return false;
+    };
+
+    return leftInstance.definition.raw() == rightInstance.definition.raw() && Mono::sameTypeIds(typeStore, &leftInstance.typeArguments, &rightInstance.typeArguments);
+  }
+
   function copyKey(key: &Mono::InstanceKey): Mono::InstanceKey {
     return Mono::InstanceKey {
       primaryDef: key.primaryDef,
@@ -2079,12 +2130,21 @@ export namespace Mono {
 
       let mut targetDef: Option<Analyzer::DefinitionId> = Option::NONE;
       let mut targetGeneric: boolean = false;
+      let mut concreteInstanceMatches: boolean = false;
 
       if (let Option::SOME(targetNode) = typeStore.get(target)) {
         match (targetNode) {
+          // A generic block stands for every instance of its type; a block
+          // over one concrete instance, only for an instance with the same
+          // arguments.
           Analyzer::Type::Instance(targetInstance) -> {
-            targetDef = Option::SOME(targetInstance.definition);
-            targetGeneric = true;
+            if (Analyzer::TypeBounds::declaredTypeParams(defStore, *block).length() > 0) {
+              targetDef = Option::SOME(targetInstance.definition);
+              targetGeneric = true;
+            } else if (let Option::SOME(receiver) = &instance) {
+              concreteInstanceMatches = receiver.definition.raw() == targetInstance.definition.raw()
+                && Mono::sameTypeIds(&*typeStore, &receiver.typeArguments, &targetInstance.typeArguments);
+            }
           },
           Analyzer::Type::Record(definition) -> {
             targetDef = Option::SOME(definition);
@@ -2094,6 +2154,12 @@ export namespace Mono {
           },
           _ -> {},
         };
+      }
+
+      if (concreteInstanceMatches) {
+        matches.push(Analyzer::TypeBounds::ExtensionMatch { extension: *block, typeArguments: Vector::new<Analyzer::TypeId>() });
+        index += 1;
+        continue;
       }
 
       if (let Option::SOME(definition) = targetDef) {

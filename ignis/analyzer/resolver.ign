@@ -2921,7 +2921,7 @@ export namespace Analyzer {
         } else if (targetResolved) {
           let targetName: String = typeStore.nameOfResolved(target, &*defStore, &*symbols);
           let message: String = `cannot extend '${targetName.toStr()}': an extension block extends a primitive, 'str', a record or an enum`;
-          let label: String = String::create("a generic type is extended over the block's own type parameters, in order: 'extension<T> Option<T>'");
+          let label: String = String::create("a generic type is extended over the block's own type parameters, in order, 'extension<T> Option<T>', or as one concrete instance, 'extension Option<i64>'");
           emitTypeDiagnosticLabeled(state, r.span, DiagnosticCode::INVALID_EXTENSION_TARGET, message.toStr(), label.toStr());
         }
       }
@@ -2968,9 +2968,9 @@ export namespace Analyzer {
     }
 
     /// Whether an extension block can carry methods for `target`: a primitive,
-    /// `str`, or a non-generic record or enum when the block declares no type
-    /// parameters, and an instance over exactly the block's own parameters, in
-    /// order, when it does.
+    /// `str`, a non-generic record or enum, or an instance whose arguments name
+    /// no type parameter when the block declares no type parameters, and an
+    /// instance over exactly the block's own parameters, in order, when it does.
     function validExtensionTarget(
       typeStore: &Analyzer::TypeStore,
       scope: &Analyzer::Resolver::TypeParamScope,
@@ -3015,6 +3015,7 @@ export namespace Analyzer {
         Analyzer::Type::F32 | Analyzer::Type::F64 | Analyzer::Type::BOOLEAN | Analyzer::Type::CHAR -> true,
         Analyzer::Type::STR | Analyzer::Type::ATOM -> true,
         Analyzer::Type::Record(_) | Analyzer::Type::Enum(_) -> true,
+        Analyzer::Type::Instance(_) -> !typeStore.containsTypeParam(target),
         _ -> false,
       };
     }

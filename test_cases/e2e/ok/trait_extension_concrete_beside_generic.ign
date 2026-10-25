@@ -1,0 +1,90 @@
+// e2e: std
+// An extension block for the instance Vector<u8> coexists with a generic block
+// for Vector<T: Weight> implementing a different trait: Vector<u8> takes both,
+// Vector<i32> only the generic one.
+import Io from "std::io";
+
+trait Weight {
+  weight(&self): i64;
+}
+
+trait Checksum {
+  checksum(&self): i64;
+}
+
+trait Total {
+  total(&self): i64;
+}
+
+@implements(Weight)
+extension u8 {
+  weight(&self): i64 {
+    return *self as i64;
+  }
+}
+
+@implements(Weight)
+extension i32 {
+  weight(&self): i64 {
+    return (*self as i64) * 10;
+  }
+}
+
+@implements(Checksum)
+extension Vector<u8> {
+  checksum(&self): i64 {
+    let mut sum: i64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < self.length()) {
+      if (let Option::SOME(byte) = self.get(index)) {
+        sum = sum * 31 + (*byte as i64);
+      }
+
+      index += 1;
+    }
+
+    return sum;
+  }
+}
+
+@implements(Total)
+extension<T: Weight> Vector<T> {
+  total(&self): i64 {
+    let mut sum: i64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < self.length()) {
+      if (let Option::SOME(item) = self.get(index)) {
+        sum += item.weight();
+      }
+
+      index += 1;
+    }
+
+    return sum;
+  }
+}
+
+function checksumOf<T: Checksum>(value: &T): i64 {
+  return value.checksum();
+}
+
+function totalOf<T: Total>(value: &T): i64 {
+  return value.total();
+}
+
+function main(): i32 {
+  let mut bytes: Vector<u8> = Vector::new<u8>();
+  bytes.push(1);
+  bytes.push(2);
+  let mut numbers: Vector<i32> = Vector::new<i32>();
+  numbers.push(3);
+  numbers.push(4);
+
+  Io::println(`bytes ${bytes.checksum()} ${bytes.total()}`.toStr());
+  Io::println(`numbers ${numbers.total()}`.toStr());
+  Io::println(`bound ${checksumOf<Vector<u8>>(&bytes)} ${totalOf<Vector<u8>>(&bytes)} ${totalOf<Vector<i32>>(&numbers)}`.toStr());
+
+  return 0;
+}

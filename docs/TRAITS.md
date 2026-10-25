@@ -445,15 +445,22 @@ Rules:
 - A generic block extends an instance over exactly its own type parameters, in order. It applies
   only where the type arguments satisfy its bounds; elsewhere the method is not found (A0054) and
   the bound is not met (A0247).
+- A block without type parameters can extend one concrete instance of a generic type,
+  `extension Vector<u8>` or `extension Option<i64>`. It implements the trait for that instance
+  only: `Vector<i32>` neither has its methods (A0054) nor satisfies the bound (A0247).
+- Blocks over the same generic type coexist when they implement different traits, or the same
+  trait for different concrete instances. A generic block and a concrete-instance block for the
+  same trait overlap, `extension<T> Option<T>` and `extension Option<i64>`, and are an error
+  naming both (A0287).
 - `extension` is a contextual keyword: an identifier named `extension` keeps working.
 
 | Code | Condition |
 |------|-----------|
 | A0285 | The block names no trait in `@implements` |
 | A0286 | The block is declared outside the module of the trait and of the type; a primitive is extended only in the trait's module |
-| A0287 | The type implements the trait twice: two blocks, or a block and the type's own `@implements`. Both spans are named |
+| A0287 | The type implements the trait twice: two blocks over the same type, a generic block and a block over one of its instances, or a block and the type's own `@implements`. Both spans are named |
 | A0288 | The block names a lang trait (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) or the canonical `Eq` or `Hash`, which the compiler answers from the type itself |
-| A0289 | The target is not a primitive, `str`, a record or an enum, or a generic instance not over the block's own parameters |
+| A0289 | The target is not a primitive, `str`, a record, an enum or a concrete instance, or a generic block's instance is not over the block's own parameters |
 
 Per-function `@extension(type)` (below) is unchanged.
 

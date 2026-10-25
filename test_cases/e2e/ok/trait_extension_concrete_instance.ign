@@ -1,0 +1,69 @@
+// e2e: std
+// A trait implemented for single instances of generic types, Vector<u8> and
+// Option<i64>, by extension blocks without type parameters. Each is called
+// directly, through a bound, and as a static through T::read.
+import Io from "std::io";
+
+trait Describe {
+  describe(&self): i64;
+
+  static read(raw: i64): Self;
+}
+
+@implements(Describe)
+extension Vector<u8> {
+  describe(&self): i64 {
+    return self.length() as i64;
+  }
+
+  static read(raw: i64): Vector<u8> {
+    let mut bytes: Vector<u8> = Vector::new<u8>();
+    let mut index: i64 = 0;
+
+    while (index < raw) {
+      bytes.push(index as u8);
+      index += 1;
+    }
+
+    return bytes;
+  }
+}
+
+@implements(Describe)
+extension Option<i64> {
+  describe(&self): i64 {
+    return match (self) {
+      Option::SOME(inner) -> inner + 1000,
+      Option::NONE -> -1,
+    };
+  }
+
+  static read(raw: i64): Option<i64> {
+    return Option::SOME(raw * 2);
+  }
+}
+
+function describe<T: Describe>(value: &T): i64 {
+  return value.describe();
+}
+
+function readOne<T: Describe>(raw: i64): T {
+  return T::read(raw);
+}
+
+function main(): i32 {
+  let mut bytes: Vector<u8> = Vector::new<u8>();
+  bytes.push(1);
+  bytes.push(2);
+  let some: Option<i64> = Option::SOME(7);
+  let none: Option<i64> = Option::NONE;
+
+  Io::println(`direct ${bytes.describe()} ${some.describe()} ${none.describe()}`.toStr());
+  Io::println(`bound ${describe<Vector<u8>>(&bytes)} ${describe<Option<i64>>(&some)}`.toStr());
+
+  let readBytes: Vector<u8> = readOne<Vector<u8>>(5);
+  let readSome: Option<i64> = readOne<Option<i64>>(4);
+  Io::println(`read ${readBytes.describe()} ${readSome.describe()}`.toStr());
+
+  return 0;
+}
