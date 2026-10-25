@@ -275,6 +275,12 @@ export namespace Borrowck {
     /// the block outlives it, so its later uses are not in the plan.
     planDeclared: Vector<HashMap<u64, u32>>;
 
+    /// The bindings whose address a `&x` or `&mut x` anywhere in each planned
+    /// block takes, by raw id. An alias of a carrier is not tracked, so a
+    /// carrier whose address is taken keeps the borrow to the end of the
+    /// scope.
+    planAddressTaken: Vector<HashMap<u64, u32>>;
+
     scopeStarts: Vector<u64>;
 
     /// Owned-local scope stack, mirroring the ownership oracle's `ScopeEntry`
@@ -503,6 +509,7 @@ export namespace Borrowck {
         planStatementStarts: Vector::new<Vector<u64>>(),
         planUses: Vector::new<HashMap<u64, Vector<u64>>>(),
         planDeclared: Vector::new<HashMap<u64, u32>>(),
+        planAddressTaken: Vector::new<HashMap<u64, u32>>(),
         scopeStarts: Vector::new<u64>(),
         scopeBlocks: Vector::new<u32>(),
         scopeHasBlock: Vector::new<u32>(),
@@ -1723,6 +1730,7 @@ export namespace Borrowck {
       let mut starts: Vector<u64> = Vector::new<u64>();
       let mut uses: HashMap<u64, Vector<u64>> = HashMap::new<u64, Vector<u64>>();
       let mut declared: HashMap<u64, u32> = HashMap::new<u64, u32>();
+      let mut addressTaken: HashMap<u64, u32> = HashMap::new<u64, u32>();
 
       let mut statementIndex: u64 = 0;
 
@@ -1766,6 +1774,11 @@ export namespace Borrowck {
                 },
                 Hir::HirKind::Variable(defId) -> {
                   Borrowck::addPlanUse(&mut uses, defId.raw() as u64, nodeIndex);
+                },
+                Hir::HirKind::Reference(reference) -> {
+                  if (let Option::SOME(root) = Borrowck::extractRootVariable(hir, reference.expression)) {
+                    addressTaken.insert(root.raw() as u64, 1);
+                  }
                 },
                 Hir::HirKind::Closure(closureNode) -> {
                   let mut captureIndex: u64 = 0;
@@ -1829,6 +1842,7 @@ export namespace Borrowck {
       self.planStatementStarts.push(starts);
       self.planUses.push(uses);
       self.planDeclared.push(declared);
+      self.planAddressTaken.push(addressTaken);
       self.planStatementNodes.push(nodes);
       self.planStatementOfNode.push(nodeStatements);
       self.planNodeInDefer.push(nodeInDefer);
@@ -1897,6 +1911,17 @@ export namespace Borrowck {
 
       let key: u64 = binding as u64;
       return declared.containsKey(&key);
+    }
+
+    /// Whether a `&` or `&mut` in the block of plan `plan` takes the address
+    /// of `binding`.
+    public planTakesAddressOf(&self, plan: u64, binding: u32): boolean {
+      let Option::SOME(taken) = self.planAddressTaken.get(plan) else {
+        return false;
+      };
+
+      let key: u64 = binding as u64;
+      return taken.containsKey(&key);
     }
 
     public planNodeRawAt(&self, plan: u64, nodeIndex: u64): u32 {
@@ -8181,12 +8206,15 @@ export namespace Borrowck {
 
         let statementOfNode: u64 = state.planStatementOfNodeAt(plan, nodeIndex);
 
-        if (statementOfNode < declaredAt) {
+        // A `defer` body runs at scope end whatever statement registered it,
+        // so a carrier it names keeps the borrow even when the `defer` is
+        // written before the view.
+        if (state.planNodeInDeferAt(plan, nodeIndex)) {
+          usedInDefer = true;
           continue;
         }
 
-        if (state.planNodeInDeferAt(plan, nodeIndex)) {
-          usedInDefer = true;
+        if (statementOfNode < declaredAt) {
           continue;
         }
 
@@ -8231,11 +8259,16 @@ export namespace Borrowck {
     }
 
     // A carrier that needs a drop lives to the end of its scope, and the
-    // view it carries with it.
+    // view it carries with it; so does one whose address the block takes,
+    // since the alias is not tracked.
     let mut dropIndex: u64 = 0;
 
     while (dropIndex < carriers.length()) {
       if (let Option::SOME(carrier) = carriers.get(dropIndex)) {
+        if (*carrier != holder && state.planTakesAddressOf(plan, *carrier)) {
+          return Borrowck::NO_LAST_STATEMENT;
+        }
+
         if (Borrowck::definitionNeedsDrop(defStore, typeStore, Id::fromRaw<Analyzer::DefinitionTag>(*carrier))) {
           return Borrowck::NO_LAST_STATEMENT;
         }
