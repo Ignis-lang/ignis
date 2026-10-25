@@ -4,25 +4,49 @@
 //! A small mapping layer on `std::sqlite3`: table descriptors that emit their
 //! SQL, typed row reads that report NULL and bad values as errors, ordered
 //! migrations applied in one transaction, and a repository that stores a
-//! record implementing `Orm::Entity` and `Orm::FromRow`. Every value goes to SQLite
-//! as a bound parameter; no statement interpolates one.
+//! record implementing `Orm::Entity` and `Orm::FromRow`. A record described by
+//! the `Orm::Table`, `Orm::PrimaryKey`, `Orm::AutoIncrement` and `Orm::Column`
+//! attributes gets both traits' methods from defaults that reflect over its
+//! fields; a hand-written method replaces the default. Every value goes to
+//! SQLite as a bound parameter; no statement interpolates one.
 //!
 //! ## Exports
 //!
-//! | Export            | Description                                      |
-//! |-------------------|--------------------------------------------------|
-//! | `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |
-//! | `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |
-//! | `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |
-//! | `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |
-//! | `Orm::Entity`     | A stored record: `static table()`, `id()`, `bindValues(statement)` |
-//! | `Orm::FromRow`    | `static fromRow(row)`: a record from a row       |
-//! | `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |
-//! | `Orm::Value`      | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |
-//! | `Orm::Migration`  | One versioned schema step                        |
-//! | `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |
-//! | `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |
-//! | `Orm::ErrorKind`  | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |
+//! | Export               | Description                                   |
+//! |----------------------|-----------------------------------------------|
+//! | `Orm::Table`         | `@Orm::Table("name")`: the table of a record  |
+//! | `Orm::PrimaryKey`    | `@Orm::PrimaryKey`: the field that is the key |
+//! | `Orm::AutoIncrement` | `@Orm::AutoIncrement`: SQLite assigns the key |
+//! | `Orm::Column`        | `@Orm::Column("name")`: a column name other than the field's |
+//! | `Orm::ColumnValue`   | A storable field type: integers, `f32`, `f64`, `boolean`, `String`, `Vector<u8>` and `Option` of each |
+//! | `Orm::Schema`        | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |
+//! | `Orm::SchemaColumn`  | One column of an `Orm::Schema`                |
+//! | `Orm::ColumnKey`     | `NONE` or `PRIMARY`                           |
+//! | `Orm::ColumnType`    | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`  |
+//! | `Orm::Row`           | A typed view of a statement's current row: `read*`, `readOptional*`, `isNull` |
+//! | `Orm::Entity`        | A stored record: `static table()`, `id()`, `bindValues(statement)` |
+//! | `Orm::FromRow`       | `static fromRow(row)`: a record from a row    |
+//! | `Orm::Repository`    | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |
+//! | `Orm::Value`         | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |
+//! | `Orm::Migration`     | One versioned schema step                     |
+//! | `Orm::migrate`       | Applies pending migrations and records them in `schema_migrations` |
+//! | `Orm::Error`         | `kind`, `message` and `code`; `fromSqlite`    |
+//! | `Orm::ErrorKind`     | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |
+//!
+//! ## Reflective entities
+//!
+//! With `@implements(Orm::Entity, Orm::FromRow)` and no methods, a record is
+//! stored as one column per field, in declaration order. The column is named
+//! by `@Orm::Column` or by the field, typed by the field's `Orm::ColumnValue`,
+//! and `NOT NULL` unless the field is an `Option`. An integer field narrower
+//! than `i64` reads a stored value outside its range as `DECODE`. A field type
+//! without an `Orm::ColumnValue` is a compile error inside the default, with
+//! a note naming the field. See `std::orm::entity` and `std::orm::column`.
+//!
+//! The compiler cannot reject a reflective record that lacks `@Orm::Table`:
+//! its `table()` has no name, and `Repository::create` and every emitter
+//! report `SCHEMA` with the message
+//! `std::orm: the table has no name; add @Orm::Table("name") to the record`.
 //!
 //! ## Errors
 //!
@@ -42,33 +66,16 @@
 //! import Orm from "std::orm";
 //! import Sqlite3 from "std::sqlite3";
 //!
+//! @Orm::Table("tasks")
 //! @implements(Orm::Entity, Orm::FromRow)
 //! record Task {
+//!   @Orm::PrimaryKey
+//!   @Orm::AutoIncrement
 //!   public id: Option<i64>;
 //!   public title: String;
-//!
-//!   static table(): Orm::Table {
-//!     return Orm::Table::create("tasks")
-//!       .columnInt("id", Orm::ColumnKey::PRIMARY)
-//!       .autoIncrement()
-//!       .columnText("title", Orm::ColumnKey::NONE)
-//!       .notNull();
-//!   }
-//!
-//!   static fromRow(row: &Orm::Row): Result<Task, Orm::Error> {
-//!     return Result::OK(Task { id: Option::SOME(row.readInt(0)!), title: row.readText(1)! });
-//!   }
-//!
-//!   id(&self): Option<i64> {
-//!     return self.id;
-//!   }
-//!
-//!   bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Orm::Error> {
-//!     return match (statement.bindText(1, self.title.toStr())) {
-//!       Result::OK(_) -> Result::OK(()),
-//!       Result::ERROR(error) -> Result::ERROR(Orm::Error::fromSqlite(error)),
-//!     };
-//!   }
+//!   @Orm::Column("is_done")
+//!   public done: boolean;
+//!   public note: Option<String>;
 //! }
 //!
 //! function main(): i32 {
@@ -78,7 +85,12 @@
 //!   Orm::migrate(&mut connection, &migrations).unwrap();
 //!
 //!   let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();
-//!   let task: Task = Task { id: Option::NONE, title: String::create("write the ORM") };
+//!   let task: Task = Task {
+//!     id: Option::NONE,
+//!     title: String::create("write the ORM"),
+//!     done: false,
+//!     note: Option::NONE,
+//!   };
 //!   let id: i64 = tasks.insert(&mut connection, &task).unwrap();
 //!
 //!   return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;
@@ -96,6 +108,8 @@ import _ from "std::orm::table";
 import _ from "std::orm::row";
 import _ from "std::orm::migration";
 import _ from "std::orm::value";
+import _ from "std::orm::attributes";
+import _ from "std::orm::column";
 import _ from "std::orm::entity";
 import _ from "std::orm::repository";
 

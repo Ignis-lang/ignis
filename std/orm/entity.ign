@@ -1,9 +1,14 @@
 //!
 //! # Entity
 //!
-//! `Orm::Entity` and `Orm::FromRow`, the two traits a record implements by
-//! hand so an `Orm::Repository` can store it: one describes the table and
-//! binds the record's values, the other builds a record from a row.
+//! `Orm::Entity` and `Orm::FromRow`, the two traits a record implements so an
+//! `Orm::Repository` can store it: one describes the table and binds the
+//! record's values, the other builds a record from a row.
+//!
+//! Every method has a default that reflects over the record's fields with
+//! `comptime for`, so a record described by the `std::orm::attributes`
+//! attributes needs no method of its own. A method the record writes itself
+//! replaces the default.
 //!
 //! ## Exports
 //!
@@ -22,29 +27,102 @@
 //!   when a statement needs it.
 //! - `fromRow` reads every column in declaration order: column 0 is the
 //!   first column of `table()`.
+//!
+//! ## Defaults
+//!
+//! - `table()`: the name from `@Orm::Table`; one column per field, in
+//!   declaration order, named by `@Orm::Column` or else by the field, typed
+//!   by the field type's `Orm::ColumnValue`; `PRIMARY KEY` for the field
+//!   marked `@Orm::PrimaryKey`, `AUTOINCREMENT` for one marked
+//!   `@Orm::AutoIncrement`; `NOT NULL` unless the field type is an `Option`.
+//!   A record without `@Orm::Table` gets a descriptor without a name, which
+//!   the emitters and `Repository::create` report as `SCHEMA`.
+//! - `id()`: the `@Orm::PrimaryKey` field as an integer, `NONE` when it is an
+//!   empty `Option` or the record has no key.
+//! - `bindValues`: every field not marked `@Orm::PrimaryKey`, in order.
+//! - `fromRow`: field `n` from column `n`.
 
 import Sqlite3 from "std::sqlite3";
 import Error from "std::orm::error";
-import Table from "std::orm::table";
+import Schema, ColumnKey from "std::orm::table";
 import Row from "std::orm::row";
+import Table, PrimaryKey, AutoIncrement, Column from "std::orm::attributes";
+import
+  columnTypeOf,
+  columnNullableOf,
+  readColumnOf,
+  bindColumnOf,
+  columnKeyOf,
+from "std::orm::column";
 
 /// The traits a stored record implements.
 export namespace Orm {
   /// A record stored as one row of `table()`.
   trait Entity {
     /// The descriptor of the record's table.
-    static table(): Table;
+    static table(): Schema {
+      let tableName: str = match (@attribute<Table>(Self)) {
+        Option::SOME(table) -> table.name,
+        Option::NONE -> "",
+      };
+      let mut schema: Schema = Schema::create(tableName);
+
+      comptime for (field of @fields<Self>()) {
+        let columnName: str = match (@attribute<Column>(field)) {
+          Option::SOME(column) -> column.name,
+          Option::NONE -> field.name,
+        };
+        let key: ColumnKey = @attribute<PrimaryKey>(field).isSome() ? ColumnKey::PRIMARY : ColumnKey::NONE;
+
+        schema = schema.column(columnName, columnTypeOf<@fieldType(field)>(), key);
+
+        if (@attribute<AutoIncrement>(field).isSome()) {
+          schema = schema.autoIncrement();
+        }
+
+        if (!columnNullableOf<@fieldType(field)>()) {
+          schema = schema.notNull();
+        }
+      }
+
+      return schema;
+    }
 
     /// The record's key, or `NONE` before it is inserted.
-    id(&self): Option<i64>;
+    id(&self): Option<i64> {
+      let mut key: Option<i64> = Option::NONE;
+
+      comptime for (field of @fields<Self>()) {
+        if (@attribute<PrimaryKey>(field).isSome()) {
+          key = columnKeyOf<@fieldType(field)>(&@field(self, field));
+        }
+      }
+
+      return key;
+    }
 
     /// Binds every non-key column, in declaration order, from parameter 1.
-    bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Error>;
+    bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Error> {
+      let mut index: i32 = 1;
+
+      comptime for (field of @fields<Self>()) {
+        if (@attribute<PrimaryKey>(field).isNone()) {
+          bindColumnOf<@fieldType(field)>(&@field(self, field), statement, index)!;
+          index = index + 1;
+        }
+      }
+
+      return Result::OK(());
+    }
   }
 
   /// A record built from a row whose columns follow its table's order.
   trait FromRow {
     /// The record in `row`, or a `DECODE` error when a column does not fit.
-    static fromRow(row: &Row): Result<Self, Error>;
+    static fromRow(row: &Row): Result<Self, Error> {
+      return Result::OK(Self {
+        comptime for (field of @fields<Self>()) @field(field): readColumnOf<@fieldType(field)>(row, field.index)!,
+      });
+    }
   }
 }

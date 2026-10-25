@@ -31,7 +31,7 @@
 
 import Sqlite3 from "std::sqlite3";
 import Error, ErrorKind from "std::orm::error";
-import Table, Column, ColumnKey, ColumnType from "std::orm::table";
+import Schema, SchemaColumn, ColumnKey, ColumnType from "std::orm::table";
 import Row from "std::orm::row";
 import Value from "std::orm::value";
 import Entity, FromRow from "std::orm::entity";
@@ -40,17 +40,17 @@ import Entity, FromRow from "std::orm::entity";
 export namespace Orm {
   /// The statements of one entity's table, built once by `create`.
   record Repository<T: Entity & FromRow> {
-    /// `Table::insertSql`.
+    /// `Schema::insertSql`.
     insertStatement: String;
-    /// `Table::selectSql`.
+    /// `Schema::selectSql`.
     selectStatement: String;
-    /// `Table::selectByIdSql`.
+    /// `Schema::selectByIdSql`.
     selectByIdStatement: String;
-    /// `Table::selectAllSql`.
+    /// `Schema::selectAllSql`.
     selectAllStatement: String;
-    /// `Table::updateByIdSql`.
+    /// `Schema::updateByIdSql`.
     updateStatement: String;
-    /// `Table::deleteByIdSql`.
+    /// `Schema::deleteByIdSql`.
     deleteStatement: String;
     /// How many parameters `Entity::bindValues` binds: the non-key columns.
     valueCount: i32;
@@ -60,14 +60,14 @@ export namespace Orm {
     /// The repository of `T`, or a `SCHEMA` error when `T::table()` is
     /// invalid or its key is missing or not `INTEGER`.
     public static create(): Result<Repository<T>, Error> {
-      let table: Table = T::table();
+      let table: Schema = T::table();
       let selectByIdStatement: String = table.selectByIdSql()!;
       let mut valueCount: i32 = 0;
       let mut insertBindsKey: boolean = false;
       let mut index: u64 = 0;
 
       while (index < table.columns.length()) {
-        let column: &Column = table.columns.get(index).unwrap();
+        let column: &SchemaColumn = table.columns.get(index).unwrap();
 
         if (column.key == ColumnKey::PRIMARY) {
           if (column.columnType != ColumnType::INTEGER) {
