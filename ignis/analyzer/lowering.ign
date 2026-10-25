@@ -1630,7 +1630,7 @@ export namespace Lowering {
           return Lowering::lowerBuiltinAttribute(defStore, typeStore, symbols, output, hir, exprId, builtinCall.span);
         }
 
-        return Lowering::lowerBuiltinCall(defStore, typeStore, symbols, module, output, locals, hir, &builtinCall);
+        return Lowering::lowerBuiltinCall(defStore, typeStore, symbols, module, output, locals, hir, exprId, &builtinCall);
       },
       Ast::Expression::Node::Lambda(lambda) -> {
         return Lowering::lowerLambda(defStore, typeStore, symbols, module, output, locals, hir, exprId, &lambda);
@@ -3809,6 +3809,7 @@ export namespace Lowering {
     output: &Analyzer::AnalyzerOutput,
     locals: &mut Lowering::LocalMap,
     hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
     builtinCall: &Ast::Expression::BuiltinCall,
   ): Hir::HirId {
     let name: &String = &builtinCall.name;
@@ -4145,22 +4146,39 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, builtinCall.span);
     };
 
-    let Option::SOME(operandType) = Analyzer::Typecheck::resolveLocalAnnotation(
-      defStore,
-      typeStore,
-      symbols,
-      module,
-      *typeArgumentId,
-      Option::NONE,
-    ) else {
+    // The typechecker resolved the operand inside its method, where a
+    // written `Self` names the implementer.
+    let mut resolvedOperand: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(recorded) = Lowering::lookupCallTypeArgs(&output.typecheck, exprId)) {
+      if (let Option::SOME(recordedType) = recorded.get(0)) {
+        resolvedOperand = Option::SOME(*recordedType);
+      }
+    }
+
+    if (resolvedOperand.isNone()) {
+      resolvedOperand = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgumentId, Option::NONE);
+    }
+
+    let Option::SOME(operandType) = resolvedOperand else {
       return Lowering::errorNode(hir, typeStore, builtinCall.span);
     };
 
     if (name.equals("typeName")) {
-      // The name is decided here rather than at run time: the printer only
-      // needs the stores, and nothing about the type changes after lowering.
-      let printed: String = typeStore.nameOfResolved(operandType, &*defStore, &*symbols);
       let nameType: Analyzer::TypeId = Lowering::strType(typeStore);
+
+      // A type parameter has no name of its own: monomorphization prints the
+      // type it stands for in each instantiation.
+      if (typeStore.containsTypeParam(operandType)) {
+        let mut deferredHirRef: &mut Hir::HirStore = hir;
+        return deferredHirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::TypeName(operandType),
+          span: builtinCall.span,
+          typeId: nameType,
+        });
+      }
+
+      let printed: String = typeStore.nameOfResolved(operandType, &*defStore, &*symbols);
 
       let mut typeNameHirRef: &mut Hir::HirStore = hir;
       return typeNameHirRef.alloc(Hir::HirNode {

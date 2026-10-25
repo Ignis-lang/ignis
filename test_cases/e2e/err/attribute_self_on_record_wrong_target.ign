@@ -1,0 +1,28 @@
+// e2e: err
+// `@attribute<A>(Self)` where `Self` is a record reads the attribute only when
+// `A` applies to records; an attribute for fields is rejected, not `NONE`.
+@attribute(field)
+record Column {
+  public name: str;
+}
+
+trait Tabled {
+  table(&self): str {
+    if (let Option::SOME(column) = @attribute<Column>(Self)) {
+      return column.name;
+    }
+
+    return "none";
+  }
+}
+
+@implements(Tabled)
+record Task {
+  public id: i64;
+}
+
+function main(): i32 {
+  let task: Task = Task { id: 1 };
+  let _name: str = task.table();
+  return 0;
+}

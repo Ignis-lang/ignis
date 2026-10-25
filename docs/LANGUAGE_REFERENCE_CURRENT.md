@@ -1103,7 +1103,9 @@ attribute's constant values. A record initializer accepts
 `comptime for (field of @fields<Self>()) @field(field): <expression>` to set every field. `comptime`
 is a keyword. Diagnostics: `A0292` (`break`/`continue` across the loop), `A0293` (`@fields` not over
 a record `Self`), `A0294` (outside a method), `A0295` (descriptor builtin outside its loop), `A0296`
-(unknown descriptor member). See `docs/TRAITS.md`, "Field Reflection".
+(unknown descriptor member). `@attribute<A>(Self)` reads the attribute on the record or enum `Self` is
+and requires `A` to be declared for that kind (`A0297`). See `docs/TRAITS.md`, "Field
+Reflection".
 
 ### Parameter attributes
 
@@ -1872,7 +1874,7 @@ Common directive builtins:
 
 - `@configFlag`
 - `@compileError`
-- `@sizeOf`, `@alignOf`, `@typeName`
+- `@sizeOf`, `@alignOf`, `@typeName` (with `Self`, inside a method: the type the method belongs to, or each implementer of a trait default; a type parameter prints the concrete type of each instantiation, `@typeName<T>()` in `nameOf<i32>()` is `"i32"`)
 - `@bitCast`, `@pointerCast`, `@integerFromPointer`, `@pointerFromInteger`
 - `@read`, `@write`, `@readVolatile`, `@writeVolatile`
 - `@atomicLoad`, `@atomicStore`, `@atomicRmw`, `@atomicCompareExchange`, `@fence`

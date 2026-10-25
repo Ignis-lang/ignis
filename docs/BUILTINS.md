@@ -132,6 +132,13 @@ function main(): void {
 }
 ```
 
+Inside a method, `@typeName<Self>()` (like `@sizeOf<Self>()` and `@alignOf<Self>()`) names the
+type the method belongs to: the record or enum, the extended type in an `extension` block, and, in
+a trait default, each implementer the default is copied onto (`"Point"`, `"Color"`, `"i64"`). A
+type parameter names the concrete type of each instantiation: `@typeName<T>()` inside
+`function nameOf<T>()` is `"i32"` for `nameOf<i32>()` and `"str"` for `nameOf<str>()`, and `Self`
+in a generic record instantiated as `Box<i32>` prints the same text as `@typeName<Box<i32>>()`.
+
 ---
 
 ### `@bitCast<T>(value)`
@@ -604,7 +611,9 @@ record; the loop is unrolled before name resolution, one copy per field (see `do
 - `@fieldType(field)`: the field's written type, in any type position.
 - `@attribute<A>(field)` / `@attribute<A>(Self)`: `Option<A>` holding the constant values of the
   declarable attribute `A` written on the field or the record, `NONE` when absent. `A` must be a
-  record marked `@attribute(...)` (`A0282`).
+  record marked `@attribute(...)` (`A0282`). `@attribute<A>(Self)` reads the attribute on the
+  record or enum `Self` is, and `A` must be declared for that kind (`@attribute(record)` or
+  `@attribute(enum)`); any other attribute is reported (`A0297`) instead of always yielding `NONE`.
 
 ```ignis
 comptime for (field of @fields<Self>()) {

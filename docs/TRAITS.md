@@ -132,7 +132,8 @@ trait Describable {
 Rules:
 - Trait methods use the same style as record/enum methods: `name(...)` (no `function` required).
 - A method ending with `;` is required (no body).
-- A method with `{ ... }` is a default method.
+- A method with `{ ... }` is a default method. It is copied onto each implementer, so `Self` in
+  its body, including `@typeName<Self>()` and `@sizeOf<Self>()`, is that implementer.
 - An instance method takes `&self` or `&mut self` (A0144 otherwise).
 - A method marked `static` takes no receiver and belongs to the implementing type. It can be
   required (`static name(...): R;`) or have a default body. `Self` in its parameter and return
@@ -813,7 +814,7 @@ Inside the body, `field` is a descriptor, not a value:
 | `@field(value, field)` | `value.<name>`: a place, readable, assignable and borrowable |
 | `@fieldType(field)` | The field's written type, valid wherever a type is |
 | `@attribute<A>(field)` | `Option<A>`: the constant values of declarable attribute `A` on the field, or `NONE` |
-| `@attribute<A>(Self)` | The same for the record itself |
+| `@attribute<A>(Self)` | The same for the record or enum itself; `A` must be declared for that kind, `@attribute(record)` or `@attribute(enum)` (`A0297`) |
 
 A record initializer builds `Self` field by field with one `comptime for` entry, which unrolls into
 one `<name>: <value>` entry per field:
@@ -839,6 +840,7 @@ the field. In the trait's own body `Self` has no known fields, so the loop unrol
 | A0294 | `comptime for` outside a method | Error |
 | A0295 | `@field`, `@fieldType`, `@attribute<A>(field)` or `@fields` outside the loop that declares the descriptor | Error |
 | A0296 | Unknown descriptor member, or the descriptor used as a value | Error |
+| A0297 | `@attribute<A>(Self)` with an `A` not declared for the kind of `Self` (record or enum) | Error |
 
 ## Diagnostics
 
@@ -883,3 +885,4 @@ the field. In the trait's own body `Self` has no known fields, so the loop unrol
 | A0294 | `comptime for` outside a method | Error |
 | A0295 | Field descriptor builtin outside its `comptime for` | Error |
 | A0296 | Unknown descriptor member or descriptor used as a value | Error |
+| A0297 | `@attribute<A>(Self)` with an attribute not declared for the kind of `Self` | Error |

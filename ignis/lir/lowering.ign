@@ -152,6 +152,7 @@ export namespace LirLowering {
       Hir::HirKind::SizeOf(_) -> "SizeOf",
       Hir::HirKind::AlignOf(_) -> "AlignOf",
       Hir::HirKind::MaxOf(_) -> "MaxOf",
+      Hir::HirKind::TypeName(_) -> "TypeName",
       Hir::HirKind::MinOf(_) -> "MinOf",
       Hir::HirKind::BuiltinLoad(_) -> "BuiltinLoad",
       Hir::HirKind::BuiltinStore(_) -> "BuiltinStore",
@@ -2471,6 +2472,11 @@ export namespace LirLowering {
         }));
 
         return Lir::Operand::Temp(dest);
+      },
+      // Monomorphization folds every `TypeName` that reaches a lowered body.
+      Hir::HirKind::TypeName(_) -> {
+        LirLowering::markUnsupported(function_, state);
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::MaxOf(ty) -> {
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
