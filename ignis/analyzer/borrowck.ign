@@ -12,7 +12,6 @@ import Output from "@compiler::output";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import HashMap from "std::collections";
-import Symbol from "@compiler::symbols";
 
 import _ from "./ownership_report";
 
@@ -239,9 +238,10 @@ export namespace Borrowck {
     /// outside one.
     currentHolder: u32;
 
-    /// The interned name of `String`, the owned buffer whose own pointer
-    /// `Analyzer::ViewType::canHoldDerived` does not count.
-    public ownedBufferName: Analyzer::SymbolId;
+    /// The raw definition id of the standard library `String`, the owned
+    /// buffer whose own pointer `Analyzer::ViewType::canHoldDerived` does
+    /// not count (`stdStringDefinition`).
+    public ownedBuffer: u32;
 
     /// Last statement each holder was planned to be used in, by holder;
     /// `NO_LAST_STATEMENT` keeps its borrows to the end of the scope. The
@@ -488,7 +488,7 @@ export namespace Borrowck {
         heldRecorded: Vector::new<u32>(),
         heldHolders: Vector::new<u32>(),
         currentHolder: Borrowck::NO_HOLDER,
-        ownedBufferName: Symbol::fromRaw(4294967295),
+        ownedBuffer: 4294967295,
         plannedHolders: Vector::new<u32>(),
         plannedLastStatements: Vector::new<u64>(),
         planBlocks: Vector::new<u32>(),
@@ -837,8 +837,8 @@ export namespace Borrowck {
       return taken;
     }
 
-    public setOwnedBufferName(&mut self, name: Analyzer::SymbolId): void {
-      self.ownedBufferName = name;
+    public setOwnedBuffer(&mut self, definition: u32): void {
+      self.ownedBuffer = definition;
     }
 
     public setCurrentFunction(&mut self, defId: Analyzer::DefinitionId): void {
@@ -8273,7 +8273,7 @@ export namespace Borrowck {
 
         while (bindingIndex < reached.length()) {
           if (let Option::SOME(binding) = reached.get(bindingIndex)) {
-            if (Borrowck::bindingCanHoldDerived(defStore, typeStore, state.ownedBufferName, *binding)) {
+            if (Borrowck::bindingCanHoldDerived(defStore, typeStore, state.ownedBuffer, *binding)) {
               Borrowck::pushRaw(output, *binding);
             }
           }
@@ -8287,7 +8287,7 @@ export namespace Borrowck {
           let mut qualifies: boolean = true;
 
           if (let Option::SOME(targetType) = Borrowck::nodeTypeOf(hir, assignNode.target)) {
-            qualifies = Analyzer::ViewType::canHoldDerived(defStore, typeStore, targetType, state.ownedBufferName);
+            qualifies = Analyzer::ViewType::canHoldDerived(defStore, typeStore, targetType, state.ownedBuffer);
           }
 
           if (qualifies && !Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, assignNode.target, 0, output)) {
@@ -8474,19 +8474,59 @@ export namespace Borrowck {
     return Option::NONE;
   }
 
+  /// The module symbol path of `std/string/mod.ign`, which declares `String`.
+  const STD_STRING_MODULE: str = "L3std6string3modE";
+
+  /// The raw definition id of the standard library `String`: the
+  /// non-generic record named `String` that the standard library module
+  /// `std/string/mod.ign` publishes, identified by its module's kind and
+  /// symbol path, so neither a user record named `String` nor one in a user
+  /// package named `std` is mistaken for it. `u32::MAX`, which matches no definition,
+  /// when the standard library is not loaded.
+  public function stdStringDefinition(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable
+  ): u32 {
+    let name: Analyzer::SymbolId = symbols.intern("String");
+    let mut raw: u64 = 0;
+
+    while (raw < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(raw as u32);
+      let mut candidate: boolean = false;
+
+      if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
+        candidate = recordDef.name.raw() == name.raw() && recordDef.typeParams.isEmpty();
+      }
+
+      if (candidate) {
+        if (let Option::SOME(moduleIndex) = defStore.defModuleOf(defId) && defStore.isStdModule(moduleIndex)) {
+          if (let Option::SOME(path) = defStore.moduleSymbolPathOf(moduleIndex)) {
+            if (path.equals(Borrowck::STD_STRING_MODULE)) {
+              return raw as u32;
+            }
+          }
+        }
+      }
+
+      raw += 1;
+    }
+
+    return 4294967295;
+  }
+
   /// Whether the local `defRaw` can hold something derived from a view
   /// (`Analyzer::ViewType::canHoldDerived`); an untyped one can.
   function bindingCanHoldDerived(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
-    ownedBufferName: Analyzer::SymbolId,
+    ownedBuffer: u32,
     defRaw: u32,
   ): boolean {
     let Option::SOME(typeId) = Borrowck::variableTypeOf(defStore, Id::fromRaw<Analyzer::DefinitionTag>(defRaw)) else {
       return true;
     };
 
-    return Analyzer::ViewType::canHoldDerived(defStore, typeStore, typeId, ownedBufferName);
+    return Analyzer::ViewType::canHoldDerived(defStore, typeStore, typeId, ownedBuffer);
   }
 
   /// Appends `nodeIndex` to the uses of the binding `key`.
@@ -10536,6 +10576,7 @@ export namespace Borrowck {
     environmentCaptures: &Vector<u32>,
     reportEnabled: boolean,
     reportEvents: &mut Vector<Borrowck::OwnershipEvent>,
+    ownedBuffer: u32,
   ): void {
     let mut state: Borrowck::State = Borrowck::State::init();
     state.setReportEnabled(reportEnabled);
@@ -10545,7 +10586,7 @@ export namespace Borrowck {
     state.pushScopeEnding(0, false, false, Borrowck::closingSpanOf(hir, bodyId));
     state.setInDropMethod(Borrowck::isInstanceDropMethod(defStore, symbols, functionId));
     state.setCurrentFunction(functionId);
-    state.setOwnedBufferName(symbols.intern("String"));
+    state.setOwnedBuffer(ownedBuffer);
 
     let mut captureIndex: u64 = 0;
 
@@ -10955,6 +10996,7 @@ export namespace Borrowck {
     let envsCapturedByEscapingClosures: Vector<u32> = Borrowck::collectEnvsCapturedByEscapingClosures(hir);
     let bindingsAssignedClosureEnv: Vector<u32> = Borrowck::collectBindingsAssignedClosureEnv(defStore, typeStore, hir);
     let thunkCaptures: Borrowck::ThunkCaptures = Borrowck::collectThunkCaptures(defStore, typeStore, hir);
+    let ownedBuffer: u32 = Borrowck::stdStringDefinition(defStore, symbols);
     let mut inherited: Borrowck::InheritedRanges = Borrowck::InheritedRanges {
       starts: Vector::new<u64>(),
       ends: Vector::new<u64>(),
@@ -11000,6 +11042,7 @@ export namespace Borrowck {
         &environmentCaptures,
         reportEnabled,
         &mut reportEvents,
+        ownedBuffer,
       );
 
       if (let Option::SOME(note) = defStore.inheritedNoteOf(*itemId)) {

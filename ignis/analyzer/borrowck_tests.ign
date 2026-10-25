@@ -12,6 +12,7 @@ import
   noFile,
 from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
+import Id from "@compiler::ids";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
 import Lowering from "./lowering";
@@ -1562,4 +1563,61 @@ function borrowckSettlesInheritedDefaultDiagnostics(): void {
   Test::assertEq<u64>(settled.length(), 2);
   Test::assertEq<u64>(countWithNote(&settled, "in default method `twice` of trait `Holder`, as inherited by `Tagged<String>`"), 1);
   Test::assertEq<u64>(countWithNote(&settled, "in default method `twice` of trait `Holder`, as inherited by `Tagged<i32>`"), 0);
+}
+
+/// Pushes a non-generic `String` record published by module `moduleIndex`,
+/// whose symbol path is the standard library string module's.
+function stdStringCandidate(
+  defs: &mut Analyzer::DefinitionStore,
+  syms: &mut Analyzer::SymbolTable,
+  moduleIndex: u64,
+): Analyzer::DefinitionId {
+  let defId: Analyzer::DefinitionId = defs.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: syms.intern("String"),
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: Id::fromRaw<Analyzer::TypeTag>(0),
+    implementsCopy: false,
+    implementsDrop: true,
+    implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
+    cLayout: false,
+    isExtern: false,
+  }));
+  defs.setDefModule(defId, moduleIndex);
+  defs.setModuleSymbolPath(moduleIndex, String::create("L3std6string3modE"));
+  return defId;
+}
+
+/// Scenario: a `String` in a user package named `std` has the standard
+/// library's symbol path but is not a standard library module, so it is not
+/// the owned buffer.
+/// Spec: S3, L34.
+@test
+function stdStringIgnoresUserPackageNamedStd(): void {
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let _user: Analyzer::DefinitionId = stdStringCandidate(&mut defs, &mut syms, 3);
+
+  Test::assertEq<u32>(Borrowck::stdStringDefinition(&mut defs, &mut syms), 4294967295);
+}
+
+/// Scenario: the `String` of the standard library string module is found.
+/// Spec: S3, L34.
+@test
+function stdStringFindsStdModule(): void {
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let _user: Analyzer::DefinitionId = stdStringCandidate(&mut defs, &mut syms, 3);
+  let stdId: Analyzer::DefinitionId = stdStringCandidate(&mut defs, &mut syms, 1);
+  defs.markStdModule(1);
+
+  Test::assertEq<u32>(Borrowck::stdStringDefinition(&mut defs, &mut syms), stdId.raw());
 }

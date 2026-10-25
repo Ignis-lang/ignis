@@ -1851,7 +1851,7 @@ function derivedPointerToByteHolds(): void {
   let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
   let id: Analyzer::TypeId = store.pointer(idU8);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: a record with a `*u8` field can hold a derived pointer.
@@ -1871,7 +1871,7 @@ function derivedRecordWithPointerFieldHolds(): void {
   let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "CArgs", fields);
   let idRecord: Analyzer::TypeId = store.recordType(defId);
   let id: Analyzer::TypeId = idRecord;
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: `Option<*u8>` can hold a derived pointer.
@@ -1891,7 +1891,7 @@ function derivedInstanceWithPointerArgumentHolds(): void {
   args.push(store.pointer(idU8));
 
   let id: Analyzer::TypeId = store.instance(defId, args);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: an enum with a `*u8` payload can hold a derived pointer.
@@ -1914,7 +1914,7 @@ function derivedEnumWithPointerPayloadHolds(): void {
 
   let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Slot", variants);
   let id: Analyzer::TypeId = store.enumType(defId);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: `&mut *u8` can hold a derived pointer.
@@ -1931,11 +1931,12 @@ function derivedMutableReferenceToPointerHolds(): void {
     referent: store.pointer(idU8),
     mutable: true,
   }));
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
-/// Scenario: `String`, whose only pointer is its own `*mut u8` buffer,
-/// cannot hold a derived pointer.
+/// Scenario: the standard library `String` (the definition the caller
+/// passes as the owned buffer), whose only pointer is its own `*mut u8`
+/// buffer, cannot hold a derived pointer.
 /// Spec: S3, L30, L34.
 @test
 function derivedStringDoesNot(): void {
@@ -1972,7 +1973,7 @@ function derivedStringDoesNot(): void {
   }));
 
   let id: Analyzer::TypeId = store.recordType(defId);
-  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, defId.raw()));
 }
 
 /// Scenario: a record of primitives cannot hold a derived pointer.
@@ -1992,7 +1993,7 @@ function derivedRecordOfPrimitivesDoesNot(): void {
   let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Plain", fields);
   let idRecord: Analyzer::TypeId = store.recordType(defId);
   let id: Analyzer::TypeId = idRecord;
-  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: a record with a capture-free `fn(A) -> R` field cannot hold a
@@ -2013,7 +2014,7 @@ function derivedRecordWithRawFunctionFieldDoesNot(): void {
   let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Callback", fields);
   let id: Analyzer::TypeId = store.recordType(defId);
 
-  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Creates a record definition with the given field types, type parameters
@@ -2123,7 +2124,7 @@ function derivedUserDropRecordHolds(): void {
   let dropId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "D", dropFields, Vector::new<Analyzer::DefinitionId>(), true);
   let idDrop: Analyzer::TypeId = store.recordType(dropId);
   let id: Analyzer::TypeId = idDrop;
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: a non-`Drop` record nesting a user `Drop` type with a `*u8` field can hold a derived pointer.
@@ -2146,7 +2147,7 @@ function derivedRecordOfUserDropHolds(): void {
   outerFields.push(idDrop);
   let outerId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Outer", outerFields);
   let id: Analyzer::TypeId = store.recordType(outerId);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: `Option<D>` with a user `Drop` type `D { p: *u8 }` can hold a derived pointer.
@@ -2171,7 +2172,7 @@ function derivedInstanceOfUserDropHolds(): void {
   args.push(idDrop);
 
   let id: Analyzer::TypeId = store.instance(boxId, args);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: a `Drop` instance of an `@owns` generic with a `*u8` argument (`Vector<*u8>` before monomorphization) can hold a derived pointer.
@@ -2192,7 +2193,7 @@ function derivedOwningInstanceWithPointerArgumentHolds(): void {
   args.push(store.pointer(idU8));
 
   let id: Analyzer::TypeId = store.instance(genericId, args);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: the post-monomorphization shell of an `@owns` generic with a `*u8` argument (`Vector<*u8>` as the borrow check sees it) can hold a derived pointer through its instance origin.
@@ -2206,7 +2207,7 @@ function derivedOwningShellWithPointerArgumentHolds(): void {
   let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
   let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.pointer(idU8));
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: the shell of an `@owns` generic over `H { p: *u8 }` (`Rc<H>`) can hold a derived pointer.
@@ -2224,7 +2225,7 @@ function derivedOwningShellOfRecordWithPointerHolds(): void {
   holderFields.push(store.pointer(idU8));
   let holderId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "H", holderFields);
   let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.recordType(holderId));
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: the shell of an `@owns` generic over `i32` (`Vector<i32>`) cannot hold a derived pointer: its own `*mut i32` buffer is skipped.
@@ -2238,7 +2239,7 @@ function derivedOwningShellWithPrimitiveArgumentDoesNot(): void {
   let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
   let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
-  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
 /// Scenario: the shell of a user `Drop` generic without `@owns` (`Boxed<i32>` with a `*mut i32` field) is walked through its fields.
@@ -2252,7 +2253,31 @@ function derivedUserDropShellWithPrimitiveArgumentHolds(): void {
   let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
   let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, false, idI32);
-  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, syms.intern("String")));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a user record named `String` with a `Drop` implementation and a
+/// `*u8` field is not the standard library `String`: identity, not the name,
+/// decides, so its field counts and it can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedUserRecordNamedStringHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+
+  let mut stdFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  stdFields.push(store.pointer(idU8));
+  let stdId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "String", stdFields, Vector::new<Analyzer::DefinitionId>(), true);
+
+  let mut userFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  userFields.push(store.pointer(idU8));
+  let userId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "String", userFields, Vector::new<Analyzer::DefinitionId>(), true);
+
+  let id: Analyzer::TypeId = store.recordType(userId);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, stdId.raw()));
 }
 
 // ─── Closure values ───────────────────────────────────────────────────────────

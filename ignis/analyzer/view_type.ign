@@ -204,7 +204,7 @@ export namespace Analyzer::ViewType {
     }
 
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 2, ViewType::NO_NAME, &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 2, ViewType::NO_OWNED_BUFFER, &mut visiting);
   }
 
   /// Whether a value of `typeId` can hold something derived from a view, so
@@ -212,8 +212,9 @@ export namespace Analyzer::ViewType {
   /// view carries it (`canCarryView`, plus a raw pointer at any depth,
   /// whatever its pointee: `text as *u8` points into the view). The raw
   /// pointers the standard owning storage keeps in its fields point to its
-  /// own allocation and do not count: `String` (the record named
-  /// `ownedBufferName`) and every type with an `@owns` type parameter
+  /// own allocation and do not count: `String` (the standard library
+  /// record whose definition is `ownedBuffer`, identified by the caller
+  /// from its module, never by name) and every type with an `@owns` type parameter
   /// (`Vector`, `HashMap`, `Rc`, ...), whose type arguments decide instead
   /// (`Vector<*u8>` counts). Any other type, a user type with a `Drop`
   /// implementation included, is walked through its fields. The borrow
@@ -223,14 +224,14 @@ export namespace Analyzer::ViewType {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
-    ownedBufferName: Analyzer::SymbolId,
+    ownedBuffer: u32,
   ): boolean {
     if (ViewType::canCarryView(defStore, typeStore, typeId)) {
       return true;
     }
 
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 3, ownedBufferName.raw(), &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 3, ownedBuffer, &mut visiting);
   }
 
   /// Whether a value of `typeId` lets the code it is handed to write into a
@@ -249,7 +250,7 @@ export namespace Analyzer::ViewType {
     typeId: Analyzer::TypeId,
   ): boolean {
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 0, ViewType::NO_NAME, &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 0, ViewType::NO_OWNED_BUFFER, &mut visiting);
   }
 
   /// `canReachMutablePlace` narrowed to places that can hold a view, for the
@@ -265,7 +266,7 @@ export namespace Analyzer::ViewType {
     typeId: Analyzer::TypeId,
   ): boolean {
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 1, ViewType::NO_NAME, &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 1, ViewType::NO_OWNED_BUFFER, &mut visiting);
   }
 
   /// The shared walker. `mode` 0 answers `canReachMutablePlace`, 1
@@ -279,7 +280,7 @@ export namespace Analyzer::ViewType {
     typeStore: &mut Analyzer::TypeStore,
     typeId: Analyzer::TypeId,
     mode: u8,
-    ownedBufferName: u32,
+    ownedBuffer: u32,
     visiting: &mut Vector<Vector<u32>>,
   ): boolean {
     let Option::SOME(type_) = typeStore.get(typeId) else {
@@ -346,7 +347,7 @@ export namespace Analyzer::ViewType {
           return true;
         };
 
-        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, mode, ownedBufferName, visiting);
+        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, mode, ownedBuffer, visiting);
       },
       _ -> {},
     };
@@ -366,7 +367,7 @@ export namespace Analyzer::ViewType {
       let mut owningStorage: boolean = false;
 
       if (mode == 3) {
-        if (let Option::SOME(arguments) = ViewType::owningStorageArguments(defStore, defId, ownedBufferName)) {
+        if (let Option::SOME(arguments) = ViewType::owningStorageArguments(defStore, defId, ownedBuffer)) {
           owningStorage = true;
           let mut argumentIndex: u64 = 0;
 
@@ -410,7 +411,7 @@ export namespace Analyzer::ViewType {
 
     while (index < components.length()) {
       if (let Option::SOME(component) = components.get(index)) {
-        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, mode, ownedBufferName, visiting)) {
+        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, mode, ownedBuffer, visiting)) {
           return true;
         }
       }
@@ -500,21 +501,21 @@ export namespace Analyzer::ViewType {
     return types;
   }
 
-  /// `ownedBufferName` of the walks that do not skip owning storage.
-  const NO_NAME: u32 = 4294967295;
+  /// `ownedBuffer` of the walks that do not skip owning storage.
+  const NO_OWNED_BUFFER: u32 = 4294967295;
 
   /// The type arguments that decide what the standard owning storage `defId`
-  /// can hold, when it is one: none for the non-generic record named
-  /// `ownedBufferName` (`String`); the instance arguments of a monomorphized
+  /// can hold, when it is one: none for the definition `ownedBuffer`
+  /// (`String`); the instance arguments of a monomorphized
   /// instance of a type with an `@owns` type parameter; and none for such a
   /// generic type itself, whose arguments an `Instance` type already lists.
   function owningStorageArguments(
     defStore: &mut Analyzer::DefinitionStore,
     defId: Analyzer::DefinitionId,
-    ownedBufferName: u32,
+    ownedBuffer: u32,
   ): Option<Vector<Analyzer::TypeId>> {
     if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
-      if (recordDef.name.raw() == ownedBufferName && recordDef.typeParams.isEmpty() && recordDef.implementsDrop) {
+      if (defId.raw() == ownedBuffer && recordDef.typeParams.isEmpty() && recordDef.implementsDrop) {
         return Option::SOME(Vector::new<Analyzer::TypeId>());
       }
     }

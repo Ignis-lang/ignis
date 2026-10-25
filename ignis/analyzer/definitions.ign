@@ -495,6 +495,11 @@ export namespace Analyzer {
     /// module index (`3std4libc2io` for `std::libc::io`). Set by the driver,
     /// which knows where each module lives.
     moduleSymbolPaths: HashMap<u64, String>;
+
+    /// The modules loaded from the standard library, by module index. A user
+    /// package named `std` gets the same symbol path prefix, so the path
+    /// alone does not identify a standard library module.
+    stdModules: HashMap<u64, boolean>;
     /// How a diagnostic names each module, keyed by module index:
     /// `std::hash` for a standard library module, its file path otherwise.
     moduleDisplayNames: HashMap<u64, String>;
@@ -536,6 +541,7 @@ export namespace Analyzer {
         byMethodOwner: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
         docs: HashMap::new<u32, String>(),
         moduleSymbolPaths: HashMap::new<u64, String>(),
+        stdModules: HashMap::new<u64, boolean>(),
         moduleDisplayNames: HashMap::new<u64, String>(),
         symbolOrigins: HashMap::new<u32, Analyzer::SymbolOrigin>(),
         symbolNames: HashMap::new<u32, String>(),
@@ -646,6 +652,16 @@ export namespace Analyzer {
     /// How diagnostics name module `moduleIndex`, when recorded.
     public moduleDisplayNameOf(&self, moduleIndex: u64): Option<&String> {
       return self.moduleDisplayNames.get(&moduleIndex);
+    }
+
+    /// Record that module `moduleIndex` was loaded from the standard library.
+    public markStdModule(&mut self, moduleIndex: u64): void {
+      self.stdModules.insert(moduleIndex, true);
+    }
+
+    /// Whether module `moduleIndex` was loaded from the standard library.
+    public isStdModule(&self, moduleIndex: u64): boolean {
+      return self.stdModules.containsKey(&moduleIndex);
     }
 
     /// The encoded symbol segments recorded for module `moduleIndex`.
