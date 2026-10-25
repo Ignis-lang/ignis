@@ -7299,7 +7299,7 @@ export namespace Lowering {
           blockType = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, tailId);
         }
 
-        return Lowering::lowerBlockParts(
+        let lowered: Hir::HirId = Lowering::lowerBlockParts(
           defStore,
           typeStore,
           symbols,
@@ -7312,6 +7312,13 @@ export namespace Lowering {
           block.span,
           blockType,
         );
+
+        if (let Option::SOME(note) = module.comptimeIterationNote(stmtId)) {
+          let mut hirRef: &mut Hir::HirStore = hir;
+          hirRef.setComptimeIterationNote(lowered, note.clone());
+        }
+
+        return lowered;
       },
       Ast::Statement::Node::If(ifStmt) -> {
         let condition: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, ifStmt.condition);

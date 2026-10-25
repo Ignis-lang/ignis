@@ -1,0 +1,214 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, SourceFile, SourceMap from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "./lowering";
+import Bounds from "./bounds";
+
+const BOUNDS_COMPTIME_PRELUDE: str = "trait Describe {\n  describe(&self): i32;\n}\n\nrecord Tag {\n  public value: i32;\n}\n\n@implements(Describe)\nextension i32 {\n  describe(&self): i32 {\n    return *self;\n  }\n}\n\n";
+
+const BOUNDS_COMPTIME_IMPLEMENTER: str = "@implements(Summary)\nrecord Item {\n  public count: i32;\n  public tag: Tag;\n}\n";
+
+/// Parses `source` and unrolls its `comptime for` loops, as the driver does
+/// before analysis.
+function boundsExpandedModules(source: str): Vector<Ast::Module> {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "main.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(parsed.module);
+
+  let mut moduleSources: Vector<String> = Vector::new<String>();
+  moduleSources.push(String::create("main.ign"));
+
+  let noPrelude: Vector<String> = Vector::new<String>();
+  Parser::materializeCrossModuleDefaults(&mut modules, &moduleSources, &noPrelude);
+  Parser::expandComptime(&mut modules);
+  return modules;
+}
+
+function boundsModuleInfos(): Vector<Analyzer::Imports::ModuleInfo> {
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(Analyzer::Imports::ModuleInfo {
+    index: 0,
+    pathText: String::create("main.ign"),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  });
+  return infos;
+}
+
+/// What analyzing `source` reports, before lowering.
+function boundsAnalyzerDiagnosticsFor(source: str): DiagnosticBag {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let modules: Vector<Ast::Module> = boundsExpandedModules(source);
+  let infos: Vector<Analyzer::Imports::ModuleInfo> = boundsModuleInfos();
+  let noPrelude: Vector<String> = Vector::new<String>();
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &noPrelude,
+  );
+
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+
+  if (let Option::SOME(analysisRecord) = records.get(0)) {
+    Analyzer::appendDiagnostics(&mut bag, &analysisRecord.output.diagnostics);
+  }
+
+  return bag;
+}
+
+/// Parses, unrolls, analyzes and lowers `source` as the driver does, then
+/// returns what the bound check over the lowered bodies reports.
+function boundsDiagnosticsFor(source: str): DiagnosticBag {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let modules: Vector<Ast::Module> = boundsExpandedModules(source);
+  let infos: Vector<Analyzer::Imports::ModuleInfo> = boundsModuleInfos();
+  let noPrelude: Vector<String> = Vector::new<String>();
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &noPrelude,
+  );
+
+  let mut hir: Hir::HirStore = Hir::HirStore::init();
+
+  if (let Option::SOME(module) = modules.get(0)) {
+    if (let Option::SOME(analysisRecord) = records.get(0)) {
+      Test::assertEq<u64>(analysisRecord.output.diagnostics.length(), 0);
+      Lowering::lowerModuleInto(&mut defStore, &mut typeStore, &mut symbols, module, &analysisRecord.output, &mut hir);
+    }
+  }
+
+  return Bounds::checkBodies(&mut defStore, &mut typeStore, &mut symbols, &hir, 0);
+}
+
+/// The notes of the only diagnostic of `bag`, one per line, after checking
+/// its code and message.
+function boundsOnlyDiagnosticNotes(bag: &DiagnosticBag, code: str, message: str): String {
+  Test::assertEq<u64>(bag.length(), 1);
+
+  let mut text: String = String::create("");
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    return text;
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+  Test::assertEq<str>(diagnostic.message.toStr(), message);
+
+  let mut index: u64 = 0;
+
+  while (index < diagnostic.notes.length()) {
+    if (let Option::SOME(note) = diagnostic.notes.get(index)) {
+      text.pushStr(note.messageText());
+      text.pushStr("\n");
+    }
+
+    index += 1;
+  }
+
+  return text;
+}
+
+/// Scenario: a bounded helper called with `@fieldType(field)` inside a
+/// `comptime for` of a trait default. The bound fails for one field only, and
+/// the notes name that field and the inheriting type.
+@test
+function boundsNotesTheComptimeIterationOfAnExplicitTypeArgument(): void {
+  let source: String = `${BOUNDS_COMPTIME_PRELUDE}function describeType<T: Describe>(): i32 {\n  return 1;\n}\n\ntrait Summary {\n  summary(&self): i32 {\n    let mut sum: i32 = 0;\n\n    comptime for (field of @fields<Self>()) {\n      sum += describeType<@fieldType(field)>();\n    }\n\n    return sum;\n  }\n}\n\n${BOUNDS_COMPTIME_IMPLEMENTER}`;
+  let bag: DiagnosticBag = boundsDiagnosticsFor(source.toStr());
+  let notes: String = boundsOnlyDiagnosticNotes(
+    &bag,
+    DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED,
+    "type 'Tag' does not satisfy the bound 'T: Describe' of 'describeType'",
+  );
+
+  Test::assertEq<str>(
+    notes.toStr(),
+    "in the 'comptime for' iteration over field 'tag' of 'Item'\nin default method `summary` of trait `Summary`, as inherited by `Item`\n",
+  );
+}
+
+/// Scenario: the same bound with the type argument inferred from
+/// `&@field(self, field)`.
+@test
+function boundsNotesTheComptimeIterationOfAnInferredTypeArgument(): void {
+  let source: String = `${BOUNDS_COMPTIME_PRELUDE}function describeValue<T: Describe>(value: &T): i32 {\n  return value.describe();\n}\n\ntrait Summary {\n  summary(&self): i32 {\n    let mut sum: i32 = 0;\n\n    comptime for (field of @fields<Self>()) {\n      sum += describeValue(&@field(self, field));\n    }\n\n    return sum;\n  }\n}\n\n${BOUNDS_COMPTIME_IMPLEMENTER}`;
+  let bag: DiagnosticBag = boundsDiagnosticsFor(source.toStr());
+  let notes: String = boundsOnlyDiagnosticNotes(
+    &bag,
+    DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED,
+    "type 'Tag' does not satisfy the bound 'T: Describe' of 'describeValue'",
+  );
+
+  Test::assertEq<str>(
+    notes.toStr(),
+    "in the 'comptime for' iteration over field 'tag' of 'Item'\nin default method `summary` of trait `Summary`, as inherited by `Item`\n",
+  );
+}
+
+/// Scenario: a bound that fails outside any `comptime for` and outside any
+/// inherited default carries no note.
+@test
+function boundsAddsNoNoteOutsideAComptimeIteration(): void {
+  let source: String = `${BOUNDS_COMPTIME_PRELUDE}function describeType<T: Describe>(): i32 {\n  return 1;\n}\n\nfunction main(): i32 {\n  return describeType<Tag>();\n}\n`;
+  let bag: DiagnosticBag = boundsDiagnosticsFor(source.toStr());
+  let notes: String = boundsOnlyDiagnosticNotes(
+    &bag,
+    DiagnosticCode::GENERIC_BOUND_NOT_SATISFIED,
+    "type 'Tag' does not satisfy the bound 'T: Describe' of 'describeType'",
+  );
+
+  Test::assertEq<str>(notes.toStr(), "");
+}
+
+/// Scenario: a method call on a `boolean` field inside a `comptime for`,
+/// where only `i32` implements the trait declaring the method. It reports the
+/// missing implementation instead of "not a record or enum", with the notes.
+@test
+function boundsTraitNotImplementedInAComptimeIterationNamesTheTrait(): void {
+  let source: String = `${BOUNDS_COMPTIME_PRELUDE}trait Summary {\n  summary(&self): i32 {\n    let mut sum: i32 = 0;\n\n    comptime for (field of @fields<Self>()) {\n      sum += @field(self, field).describe();\n    }\n\n    return sum;\n  }\n}\n\n@implements(Summary)\nrecord Item {\n  public count: i32;\n  public flag: boolean;\n}\n`;
+  let bag: DiagnosticBag = boundsAnalyzerDiagnosticsFor(source.toStr());
+  let notes: String = boundsOnlyDiagnosticNotes(
+    &bag,
+    DiagnosticCode::TRAIT_NOT_IMPLEMENTED,
+    "type 'bool' does not implement trait 'Describe', which declares method 'describe'",
+  );
+
+  Test::assertEq<str>(
+    notes.toStr(),
+    "in the 'comptime for' iteration over field 'flag' of 'Item'\nin default method `summary` of trait `Summary`, as inherited by `Item`\n",
+  );
+}
+
+/// Scenario: a method call on a primitive when no trait declares the method
+/// keeps the "not a record or enum" error.
+@test
+function boundsMethodOnPrimitiveWithoutTraitKeepsTheOwnerError(): void {
+  let source: String = `${BOUNDS_COMPTIME_PRELUDE}function main(): i32 {\n  let flag: boolean = true;\n  return flag.unknown();\n}\n`;
+  let bag: DiagnosticBag = boundsAnalyzerDiagnosticsFor(source.toStr());
+  let notes: String = boundsOnlyDiagnosticNotes(
+    &bag,
+    DiagnosticCode::PATTERN_TYPE_MISMATCH,
+    "method call target must be a non-generic record or enum",
+  );
+
+  Test::assertEq<str>(notes.toStr(), "");
+}
