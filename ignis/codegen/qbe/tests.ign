@@ -375,6 +375,19 @@ function qbeEmitsThreadLocalGlobals(): void {
   qbeRunExpected(source, 42);
 }
 
+/// String literals are read-only data, as the C backend's are: a write through
+/// a `str` literal faults instead of changing every use of that text. Mutable
+/// globals stay writable.
+@test
+function qbeEmitsStringLiteralsAsReadOnlyData(): void {
+  let source: str = "record Counter { static mut TOTAL: i32 = 3; } function main(): i32 { let s: str = \"hey\"; Counter::TOTAL = Counter::TOTAL + 1; return Counter::TOTAL; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "section \".rodata\" data $str_"));
+  Test::assert(!qbeContains(&emission.source, "\ndata $str_"));
+  Test::assert(qbeContains(&emission.source, "\ndata $"));
+}
+
 @test
 function qbeEmitsStringLiteralsAndGlobals(): void {
   qbeRunExpected("extern LibC { function strcmp(left: str, right: str): i32; } record Counter { static mut TOTAL: i32 = 3; } const GREETING: str = \"hey\"; function main(): i32 { let s: str = GREETING; Counter::TOTAL = Counter::TOTAL + 1; return Counter::TOTAL + LibC::strcmp(s, \"hey\"); }", 4);
