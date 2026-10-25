@@ -46,10 +46,11 @@
     },
     {
       "name": "std::format",
-      "doc": "  \n# Format Module  \n  \nFormatting traits for user-defined textual representations."
+      "doc": "  \n# Format Module  \n  \nFormatting traits for user-defined textual representations.  \n  \n## Exports  \n  \n| Export    | Description                                               |  \n|-----------|-----------------------------------------------------------|  \n| `Display` | `display(&self): String`, with a reflective record default and implementations for primitives, `str`, `String`, `Option` and `Vector` |  \n  \n## Example  \n  \n```ignis  \n@implements(Display)  \nrecord Point {  \n  public x: i32;  \n  public label: String;  \n}  \n  \nlet point: Point = Point { x: 1, label: String::create(\"origin\") };  \nlet text: String = point.display(); // Point { x: 1, label: origin }  \n```  \n  \nEnums still need a hand-written `display`: the default walks record  \nfields only (see `std::format::display`)."
     },
     {
-      "name": "std::format::display"
+      "name": "std::format::display",
+      "doc": "  \n# Display  \n  \nThe `Display` trait and its implementations for the built-in types.  \n  \n`display` has a default that reflects over the record's fields with  \n`comptime for`, so `@implements(Display)` on a record needs no method of  \nits own. A `display` the record writes itself replaces the default.  \n  \n## Default  \n  \n`TypeName { field: value, field: value }`, fields in declaration order,  \neach rendered by its own `Display`. The name is the record's concrete  \nname: a generic record shows its type arguments, `Box<i32> { value: 1 }`.  \nA record without fields renders as `TypeName {}`. A field whose type does  \nnot implement `Display` is a compile error inside the default, with a  \nnote naming the field.  \n  \n## Implementations  \n  \n| Type | Rendering |  \n|------|-----------|  \n| integers, `f32`, `f64`, `boolean` | `toString()`: `-3`, `1.5`, `true` |  \n| `char` | the character itself, unquoted |  \n| `str`, `String` | the text itself, unquoted and unescaped |  \n| `Option<T: Display>` | `Option::SOME(value)` or `Option::NONE` |  \n| `Vector<T: Display>` | `[first, second]`, `[]` when empty |  \n  \n## Enums  \n  \nThe default walks record fields only. An enum that declares  \n`@implements(Display)` without a `display` of its own is a compile error  \ninside the default (A0293, `'@fields' needs a record`), so an enum  \nneeds a hand-written `display`."
     },
     {
       "name": "std::fs",
@@ -281,7 +282,11 @@
     },
     {
       "name": "std::serializer",
-      "doc": "  \n# Serializer  \n  \nOpt-in std serialization contracts shared by JSON and TOML front-ends.  \n  \n## Overview  \n  \n`std::serializer` defines a small format-agnostic writer surface. Concrete  \nmodules such as `std::json` and `std::toml` provide writer settings, while  \nuser-defined records opt in by implementing `Serialize`.  \n  \nThe module intentionally separates three responsibilities:  \n  \n| Layer                  | Responsibility                                  |  \n|------------------------|--------------------------------------------------|  \n| `Serializer::Writer`   | Format punctuation and root-shape policy         |  \n| `Serializer::write`    | Scalar text and string escaping helpers          |  \n| `Serialize` trait      | User record field ordering and value selection   |  \n  \nConcrete front-ends create a writer and then call either scalar overloads or  \na user-provided `Serialize` implementation. Records use `beginRecord`,  \n`writeField`, scalar `write` overloads, and `endRecord` to produce output.  \n  \n```text  \n  Json::stringify(value) / Toml::stringify(value)  \n                │  \n                ▼  \n       concrete Serializer::Writer  \n                │  \n                ▼  \n  scalar overloads or value.serialize(...)  \n                │  \n                ▼  \n       caller-provided output String  \n```  \n  \n## Exports  \n  \n| Export        | Description                                      |  \n|---------------|--------------------------------------------------|  \n| `Serialize`   | Trait for records that can write themselves      |  \n| `Serializer`  | Writer configuration, helpers, and error types   |  \n  \n## Notes  \n  \nThe current serializer is text-oriented and writes into an existing  \n`String`. It supports scalar roots only when the selected format allows  \nthem, and validates bare field names for formats such as TOML.  \n  \nWriter helpers append to the output string. They do not clear existing  \ncontent, allocate a destination automatically, or validate that callers emit a  \ncomplete record. A `Serialize` implementation is responsible for pairing  \n`beginRecord` with `endRecord` and for passing the correct `first` flag to  \n`writeField` so separators are emitted in the right positions.  \n  \n## Example  \n  \n```ignis  \nimport Serializer, Serialize from \"std::serializer\";  \n  \n// Format front-ends provide a Serializer::Writer for concrete output.  \n```"
+      "doc": "  \n# Serializer  \n  \nOpt-in std serialization contracts shared by JSON and TOML front-ends.  \n  \n## Overview  \n  \n`std::serializer` defines a small format-agnostic writer surface. Concrete  \nmodules such as `std::json` and `std::toml` provide writer settings, while  \nuser-defined records opt in by implementing `Serialize`.  \n  \nThe module intentionally separates three responsibilities:  \n  \n| Layer                  | Responsibility                                  |  \n|------------------------|--------------------------------------------------|  \n| `Serializer::Writer`   | Format punctuation and root-shape policy         |  \n| `Serializer::write`    | Scalar text and string escaping helpers          |  \n| `Serialize` trait      | User record field ordering and value selection   |  \n  \nConcrete front-ends create a writer and then call either scalar overloads or  \na user-provided `Serialize` implementation. Records use `beginRecord`,  \n`writeField`, scalar `write` overloads, and `endRecord` to produce output.  \n  \n```text  \n  Json::stringify(value) / Toml::stringify(value)  \n                │  \n                ▼  \n       concrete Serializer::Writer  \n                │  \n                ▼  \n  scalar overloads or value.serialize(...)  \n                │  \n                ▼  \n       caller-provided output String  \n```  \n  \n## Exports  \n  \n| Export        | Description                                      |  \n|---------------|--------------------------------------------------|  \n| `Serialize`   | Trait for records that can write themselves, with a reflective default |  \n| `Serializer`  | Writer configuration, helpers, error types, and the `Serializer::Rename` field attribute |  \n  \n## Notes  \n  \nThe current serializer is text-oriented and writes into an existing  \n`String`. It supports scalar roots only when the selected format allows  \nthem, and validates bare field names for formats such as TOML.  \n  \nWriter helpers append to the output string. They do not clear existing  \ncontent, allocate a destination automatically, or validate that callers emit a  \ncomplete record. A `Serialize` implementation is responsible for pairing  \n`beginRecord` with `endRecord` and for passing the correct `first` flag to  \n`writeField` so separators are emitted in the right positions.  \n  \n`@implements(Serialize)` on a record without a `serialize` method uses the  \nreflective default: every field in declaration order, keyed by its name or  \nby `@Serializer::Rename(\"key\")`. Field types are limited to scalars,  \nstrings and nested `Serialize` records (nested records in JSON only); see  \n`std::serializer::serialize`. Enums still need a hand-written `serialize`.  \n  \n## Example  \n  \n```ignis  \nimport Serializer, Serialize from \"std::serializer\";  \nimport Json from \"std::json\";  \n  \n@implements(Serialize)  \nrecord Package {  \n  @Serializer::Rename(\"package-name\")  \n  public name: String;  \n  public version: i32;  \n}  \n  \n// {\"package-name\":\"ignis\",\"version\":4}  \nlet package: Package = Package { name: String::create(\"ignis\"), version: 4 };  \nlet json: Result<String, Serializer::Error> = Json::stringify<Package>(&package);  \n```"
+    },
+    {
+      "name": "std::serializer::attributes",
+      "doc": "  \n# Serializer Attributes  \n  \nThe declarable attributes the reflective `Serialize` default reads.  \n  \n## Exports  \n  \n| Export               | Description                                         |  \n|----------------------|-----------------------------------------------------|  \n| `Serializer::Rename` | `@Serializer::Rename(\"key\")` on a field: the key written instead of the field name |"
     },
     {
       "name": "std::serializer::core",
@@ -293,7 +298,7 @@
     },
     {
       "name": "std::serializer::serialize",
-      "doc": "  \n# Serializer Trait  \n  \nShared format-agnostic record serialization contract.  \n  \n## Overview  \n  \n`Serialize` is implemented by records that know how to write their own fields  \ninto a caller-provided `String` using a caller-provided `Serializer::Writer`.  \nThe trait does not choose a format; JSON, TOML, or another front-end supplies  \nthe writer configuration.  \n  \n## Contract  \n  \nImplementations should:  \n  \n- Append output to the provided `String` without clearing it.  \n- Call `Serializer::beginRecord` before emitting fields.  \n- Call `Serializer::writeField` before each field value.  \n- Pass `first = true` only for the first field.  \n- Use `Serializer::write` or nested `Serialize::serialize` for field values.  \n- Propagate `Serializer::Error` with `!` when a helper fails.  \n- Call `Serializer::endRecord` before returning success.  \n  \n```ignis  \nimport Serialize, Serializer from \"std::serializer\";  \n  \nrecord Package {  \n  name: String;  \n  \n  public serialize(&self, output: &mut String, writer: &Serializer::Writer): Result<boolean, Serializer::Error> {  \n    Serializer::beginRecord(output, writer)!;  \n    Serializer::writeField(output, \"name\", writer, true)!;  \n    Serializer::write(output, &self.name, writer)!;  \n    Serializer::endRecord(output, writer)!;  \n  \n    return Result::OK(true);  \n  }  \n}  \n```"
+      "doc": "  \n# Serializer Trait  \n  \nShared format-agnostic record serialization contract.  \n  \n## Overview  \n  \n`Serialize` is implemented by records that know how to write their own fields  \ninto a caller-provided `String` using a caller-provided `Serializer::Writer`.  \nThe trait does not choose a format; JSON, TOML, or another front-end supplies  \nthe writer configuration.  \n  \n## Exports  \n  \n| Export      | Description                                                 |  \n|-------------|-------------------------------------------------------------|  \n| `Serialize` | `serialize(&self, output, writer)`, with a reflective record default and implementations for the scalar types |  \n  \n## Default  \n  \n`serialize` has a default that reflects over the record's fields with  \n`comptime for`, so `@implements(Serialize)` on a record needs no method of  \nits own. It writes `beginRecord`, then one `writeField` and value per  \nfield in declaration order, then `endRecord`. The key is the name given by  \n`@Serializer::Rename(\"key\")` on the field, else the field name. Each value  \nis written by its type's `Serialize`:  \n  \n| Field type | Written by |  \n|------------|------------|  \n| `boolean`, integers, `f32`, `f64`, `char`, `str`, `String` | the matching `Serializer::write` overload |  \n| a record implementing `Serialize` | its own `serialize`, as a nested record |  \n  \nA field of any other type, `Option` and `Vector` included, is a compile  \nerror inside the default, with a note naming the field: the writer has no  \nnull or array output yet. A nested record is valid JSON; TOML output has no  \nnested tables yet, so a TOML record must keep scalar fields. A `serialize`  \nthe record writes itself replaces the default.  \n  \nThe default walks record fields only. An enum that declares  \n`@implements(Serialize)` without a `serialize` of its own is a compile  \nerror inside the default (A0293, `'@fields' needs a record`), so an enum  \nneeds a hand-written `serialize`.  \n  \n## Contract  \n  \nImplementations should:  \n  \n- Append output to the provided `String` without clearing it.  \n- Call `Serializer::beginRecord` before emitting fields.  \n- Call `Serializer::writeField` before each field value.  \n- Pass `first = true` only for the first field.  \n- Use `Serializer::write` or nested `Serialize::serialize` for field values.  \n- Propagate `Serializer::Error` with `!` when a helper fails.  \n- Call `Serializer::endRecord` before returning success.  \n  \n```ignis  \nimport Serialize, Serializer from \"std::serializer\";  \n  \nrecord Package {  \n  name: String;  \n  \n  public serialize(&self, output: &mut String, writer: &Serializer::Writer): Result<boolean, Serializer::Error> {  \n    Serializer::beginRecord(output, writer)!;  \n    Serializer::writeField(output, \"name\", writer, true)!;  \n    Serializer::write(output, &self.name, writer)!;  \n    Serializer::endRecord(output, writer)!;  \n  \n    return Result::OK(true);  \n  }  \n}  \n```"
     },
     {
       "name": "std::serializer::writer",
@@ -1719,14 +1724,24 @@
       "kind": "trait",
       "visibility": "public",
       "signature": "trait Display",
-      "doc": "Trait for values that can render themselves as an owned `String`.  \n  \nTypes marked with `@implements(Display)` must provide  \n`display(&self): String`.",
+      "doc": "Trait for values that can render themselves as an owned `String`.  \n  \nA record marked `@implements(Display)` gets the reflective default  \ndescribed in the module documentation, or provides `display(&self):  \nString` itself.",
       "members": [
         {
           "name": "display",
           "kind": "method",
-          "signature": "display(&self): String"
+          "signature": "display(&self): String",
+          "doc": "The value as text."
         }
       ]
+    },
+    {
+      "module": "std::format::display",
+      "path": "std::format::display::displayOf",
+      "name": "displayOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function displayOf<T>(value: &T): String",
+      "doc": "`value.display()`, the per-field call of the reflective default."
     },
     {
       "module": "std::fs",
@@ -14099,15 +14114,6 @@
       "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`."
     },
     {
-      "module": "std::orm::repository",
-      "path": "std::orm::repository::Orm::sqliteUnit",
-      "name": "sqliteUnit",
-      "kind": "function",
-      "visibility": "private",
-      "signature": "function sqliteUnit(result: Result<void, Error>): Result<void, Error>",
-      "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`.  \n`sqliteResult<void>` is not used: rewrapping a `void` payload through  \nthe type parameter emits C that does not compile."
-    },
-    {
       "module": "std::orm::row",
       "path": "std::orm::row::Orm",
       "name": "Orm",
@@ -15873,6 +15879,32 @@
       ]
     },
     {
+      "module": "std::serializer::attributes",
+      "path": "std::serializer::attributes::Serializer",
+      "name": "Serializer",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Serializer",
+      "doc": "The attributes of the reflective `Serialize` default."
+    },
+    {
+      "module": "std::serializer::attributes",
+      "path": "std::serializer::attributes::Serializer::Rename",
+      "name": "Rename",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Rename",
+      "doc": "The key a field is written under, when it differs from the field name.  \nThe selected writer still validates it: TOML accepts only bare keys.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: str",
+          "doc": "The key to write."
+        }
+      ]
+    },
+    {
       "module": "std::serializer::core",
       "path": "std::serializer::core::Serializer",
       "name": "Serializer",
@@ -16103,7 +16135,7 @@
       "kind": "trait",
       "visibility": "public",
       "signature": "trait Serialize",
-      "doc": "Format-agnostic serialization contract for record-like values.",
+      "doc": "Format-agnostic serialization contract for record-like values.  \n  \nA record marked `@implements(Serialize)` gets the reflective default  \ndescribed in the module documentation, or provides `serialize` itself.",
       "members": [
         {
           "name": "serialize",
@@ -16112,6 +16144,15 @@
           "doc": "Appends a serialized representation of `self` to `output`.  \n  \n# Arguments  \n  \n- `output`: destination string to append to.  \n- `writer`: format settings supplied by the concrete front-end.  \n  \n# Returns  \n  \n`Result::OK(true)` on success, or `Serializer::Error` when the selected  \nwriter rejects a field key or root shape."
         }
       ]
+    },
+    {
+      "module": "std::serializer::serialize",
+      "path": "std::serializer::serialize::serializeOf",
+      "name": "serializeOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function serializeOf<T>(value: &T, output: &mut String, writer: &Writer): Result<boolean, Error>",
+      "doc": "`value.serialize(output, writer)`, the per-field call of the reflective  \ndefault."
     },
     {
       "module": "std::serializer::writer",
