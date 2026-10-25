@@ -1,0 +1,403 @@
+//!
+//! # Column values
+//!
+//! `Orm::ColumnValue`, what a field type contributes to the reflective
+//! `Orm::Entity` and `Orm::FromRow` defaults: the SQL type of its column,
+//! whether the column is nullable, how to read it from an `Orm::Row` and how
+//! to bind it. A field of a type without an implementation is a compile error
+//! inside the default, with a note naming the field.
+//!
+//! ## Exports
+//!
+//! | Export             | Description                                     |
+//! |--------------------|-------------------------------------------------|
+//! | `Orm::ColumnValue` | `columnType`, `columnNullable`, `readColumn`, `toColumnValue`, `bindColumn`, `columnKey` |
+//! | `Orm::BlobByte`    | The element type of a `BLOB` field: only `u8`   |
+//!
+//! ## Implementations
+//!
+//! | Field type | Column | Read |
+//! |------------|--------|------|
+//! | `i8`, `i16`, `i32`, `u8`, `u16`, `u32` | `INTEGER NOT NULL` | `readInt`, a value outside the type's range is `DECODE` |
+//! | `i64` | `INTEGER NOT NULL` | `readInt` |
+//! | `f32`, `f64` | `REAL NOT NULL` | `readReal` |
+//! | `boolean` | `INTEGER NOT NULL` | `readBoolean`: 0 or 1 |
+//! | `String` | `TEXT NOT NULL` | `readText` |
+//! | `Vector<u8>` | `BLOB NOT NULL` | `readBlob` |
+//! | `Option<T>` | `T`'s column, nullable | NULL is `NONE` |
+//!
+//! `Vector<u8>` is implemented as `Vector<T: Orm::BlobByte>`, because an
+//! extension block extends a generic type only over its own parameters;
+//! `u8` is the one `BlobByte`.
+
+import Sqlite3 from "std::sqlite3";
+import Error, ErrorKind from "std::orm::error";
+import ColumnType from "std::orm::table";
+import Row from "std::orm::row";
+import Value from "std::orm::value";
+
+/// Field types the reflective defaults can store.
+export namespace Orm {
+  /// A type a field can have in a reflective entity.
+  trait ColumnValue {
+    /// The SQL type of the column.
+    static columnType(): ColumnType;
+
+    /// Whether the column accepts NULL; only `Option` does.
+    static columnNullable(): boolean {
+      return false;
+    }
+
+    /// The value of `column` in `row`, or a `DECODE` error.
+    static readColumn(row: &Row, column: i32): Result<Self, Error>;
+
+    /// The value as a raw parameter.
+    toColumnValue(&self): Value;
+
+    /// Binds the value to the 1-based parameter `index` of `statement`.
+    bindColumn(&self, statement: &mut Sqlite3::Statement, index: i32): Result<void, Error> {
+      let value: Value = self.toColumnValue();
+
+      return value.bind(statement, index);
+    }
+
+    /// The value as a repository key: an integer, or `NONE`.
+    columnKey(&self): Option<i64> {
+      return Option::NONE;
+    }
+  }
+
+  /// The element type of a `BLOB` field. `u8` is the only implementation.
+  trait BlobByte {
+    /// The element for a stored byte.
+    static fromBlobByte(byte: u8): Self;
+
+    /// The stored byte of the element.
+    toBlobByte(&self): u8;
+  }
+
+  /// `T::columnType()`.
+  function columnTypeOf<T: ColumnValue>(): ColumnType {
+    return T::columnType();
+  }
+
+  /// `T::columnNullable()`.
+  function columnNullableOf<T: ColumnValue>(): boolean {
+    return T::columnNullable();
+  }
+
+  /// `T::readColumn(row, column)`.
+  function readColumnOf<T: ColumnValue>(row: &Row, column: i32): Result<T, Error> {
+    return T::readColumn(row, column);
+  }
+
+  /// `value.bindColumn(statement, index)`.
+  function bindColumnOf<T: ColumnValue>(
+    value: &T,
+    statement: &mut Sqlite3::Statement,
+    index: i32
+  ): Result<void, Error> {
+    return value.bindColumn(statement, index);
+  }
+
+  /// `value.columnKey()`.
+  function columnKeyOf<T: ColumnValue>(value: &T): Option<i64> {
+    return value.columnKey();
+  }
+
+  /// Column `column` as an integer in `minimum..=maximum`; a value outside
+  /// is a `DECODE` error naming `typeName`.
+  function readIntegerInRange(
+    row: &Row,
+    column: i32,
+    minimum: i64,
+    maximum: i64,
+    typeName: str
+  ): Result<i64, Error> {
+    let value: i64 = row.readInt(column)!;
+
+    if (value < minimum || value > maximum) {
+      let columnText: String = String::create(column);
+      let valueText: String = String::create(value);
+      let mut message: String = String::create("std::orm: column ");
+      message.push(&columnText);
+      message.pushStr(" holds ");
+      message.push(&valueText);
+      message.pushStr(", out of range for ");
+      message.pushStr(typeName);
+
+      return Result::ERROR(Error::create(ErrorKind::DECODE, message));
+    }
+
+    return Result::OK(value);
+  }
+
+  @implements(ColumnValue)
+  extension i8 {
+    static columnType(): ColumnType {
+      return ColumnType::INTEGER;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<i8, Error> {
+      return Result::OK(readIntegerInRange(row, column, -128, 127, "i8")! as i8);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self as i64);
+    }
+
+    columnKey(&self): Option<i64> {
+      return Option::SOME(*self as i64);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension i16 {
+    static columnType(): ColumnType {
+      return ColumnType::INTEGER;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<i16, Error> {
+      return Result::OK(readIntegerInRange(row, column, -32768, 32767, "i16")! as i16);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self as i64);
+    }
+
+    columnKey(&self): Option<i64> {
+      return Option::SOME(*self as i64);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension i32 {
+    static columnType(): ColumnType {
+      return ColumnType::INTEGER;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<i32, Error> {
+      return Result::OK(readIntegerInRange(row, column, -2147483648, 2147483647, "i32")! as i32);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self as i64);
+    }
+
+    columnKey(&self): Option<i64> {
+      return Option::SOME(*self as i64);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension u8 {
+    static columnType(): ColumnType {
+      return ColumnType::INTEGER;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<u8, Error> {
+      return Result::OK(readIntegerInRange(row, column, 0, 255, "u8")! as u8);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self as i64);
+    }
+
+    columnKey(&self): Option<i64> {
+      return Option::SOME(*self as i64);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension u16 {
+    static columnType(): ColumnType {
+      return ColumnType::INTEGER;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<u16, Error> {
+      return Result::OK(readIntegerInRange(row, column, 0, 65535, "u16")! as u16);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self as i64);
+    }
+
+    columnKey(&self): Option<i64> {
+      return Option::SOME(*self as i64);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension u32 {
+    static columnType(): ColumnType {
+      return ColumnType::INTEGER;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<u32, Error> {
+      return Result::OK(readIntegerInRange(row, column, 0, 4294967295, "u32")! as u32);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self as i64);
+    }
+
+    columnKey(&self): Option<i64> {
+      return Option::SOME(*self as i64);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension i64 {
+    static columnType(): ColumnType {
+      return ColumnType::INTEGER;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<i64, Error> {
+      return row.readInt(column);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self);
+    }
+
+    columnKey(&self): Option<i64> {
+      return Option::SOME(*self);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension f32 {
+    static columnType(): ColumnType {
+      return ColumnType::REAL;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<f32, Error> {
+      return Result::OK(row.readReal(column)! as f32);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::REAL(*self as f64);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension f64 {
+    static columnType(): ColumnType {
+      return ColumnType::REAL;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<f64, Error> {
+      return row.readReal(column);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::REAL(*self);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension boolean {
+    static columnType(): ColumnType {
+      return ColumnType::BOOLEAN;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<boolean, Error> {
+      return row.readBoolean(column);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::INT(*self ? 1 : 0);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension String {
+    static columnType(): ColumnType {
+      return ColumnType::TEXT;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<String, Error> {
+      return row.readText(column);
+    }
+
+    toColumnValue(&self): Value {
+      return Value::TEXT(self.clone());
+    }
+  }
+
+  @implements(BlobByte)
+  extension u8 {
+    static fromBlobByte(byte: u8): u8 {
+      return byte;
+    }
+
+    toBlobByte(&self): u8 {
+      return *self;
+    }
+  }
+
+  @implements(ColumnValue)
+  extension<T: BlobByte> Vector<T> {
+    static columnType(): ColumnType {
+      return ColumnType::BLOB;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<Vector<T>, Error> {
+      let bytes: Vector<u8> = row.readBlob(column)!;
+      let mut elements: Vector<T> = Vector::new<T>();
+      let mut index: u64 = 0;
+
+      while (index < bytes.length()) {
+        elements.push(T::fromBlobByte(*bytes.get(index).unwrap()));
+        index = index + 1;
+      }
+
+      return Result::OK(elements);
+    }
+
+    toColumnValue(&self): Value {
+      let mut bytes: Vector<u8> = Vector::new<u8>();
+      let mut index: u64 = 0;
+
+      while (index < self.length()) {
+        bytes.push(self.get(index).unwrap().toBlobByte());
+        index = index + 1;
+      }
+
+      return Value::BLOB(bytes);
+    }
+  }
+
+  @implements(ColumnValue)
+  extension<T: ColumnValue> Option<T> {
+    static columnType(): ColumnType {
+      return columnTypeOf<T>();
+    }
+
+    static columnNullable(): boolean {
+      return true;
+    }
+
+    static readColumn(row: &Row, column: i32): Result<Option<T>, Error> {
+      if (row.isNull(column)!) {
+        return Result::OK(Option::NONE);
+      }
+
+      return Result::OK(Option::SOME(readColumnOf<T>(row, column)!));
+    }
+
+    toColumnValue(&self): Value {
+      return match (self) {
+        Option::SOME(value) -> value.toColumnValue(),
+        Option::NONE -> Value::NULL,
+      };
+    }
+
+    columnKey(&self): Option<i64> {
+      return match (self) {
+        Option::SOME(value) -> value.columnKey(),
+        Option::NONE -> Option::NONE,
+      };
+    }
+  }
+}

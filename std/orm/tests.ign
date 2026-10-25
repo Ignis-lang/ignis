@@ -13,8 +13,8 @@ function ormTestConnection(): Sqlite3::Connection {
 }
 
 /// The descriptor most tests share.
-function ormTestTasksTable(): Orm::Table {
-  return Orm::Table::create("tasks")
+function ormTestTasksTable(): Orm::Schema {
+  return Orm::Schema::create("tasks")
     .columnInt("id", Orm::ColumnKey::PRIMARY)
     .autoIncrement()
     .columnText("title", Orm::ColumnKey::NONE)
@@ -91,7 +91,7 @@ function ormTestTableExists(connection: &mut Sqlite3::Connection, name: str): bo
 
 @test
 function ormTableEmitsCreateTable(): void {
-  let table: Orm::Table = ormTestTasksTable();
+  let table: Orm::Schema = ormTestTasksTable();
   let sql: String = ormTestSql(table.createTableSql());
 
   Test::assertEq<String>(
@@ -104,7 +104,7 @@ function ormTableEmitsCreateTable(): void {
 
 @test
 function ormTableEmitsTheRepositoryStatements(): void {
-  let table: Orm::Table = ormTestTasksTable();
+  let table: Orm::Schema = ormTestTasksTable();
 
   Test::assertEq<String>(
     ormTestSql(table.insertSql()),
@@ -130,7 +130,7 @@ function ormTableEmitsTheRepositoryStatements(): void {
 
 @test
 function ormTableInsertKeepsAKeyThatIsNotAutoIncrement(): void {
-  let table: Orm::Table = Orm::Table::create("tags")
+  let table: Orm::Schema = Orm::Schema::create("tags")
     .columnText("slug", Orm::ColumnKey::PRIMARY)
     .columnReal("weight", Orm::ColumnKey::NONE)
     .columnBlob("icon", Orm::ColumnKey::NONE);
@@ -148,7 +148,7 @@ function ormTableInsertKeepsAKeyThatIsNotAutoIncrement(): void {
 @test
 function ormTableCreatesItsSchemaInTheDatabase(): void {
   let mut connection: Sqlite3::Connection = ormTestConnection();
-  let table: Orm::Table = ormTestTasksTable();
+  let table: Orm::Schema = ormTestTasksTable();
 
   ormTestOk(connection.exec(ormTestSql(table.createTableSql()).toStr()));
 
@@ -166,10 +166,10 @@ function ormTableCreatesItsSchemaInTheDatabase(): void {
 
 @test
 function ormTableRejectsAnIdentifierThatIsNotPlain(): void {
-  let badTable: Orm::Table = Orm::Table::create("tasks; DROP TABLE users").columnInt("id", Orm::ColumnKey::PRIMARY);
-  let badColumn: Orm::Table = Orm::Table::create("tasks").columnText("title\"", Orm::ColumnKey::NONE);
-  let digitFirst: Orm::Table = Orm::Table::create("1tasks").columnInt("id", Orm::ColumnKey::PRIMARY);
-  let empty: Orm::Table = Orm::Table::create("").columnInt("id", Orm::ColumnKey::PRIMARY);
+  let badTable: Orm::Schema = Orm::Schema::create("tasks; DROP TABLE users").columnInt("id", Orm::ColumnKey::PRIMARY);
+  let badColumn: Orm::Schema = Orm::Schema::create("tasks").columnText("title\"", Orm::ColumnKey::NONE);
+  let digitFirst: Orm::Schema = Orm::Schema::create("1tasks").columnInt("id", Orm::ColumnKey::PRIMARY);
+  let empty: Orm::Schema = Orm::Schema::create("").columnInt("id", Orm::ColumnKey::PRIMARY);
 
   Test::assert(ormTestErrorKind(badTable.createTableSql()) == Orm::ErrorKind::SCHEMA);
   Test::assert(ormTestErrorKind(badColumn.insertSql()) == Orm::ErrorKind::SCHEMA);
@@ -179,15 +179,15 @@ function ormTableRejectsAnIdentifierThatIsNotPlain(): void {
 
 @test
 function ormTableRejectsAnInconsistentDescriptor(): void {
-  let noColumns: Orm::Table = Orm::Table::create("tasks");
-  let duplicate: Orm::Table = Orm::Table::create("tasks")
+  let noColumns: Orm::Schema = Orm::Schema::create("tasks");
+  let duplicate: Orm::Schema = Orm::Schema::create("tasks")
     .columnInt("id", Orm::ColumnKey::PRIMARY)
     .columnText("id", Orm::ColumnKey::NONE);
-  let twoKeys: Orm::Table = Orm::Table::create("tasks")
+  let twoKeys: Orm::Schema = Orm::Schema::create("tasks")
     .columnInt("id", Orm::ColumnKey::PRIMARY)
     .columnInt("other", Orm::ColumnKey::PRIMARY);
-  let textAutoIncrement: Orm::Table = Orm::Table::create("tasks").columnText("id", Orm::ColumnKey::PRIMARY).autoIncrement();
-  let noKey: Orm::Table = Orm::Table::create("tasks").columnText("title", Orm::ColumnKey::NONE);
+  let textAutoIncrement: Orm::Schema = Orm::Schema::create("tasks").columnText("id", Orm::ColumnKey::PRIMARY).autoIncrement();
+  let noKey: Orm::Schema = Orm::Schema::create("tasks").columnText("title", Orm::ColumnKey::NONE);
 
   Test::assert(ormTestErrorKind(noColumns.createTableSql()) == Orm::ErrorKind::SCHEMA);
   Test::assert(ormTestErrorKind(duplicate.createTableSql()) == Orm::ErrorKind::SCHEMA);
@@ -457,7 +457,7 @@ record OrmTestTask {
   public priority: i64;
   public note: Option<String>;
 
-  static table(): Orm::Table {
+  static table(): Orm::Schema {
     return ormTestTasksTable().columnText("note", Orm::ColumnKey::NONE);
   }
 
@@ -493,8 +493,8 @@ record OrmTestTag {
   public id: Option<i64>;
   public name: String;
 
-  static table(): Orm::Table {
-    return Orm::Table::create("tags")
+  static table(): Orm::Schema {
+    return Orm::Schema::create("tags")
       .columnInt("id", Orm::ColumnKey::PRIMARY)
       .columnText("name", Orm::ColumnKey::NONE)
       .notNull();
@@ -518,8 +518,8 @@ record OrmTestTag {
 record OrmTestBroken {
   public id: Option<i64>;
 
-  static table(): Orm::Table {
-    return Orm::Table::create("bad name").columnInt("id", Orm::ColumnKey::PRIMARY);
+  static table(): Orm::Schema {
+    return Orm::Schema::create("bad name").columnInt("id", Orm::ColumnKey::PRIMARY);
   }
 
   static fromRow(row: &Orm::Row): Result<OrmTestBroken, Orm::Error> {
@@ -862,4 +862,247 @@ function ormRepositoryInsertsTheGivenIdOfAPlainIntegerKey(): void {
   Test::assertEq<i64>(stored.id.unwrap(), 40);
   Test::assertEq<String>(stored.name, String::create("urgent"));
   Test::assertEq<i64>(ormTestCount(&mut connection, "SELECT COUNT(*) FROM tags WHERE id = 40 AND name = 'urgent'"), 1);
+}
+
+/// An entity with no hand-written method: its table, key, binding and
+/// decoding all come from the attributes and the `Entity`/`FromRow` defaults.
+@Orm::Table("notes")
+@implements(Orm::Entity, Orm::FromRow)
+record OrmTestNote {
+  @Orm::PrimaryKey
+  @Orm::AutoIncrement
+  public id: Option<i64>;
+  @Orm::Column("heading")
+  public title: String;
+  public pinned: boolean;
+  public rank: i32;
+  public body: Option<String>;
+}
+
+/// An attribute-driven entity whose INTEGER key is not `AUTOINCREMENT`.
+@Orm::Table("labels")
+@implements(Orm::Entity, Orm::FromRow)
+record OrmTestLabel {
+  @Orm::PrimaryKey
+  public code: i64;
+  public weight: f64;
+  public icon: Vector<u8>;
+  public level: u8;
+}
+
+/// An attribute-driven entity that forgot `@Orm::Table`.
+@implements(Orm::Entity, Orm::FromRow)
+record OrmTestUntitled {
+  @Orm::PrimaryKey
+  @Orm::AutoIncrement
+  public id: Option<i64>;
+}
+
+/// A connection with the notes table created from its derived descriptor.
+function ormTestNotesConnection(): Sqlite3::Connection {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+  ormTestOk(connection.exec(ormTestSql(OrmTestNote::table().createTableSql()).toStr()));
+
+  return connection;
+}
+
+/// A note without an id, ready to insert.
+function ormTestNewNote(title: str, pinned: boolean, rank: i32, body: Option<String>): OrmTestNote {
+  return OrmTestNote {
+    id: Option::NONE,
+    title: String::create(title),
+    pinned: pinned,
+    rank: rank,
+    body: body,
+  };
+}
+
+/// Asserts that `note` holds exactly the given fields.
+function ormTestAssertNote(
+  note: &OrmTestNote,
+  id: i64,
+  title: str,
+  pinned: boolean,
+  rank: i32,
+  body: Option<str>
+): void {
+  Test::assertEq<i64>(note.id.unwrap(), id);
+  Test::assertEq<String>(note.title.clone(), String::create(title));
+  Test::assert(note.pinned == pinned);
+  Test::assertEq<i32>(note.rank, rank);
+
+  match (body) {
+    Option::SOME(text) -> {
+      match (note.body.asRef()) {
+        Option::SOME(stored) -> {
+          Test::assertEq<String>(stored.clone(), String::create(text));
+        },
+        Option::NONE -> {
+          Test::fail();
+        },
+      };
+    },
+    Option::NONE -> {
+      Test::assert(note.body.isNone());
+    },
+  };
+}
+
+/// The stored note with key `id` as `heading|pinned|rank|body`, NULL as `NULL`.
+function ormTestStoredNote(connection: &mut Sqlite3::Connection, id: i64): String {
+  let mut statement: Sqlite3::Statement = connection.prepare(
+    "SELECT heading || '|' || pinned || '|' || rank || '|' || COALESCE(body, 'NULL') FROM notes WHERE id = ?",
+  ).unwrap();
+  ormTestOk(statement.bindInt(1, id));
+  let Result::OK(Sqlite3::Step::ROW) = statement.step() else {
+    return String::create("<missing>");
+  };
+
+  return statement.columnText(0);
+}
+
+@test
+function ormDerivedTableComesFromTheAttributes(): void {
+  let notes: Orm::Schema = OrmTestNote::table();
+
+  Test::assertEq<String>(
+    ormTestSql(notes.createTableSql()),
+    String::create(
+      "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, heading TEXT NOT NULL, pinned INTEGER NOT NULL, rank INTEGER NOT NULL, body TEXT)",
+    ),
+  );
+  Test::assertEq<String>(
+    ormTestSql(notes.insertSql()),
+    String::create("INSERT INTO notes (heading, pinned, rank, body) VALUES (?, ?, ?, ?)"),
+  );
+  Test::assertEq<String>(
+    ormTestSql(notes.updateByIdSql()),
+    String::create("UPDATE notes SET heading = ?, pinned = ?, rank = ?, body = ? WHERE id = ?"),
+  );
+
+  Test::assertEq<String>(
+    ormTestSql(OrmTestLabel::table().createTableSql()),
+    String::create(
+      "CREATE TABLE labels (code INTEGER PRIMARY KEY NOT NULL, weight REAL NOT NULL, icon BLOB NOT NULL, level INTEGER NOT NULL)",
+    ),
+  );
+}
+
+@test
+function ormDerivedEntityRoundTripsThroughTheRepository(): void {
+  let mut connection: Sqlite3::Connection = ormTestNotesConnection();
+  let notes: Orm::Repository<OrmTestNote> = Orm::Repository::create<OrmTestNote>().unwrap();
+
+  let first: OrmTestNote = ormTestNewNote("plan", true, -3, Option::SOME(String::create("draft")));
+  let second: OrmTestNote = ormTestNewNote("ship", false, 7, Option::NONE);
+
+  Test::assert(first.id().isNone());
+  Test::assertEq<i64>(notes.insert(&mut connection, &first).unwrap(), 1);
+  Test::assertEq<i64>(notes.insert(&mut connection, &second).unwrap(), 2);
+  Test::assertEq<String>(ormTestStoredNote(&mut connection, 1), String::create("plan|1|-3|draft"));
+  Test::assertEq<String>(ormTestStoredNote(&mut connection, 2), String::create("ship|0|7|NULL"));
+
+  let found: OrmTestNote = notes.findById(&mut connection, 1).unwrap();
+  ormTestAssertNote(&found, 1, "plan", true, -3, Option::SOME("draft"));
+  Test::assertEq<i64>(found.id().unwrap(), 1);
+  let unpinned: OrmTestNote = notes.findById(&mut connection, 2).unwrap();
+  ormTestAssertNote(&unpinned, 2, "ship", false, 7, Option::NONE);
+
+  let all: Vector<OrmTestNote> = notes.all(&mut connection).unwrap();
+  Test::assertEq<u64>(all.length(), 2);
+  ormTestAssertNote(all.get(0).unwrap(), 1, "plan", true, -3, Option::SOME("draft"));
+  ormTestAssertNote(all.get(1).unwrap(), 2, "ship", false, 7, Option::NONE);
+
+  let mut changed: OrmTestNote = notes.findById(&mut connection, 2).unwrap();
+  changed.title = String::create("shipped");
+  changed.pinned = true;
+  changed.rank = 2147483647;
+  changed.body = Option::SOME(String::create("done"));
+  Test::assert(notes.update(&mut connection, &changed).isOk());
+  Test::assertEq<String>(ormTestStoredNote(&mut connection, 2), String::create("shipped|1|2147483647|done"));
+  Test::assertEq<String>(ormTestStoredNote(&mut connection, 1), String::create("plan|1|-3|draft"));
+  let updated: OrmTestNote = notes.findById(&mut connection, 2).unwrap();
+  ormTestAssertNote(&updated, 2, "shipped", true, 2147483647, Option::SOME("done"));
+
+  let mut pinned: Vector<Orm::Value> = Vector::new<Orm::Value>();
+  pinned.push(Orm::Value::INT(1));
+  pinned.push(Orm::Value::TEXT(String::create("plan")));
+  let matched: Vector<OrmTestNote> = notes.findWhere(&mut connection, "pinned = ? AND heading = ?", &pinned).unwrap();
+  Test::assertEq<u64>(matched.length(), 1);
+  ormTestAssertNote(matched.get(0).unwrap(), 1, "plan", true, -3, Option::SOME("draft"));
+
+  Test::assert(notes.deleteById(&mut connection, 1).isOk());
+  Test::assert(ormTestKindOf<OrmTestNote>(notes.findById(&mut connection, 1)) == Orm::ErrorKind::NOT_FOUND);
+  Test::assertEq<i64>(ormTestCount(&mut connection, "SELECT COUNT(*) FROM notes"), 1);
+  Test::assertEq<String>(ormTestStoredNote(&mut connection, 2), String::create("shipped|1|2147483647|done"));
+}
+
+@test
+function ormDerivedNarrowIntegerOutOfRangeIsDecode(): void {
+  let mut connection: Sqlite3::Connection = ormTestNotesConnection();
+  let notes: Orm::Repository<OrmTestNote> = Orm::Repository::create<OrmTestNote>().unwrap();
+
+  ormTestOk(connection.exec("INSERT INTO notes (heading, pinned, rank) VALUES ('wide', 0, 2147483648)"));
+  ormTestOk(connection.exec("INSERT INTO notes (heading, pinned, rank) VALUES ('low', 0, -2147483648)"));
+
+  Test::assert(ormTestKindOf<OrmTestNote>(notes.findById(&mut connection, 1)) == Orm::ErrorKind::DECODE);
+  let lowest: OrmTestNote = notes.findById(&mut connection, 2).unwrap();
+  ormTestAssertNote(&lowest, 2, "low", false, -2147483648, Option::NONE);
+  Test::assert(ormTestKindOf<Vector<OrmTestNote>>(notes.all(&mut connection)) == Orm::ErrorKind::DECODE);
+}
+
+@test
+function ormDerivedEntityWithoutTableAttributeIsSchema(): void {
+  match (Orm::Repository::create<OrmTestUntitled>()) {
+    Result::OK(_) -> {
+      Test::fail();
+    },
+    Result::ERROR(error) -> {
+      Test::assert(error.kind == Orm::ErrorKind::SCHEMA);
+      Test::assertEq<String>(
+        error.message,
+        String::create("std::orm: the table has no name; add @Orm::Table(\"name\") to the record"),
+      );
+    },
+  };
+}
+
+@test
+function ormDerivedEntityBindsAKeyThatIsNotAutoIncrement(): void {
+  let mut connection: Sqlite3::Connection = ormTestConnection();
+  let labels: Orm::Repository<OrmTestLabel> = Orm::Repository::create<OrmTestLabel>().unwrap();
+
+  Test::assertEq<String>(
+    ormTestSql(OrmTestLabel::table().insertSql()),
+    String::create("INSERT INTO labels (weight, icon, level, code) VALUES (?, ?, ?, ?)"),
+  );
+  ormTestOk(connection.exec(ormTestSql(OrmTestLabel::table().createTableSql()).toStr()));
+
+  let mut icon: Vector<u8> = Vector::new<u8>();
+  icon.push(7);
+  icon.push(255);
+
+  let label: OrmTestLabel = OrmTestLabel { code: 40, weight: 1.5, icon: icon, level: 200 };
+
+  Test::assertEq<i64>(label.id().unwrap(), 40);
+  Test::assertEq<i64>(labels.insert(&mut connection, &label).unwrap(), 40);
+  Test::assertEq<i64>(
+    ormTestCount(
+      &mut connection,
+      "SELECT COUNT(*) FROM labels WHERE code = 40 AND weight = 1.5 AND icon = x'07ff' AND level = 200",
+    ),
+    1,
+  );
+
+  let stored: OrmTestLabel = labels.findById(&mut connection, 40).unwrap();
+
+  Test::assertEq<i64>(stored.code, 40);
+  Test::assert(stored.weight == 1.5);
+  Test::assertEq<u64>(stored.icon.length(), 2);
+  Test::assertEq<u8>(*stored.icon.get(0).unwrap(), 7);
+  Test::assertEq<u8>(*stored.icon.get(1).unwrap(), 255);
+  Test::assertEq<u8>(stored.level, 200);
+
+  ormTestOk(connection.exec("UPDATE labels SET level = 256 WHERE code = 40"));
+  Test::assert(ormTestKindOf<OrmTestLabel>(labels.findById(&mut connection, 40)) == Orm::ErrorKind::DECODE);
 }
