@@ -26,6 +26,12 @@ export namespace ParserExpressions {
     public span: SourceSpan;
   }
 
+  record ComptimeForHeader {
+    public pattern: Ast::PatternId;
+    public iterable: Ast::ExpressionId;
+    public end: SourceSpan;
+  }
+
   record ParsedCondition {
     public id: Ast::ExpressionId;
     public span: SourceSpan;
@@ -729,7 +735,16 @@ export namespace ParserExpressions {
     parserRef.skipTrivia();
     let token: Token = parserRef.current();
 
-    if (token.kindValue() != TokenKind::IDENTIFIER && !(token.kindValue() == TokenKind::KEYWORD && (token.keywordValue() == Keyword::SELF_ || token.keywordValue() == Keyword::THIS))) {
+    // `i64::read(raw)` names a static method an extension block declares on
+    // the primitive, so a primitive type name starts a path when `::` follows.
+    let mut primitiveOwner: boolean = false;
+
+    if (ParserTypes::isPrimitiveTypeKeyword(&token)) {
+      let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+      primitiveOwner = next.kindValue() == TokenKind::PUNCTUATION && next.punctuationValue() == Punctuation::DOUBLE_COLON;
+    }
+
+    if (!primitiveOwner && token.kindValue() != TokenKind::IDENTIFIER && !(token.kindValue() == TokenKind::KEYWORD && (token.keywordValue() == Keyword::SELF_ || token.keywordValue() == Keyword::THIS))) {
       return Option::NONE;
     }
 
@@ -1865,6 +1880,7 @@ export namespace ParserExpressions {
       copied.push(Ast::Expression::RecordInitField {
         name: value.name.clone(),
         value: value.value,
+        loop: Ast::Expression::copyRecordInitLoop(&value.loop),
       });
       index += 1;
     }
@@ -2982,6 +2998,70 @@ export namespace ParserExpressions {
     });
   }
 
+  /// The `for (binding of iterable)` that follows `comptime`, in a statement
+  /// or a record initializer entry. The binding takes no `let`: it names a
+  /// compile-time field descriptor, not a variable.
+  function parseComptimeForHeader(parser: &mut ParserShared::State): Option<ComptimeForHeader> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(_) = parserRef.expectKeyword(Keyword::FOR, "expected 'for' after 'comptime'") else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'comptime for'") else {
+      return Option::NONE;
+    };
+    let nameToken = parserRef.expectIdentifier("expected field descriptor name")!;
+    let pattern: Ast::PatternId = parserRef.module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+      span: nameToken.span,
+      name: nameToken.lexemeString(),
+      annotation: Option::NONE,
+      initializer: Option::NONE,
+      metadata: Ast::emptyMetadata(),
+    }));
+    let Option::SOME(_) = parserRef.expectKeyword(Keyword::OF, "expected 'of' in comptime for") else {
+      return Option::NONE;
+    };
+    let iterableResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+    let iterable = iterableResult!;
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after comptime for iterable")!;
+
+    return Option::SOME(ComptimeForHeader { pattern: pattern, iterable: iterable.id, end: closeParen.span });
+  }
+
+  /// `comptime for (field of @fields<Self>()) @field(field): value`, one
+  /// record initializer entry that unrolls into one entry per field.
+  function parseRecordInitLoop(
+    parser: &mut ParserShared::State
+  ): Option<Ast::Expression::RecordInitField> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let keyword = parserRef.expectKeyword(Keyword::COMPTIME, "expected 'comptime'")!;
+    let header = ParserExpressions::parseComptimeForHeader(parserRef)!;
+
+    if (!parserRef.atPunctuation(Punctuation::AT)) {
+      let token: Token = parserRef.current();
+      parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_IDENTIFIER, "Expected '@field(...)'", "a comptime for entry names its field with '@field(<descriptor>)'");
+      return Option::NONE;
+    }
+
+    let nameResult: Option<ParsedExpression> = ParserExpressions::parseBuiltinCallExpression(parserRef);
+    let name = nameResult!;
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after '@field(...)'") else {
+      return Option::NONE;
+    };
+    let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+    let value = valueResult!;
+
+    return Option::SOME(Ast::Expression::RecordInitField {
+      name: String::new(),
+      value: value.id,
+      loop: Option::SOME(Ast::Expression::RecordInitLoop {
+        span: ParserShared::mergeSpans(keyword.span, value.span),
+        pattern: header.pattern,
+        iterable: header.iterable,
+        name: name.id,
+      }),
+    });
+  }
+
   function parseRecordInit(
     parser: &mut ParserShared::State,
     path: Ast::ExpressionId,
@@ -3000,6 +3080,21 @@ export namespace ParserExpressions {
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
       while (true) {
+        if (parserRef.atKeyword(Keyword::COMPTIME)) {
+          let loopField = ParserExpressions::parseRecordInitLoop(parserRef)!;
+          fields.push(loopField);
+
+          if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+            if (parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
+              break;
+            }
+
+            continue;
+          }
+
+          break;
+        }
+
         let nameToken = parserRef.expectIdentifier("expected record field name")!;
         let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after record field name") else {
           return Option::NONE;
@@ -3010,6 +3105,7 @@ export namespace ParserExpressions {
         fields.push(Ast::Expression::RecordInitField {
           name: nameToken.lexemeString(),
           value: value.id,
+          loop: Option::NONE,
         });
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {

@@ -133,8 +133,10 @@ Rules:
 - Trait methods use the same style as record/enum methods: `name(...)` (no `function` required).
 - A method ending with `;` is required (no body).
 - A method with `{ ... }` is a default method.
-- Trait methods must be instance methods (`&self` or `&mut self`).
-- Static methods are not allowed in traits.
+- An instance method takes `&self` or `&mut self` (A0144 otherwise).
+- A method marked `static` takes no receiver and belongs to the implementing type. It can be
+  required (`static name(...): R;`) or have a default body. `Self` in its parameter and return
+  types stands for the implementing type.
 - Fields are not allowed in traits.
 - Traits are allowed at top level and inside `namespace` blocks.
 - Traits are not allowed inside `extern` blocks.
@@ -168,6 +170,18 @@ found by its bare name, even when it is the only trait of that name. A name that
 trait, or to a declaration that is not a trait, is an error (A0142). The language traits are the
 exception: the lang traits (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) and `Eq` and `Hash` need no
 declaration in scope and are recognized by name.
+
+A static trait method is declared with `static`:
+
+```ignis
+trait Make {
+    static make(seed: i32): Self;
+
+    static label(): i32 {
+        return 0;
+    }
+}
+```
 
 ### Default Methods
 
@@ -204,16 +218,23 @@ still at the trait's line, with a note that names the trait, the method and the 
 
 ### Signature Validation
 
-When a record method implements a trait method, the signature must match exactly:
+When a record or enum names a trait in `@implements`, the compiler checks each trait method:
 
-- `&self` vs `&mut self`
-- Number of explicit parameters
-- Parameter types
-- Return type
+- A required method has to be declared on the type. If it is missing, compilation fails (A0140),
+  whether the trait is named bare or by its path. A method with a default body in the trait is not
+  required: the type inherits the default, static defaults included.
+- The method has to be declared with the same kind: a static trait method by a `static` method, an
+  instance trait method by a method with a `self` parameter (A0276 otherwise).
+- A static method has to match the trait's signature: the same number of parameters, the same
+  parameter types and the same return type, with `Self` in the trait's signature read as the
+  implementing type (A0277). For a generic trait the static signature is not compared.
 
-If a required trait method is missing, compilation fails (A0140), whether the trait is named bare or
-by its path. A method with a default body in the trait is not required. Each named trait is checked
-on its own, so a complete `A::Named` does not excuse a missing method of `B::Named`.
+Instance method signatures are not compared yet: an instance method that implements a trait method
+only has to have the same name and take a `self` parameter. A different parameter list or return
+type is not reported at the declaration.
+
+Each named trait is checked on its own, so a complete `A::Named` does not excuse a missing method
+of `B::Named`.
 
 ### `Send` and `Sync`
 
@@ -326,9 +347,28 @@ a function, a method, a record or an enum:
   unresolved bound is an error (A0142), whether or not the generic is used.
 - A type parameter answers the methods of every trait it is bounded by, including their default
   methods. A method declared by more than one of its bounds is ambiguous (A0262).
+- `T::name(args)` calls a static method that a bound of `T` declares. `Self` in that method's
+  signature reads as `T`, so a trait method returning `Result<Self, Error>` returns
+  `Result<T, Error>` at the call. After monomorphization the call goes to the static method of the
+  type `T` stands for, or to the trait's default when the type does not declare it. Only the bounds
+  of `T` are searched: a static method of the same name on an unrelated record is never picked,
+  and a name no bound declares as static is an error (A0278).
+- Inside a trait's default body, static or instance, `Self::name(args)` calls the trait's static
+  method `name` on the implementing type, the way `T::name(args)` does on a bounded type
+  parameter: an implementer that inherits the default reaches its own `name`, or the trait's
+  default for `name` when it declares none. Inside a record or enum, `Self::name` means what the
+  owner's own name does; outside a record, enum or trait it is an error (A0280).
+- A static trait method is not callable through a value (`value.make()`), neither on a type
+  parameter nor on the implementing type, and `Trait::make()` names no implementing type, so it is
+  an error (A0279).
 - A type parameter satisfies a bound only when it declares the same bound itself.
 - `Eq` and `Hash` are satisfied by the integer primitives, `boolean`, `char` and `str`, and `Copy`
   by every Copy type, since primitives have no declaration to write `@implements` on.
+- Any other trait is satisfied by a primitive, `str` or a type declared elsewhere through an
+  extension block that implements it (see [Implementing a Trait for an Existing
+  Type](#implementing-a-trait-for-an-existing-type)). A generic block satisfies the bound only for
+  type arguments that satisfy its own bounds: `extension<T: Describe> Option<T>` makes
+  `Option<i64>` a `Describe` when `i64` is one, and leaves `Option<boolean>` without it.
 - `Send` and `Sync` are judged from the type's structure, or taken from an `@implements(Send)` /
   `@implements(Sync)` declaration. A closure bound to a `Send` or `Sync` parameter is judged by
   what it captures (A0252); any other function value is rejected (A0253).
@@ -340,6 +380,81 @@ module. Declared types are checked too, even
 when no expression has them: record and static field types, enum payload types, and the parameter
 and return types of every function and method, called or not. A generic record or enum's own
 type parameter used there satisfies a bound only when it declares the bound itself.
+
+Overload resolution takes bounds into account. A generic overload whose inferred type arguments
+miss a bound is set aside before the overloads are ranked, so the call picks another overload
+instead of reporting the bound or a tie. Only when every matching overload misses a bound is the
+lowest-cost one selected, and the call reports the bound it misses (A0247). See the language
+reference, section 4.1, for how overloads are ranked.
+
+### Implementing a Trait for an Existing Type
+
+A type that cannot carry `@implements` itself, a primitive, `str`, or a record or enum declared
+elsewhere such as the standard library's `String` or `Option`, implements a trait through an
+extension block:
+
+```ignis
+trait Describe {
+  describe(&self): i64;
+
+  static read(raw: i64): Self;
+
+  twice(&self): i64 {
+    return self.describe() * 2;
+  }
+}
+
+@implements(Describe)
+extension i64 {
+  describe(&self): i64 {
+    return *self;
+  }
+
+  static read(raw: i64): i64 {
+    return raw + 1;
+  }
+}
+
+@implements(Describe)
+extension<T: Describe> Option<T> {
+  describe(&self): i64 {
+    return match (self) {
+      Option::SOME(inner) -> inner.describe(),
+      Option::NONE -> -1,
+    };
+  }
+
+  static read(raw: i64): Option<T> {
+    return Option::SOME(T::read(raw));
+  }
+}
+```
+
+Rules:
+
+- The block declares methods only, following record-method rules: an instance method takes
+  `&self` or `&mut self`, a static one is marked `static`. `Self` is the extended type.
+- The methods are checked against the trait like a record's (A0140, A0276, A0277), and the
+  trait's defaults are inherited, from another module too.
+- They are called on the type itself, `value.describe()` and `(5 as i64).describe()`, and a
+  static one by the type's path, `i64::read(3)`. A method the type declares itself wins over one
+  of the same name in a block, and an `@extension(T)` function wins over a block too.
+- The type satisfies the trait as a bound, and `T::read` with `T = i64` reaches the block's static
+  method after monomorphization.
+- A generic block extends an instance over exactly its own type parameters, in order. It applies
+  only where the type arguments satisfy its bounds; elsewhere the method is not found (A0054) and
+  the bound is not met (A0247).
+- `extension` is a contextual keyword: an identifier named `extension` keeps working.
+
+| Code | Condition |
+|------|-----------|
+| A0285 | The block names no trait in `@implements` |
+| A0286 | The block is declared outside the module of the trait and of the type; a primitive is extended only in the trait's module |
+| A0287 | The type implements the trait twice: two blocks, or a block and the type's own `@implements`. Both spans are named |
+| A0288 | The block names a lang trait (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) or the canonical `Eq` or `Hash`, which the compiler answers from the type itself |
+| A0289 | The target is not a primitive, `str`, a record or an enum, or a generic instance not over the block's own parameters |
+
+Per-function `@extension(type)` (below) is unchanged.
 
 ### Current Limit
 
@@ -614,6 +729,117 @@ record or enum it reports, which overrides the module level for that declaration
 |-----------|-------------|
 | `@aligned(N)` | Set minimum alignment for this field |
 
+### Declarable Attributes
+
+A program declares its own attributes as records marked `@attribute(<targets>)`. A declarable
+attribute is written with a capitalized name and resolves like a type name: through the enclosing
+namespaces, the module's own declarations and its imports, or by a qualified path.
+
+```ignis
+@attribute(record)
+export record Table {
+  public name: str;
+}
+
+export namespace Orm {
+  @attribute(field)
+  export record PrimaryKey {}
+}
+```
+
+```ignis
+import Table, Orm from "./orm";
+
+@Table("tasks")
+record Task {
+  @Orm::PrimaryKey
+  public id: i64;
+}
+```
+
+| Rule | Detail |
+|------|--------|
+| Targets | One or more of `record`, `enum`, `field`, `function` (a method counts) and `variant`. |
+| Arguments | One per field of the record, in declaration order. A record with no fields is written without parentheses. |
+| Argument values | Compile-time constants: literals, constants, negation and what constant evaluation folds. Each must fit its field: an integer in the field type's range, a float in `f32`/`f64`, a string in `str`, plus `boolean` and `char`. |
+| Ordinary use | An attribute record is an ordinary record: it can be constructed and passed like any other. |
+| Built-ins | Lowercase attributes (`@packed`, `@implements(...)`, ...) keep their meaning and are not records. |
+
+| Code | Message | Severity |
+|------|---------|----------|
+| A0117 | Unknown attribute; for a declarable one in another module, the message names the import to add | Error |
+| A0118 | Wrong number of attribute arguments | Error |
+| A0281 | Declarable attribute used on a target its `@attribute(...)` does not list | Error |
+| A0282 | Capitalized attribute names something other than a record marked `@attribute` | Error |
+| A0283 | Attribute argument does not fit its field | Error |
+| A0284 | Attribute argument is not a compile-time constant | Error |
+| A0290 | `@attribute` without targets, or naming an unknown target | Error |
+
+## Field Reflection: `comptime for`
+
+A method whose `Self` is a concrete record walks that record's fields with a compile-time loop.
+The loop is unrolled before name resolution: one copy of its body per instance field, in declaration
+order, so each copy is analyzed with the field's concrete type. A trait default that uses it unrolls
+on each implementing record its copy lands on, hand-written record methods and methods of an
+`extension` block whose target is a record of the same module unroll over that record.
+
+```ignis
+trait Describe {
+  describe(&self): String {
+    let mut text: String = String::new();
+
+    comptime for (field of @fields<Self>()) {
+      if (field.index > 0) {
+        text.pushStr(", ");
+      }
+
+      text.pushStr(field.name);
+      text.pushStr(": ");
+      let shown: String = show(@field(self, field));
+      text.push(&shown);
+    }
+
+    return text;
+  }
+}
+```
+
+Inside the body, `field` is a descriptor, not a value:
+
+| Form | Meaning |
+|------|---------|
+| `field.name` | The field's name, a `str` literal |
+| `field.index` | Its position, an `i32` literal starting at 0 |
+| `@field(value, field)` | `value.<name>`: a place, readable, assignable and borrowable |
+| `@fieldType(field)` | The field's written type, valid wherever a type is |
+| `@attribute<A>(field)` | `Option<A>`: the constant values of declarable attribute `A` on the field, or `NONE` |
+| `@attribute<A>(Self)` | The same for the record itself |
+
+A record initializer builds `Self` field by field with one `comptime for` entry, which unrolls into
+one `<name>: <value>` entry per field:
+
+```ignis
+trait Seeded {
+  static seeded(seed: i32): Self {
+    return Self {
+      comptime for (field of @fields<Self>()) @field(field): (seed + field.index) as @fieldType(field),
+    };
+  }
+}
+```
+
+Per-field-type behavior comes from overloads: each copy calls the overload for its field's type, and
+a field type with no matching overload is reported at its place in the loop body with a note naming
+the field. In the trait's own body `Self` has no known fields, so the loop unrolls over none there.
+
+| Code | Message | Severity |
+|------|---------|----------|
+| A0292 | `break` or `continue` that would cross a `comptime for` | Error |
+| A0293 | `@fields<T>()` over something other than a record `Self`: a type parameter, an enum, another type | Error |
+| A0294 | `comptime for` outside a method | Error |
+| A0295 | `@field`, `@fieldType`, `@attribute<A>(field)` or `@fields` outside the loop that declares the descriptor | Error |
+| A0296 | Unknown descriptor member, or the descriptor used as a value | Error |
+
 ## Diagnostics
 
 | Code | Message | Severity |
@@ -630,12 +856,10 @@ record or enum it reports, which overrides the module level for that declaration
 | A0138 | Cannot call extension method on literal | Error |
 | A0139 | Cannot call extension method on temporary | Error |
 | A0140 | Record or enum names a trait in `@implements` but does not declare one of its required methods | Error |
-| A0141 | Method signature does not match trait definition | Error |
 | A0142 | Unknown trait in `@implements(...)` or a generic bound | Error |
 | A0143 | Traits cannot be declared in `extern` blocks | Error |
-| A0144 | Trait method must have `&self` or `&mut self` | Error |
+| A0144 | Trait instance method must have `&self` or `&mut self` | Error |
 | A0145 | Fields are not allowed in trait declarations | Error |
-| A0146 | Static methods are not allowed in trait declarations | Error |
 | A0148 | Type declares `@implements(Copy)` but a record field is non-Copy | Error |
 | A0149 | Type declares `@implements(Copy)` but an enum payload is non-Copy | Error |
 | A0247 | Type argument does not satisfy a bound of its type parameter | Error |
@@ -644,3 +868,18 @@ record or enum it reports, which overrides the module level for that declaration
 | A0254 | `@implements(Send)` / `@implements(Sync)` on a type whose structure does not support it (`thread_safety` lint) | Warning |
 | A0255 | `@sendable` on a parameter that is not of function type | Error |
 | A0262 | Method called on a type parameter is declared by more than one of its bounds | Error |
+| A0276 | Trait method implemented with the other kind (static for instance, or instance for static) | Error |
+| A0277 | Static method does not match the static trait method's signature, `Self` read as the implementing type | Error |
+| A0278 | `T::name(args)` where no bound of `T` declares a static method `name` | Error |
+| A0279 | `Trait::name(args)` calls a static trait method without an implementing type | Error |
+| A0280 | `Self::name` written outside a record, enum or trait | Error |
+| A0285 | `extension` block without a trait in `@implements` | Error |
+| A0286 | `extension` block outside the module of its trait and of its type | Error |
+| A0287 | A type implements the same trait twice | Error |
+| A0288 | `extension` block implementing a lang trait or canonical `Eq`/`Hash` | Error |
+| A0289 | Invalid `extension` target type | Error |
+| A0292 | `break` or `continue` crossing a `comptime for` | Error |
+| A0293 | `@fields` over a type that is not the record `Self` | Error |
+| A0294 | `comptime for` outside a method | Error |
+| A0295 | Field descriptor builtin outside its `comptime for` | Error |
+| A0296 | Unknown descriptor member or descriptor used as a value | Error |

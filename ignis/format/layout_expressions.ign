@@ -536,6 +536,31 @@ export namespace Format {
         result.pushStr(")");
       }
 
+      // No declarable attribute applies to a parameter, so its arguments are
+      // kept as written rather than laid out.
+      if (attribute.expressions.length() > 0) {
+        result.pushStr("(");
+        let mut expressionIndex: u64 = 0;
+
+        while (expressionIndex < attribute.expressions.length()) {
+          if (expressionIndex > 0) {
+            result.pushStr(", ");
+          }
+
+          if (let Option::SOME(expressionId) = attribute.expressions.get(expressionIndex)) {
+            if (let Option::SOME(expression) = module.expressions.get(*expressionId)) {
+              let span: SourceSpan = Ast::Serializer::expressionSpan(expression);
+              let text: String = Format::sliceSpanText(source, &span).trimAsciiWhitespace();
+              result.push(&text);
+            }
+          }
+
+          expressionIndex += 1;
+        }
+
+        result.pushStr(")");
+      }
+
       result.pushStr(" ");
       attributeIndex += 1;
     }

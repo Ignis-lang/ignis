@@ -1,0 +1,81 @@
+// e2e: std
+// Static record fields passed straight to calls: a byte array's address cast
+// to a pointer, scalars, and an `Option` of a record built from them.
+import Io from "std::io";
+
+record Size {
+  public columns: u16;
+  public rows: u16;
+}
+
+record State {
+  static mut VISIBLE: boolean;
+  static mut FRAME: u64;
+  static mut TEXT: u8[8];
+  static mut TEXT_LENGTH: u64;
+}
+
+record Frame {
+  public spinner: u64;
+  public text: String;
+  public elapsed: u64;
+}
+
+function size(wide: boolean): Option<Size> {
+  if (wide) {
+    return Option::SOME(Size { columns: 120, rows: 40 });
+  }
+
+  return Option::NONE;
+}
+
+function render(frame: &Frame, columns: u64, color: boolean): String {
+  let mut line: String = String::create("[");
+  line.push(&frame.text);
+  let close: String = String::create("]");
+  line.push(&close);
+
+  if (color) {
+    return line;
+  }
+
+  return `${frame.spinner} ${columns} ${frame.elapsed}`;
+}
+
+function draw(force: boolean): void {
+  if (!force && State::VISIBLE) {
+    return;
+  }
+
+  State::FRAME += 1;
+
+  let columns: u64 = match (size(force)) {
+    Option::SOME(size) -> size.columns as u64,
+    Option::NONE -> 80,
+  };
+  let frame: Frame = Frame {
+    spinner: State::FRAME,
+    text: String::create((&mut State::TEXT) as *mut u8, State::TEXT_LENGTH),
+    elapsed: State::TEXT_LENGTH * 10,
+  };
+
+  let mut line: String = String::create(">");
+  let rendered: String = render(&frame, columns, true);
+  let plain: String = render(&frame, columns, false);
+  line.push(&rendered);
+
+  Io::println(line);
+  Io::println(plain);
+  State::VISIBLE = true;
+}
+
+function main(): i32 {
+  State::TEXT[0] = 104;
+  State::TEXT[1] = 105;
+  State::TEXT_LENGTH = 2;
+  draw(false);
+  draw(false);
+  draw(true);
+
+  return 0;
+}

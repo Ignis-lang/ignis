@@ -1,0 +1,32 @@
+// e2e: std
+// An extension block whose target is a record of this module walks the
+// record's fields: `Self` is the extended record.
+import Io from "std::io";
+
+trait Weighted {
+  total(&self): i32;
+}
+
+record Size {
+  public width: i32;
+  public height: i32;
+}
+
+@implements(Weighted)
+extension Size {
+  total(&self): i32 {
+    let mut sum: i32 = 0;
+
+    comptime for (field of @fields<Self>()) {
+      sum += @field(self, field) * (field.index + 1);
+    }
+
+    return sum;
+  }
+}
+
+function main(): i32 {
+  let size: Size = Size { width: 5, height: 7 };
+  Io::println(`${size.total()}`.toStr());
+  return 0;
+}

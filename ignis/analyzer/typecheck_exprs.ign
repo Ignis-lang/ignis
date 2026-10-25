@@ -1,4 +1,4 @@
-import SourceSpan, DiagnosticCode from "@compiler::diagnostics";
+import SourceSpan, DiagnosticBag, DiagnosticCode from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
 
@@ -1019,6 +1019,30 @@ export namespace Analyzer {
             return Option::NONE;
           };
 
+          // `Self` inside a generic owner is the owner with its own parameters:
+          // `Self::make(x)` in `Wrap<U>` calls `Wrap::make<U>(x)`.
+          if (call.typeArguments.length() == 0 && Analyzer::Typecheck::isSelfOwnedPath(module, call.callee)) {
+            if (Analyzer::Typecheck::calleeTypeParamSymbols(defStore, staticDefId).length() == 0) {
+              let ownerSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, staticDefId);
+
+              if (ownerSymbols.length() > 0) {
+                let mut ownerParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+                let mut ownerIndex: u64 = 0;
+
+                while (ownerIndex < ownerSymbols.length()) {
+                  if (let Option::SOME(ownerSymbol) = ownerSymbols.get(ownerIndex)) {
+                    let mut typeStoreOwnerRef: &mut Analyzer::TypeStore = typeStore;
+                    ownerParams.push(typeStoreOwnerRef.param(*ownerSymbol));
+                  }
+
+                  ownerIndex += 1;
+                }
+
+                Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &ownerParams);
+              }
+            }
+          }
+
           if (call.typeArguments.length() > 0) {
             let staticParamTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(
               defStore,
@@ -1072,6 +1096,31 @@ export namespace Analyzer {
             call,
             &staticSignature,
             0,
+          );
+        }
+      }
+
+      // Branch 2a: `T::name(args)` on a type parameter calls a static method
+      // one of its bounds declares.
+      let paramResolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, call.callee);
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::TypeParam(paramSymbol)) = paramResolvedOpt) {
+        let mut isMemberPath: boolean = false;
+
+        if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(call.callee)) {
+          isMemberPath = path.segments.length() >= 2;
+        }
+
+        if (isMemberPath) {
+          return Analyzer::Typecheck::checkBoundStaticMethodCall(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            callExprId,
+            call,
+            paramSymbol,
           );
         }
       }
@@ -2084,6 +2133,154 @@ export namespace Analyzer {
       return Option::SOME(signature.returnType);
     }
 
+    /// Typechecks `T::name(args)` where `T` is a type parameter: `name` is a
+    /// static method of one of `T`'s bounds, and `Self` in its signature reads
+    /// as `T`. The trait's method is recorded as the call target; lowering keeps
+    /// `T` on the call so monomorphization reaches the implementing type's
+    /// method once `T` is concrete.
+    /// Whether `exprId` is a two-segment path whose owner segment is `Self`.
+    function isSelfOwnedPath(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      if (path.segments.length() != 2) {
+        return false;
+      }
+
+      let Option::SOME(owner) = path.segments.get(0) else {
+        return false;
+      };
+
+      return owner.equals("Self");
+    }
+
+    function checkBoundStaticMethodCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      paramSymbol: Analyzer::SymbolId,
+    ): Option<Analyzer::TypeId> {
+      let mut memberName: String = String::create("");
+
+      if (let Option::SOME(Ast::Expression::Node::Path(path)) = module.expressions.get(call.callee)) {
+        if (let Option::SOME(last) = path.segments.get(path.segments.length() - 1)) {
+          memberName = last.clone();
+        }
+      }
+
+      let paramName: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, paramSymbol);
+      let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+      let paramType: Analyzer::TypeId = typeStoreParamRef.param(paramSymbol);
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+      let boundTraits: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::traitBoundsFor(defStore, state.currentFunction, paramSymbol, selfSymbol);
+
+      let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (boundTraits.length() > 0) {
+        let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireMethodOwner(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          call.span,
+          paramType,
+          "static method call target must be a bounded type parameter",
+          "typecheck does not support generic method receivers",
+        );
+        let Option::SOME(owner) = ownerOpt else {
+          return Option::NONE;
+        };
+
+        let candidates: Vector<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(
+          defStore,
+          &owner.staticMethods,
+          memberName.toStr(),
+          symbols,
+        );
+
+        if (Analyzer::Typecheck::rejectMethodInSeveralBounds(state, defStore, symbols, &owner, &candidates, memberName.toStr(), call.span)) {
+          return Option::NONE;
+        }
+
+        staticMethods = candidates;
+        instanceMethods = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(
+          defStore,
+          &owner.instanceMethods,
+          memberName.toStr(),
+          symbols,
+        );
+      }
+
+      let Option::SOME(methodDefId) = staticMethods.get(0) else {
+        let message: String = `no bound of type parameter '${paramName.toStr()}' declares a static method '${memberName.toStr()}'`;
+        let mut label: String = `a static method reached through '${paramName.toStr()}' has to be declared by one of its bounds`;
+
+        if (instanceMethods.length() > 0) {
+          label = `'${memberName.toStr()}' is an instance method: call it through a value of type '${paramName.toStr()}'`;
+        }
+
+        Analyzer::Typecheck::emitDiagnosticLabeled(state, call.span, DiagnosticCode::BOUND_STATIC_METHOD_NOT_FOUND, message.toStr(), label.toStr());
+        return Option::NONE;
+      };
+      let traitMethodId: Analyzer::DefinitionId = *methodDefId;
+
+      if (call.typeArguments.length() > 0 || Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, traitMethodId).length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "generic static methods called through a type parameter");
+        return Option::NONE;
+      }
+
+      let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, traitMethodId) else {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through non-function definitions");
+        return Option::NONE;
+      };
+
+      let declaredParams: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, true);
+      let mut selfSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      selfSymbols.push(selfSymbol);
+      let mut selfArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      selfArguments.push(paramType);
+
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < declaredParams.length()) {
+        if (let Option::SOME(declared) = declaredParams.get(index)) {
+          let mut typeStoreSubstituteRef: &mut Analyzer::TypeStore = typeStore;
+          paramTypes.push(typeStoreSubstituteRef.substitute(*declared, &selfSymbols, &selfArguments));
+        }
+
+        index += 1;
+      }
+
+      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+      let returnType: Analyzer::TypeId = typeStoreReturnRef.substitute(signature.returnType, &selfSymbols, &selfArguments);
+      let calleeType: Analyzer::TypeId = typeStoreReturnRef.functionType(Analyzer::Typecheck::copyTypeIdVector(&paramTypes), returnType);
+
+      Analyzer::Typecheck::recordExprType(state, call.callee, calleeType);
+      Analyzer::Typecheck::recordCallTarget(state, callExprId, traitMethodId);
+
+      return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &paramTypes,
+        returnType,
+      );
+    }
+
     /// Typechecks `expr.method(args)` where `call.callee` is a `MemberAccess`
     /// with `Dot`. Resolves the receiver's owner via `requireMethodOwner`,
     /// looks the member up in `instanceMethods` (falling back to `staticMethods`
@@ -2129,13 +2326,33 @@ export namespace Analyzer {
       // of type `T`, including the primitives no record or enum owns. Owner
       // methods win: the lookup only runs when the receiver has no owner able
       // to carry the name.
-      if (let Option::SOME(extensionDefId) = Analyzer::Typecheck::lookupExtensionFunction(
+      let extensionFunctionOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::lookupExtensionFunction(
         defStore,
         typeStore,
         symbols,
         receiverType,
         ma.member.toStr(),
-      )) {
+      );
+
+      // An extension block implementing a trait for the receiver's type
+      // answers a name neither the type's own declaration nor an
+      // `@extension(T)` function does.
+      let mut extensionOwnerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Option::NONE;
+
+      if (extensionFunctionOpt.isNone()) {
+        extensionOwnerOpt = Analyzer::Typecheck::extensionMethodOwner(
+          defStore,
+          typeStore,
+          symbols,
+          state.currentFunction,
+          receiverType,
+          ma.member.toStr(),
+        );
+      }
+
+      let throughExtensionBlock: boolean = extensionOwnerOpt.isSome();
+
+      if (let Option::SOME(extensionDefId) = extensionFunctionOpt) {
         return Analyzer::Typecheck::checkExtensionMethodCall(
           state,
           defStore,
@@ -2152,22 +2369,27 @@ export namespace Analyzer {
         );
       }
 
-      if (Analyzer::Typecheck::sliceElementType(defStore, typeStore, receiverType).isSome()) {
+      if (!throughExtensionBlock && Analyzer::Typecheck::sliceElementType(defStore, typeStore, receiverType).isSome()) {
         let sliceName: String = typeStore.nameOfResolved(receiverType, &*defStore, &*symbols);
         Analyzer::Typecheck::emitFieldNotFound(state, ma.span, ma.member.toStr(), sliceName.toStr(), "a slice has only the methods length() and asPtr()");
         return Option::NONE;
       }
 
-      let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireMethodOwner(
-        state,
-        defStore,
-        typeStore,
-        symbols,
-        ma.span,
-        receiverType,
-        "method call target must be a non-generic record or enum",
-        "typecheck does not support generic method receivers",
-      );
+      let mut ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = extensionOwnerOpt;
+
+      if (!throughExtensionBlock) {
+        ownerOpt = Analyzer::Typecheck::requireMethodOwner(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          ma.span,
+          receiverType,
+          "method call target must be a non-generic record or enum",
+          "typecheck does not support generic method receivers",
+        );
+      }
+
       let Option::SOME(owner) = ownerOpt else {
         return Option::NONE;
       };
@@ -2209,10 +2431,12 @@ export namespace Analyzer {
       } else if (let Option::SOME(single) = candidateSet.get(0)) {
         instanceOpt = Option::SOME(*single);
 
-        // A method reached through a trait bound is not in the receiver type's
-        // own method table, so lowering cannot find it by name. Recording the
-        // target is the only way it reaches the HIR.
+        // A method reached through a trait bound or an extension block is not
+        // in the receiver type's own method table, so lowering cannot find it
+        // by name. Recording the target is the only way it reaches the HIR.
         if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(owner.defId)) {
+          Analyzer::Typecheck::recordCallTarget(state, callExprId, *single);
+        } else if (throughExtensionBlock) {
           Analyzer::Typecheck::recordCallTarget(state, callExprId, *single);
         }
       }
@@ -2808,20 +3032,28 @@ export namespace Analyzer {
     ///
     /// An exact parameter match is free, a value-satisfies match costs two, and a
     /// candidate that declares type parameters may instead bind them structurally
-    /// against the argument — a candidate that binds anything pays one flat unit,
-    /// so a concrete signature always outranks a generic one that would accept the
-    /// same call. `NONE` disqualifies the candidate. Written type arguments are not
+    /// against the argument. A candidate that binds anything pays more than two
+    /// units per argument, so a concrete signature outranks a generic one that
+    /// would accept the same call even when every argument only value-satisfies
+    /// it. `NONE` disqualifies the candidate. Written type arguments are not
     /// consulted here: unification reaches the same specialization from the
     /// arguments, and the selected callee resolves them again when it instantiates.
+    ///
+    /// `boundsHold` is set to whether the type arguments the candidate binds
+    /// satisfy its type parameters' bounds, judged by the check the call runs
+    /// once it is selected.
     function overloadCandidateMatchCost(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       candidateDefId: Analyzer::DefinitionId,
       paramTypes: &Vector<Analyzer::TypeId>,
       argTypes: &Vector<Analyzer::TypeId>,
+      boundsHold: &mut boolean,
     ): Option<u64> {
+      *boundsHold = true;
       let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, candidateDefId);
 
       let mut bindings: Vector<Option<Analyzer::TypeId>> = Vector::new<Option<Analyzer::TypeId>>();
@@ -2877,19 +3109,109 @@ export namespace Analyzer {
         index += 1;
       }
 
+      let typeParams: Vector<Analyzer::DefinitionId> = match (defStore.get(candidateDefId)) {
+        Option::SOME(Analyzer::Definition::Function(function_)) -> Analyzer::Typecheck::copyDefinitionIdVector(&function_.typeParams),
+        Option::SOME(Analyzer::Definition::Method(method)) -> Analyzer::Typecheck::copyDefinitionIdVector(&method.typeParams),
+        _ -> Vector::new<Analyzer::DefinitionId>(),
+      };
+      let mut boundParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut boundTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut boundIndex: u64 = 0;
 
       while (boundIndex < bindings.length()) {
-        if (let Option::SOME(binding) = bindings.get(boundIndex)) {
-          if (binding.isSome()) {
-            return Option::SOME(cost + 1);
+        if (let Option::SOME(Option::SOME(binding)) = bindings.get(boundIndex)) {
+          if (let Option::SOME(typeParam) = typeParams.get(boundIndex)) {
+            boundParams.push(*typeParam);
+            boundTypes.push(binding);
           }
         }
 
         boundIndex += 1;
       }
 
-      return Option::SOME(cost);
+      if (boundParams.length() == 0) {
+        return Option::SOME(cost);
+      }
+
+      // A parameter left unbound has no type argument to judge yet; the call
+      // reports what it cannot infer once the candidate is selected.
+      let mut boundDiagnostics: DiagnosticBag = DiagnosticBag::init();
+      Analyzer::TypeBounds::checkArguments(
+        defStore,
+        typeStore,
+        symbols,
+        state.currentFunction,
+        candidateDefId,
+        &boundParams,
+        &boundTypes,
+        true,
+        span,
+        &mut boundDiagnostics,
+      );
+      *boundsHold = boundDiagnostics.length() == 0;
+
+      return Option::SOME(cost + (2 * argTypes.length()) + 1);
+    }
+
+    /// Keeps `candidateDefId` among the lowest-cost candidates seen so far.
+    function rankOverloadCandidate(
+      best: &mut Vector<Analyzer::DefinitionId>,
+      bestCost: &mut u64,
+      candidateDefId: Analyzer::DefinitionId,
+      cost: u64,
+    ): void {
+      if (best.length() == 0 || cost < *bestCost) {
+        *best = Vector::new<Analyzer::DefinitionId>();
+        best.push(candidateDefId);
+        *bestCost = cost;
+      } else if (cost == *bestCost) {
+        best.push(candidateDefId);
+      }
+    }
+
+    /// The single overload among the lowest-cost candidates, preferring those
+    /// whose bounds hold. When every matching candidate fails its bounds, the
+    /// lowest-cost one is still selected so the call reports the bound it
+    /// fails. `NONE` once nothing matches or several tie, which is reported here.
+    function finishOverloadSelection(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      candidates: &Vector<Analyzer::DefinitionId>,
+      satisfied: &Vector<Analyzer::DefinitionId>,
+      unsatisfied: &Vector<Analyzer::DefinitionId>,
+      argTypes: &Vector<Analyzer::TypeId>,
+      span: SourceSpan,
+      memberName: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut bestDefIds: &Vector<Analyzer::DefinitionId> = unsatisfied;
+
+      if (satisfied.length() > 0) {
+        bestDefIds = satisfied;
+      }
+
+      if (bestDefIds.length() == 0) {
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
+        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
+        return Option::NONE;
+      }
+
+      if (bestDefIds.length() > 1) {
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, bestDefIds);
+        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
+        return Option::NONE;
+      }
+
+      let Option::SOME(winner) = bestDefIds.get(0) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*winner);
     }
 
     /// Pick one static method among same-name candidates by arity and
@@ -2952,8 +3274,10 @@ export namespace Analyzer {
       span: SourceSpan,
       memberName: str,
     ): Option<Analyzer::DefinitionId> {
-      let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-      let mut bestCost: u64 = 0;
+      let mut satisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut satisfiedCost: u64 = 0;
+      let mut unsatisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut unsatisfiedCost: u64 = 0;
       let mut candidateIndex: u64 = 0;
 
       while (candidateIndex < candidates.length()) {
@@ -2973,50 +3297,42 @@ export namespace Analyzer {
           continue;
         }
 
+        let mut boundsHold: boolean = true;
         let costOpt: Option<u64> = Analyzer::Typecheck::overloadCandidateMatchCost(
           state,
           defStore,
           typeStore,
+          symbols,
           span,
           *candidateDefId,
           &paramTypes,
           argTypes,
+          &mut boundsHold,
         );
 
         if (let Option::SOME(cost) = costOpt) {
-          if (bestDefIds.length() == 0 || cost < bestCost) {
-            bestDefIds = Vector::new<Analyzer::DefinitionId>();
-            bestDefIds.push(*candidateDefId);
-            bestCost = cost;
-          } else if (cost == bestCost) {
-            bestDefIds.push(*candidateDefId);
+          if (boundsHold) {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut satisfied, &mut satisfiedCost, *candidateDefId, cost);
+          } else {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut unsatisfied, &mut unsatisfiedCost, *candidateDefId, cost);
           }
         }
 
         candidateIndex += 1;
       }
 
-      if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
-        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
-        return Option::NONE;
-      }
-
-      if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
-        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
-        return Option::NONE;
-      }
-
-      let Option::SOME(winner) = bestDefIds.get(0) else {
-        return Option::NONE;
-      };
-
-      return Option::SOME(*winner);
+      return Analyzer::Typecheck::finishOverloadSelection(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        candidates,
+        &satisfied,
+        &unsatisfied,
+        argTypes,
+        span,
+        memberName,
+      );
     }
 
     /// The overload a pipe's path callee names, given the piped value and the
@@ -3089,10 +3405,10 @@ export namespace Analyzer {
     }
 
     /// Pick one method among same-name candidates by arity and argument types,
-    /// mirroring the host's `resolve_overload`: an exact type match costs 0, a
-    /// value-satisfies match costs 1, anything else disqualifies. A unique
-    /// lowest cost wins; a tie is ambiguous (A0101) and no survivor is a
-    /// no-match (A0100). Arguments are typed once with no expectation — a
+    /// with the costs of `overloadCandidateMatchCost`. A generic candidate whose
+    /// bounds the arguments do not satisfy is ranked only when no other
+    /// candidate matches. A unique lowest cost wins; a tie is ambiguous (A0101)
+    /// and no survivor is a no-match (A0100). Arguments are typed once with no expectation — a
     /// failing argument has already reported itself, so the call just bails.
     function selectMethodOverload(
       state: &mut Analyzer::Typecheck::TypecheckState,
@@ -3154,8 +3470,10 @@ export namespace Analyzer {
       span: SourceSpan,
       memberName: str,
     ): Option<Analyzer::DefinitionId> {
-      let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-      let mut bestCost: u64 = 0;
+      let mut satisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut satisfiedCost: u64 = 0;
+      let mut unsatisfied: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut unsatisfiedCost: u64 = 0;
       let mut candidateIndex: u64 = 0;
 
       while (candidateIndex < candidates.length()) {
@@ -3175,50 +3493,42 @@ export namespace Analyzer {
           continue;
         }
 
+        let mut boundsHold: boolean = true;
         let costOpt: Option<u64> = Analyzer::Typecheck::overloadCandidateMatchCost(
           state,
           defStore,
           typeStore,
+          symbols,
           span,
           *candidateDefId,
           &paramTypes,
           argTypes,
+          &mut boundsHold,
         );
 
         if (let Option::SOME(cost) = costOpt) {
-          if (bestDefIds.length() == 0 || cost < bestCost) {
-            bestDefIds = Vector::new<Analyzer::DefinitionId>();
-            bestDefIds.push(*candidateDefId);
-            bestCost = cost;
-          } else if (cost == bestCost) {
-            bestDefIds.push(*candidateDefId);
+          if (boundsHold) {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut satisfied, &mut satisfiedCost, *candidateDefId, cost);
+          } else {
+            Analyzer::Typecheck::rankOverloadCandidate(&mut unsatisfied, &mut unsatisfiedCost, *candidateDefId, cost);
           }
         }
 
         candidateIndex += 1;
       }
 
-      if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
-        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
-        return Option::NONE;
-      }
-
-      if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
-        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
-        return Option::NONE;
-      }
-
-      let Option::SOME(winner) = bestDefIds.get(0) else {
-        return Option::NONE;
-      };
-
-      return Option::SOME(*winner);
+      return Analyzer::Typecheck::finishOverloadSelection(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        candidates,
+        &satisfied,
+        &unsatisfied,
+        argTypes,
+        span,
+        memberName,
+      );
     }
 
     /// The `@extension` function that answers `name` for a receiver of
@@ -4564,6 +4874,26 @@ export namespace Analyzer {
       value: &Ast::Expression::RecordInit,
       expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
+      // `Self { ... }` in the body of a trait default, which is checked once
+      // against the trait: its fields are only known on each implementing
+      // type, where the copy of the default names the record itself.
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::TypeParam(selfSymbol)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, value.path)) {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < value.fields.length()) {
+          if (let Option::SOME(field) = value.fields.get(fieldIndex)) {
+            let _fieldType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, field.value);
+          }
+
+          fieldIndex += 1;
+        }
+
+        let mut typeStoreSelfRef: &mut Analyzer::TypeStore = typeStore;
+        let selfType: Analyzer::TypeId = typeStoreSelfRef.param(selfSymbol);
+        Analyzer::Typecheck::recordExprType(state, exprId, selfType);
+        return Option::SOME(selfType);
+      }
+
       let pathTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
         state,
         defStore,
@@ -5903,6 +6233,23 @@ export namespace Analyzer {
           );
         },
         Ast::Expression::Node::BuiltinCall(value) -> {
+          if (value.name.equals("attribute")) {
+            let Option::SOME(attributeType) = Analyzer::Typecheck::checkBuiltinAttribute(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              exprId,
+              &value,
+            ) else {
+              return Option::NONE;
+            };
+
+            Analyzer::Typecheck::recordExprType(state, exprId, attributeType);
+            return Option::SOME(attributeType);
+          }
+
           let Option::SOME(builtinType) = Analyzer::Typecheck::checkBuiltinCall(
             state,
             defStore,
@@ -8342,6 +8689,12 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinSplat(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
 
+      // A reflection builtin that reaches here stood where no `comptime for`
+      // could replace it, which unrolling already reported.
+      if (name.equals("fields") || name.equals("field")) {
+        return Option::NONE;
+      }
+
       if (Analyzer::Typecheck::isKnownBuiltinName(name)) {
         let detail: String = `the \`@${name.toStr()}\` builtin`;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
@@ -8350,6 +8703,122 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::emitUnknownBuiltin(state, call.span, name.toStr());
       return Option::NONE;
+    }
+
+    /// `@attribute<A, Self, Option<A>>("field")` or `@attribute<A, Self, Option<A>>()`,
+    /// what unrolling a `comptime for` makes of `@attribute<A>(field)` and
+    /// `@attribute<A>(Self)` (`ParserComptime`). Its type is the third type
+    /// argument, `Option<A>`. The record `Self` names, or its field, is
+    /// recorded as the call target: HIR lowering reads the values of `A` on it
+    /// once attributes are evaluated. Inside a trait, `Self` has no fields and
+    /// no attributes, so nothing is recorded.
+    function checkBuiltinAttribute(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      // `@attribute<A>(...)` left as written stood where unrolling could not
+      // rewrite it, and unrolling reported it.
+      if (call.typeArguments.length() == 1) {
+        return Option::NONE;
+      }
+
+      if (call.typeArguments.length() != 3) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      let Option::SOME(attributeTypeId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+      let Option::SOME(resultTypeId) = call.typeArguments.get(2) else {
+        return Option::NONE;
+      };
+      let enclosing: Option<Analyzer::DefinitionId> = Option::SOME(state.currentFunction);
+
+      let Option::SOME(attributeType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *attributeTypeId, enclosing) else {
+        return Option::NONE;
+      };
+
+      let mut attributeDef: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Type::Record(recordDefId)) = typeStore.get(attributeType)) {
+        if (defStore.attributeTargetsOf(recordDefId).isSome()) {
+          attributeDef = Option::SOME(recordDefId);
+        }
+      }
+
+      if (attributeDef.isNone()) {
+        let typeName: String = typeStore.nameOfResolved(attributeType, &*defStore, &*symbols);
+        let message: String = `'${typeName.toStr()}' is not an attribute: '@attribute<A>' needs a record marked '@attribute(...)'`;
+        Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::NOT_AN_ATTRIBUTE, message.toStr());
+        return Option::NONE;
+      }
+
+      let Option::SOME(resultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *resultTypeId, enclosing) else {
+        return Option::NONE;
+      };
+
+      // `Self` is the owner of the method being checked: read it from the
+      // method rather than resolving the written `Self`.
+      let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(state.currentFunction)) {
+        if (let Option::SOME(Analyzer::Definition::Record(_)) = defStore.get(method.owner)) {
+          recordDefId = Option::SOME(method.owner);
+        }
+      }
+
+      let Option::SOME(recordDef) = recordDefId else {
+        return Option::SOME(resultType);
+      };
+
+      let mut target: Analyzer::DefinitionId = recordDef;
+
+      if (let Option::SOME(argumentId) = call.arguments.get(0)) {
+        let Option::SOME(Ast::Expression::Node::Literal(literal)) = module.expressions.get(*argumentId) else {
+          return Option::SOME(resultType);
+        };
+        let Ast::Expression::LiteralValue::String(fieldName) = &literal.value else {
+          return Option::SOME(resultType);
+        };
+        let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(recordDef)) {
+          let mut fieldIndex: u64 = 0;
+
+          while (fieldIndex < record_.fields.length()) {
+            if (let Option::SOME(fieldId) = record_.fields.get(fieldIndex)) {
+              fields.push(*fieldId);
+            }
+
+            fieldIndex += 1;
+          }
+        }
+
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < fields.length()) {
+          if (let Option::SOME(fieldId) = fields.get(fieldIndex)) {
+            if (let Option::SOME(Analyzer::Definition::Field(fieldDef)) = defStore.get(*fieldId)) {
+              if (let Option::SOME(text) = symbols.resolve(fieldDef.name)) {
+                if (fieldName.equals(text)) {
+                  target = *fieldId;
+                }
+              }
+            }
+          }
+
+          fieldIndex += 1;
+        }
+      }
+
+      Analyzer::Typecheck::recordCallTarget(state, exprId, target);
+      return Option::SOME(resultType);
     }
 
     /// Whether `name` is a builtin the language defines, typed here or not.
@@ -12106,6 +12575,7 @@ export namespace Analyzer {
           }
         },
         Ast::Statement::Node::Block(blockStmt) -> {
+          let start: u64 = state.diagnostics.length();
           let _blockType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(
             state,
             defStore,
@@ -12117,6 +12587,21 @@ export namespace Analyzer {
             blockStmt.tail,
             Option::NONE,
           );
+
+          // One iteration of an unrolled `comptime for`: every copy points at
+          // the same place in the loop body, so the note names the field.
+          if (let Option::SOME(note) = module.comptimeIterationNote(stmtId)) {
+            let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+            let mut index: u64 = start;
+
+            while (index < stateRef.diagnostics.length()) {
+              if (let Option::SOME(diagnostic) = stateRef.diagnostics.getMut(index)) {
+                diagnostic.addNote(note.toStr());
+              }
+
+              index += 1;
+            }
+          }
         },
         Ast::Statement::Node::Return(returnStmt) -> {
           if (let Option::SOME(valueExprId) = returnStmt.value) {

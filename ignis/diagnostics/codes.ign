@@ -114,6 +114,63 @@ export namespace DiagnosticCode {
   /// A method called on a type parameter is declared by more than one of its
   /// bounds.
   const AMBIGUOUS_BOUND_METHOD: static str = "A0262";
+  /// A record or enum implements a trait method with the other kind: a static
+  /// method where the trait declares an instance method, or the reverse.
+  const TRAIT_METHOD_KIND_MISMATCH: static str = "A0276";
+  /// A static method implementing a trait's static method does not match its
+  /// signature, with `Self` read as the implementing type.
+  const TRAIT_STATIC_METHOD_SIGNATURE_MISMATCH: static str = "A0277";
+  /// `T::name(args)` where no bound of the type parameter `T` declares a static
+  /// method `name`.
+  const BOUND_STATIC_METHOD_NOT_FOUND: static str = "A0278";
+  /// `Trait::name(args)` names a static trait method without a type that
+  /// implements it.
+  const TRAIT_STATIC_METHOD_WITHOUT_TYPE: static str = "A0279";
+  /// `Self::name` written outside the methods of a record, enum or trait, where
+  /// `Self` names nothing.
+  const SELF_PATH_OUTSIDE_OWNER: static str = "A0280";
+  /// A declarable attribute written on a declaration its `@attribute(...)`
+  /// targets do not include.
+  const ATTRIBUTE_TARGET_NOT_ALLOWED: static str = "A0281";
+  /// A capitalized attribute that names a declaration other than a record
+  /// marked `@attribute`.
+  const NOT_AN_ATTRIBUTE: static str = "A0282";
+  /// A declarable attribute argument whose value does not fit its field.
+  const ATTRIBUTE_ARGUMENT_TYPE: static str = "A0283";
+  /// A declarable attribute argument that is not a compile-time constant.
+  const ATTRIBUTE_ARGUMENT_NOT_CONSTANT: static str = "A0284";
+  /// An `@attribute(...)` without targets, or naming one that does not exist.
+  const INVALID_ATTRIBUTE_TARGETS: static str = "A0290";
+  /// An `extension` block that names no trait in `@implements`.
+  const EXTENSION_WITHOUT_TRAIT: static str = "A0285";
+  /// An `extension` block declared outside the module of the trait it
+  /// implements and of the type it extends.
+  const EXTENSION_OUTSIDE_OWNING_MODULE: static str = "A0286";
+  /// A type implements the same trait twice: two `extension` blocks, or an
+  /// `extension` block and the type's own `@implements`.
+  const DUPLICATE_TRAIT_IMPLEMENTATION: static str = "A0287";
+  /// An `extension` block names a language trait or the canonical `Eq` or
+  /// `Hash`, which the compiler answers from the type itself.
+  const EXTENSION_OF_LANG_TRAIT: static str = "A0288";
+  /// An `extension` block extends a type it cannot carry methods for: one that
+  /// is not a primitive, `str`, a record or an enum, or a generic instance whose
+  /// arguments are not the block's own type parameters in order.
+  const INVALID_EXTENSION_TARGET: static str = "A0289";
+  /// A `break` or `continue` that would leave or skip an unrolled
+  /// `comptime for`, which is not a runtime loop.
+  const COMPTIME_FOR_CONTROL_FLOW: static str = "A0292";
+  /// `@fields<T>()` over a type that is not the record `Self` of the method:
+  /// a type parameter, an enum, a primitive or another type.
+  const COMPTIME_FIELDS_TARGET: static str = "A0293";
+  /// A `comptime for` outside the body of a record method, where there is no
+  /// `Self` whose fields it could walk.
+  const COMPTIME_FOR_OUTSIDE_METHOD: static str = "A0294";
+  /// A reflection builtin that takes a field descriptor (`@field`,
+  /// `@fieldType`, `@attribute<A>(field)`) outside the loop that declares it.
+  const COMPTIME_DESCRIPTOR_OUTSIDE_LOOP: static str = "A0295";
+  /// A field descriptor used other than as `field.name`, `field.index` or an
+  /// argument of a reflection builtin.
+  const COMPTIME_DESCRIPTOR_MEMBER: static str = "A0296";
   /// A `str` view supplied where `static str` is required. Only string literals and
   /// compile-time strings have the static type; a view converts the other way only.
   const STR_VIEW_AS_STATIC_STR: static str = "A0267";
@@ -453,6 +510,11 @@ export namespace DiagnosticCode {
   /// A record or enum that holds a value of itself inline, directly or
   /// through other types, so its size would be infinite.
   const RECURSIVE_TYPE_WITHOUT_INDIRECTION: static str = "A0256";
+  /// A generic record or enum that refers to itself, directly or through
+  /// other types, with a type argument that nests one of its type parameters
+  /// (`Nest<T>` holding `Nest<Vector<T>>`): monomorphizing it would need an
+  /// unbounded family of instances.
+  const EXPANDING_GENERIC_RECURSION: static str = "A0275";
   /// A record declaring an instance method and a field of function type with
   /// the same name: `value.name(args)` calls either, so it could mean both.
   const METHOD_AND_FUNCTION_FIELD_SHARE_NAME: static str = "A0257";
@@ -529,6 +591,42 @@ export namespace DiagnosticCode {
   /// A manual `.drop()` whose receiver is neither a local nor a field of one,
   /// so no compile-time state tracks it. Reported as a warning.
   const DROP_ON_COMPLEX_RECEIVER: static str = "O0010";
+
+  /// The standard library manifest is missing.
+  const BUILD_STD_MANIFEST_MISSING: static str = "B1001";
+  const BUILD_STD_MANIFEST_MALFORMED: static str = "B1002";
+  const BUILD_STD_MANIFEST_INVALID_FIELD_TYPE: static str = "B1003";
+  const BUILD_UNKNOWN_KEY: static str = "B1004";
+  const BUILD_CONFIG_INVALID_ENTRY: static str = "B1010";
+  /// A module source that cannot be found or read, which also names a project
+  /// or std root that cannot be resolved.
+  const BUILD_MISSING_MODULE: static str = "B2001";
+  const BUILD_AMBIGUOUS_IMPORT: static str = "B2002";
+  const BUILD_CYCLIC_IMPORT: static str = "B2003";
+  const BUILD_INVALID_PROFILE: static str = "B2004";
+  const TOOLCHAIN_COMPILE_FAILED: static str = "B4001";
+  const TOOLCHAIN_ARCHIVE_FAILED: static str = "B4002";
+  const TOOLCHAIN_LINK_FAILED: static str = "B4003";
+  /// A backend that cannot build what was asked: an unknown target, a mode
+  /// the backend does not support, or an instruction it cannot lower yet.
+  const BACKEND_UNSUPPORTED: static str = "B4004";
+  const QBE_LOWER_FAILED: static str = "B4005";
+  const PIPELINE_STD_BUILD_FAILED: static str = "B5001";
+  const PIPELINE_STD_HEADER_WRITE_FAILED: static str = "B5002";
+  const PIPELINE_STD_ARCHIVE_MISSING: static str = "B5003";
+  const PIPELINE_USER_LINK_BLOCKED: static str = "B5004";
+  const CONFIG_NOT_FOUND: static str = "C1001";
+  const CONFIG_MALFORMED_TOML: static str = "C1002";
+  const CONFIG_INVALID_FIELD_TYPE: static str = "C1003";
+  const CONFIG_EMPTY_FIELD: static str = "C1004";
+  const CONFIG_RESERVED_ALIAS: static str = "C1005";
+  const CONFIG_PATH_NOT_FOUND: static str = "C1006";
+  const CONFIG_MISSING_STD_MANIFEST: static str = "C1007";
+  const CONFIG_UNKNOWN_KEY: static str = "C1008";
+  const FORMAT_CONFIG_IO: static str = "F1001";
+  const FORMAT_CONFIG_PARSE: static str = "F1002";
+  const FORMAT_CONFIG_UNKNOWN_KEY: static str = "F1003";
+  const FORMAT_CONFIG_INVALID_VALUE: static str = "F1004";
 
   function isStable(value: str): boolean {
     let code: String = String::create(value);

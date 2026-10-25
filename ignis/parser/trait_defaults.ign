@@ -709,6 +709,35 @@ export namespace ParserTraitDefaults {
     return cloned;
   }
 
+  /// Copies `metadata` from `source` into `target`, cloning the argument
+  /// expressions of every declarable attribute so they live in `target`'s
+  /// expression arena.
+  function cloneMetadata(
+    source: &Ast::Module,
+    target: &mut Ast::Module,
+    metadata: &Ast::Metadata,
+  ): Ast::Metadata {
+    let mut copied: Ast::Metadata = Ast::copyMetadata(metadata);
+    let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+    let mut index: u64 = 0;
+
+    while (index < metadata.attributes.length()) {
+      if (let Option::SOME(attribute) = metadata.attributes.get(index)) {
+        attributes.push(Ast::Attribute {
+          span: attribute.span,
+          name: attribute.name.clone(),
+          arguments: Ast::copyAttributeArguments(&attribute.arguments),
+          expressions: ParserTraitDefaults::cloneExpressionList(source, target, &attribute.expressions),
+        });
+      }
+
+      index += 1;
+    }
+
+    copied.attributes = attributes;
+    return copied;
+  }
+
   function cloneOptionalExpression(
     source: &Ast::Module,
     target: &mut Ast::Module,
@@ -794,7 +823,7 @@ export namespace ParserTraitDefaults {
         name: binding.name.clone(),
         annotation: ParserTraitDefaults::cloneOptionalType(source, target, binding.annotation),
         initializer: ParserTraitDefaults::cloneOptionalExpression(source, target, binding.initializer),
-        metadata: Ast::copyMetadata(&binding.metadata),
+        metadata: ParserTraitDefaults::cloneMetadata(source, target, &binding.metadata),
       }),
       Ast::Pattern::Node::Literal(literal) -> Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
         span: literal.span,
@@ -842,6 +871,23 @@ export namespace ParserTraitDefaults {
     return cloned;
   }
 
+  function cloneRecordInitLoop(
+    source: &Ast::Module,
+    target: &mut Ast::Module,
+    header: &Option<Ast::Expression::RecordInitLoop>,
+  ): Option<Ast::Expression::RecordInitLoop> {
+    let Option::SOME(present) = header else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(Ast::Expression::RecordInitLoop {
+      span: present.span,
+      pattern: ParserTraitDefaults::clonePattern(source, target, present.pattern),
+      iterable: ParserTraitDefaults::cloneExpression(source, target, present.iterable),
+      name: ParserTraitDefaults::cloneExpression(source, target, present.name),
+    });
+  }
+
   function cloneRecordInitFields(
     source: &Ast::Module,
     target: &mut Ast::Module,
@@ -855,6 +901,7 @@ export namespace ParserTraitDefaults {
         cloned.push(Ast::Expression::RecordInitField {
           name: field.name.clone(),
           value: ParserTraitDefaults::cloneExpression(source, target, field.value),
+          loop: ParserTraitDefaults::cloneRecordInitLoop(source, target, &field.loop),
         });
       }
 
@@ -1105,6 +1152,7 @@ export namespace ParserTraitDefaults {
         pattern: ParserTraitDefaults::clonePattern(source, target, node.pattern),
         iterable: ParserTraitDefaults::cloneExpression(source, target, node.iterable),
         body: ParserTraitDefaults::cloneStatement(source, target, node.body),
+        isComptime: node.isComptime,
       }),
       Ast::Statement::Node::Return(node) -> Ast::Statement::Node::Return(Ast::Statement::Return {
         span: node.span,
@@ -1179,7 +1227,7 @@ export namespace ParserTraitDefaults {
       parameters: clonedParameters,
       returnType: clonedReturnType,
       body: clonedBody,
-      metadata: Ast::copyMetadata(&method.metadata),
+      metadata: ParserTraitDefaults::cloneMetadata(source, target, &method.metadata),
     })));
   }
 
@@ -1198,8 +1246,15 @@ export namespace ParserTraitDefaults {
     return ParserTraitDefaults::cloneMethodItem(&scratch, module, scratchItemId);
   }
 
-  /// The declared name of a record or enum item.
+  /// The declared name of a record or enum item, or the type an extension
+  /// block extends.
   function typeItemName(module: &Ast::Module, itemId: Ast::ItemId): String {
+    // An extension block's node is named after its traits; the type it
+    // inherits for is the one it extends.
+    if (let Option::SOME(target) = module.extensionTarget(itemId)) {
+      return Ast::extensionTypeText(module, target);
+    }
+
     return match (module.items.get(itemId)) {
       Option::SOME(Ast::Item::Node::Record(record_)) -> record_.name.clone(),
       Option::SOME(Ast::Item::Node::Enum(enum_)) -> enum_.name.clone(),

@@ -1,0 +1,80 @@
+// Float arithmetic on both widths, through values the constant folder cannot
+// see: every operand arrives as a parameter.
+
+function add(left: f64, right: f64): f64 {
+  return left + right;
+}
+
+function subtract(left: f64, right: f64): f64 {
+  return left - right;
+}
+
+function multiply(left: f32, right: f32): f32 {
+  return left * right;
+}
+
+function divide(left: f64, right: f64): f64 {
+  return left / right;
+}
+
+function remainder(left: f32, right: f32): f32 {
+  return left % right;
+}
+
+function negate(value: f64): f64 {
+  return -value;
+}
+
+function main(): i32 {
+  // 0.1 + 0.2 is not 0.3 in binary; the exact sum has this bit pattern.
+  if (@bitCast<u64>(add(0.1, 0.2)) != 4599075939470750516) {
+    return 1;
+  }
+
+  if (subtract(1.5, 0.25) != 1.25) {
+    return 2;
+  }
+
+  if (multiply(1.5, 3.0) != 4.5) {
+    return 3;
+  }
+
+  if (divide(1.0, 3.0) * 3.0 != 1.0) {
+    return 4;
+  }
+
+  if (remainder(7.5, 2.0) != 1.5) {
+    return 5;
+  }
+
+  // Negating zero gives negative zero, which divides into negative infinity.
+  let negativeZero: f64 = negate(0.0);
+
+  if (@bitCast<u64>(negativeZero) != 9223372036854775808) {
+    return 6;
+  }
+
+  if (divide(1.0, negativeZero) >= 0.0) {
+    return 7;
+  }
+
+  let mut accumulated: f64 = 0.0;
+  let mut index: i32 = 0;
+
+  while (index < 10) {
+    accumulated += 0.5;
+    index += 1;
+  }
+
+  if (accumulated != 5.0) {
+    return 8;
+  }
+
+  let narrow: f32 = 0.1;
+
+  if (@bitCast<u32>(narrow) != 1036831949) {
+    return 9;
+  }
+
+  return 0;
+}

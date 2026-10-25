@@ -256,6 +256,30 @@ function monoRedispatchPicksTheOverloadMatchingTheTraitArity(): void {
   Test::assertEq<u64>(method.params.length(), 1);
 }
 
+/// Scenario: `T::make()` names a static trait method, so the re-dispatch picks
+/// the implementing record's static `make`, not an instance method sharing the
+/// name and parameter count.
+@test
+function monoRedispatchesAStaticTraitMethodToTheStaticImplementation(): void {
+  let mut defStore: Analyzer::DefinitionStore = monoAnalyzeDefinitions(
+    "trait Make {\n  static make(): Self;\n}\n\n@implements(Make)\nrecord Box {\n  public content: i32;\n\n  static make(): Box {\n    return Box { content: 1 };\n  }\n}\n\nfunction build<T: Make>(): T {\n  return T::make();\n}\n",
+  );
+
+  let traitMethod: Analyzer::DefinitionId = monoTraitMethodAt(&mut defStore, 0);
+  let recordDef: Analyzer::DefinitionId = monoOnlyRecordDef(&mut defStore);
+
+  let Option::SOME(implementation) = Mono::traitImplementationMethod(&mut defStore, recordDef, traitMethod) else {
+    @panic("expected the record's static implementation");
+  };
+
+  let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(implementation) else {
+    @panic("expected a method definition");
+  };
+
+  Test::assertEq<u32>(method.owner.raw(), recordDef.raw());
+  Test::assertEq<boolean>(method.isStatic, true);
+}
+
 /// Scenario: an ordinary method call already names a record's own method, so
 /// the re-dispatch leaves it alone instead of rewriting every method call.
 @test

@@ -230,6 +230,67 @@ function parserParsesAnOwnsAttributeOnAGenericParameter(): void {
 }
 
 @test
+function parserParsesDeclarableAttributeArgumentsAsExpressions(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let source: SourceFile = SourceFile::create(
+    &mut sourceMap,
+    "fixtures/parser_declarable_attribute.ign",
+    "@Orm::Table(\"tasks\", -1, WIDTH)\n@Marker\n@implements(Copy)\nrecord Task { id: i64; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&sourceMap, &module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let expectedRenderedNeedle: String = String::create("@Orm::Table(expression#0, expression#2, expression#3)");
+  Test::assert(rendered.contains(&expectedRenderedNeedle));
+
+  match (expectItem(&module, match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing declarable attribute record root"),
+  })) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.metadata.attributes.length(), 3);
+
+      let table: &Ast::Attribute = match (recordItem.metadata.attributes.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing declarable attribute"),
+      };
+      let marker: &Ast::Attribute = match (recordItem.metadata.attributes.get(1)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing argumentless declarable attribute"),
+      };
+      let implements: &Ast::Attribute = match (recordItem.metadata.attributes.get(2)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing built-in attribute"),
+      };
+
+      Test::assertEq<str>(table.name.toStr(), "Orm::Table");
+      Test::assertEq<u64>(table.expressions.length(), 3);
+      Test::assertEq<u64>(table.arguments.length(), 0);
+
+      match (module.expressions.get(match (table.expressions.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing negative argument"),
+      })) {
+        Option::SOME(expression) -> match (expression) {
+          Ast::Expression::Node::Unary(_) -> {},
+          _ -> @panic("expected a unary negation argument"),
+        },
+        Option::NONE -> @panic("missing negative argument expression"),
+      };
+
+      Test::assertEq<u64>(marker.expressions.length(), 0);
+      Test::assertEq<u64>(implements.expressions.length(), 0);
+      Test::assertEq<u64>(implements.arguments.length(), 1);
+    },
+    _ -> @panic("expected declarable attribute record root"),
+  };
+}
+
+@test
 function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
   let mut sourceMap: SourceMap = SourceMap::new();
   let source: SourceFile = SourceFile::create(
@@ -6618,4 +6679,85 @@ function parserKeepsFnAsAnOrdinaryName(): void {
   Parser::parseInto(&source, &mut module, &mut diagnostics);
   Test::assertEq<u64>(diagnostics.length(), 0);
   Test::assertEq<u64>(module.roots.length(), 2);
+}
+
+function parseExtensionSource(source: str): Ast::Module {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_extension_block.ign", source);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&file, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  return module;
+}
+
+@test
+function parserParsesAnExtensionBlockAsARecordWithItsTarget(): void {
+  let module: Ast::Module = parseExtensionSource("@implements(Describe) extension i64 { describe(&self): i64 { return 0; } static read(raw: i64): i64 { return raw; } }");
+
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing extension root"),
+  };
+
+  match (module.items.get(itemId)) {
+    Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
+      Test::assertEq<str>(recordItem.name.toStr(), "extension(Describe) i64");
+      Test::assertEq<u64>(recordItem.fields.length(), 0);
+      Test::assertEq<u64>(recordItem.methods.length(), 2);
+    },
+    _ -> @panic("expected the extension block to parse as a record node"),
+  };
+
+  let Option::SOME(target) = module.extensionTarget(itemId) else {
+    @panic("expected the extension block to record its target");
+  };
+
+  Test::assertEq<str>(Ast::extensionTypeText(&module, target).toStr(), "i64");
+}
+
+@test
+function parserParsesAGenericExtensionBlock(): void {
+  let module: Ast::Module = parseExtensionSource("@implements(Describe) extension<T: Describe> Option<T> { describe(&self): i64 { return 0; } }");
+
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing extension root"),
+  };
+
+  match (module.items.get(itemId)) {
+    Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
+      Test::assertEq<str>(recordItem.name.toStr(), "extension(Describe) Option<T>");
+      Test::assertEq<u64>(recordItem.genericParameters.length(), 1);
+    },
+    _ -> @panic("expected the extension block to parse as a record node"),
+  };
+}
+
+@test
+function parserKeepsExtensionAnOrdinaryIdentifier(): void {
+  let module: Ast::Module = parseExtensionSource("function extension(extension: i32): i32 { let value: i32 = extension; return value; }");
+
+  Test::assertEq<u64>(module.roots.length(), 1);
+  Test::assertEq<u64>(module.extensionTargets.length(), 0);
+}
+
+@test
+function parserReadsAPrimitiveTypeNameAsAPathOwner(): void {
+  let module: Ast::Module = parseExtensionSource("function main(): i64 { return i64::read(3); }");
+
+  Test::assertEq<u64>(module.roots.length(), 1);
+}
+
+@test
+function parserRejectsAFieldInAnExtensionBlock(): void {
+  let mut sourceMap: SourceMap = SourceMap::new();
+  let file: SourceFile = SourceFile::create(&mut sourceMap, "fixtures/parser_extension_field.ign", "@implements(Describe) extension i64 { value: i64; }");
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&file, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
 }

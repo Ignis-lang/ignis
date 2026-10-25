@@ -54,6 +54,17 @@ and other output are printed above it, and it is erased before the closing
 With the line off, stdout and stderr carry exactly the bytes they would
 without it, which is what CI logs, editors and the fixture baselines see.
 
+## Errors reported after analysis
+
+The phases from `lower` on run only when `analyze` reported no errors, because
+they assume every name resolved and every expression typed (`-v` prints
+`lower: skipped (analyze errors)`). The checks that read the lowered program
+are therefore reported only once the earlier errors are fixed: the generic
+bounds of the types and calls inside function bodies (A0247), closure
+captures, and ownership and borrowing (the `O` codes). A file with a type
+mismatch and a `Channel<T>` of a type that is not `Send` reports the mismatch
+first and the bound on the next run.
+
 ## `ignis init`
 
 Initializes a project directory with:

@@ -1,0 +1,32 @@
+// e2e: std
+// A static trait default builds `Self` field by field: the record
+// initializer holds a `comptime for` entry that names each field with
+// `@field(field)` and converts its value to the field's written type.
+import Io from "std::io";
+
+trait Seeded {
+  static seeded(seed: i32): Self {
+    return Self {
+      comptime for (field of @fields<Self>()) @field(field): (seed + field.index) as @fieldType(field),
+    };
+  }
+}
+
+@implements(Seeded)
+record Coordinates {
+  public x: i32;
+  public y: i64;
+  public z: u8;
+}
+
+@implements(Seeded)
+record Single {
+  public only: i64;
+}
+
+function main(): i32 {
+  let coordinates: Coordinates = Coordinates::seeded(10);
+  let single: Single = Single::seeded(7);
+  Io::println(`${coordinates.x} ${coordinates.y} ${coordinates.z} ${single.only}`.toStr());
+  return 0;
+}

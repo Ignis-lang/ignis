@@ -74,6 +74,7 @@ scripts/bootstrap.sh gate-g6                   # G6: stage2 parse verdicts vs co
 scripts/bootstrap.sh gate-g6-baselines [bin]   # regenerate test_cases/__parse_verdicts__ (review the diff)
 scripts/bootstrap.sh gate-g7                   # G7: stage2 drop schedules vs committed baselines
 scripts/bootstrap.sh gate-g7-baselines [bin]   # regenerate test_cases/e2e/ok/__drop_schedules__ (review the diff)
+scripts/bootstrap.sh gate-qbe-selfhost [bin]   # build the compiler with --target qbe, then require that build to emit stage1's C (needs qbe)
 scripts/bootstrap.sh stages                    # stage1 -> stage2 -> gate-g4 -> stage3 (the nightly's ladder job)
 scripts/bootstrap.sh gates                     # every stage and gate (G1, G3, G4, G6, G7), then report
 scripts/bootstrap.sh seal-gates                # write a skipped placeholder for every gate that has no result yet
@@ -111,6 +112,16 @@ Formatter defaults: `indent_width = 2`, `line_width = 100`, `use_tabs = false`, 
 Canonical formatter rules now include inline empty high-level blocks (`namespace Foo {}`), multiline trailing commas, and no trailing comma on single-line callable signatures or record initializers.
 
 Commands that compile the compiler itself take minutes: one stage is about two minutes of a single core, and a full `ignis test` of the compiler is longer.
+
+### Local checks use the installed compiler
+
+When working on this repository, compile and test with the locally installed `ignis`, not the bootstrap ladder. Do not run `scripts/bootstrap.sh` stages or gates (`stage1`, `gate-g3-stage1`, `gates`, ...) locally: PR CI runs them on every pull request, and a local run of the full suite takes the better part of an hour.
+
+- A change to `std/`, `example/` or `test_cases/`: check it with `ignis`.
+- A change to `ignis/`: the installed `ignis` does not contain it, so build the compiler from the tree with `ignis build` at the repository root (it writes `<out_dir>/ignis`, `build/selfhost/ignis` with the committed `ignis.toml`), then run that binary on what you changed: `build/selfhost/ignis check <file>`, or `build/selfhost/ignis test --filter <name> -o build/tests/ignis-tests` for the tests and fixtures that cover the change.
+- Before pushing, run `ignis check`, `ignis check-std` and `ignis fmt --check` on the changed files with that binary. Leave the full test suite and the gates to CI.
+
+The baseline scripts are not gates: a new fixture still needs its G6 baseline, and a new ok fixture its G7 baseline, generated with the locally built binary (`scripts/bootstrap.sh gate-g6-baselines build/selfhost/ignis`, `scripts/bootstrap.sh gate-g7-baselines build/selfhost/ignis`).
 
 ## Working on `ignis/`
 
@@ -182,9 +193,13 @@ Build (ignis/build/)
   → linker.ign       gcc link → executable
 ```
 
+### Backends
+
+A target is done only when the compiler builds with it and the target-built compiler passes the cross G1: compiling `ignis/` with the C target, it emits C identical to stage1's. A build error with the target means the target is not finished. `scripts/bootstrap.sh gate-qbe-selfhost` checks this for QBE; CI runs it on pull requests that touch `ignis/` or `std/`, and in the nightly. A new backend gets the same gate. See BOOTSTRAP.md, "Every backend builds the compiler".
+
 ## Extending the Compiler
 
-Every step below is an edit under `ignis/`. After a change, build stage1 and run the checks in "Build & Run Commands"; `scripts/bootstrap.sh stage1` and `gate-g3-stage1` are the minimum.
+Every step below is an edit under `ignis/`. After a change, build the compiler with the installed `ignis` and check it as "Local checks use the installed compiler" describes; CI runs the stages and gates.
 
 ### Adding a New AST Node
 
@@ -236,7 +251,7 @@ Existing lints: unused variable, unused import, unused `mut`, deprecated call.
 
 | Type | Where | Run with |
 | --- | --- | --- |
-| Compiler unit tests | `@test` functions in `tests.ign` / `*_tests.ign` modules next to the code in `ignis/` | `ignis test --filter <name>` from the repository root, or `scripts/bootstrap.sh gate-g3-stage1` for all of them |
+| Compiler unit tests | `@test` functions in `tests.ign` / `*_tests.ign` modules next to the code in `ignis/` | `ignis test --filter <name>` from the repository root; CI runs all of them (`gate-g3-stage1`) |
 | E2E fixtures (ok/err/warn) | `test_cases/e2e/{ok,err}`, baselines in their `__snapshots__/` | the same `ignis test` run (`[test] fixtures` in `ignis.toml`), names `e2e::<path>` |
 | Standard library tests | `@test` functions under `std/` | `ignis test-std --std-path std` |
 | Drop-schedule baselines (G7) | `test_cases/e2e/ok/__drop_schedules__/` | `scripts/bootstrap.sh gate-g7-stage1` |
@@ -270,13 +285,13 @@ function main(): i32 {
 }
 ```
 
-With a built compiler at `build/bootstrap/stage1/ignis`, from the repository root:
+With a compiler built from the tree by `ignis build` (`build/selfhost/ignis`), from the repository root:
 
 ```bash
 mkdir -p build/tests
-build/bootstrap/stage1/ignis test --filter e2e::my_feature -o build/tests/ignis-tests                     # run it
-build/bootstrap/stage1/ignis test --filter e2e::my_feature --update-snapshots -o build/tests/ignis-tests  # record its baseline
-scripts/bootstrap.sh gate-g7-baselines build/bootstrap/stage1/ignis                                        # an ok fixture also needs its G7 baseline
+build/selfhost/ignis test --filter e2e::my_feature -o build/tests/ignis-tests                     # run it
+build/selfhost/ignis test --filter e2e::my_feature --update-snapshots -o build/tests/ignis-tests  # record its baseline
+scripts/bootstrap.sh gate-g7-baselines build/selfhost/ignis                                        # an ok fixture also needs its G7 baseline
 ```
 
 A new `.ign` file under `test_cases/`, `example/` or `std/` also needs its G6 parse-verdict baseline (`scripts/bootstrap.sh gate-g6-baselines`). PR CI rejects a missing one. Baseline diffs are semantic changes: read them before committing.

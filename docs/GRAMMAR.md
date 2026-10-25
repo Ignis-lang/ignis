@@ -79,6 +79,7 @@ spelled (see the reserved list).
   | <if>
   | <for>
   | <for-of>
+  | <comptime-for>
   | <while>
   | <return>
   | <break>
@@ -178,6 +179,9 @@ spelled (see the reserved list).
 <tuple> ::= "(" <expression> ("," <expression>)+ ")"
 
 <type> ::= <type-modifier>? <type-core> <type-suffix>*
+  | <reflection-type>
+
+<reflection-type> ::= "@fieldType" "(" <identifier> ")"
 
 <type-core> ::= <primitive>
   | <type-path>
@@ -248,6 +252,7 @@ spelled (see the reserved list).
   | <record>
   | <enum>
   | <trait>
+  | <extension>
   | <type-alias>
   | <extern>
   | <namespace>
@@ -284,6 +289,13 @@ spelled (see the reserved list).
 <directive-attrs> ::= (<directive-attr>)+
 
 <directive-attr> ::= "@" <qualified-identifier> <attribute-args>?
+  | "@" <declarable-attribute-name> <declarable-attribute-args>?
+
+// A declarable attribute is one whose last name segment starts with an
+// uppercase letter (`@Table`, `@Orm::Column`). Its arguments are expressions,
+// checked later against the fields of the record marked `@attribute` it names.
+<declarable-attribute-name> ::= <qualified-identifier>
+<declarable-attribute-args> ::= "(" (<expression> ("," <expression>)* ","?)? ")"
 
 <attribute-args> ::= "(" (<attribute-arg-item> ("," <attribute-arg-item>)* ","?)? ")"
 <attribute-arg-item> ::= <attribute-arg> | <identifier> ":" <attribute-arg>
@@ -312,6 +324,9 @@ spelled (see the reserved list).
   | "@" "takes"
   | "@" "noescape"
   | "@" ("allow" | "warn" | "deny") "(" <identifier> ")"
+  | "@" "attribute" "(" <attribute-target> ("," <attribute-target>)* ")"
+
+<attribute-target> ::= "record" | "enum" | "field" | "function" | "variant"
 
 // `@extension(T)` and `@extension(T, mut)` apply to a free function whose first
 // parameter is the receiver; the `mut` form allows a mutable receiver.
@@ -440,6 +455,23 @@ spelled (see the reserved list).
 //     greet(&self): i32 { return self.name() + 1; }
 //   }
 // An omitted return type means `void`.
+// A `static` trait method takes no receiver; `Self` in its signature is the
+// implementing type, and a bounded type parameter calls it as `T::name(args)`:
+//   trait Make {
+//     static make(seed: i32): Self;
+//   }
+
+// `extension` is a contextual keyword: it starts an item only when a type or
+// `<` follows it, and stays an ordinary identifier everywhere else. The block
+// implements the traits its `@implements` names for an existing type (a
+// primitive, `str`, a record or an enum); it declares methods only, no fields.
+// A generic block extends an instance over exactly its own type parameters.
+<extension> ::= <directive-attrs> "extension" <generic-type>? <type>
+                "{" <method>* "}"
+//   @implements(Describe)
+//   extension<T: Describe> Option<T> { describe(&self): i64 { ... } }
+// A primitive type name followed by `::` starts a path expression, so a static
+// method an extension block declares is called as `i64::read(raw)`.
 
 <statement> ::= <declaration>
   | <if>
@@ -480,6 +512,14 @@ spelled (see the reserved list).
 // The optional annotation in `for ... of` selects how each element is bound:
 // `for (let x of arr)` binds by value, `for (let x: &i32 of arr)` binds a shared
 // reference and `for (let x: &mut i32 of arr)` binds a mutable one.
+
+<comptime-for> ::= "comptime" "for" "(" <identifier> "of" "@fields" "<" <type> ">" "(" ")" ")" <block>
+
+// Valid only in a method whose `Self` is a record, and unrolled before name
+// resolution into one copy of the block per field. `comptime` is a keyword. In
+// the body, the identifier is a field descriptor: `field.name`, `field.index`,
+// `@field(value, field)`, `@attribute<A>(field)`, and `@fieldType(field)` in
+// type position (see <reflection-type>). `break` and `continue` cannot cross it.
 
 <while> ::= "while" "(" <condition> ")" <block>
 
@@ -656,6 +696,11 @@ spelled (see the reserved list).
 <record-init> ::= <type-path> "{" <record-init-fields>? "}"
 <record-init-fields> ::= <record-init-field> ("," <record-init-field>)* ","?
 <record-init-field> ::= <identifier> ":" <expression>
+  | "comptime" "for" "(" <identifier> "of" "@fields" "<" <type> ">" "(" ")" ")"
+    "@field" "(" <identifier> ")" ":" <expression>
+
+// The `comptime for` entry unrolls into one `<name>: <expression>` entry per
+// field of `Self`, the descriptor substituted in each copy of the expression.
 
 <type-path> ::= <qualified-identifier> <generic-args>?
 

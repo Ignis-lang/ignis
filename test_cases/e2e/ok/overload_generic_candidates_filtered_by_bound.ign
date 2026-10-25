@@ -1,0 +1,51 @@
+// e2e: std
+// Two generic overloads with different bounds: each argument satisfies only
+// one of them, so the other is dropped before scoring instead of tying with
+// it.
+import Io from "std::io";
+
+trait Describe {
+  describe(&self): String;
+}
+
+trait Measure {
+  measure(&self): i32;
+}
+
+@implements(Describe)
+record Point {
+  public x: i32;
+
+  describe(&self): String {
+    return `point ${self.x}`;
+  }
+}
+
+@implements(Measure)
+record Rope {
+  public length: i32;
+
+  measure(&self): i32 {
+    return self.length;
+  }
+}
+
+function bind<T: Describe>(value: &T): String {
+  let described: String = value.describe();
+  return `described ${described.toStr()}`;
+}
+
+function bind<T: Measure>(value: &T): String {
+  return `measured ${value.measure()}`;
+}
+
+function main(): i32 {
+  let point: Point = Point { x: 6 };
+  let rope: Rope = Rope { length: 9 };
+  let byPoint: String = bind(&point);
+  let byRope: String = bind(&rope);
+  Io::println(byPoint.toStr());
+  Io::println(byRope.toStr());
+
+  return 0;
+}

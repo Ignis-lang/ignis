@@ -15,10 +15,57 @@ export namespace Ast {
     Declare,
   }
 
+  /// One `@name` or `@name(arguments)` attribute.
+  ///
+  /// A declarable attribute (a capitalized name, which names a record marked
+  /// `@attribute`) has its arguments parsed as expressions in the module's
+  /// expression arena, held in `expressions`, and `arguments` stays empty. A
+  /// built-in lowercase attribute keeps its arguments as written text in
+  /// `arguments`: several of them take type names or bare words (`Vector<T>`,
+  /// `mut`, lint names) that are not expressions.
   record Attribute {
     public span: SourceSpan;
     public name: String;
     public arguments: Vector<String>;
+    public expressions: Vector<Ast::ExpressionId>;
+  }
+
+  /// Whether `name` is written the way a declarable attribute is: its last
+  /// path segment starts with an uppercase ASCII letter.
+  function isDeclarableAttributeName(name: &String): boolean {
+    let mut start: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < name.length()) {
+      if (let Option::SOME(byte) = name.byteAt(index)) {
+        if (byte == ':' as u8) {
+          start = index + 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    let Option::SOME(first) = name.byteAt(start) else {
+      return false;
+    };
+
+    return first >= 'A' as u8 && first <= 'Z' as u8;
+  }
+
+  function copyAttributeExpressions(source: &Vector<Ast::ExpressionId>): Vector<Ast::ExpressionId> {
+    let mut copied: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(value) = source.get(index)) {
+        copied.push(*value);
+      }
+
+      index += 1;
+    }
+
+    return copied;
   }
 
   record Metadata {
@@ -48,6 +95,7 @@ export namespace Ast {
       span: attribute.span,
       name: attribute.name.clone(),
       arguments: Ast::copyAttributeArguments(&attribute.arguments),
+      expressions: Ast::copyAttributeExpressions(&attribute.expressions),
     };
   }
 

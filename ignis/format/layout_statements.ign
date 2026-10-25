@@ -2066,8 +2066,8 @@ export namespace Format {
       }
 
       let valueText: String = Format::formatExpressionNode(module, field.value, 0, source, config, 0)!;
-      fields.push(&field.name);
-      fields.pushStr(": ");
+      let prefix: String = Format::recordInitFieldPrefix(module, field, source, config)!;
+      fields.push(&prefix);
       fields.push(&valueText);
       index += 1;
     }
@@ -2077,6 +2077,34 @@ export namespace Format {
     result.push(&fields);
     result.pushStr(" }");
     return Result::OK(result);
+  }
+
+  /// What a record initializer entry writes before its value: `name: `, or
+  /// `comptime for (field of @fields<Self>()) @field(field): ` for an entry
+  /// that unrolls over the fields of `Self`.
+  function recordInitFieldPrefix(
+    module: &Ast::Module,
+    field: &Ast::Expression::RecordInitField,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let Option::SOME(header) = &field.loop else {
+      let mut prefix: String = field.name.clone();
+      prefix.pushStr(": ");
+      return Result::OK(prefix);
+    };
+
+    let bindingText: String = Format::formatParameterPattern(module, header.pattern, source);
+    let iterableText: String = Format::formatExpressionNode(module, header.iterable, 0, source, config, 0)!;
+    let nameText: String = Format::formatExpressionNode(module, header.name, 0, source, config, 0)!;
+    let mut prefix: String = String::create("comptime for (");
+    prefix.push(&bindingText);
+    prefix.pushStr(" of ");
+    prefix.push(&iterableText);
+    prefix.pushStr(") ");
+    prefix.push(&nameText);
+    prefix.pushStr(": ");
+    return Result::OK(prefix);
   }
 
   /// Renders an initializer that a `return`/`let`/`const` may spread over
@@ -2104,8 +2132,7 @@ export namespace Format {
         continue;
       };
 
-      let mut fieldText: String = field.name.clone();
-      fieldText.pushStr(": ");
+      let mut fieldText: String = Format::recordInitFieldPrefix(module, field, source, config)!;
 
       let Option::SOME(valueNode) = module.expressions.get(field.value) else {
         index += 1;
@@ -2557,7 +2584,13 @@ export namespace Format {
       let bodyText: String = Format::formatBlockLikeStatement(module, forOfStatement.body, source, config, indentLevel)!;
 
       let mut result: String = indentText;
-      result.pushStr("for (let ");
+
+      if (forOfStatement.isComptime) {
+        result.pushStr("comptime for (");
+      } else {
+        result.pushStr("for (let ");
+      }
+
       result.push(&bindingText);
       result.pushStr(" of ");
       result.push(&iterableText);

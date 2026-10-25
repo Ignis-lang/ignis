@@ -52,6 +52,9 @@ function pushBuiltins(items: &mut Vector<AtItem>): void {
   pushAtItem(itemsRef, "eq", true, "@eq<T>(left, right)", "Compares two values with the concrete `Eq` implementation for `T`.", "Used by std collections to force concrete equality dispatch after monomorphization.");
   pushAtItem(itemsRef, "maxOf", true, "@maxOf<T>()", "Returns the maximum representable value of type `T`.", "Compile-time builtin for integer limits.");
   pushAtItem(itemsRef, "minOf", true, "@minOf<T>()", "Returns the minimum representable value of type `T`.", "Compile-time builtin for integer limits.");
+  pushAtItem(itemsRef, "fields", true, "@fields<Self>()", "The fields of the record `Self`, walked by `comptime for (field of @fields<Self>()) { ... }`.", "Only valid as the iterable of a `comptime for` in a method whose `Self` is a record. The loop is unrolled before name resolution, one copy of its body per field, in declaration order; `field.name` is the field's name (`str`) and `field.index` its position (`i32`).");
+  pushAtItem(itemsRef, "field", true, "@field(value, field)", "The field a `comptime for` descriptor names, on `value`: `value.<name>`.", "A place like the field itself: readable, assignable and borrowable. In a record initializer, `comptime for (field of @fields<Self>()) @field(field): value` sets every field.");
+  pushAtItem(itemsRef, "fieldType", true, "@fieldType(field)", "The written type of the field a `comptime for` descriptor names.", "Valid wherever a type is: annotations, casts, type arguments.");
 }
 
 /// The rest of the registry: `configFlag`, the last builtins and the
@@ -67,6 +70,7 @@ function pushDirectives(items: &mut Vector<AtItem>): void {
   pushAtItem(itemsRef, "aligned", false, "@aligned(N)", "Sets minimum alignment to `N` bytes.", "Valid on: record, field, static field. `N` is an integer literal, a power of two, at most 1073741824.");
   pushAtItem(itemsRef, "threadLocal", false, "@threadLocal", "Gives a `static mut` field one copy per thread.", "Valid on: `static mut` field. The initializer is a constant expression or absent (zero), the type must not run a drop, and the field cannot be borrowed with `&`, `&mut`, a `&self`/`&mut self` method call or a slice of it; read and write it by value.");
   pushAtItem(itemsRef, "cLayout", false, "@cLayout", "Gives a record a C layout: fields in declaration order, each emitted under its written name.", "Valid on: record. The C struct name stays mangled and methods are allowed. Not on generic records or records implementing `Drop`. Records inside an `extern` block have a C layout already.");
+  pushAtItem(itemsRef, "attribute", false, "@attribute(record, field)", "Marks a record as a declarable attribute, written as `@Name(arguments)`.", "Valid on: record. Targets among `record`, `enum`, `field`, `function`, `variant`. The record's fields are the attribute's arguments, in order; each must be a compile-time constant. In a method body, `@attribute<A>(field)` and `@attribute<A>(Self)` read attribute `A` on a `comptime for` field or on the record as an `Option<A>`.");
   pushAtItem(itemsRef, "implements", false, "@implements(TraitName)", "Declares that a record implements a trait.", "Valid on: record. Accepts one or more trait names: `@implements(Drop)`, `@implements(Clone, Copy)`.");
   pushAtItem(itemsRef, "lang", false, "@lang(try)", "Marks a declaration with compiler-recognized language semantics.", "Currently used for language hooks such as `try`-capable records.");
   pushAtItem(itemsRef, "externName", false, "@externName(\"symbol\")", "Sets the C symbol name for an extern function.", "Valid on: function. Overrides the default mangled name in the generated C code.");
@@ -166,6 +170,18 @@ export function atItemSnippet(item: &AtItem): Option<String> {
 
   if (name.equals("zeroed")) {
     return Option::SOME(name.concat("<${1:T}>()"));
+  }
+
+  if (name.equals("fields")) {
+    return Option::SOME(name.concat("<${1:Self}>()"));
+  }
+
+  if (name.equals("field")) {
+    return Option::SOME(name.concat("(${1:value}, ${2:field})"));
+  }
+
+  if (name.equals("fieldType")) {
+    return Option::SOME(name.concat("(${1:field})"));
   }
 
   if (name.equals("atomicLoad")) {

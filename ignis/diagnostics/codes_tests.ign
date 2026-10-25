@@ -1,4 +1,5 @@
 import Fs from "std::fs";
+import Io from "std::io";
 import Test from "std::test";
 
 /// The code each `DiagnosticCode` constant declares, read from the source of
@@ -62,4 +63,97 @@ function diagnosticCodesAreUnique(): void {
   }
 
   Test::assertEq<str>(duplicates.toStr(), "");
+}
+
+/// Whether `byte` is an ASCII uppercase letter.
+function isUppercaseByte(byte: u8): boolean {
+  return byte >= 65 && byte <= 90;
+}
+
+/// Whether `byte` is an ASCII digit.
+function isDigitByte(byte: u8): boolean {
+  return byte >= 48 && byte <= 57;
+}
+
+/// Whether the bytes of `source` at `start` are a string literal shaped like
+/// a diagnostic code: a quote, an uppercase letter, four digits and a quote.
+function isCodeLiteralAt(source: &String, start: u64): boolean {
+  if (start + 7 > source.length()) {
+    return false;
+  }
+
+  let mut offset: u64 = 0;
+
+  while (offset < 7) {
+    let Option::SOME(byte) = source.byteAt(start + offset) else {
+      return false;
+    };
+
+    let mut matches: boolean = isDigitByte(byte);
+
+    if (offset == 0 || offset == 6) {
+      matches = byte == 34;
+    } else if (offset == 1) {
+      matches = isUppercaseByte(byte);
+    }
+
+    if (!matches) {
+      return false;
+    }
+
+    offset += 1;
+  }
+
+  return true;
+}
+
+/// Whether the compiler source at `path` may spell a code by hand: the
+/// registry declares them, and tests assert the codes a user sees.
+function mayWriteCodeLiterals(path: &String): boolean {
+  return path.endsWith("ignis/diagnostics/codes.ign") || path.endsWith("_tests.ign") || path.endsWith("/tests.ign");
+}
+
+/// Scenario: every diagnostic the compiler emits takes its code from a
+/// `DiagnosticCode` constant, so the uniqueness check above sees every code.
+/// The failure lists each hand-written code literal with its file.
+@test
+function diagnosticCodesAreNotWrittenByHand(): void {
+  let Result::OK(paths) = Fs::walk("ignis") else {
+    @panic("cannot walk ignis/");
+  };
+  let mut literals: String = String::new();
+  let mut scanned: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < paths.length()) {
+    if (let Option::SOME(path) = paths.get(index)) {
+      if (path.endsWith(".ign") && !mayWriteCodeLiterals(path)) {
+        if (let Result::OK(source) = Fs::readToString(path)) {
+          let mut offset: u64 = 0;
+          scanned += 1;
+
+          while (offset < source.length()) {
+            if (isCodeLiteralAt(&source, offset)) {
+              literals.pushStr(path.toStr());
+              literals.pushStr(":");
+              let code: String = source.substringBytes(offset + 1, offset + 6);
+              literals.pushStr(code.toStr());
+              literals.pushStr(" ");
+            }
+
+            offset += 1;
+          }
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  if (literals.length() > 0) {
+    Io::eprintln(literals.toStr());
+  }
+
+  Test::assert(scanned > 100);
+  Test::assertEq<str>(literals.toStr(), "");
 }

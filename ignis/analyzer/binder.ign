@@ -544,7 +544,20 @@ export namespace Analyzer {
       if (let Option::SOME(node) = nodeOpt) {
         match (node) {
           Ast::Item::Node::Record(r) -> {
-            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &r.name, r.span, scopeKey, false);
+            // An extension block declares no name of its own: nothing can
+            // refer to it, and two blocks for the same type are reported as a
+            // duplicate implementation once their traits resolve.
+            if (ast.extensionTarget(itemId).isSome()) {
+              let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+              let sym: Analyzer::SymbolId = symbolsRef.intern(r.name.toStr());
+              let defId: Analyzer::DefinitionId = allocateRecordPlaceholder(defStore, typeStore, sym);
+              let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+              stateRef.nodeIds.push(itemId.raw());
+              stateRef.defIds.push(defId);
+              stateRef.declScopeKeys.push(scopeKey);
+            } else {
+              predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &r.name, r.span, scopeKey, false);
+            }
           },
           Ast::Item::Node::Enum(e) -> {
             predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &e.name, e.span, scopeKey, true);
@@ -1412,6 +1425,12 @@ export namespace Analyzer {
     /// parser does not gate — where it survives as an ordinary attribute — is
     /// not also reported as an unknown attribute.
     function attributeIsKnownFor(name: &String, target: str): boolean {
+      // A declarable attribute resolves by name later, against the records
+      // marked `@attribute`; `Analyzer::Attributes` reports what it rejects.
+      if (Ast::isDeclarableAttributeName(name)) {
+        return true;
+      }
+
       if (name.equals("allow") || name.equals("warn") || name.equals("deny") || name.equals("configFlag")) {
         return true;
       }
@@ -1419,7 +1438,11 @@ export namespace Analyzer {
       let targetName: String = String::create(target);
 
       if (targetName.equals("record")) {
-        return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang") || name.equals("cLayout");
+        return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang") || name.equals("cLayout") || name.equals("attribute");
+      }
+
+      if (targetName.equals("extension")) {
+        return name.equals("implements");
       }
 
       if (targetName.equals("field")) {
@@ -1649,7 +1672,7 @@ export namespace Analyzer {
       name: str,
       span: SourceSpan,
     ): void {
-      let message: String = `trait method '${name}' must have a self parameter (&self or &mut self)`;
+      let message: String = `trait method '${name}' must have a self parameter (&self or &mut self) or be declared static`;
       let mut diag: Diagnostic = Diagnostic::new(
         Severity::ERROR,
         DiagnosticCode::TRAIT_METHOD_REQUIRES_SELF,
@@ -2610,7 +2633,9 @@ export namespace Analyzer {
           if (let Option::SOME(item) = ast.items.get(*methodItemId)) {
             match (item) {
               Ast::Item::Node::Function(fn_) -> {
-                if (!functionHasSelfReceiver(ast, &fn_)) {
+                // A `static` trait method belongs to the implementing type and
+                // takes no receiver.
+                if (!metadataIsStatic(&fn_.metadata) && !functionHasSelfReceiver(ast, &fn_)) {
                   emitMissingTraitSelfDiagnostic(state, fn_.name.toStr(), fn_.span);
                 }
               },
@@ -2677,12 +2702,43 @@ export namespace Analyzer {
       scopeKey: u64,
       pass1: &Analyzer::Binder::BinderOutput,
     ): void {
-      Analyzer::Binder::validateAttributes(state, &rec.metadata, "record");
+      let isExtension: boolean = ast.extensionTarget(itemId).isSome();
+
+      if (isExtension) {
+        Analyzer::Binder::validateAttributes(state, &rec.metadata, "extension");
+
+        if (Analyzer::Binder::implementedTraitNames(&rec.metadata).length() == 0) {
+          let mut diag: Diagnostic = Diagnostic::new(
+            Severity::ERROR,
+            DiagnosticCode::EXTENSION_WITHOUT_TRAIT,
+            "an extension block has to name the trait it implements in @implements",
+            rec.span,
+          );
+          diag.addLabel(LabelKind::PRIMARY, rec.span, "write @implements(Trait) before 'extension'");
+          let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+          stateRef.diagnostics.push(diag);
+        }
+      } else {
+        Analyzer::Binder::validateAttributes(state, &rec.metadata, "record");
+      }
 
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
       let Option::SOME(defId) = defIdOpt else {
         return;
       };
+
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+
+      // `@attribute` on an extension block is already reported as unknown
+      // there; the block is no record a program can use as an attribute.
+      if (!isExtension) {
+        if (let Option::SOME(targets) = Analyzer::Attributes::declaredTargets(&mut stateRef.diagnostics, &rec.metadata)) {
+          if (targets != 0) {
+            let mut targetsRef: &mut Analyzer::DefinitionStore = defStore;
+            targetsRef.setAttributeTargets(defId, targets);
+          }
+        }
+      }
 
       // Read name and visibility from the placeholder before allocating sub-defs.
       // This scopes the immutable borrow of defStore so it ends before replace.
@@ -2739,8 +2795,8 @@ export namespace Analyzer {
         staticMethods: methods.staticMethods,
         staticFields: fieldTables.staticFields,
         typeId: realTypeId,
-        implementsCopy: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
-        implementsDrop: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
+        implementsCopy: !isExtension && Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
+        implementsDrop: !isExtension && Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
         implementedTraits: Analyzer::Binder::implementedTraitNames(&rec.metadata),
         packed: Analyzer::Binder::packedAttribute(&rec.metadata),
         alignment: Analyzer::Binder::alignmentAttribute(&rec.metadata),
@@ -2773,6 +2829,11 @@ export namespace Analyzer {
       if (let Option::SOME(cLayoutSpan) = Analyzer::Binder::attributeSpanNamed(&en.metadata, "cLayout")) {
         let cLayoutName: String = String::create("cLayout");
         Analyzer::Binder::emitUnknownAttribute(state, &cLayoutName, "enum", cLayoutSpan);
+      }
+
+      if (let Option::SOME(attributeSpan) = Analyzer::Binder::attributeSpanNamed(&en.metadata, "attribute")) {
+        let attributeName: String = String::create("attribute");
+        Analyzer::Binder::emitUnknownAttribute(state, &attributeName, "enum", attributeSpan);
       }
 
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());

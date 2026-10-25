@@ -216,6 +216,38 @@
       "doc": "  \n# Option Module  \n  \nPresence/absence sum type.  \n  \n## Overview  \n  \n`Option<S>` models values that may or may not exist. It is an enum with  \ntwo variants:  \n  \n- `Option::SOME(value)` — the value is present  \n- `Option::NONE`        — the value is absent  \n  \nUse `Option` instead of sentinel values (like `-1` or `null`) whenever  \na function might not produce a meaningful result.  \n  \n## Variants  \n  \n```text  \n  Option<S>  \n  ┌─────────────────────────────────────┐  \n  │                                     │  \n  │   SOME(S) ── carries a value of S   │  \n  │                                     │  \n  │   NONE    ── no value               │  \n  │                                     │  \n  └─────────────────────────────────────┘  \n```  \n  \n## Ownership  \n  \nEvery method that can hand the payload out takes `self` by value and  \nconsumes the option: `unwrap`, `unwrapOr`, `unwrapOrElse`, `filter`,  \n`orElse`, `inspect`, `map`, and `andThen`. The receiver cannot be used  \nagain afterwards, so an owning payload is moved exactly once.  \n  \nOnly `isSome` and `isNone` observe through `&self` and leave the option  \nusable.  \n  \nA borrowed `Option<S>` therefore cannot be fed to a consuming combinator  \ndirectly. Match on the borrow instead, or clone the option when the value  \nis genuinely needed twice.  \n  \n## Higher-Order Methods  \n  \nOption provides callback-based methods for transforming and inspecting  \noptional values without manual `match` boilerplate:  \n  \n| Method         | Signature                          | Description                        |  \n|----------------|------------------------------------|------------------------------------|  \n| `filter`       | `(&S) -> boolean` → `Option<S>`    | Keep SOME only if predicate holds  |  \n| `unwrapOrElse` | `() -> S` → `S`                    | Lazy default on NONE               |  \n| `orElse`       | `() -> Option<S>` → `Option<S>`    | Lazy alternative on NONE           |  \n| `inspect`      | `(&S) -> void` → `Option<S>`       | Side-effect on the inner value     |  \n| `map<U>`       | `(S) -> U` → `Option<U>`           | Transform inner value              |  \n| `andThen<U>`   | `(S) -> Option<U>` → `Option<U>`   | Chain fallible operations          |  \n  \n`filter` and `inspect` observe the payload through `&S` because they hand  \nthe original option back. `map` and `andThen` pass `S` by value because the  \npayload is given away to the callback.  \n  \nAll callbacks are `@noescape`: the closure must not outlive the method call.  \n  \n## Example  \n  \n```ignis  \n  \nfunction findUser(id: i32): Option<str> {  \n  if (id == 1) {  \n    return Option::SOME(\"alice\");  \n  }  \n  return Option::NONE;  \n}  \n  \nfunction main(): i32 {  \n  let name: str = findUser(1).unwrapOr(\"unknown\");  \n  \n  // Chain: look up user, check name length, convert to uppercase  \n  let result: Option<i32> = findUser(1)  \n    .filter((s: &str): boolean -> { return *s != \"\"; })  \n    .map<i32>((s: str): i32 -> { return 42; });  \n  \n  return 0;  \n}  \n```"
     },
     {
+      "name": "std::orm",
+      "doc": "  \n# ORM  \n  \nA small mapping layer on `std::sqlite3`: table descriptors that emit their  \nSQL, typed row reads that report NULL and bad values as errors, ordered  \nmigrations applied in one transaction, and a repository that stores a  \nrecord implementing `Orm::Entity` and `Orm::FromRow`. Every value goes to SQLite  \nas a bound parameter; no statement interpolates one.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |  \n| `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |  \n| `Orm::Entity`     | A stored record: `static table()`, `id()`, `bindValues(statement)` |  \n| `Orm::FromRow`    | `static fromRow(row)`: a record from a row       |  \n| `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |  \n| `Orm::Value`      | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |  \n| `Orm::Migration`  | One versioned schema step                        |  \n| `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |  \n| `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |  \n| `Orm::ErrorKind`  | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Orm::Error>`; nothing in the  \nmodule panics. A SQLite failure keeps its extended code in `Error::code`,  \nand `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),  \n`CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.  \n  \n## Linking  \n  \nThe module adds no linking of its own: it builds on `std::sqlite3`, which  \nlinks `libsqlite3`.  \n  \n## Example  \n  \n```ignis  \nimport Orm from \"std::orm\";  \nimport Sqlite3 from \"std::sqlite3\";  \n  \n@implements(Orm::Entity, Orm::FromRow)  \nrecord Task {  \n  public id: Option<i64>;  \n  public title: String;  \n  \n  static table(): Orm::Table {  \n    return Orm::Table::create(\"tasks\")  \n      .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n      .autoIncrement()  \n      .columnText(\"title\", Orm::ColumnKey::NONE)  \n      .notNull();  \n  }  \n  \n  static fromRow(row: &Orm::Row): Result<Task, Orm::Error> {  \n    return Result::OK(Task { id: Option::SOME(row.readInt(0)!), title: row.readText(1)! });  \n  }  \n  \n  id(&self): Option<i64> {  \n    return self.id;  \n  }  \n  \n  bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Orm::Error> {  \n    return match (statement.bindText(1, self.title.toStr())) {  \n      Result::OK(_) -> Result::OK(()),  \n      Result::ERROR(error) -> Result::ERROR(Orm::Error::fromSqlite(error)),  \n    };  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();  \n  migrations.push(Orm::Migration::create(1, Task::table().createTableSql().unwrap().toStr()));  \n  Orm::migrate(&mut connection, &migrations).unwrap();  \n  \n  let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();  \n  let task: Task = Task { id: Option::NONE, title: String::create(\"write the ORM\") };  \n  let id: i64 = tasks.insert(&mut connection, &task).unwrap();  \n  \n  return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;  \n}  \n```  \n  \n## Non-goals  \n  \nThere is no query builder: the generated SQL covers single-table CRUD,  \nand `Repository::findWhere` takes a raw `WHERE` clause with bound  \n`Orm::Value` parameters for everything else. There are no relationships."
+    },
+    {
+      "name": "std::orm::entity",
+      "doc": "  \n# Entity  \n  \n`Orm::Entity` and `Orm::FromRow`, the two traits a record implements by  \nhand so an `Orm::Repository` can store it: one describes the table and  \nbinds the record's values, the other builds a record from a row.  \n  \n## Exports  \n  \n| Export         | Description                                        |  \n|----------------|----------------------------------------------------|  \n| `Orm::Entity`  | `static table()`, `id(&self)`, `bindValues(&self, statement)` |  \n| `Orm::FromRow` | `static fromRow(row)`                              |  \n  \n## Contract  \n  \n- `table()` returns the same descriptor on every call. A repository needs  \n  an `INTEGER` primary key.  \n- `id()` is the key: `NONE` for a record not stored yet.  \n- `bindValues` binds every non-key column, in declaration order, to the  \n  parameters `1..n`. The repository binds the key itself, after them,  \n  when a statement needs it.  \n- `fromRow` reads every column in declaration order: column 0 is the  \n  first column of `table()`."
+    },
+    {
+      "name": "std::orm::error",
+      "doc": "  \n# Errors  \n  \n`Orm::Error`, the error type every fallible operation of `std::orm`  \nreturns. Nothing in the module panics: an invalid descriptor, a value that  \ndoes not decode and a failing SQLite call all become an `Error` value with  \na kind a service can map to a status.  \n  \n## Exports  \n  \n| Export           | Description                                       |  \n|------------------|---------------------------------------------------|  \n| `Orm::ErrorKind` | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n| `Orm::Error`     | `kind`, `message` and `code`; `fromSqlite` maps a `Sqlite3::Error` |  \n  \n## Mapping SQLite errors  \n  \n`Error::fromSqlite` keeps the extended result code in `code` and picks the  \nkind from it: a primary-key or unique violation is `CONFLICT` (409), any  \nother constraint violation is `CONSTRAINT` (422), and everything else is  \n`SQLITE` (500)."
+    },
+    {
+      "name": "std::orm::migration",
+      "doc": "  \n# Migrations  \n  \n`Orm::Migration` and `Orm::migrate`, ordered schema steps applied once.  \nEach step is a version and the SQL that moves the schema to it; the  \nversions already applied are recorded in a `schema_migrations` table.  \n  \n## Exports  \n  \n| Export           | Description                                       |  \n|------------------|---------------------------------------------------|  \n| `Orm::Migration` | `create(version, sql)`: one versioned step        |  \n| `Orm::migrate`   | Applies the pending steps in one transaction and returns how many it applied |  \n  \n## Contract  \n  \n`migrate` checks the list before touching the database: every version is  \npositive and the versions strictly increase, or the call fails with a  \n`SCHEMA` error and nothing runs. Then, in one transaction, it creates  \n`schema_migrations (version INTEGER PRIMARY KEY)` when it is missing,  \napplies in order every step above the highest recorded version and  \nrecords each one. A failing step rolls back the whole call, the  \n`schema_migrations` table included, and is returned as a `SQLITE` error.  \n  \nA step's SQL runs through `Connection::exec`, so it may hold several  \nstatements separated by semicolons; it takes no parameters.  \n  \nA step's SQL must not contain its own `BEGIN`, `COMMIT`, `END` (as a  \ntransaction statement) or `ROLLBACK`: `migrate` already runs every step  \ninside one transaction, and a nested one either fails or ends the outer  \ntransaction early, so later steps would no longer roll back with it. The  \nSQL is not scanned for them, because a text match cannot tell a  \ntransaction statement from the `BEGIN ... END` body of a `CREATE TRIGGER`  \nor from a string literal; the rule is the caller's to keep."
+    },
+    {
+      "name": "std::orm::repository",
+      "doc": "  \n# Repository  \n  \n`Orm::Repository<T>`, single-table CRUD for a record that implements  \n`Orm::Entity` and `Orm::FromRow`. The repository builds its SQL once from  \n`T::table()` and binds every value; it never interpolates one.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` |  \n  \n## Contract  \n  \n- `create()` validates `T::table()`: an invalid descriptor, a table  \n  without a key or a key that is not `INTEGER` is a `SCHEMA` error.  \n- `findById`, `update` and `deleteById` report a missing row as  \n  `NOT_FOUND`; `update` of a record whose `id()` is `NONE` is `SCHEMA`.  \n- `insert` returns the key SQLite stored: the assigned one for an  \n  `AUTOINCREMENT` key, otherwise the bound `id()` (or the assigned rowid  \n  when it is `NONE`).  \n- `all` returns rows in key order. `findWhere` appends `WHERE <whereSql>`  \n  to the select and binds `params` to its `?` in order; `whereSql` is SQL  \n  text, so only `params` may carry caller data.  \n- SQLite failures go through `Error::fromSqlite`, so a unique violation  \n  is `CONFLICT`.  \n  \nEvery method takes the connection, so a caller holding a lock on it  \ndecides how long it is held."
+    },
+    {
+      "name": "std::orm::row",
+      "doc": "  \n# Row  \n  \n`Orm::Row`, a typed view of the current row of a `Sqlite3::Statement`.  \nEvery getter checks what the binding's coercing getters cannot: the column  \nexists, it is not NULL where a value is required, and a boolean is 0 or 1.  \n  \n## Exports  \n  \n| Export     | Description                                             |  \n|------------|---------------------------------------------------------|  \n| `Orm::Row` | `create`, `columnCount`, `readInt`, `readReal`, `readText`, `readBlob`, `readBoolean` and their `readOptional*` forms |  \n  \n## Decoding  \n  \nColumn indexes are 0-based. A negative or out-of-range index is a  \n`DECODE` error in every getter. `read*` reports NULL as `DECODE`;  \n`readOptional*` reports it as `Option::NONE`. Values are otherwise read  \nwith SQLite's own coercion, so `readInt` on a TEXT column parses a number.  \n  \n## Lifetime  \n  \nA `Row` borrows its statement and reads the row the statement is on now:  \nuse it between a `step()` that returned `Step::ROW` and the next `step()`."
+    },
+    {
+      "name": "std::orm::table",
+      "doc": "  \n# Table  \n  \n`Orm::Table`, the descriptor of one table: its name and its columns, in  \norder. The descriptor emits the SQL of its `CREATE TABLE` and of the  \nstatements a repository runs; every value in those statements is a `?`  \nparameter, never interpolated text.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |  \n  \n## Building a descriptor  \n  \nThe builder methods take the table by value and return it, so a  \ndescriptor is one expression. `autoIncrement()` and `notNull()` apply to  \nthe column added last:  \n  \n```ignis  \nlet table: Orm::Table = Orm::Table::create(\"tasks\")  \n  .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n  .autoIncrement()  \n  .columnText(\"title\", Orm::ColumnKey::NONE)  \n  .notNull();  \n```  \n  \n## Validation  \n  \nEvery emitter validates the descriptor first and returns an `Orm::Error`  \nof kind `SCHEMA` when the table or a column name is not a plain identifier  \n(`[A-Za-z_][A-Za-z0-9_]*`, so a name never needs quoting), when there are  \nno columns, when a column name repeats, when more than one column is a  \nprimary key, or when `autoIncrement()` marks a column that is not an  \nINTEGER primary key. The by-id statements also need a key.  \n  \n## Bind order  \n  \nEach emitter documents the order of its `?` parameters; a repository binds  \nvalues in exactly that order."
+    },
+    {
+      "name": "std::orm::value",
+      "doc": "  \n# Value  \n  \n`Orm::Value`, one SQL parameter of a raw query such as  \n`Repository::findWhere`. A value always reaches SQLite through a `bind*`  \ncall, never as text in the statement.  \n  \n## Exports  \n  \n| Export       | Description                                          |  \n|--------------|------------------------------------------------------|  \n| `Orm::Value` | `NULL`, `INT`, `REAL`, `TEXT`, `BLOB`; `bind` binds it to a `?` |"
+    },
+    {
       "name": "std::path",
       "doc": "  \n# Filesystem Paths  \n  \nOwned, mutable filesystem path type for building, inspecting, and  \ndecomposing POSIX paths.  \n  \nAll public API lives under the `Path` namespace (imported as  \n`Path` from `\"std::path\"`).  \n  \n## Types  \n  \n| Type       | Description                                        |  \n|------------|----------------------------------------------------|  \n| `PathBuf`  | Owned path backed by a `String` — the main type    |  \n  \n## Constructors  \n  \n| Method                   | Source        | Cost               |  \n|--------------------------|---------------|--------------------|  \n| `PathBuf::new()`         | (empty)       | One String alloc   |  \n| `PathBuf::create(s)`     | `str` literal | Copy into String   |  \n| `PathBuf::fromString(s)` | `&String`     | Clone the String   |  \n  \n## Query Methods  \n  \n| Method        | Returns          | Description                             |  \n|---------------|------------------|-----------------------------------------|  \n| `isEmpty`     | `boolean`        | True if the path has no bytes           |  \n| `isAbsolute`  | `boolean`        | True if the path starts with `/`        |  \n| `isRelative`  | `boolean`        | True if the path does not start with `/`|  \n| `asStr`       | `str`            | Borrow as `const char*` (NUL-terminated)|  \n| `toString`    | `String`         | Clone the inner String                  |  \n| `fileName`    | `Option<String>` | Last component after final `/`          |  \n| `extension`   | `Option<String>` | After last `.` in fileName              |  \n| `parent`      | `Option<PathBuf>`| Everything before last component        |  \n  \n## Mutation Methods  \n  \n| Method   | Signature                          | Description                    |  \n|----------|------------------------------------|--------------------------------|  \n| `push`   | `push(&mut self, part: str): void` | Append a path component        |  \n| `pop`    | `pop(&mut self): boolean`          | Remove the last component      |  \n  \n## Operations (return new PathBuf)  \n  \n| Method   | Signature                           | Description                   |  \n|----------|-------------------------------------|-------------------------------|  \n| `join`   | `join(&self, part: str): PathBuf`   | Clone self, then push `part`  |  \n| `normalize` | `normalize(&self): PathBuf`      | Lexically resolve `.`/`..`    |  \n  \n## Platform Notes  \n  \nThis module is **POSIX-oriented**: the separator is `/` and there is  \nno drive-letter or UNC prefix handling.  Windows support will be added  \nwhen `@platform` attributes land.  \n  \n## Design Decisions  \n  \n- **No `Path` (borrowed view) type yet.**  Ignis `str` is `const char*`  \n  with no length — it cannot represent a sub-range without copying.  \n  A borrowed `Path` will be added when string slices land.  \n- `fileName`, `extension`, and `parent` return **owned** values  \n  (String / PathBuf) because there is no zero-copy substring today.  \n- `push` with an absolute path (`/...`) **replaces** self entirely,  \n  matching POSIX `join` semantics (and Rust's `PathBuf::push`).  \n  \n## Example  \n  \n```ignis  \nimport Path from \"std::path\";  \n  \nfunction main(): i32 {  \n  let mut p: Path::PathBuf = Path::PathBuf::create(\"/usr/local\");  \n  p.push(\"bin\");  \n  p.push(\"ignis\");  \n  \n  // p.asStr() == \"/usr/local/bin/ignis\"  \n  \n  let name: Option<String> = p.fileName();  \n  // name == Option::SOME(\"ignis\")  \n  \n  let ext: Option<String> = p.extension();  \n  // ext == Option::NONE (no extension)  \n  \n  let par: Option<Path::PathBuf> = p.parent();  \n  // par.unwrap().asStr() == \"/usr/local/bin\"  \n  \n  p.pop();  \n  // p.asStr() == \"/usr/local/bin\"  \n  \n  let joined: Path::PathBuf = p.join(\"rustc\");  \n  // joined.asStr() == \"/usr/local/bin/rustc\"  \n  \n  return 0;  \n}  \n```"
     },
@@ -264,7 +296,7 @@
     },
     {
       "name": "std::sqlite3",
-      "doc": "  \n# SQLite3  \n  \nA faithful SQLite binding: `std::sqlite3` wraps the C API's `sqlite3*` and  \n`sqlite3_stmt*` handles in RAII types and returns every failure as a  \n`Result`. The mapping layer (`std::orm`, planned) builds on it; programs  \nthat only want raw SQL never link anything else.  \n  \n## Exports  \n  \n| Export                | Description                                    |  \n|-----------------------|------------------------------------------------|  \n| `Sqlite3::Connection` | One database: `open`, `openInMemory`, `close`, `exec`, `prepare`, `lastInsertRowId`, `changes`, `busyTimeout`, `begin`. Closes on drop |  \n| `Sqlite3::Statement`  | One compiled statement: `bindNull`, `bindInt`, `bindReal`, `bindText`, `bindBlob`, `step`, `columnCount`, `columnIsNull`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `reset`. Finalizes on drop |  \n| `Sqlite3::Step`       | `ROW` or `DONE`, what `Statement::step` reports |  \n| `Sqlite3::Transaction`| A scoped transaction: `commit`, `rollback`; rolls back on drop |  \n| `Sqlite3::Error`      | `code` (extended result code) and `message`; `isConstraint()` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Sqlite3::Error>`; nothing in  \nthe module panics. `Error::code` is SQLite's extended result code and  \n`Error::isConstraint()` names the constraint family, which a service turns  \ninto 409/422. See `std::sqlite3::error`.  \n  \n## Linking  \n  \nThe module links `libsqlite3` and includes `sqlite3.h`  \n(`[linking.sqlite3]` in `std/manifest.toml`), so every machine that builds  \nthe compiler or the standard library needs the SQLite development headers  \ninstalled (`libsqlite3-dev` on Debian and Ubuntu, `pkgs.sqlite` in this  \nrepository's Nix dev shell).  \n  \n## Journal mode  \n  \n`Connection::open` runs `PRAGMA journal_mode=WAL` on file databases so  \nreaders do not block behind a writer; `\":memory:\"` databases skip the  \npragma, where WAL never applies. See `std::sqlite3::connection`.  \n  \n## Example  \n  \n```ignis  \nimport Sqlite3 from \"std::sqlite3\";  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  \n  connection.exec(\"CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL)\").unwrap();  \n  \n  let mut statement: Sqlite3::Statement =  \n    connection.prepare(\"INSERT INTO tasks (title) VALUES (?)\").unwrap();  \n  \n  statement.bindText(1, \"write the ORM\").unwrap();  \n  statement.step().unwrap();  \n  \n  return connection.lastInsertRowId() == 1 ? 0 : 1;  \n}  \n```  \n  \n## Statements  \n  \n`Connection::prepare` compiles only the first statement of its SQL;  \nanything after the first semicolon is not compiled and is silently  \ndropped. Run each statement on its own `prepare`, or hand multi-statement  \nscripts that need no parameters and read no rows to `Connection::exec`.  \n  \n## Transactions  \n  \n`Connection::begin` returns a `Sqlite3::Transaction` that commits on  \n`commit()` and rolls back on drop, so an early `return` cannot leave one  \nopen; the guard reads its connection's live handle on every use, so a  \ntransaction on a closed connection is refused with a misuse error instead  \nof touching freed memory. See `std::sqlite3::transaction`.  \n  \n## Non-goals  \n  \nThe binding is blocking and synchronous. There is no asynchronous API and  \nno query builder; the mapping layer is `std::orm` (planned), not this  \nmodule."
+      "doc": "  \n# SQLite3  \n  \nA faithful SQLite binding: `std::sqlite3` wraps the C API's `sqlite3*` and  \n`sqlite3_stmt*` handles in RAII types and returns every failure as a  \n`Result`. The mapping layer, `std::orm`, builds on it; programs that only  \nwant raw SQL never link anything else.  \n  \n## Exports  \n  \n| Export                | Description                                    |  \n|-----------------------|------------------------------------------------|  \n| `Sqlite3::Connection` | One database: `open`, `openInMemory`, `close`, `exec`, `prepare`, `lastInsertRowId`, `changes`, `busyTimeout`, `begin`. Closes on drop |  \n| `Sqlite3::Statement`  | One compiled statement: `bindNull`, `bindInt`, `bindReal`, `bindText`, `bindBlob`, `step`, `columnCount`, `columnIsNull`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `reset`. Finalizes on drop |  \n| `Sqlite3::Step`       | `ROW` or `DONE`, what `Statement::step` reports |  \n| `Sqlite3::Transaction`| A scoped transaction: `commit`, `rollback`; rolls back on drop |  \n| `Sqlite3::Error`      | `code` (extended result code) and `message`; `isConstraint()` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Sqlite3::Error>`; nothing in  \nthe module panics. `Error::code` is SQLite's extended result code and  \n`Error::isConstraint()` names the constraint family, which a service turns  \ninto 409/422. See `std::sqlite3::error`.  \n  \n## Linking  \n  \nThe module links `libsqlite3` and includes `sqlite3.h`  \n(`[linking.sqlite3]` in `std/manifest.toml`), so every machine that builds  \nthe compiler or the standard library needs the SQLite development headers  \ninstalled (`libsqlite3-dev` on Debian and Ubuntu, `pkgs.sqlite` in this  \nrepository's Nix dev shell).  \n  \n## Journal mode  \n  \n`Connection::open` runs `PRAGMA journal_mode=WAL` on file databases so  \nreaders do not block behind a writer; `\":memory:\"` databases skip the  \npragma, where WAL never applies. See `std::sqlite3::connection`.  \n  \n## Example  \n  \n```ignis  \nimport Sqlite3 from \"std::sqlite3\";  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  \n  connection.exec(\"CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL)\").unwrap();  \n  \n  let mut statement: Sqlite3::Statement =  \n    connection.prepare(\"INSERT INTO tasks (title) VALUES (?)\").unwrap();  \n  \n  statement.bindText(1, \"write the ORM\").unwrap();  \n  statement.step().unwrap();  \n  \n  return connection.lastInsertRowId() == 1 ? 0 : 1;  \n}  \n```  \n  \n## Statements  \n  \n`Connection::prepare` compiles only the first statement of its SQL;  \nanything after the first semicolon is not compiled and is silently  \ndropped. Run each statement on its own `prepare`, or hand multi-statement  \nscripts that need no parameters and read no rows to `Connection::exec`.  \n  \n## Transactions  \n  \n`Connection::begin` returns a `Sqlite3::Transaction` that commits on  \n`commit()` and rolls back on drop, so an early `return` cannot leave one  \nopen; the guard reads its connection's live handle on every use, so a  \ntransaction on a closed connection is refused with a misuse error instead  \nof touching freed memory. See `std::sqlite3::transaction`.  \n  \n## Non-goals  \n  \nThe binding is blocking and synchronous. There is no asynchronous API and  \nno query builder; the mapping layer is `std::orm`, not this module."
     },
     {
       "name": "std::sqlite3::connection",
@@ -13480,6 +13512,858 @@
           "kind": "method",
           "signature": "unwrapOrElse(self, f: () -> S): S",
           "doc": "Returns the contained value, or calls `f` to produce a default.  \n  \nConsumes the option: the receiver is moved and cannot be used again.  \n  \nUnlike `unwrapOr`, the fallback is only evaluated when the option  \nis `NONE`. Use this when computing the default is expensive.  \n  \n# Arguments  \n  \n* `f` - Callback that produces a default value of type `S`.  \n  \n# Example  \n  \n```ignis  \n  \nlet x: Option<i32> = Option::NONE;  \nlet val: i32 = x.unwrapOrElse((): i32 -> { return 99; });  \n// val == 99 (callback was called)  \n  \nlet y: Option<i32> = Option::SOME(42);  \nlet val2: i32 = y.unwrapOrElse((): i32 -> { return 99; });  \n// val2 == 42 (callback was NOT called)  \n```"
+        }
+      ]
+    },
+    {
+      "module": "std::orm",
+      "path": "std::orm::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm"
+    },
+    {
+      "module": "std::orm::entity",
+      "path": "std::orm::entity::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "The traits a stored record implements."
+    },
+    {
+      "module": "std::orm::entity",
+      "path": "std::orm::entity::Orm::Entity",
+      "name": "Entity",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait Entity",
+      "doc": "A record stored as one row of `table()`.",
+      "members": [
+        {
+          "name": "id",
+          "kind": "method",
+          "signature": "id(&self): Option<i64>",
+          "doc": "The record's key, or `NONE` before it is inserted."
+        },
+        {
+          "name": "bindValues",
+          "kind": "method",
+          "signature": "bindValues(&self): Result<void, Error>",
+          "doc": "Binds every non-key column, in declaration order, from parameter 1."
+        },
+        {
+          "name": "table",
+          "kind": "method",
+          "signature": "static table(): Table",
+          "doc": "The descriptor of the record's table."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::entity",
+      "path": "std::orm::entity::Orm::FromRow",
+      "name": "FromRow",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait FromRow",
+      "doc": "A record built from a row whose columns follow its table's order.",
+      "members": [
+        {
+          "name": "fromRow",
+          "kind": "method",
+          "signature": "static fromRow(row: &Row): Result<Self, Error>",
+          "doc": "The record in `row`, or a `DECODE` error when a column does not fit."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::error",
+      "path": "std::orm::error::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Why an ORM operation failed.  \n  \nEvery fallible operation in `std::orm` returns `Result<T, Orm::Error>`; no  \nfunction in the module panics."
+    },
+    {
+      "module": "std::orm::error",
+      "path": "std::orm::error::Orm::Error",
+      "name": "Error",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Error",
+      "doc": "A failed ORM operation.",
+      "members": [
+        {
+          "name": "kind",
+          "kind": "field",
+          "signature": "kind: ErrorKind",
+          "doc": "The family of the failure."
+        },
+        {
+          "name": "message",
+          "kind": "field",
+          "signature": "message: String",
+          "doc": "A human-readable description."
+        },
+        {
+          "name": "code",
+          "kind": "field",
+          "signature": "code: i32",
+          "doc": "The SQLite extended result code, or 0 when SQLite did not report it."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(kind: ErrorKind, message: String): Error",
+          "doc": "Builds an error that did not come from SQLite."
+        },
+        {
+          "name": "fromSqlite",
+          "kind": "method",
+          "signature": "static fromSqlite(error: Error): Error",
+          "doc": "Maps a `Sqlite3::Error`: primary-key and unique violations become  \n`CONFLICT`, other constraint violations `CONSTRAINT`, the rest  \n`SQLITE`. The extended code is kept in `code`."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::error",
+      "path": "std::orm::error::Orm::ErrorKind",
+      "name": "ErrorKind",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum ErrorKind",
+      "doc": "The family of an `Orm::Error`.",
+      "members": [
+        {
+          "name": "NOT_FOUND",
+          "kind": "variant",
+          "signature": "NOT_FOUND"
+        },
+        {
+          "name": "CONFLICT",
+          "kind": "variant",
+          "signature": "CONFLICT"
+        },
+        {
+          "name": "CONSTRAINT",
+          "kind": "variant",
+          "signature": "CONSTRAINT"
+        },
+        {
+          "name": "DECODE",
+          "kind": "variant",
+          "signature": "DECODE"
+        },
+        {
+          "name": "SQLITE",
+          "kind": "variant",
+          "signature": "SQLITE"
+        },
+        {
+          "name": "SCHEMA",
+          "kind": "variant",
+          "signature": "SCHEMA"
+        }
+      ]
+    },
+    {
+      "module": "std::orm::error",
+      "path": "std::orm::error::SQLITE_CONSTRAINT_PRIMARYKEY",
+      "name": "SQLITE_CONSTRAINT_PRIMARYKEY",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_CONSTRAINT_PRIMARYKEY: i32"
+    },
+    {
+      "module": "std::orm::error",
+      "path": "std::orm::error::SQLITE_CONSTRAINT_UNIQUE",
+      "name": "SQLITE_CONSTRAINT_UNIQUE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SQLITE_CONSTRAINT_UNIQUE: i32"
+    },
+    {
+      "module": "std::orm::migration",
+      "path": "std::orm::migration::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Versioned schema steps."
+    },
+    {
+      "module": "std::orm::migration",
+      "path": "std::orm::migration::Orm::Migration",
+      "name": "Migration",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Migration",
+      "doc": "One schema step: the version it moves the schema to and its SQL.",
+      "members": [
+        {
+          "name": "version",
+          "kind": "field",
+          "signature": "version: i64",
+          "doc": "The version, positive and strictly increasing along the list."
+        },
+        {
+          "name": "sql",
+          "kind": "field",
+          "signature": "sql: String",
+          "doc": "The SQL of the step, one or more statements."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(version: i64, sql: str): Migration",
+          "doc": "The step that moves the schema to `version` by running `sql`."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::migration",
+      "path": "std::orm::migration::Orm::migrate",
+      "name": "migrate",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function migrate(connection: &mut Connection, migrations: &Vector<Migration>): Result<i64, Error>",
+      "doc": "Applies the steps of `migrations` that are above the highest version  \nrecorded in `schema_migrations`, in order, in one transaction, and  \nreturns how many it applied. A step's SQL must not open, commit or roll  \nback a transaction of its own. See the module docs for the contract."
+    },
+    {
+      "module": "std::orm::migration",
+      "path": "std::orm::migration::Orm::recordVersion",
+      "name": "recordVersion",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function recordVersion(connection: &mut Connection, version: i64): Result<void, Error>",
+      "doc": "Records `version` as applied, binding it as a parameter."
+    },
+    {
+      "module": "std::orm::migration",
+      "path": "std::orm::migration::Orm::recordedVersion",
+      "name": "recordedVersion",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function recordedVersion(connection: &mut Connection): Result<i64, Error>",
+      "doc": "The highest version in `schema_migrations`, or 0 when it is empty."
+    },
+    {
+      "module": "std::orm::migration",
+      "path": "std::orm::migration::Orm::validateMigrations",
+      "name": "validateMigrations",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function validateMigrations(migrations: &Vector<Migration>): Result<void, Error>",
+      "doc": "Succeeds when every version is positive and the versions strictly  \nincrease; a `SCHEMA` error otherwise."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Single-table CRUD over an entity."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::Repository",
+      "name": "Repository",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Repository<T>",
+      "doc": "The statements of one entity's table, built once by `create`.",
+      "members": [
+        {
+          "name": "insertStatement",
+          "kind": "field",
+          "signature": "insertStatement: String",
+          "doc": "`Table::insertSql`."
+        },
+        {
+          "name": "selectStatement",
+          "kind": "field",
+          "signature": "selectStatement: String",
+          "doc": "`Table::selectSql`."
+        },
+        {
+          "name": "selectByIdStatement",
+          "kind": "field",
+          "signature": "selectByIdStatement: String",
+          "doc": "`Table::selectByIdSql`."
+        },
+        {
+          "name": "selectAllStatement",
+          "kind": "field",
+          "signature": "selectAllStatement: String",
+          "doc": "`Table::selectAllSql`."
+        },
+        {
+          "name": "updateStatement",
+          "kind": "field",
+          "signature": "updateStatement: String",
+          "doc": "`Table::updateByIdSql`."
+        },
+        {
+          "name": "deleteStatement",
+          "kind": "field",
+          "signature": "deleteStatement: String",
+          "doc": "`Table::deleteByIdSql`."
+        },
+        {
+          "name": "valueCount",
+          "kind": "field",
+          "signature": "valueCount: i32",
+          "doc": "How many parameters `Entity::bindValues` binds: the non-key columns."
+        },
+        {
+          "name": "insertBindsKey",
+          "kind": "field",
+          "signature": "insertBindsKey: boolean",
+          "doc": "Whether the insert binds the key after the values (not `AUTOINCREMENT`)."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(): Result<Repository<T>, Error>",
+          "doc": "The repository of `T`, or a `SCHEMA` error when `T::table()` is  \ninvalid or its key is missing or not `INTEGER`."
+        },
+        {
+          "name": "all",
+          "kind": "method",
+          "signature": "all(&self, connection: &mut Connection): Result<Vector<T>, Error>",
+          "doc": "Every row, in key order."
+        },
+        {
+          "name": "deleteById",
+          "kind": "method",
+          "signature": "deleteById(&self, connection: &mut Connection, id: i64): Result<void, Error>",
+          "doc": "Deletes the row with key `id`, or reports `NOT_FOUND`."
+        },
+        {
+          "name": "findById",
+          "kind": "method",
+          "signature": "findById(&self, connection: &mut Connection, id: i64): Result<T, Error>",
+          "doc": "The row with key `id`, or `NOT_FOUND`."
+        },
+        {
+          "name": "findWhere",
+          "kind": "method",
+          "signature": "findWhere(&self, connection: &mut Connection, whereSql: str, params: &Vector<Value>): Result<Vector<T>, Error>",
+          "doc": "The rows of `SELECT columns FROM table WHERE <whereSql>`, with  \n`params` bound to its `?` in order. `whereSql` may end with its own  \n`ORDER BY` or `LIMIT`; without one the order is SQLite's."
+        },
+        {
+          "name": "insert",
+          "kind": "method",
+          "signature": "insert(&self, connection: &mut Connection, entity: &T): Result<i64, Error>",
+          "doc": "Inserts `entity` and returns its key. See the module docs for which  \nkey that is."
+        },
+        {
+          "name": "update",
+          "kind": "method",
+          "signature": "update(&self, connection: &mut Connection, entity: &T): Result<void, Error>",
+          "doc": "Writes every non-key column of `entity` to the row with its key. An  \n`id()` of `NONE` is `SCHEMA`; no row with that key is `NOT_FOUND`."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::collectRows",
+      "name": "collectRows",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function collectRows<T>(statement: &mut Statement): Result<Vector<T>, Error>",
+      "doc": "Steps `statement` to the end, decoding each row with `T::fromRow`."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::notFound",
+      "name": "notFound",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function notFound(id: i64): Error",
+      "doc": "The `NOT_FOUND` error for key `id`."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::sqliteResult",
+      "name": "sqliteResult",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqliteResult<V>(result: Result<V, Error>): Result<V, Error>",
+      "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`."
+    },
+    {
+      "module": "std::orm::repository",
+      "path": "std::orm::repository::Orm::sqliteUnit",
+      "name": "sqliteUnit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqliteUnit(result: Result<void, Error>): Result<void, Error>",
+      "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`.  \n`sqliteResult<void>` is not used: rewrapping a `void` payload through  \nthe type parameter emits C that does not compile."
+    },
+    {
+      "module": "std::orm::row",
+      "path": "std::orm::row::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "A typed view of a statement's current row."
+    },
+    {
+      "module": "std::orm::row",
+      "path": "std::orm::row::Orm::Row",
+      "name": "Row",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Row",
+      "doc": "The current row of a stepped statement.",
+      "members": [
+        {
+          "name": "statement",
+          "kind": "field",
+          "signature": "statement: &Statement",
+          "doc": "The statement whose current row this reads."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(statement: &Statement): Row",
+          "doc": "A view of `statement`'s current row."
+        },
+        {
+          "name": "columnCount",
+          "kind": "method",
+          "signature": "columnCount(&self): i32",
+          "doc": "How many columns the row has."
+        },
+        {
+          "name": "present",
+          "kind": "method",
+          "signature": "present(&self, column: i32): Result<boolean, Error>",
+          "doc": "Whether column `column` holds a value (`false` for NULL); an index  \noutside the row is a `DECODE` error."
+        },
+        {
+          "name": "readBlob",
+          "kind": "method",
+          "signature": "readBlob(&self, column: i32): Result<Vector<u8>, Error>",
+          "doc": "Column `column` as owned bytes; NULL is a `DECODE` error."
+        },
+        {
+          "name": "readBoolean",
+          "kind": "method",
+          "signature": "readBoolean(&self, column: i32): Result<boolean, Error>",
+          "doc": "Column `column` as a boolean stored as INTEGER 0 or 1; NULL or any  \nother value is a `DECODE` error."
+        },
+        {
+          "name": "readInt",
+          "kind": "method",
+          "signature": "readInt(&self, column: i32): Result<i64, Error>",
+          "doc": "Column `column` as an integer; NULL is a `DECODE` error."
+        },
+        {
+          "name": "readOptionalBlob",
+          "kind": "method",
+          "signature": "readOptionalBlob(&self, column: i32): Result<Option<Vector<u8>>, Error>",
+          "doc": "Column `column` as owned bytes, or `NONE` when it is NULL."
+        },
+        {
+          "name": "readOptionalBoolean",
+          "kind": "method",
+          "signature": "readOptionalBoolean(&self, column: i32): Result<Option<boolean>, Error>",
+          "doc": "Column `column` as a boolean, or `NONE` when it is NULL; a value other  \nthan 0 or 1 is a `DECODE` error."
+        },
+        {
+          "name": "readOptionalInt",
+          "kind": "method",
+          "signature": "readOptionalInt(&self, column: i32): Result<Option<i64>, Error>",
+          "doc": "Column `column` as an integer, or `NONE` when it is NULL."
+        },
+        {
+          "name": "readOptionalReal",
+          "kind": "method",
+          "signature": "readOptionalReal(&self, column: i32): Result<Option<f64>, Error>",
+          "doc": "Column `column` as a float, or `NONE` when it is NULL."
+        },
+        {
+          "name": "readOptionalText",
+          "kind": "method",
+          "signature": "readOptionalText(&self, column: i32): Result<Option<String>, Error>",
+          "doc": "Column `column` as an owned `String`, or `NONE` when it is NULL."
+        },
+        {
+          "name": "readReal",
+          "kind": "method",
+          "signature": "readReal(&self, column: i32): Result<f64, Error>",
+          "doc": "Column `column` as a float; NULL is a `DECODE` error."
+        },
+        {
+          "name": "readText",
+          "kind": "method",
+          "signature": "readText(&self, column: i32): Result<String, Error>",
+          "doc": "Column `column` as an owned `String`; NULL is a `DECODE` error."
+        },
+        {
+          "name": "required",
+          "kind": "method",
+          "signature": "required(&self, column: i32): Result<void, Error>",
+          "doc": "Succeeds when column `column` exists and is not NULL."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::row",
+      "path": "std::orm::row::Orm::decodeBoolean",
+      "name": "decodeBoolean",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function decodeBoolean(value: i64, column: i32): Result<boolean, Error>",
+      "doc": "A stored boolean: 0 is `false`, 1 is `true`, anything else is `DECODE`."
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "A table descriptor and the SQL it emits."
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::Column",
+      "name": "Column",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Column",
+      "doc": "One column of a table descriptor.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String",
+          "doc": "The column name."
+        },
+        {
+          "name": "columnType",
+          "kind": "field",
+          "signature": "columnType: ColumnType",
+          "doc": "The declared type."
+        },
+        {
+          "name": "key",
+          "kind": "field",
+          "signature": "key: ColumnKey",
+          "doc": "Whether the column is the primary key."
+        },
+        {
+          "name": "autoIncrement",
+          "kind": "field",
+          "signature": "autoIncrement: boolean",
+          "doc": "Whether the key is `AUTOINCREMENT` (and so left out of inserts)."
+        },
+        {
+          "name": "notNull",
+          "kind": "field",
+          "signature": "notNull: boolean",
+          "doc": "Whether the column is `NOT NULL`."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::ColumnKey",
+      "name": "ColumnKey",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum ColumnKey",
+      "doc": "Whether a column is the table's primary key.",
+      "members": [
+        {
+          "name": "NONE",
+          "kind": "variant",
+          "signature": "NONE"
+        },
+        {
+          "name": "PRIMARY",
+          "kind": "variant",
+          "signature": "PRIMARY"
+        }
+      ]
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::ColumnType",
+      "name": "ColumnType",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum ColumnType",
+      "doc": "The SQLite type a column is declared with.",
+      "members": [
+        {
+          "name": "INTEGER",
+          "kind": "variant",
+          "signature": "INTEGER"
+        },
+        {
+          "name": "REAL",
+          "kind": "variant",
+          "signature": "REAL"
+        },
+        {
+          "name": "TEXT",
+          "kind": "variant",
+          "signature": "TEXT"
+        },
+        {
+          "name": "BLOB",
+          "kind": "variant",
+          "signature": "BLOB"
+        },
+        {
+          "name": "BOOLEAN",
+          "kind": "variant",
+          "signature": "BOOLEAN"
+        }
+      ]
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::Table",
+      "name": "Table",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Table",
+      "doc": "The descriptor of one table: its name and its columns, in order.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String",
+          "doc": "The table name."
+        },
+        {
+          "name": "columns",
+          "kind": "field",
+          "signature": "columns: Vector<Column>",
+          "doc": "The columns, in declaration order."
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(name: str): Table",
+          "doc": "An empty descriptor for the table `name`."
+        },
+        {
+          "name": "autoIncrement",
+          "kind": "method",
+          "signature": "autoIncrement(self): Table",
+          "doc": "Marks the column added last `AUTOINCREMENT`. Only an `INTEGER` primary  \nkey accepts it; the emitters report any other column as `SCHEMA`."
+        },
+        {
+          "name": "columnBlob",
+          "kind": "method",
+          "signature": "columnBlob(self, name: str, key: ColumnKey): Table",
+          "doc": "Adds a `BLOB` column."
+        },
+        {
+          "name": "columnBoolean",
+          "kind": "method",
+          "signature": "columnBoolean(self, name: str, key: ColumnKey): Table",
+          "doc": "Adds a boolean column, stored as `INTEGER` 0 or 1."
+        },
+        {
+          "name": "columnInt",
+          "kind": "method",
+          "signature": "columnInt(self, name: str, key: ColumnKey): Table",
+          "doc": "Adds an `INTEGER` column."
+        },
+        {
+          "name": "columnReal",
+          "kind": "method",
+          "signature": "columnReal(self, name: str, key: ColumnKey): Table",
+          "doc": "Adds a `REAL` column."
+        },
+        {
+          "name": "columnText",
+          "kind": "method",
+          "signature": "columnText(self, name: str, key: ColumnKey): Table",
+          "doc": "Adds a `TEXT` column."
+        },
+        {
+          "name": "createTableSql",
+          "kind": "method",
+          "signature": "createTableSql(&self): Result<String, Error>",
+          "doc": "`CREATE TABLE name (column TYPE [PRIMARY KEY [AUTOINCREMENT]] [NOT NULL], ...)`.  \nNo parameters."
+        },
+        {
+          "name": "deleteByIdSql",
+          "kind": "method",
+          "signature": "deleteByIdSql(&self): Result<String, Error>",
+          "doc": "`DELETE FROM name WHERE key = ?`. Binds the key. A table without a key  \nis a `SCHEMA` error."
+        },
+        {
+          "name": "insertSql",
+          "kind": "method",
+          "signature": "insertSql(&self): Result<String, Error>",
+          "doc": "`INSERT INTO name (columns) VALUES (?, ...)`. Binds every non-key  \ncolumn in declaration order, then the key unless it is  \n`AUTOINCREMENT` (SQLite assigns that one). Non-key columns come first,  \nas in `updateByIdSql`, so one `Entity::bindValues` serves both."
+        },
+        {
+          "name": "keyIndex",
+          "kind": "method",
+          "signature": "keyIndex(&self): Option<u64>",
+          "doc": "The index of the primary-key column, when there is one."
+        },
+        {
+          "name": "lastColumn",
+          "kind": "method",
+          "signature": "lastColumn(&mut self): Option<&mut Column>",
+          "doc": "The column added last, when there is one."
+        },
+        {
+          "name": "notNull",
+          "kind": "method",
+          "signature": "notNull(self): Table",
+          "doc": "Marks the column added last `NOT NULL`."
+        },
+        {
+          "name": "selectAllSql",
+          "kind": "method",
+          "signature": "selectAllSql(&self): Result<String, Error>",
+          "doc": "`SELECT columns FROM name [ORDER BY key]`. No parameters. The selected  \ncolumns are every column in declaration order; rows come in key order  \nwhen the table has a key."
+        },
+        {
+          "name": "selectByIdSql",
+          "kind": "method",
+          "signature": "selectByIdSql(&self): Result<String, Error>",
+          "doc": "`SELECT columns FROM name WHERE key = ?`. Binds the key. The selected  \ncolumns are every column in declaration order. A table without a key  \nis a `SCHEMA` error."
+        },
+        {
+          "name": "selectPrefix",
+          "kind": "method",
+          "signature": "selectPrefix(&self): String",
+          "doc": "`SELECT columns FROM name`, every column in declaration order."
+        },
+        {
+          "name": "selectSql",
+          "kind": "method",
+          "signature": "selectSql(&self): Result<String, Error>",
+          "doc": "`SELECT columns FROM name`. No parameters. The selected columns are  \nevery column in declaration order; a caller appends its own clauses."
+        },
+        {
+          "name": "updateByIdSql",
+          "kind": "method",
+          "signature": "updateByIdSql(&self): Result<String, Error>",
+          "doc": "`UPDATE name SET column = ?, ... WHERE key = ?`. Binds every non-key  \ncolumn in declaration order, then the key. A table without a key is a  \n`SCHEMA` error."
+        },
+        {
+          "name": "validate",
+          "kind": "method",
+          "signature": "validate(&self): Result<void, Error>",
+          "doc": "Checks every rule in the module docs' \"Validation\" section."
+        },
+        {
+          "name": "validatedKey",
+          "kind": "method",
+          "signature": "validatedKey(&self): Result<String, Error>",
+          "doc": "Validates the descriptor and returns its key column's name, or a  \n`SCHEMA` error when it has none."
+        },
+        {
+          "name": "withColumn",
+          "kind": "method",
+          "signature": "withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Table",
+          "doc": "The descriptor with one more column."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::appendInsertColumn",
+      "name": "appendInsertColumn",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function appendInsertColumn(names: &mut String, placeholders: &mut String, name: &String): void",
+      "doc": "Appends `name` to an insert's column list and a `?` to its values."
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::declaredType",
+      "name": "declaredType",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function declaredType(columnType: ColumnType): str",
+      "doc": "The SQL type a column is declared with."
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::isPlainIdentifier",
+      "name": "isPlainIdentifier",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isPlainIdentifier(name: &String): boolean",
+      "doc": "Whether `name` matches `[A-Za-z_][A-Za-z0-9_]*`, so it never needs  \nquoting in SQL."
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::schemaError",
+      "name": "schemaError",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function schemaError(before: str, name: &String, after: str): Error",
+      "doc": "A `SCHEMA` error whose message is `before`, `name` and `after`."
+    },
+    {
+      "module": "std::orm::value",
+      "path": "std::orm::value::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Raw SQL parameters."
+    },
+    {
+      "module": "std::orm::value",
+      "path": "std::orm::value::Orm::Value",
+      "name": "Value",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum Value",
+      "doc": "One parameter of a raw query.",
+      "members": [
+        {
+          "name": "NULL",
+          "kind": "variant",
+          "signature": "NULL"
+        },
+        {
+          "name": "INT",
+          "kind": "variant",
+          "signature": "INT(i64)"
+        },
+        {
+          "name": "REAL",
+          "kind": "variant",
+          "signature": "REAL(f64)"
+        },
+        {
+          "name": "TEXT",
+          "kind": "variant",
+          "signature": "TEXT(String)"
+        },
+        {
+          "name": "BLOB",
+          "kind": "variant",
+          "signature": "BLOB(Vector<u8>)"
+        },
+        {
+          "name": "bind",
+          "kind": "method",
+          "signature": "bind(&self, statement: &mut Statement, index: i32): Result<void, Error>",
+          "doc": "Binds the value to the 1-based parameter `index` of `statement`."
         }
       ]
     },

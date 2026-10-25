@@ -1,0 +1,34 @@
+// e2e: err
+// A generic record that refers to itself with a type argument nesting its own parameter
+// would need an unbounded family of instances, so it is rejected at the field. Its own
+// parameters, a permutation of them, or arguments that hold no parameter name finitely
+// many instances and stay accepted.
+
+record Nest<T> {
+  public value: T;
+  public inner: Vector<Nest<Vector<T>>>;
+}
+
+record List<T> {
+  public value: T;
+  public next: Vector<List<T>>;
+}
+
+record Pair<A, B> {
+  public first: A;
+  public second: B;
+  public swapped: Vector<Pair<B, A>>;
+}
+
+record Fixed<T> {
+  public value: T;
+  public counts: Vector<Fixed<i32>>;
+}
+
+function main(): i32 {
+  let list: List<i32> = List<i32> { value: 1, next: Vector::new<List<i32>>() };
+  let pair: Pair<i32, boolean> = Pair<i32, boolean> { first: 2, second: true, swapped: Vector::new<Pair<boolean, i32>>() };
+  let fixed: Fixed<boolean> = Fixed<boolean> { value: false, counts: Vector::new<Fixed<i32>>() };
+
+  return list.value + pair.first + (fixed.counts.length() as i32);
+}

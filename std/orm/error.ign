@@ -1,0 +1,81 @@
+//!
+//! # Errors
+//!
+//! `Orm::Error`, the error type every fallible operation of `std::orm`
+//! returns. Nothing in the module panics: an invalid descriptor, a value that
+//! does not decode and a failing SQLite call all become an `Error` value with
+//! a kind a service can map to a status.
+//!
+//! ## Exports
+//!
+//! | Export           | Description                                       |
+//! |------------------|---------------------------------------------------|
+//! | `Orm::ErrorKind` | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |
+//! | `Orm::Error`     | `kind`, `message` and `code`; `fromSqlite` maps a `Sqlite3::Error` |
+//!
+//! ## Mapping SQLite errors
+//!
+//! `Error::fromSqlite` keeps the extended result code in `code` and picks the
+//! kind from it: a primary-key or unique violation is `CONFLICT` (409), any
+//! other constraint violation is `CONSTRAINT` (422), and everything else is
+//! `SQLITE` (500).
+
+import Sqlite3 from "std::sqlite3";
+
+/// `SQLITE_CONSTRAINT_PRIMARYKEY`, a primary-key violation.
+const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
+
+/// `SQLITE_CONSTRAINT_UNIQUE`, a unique-index violation.
+const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
+
+/// Why an ORM operation failed.
+///
+/// Every fallible operation in `std::orm` returns `Result<T, Orm::Error>`; no
+/// function in the module panics.
+export namespace Orm {
+  /// The family of an `Orm::Error`.
+  export enum ErrorKind {
+    /// The addressed row does not exist.
+    NOT_FOUND,
+    /// A primary-key or unique constraint rejected the write.
+    CONFLICT,
+    /// Any other constraint (not-null, check, foreign key) rejected the write.
+    CONSTRAINT,
+    /// A column value does not fit the type it was read as.
+    DECODE,
+    /// SQLite failed for a reason that is not a constraint.
+    SQLITE,
+    /// A table descriptor or a migration list is invalid.
+    SCHEMA,
+  }
+
+  /// A failed ORM operation.
+  record Error {
+    /// The family of the failure.
+    public kind: ErrorKind;
+    /// A human-readable description.
+    public message: String;
+    /// The SQLite extended result code, or 0 when SQLite did not report it.
+    public code: i32;
+
+    /// Builds an error that did not come from SQLite.
+    public static create(kind: ErrorKind, message: String): Error {
+      return Error { kind: kind, message: message, code: 0 };
+    }
+
+    /// Maps a `Sqlite3::Error`: primary-key and unique violations become
+    /// `CONFLICT`, other constraint violations `CONSTRAINT`, the rest
+    /// `SQLITE`. The extended code is kept in `code`.
+    public static fromSqlite(error: Sqlite3::Error): Error {
+      let mut kind: ErrorKind = ErrorKind::SQLITE;
+
+      if (error.code == SQLITE_CONSTRAINT_PRIMARYKEY || error.code == SQLITE_CONSTRAINT_UNIQUE) {
+        kind = ErrorKind::CONFLICT;
+      } else if (error.isConstraint()) {
+        kind = ErrorKind::CONSTRAINT;
+      }
+
+      return Error { kind: kind, message: error.message.clone(), code: error.code };
+    }
+  }
+}

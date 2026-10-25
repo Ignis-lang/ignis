@@ -275,6 +275,7 @@ function typecheckImplementsMetadata(traitName: str): Ast::Metadata {
     span: typecheckDummySpan(),
     name: String::create("implements"),
     arguments: arguments,
+    expressions: Vector::new<Ast::ExpressionId>(),
   });
 
   return Ast::Metadata {
@@ -305,6 +306,7 @@ function typecheckRecordInitField(
   return Ast::Expression::RecordInitField {
     name: String::create(name),
     value: value,
+    loop: Option::NONE,
   };
 }
 
@@ -606,6 +608,7 @@ function typecheckAddForOfStatement(
     pattern: pattern,
     iterable: iterable,
     body: body,
+    isComptime: false,
   }));
 }
 
@@ -9736,6 +9739,7 @@ function typecheckTryMetadata(): Ast::Metadata {
     span: typecheckDummySpan(),
     name: String::create("lang"),
     arguments: arguments,
+    expressions: Vector::new<Ast::ExpressionId>(),
   });
 
   return Ast::Metadata {
@@ -15554,6 +15558,83 @@ function typecheckOverloadSelectsGenericCandidateForReferenceArgument(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a concrete `i64` candidate and a bounded generic one, as free
+/// functions, instance methods and static methods. An `i64` takes the
+/// concrete one and a record implementing the bound the generic one. An
+/// `i32`, which only widens to `i64`, takes the concrete one: the generic
+/// candidate's bound fails for `i32`, so it is dropped before scoring. The
+/// return types tell the candidates apart. R4 (S6).
+@test
+function typecheckOverloadDropsGenericCandidateWhoseBoundFails(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Describe {\n  describe(&self): i32;\n}\n\n@implements(Describe)\nrecord Point {\n  x: i32;\n\n  describe(&self): i32 {\n    return self.x;\n  }\n}\n\nrecord Statement {\n  bind(&self, value: i64): i32 {\n    return 1;\n  }\n\n  bind<T: Describe>(&self, value: T): u32 {\n    return 2 as u32;\n  }\n\n  static make(value: i64): i32 {\n    return 1;\n  }\n\n  static make<T: Describe>(value: T): u32 {\n    return 2 as u32;\n  }\n}\n\nfunction bind(value: i64): i32 {\n  return 1;\n}\n\nfunction bind<T: Describe>(value: T): u32 {\n  return 2 as u32;\n}\n\nfunction useBind(statement: &Statement): i32 {\n  let wide: i64 = 7;\n  let narrow: i32 = 3;\n  let freeWide: i32 = bind(wide);\n  let freeNarrow: i32 = bind(narrow);\n  let freePoint: u32 = bind(Point { x: 3 });\n  let methodWide: i32 = statement.bind(wide);\n  let methodNarrow: i32 = statement.bind(narrow);\n  let methodPoint: u32 = statement.bind(Point { x: 4 });\n  let staticNarrow: i32 = Statement::make(narrow);\n  return freeWide + freeNarrow + methodWide + methodNarrow + staticNarrow + ((freePoint + methodPoint) as i32);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: two generic candidates with different bounds; each argument
+/// satisfies one bound, so the call picks it instead of reporting a tie.
+/// R4 (S6).
+@test
+function typecheckOverloadPicksTheGenericCandidateWhoseBoundHolds(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Describe {\n  describe(&self): i32;\n}\n\n@implements(Describe)\nrecord Point {\n  x: i32;\n\n  describe(&self): i32 {\n    return self.x;\n  }\n}\n\ntrait Measure {\n  measure(&self): i32;\n}\n\n@implements(Measure)\nrecord Rope {\n  length: i32;\n\n  measure(&self): i32 {\n    return self.length;\n  }\n}\n\nfunction bind<T: Describe>(value: &T): i32 {\n  return value.describe();\n}\n\nfunction bind<T: Measure>(value: &T): u32 {\n  return value.measure() as u32;\n}\n\nfunction useBind(): i32 {\n  let point: Point = Point { x: 3 };\n  let rope: Rope = Rope { length: 4 };\n  let described: i32 = bind(&point);\n  let measured: u32 = bind(&rope);\n  return described + (measured as i32);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a concrete candidate the argument only value-satisfies (an `i32`
+/// widening to `i64`, a `static str` converting to `str`) outranks an
+/// unbounded generic candidate that binds it exactly; an argument the
+/// concrete candidate rejects takes the generic one. R4 (S6).
+@test
+function typecheckOverloadValueSatisfyingConcreteBeatsGeneric(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function wide(value: i64): i32 {\n  return 1;\n}\n\nfunction wide<T>(value: T): u32 {\n  return 2 as u32;\n}\n\nfunction label(value: str): i32 {\n  return 1;\n}\n\nfunction label<T>(value: T): u32 {\n  return 2 as u32;\n}\n\nfunction useWide(): i32 {\n  let narrow: i32 = 3;\n  let literal: static str = \"literal\";\n  let concrete: i32 = wide(narrow);\n  let concreteLabel: i32 = label(literal);\n  let generic: u32 = wide(true);\n  return concrete + concreteLabel + (generic as i32);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: no candidate is left once the generic one's bound fails; the
+/// call still selects it, so the bound is what gets reported, not a missing
+/// or ambiguous overload. R4 (S6).
+@test
+function typecheckOverloadWithEveryBoundFailingReportsNoOverloadError(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Describe {\n  describe(&self): i32;\n}\n\nfunction bind(value: i64): i32 {\n  return 1;\n}\n\nfunction bind<T: Describe>(value: T): i32 {\n  return value.describe();\n}\n\nfunction useBind(): i32 {\n  return bind(true);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::NO_OVERLOAD_MATCHES), 0);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::AMBIGUOUS_OVERLOAD), 0);
 }
 
 /// Counts the methods named `methodName` that a record owns.

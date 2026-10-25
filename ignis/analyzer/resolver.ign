@@ -2905,8 +2905,118 @@ export namespace Analyzer {
         patternIndex += 1;
       }
 
-      let selfTypeId: Analyzer::TypeId = selfTypeFor(typeStore, defId, &scope, false);
+      let mut selfTypeId: Analyzer::TypeId = selfTypeFor(typeStore, defId, &scope, false);
+
+      // `Self` in an extension block is the type it extends.
+      if (let Option::SOME(targetNode) = module.extensionTarget(itemId)) {
+        let diagnosticsBefore: u64 = state.diagnostics.length();
+        let target: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, targetNode);
+        let targetResolved: boolean = state.diagnostics.length() == diagnosticsBefore;
+
+        if (targetResolved && Analyzer::Resolver::validExtensionTarget(&*typeStore, &scope, target)) {
+          let entry: Analyzer::ExtensionTarget = Analyzer::Resolver::extensionTargetEntry(&*typeStore, target, r.span);
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.registerExtension(defId, entry);
+          selfTypeId = target;
+        } else if (targetResolved) {
+          let targetName: String = typeStore.nameOfResolved(target, &*defStore, &*symbols);
+          let message: String = `cannot extend '${targetName.toStr()}': an extension block extends a primitive, 'str', a record or an enum`;
+          let label: String = String::create("a generic type is extended over the block's own type parameters, in order: 'extension<T> Option<T>'");
+          emitTypeDiagnosticLabeled(state, r.span, DiagnosticCode::INVALID_EXTENSION_TARGET, message.toStr(), label.toStr());
+        }
+      }
+
       resolveOwnerMethodSignatures(state, defStore, typeStore, symbols, module, pass1, pass2, &r.methods, &scope, selfTypeId);
+    }
+
+    /// How paths and receivers reach the extension target `target`.
+    function extensionTargetEntry(
+      typeStore: &Analyzer::TypeStore,
+      target: Analyzer::TypeId,
+      span: SourceSpan,
+    ): Analyzer::ExtensionTarget {
+      let mut headDef: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut primitiveName: Option<String> = Option::NONE;
+
+      if (let Option::SOME(node) = typeStore.get(target)) {
+        match (node) {
+          Analyzer::Type::Record(defId) -> {
+            headDef = Option::SOME(defId);
+          },
+          Analyzer::Type::Enum(defId) -> {
+            headDef = Option::SOME(defId);
+          },
+          Analyzer::Type::Instance(instance) -> {
+            headDef = Option::SOME(instance.definition);
+          },
+          Analyzer::Type::BOOLEAN -> {
+            primitiveName = Option::SOME(String::create("boolean"));
+          },
+          _ -> {
+            // The name a path writes, which is how `i64::read` finds it.
+            primitiveName = Option::SOME(String::create(node.name()));
+          },
+        };
+      }
+
+      return Analyzer::ExtensionTarget {
+        target: target,
+        span: span,
+        headDef: headDef,
+        primitiveName: primitiveName,
+      };
+    }
+
+    /// Whether an extension block can carry methods for `target`: a primitive,
+    /// `str`, or a non-generic record or enum when the block declares no type
+    /// parameters, and an instance over exactly the block's own parameters, in
+    /// order, when it does.
+    function validExtensionTarget(
+      typeStore: &Analyzer::TypeStore,
+      scope: &Analyzer::Resolver::TypeParamScope,
+      target: Analyzer::TypeId,
+    ): boolean {
+      let Option::SOME(node) = typeStore.get(target) else {
+        return false;
+      };
+
+      if (scope.typeIds.length() > 0) {
+        let Analyzer::Type::Instance(instance) = node else {
+          return false;
+        };
+
+        if (instance.typeArguments.length() != scope.typeIds.length()) {
+          return false;
+        }
+
+        let mut index: u64 = 0;
+
+        while (index < scope.typeIds.length()) {
+          let Option::SOME(expected) = scope.typeIds.get(index) else {
+            return false;
+          };
+          let Option::SOME(argument) = instance.typeArguments.get(index) else {
+            return false;
+          };
+
+          if (expected.raw() != argument.raw()) {
+            return false;
+          }
+
+          index += 1;
+        }
+
+        return true;
+      }
+
+      return match (node) {
+        Analyzer::Type::I8 | Analyzer::Type::I16 | Analyzer::Type::I32 | Analyzer::Type::I64 -> true,
+        Analyzer::Type::U8 | Analyzer::Type::U16 | Analyzer::Type::U32 | Analyzer::Type::U64 -> true,
+        Analyzer::Type::F32 | Analyzer::Type::F64 | Analyzer::Type::BOOLEAN | Analyzer::Type::CHAR -> true,
+        Analyzer::Type::STR | Analyzer::Type::ATOM -> true,
+        Analyzer::Type::Record(_) | Analyzer::Type::Enum(_) -> true,
+        _ -> false,
+      };
     }
 
     /// Resolve function parameter declared types and return type.

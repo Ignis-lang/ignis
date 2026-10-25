@@ -167,6 +167,28 @@ export namespace ParserTypes {
     };
   }
 
+  /// `@fieldType(field)` in type position. Like `static str`, it stays a
+  /// one-segment path, its text exactly as written, so the formatter and the
+  /// serializer print it unchanged; unrolling a `comptime for` replaces it
+  /// with the field's written type before anything resolves it.
+  function parseReflectionType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let atToken = parserRef.consumePunctuation(Punctuation::AT)!;
+    let nameToken = parserRef.expectIdentifier("expected builtin name after '@' in a type")!;
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after builtin name") else {
+      return Option::NONE;
+    };
+    let argumentToken = parserRef.expectIdentifier("expected a field descriptor")!;
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after the field descriptor")!;
+    let mut segments: Vector<String> = Vector::new<String>();
+    segments.push(`@${nameToken.lexemeString().toStr()}(${argumentToken.lexemeString().toStr()})`);
+
+    return Option::SOME(parserRef.module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+      span: ParserShared::mergeSpans(atToken.span, closeParen.span),
+      segments: segments,
+    })));
+  }
+
   function parsePrimaryType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -179,6 +201,10 @@ export namespace ParserTypes {
     if (ParserTypes::atFunctionPointerType(parserRef)) {
       let fnToken: Token = parserRef.bump();
       return ParserTypes::parseFunctionType(parserRef, Option::SOME(fnToken.span));
+    }
+
+    if (parserRef.atPunctuation(Punctuation::AT)) {
+      return ParserTypes::parseReflectionType(parserRef);
     }
 
     if (!ParserTypes::isTypeSegment(parserRef)) {

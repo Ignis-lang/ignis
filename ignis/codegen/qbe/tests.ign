@@ -198,6 +198,10 @@ function qbeRunExpectedLinked(
   }
   link.arg("-o");
   link.arg(executable.asStr());
+
+  // A float remainder calls libm's `fmod`, which the C backend's hosted link
+  // pulls in as well.
+  link.arg("-lm");
   let Result::OK(linked) = link.output() else {
     Test::fail();
     return;
@@ -276,9 +280,6 @@ function qbeEmitsCalls(): void {
 
 @test
 function qbeFailsClosedOnUnsupportedRecordLayouts(): void {
-  let empty: QbeEmission = qbeEmit("record Empty {} function main(): i32 { let value: Empty = Empty {}; return 0; }");
-  Test::assert(empty.error.isSome());
-  Test::assert(empty.source.length() == 0);
   let aligned: QbeEmission = qbeEmit("@aligned(32) record Wide { public x: i32; } function main(): i32 { let value: Wide = Wide { x: 42 }; return value.x; }");
   Test::assert(aligned.error.isSome());
   Test::assert(aligned.source.length() == 0);
@@ -286,14 +287,14 @@ function qbeFailsClosedOnUnsupportedRecordLayouts(): void {
 
 @test
 function qbeReportsAnUnsupportedInstructionAtItsFunction(): void {
-  let source: str = "function main(): i32 { return (half(4.0) as i32) - 2; }\nfunction half(value: f64): f64 { return value / 2.0; }";
+  let source: str = "function main(): i32 { return helper(4) - 2; }\nfunction helper(value: i32): i32 { @trap(); return value; }";
   let emission: QbeEmission = qbeEmit(source);
   Test::assert(emission.error.isSome());
   let Option::SOME(span) = emission.errorSpan else {
     Test::fail();
     return;
   };
-  let bodyStart: u64 = 87;
+  let bodyStart: u64 = 80;
   Test::assertEq<u64>(span.start, bodyStart);
 }
 
@@ -409,7 +410,7 @@ function qbeEmitsMainWrapper(): void {
 /// module or the corpus shifts the ids.
 @test
 function qbeNamesTheFailingFunctionWithoutADefinitionId(): void {
-  let emission: QbeEmission = qbeEmit("function scale(value: f64): f64 { return value; } function main(): i32 { return scale(1.5) as i32; }");
+  let emission: QbeEmission = qbeEmit("function scale(value: Range<i32>): i32 { return value.start; } function main(): i32 { return scale(1..5); }");
   let Option::SOME(error) = &emission.error else {
     Test::fail();
     return;
@@ -491,14 +492,135 @@ function qbeEmitsFixedArrayPayloadEnums(): void {
 }
 
 @test
-function qbeFailsClosedOnFloats(): void {
-  let emission: QbeEmission = qbeEmit("function main(): i32 { let x: f64 = 1.5; return x as i32; }");
+function qbeEmitsFloatLocalsAndCasts(): void {
+  let source: str = "function main(): i32 { let x: f64 = 1.5; let y: f32 = x as f32; return (y * 2.0) as i32 + x as i32; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "loadd"));
+  Test::assert(qbeContains(&emission.source, "truncd"));
+  qbeRunExpected(source, 4);
+}
+
+/// Float constants are their IEEE bit patterns, so 0.1 is the double nearest
+/// to it and not a decimal QBE would have to round again.
+@test
+function qbeEmitsFloatConstantsAsBitPatterns(): void {
+  let source: str = "function main(): i32 { let tenth: f64 = 0.1; let narrow: f32 = 0.1; if (@bitCast<u64>(tenth) != 4591870180066957722) { return 1; } if (@bitCast<u32>(narrow) != 1036831949) { return 2; } return 0; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "4591870180066957722"));
+  Test::assert(qbeContains(&emission.source, "1036831949"));
+  qbeRunExpected(source, 0);
+}
+
+@test
+function qbeEmitsFloatBounds(): void {
+  qbeRunExpected("function main(): i32 { if (@bitCast<u64>(@maxOf<f64>()) != 9218868437227405311 || @bitCast<u64>(@minOf<f64>()) != 18442240474082181119) { return 1; } if (@bitCast<u32>(@maxOf<f32>()) != 2139095039 || @bitCast<u32>(@minOf<f32>()) != 4286578687) { return 2; } return 0; }", 0);
+}
+
+/// `-x` on a float flips the sign bit: negating +0 gives -0, which `sub 0, x`
+/// would not.
+@test
+function qbeNegatesFloatsWithTheSignBit(): void {
+  let source: str = "function negate(value: f64): f64 { return -value; } function main(): i32 { return @bitCast<u64>(negate(0.0)) == 9223372036854775808 ? 0 : 1; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, " neg "));
+  qbeRunExpected(source, 0);
+}
+
+@test
+function qbeComparesNanLikeC(): void {
+  qbeRunExpected("function nan(): f64 { let zero: f64 = 0.0; return zero / zero; } function main(): i32 { let value: f64 = nan(); if (value == value || value < 1.0 || value >= 1.0) { return 1; } if (!(value != value)) { return 2; } return 0; }", 0);
+}
+
+@test
+function qbeConvertsUnsignedIntegersAndFloats(): void {
+  qbeRunExpected("function up(value: u64): f64 { return value as f64; } function down(value: f64): u64 { return value as u64; } function narrow(value: f32): u32 { return value as u32; } function main(): i32 { if (up(18446744073709551615) != 18446744073709551616.0) { return 1; } if (down(10000000000000000000.0) != 10000000000000000000) { return 2; } if (narrow(4000000000.0) != 4000000000) { return 3; } return 0; }", 0);
+}
+
+@test
+function qbeComputesFloatRemainderWithFmod(): void {
+  let source: str = "function rem(left: f64, right: f64): f64 { return left % right; } function main(): i32 { return rem(-7.5, 2.0) == -1.5 ? 0 : 1; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, "call $fmod("));
+  qbeRunExpectedLinked(source, 0, "", "", "");
+}
+
+/// A double through a variadic C function travels in a vector register with
+/// the register count in `%al`, the convention `snprintf`-style calls need.
+@test
+function qbePassesDoublesToVariadicExterns(): void {
+  let source: str = "extern Native { @externName(\"dprintf\") function printValue(descriptor: i32, format: str, value: f64): i32; } function main(): i32 { Native::printValue(2, \"value: %.3f\\n\", 2.5); return 0; }";
+  qbeRunExpectedLinked(source, 0, "", "", "value: 2.500\n");
+}
+
+/// Float record fields are `s`/`d` items, so the record crosses into C in the
+/// SSE registers its C struct is classified into, and a float mixed with an
+/// integer in one eightbyte stays INTEGER as C merges it.
+@test
+function qbePassesFloatRecordsByTheCAbi(): void {
+  let source: str = "record Point { public x: f64; public y: f64; } record Mixed { public ratio: f32; public count: i32; } extern Native { function sumPoint(point: Point): f64; function scaleMixed(mixed: Mixed): Mixed; } function main(): i32 { if (Native::sumPoint(Point { x: 1.5, y: 2.25 }) != 3.75) { return 1; } let scaled: Mixed = Native::scaleMixed(Mixed { ratio: 0.5, count: 20 }); if (scaled.ratio != 1.0 || scaled.count != 21) { return 2; } return 0; }";
+  let native: str = "typedef struct { double x; double y; } Point; typedef struct { float ratio; int count; } Mixed; double sumPoint(Point point) { return point.x + point.y; } Mixed scaleMixed(Mixed mixed) { Mixed result = { mixed.ratio * 2.0f, mixed.count + 1 }; return result; }\n";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, "{ d, d }"));
+  Test::assert(qbeContains(&emission.source, "{ s, w }"));
+  qbeRunExpectedLinked(source, 0, native, "", "");
+}
+
+/// An enum of at most sixteen bytes whose payload eightbyte is float in every
+/// variant is SSE in its second eightbyte, as the C struct with its union is.
+@test
+function qbeClassifiesFloatEnumPayloadsAsSse(): void {
+  let source: str = "enum Tail { VALUE(f64), NOTHING } extern Native { function readTail(tail: Tail): f64; function makeTail(value: f64): Tail; } function main(): i32 { if (Native::readTail(Tail::VALUE(2.5)) != 2.5) { return 1; } if (let Tail::VALUE(value) = Native::makeTail(4.0)) { return value == 4.0 ? 0 : 2; } return 3; }";
+  let native: str = "typedef struct { unsigned tag; union { struct { double value; } v; } payload; } Tail; double readTail(Tail tail) { return tail.tag == 0 ? tail.payload.v.value : -1.0; } Tail makeTail(double value) { Tail tail; tail.tag = 0; tail.payload.v.value = value; return tail; }\n";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(qbeContains(&emission.source, "{ w, b 4, d }"));
+  qbeRunExpectedLinked(source, 0, native, "", "");
+}
+
+/// A float payload sharing its eightbyte with an integer payload of another
+/// variant merges into INTEGER, so the enum keeps its byte blob.
+@test
+function qbeKeepsMixedEnumPayloadsInteger(): void {
+  let emission: QbeEmission = qbeEmit("enum Number { INT(i64), FLOAT(f64) } function half(number: Number): f64 { return match (number) { Number::INT(value) -> value as f64 / 2.0, Number::FLOAT(value) -> value / 2.0 }; } function main(): i32 { return half(Number::FLOAT(8.0)) as i32; }");
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "{ w, b 4, b 8 }"));
+}
+
+/// A layout failure names the type it could not lay out.
+@test
+function qbeNamesTheTypeOfALayoutFailure(): void {
+  let emission: QbeEmission = qbeEmit("function main(): i32 { return spanOf(); }\nfunction spanOf(): i32 { let span: Range<i32> = 1..5; return span.start; }");
   let Option::SOME(error) = &emission.error else {
     Test::fail();
     return;
   };
-  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
-  Test::assertEq<u64>(emission.source.length(), 0);
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: SizeOf(Range<i32>)");
+  let Option::SOME(span) = emission.errorSpan else {
+    Test::fail();
+    return;
+  };
+  let bodyStart: u64 = 65;
+  Test::assertEq<u64>(span.start, bodyStart);
+}
+
+/// A type declaration this emitter cannot write is reported at the function
+/// whose local needs it, not at the start of the unit, even though the
+/// declarations are written before any function body.
+@test
+function qbeReportsATypeDeclarationFailureAtTheFunctionThatNeedsIt(): void {
+  let emission: QbeEmission = qbeEmit("function main(): i32 { return helper(); }\nfunction helper(): i32 { let value: Wide = Wide { x: 42 }; return value.x; }\n@aligned(32) record Wide { public x: i32; }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: OveralignedRecord");
+  let Option::SOME(span) = emission.errorSpan else {
+    Test::fail();
+    return;
+  };
+  let bodyStart: u64 = 65;
+  Test::assertEq<u64>(span.start, bodyStart);
 }
 
 @test
@@ -527,14 +649,12 @@ function qbeReviewF21EmitsRecordGlobals(): void {
 }
 
 @test
-function qbeReviewF24RejectsFloatGlobal(): void {
-  let emission: QbeEmission = qbeEmit("extern Native { function readScale(pointer: *f64): i32; } const SCALE: f64 = 2.5; function main(): i32 { return Native::readScale(&SCALE as *f64); }");
-  let Option::SOME(error) = &emission.error else {
-    Test::fail();
-    return;
-  };
-  Test::assert(qbeContains(&error, "not supported by the qbe target yet: "));
-  Test::assertEq<u64>(emission.source.length(), 0);
+function qbeReviewF24EmitsFloatGlobal(): void {
+  let source: str = "extern Native { function readScale(pointer: *f64): i32; } const SCALE: f64 = 2.5; function main(): i32 { return Native::readScale(&SCALE as *f64); }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, "d 4612811918334230528"));
+  qbeRunExpectedLinked(source, 0, "int readScale(const double *pointer) { return *pointer == 2.5 ? 0 : 1; }\n", "", "");
 }
 
 @test
@@ -764,4 +884,67 @@ function qbeIdentifierKeepsLongSharedPrefixNamesDistinct(): void {
   Test::assertEq<u64>(cappedFirst.length(), CodegenQbe::MAX_IDENTIFIER_LENGTH);
   Test::assertEq<u64>(cappedSecond.length(), CodegenQbe::MAX_IDENTIFIER_LENGTH);
   Test::assert(!cappedFirst.equals(&cappedSecond));
+}
+
+/// A record without fields is the C backend's empty struct: a zero-byte
+/// opaque type that takes no register when it is passed by value.
+@test
+function qbeEmitsZeroSizedRecords(): void {
+  let source: str = "record Empty {} record Holder { public before: i32; public empty: Empty; public after: i32; } function take(value: Empty, tag: i32): i32 { let copy: Empty = value; return tag; } function make(): Empty { return Empty {}; } function main(): i32 { let holder: Holder = Holder { before: 1, empty: make(), after: 2 }; return take(holder.empty, 40) + holder.before + holder.after; }";
+  let emission: QbeEmission = qbeEmit(source);
+  Test::assert(emission.error.isNone());
+  Test::assert(qbeContains(&emission.source, " = align 1 { 0 }"));
+  qbeRunExpected(source, 43);
+}
+
+@test
+function qbeEmitsArrayLiterals(): void {
+  qbeRunExpected("record Pair { public left: u8; public right: i64; } function main(): i32 { let mut words: i32[3] = [1, -2, 3]; words[1] = 20; let bytes: u8[2] = [250, 7]; let pairs: Pair[2] = [Pair { left: 1, right: -2 }, Pair { left: 3, right: 40 }]; return words[0] + words[1] + words[2] + (bytes[0] as i32) - 250 + bytes[1] as i32 + (pairs[1].right as i32) + (pairs[0].right as i32) + pairs[1].left as i32; }", 72);
+}
+
+/// A static record field is a global, so its type comes from its definition
+/// rather than from the function's temps and locals.
+@test
+function qbePassesStaticFieldsAsCallArguments(): void {
+  qbeRunExpected("record State { static mut COUNT: u64; static mut TEXT: u8[4]; } function take(pointer: *mut u8, count: u64): u64 { return count + (@read<u8>(pointer) as u64); } function main(): i32 { State::COUNT = 5; State::TEXT[0] = 37; return take((&mut State::TEXT) as *mut u8, State::COUNT) as i32; }", 42);
+}
+
+/// `@hash` calls the `Hasher` method of a primitive with the loaded value and
+/// a nominal's own `hash` with its address, as the C backend does.
+@test
+function qbeEmitsBuiltinHash(): void {
+  let source: str = "record Hasher { public state: u64; public writeI32(&mut self, value: i32): void { self.state = self.state * 31 + (value as u64); } public writeByte(&mut self, value: u8): void { self.state = self.state * 7 + (value as u64); } } record Key { public id: u8; public hash(&self, hasher: &mut Hasher): void { hasher.writeByte(self.id); } } function main(): i32 { let mut hasher: Hasher = Hasher { state: 0 }; let value: i32 = 3; let key: Key = Key { id: 2 }; @hash<i32>(&value, (&mut hasher) as &mut Hasher); @hash<Key>(&key, (&mut hasher) as &mut Hasher); return hasher.state as i32; }";
+  let emission: QbeEmission = qbeEmit(source);
+  if (let Option::SOME(error) = &emission.error) {
+    Io::eprintln(error.toStr());
+  }
+  Test::assert(emission.error.isNone());
+  qbeRunExpected(source, 23);
+}
+
+/// An array read through a pointer is the pointee's own storage, as in the C
+/// backend: a write through it reaches the pointee, and only a store into a
+/// local takes a copy.
+@test
+function qbeAliasesArraysReadThroughPointers(): void {
+  qbeRunExpected("record Frame { public values: i32[2]; public tag: u8; } function update(frame: *mut Frame): void { (*frame).values[1] = 40; } function main(): i32 { let mut frame: Frame = Frame { values: [1, 2], tag: 0 }; update(&mut frame as *mut Frame); let pointer: *Frame = &frame as *Frame; let copy: i32[2] = (*pointer).values; frame.values[0] = 9; return frame.values[1] + copy[0] + frame.values[0] - 9; }", 41);
+}
+
+/// QBE 1.2 cannot align data past 64 bytes, so a global that asks for more
+/// fails closed instead of landing at a misaligned address.
+@test
+function qbeFailsClosedOnOveralignedGlobals(): void {
+  let emission: QbeEmission = qbeEmit("record Tables { @aligned(4096) static mut PAGE: u64[2]; } function main(): i32 { return Tables::PAGE[0] as i32; }");
+  let Option::SOME(error) = &emission.error else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<str>(error.toStr(), "not supported by the qbe target yet: OveralignedGlobal");
+  Test::assert(emission.source.length() == 0);
+  qbeRunExpected("record Tables { @aligned(64) static mut LINE: u32[4]; } function main(): i32 { return (@integerFromPointer(&Tables::LINE as *mut u8) % 64) as i32; }", 0);
+}
+
+@test
+function qbeScalesPointerArithmeticByPointeeSize(): void {
+  qbeRunExpected("function main(): i32 { let mut values: u64[4] = [10, 20, 30, 40]; let base: *mut u64 = (&mut values[0]) as *mut u64; let narrow: i32 = 1; let last: *mut u64 = base + 3; if (@read<u64>(base + 2) != 30 || @read<u64>(last - narrow) != 30 || last - base != 3) { return 1; } return 0; }", 0);
 }

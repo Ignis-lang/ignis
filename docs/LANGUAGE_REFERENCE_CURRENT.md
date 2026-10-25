@@ -230,6 +230,8 @@ function main(): i32 {
 
 A type parameter may be bounded by traits, as in `K: Hash & Eq`. Every type argument has to satisfy every bound of the parameter it binds (A0247): a record or enum by declaring `@implements` for the trait, a type parameter by declaring the same bound, and the integer primitives, `boolean`, `char` and `str` satisfy `Eq` and `Hash` without a declaration, as every Copy type satisfies `Copy`. `Send` and `Sync` are lang traits judged from a type's structure: raw pointers and closure values are neither, function pointers (`fn(A) -> R`) are both, `&T` follows whether `T` is `Sync`, and records, enums, arrays and tuples follow their members unless a record or enum declares the trait in `@implements` (for a generic one, every type argument must also have the trait), which the `thread_safety` lint warns about when its structure disagrees (A0254). View types — a `str`, a reference, a slice, or a record or container holding one — are neither, so `share<T: Sync>(&text)` rejects a `str` just as `Channel<T: Send>` does: sharing a view by reference across threads outlives the owner it borrows, exactly as sending it would. A closure bound to a `Send` or `Sync` type parameter, or passed to a parameter marked `@sendable`, is judged by its captures at the call (A0252), and a closure bound to `Sync` may not capture by mutable reference; a named function or a forwarded `@sendable` parameter is accepted, and any other function value is rejected there (A0253). `@sendable` is valid only on a parameter of function type (A0255), which stays callable inside the function.
 
+A generic record or enum may refer to itself through indirection with its own type parameters (`record List<T> { public next: Vector<List<T>>; }`), a permutation of them, or arguments that hold no parameter (`Vector<List<i32>>`). Reaching itself, directly or through other types, with an argument that nests one of its parameters (`record Nest<T> { public inner: Vector<Nest<Vector<T>>>; }`) is rejected at that field or variant (A0275): every instance would need a larger one, so monomorphization could never finish.
+
 ## 4. Declarations
 
 ### 4.1 Functions
@@ -265,7 +267,29 @@ let x = identity(42);       // T inferred as i32
 let y = identity<i64>(42);  // T explicitly i64
 ```
 
-Function overloading is supported by signature differences.
+Function overloading is supported by signature differences. Functions with the same name in the
+same scope, a type's static methods with the same name, and a type's instance methods with the same
+name each form an overload set, and a call picks one from its argument types:
+
+- An overload is ranked by its parameters: an argument of exactly the parameter's type costs
+  nothing, an argument that only converts to it (integer widening, `static str` to `str`, a fixed
+  array to a slice, a function pointer to a closure) costs more, and any other argument rules the
+  overload out.
+- A generic overload, one that infers a type parameter from an argument, ranks below every
+  non-generic overload that accepts the call, even one that needs conversions. An `i32` argument
+  picks `f(value: i64)` over `f<T>(value: T)`.
+- A generic overload whose inferred type arguments miss a bound of its type parameters is set aside
+  first. Only when no other overload matches is it selected, and the call reports the bound (A0247).
+- The lowest-ranked overload wins. A tie is ambiguous (A0101), and no matching overload is an error
+  (A0100).
+
+```ignis
+function bind(value: i64): String { ... }
+function bind<T: Describe>(value: T): String { ... }
+
+bind(3 as i32);              // the i64 overload: i32 does not satisfy Describe
+bind(Point { x: 1 });        // the generic overload, when Point implements Describe
+```
 
 ### 4.2 Variables and Constants
 
@@ -389,6 +413,8 @@ record Config {
 
 let max = Config::MAX_SIZE;
 ```
+
+Inside the methods of a record or enum, static or instance, `Self::name` means what the owner's own name does: `Self::default()` calls a static method, `Self::MAX_SIZE` reads a static field, and in an enum `Self::HIGH` or `Self::SOME(x)` builds or matches a variant. In a generic owner `Self` is the owner with its own type parameters, so `Self::create(value)` inside `Wrap<U>` calls `Wrap::create<U>(value)`. `Self::name` reaches only the owner's members: a name the owner does not declare is an error even when a top-level declaration has that name. Outside a record, enum or trait, `Self::name` is an error (A0280).
 
 A `static mut` field is one global storage location, so its initializer must be a constant expression: a literal, a constant, an expression of those, or an array or record literal whose elements and fields are constant expressions. Any other initializer is an error (A0230).
 
@@ -519,6 +545,10 @@ record Item {
     }
 }
 ```
+
+A trait may declare `static` methods, required or with a default body; `Self` in their signatures is the implementing type. A record or enum implements them with `static` methods of the same signature (A0276, A0277), and a generic calls them through a bounded type parameter as `T::name(args)` (A0278), which reaches the implementing type's method after monomorphization. A static trait method is not callable through a value or as `Trait::name(args)` (A0279). Inside a trait's default body, static or instance, `Self::name(args)` calls the trait's static method on the implementing type, as `T::name(args)` does. See `docs/TRAITS.md`.
+
+An existing type, a primitive, `str` or a record or enum including the standard library's, implements a trait through an extension block: `@implements(Describe) extension i64 { describe(&self): i64 { ... } }`, or generically `@implements(Describe) extension<T: Describe> Option<T> { ... }`. Its methods follow record-method rules, are checked against the trait like a record's, inherit the trait's defaults, and are callable on the type itself (`value.describe()`, `i64::read(raw)`) and through bounds (`T::read` with `T = i64`); the type then satisfies `T: Describe`. A block is allowed only in the module that declares the trait or the one that declares the type, only the trait's for a primitive (A0286); a second implementation for the same type is an error naming both (A0287); a block has to name a trait (A0285), cannot implement a language trait or the canonical `Eq` and `Hash` (A0288), and extends only the types listed above (A0289). See `docs/TRAITS.md`.
 
 ### 4.9 Namespaces
 
@@ -1025,6 +1055,49 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@lang(try)` -- mark an enum as try-capable for use with the `!` operator
 - `@test` -- mark a top-level function as a native test case
 - `@panicHandler`, `@allocHandler`, `@freeHandler` -- runtime handlers of a freestanding (`std = false`) build, which replace libc for panics and escaping closure environments (see `docs/PROJECT.md`)
+- `@attribute(targets)` -- mark a record as a declarable attribute (see below)
+
+### Declarable attributes
+
+A record marked `@attribute(<targets>)` is an attribute the program declares. `<targets>` lists
+where it applies, among `record`, `enum`, `field`, `function` (methods included) and `variant`.
+It is written with its capitalized name, resolved as a type name is (namespaces, imports,
+qualified paths), and takes one argument per field in declaration order; a record without fields
+is written without parentheses.
+
+```ignis
+@attribute(field)
+record Column {
+  public name: str;
+  public width: i32;
+}
+
+const WIDTH: i32 = 12;
+
+record Task {
+  @Column("title", WIDTH)
+  public title: str;
+}
+```
+
+Arguments are expressions that must be compile-time constants (literals, constants, negation,
+anything constant evaluation folds) and fit their field. An unknown or out-of-scope attribute is
+`A0117`, whose message names the import to add when another module declares it; a wrong argument
+count is `A0118`; a disallowed target `A0281`; a capitalized name that is not an attribute record
+`A0282`; an argument that does not fit `A0283` or is not constant `A0284`; invalid
+`@attribute(...)` targets `A0290`. The record stays an ordinary record usable as a value.
+
+### Field reflection
+
+Inside a method whose `Self` is a record, `comptime for (field of @fields<Self>()) { ... }` is
+unrolled before name resolution into one block per field, in declaration order. `field.name` is a
+`str`, `field.index` an `i32`, `@field(value, field)` the place `value.<name>`, `@fieldType(field)`
+the field's written type, and `@attribute<A>(field)` / `@attribute<A>(Self)` an `Option<A>` with the
+attribute's constant values. A record initializer accepts
+`comptime for (field of @fields<Self>()) @field(field): <expression>` to set every field. `comptime`
+is a keyword. Diagnostics: `A0292` (`break`/`continue` across the loop), `A0293` (`@fields` not over
+a record `Self`), `A0294` (outside a method), `A0295` (descriptor builtin outside its loop), `A0296`
+(unknown descriptor member). See `docs/TRAITS.md`, "Field Reflection".
 
 ### Parameter attributes
 
@@ -1823,7 +1896,7 @@ Common directive builtins:
 - `@implements(Drop)` types are automatically dropped at scope exit; double-drop is a compile-time error.
 - The pipe operator `|>` desugars to a function call with the LHS as the first argument. It supports bare functions, namespace paths, calls with extra args, generic calls, lambdas, and instance method calls. The `_` placeholder controls argument insertion position.
 - The try operator `expr!` unwraps a try-capable enum (marked with `@lang(try)`) or performs early return with the error variant. The function return type must be compatible.
-- User-defined trait checks currently target records.
+- User-defined trait checks target records, enums and extension blocks.
 - `a..b` and `a..=b` are values of `Range<T>` and `RangeInclusive<T>`; `for (i of a..b)` is a counted loop and `[a..b]` over literal bounds is an array of the values.
 - `T[]` is the slice type: a pointer-and-length view over elements of `T`. A fixed array coerces to a slice of the same element type. Callers must keep the backing storage valid; the current selfhost borrow checker does not track slice-view lifetimes. Dynamic vectors come from `std::vector::Vector<T>`, not from type syntax.
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.

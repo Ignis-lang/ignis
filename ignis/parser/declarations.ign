@@ -165,6 +165,19 @@ export namespace ParserDeclarations {
         span: span,
         name: attributeName.name.clone(),
         arguments: Vector::new<String>(),
+        expressions: Vector::new<Ast::ExpressionId>(),
+      });
+    }
+
+    if (Ast::isDeclarableAttributeName(&attributeName.name)) {
+      let expressions = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_PAREN)!;
+      let closing = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' to close attribute arguments")!;
+
+      return Option::SOME(Ast::Attribute {
+        span: ParserShared::mergeSpans(span, closing.span),
+        name: attributeName.name.clone(),
+        arguments: Vector::new<String>(),
+        expressions: expressions,
       });
     }
 
@@ -179,6 +192,7 @@ export namespace ParserDeclarations {
       span: span,
       name: attributeName.name.clone(),
       arguments: Ast::copyAttributeArguments(&parsedArguments),
+      expressions: Vector::new<Ast::ExpressionId>(),
     });
   }
 
@@ -1358,6 +1372,120 @@ export namespace ParserDeclarations {
     return Option::SOME(itemId);
   }
 
+  /// Whether the parser stands on an `extension` block. `extension` is a
+  /// contextual keyword: it starts an item only when a type or a generic
+  /// parameter list follows it, and stays an ordinary identifier everywhere
+  /// else.
+  function atExtensionKeyword(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+    parserRef.skipTrivia();
+    let token: Token = parserRef.current();
+
+    if (token.kindValue() != TokenKind::IDENTIFIER || !token.lexemeString().equals("extension")) {
+      return false;
+    }
+
+    let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+
+    if (next.kindValue() == TokenKind::IDENTIFIER || ParserTypes::isPrimitiveTypeKeyword(&next)) {
+      return true;
+    }
+
+    return next.kindValue() == TokenKind::PUNCTUATION && next.punctuationValue() == Punctuation::LESS;
+  }
+
+  /// The traits an `@implements(...)` attribute in `metadata` names, as
+  /// written and joined by `, `.
+  function implementedTraitsText(metadata: &Ast::Metadata): String {
+    let mut text: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < metadata.attributes.length()) {
+      if (let Option::SOME(attribute) = metadata.attributes.get(index)) {
+        if (attribute.name.equals("implements")) {
+          let mut argumentIndex: u64 = 0;
+
+          while (argumentIndex < attribute.arguments.length()) {
+            if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+              if (text.length() > 0) {
+                text.pushStr(", ");
+              }
+
+              text.push(argument);
+            }
+
+            argumentIndex += 1;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return text;
+  }
+
+  /// `extension<G> Type { methods }`, the methods an `@implements(Trait)`
+  /// gives an existing type. It becomes a record node with no fields, named
+  /// after the traits and the type so no declaration can collide with it,
+  /// and the module records which type it extends.
+  function parseExtensionItem(
+    parser: &mut ParserShared::State,
+    metadata: Ast::Metadata
+  ): Option<Ast::ItemId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let doc: Option<String> = parserRef.takePendingDoc();
+
+    let keyword: Token = parserRef.bump();
+    let genericParameters = ParserDeclarations::parseOptionalGenericParameterList(parserRef)!;
+    let target = ParserTypes::parseType(parserRef)!;
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after the extended type") else {
+      return Option::NONE;
+    };
+    let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+
+    while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      let memberDoc: Option<String> = parserRef.takePendingDoc();
+      let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
+      parserRef.skipTrivia();
+
+      if (ParserDeclarations::recordMemberLooksLikeField(parserRef)) {
+        parserRef.emitDiagnostic(parserRef.currentSpan(), DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "an extension block declares methods only, not fields");
+        ParserRecovery::synchronizeTopLevel(parserRef);
+        break;
+      }
+
+      let Option::SOME(methodId) = ParserDeclarations::parseMethodLikeItem(parserRef, Ast::copyMetadata(&memberMetadata), false) else {
+        ParserRecovery::synchronizeTopLevel(parserRef);
+        break;
+      };
+      parserRef.module.setItemDoc(methodId, &memberDoc);
+      methods.push(methodId);
+    }
+
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after extension methods")!;
+
+    let mut name: String = String::create("extension(");
+    let traitsText: String = ParserDeclarations::implementedTraitsText(&metadata);
+    name.push(&traitsText);
+    name.pushStr(") ");
+    let targetText: String = Ast::extensionTypeText(&*parserRef.module, target);
+    name.push(&targetText);
+
+    let itemId: Ast::ItemId = parserRef.module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+      span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
+      name: name,
+      genericParameters: Ast::copyGenericParams(&genericParameters),
+      fields: Vector::new<Ast::PatternId>(),
+      methods: ParserDeclarations::copyItemIds(&methods),
+      metadata: Ast::copyMetadata(&metadata),
+    }));
+    parserRef.module.setItemDoc(itemId, &doc);
+    parserRef.module.setExtensionTarget(itemId, target);
+    return Option::SOME(itemId);
+  }
+
   function parseNamespaceItem(
     parser: &mut ParserShared::State,
     metadata: Ast::Metadata
@@ -1838,8 +1966,12 @@ export namespace ParserDeclarations {
       return ParserDeclarations::parseExportItem(parserRef, Ast::copyMetadata(&metadata));
     }
 
+    if (ParserDeclarations::atExtensionKeyword(parserRef)) {
+      return ParserDeclarations::parseExtensionItem(parserRef, Ast::copyMetadata(&metadata));
+    }
+
     let token: Token = parserRef.current();
-    parserRef.emitDiagnostic(token.span, DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "expected import, type, record, namespace, function, const, extern, enum, trait, or export declaration");
+    parserRef.emitDiagnostic(token.span, DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "expected import, type, record, namespace, function, const, extern, enum, trait, extension, or export declaration");
     return Option::NONE;
   }
 

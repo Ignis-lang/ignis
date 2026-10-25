@@ -1,0 +1,62 @@
+// e2e: std
+// Hand-written record methods use `comptime for`: `@fieldType(field)` in a
+// local annotation and as a type argument, and `@field(self, field)` read,
+// assigned and borrowed like the field itself.
+import Io from "std::io";
+
+function byteSize<T>(value: &T): u64 {
+  return @sizeOf<T>();
+}
+
+function widen(value: i32): i64 {
+  return value as i64;
+}
+
+function widen(value: i64): i64 {
+  return value;
+}
+
+function widen(value: u8): i64 {
+  return value as i64;
+}
+
+record Sample {
+  public count: i32;
+  public total: i64;
+  public flag: u8;
+
+  public sum(&self): i64 {
+    let mut result: i64 = 0;
+
+    comptime for (field of @fields<Self>()) {
+      let value: @fieldType(field) = @field(self, field);
+      result += widen(value);
+    }
+
+    return result;
+  }
+
+  public bytes(&self): u64 {
+    let mut result: u64 = 0;
+
+    comptime for (field of @fields<Self>()) {
+      result += byteSize<@fieldType(field)>(&@field(self, field));
+    }
+
+    return result;
+  }
+
+  public reset(&mut self): void {
+    comptime for (field of @fields<Self>()) {
+      @field(self, field) = @zeroed<@fieldType(field)>();
+    }
+  }
+}
+
+function main(): i32 {
+  let mut sample: Sample = Sample { count: 2, total: 40, flag: 1 };
+  Io::println(`${sample.sum()} ${sample.bytes()}`.toStr());
+  sample.reset();
+  Io::println(`${sample.sum()}`.toStr());
+  return 0;
+}

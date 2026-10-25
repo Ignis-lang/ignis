@@ -1,0 +1,536 @@
+//!
+//! # Table
+//!
+//! `Orm::Table`, the descriptor of one table: its name and its columns, in
+//! order. The descriptor emits the SQL of its `CREATE TABLE` and of the
+//! statements a repository runs; every value in those statements is a `?`
+//! parameter, never interpolated text.
+//!
+//! ## Exports
+//!
+//! | Export            | Description                                      |
+//! |-------------------|--------------------------------------------------|
+//! | `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |
+//! | `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |
+//! | `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |
+//!
+//! ## Building a descriptor
+//!
+//! The builder methods take the table by value and return it, so a
+//! descriptor is one expression. `autoIncrement()` and `notNull()` apply to
+//! the column added last:
+//!
+//! ```ignis
+//! let table: Orm::Table = Orm::Table::create("tasks")
+//!   .columnInt("id", Orm::ColumnKey::PRIMARY)
+//!   .autoIncrement()
+//!   .columnText("title", Orm::ColumnKey::NONE)
+//!   .notNull();
+//! ```
+//!
+//! ## Validation
+//!
+//! Every emitter validates the descriptor first and returns an `Orm::Error`
+//! of kind `SCHEMA` when the table or a column name is not a plain identifier
+//! (`[A-Za-z_][A-Za-z0-9_]*`, so a name never needs quoting), when there are
+//! no columns, when a column name repeats, when more than one column is a
+//! primary key, or when `autoIncrement()` marks a column that is not an
+//! INTEGER primary key. The by-id statements also need a key.
+//!
+//! ## Bind order
+//!
+//! Each emitter documents the order of its `?` parameters; a repository binds
+//! values in exactly that order.
+
+import Error, ErrorKind from "std::orm::error";
+
+/// A table descriptor and the SQL it emits.
+export namespace Orm {
+  /// Whether a column is the table's primary key.
+  export enum ColumnKey {
+    /// An ordinary column.
+    NONE,
+    /// The primary key. A table has at most one.
+    PRIMARY,
+  }
+
+  /// The SQLite type a column is declared with.
+  export enum ColumnType {
+    /// `INTEGER`, read with `Row::readInt`.
+    INTEGER,
+    /// `REAL`, read with `Row::readReal`.
+    REAL,
+    /// `TEXT`, read with `Row::readText`.
+    TEXT,
+    /// `BLOB`, read with `Row::readBlob`.
+    BLOB,
+    /// Declared `INTEGER` holding 0 or 1, read with `Row::readBoolean`.
+    BOOLEAN,
+  }
+
+  /// One column of a table descriptor.
+  record Column {
+    /// The column name.
+    public name: String;
+    /// The declared type.
+    public columnType: ColumnType;
+    /// Whether the column is the primary key.
+    public key: ColumnKey;
+    /// Whether the key is `AUTOINCREMENT` (and so left out of inserts).
+    public autoIncrement: boolean;
+    /// Whether the column is `NOT NULL`.
+    public notNull: boolean;
+  }
+
+  /// The descriptor of one table: its name and its columns, in order.
+  record Table {
+    /// The table name.
+    public name: String;
+    /// The columns, in declaration order.
+    public columns: Vector<Column>;
+
+    /// An empty descriptor for the table `name`.
+    public static create(name: str): Table {
+      return Table { name: String::create(name), columns: Vector::new<Column>() };
+    }
+
+    /// Adds an `INTEGER` column.
+    public columnInt(self, name: str, key: ColumnKey): Table {
+      return self.withColumn(name, ColumnType::INTEGER, key);
+    }
+
+    /// Adds a `REAL` column.
+    public columnReal(self, name: str, key: ColumnKey): Table {
+      return self.withColumn(name, ColumnType::REAL, key);
+    }
+
+    /// Adds a `TEXT` column.
+    public columnText(self, name: str, key: ColumnKey): Table {
+      return self.withColumn(name, ColumnType::TEXT, key);
+    }
+
+    /// Adds a `BLOB` column.
+    public columnBlob(self, name: str, key: ColumnKey): Table {
+      return self.withColumn(name, ColumnType::BLOB, key);
+    }
+
+    /// Adds a boolean column, stored as `INTEGER` 0 or 1.
+    public columnBoolean(self, name: str, key: ColumnKey): Table {
+      return self.withColumn(name, ColumnType::BOOLEAN, key);
+    }
+
+    /// Marks the column added last `AUTOINCREMENT`. Only an `INTEGER` primary
+    /// key accepts it; the emitters report any other column as `SCHEMA`.
+    public autoIncrement(self): Table {
+      let mut table: Table = self;
+
+      if (let Option::SOME(column) = table.lastColumn()) {
+        column.autoIncrement = true;
+      }
+
+      return table;
+    }
+
+    /// Marks the column added last `NOT NULL`.
+    public notNull(self): Table {
+      let mut table: Table = self;
+
+      if (let Option::SOME(column) = table.lastColumn()) {
+        column.notNull = true;
+      }
+
+      return table;
+    }
+
+    /// `CREATE TABLE name (column TYPE [PRIMARY KEY [AUTOINCREMENT]] [NOT NULL], ...)`.
+    /// No parameters.
+    public createTableSql(&self): Result<String, Error> {
+      match (self.validate()) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      let mut sql: String = String::create("CREATE TABLE ");
+      sql.push(&self.name);
+      sql.pushStr(" (");
+
+      let mut index: u64 = 0;
+
+      while (index < self.columns.length()) {
+        let column: &Column = self.columns.get(index).unwrap();
+
+        if (index > 0) {
+          sql.pushStr(", ");
+        }
+
+        sql.push(&column.name);
+        sql.pushStr(" ");
+        sql.pushStr(declaredType(column.columnType));
+
+        if (column.key == ColumnKey::PRIMARY) {
+          sql.pushStr(" PRIMARY KEY");
+        }
+
+        if (column.autoIncrement) {
+          sql.pushStr(" AUTOINCREMENT");
+        }
+
+        if (column.notNull) {
+          sql.pushStr(" NOT NULL");
+        }
+
+        index = index + 1;
+      }
+
+      sql.pushStr(")");
+
+      return Result::OK(sql);
+    }
+
+    /// `INSERT INTO name (columns) VALUES (?, ...)`. Binds every non-key
+    /// column in declaration order, then the key unless it is
+    /// `AUTOINCREMENT` (SQLite assigns that one). Non-key columns come first,
+    /// as in `updateByIdSql`, so one `Entity::bindValues` serves both.
+    public insertSql(&self): Result<String, Error> {
+      match (self.validate()) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      let mut names: String = String::create("");
+      let mut placeholders: String = String::create("");
+      let mut index: u64 = 0;
+
+      while (index < self.columns.length()) {
+        let column: &Column = self.columns.get(index).unwrap();
+
+        if (column.key != ColumnKey::PRIMARY) {
+          appendInsertColumn(&mut names, &mut placeholders, &column.name);
+        }
+
+        index = index + 1;
+      }
+
+      if (let Option::SOME(keyIndex) = self.keyIndex()) {
+        let key: &Column = self.columns.get(keyIndex).unwrap();
+
+        if (!key.autoIncrement) {
+          appendInsertColumn(&mut names, &mut placeholders, &key.name);
+        }
+      }
+
+      let mut sql: String = String::create("INSERT INTO ");
+      sql.push(&self.name);
+      sql.pushStr(" (");
+      sql.push(&names);
+      sql.pushStr(") VALUES (");
+      sql.push(&placeholders);
+      sql.pushStr(")");
+
+      return Result::OK(sql);
+    }
+
+    /// `SELECT columns FROM name`. No parameters. The selected columns are
+    /// every column in declaration order; a caller appends its own clauses.
+    public selectSql(&self): Result<String, Error> {
+      match (self.validate()) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return Result::OK(self.selectPrefix());
+    }
+
+    /// `SELECT columns FROM name WHERE key = ?`. Binds the key. The selected
+    /// columns are every column in declaration order. A table without a key
+    /// is a `SCHEMA` error.
+    public selectByIdSql(&self): Result<String, Error> {
+      let key: String = match (self.validatedKey()) {
+        Result::OK(name) -> name,
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      let mut sql: String = self.selectPrefix();
+      sql.pushStr(" WHERE ");
+      sql.push(&key);
+      sql.pushStr(" = ?");
+
+      return Result::OK(sql);
+    }
+
+    /// `SELECT columns FROM name [ORDER BY key]`. No parameters. The selected
+    /// columns are every column in declaration order; rows come in key order
+    /// when the table has a key.
+    public selectAllSql(&self): Result<String, Error> {
+      match (self.validate()) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      let mut sql: String = self.selectPrefix();
+
+      if (let Option::SOME(index) = self.keyIndex()) {
+        sql.pushStr(" ORDER BY ");
+        sql.push(&self.columns.get(index).unwrap().name);
+      }
+
+      return Result::OK(sql);
+    }
+
+    /// `UPDATE name SET column = ?, ... WHERE key = ?`. Binds every non-key
+    /// column in declaration order, then the key. A table without a key is a
+    /// `SCHEMA` error.
+    public updateByIdSql(&self): Result<String, Error> {
+      let key: String = match (self.validatedKey()) {
+        Result::OK(name) -> name,
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      let mut sql: String = String::create("UPDATE ");
+      sql.push(&self.name);
+      sql.pushStr(" SET ");
+
+      let mut first: boolean = true;
+      let mut index: u64 = 0;
+
+      while (index < self.columns.length()) {
+        let column: &Column = self.columns.get(index).unwrap();
+
+        if (column.key != ColumnKey::PRIMARY) {
+          if (!first) {
+            sql.pushStr(", ");
+          }
+
+          sql.push(&column.name);
+          sql.pushStr(" = ?");
+          first = false;
+        }
+
+        index = index + 1;
+      }
+
+      sql.pushStr(" WHERE ");
+      sql.push(&key);
+      sql.pushStr(" = ?");
+
+      return Result::OK(sql);
+    }
+
+    /// `DELETE FROM name WHERE key = ?`. Binds the key. A table without a key
+    /// is a `SCHEMA` error.
+    public deleteByIdSql(&self): Result<String, Error> {
+      let key: String = match (self.validatedKey()) {
+        Result::OK(name) -> name,
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      let mut sql: String = String::create("DELETE FROM ");
+      sql.push(&self.name);
+      sql.pushStr(" WHERE ");
+      sql.push(&key);
+      sql.pushStr(" = ?");
+
+      return Result::OK(sql);
+    }
+
+    /// The descriptor with one more column.
+    withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Table {
+      let mut table: Table = self;
+
+      table.columns.push(Column {
+        name: String::create(name),
+        columnType: columnType,
+        key: key,
+        autoIncrement: false,
+        notNull: false,
+      });
+
+      return table;
+    }
+
+    /// The column added last, when there is one.
+    lastColumn(&mut self): Option<&mut Column> {
+      let length: u64 = self.columns.length();
+
+      if (length == 0) {
+        return Option::NONE;
+      }
+
+      return self.columns.getMut(length - 1);
+    }
+
+    /// The index of the primary-key column, when there is one.
+    keyIndex(&self): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < self.columns.length()) {
+        if (self.columns.get(index).unwrap().key == ColumnKey::PRIMARY) {
+          return Option::SOME(index);
+        }
+
+        index = index + 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// `SELECT columns FROM name`, every column in declaration order.
+    selectPrefix(&self): String {
+      let mut sql: String = String::create("SELECT ");
+      let mut index: u64 = 0;
+
+      while (index < self.columns.length()) {
+        if (index > 0) {
+          sql.pushStr(", ");
+        }
+
+        sql.push(&self.columns.get(index).unwrap().name);
+        index = index + 1;
+      }
+
+      sql.pushStr(" FROM ");
+      sql.push(&self.name);
+
+      return sql;
+    }
+
+    /// Validates the descriptor and returns its key column's name, or a
+    /// `SCHEMA` error when it has none.
+    validatedKey(&self): Result<String, Error> {
+      match (self.validate()) {
+        Result::OK(_) -> {},
+        Result::ERROR(error) -> {
+          return Result::ERROR(error);
+        },
+      };
+
+      return match (self.keyIndex()) {
+        Option::SOME(index) -> Result::OK(self.columns.get(index).unwrap().name.clone()),
+        Option::NONE -> Result::ERROR(schemaError("std::orm: table ", &self.name, " has no primary key")),
+      };
+    }
+
+    /// Checks every rule in the module docs' "Validation" section.
+    validate(&self): Result<void, Error> {
+      if (!isPlainIdentifier(&self.name)) {
+        return Result::ERROR(schemaError("std::orm: table name '", &self.name, "' is not a plain identifier"));
+      }
+
+      if (self.columns.length() == 0) {
+        return Result::ERROR(schemaError("std::orm: table ", &self.name, " has no columns"));
+      }
+
+      let mut keys: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < self.columns.length()) {
+        let column: &Column = self.columns.get(index).unwrap();
+
+        if (!isPlainIdentifier(&column.name)) {
+          return Result::ERROR(schemaError("std::orm: column name '", &column.name, "' is not a plain identifier"));
+        }
+
+        let mut earlier: u64 = 0;
+
+        while (earlier < index) {
+          if (self.columns.get(earlier).unwrap().name.equals(&column.name)) {
+            return Result::ERROR(schemaError("std::orm: column ", &column.name, " is declared twice"));
+          }
+
+          earlier = earlier + 1;
+        }
+
+        if (column.key == ColumnKey::PRIMARY) {
+          keys = keys + 1;
+        }
+
+        if (column.autoIncrement && (column.key != ColumnKey::PRIMARY || column.columnType != ColumnType::INTEGER)) {
+          return Result::ERROR(schemaError(
+            "std::orm: column ",
+            &column.name,
+            " is AUTOINCREMENT but not an INTEGER primary key",
+          ));
+        }
+
+        index = index + 1;
+      }
+
+      if (keys > 1) {
+        return Result::ERROR(schemaError("std::orm: table ", &self.name, " has more than one primary key"));
+      }
+
+      return Result::OK(());
+    }
+  }
+
+  /// Appends `name` to an insert's column list and a `?` to its values.
+  function appendInsertColumn(names: &mut String, placeholders: &mut String, name: &String): void {
+    if (names.length() > 0) {
+      names.pushStr(", ");
+      placeholders.pushStr(", ");
+    }
+
+    names.push(name);
+    placeholders.pushStr("?");
+  }
+
+  /// The SQL type a column is declared with.
+  function declaredType(columnType: ColumnType): str {
+    return match (columnType) {
+      ColumnType::INTEGER -> "INTEGER",
+      ColumnType::REAL -> "REAL",
+      ColumnType::TEXT -> "TEXT",
+      ColumnType::BLOB -> "BLOB",
+      ColumnType::BOOLEAN -> "INTEGER",
+    };
+  }
+
+  /// Whether `name` matches `[A-Za-z_][A-Za-z0-9_]*`, so it never needs
+  /// quoting in SQL.
+  function isPlainIdentifier(name: &String): boolean {
+    let length: u64 = name.length();
+
+    if (length == 0) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      let byte: u8 = name.byteAt(index).unwrap();
+      let letter: boolean = (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 95;
+      let digit: boolean = byte >= 48 && byte <= 57;
+
+      if (!letter && !(digit && index > 0)) {
+        return false;
+      }
+
+      index = index + 1;
+    }
+
+    return true;
+  }
+
+  /// A `SCHEMA` error whose message is `before`, `name` and `after`.
+  function schemaError(before: str, name: &String, after: str): Error {
+    let mut message: String = String::create(before);
+    message.push(name);
+    message.pushStr(after);
+
+    return Error::create(ErrorKind::SCHEMA, message);
+  }
+}

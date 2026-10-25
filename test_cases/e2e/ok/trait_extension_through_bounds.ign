@@ -1,0 +1,78 @@
+// e2e: std
+// A trait implemented for i64, for the standard library's String and, by a
+// generic extension, for every Option<T> whose T implements it. A generic
+// function bounded by the trait takes all three, and a static method is
+// reached as T::read with T = i64.
+import Io from "std::io";
+
+trait Describe {
+  describe(&self): i64;
+
+  static read(raw: i64): Self;
+}
+
+@implements(Describe)
+extension i64 {
+  describe(&self): i64 {
+    return *self;
+  }
+
+  static read(raw: i64): i64 {
+    return raw + 1;
+  }
+}
+
+@implements(Describe)
+extension String {
+  describe(&self): i64 {
+    return self.length() as i64;
+  }
+
+  static read(raw: i64): String {
+    return String::create("read");
+  }
+}
+
+@implements(Describe)
+extension<T: Describe> Option<T> {
+  describe(&self): i64 {
+    return match (self) {
+      Option::SOME(inner) -> inner.describe() + 1000,
+      Option::NONE -> -1,
+    };
+  }
+
+  static read(raw: i64): Option<T> {
+    return Option::SOME(T::read(raw));
+  }
+}
+
+function describe<T: Describe>(value: &T): i64 {
+  return value.describe();
+}
+
+function readOne<T: Describe>(raw: i64): T {
+  return T::read(raw);
+}
+
+function main(): i32 {
+  let number: i64 = 42;
+  let text: String = String::create("hello");
+  let some: Option<i64> = Option::SOME(7);
+  let none: Option<i64> = Option::NONE;
+
+  Io::println(`i64 ${describe<i64>(&number)}`.toStr());
+  Io::println(`String ${describe<String>(&text)}`.toStr());
+  Io::println(`some ${describe<Option<i64>>(&some)}`.toStr());
+  Io::println(`none ${describe<Option<i64>>(&none)}`.toStr());
+  Io::println(`direct ${text.describe()} ${some.describe()}`.toStr());
+  Io::println(`read ${readOne<i64>(9)}`.toStr());
+
+  let readText: String = readOne<String>(0);
+  Io::println(`read ${readText.toStr()}`.toStr());
+
+  let readSome: Option<i64> = readOne<Option<i64>>(2);
+  Io::println(`read ${readSome.describe()}`.toStr());
+
+  return 0;
+}

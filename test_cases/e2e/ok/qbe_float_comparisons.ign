@@ -1,0 +1,96 @@
+// Every comparison on floats, with NaN on either side: the ordered ones are
+// false and `!=` is true, as C compares them.
+
+function notANumber(): f64 {
+  let zero: f64 = 0.0;
+
+  return zero / zero;
+}
+
+function score(left: f64, right: f64): i32 {
+  let mut bits: i32 = 0;
+
+  if (left == right) {
+    bits = bits | 1;
+  }
+
+  if (left != right) {
+    bits = bits | 2;
+  }
+
+  if (left < right) {
+    bits = bits | 4;
+  }
+
+  if (left <= right) {
+    bits = bits | 8;
+  }
+
+  if (left > right) {
+    bits = bits | 16;
+  }
+
+  if (left >= right) {
+    bits = bits | 32;
+  }
+
+  return bits;
+}
+
+function scoreNarrow(left: f32, right: f32): i32 {
+  let mut bits: i32 = 0;
+
+  if (left == right) {
+    bits = bits | 1;
+  }
+
+  if (left != right) {
+    bits = bits | 2;
+  }
+
+  if (left < right) {
+    bits = bits | 4;
+  }
+
+  if (left >= right) {
+    bits = bits | 32;
+  }
+
+  return bits;
+}
+
+function main(): i32 {
+  let nan: f64 = notANumber();
+
+  if (score(1.0, 2.0) != 14) {
+    return 1;
+  }
+
+  if (score(2.0, 2.0) != 41) {
+    return 2;
+  }
+
+  if (score(3.0, 2.0) != 50) {
+    return 3;
+  }
+
+  if (score(nan, 1.0) != 2 || score(1.0, nan) != 2 || score(nan, nan) != 2) {
+    return 4;
+  }
+
+  if (score(0.0, -0.0) != 41) {
+    return 5;
+  }
+
+  let narrowNan: f32 = nan as f32;
+
+  if (scoreNarrow(narrowNan, narrowNan) != 2 || scoreNarrow(1.5, 1.5) != 33) {
+    return 6;
+  }
+
+  if (nan == nan) {
+    return 7;
+  }
+
+  return 0;
+}

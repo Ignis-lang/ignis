@@ -1,0 +1,40 @@
+// e2e: std
+import Io from "std::io";
+import Memory from "std::memory";
+
+record Pair {
+  public first: u64;
+  public second: u32;
+}
+
+function main(): i32 {
+  let values: *mut u64 = Memory::allocateZeroedVector<u64>(4);
+  let mut index: u64 = 0;
+
+  while (index < 4) {
+    @write<u64>(values + index, index * 1000 + 7);
+    index += 1;
+  }
+
+  let narrow: i32 = 2;
+  let cursor: *mut u64 = values + 3;
+  let back: *mut u64 = cursor - 1;
+
+  Io::println(`${@read<u64>(values + 1)} ${@read<u64>(values + narrow)} ${@read<u64>(cursor)} ${@read<u64>(back)}`.toStr());
+  Io::println(`${cursor - values}`.toStr());
+
+  let pairs: *mut Pair = Memory::allocateZeroedVector<Pair>(3);
+  @write<Pair>(pairs + 2, Pair { first: 42, second: 9 });
+  let last: Pair = @read<Pair>(pairs + 2);
+  Io::println(`${last.first} ${last.second}`.toStr());
+
+  let names: *mut str = Memory::allocateZeroedVector<str>(2);
+  @write<str>(names, "zero");
+  @write<str>(names + 1, "one");
+  Io::println(@read<str>(names + 1));
+
+  Memory::free(names as *mut u8);
+  Memory::free(pairs as *mut u8);
+  Memory::free(values as *mut u8);
+  return 0;
+}

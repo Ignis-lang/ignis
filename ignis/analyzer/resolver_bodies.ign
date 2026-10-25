@@ -94,7 +94,7 @@ export namespace Analyzer {
       InstanceMethod(Analyzer::DefinitionId),
       TypeFallback(Analyzer::DefinitionId),
       NamespaceMember(Analyzer::DefinitionId),
-      OwnerIsTrait,
+      OwnerIsTrait(Analyzer::DefinitionId),
       OwnerInvalid,
       OwnerNotFound,
       MemberNotFoundOnEnum,
@@ -136,6 +136,9 @@ export namespace Analyzer {
       public diagnostics: DiagnosticBag;
       public bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap;
       public captures: Analyzer::ResolverBodies::LambdaCaptureMap;
+      /// The declarable attributes whose name, target and argument count
+      /// check, with their argument names resolved, waiting for their values.
+      public attributes: Vector<Analyzer::Attributes::PendingAttribute>;
     }
 
     /// Lexical local scope stack. Parallel vectors per binder ADR-1.
@@ -499,6 +502,29 @@ export namespace Analyzer {
       diag.addLabel(LabelKind::PRIMARY, span, message);
       let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
       stateRef.diagnostics.push(diag);
+    }
+
+    /// Whether the trait `traitDefId` declares a static method named `name`.
+    function traitDeclaresStaticMethod(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      traitDefId: Analyzer::DefinitionId,
+      name: str,
+    ): boolean {
+      let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(traitDefId)) {
+        methods = Analyzer::Resolver::copyDefinitionIdVector(&trait_.methods);
+      }
+
+      let Option::SOME(methodId) = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &methods, name, symbols) else {
+        return false;
+      };
+
+      return match (defStore.get(methodId)) {
+        Option::SOME(Analyzer::Definition::Method(methodDef)) -> methodDef.isStatic,
+        _ -> false,
+      };
     }
 
     /// Emit an `INVALID_NUMBER_OF_ARGUMENTS` (I0011) ERROR diagnostic.
@@ -2029,6 +2055,36 @@ export namespace Analyzer {
       return out;
     }
 
+    /// The first static method named `name` among the extension blocks
+    /// `extensions`, the way `Type::name` reaches a static method an
+    /// extension block declares for `Type`.
+    function lookupExtensionStatic(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      extensions: &Vector<Analyzer::DefinitionId>,
+      name: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < extensions.length()) {
+        let mut statics: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        if (let Option::SOME(extension) = extensions.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(*extension)) {
+            statics = Analyzer::copyDefIdBucket(Option::SOME(&record_.staticMethods));
+          }
+        }
+
+        if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &statics, name, symbols)) {
+          return Option::SOME(methodDefId);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function lookupMethodInTable(
       defStore: &mut Analyzer::DefinitionStore,
       table: &Vector<Analyzer::DefinitionId>,
@@ -2142,6 +2198,62 @@ export namespace Analyzer {
       @panic("unreachable: resolvePathTailTypeFallback match did not return");
     }
 
+    /// The record, enum or trait whose method the walk is in: what `Self`
+    /// names as a path owner. `NONE` outside any method.
+    function selfPathOwner(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+    ): Option<Analyzer::DefinitionId> {
+      let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(state.currentFunction) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(method.owner);
+    }
+
+    /// Reports `Self::member` written where no record, enum or trait encloses it.
+    function emitSelfPathOutsideOwner(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      span: SourceSpan
+    ): void {
+      let message: str = "'Self' exists only inside a record, enum or trait";
+      let mut diag: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::SELF_PATH_OUTSIDE_OWNER, message, span);
+      diag.addLabel(LabelKind::PRIMARY, span, "'Self' used outside the methods of a record, enum or trait");
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// `resolvePathTailForOwner` for `Self::member` inside a record or enum.
+    ///
+    /// Only the owner's own members answer: the record branch's namespace and
+    /// member-only fallbacks would bind `Self::Other` to an unrelated top-level
+    /// declaration named `Other`.
+    function resolveSelfPathTail(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ownerDefId: Analyzer::DefinitionId,
+      memberName: str,
+      segments: &Vector<String>,
+      segCount: u64,
+    ): Analyzer::ResolverBodies::PathTailLookup {
+      let lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::resolvePathTailForOwner(
+        state,
+        defStore,
+        symbols,
+        ownerDefId,
+        memberName,
+        segments,
+        segCount,
+      );
+
+      return match (lookup) {
+        Analyzer::ResolverBodies::PathTailLookup::TypeFallback(_) -> Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord,
+        Analyzer::ResolverBodies::PathTailLookup::NamespaceMember(_) -> Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord,
+        _ -> lookup,
+      };
+    }
+
     /// Resolve the last two segments of a multi-segment path (`owner::member`;
     /// for N>=3 segments, `owner`/`member` are the last two — the segments
     /// before them are validated beforehand by callers via
@@ -2169,6 +2281,14 @@ export namespace Analyzer {
       };
 
       let Option::SOME(ownerDefId) = ownerOpt else {
+        // `i64::read(raw)`: a primitive owner has only the static methods its
+        // extension blocks declare.
+        let primitiveExtensions: Vector<Analyzer::DefinitionId> = defStore.extensionsOfPrimitive(ownerName);
+
+        if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupExtensionStatic(defStore, symbols, &primitiveExtensions, memberName)) {
+          return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
+        }
+
         let fallback: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::resolvePathTailTypeFallback(
           state,
           defStore,
@@ -2241,6 +2361,12 @@ export namespace Analyzer {
             return Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(methodDefId);
           }
 
+          let enumExtensions: Vector<Analyzer::DefinitionId> = defStore.extensionsOfDefinition(ownerDefId);
+
+          if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupExtensionStatic(defStore, symbols, &enumExtensions, memberName)) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
+          }
+
           return Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum;
         },
         Analyzer::Definition::Record(rec) -> {
@@ -2275,6 +2401,12 @@ export namespace Analyzer {
 
           if (let Option::SOME(methodDefId) = instanceOpt) {
             return Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(methodDefId);
+          }
+
+          let recordExtensions: Vector<Analyzer::DefinitionId> = defStore.extensionsOfDefinition(ownerDefId);
+
+          if (let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupExtensionStatic(defStore, symbols, &recordExtensions, memberName)) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
           }
 
           // The chain-aware reading goes first: `Ast::Type::Path` must find
@@ -2328,7 +2460,7 @@ export namespace Analyzer {
           };
         },
         Analyzer::Definition::Trait(_) -> {
-          return Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait;
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait(ownerDefId);
         },
         Analyzer::Definition::Function(_) -> {
           return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
@@ -2476,6 +2608,45 @@ export namespace Analyzer {
     ///
     /// Returns false when nothing chain-scoped answers, and the ordinary
     /// expression walk resolves the path instead.
+    /// `Self { ... }` in a method: the record the method belongs to, or, inside
+    /// a trait, the implementing type, read like a type parameter. This is how
+    /// a static trait default builds `Self` field by field.
+    function resolveSelfRecordInitPath(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pathExprId: Ast::ExpressionId,
+    ): boolean {
+      let isSelf: boolean = match (module.expressions.get(pathExprId)) {
+        Option::SOME(Ast::Expression::Node::Variable(variable)) -> variable.name.equals("Self"),
+        Option::SOME(Ast::Expression::Node::Path(path)) -> path.segments.length() == 1 && Analyzer::ResolverBodies::joinPathSegments(&path.segments, 1).equals("Self"),
+        _ -> false,
+      };
+
+      if (!isSelf) {
+        return false;
+      }
+
+      let Option::SOME(ownerId) = Analyzer::ResolverBodies::selfPathOwner(state, defStore) else {
+        return false;
+      };
+
+      if (Analyzer::ResolverBodies::isTraitDef(defStore, ownerId)) {
+        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+        let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+        Analyzer::ResolverBodies::recordExprRef(state, pathExprId, Analyzer::ResolverBodies::ResolvedRef::TypeParam(selfSymbol));
+        return true;
+      }
+
+      let Option::SOME(Analyzer::Definition::Record(_)) = defStore.get(ownerId) else {
+        return false;
+      };
+
+      Analyzer::ResolverBodies::recordExprRef(state, pathExprId, Analyzer::ResolverBodies::ResolvedRef::Definition(ownerId));
+      return true;
+    }
+
     function resolveRecordInitPathAsType(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2483,6 +2654,10 @@ export namespace Analyzer {
       module: &Ast::Module,
       pathExprId: Ast::ExpressionId,
     ): boolean {
+      if (Analyzer::ResolverBodies::resolveSelfRecordInitPath(state, defStore, symbols, module, pathExprId)) {
+        return true;
+      }
+
       if (state.namespaceChain.length() == 0) {
         return false;
       }
@@ -2711,7 +2886,17 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_IDENTIFIER, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
-        Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait -> {
+        Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait(traitDefId) -> {
+          if (Analyzer::ResolverBodies::traitDeclaresStaticMethod(defStore, symbols, traitDefId, memberName)) {
+            let message: String = `static method '${memberName}' of trait '${ownerName}' is called without an implementing type`;
+            let label: String = `call it on a type that implements '${ownerName}', or as 'T::${memberName}' on a type parameter bounded by it`;
+            let mut diag: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TRAIT_STATIC_METHOD_WITHOUT_TYPE, message.toStr(), span);
+            diag.addLabel(LabelKind::PRIMARY, span, label.toStr());
+            let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            stateRef.diagnostics.push(diag);
+            return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+          }
+
           let message: String = `Expected a type, but '${ownerName}' refers to a trait`;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
@@ -2895,7 +3080,48 @@ export namespace Analyzer {
           &p.segments,
           segCount,
         );
+      } else if (ownerStr.equals("Self")) {
+        let Option::SOME(selfOwnerId) = Analyzer::ResolverBodies::selfPathOwner(state, defStore) else {
+          Analyzer::ResolverBodies::emitSelfPathOutsideOwner(state, p.span);
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
+          );
+          return;
+        };
+
+        // Inside a trait, `Self` is the implementing type, read like a type
+        // parameter bounded by the trait: `Self::name` is `T::name`.
+        if (Analyzer::ResolverBodies::isTraitDef(defStore, selfOwnerId)) {
+          let mut symbolsSelfRef: &mut Analyzer::SymbolTable = symbols;
+          let selfSymbol: Analyzer::SymbolId = symbolsSelfRef.intern("Self");
+          Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::TypeParam(selfSymbol));
+          return;
+        }
+
+        lookup = Analyzer::ResolverBodies::resolveSelfPathTail(
+          state,
+          defStore,
+          symbols,
+          selfOwnerId,
+          memberStr.toStr(),
+          &p.segments,
+          segCount,
+        );
       } else {
+        // `T::name` on a type parameter names a static method of one of its
+        // bounds, which the typechecker picks. This runs before the flat
+        // lookup, whose member-only fallback would bind any record's static
+        // method of the same name.
+        let mut symbolsParamRef: &mut Analyzer::SymbolTable = symbols;
+        let ownerSym: Analyzer::SymbolId = symbolsParamRef.intern(ownerStr.toStr());
+
+        if (Analyzer::Resolver::scopeLookup(&state.typeParamScope, ownerSym).isSome()) {
+          Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::TypeParam(ownerSym));
+          return;
+        }
+
         lookup = Analyzer::ResolverBodies::resolvePathTail(
           state,
           defStore,
@@ -3314,6 +3540,30 @@ export namespace Analyzer {
         }
       }
 
+      if (!ownerResolved && ownerStr.equals("Self")) {
+        let Option::SOME(selfOwnerId) = Analyzer::ResolverBodies::selfPathOwner(state, defStore) else {
+          Analyzer::ResolverBodies::emitSelfPathOutsideOwner(state, p.span);
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        };
+
+        // A trait declares no variants, and its implementing type is unknown here.
+        if (Analyzer::ResolverBodies::isTraitDef(defStore, selfOwnerId)) {
+          Analyzer::ResolverBodies::emitUnknownVariantPattern(state, p);
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        }
+
+        lookup = Analyzer::ResolverBodies::resolveSelfPathTail(
+          state,
+          defStore,
+          symbols,
+          selfOwnerId,
+          memberStr.toStr(),
+          &p.segments,
+          segCount,
+        );
+        ownerResolved = true;
+      }
+
       if (!ownerResolved) {
         lookup = Analyzer::ResolverBodies::resolvePathTail(
           state,
@@ -3551,7 +3801,7 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::emitUnknownVariantPattern(state, p);
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
-        Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait -> {
+        Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait(_) -> {
           let message: String = `Expected a type, but '${ownerName}' refers to a trait`;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
@@ -4677,10 +4927,21 @@ export namespace Analyzer {
         i += 1;
       }
 
+      let attributes: Vector<Analyzer::Attributes::PendingAttribute> = Analyzer::Attributes::collectModule(
+        &mut state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+      );
+
       return Analyzer::ResolverBodies::ResolverBodiesOutput {
         diagnostics: state.diagnostics,
         bodyResolution: state.bodyResolution,
         captures: state.captures,
+        attributes: attributes,
       };
     }
   }
