@@ -32,9 +32,11 @@
 //!
 //! A field of any other type, `Option` and `Vector` included, is a compile
 //! error inside the default, with a note naming the field: the writer has no
-//! null or array output yet. A nested record is valid JSON; TOML output has no
-//! nested tables yet, so a TOML record must keep scalar fields. A `serialize`
-//! the record writes itself replaces the default.
+//! null or array output yet. Each field value is written with
+//! `Serializer::nested(writer)`, so a nested record takes the writer's nested
+//! punctuation: an object in JSON, an inline table in TOML
+//! (`owner = { name = "Ada", age = 36 }`), recursively. A `serialize` the
+//! record writes itself replaces the default.
 //!
 //! The default walks record fields only. An enum that declares
 //! `@implements(Serialize)` without a `serialize` of its own is a compile
@@ -49,7 +51,8 @@
 //! - Call `Serializer::beginRecord` before emitting fields.
 //! - Call `Serializer::writeField` before each field value.
 //! - Pass `first = true` only for the first field.
-//! - Use `Serializer::write` or nested `Serialize::serialize` for field values.
+//! - Use `Serializer::write` for scalar field values, and pass
+//!   `Serializer::nested(writer)` to the `serialize` of a nested record.
 //! - Propagate `Serializer::Error` with `!` when a helper fails.
 //! - Call `Serializer::endRecord` before returning success.
 //!
@@ -110,14 +113,16 @@ export trait Serialize {
   }
 }
 
-/// `value.serialize(output, writer)`, the per-field call of the reflective
-/// default.
+/// `value.serialize(output, writer)` one record deeper, the per-field call of
+/// the reflective default.
 function serializeOf<T: Serialize>(
   value: &T,
   output: &mut String,
   writer: &Serializer::Writer
 ): Result<boolean, Serializer::Error> {
-  return value.serialize(output, writer);
+  let nested: Serializer::Writer = Serializer::nested(writer);
+
+  return value.serialize(output, &nested);
 }
 
 @implements(Serialize)

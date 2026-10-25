@@ -31,6 +31,9 @@
 //!
 //! TOML root output must be a record-like serialized value. Scalar roots are
 //! rejected by the shared serializer because they are not valid TOML documents.
+//! A record nested in the root is written as an inline table on its field's
+//! line (`owner = { name = "Ada", age = 36 }`), recursively, and parses back
+//! with `Toml::parse`.
 //!
 //! ## Example
 //!
@@ -1369,8 +1372,9 @@ export namespace Toml {
 
   /// Returns the serializer configuration used for TOML record output.
   ///
-  /// The writer emits field entries as `key = value` lines, does not wrap records
-  /// in braces, and rejects scalar roots.
+  /// The writer emits the root record's fields as `key = value` lines without
+  /// braces, writes a nested record as an inline table (`key = { a = 1, b = 2 }`),
+  /// and rejects scalar roots.
   function writer(): Serializer::Writer {
     return Serializer::Writer {
       recordPrefix: "",
@@ -1379,6 +1383,10 @@ export namespace Toml {
       fieldSeparator: " = ",
       supportsScalarRoot: false,
       quoteFieldKeys: false,
+      nestedRecordPrefix: "{ ",
+      nestedRecordSuffix: " }",
+      nestedEntrySeparator: ", ",
+      depth: 0,
     };
   }
 
@@ -1762,7 +1770,15 @@ export namespace Toml {
   /// Serializes a record-like value as a TOML document string.
   ///
   /// The type's `Serialize` implementation controls which fields are emitted.
-  /// Serializer errors are propagated, including unsupported nested shapes or an
+  /// The root record is one `key = value` line per field, and a nested record
+  /// is an inline table, recursively:
+  ///
+  /// ```text
+  /// id = 1
+  /// middle = { level = 2, inner = { a = 3, b = "x" } }
+  /// ```
+  ///
+  /// Serializer errors are propagated, such as an invalid bare key or an
   /// implementation that does not produce a TOML-compatible root record.
   function stringify<T: Serialize>(value: &T): Result<String, Serializer::Error> {
     let mut output: String = String::new();
