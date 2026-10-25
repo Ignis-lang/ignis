@@ -1,0 +1,123 @@
+import Test from "std::test";
+
+@implements(Display)
+record Labeled<T: Display> {
+  public value: T;
+}
+
+@implements(Display)
+record Mixed {
+  public count: i32;
+  public total: u64;
+  public ratio: f64;
+  public enabled: boolean;
+  public initial: char;
+  public code: str;
+  public name: String;
+}
+
+@implements(Display)
+record Pair {
+  public left: Labeled<i32>;
+  public right: Labeled<String>;
+}
+
+@implements(Display)
+record Collected {
+  public present: Option<i32>;
+  public missing: Option<i32>;
+  public values: Vector<i64>;
+  public empty: Vector<i64>;
+}
+
+@implements(Display)
+record Fieldless {}
+
+@implements(Display)
+record Custom {
+  public secret: i32;
+
+  display(&self): String {
+    return String::create("custom");
+  }
+}
+
+function assertDisplays<T: Display>(value: &T, expected: str): void {
+  let text: String = value.display();
+
+  Test::assertEq<str>(text.toStr(), expected);
+}
+
+@test
+function displaysMixedFieldsInDeclarationOrder(): void {
+  let mixed: Mixed = Mixed {
+    count: -3,
+    total: 7,
+    ratio: 1.5,
+    enabled: true,
+    initial: 'x',
+    code: "abc",
+    name: String::create("ignis"),
+  };
+
+  assertDisplays<Mixed>(
+    &mixed,
+    "Mixed { count: -3, total: 7, ratio: 1.5, enabled: true, initial: x, code: abc, name: ignis }",
+  );
+}
+
+@test
+function displaysGenericRecordsWithConcreteNames(): void {
+  let number: Labeled<i32> = Labeled { value: 1 };
+  let text: Labeled<String> = Labeled { value: String::create("one") };
+
+  assertDisplays<Labeled<i32>>(&number, "Labeled<i32> { value: 1 }");
+  assertDisplays<Labeled<String>>(&text, "Labeled<String> { value: one }");
+}
+
+@test
+function displaysNestedRecords(): void {
+  let pair: Pair = Pair {
+    left: Labeled { value: 2 },
+    right: Labeled { value: String::create("two") },
+  };
+
+  assertDisplays<Pair>(
+    &pair,
+    "Pair { left: Labeled<i32> { value: 2 }, right: Labeled<String> { value: two } }",
+  );
+}
+
+@test
+function displaysOptionAndVectorFields(): void {
+  let mut values: Vector<i64> = Vector::new<i64>();
+  values.push(1);
+  values.push(2);
+
+  let collected: Collected = Collected {
+    present: Option::SOME(5),
+    missing: Option::NONE,
+    values: values,
+    empty: Vector::new<i64>(),
+  };
+
+  assertDisplays<Collected>(
+    &collected,
+    "Collected { present: Option::SOME(5), missing: Option::NONE, values: [1, 2], empty: [] }",
+  );
+}
+
+@test
+function displaysARecordWithoutFields(): void {
+  let empty: Fieldless = Fieldless {  };
+
+  assertDisplays<Fieldless>(&empty, "Fieldless {}");
+}
+
+@test
+function handWrittenDisplayReplacesTheDefault(): void {
+  let custom: Custom = Custom { secret: 9 };
+
+  assertDisplays<Custom>(&custom, "custom");
+  Test::assertEq<i32>(custom.secret, 9);
+}

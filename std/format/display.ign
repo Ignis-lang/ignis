@@ -1,7 +1,232 @@
+//!
+//! # Display
+//!
+//! The `Display` trait and its implementations for the built-in types.
+//!
+//! `display` has a default that reflects over the record's fields with
+//! `comptime for`, so `@implements(Display)` on a record needs no method of
+//! its own. A `display` the record writes itself replaces the default.
+//!
+//! ## Default
+//!
+//! `TypeName { field: value, field: value }`, fields in declaration order,
+//! each rendered by its own `Display`. The name is the record's concrete
+//! name: a generic record shows its type arguments, `Box<i32> { value: 1 }`.
+//! A record without fields renders as `TypeName {}`. A field whose type does
+//! not implement `Display` is a compile error inside the default, with a
+//! note naming the field.
+//!
+//! ## Implementations
+//!
+//! | Type | Rendering |
+//! |------|-----------|
+//! | integers, `f32`, `f64`, `boolean` | `toString()`: `-3`, `1.5`, `true` |
+//! | `char` | the character itself, unquoted |
+//! | `str`, `String` | the text itself, unquoted and unescaped |
+//! | `Option<T: Display>` | `Option::SOME(value)` or `Option::NONE` |
+//! | `Vector<T: Display>` | `[first, second]`, `[]` when empty |
+//!
+//! ## Enums
+//!
+//! The default walks record fields only. An enum that declares
+//! `@implements(Display)` without a `display` of its own is a compile error
+//! inside the default (A0293, `'@fields' needs a record`), so an enum
+//! needs a hand-written `display`.
+
 /// Trait for values that can render themselves as an owned `String`.
 ///
-/// Types marked with `@implements(Display)` must provide
-/// `display(&self): String`.
+/// A record marked `@implements(Display)` gets the reflective default
+/// described in the module documentation, or provides `display(&self):
+/// String` itself.
 export trait Display {
-  display(&self): String;
+  /// The value as text.
+  display(&self): String {
+    let mut output: String = String::create(@typeName<Self>());
+    output.pushStr(" {");
+    let emptyLength: u64 = output.length();
+
+    comptime for (field of @fields<Self>()) {
+      output.pushStr(field.index == 0 ? " " : ", ");
+      output.pushStr(field.name);
+      output.pushStr(": ");
+      let shown: String = displayOf(&@field(self, field));
+      output.push(&shown);
+    }
+
+    output.pushStr(output.length() == emptyLength ? "}" : " }");
+
+    return output;
+  }
+}
+
+/// `value.display()`, the per-field call of the reflective default.
+function displayOf<T: Display>(value: &T): String {
+  return value.display();
+}
+
+@implements(Display)
+extension i8 {
+  display(&self): String {
+    let value: i8 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension i16 {
+  display(&self): String {
+    let value: i16 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension i32 {
+  display(&self): String {
+    let value: i32 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension i64 {
+  display(&self): String {
+    let value: i64 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension u8 {
+  display(&self): String {
+    let value: u8 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension u16 {
+  display(&self): String {
+    let value: u16 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension u32 {
+  display(&self): String {
+    let value: u32 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension u64 {
+  display(&self): String {
+    let value: u64 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension f32 {
+  display(&self): String {
+    let value: f32 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension f64 {
+  display(&self): String {
+    let value: f64 = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension boolean {
+  display(&self): String {
+    let value: boolean = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension char {
+  display(&self): String {
+    let value: char = *self;
+
+    return value.toString();
+  }
+}
+
+@implements(Display)
+extension str {
+  display(&self): String {
+    return String::create(*self);
+  }
+}
+
+@implements(Display)
+extension String {
+  display(&self): String {
+    return self.clone();
+  }
+}
+
+@implements(Display)
+extension<T: Display> Option<T> {
+  display(&self): String {
+    return match (self) {
+      Option::SOME(inner) -> {
+        let mut output: String = String::create("Option::SOME(");
+        let shown: String = inner.display();
+        output.push(&shown);
+        output.pushStr(")");
+
+        output
+      },
+      Option::NONE -> String::create("Option::NONE"),
+    };
+  }
+}
+
+@implements(Display)
+extension<T: Display> Vector<T> {
+  display(&self): String {
+    let mut output: String = String::create("[");
+    let mut index: u64 = 0;
+
+    while (index < self.length()) {
+      if (index > 0) {
+        output.pushStr(", ");
+      }
+
+      match (self.get(index)) {
+        Option::SOME(item) -> {
+          let shown: String = item.display();
+          output.push(&shown);
+        },
+        Option::NONE -> {},
+      };
+
+      index += 1;
+    }
+
+    output.pushStr("]");
+
+    return output;
+  }
 }
