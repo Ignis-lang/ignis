@@ -144,3 +144,55 @@ function serializerSurfaceAndHashMapTraversalStayStable(): void {
   Test::assert(firstOrder != 0);
   Test::assertEq<i32>(firstOrder, secondOrder);
 }
+
+@implements(Serialize)
+record Owner {
+  @Serializer::Rename("display-name")
+  public name: String;
+  public age: u8;
+}
+
+@implements(Serialize)
+record Account {
+  public id: i64;
+  public active: boolean;
+  public score: f64;
+  public grade: char;
+  public tag: str;
+  public owner: Owner;
+}
+
+function sampleAccount(): Account {
+  return Account {
+    id: 42,
+    active: true,
+    score: 2.5,
+    grade: 'A',
+    tag: "line\n",
+    owner: Owner { name: String::create("Ada"), age: 36 },
+  };
+}
+
+@test
+function reflectiveSerializeWritesJsonInDeclarationOrder(): void {
+  let account: Account = sampleAccount();
+
+  assertOkString(
+    Json::stringify<Account>(&account),
+    "{\"id\":42,\"active\":true,\"score\":2.5,\"grade\":\"A\",\"tag\":\"line\\n\",\"owner\":{\"display-name\":\"Ada\",\"age\":36}}",
+  );
+}
+
+@test
+function reflectiveSerializeWritesTomlWithRenamedFields(): void {
+  let owner: Owner = Owner { name: String::create("Ada"), age: 36 };
+
+  assertOkString(Toml::stringify<Owner>(&owner), "display-name = \"Ada\"\nage = 36");
+}
+
+@test
+function handWrittenSerializeReplacesTheDefault(): void {
+  let payload: Payload = Payload { value: 7, name: "ignis" };
+
+  assertOkString(Json::stringify<Payload>(&payload), "{\"value\":7,\"name\":\"ignis\"}");
+}

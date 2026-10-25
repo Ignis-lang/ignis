@@ -10,6 +10,37 @@
 //! The trait does not choose a format; JSON, TOML, or another front-end supplies
 //! the writer configuration.
 //!
+//! ## Exports
+//!
+//! | Export      | Description                                                 |
+//! |-------------|-------------------------------------------------------------|
+//! | `Serialize` | `serialize(&self, output, writer)`, with a reflective record default and implementations for the scalar types |
+//!
+//! ## Default
+//!
+//! `serialize` has a default that reflects over the record's fields with
+//! `comptime for`, so `@implements(Serialize)` on a record needs no method of
+//! its own. It writes `beginRecord`, then one `writeField` and value per
+//! field in declaration order, then `endRecord`. The key is the name given by
+//! `@Serializer::Rename("key")` on the field, else the field name. Each value
+//! is written by its type's `Serialize`:
+//!
+//! | Field type | Written by |
+//! |------------|------------|
+//! | `boolean`, integers, `f32`, `f64`, `char`, `str`, `String` | the matching `Serializer::write` overload |
+//! | a record implementing `Serialize` | its own `serialize`, as a nested record |
+//!
+//! A field of any other type, `Option` and `Vector` included, is a compile
+//! error inside the default, with a note naming the field: the writer has no
+//! null or array output yet. A nested record is valid JSON; TOML output has no
+//! nested tables yet, so a TOML record must keep scalar fields. A `serialize`
+//! the record writes itself replaces the default.
+//!
+//! The default walks record fields only. An enum that declares
+//! `@implements(Serialize)` without a `serialize` of its own is a compile
+//! error inside the default (A0293, `'@fields' needs a record`), so an enum
+//! needs a hand-written `serialize`.
+//!
 //! ## Contract
 //!
 //! Implementations should:
@@ -43,6 +74,9 @@ import _ from "std::serializer::error";
 import _ from "std::serializer::writer";
 
 /// Format-agnostic serialization contract for record-like values.
+///
+/// A record marked `@implements(Serialize)` gets the reflective default
+/// described in the module documentation, or provides `serialize` itself.
 export trait Serialize {
   /// Appends a serialized representation of `self` to `output`.
   ///
@@ -59,5 +93,183 @@ export trait Serialize {
     &self,
     output: &mut String,
     writer: &Serializer::Writer
-  ): Result<boolean, Serializer::Error>;
+  ): Result<boolean, Serializer::Error> {
+    Serializer::beginRecord(output, writer)!;
+
+    comptime for (field of @fields<Self>()) {
+      let key: str = match (@attribute<Serializer::Rename>(field)) {
+        Option::SOME(rename) -> rename.name,
+        Option::NONE -> field.name,
+      };
+
+      Serializer::writeField(output, key, writer, field.index == 0)!;
+      serializeOf(&@field(self, field), output, writer)!;
+    }
+
+    return Serializer::endRecord(output, writer);
+  }
+}
+
+/// `value.serialize(output, writer)`, the per-field call of the reflective
+/// default.
+function serializeOf<T: Serialize>(
+  value: &T,
+  output: &mut String,
+  writer: &Serializer::Writer
+): Result<boolean, Serializer::Error> {
+  return value.serialize(output, writer);
+}
+
+@implements(Serialize)
+extension boolean {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension i8 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension i16 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension i32 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension i64 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension u8 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension u16 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension u32 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension u64 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension f32 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension f64 {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension char {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension str {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, *self, writer);
+  }
+}
+
+@implements(Serialize)
+extension String {
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    return Serializer::write(output, self, writer);
+  }
 }

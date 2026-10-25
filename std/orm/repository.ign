@@ -103,7 +103,7 @@ export namespace Orm {
       let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(
         self.selectByIdStatement.toStr(),
       ))!;
-      sqliteUnit(statement.bindInt(1, id))!;
+      sqliteResult<void>(statement.bindInt(1, id))!;
 
       if (sqliteResult<Sqlite3::Step>(statement.step())! == Sqlite3::Step::DONE) {
         return Result::ERROR(notFound(id));
@@ -136,10 +136,10 @@ export namespace Orm {
 
         match (entity.id()) {
           Option::SOME(id) -> {
-            sqliteUnit(statement.bindInt(keyIndex, id))!;
+            sqliteResult<void>(statement.bindInt(keyIndex, id))!;
           },
           Option::NONE -> {
-            sqliteUnit(statement.bindNull(keyIndex))!;
+            sqliteResult<void>(statement.bindNull(keyIndex))!;
           },
         };
       }
@@ -163,7 +163,7 @@ export namespace Orm {
         self.updateStatement.toStr(),
       ))!;
       entity.bindValues(&mut statement)!;
-      sqliteUnit(statement.bindInt(self.valueCount + 1, id))!;
+      sqliteResult<void>(statement.bindInt(self.valueCount + 1, id))!;
       sqliteResult<Sqlite3::Step>(statement.step())!;
 
       if (connection.changes() == 0) {
@@ -178,7 +178,7 @@ export namespace Orm {
       let mut statement: Sqlite3::Statement = sqliteResult<Sqlite3::Statement>(connection.prepare(
         self.deleteStatement.toStr(),
       ))!;
-      sqliteUnit(statement.bindInt(1, id))!;
+      sqliteResult<void>(statement.bindInt(1, id))!;
       sqliteResult<Sqlite3::Step>(statement.step())!;
 
       if (connection.changes() == 0) {
@@ -229,16 +229,6 @@ export namespace Orm {
   function sqliteResult<V>(result: Result<V, Sqlite3::Error>): Result<V, Error> {
     return match (result) {
       Result::OK(value) -> Result::OK(value),
-      Result::ERROR(error) -> Result::ERROR(Error::fromSqlite(error)),
-    };
-  }
-
-  /// `result` with its SQLite error mapped by `Error::fromSqlite`.
-  /// `sqliteResult<void>` is not used: rewrapping a `void` payload through
-  /// the type parameter emits C that does not compile.
-  function sqliteUnit(result: Result<void, Sqlite3::Error>): Result<void, Error> {
-    return match (result) {
-      Result::OK(_) -> Result::OK(()),
       Result::ERROR(error) -> Result::ERROR(Error::fromSqlite(error)),
     };
   }

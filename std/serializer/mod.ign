@@ -38,8 +38,8 @@
 //!
 //! | Export        | Description                                      |
 //! |---------------|--------------------------------------------------|
-//! | `Serialize`   | Trait for records that can write themselves      |
-//! | `Serializer`  | Writer configuration, helpers, and error types   |
+//! | `Serialize`   | Trait for records that can write themselves, with a reflective default |
+//! | `Serializer`  | Writer configuration, helpers, error types, and the `Serializer::Rename` field attribute |
 //!
 //! ## Notes
 //!
@@ -53,12 +53,28 @@
 //! `beginRecord` with `endRecord` and for passing the correct `first` flag to
 //! `writeField` so separators are emitted in the right positions.
 //!
+//! `@implements(Serialize)` on a record without a `serialize` method uses the
+//! reflective default: every field in declaration order, keyed by its name or
+//! by `@Serializer::Rename("key")`. Field types are limited to scalars,
+//! strings and nested `Serialize` records (nested records in JSON only); see
+//! `std::serializer::serialize`. Enums still need a hand-written `serialize`.
+//!
 //! ## Example
 //!
 //! ```ignis
 //! import Serializer, Serialize from "std::serializer";
+//! import Json from "std::json";
 //!
-//! // Format front-ends provide a Serializer::Writer for concrete output.
+//! @implements(Serialize)
+//! record Package {
+//!   @Serializer::Rename("package-name")
+//!   public name: String;
+//!   public version: i32;
+//! }
+//!
+//! // {"package-name":"ignis","version":4}
+//! let package: Package = Package { name: String::create("ignis"), version: 4 };
+//! let json: Result<String, Serializer::Error> = Json::stringify<Package>(&package);
 //! ```
 
 export Serialize from "std::serializer::serialize";
