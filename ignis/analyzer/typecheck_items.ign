@@ -537,6 +537,76 @@ export namespace Analyzer {
       return typeStoreRef.instance(defId, arguments);
     }
 
+    /// The type a written `Self` names inside `functionId`: the extended type
+    /// in an extension block, the record or enum in its own methods and in a
+    /// trait default copied onto it, and the parameter `Self` in a trait's
+    /// own methods. `NONE` outside a method.
+    function methodSelfType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      functionId: Analyzer::DefinitionId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(functionId) else {
+        return Option::NONE;
+      };
+      let owner: Analyzer::DefinitionId = method.owner;
+
+      if (let Option::SOME(target) = defStore.extensionTargetOf(owner)) {
+        return Option::SOME(target);
+      }
+
+      let mut typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut ownerType: Option<Analyzer::TypeId> = Option::NONE;
+
+      match (defStore.get(owner)) {
+        Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+          typeParams = Analyzer::TypeBounds::copyDefinitionIds(&recordDef.typeParams);
+          ownerType = Option::SOME(recordDef.typeId);
+        },
+        Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+          typeParams = Analyzer::TypeBounds::copyDefinitionIds(&enumDef.typeParams);
+          ownerType = Option::SOME(enumDef.typeId);
+        },
+        Option::SOME(Analyzer::Definition::Trait(_)) -> {
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let selfSymbol: Analyzer::SymbolId = symbolsRef.intern("Self");
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          return Option::SOME(typeStoreRef.param(selfSymbol));
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(ownerTypeId) = ownerType else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(Analyzer::Typecheck::implementingSelfType(defStore, typeStore, owner, &typeParams, ownerTypeId));
+    }
+
+    /// Resolves the type argument of a builtin such as `@typeName<T>()`,
+    /// reading a bare `Self` from the method `enclosing` rather than as a name.
+    function resolveBuiltinTypeArgument(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      typeId: Ast::TypeId,
+      enclosing: Analyzer::DefinitionId,
+    ): Option<Analyzer::TypeId> {
+      if (let Option::SOME(Ast::Type::Node::Path(path)) = module.types.get(typeId)) {
+        if (path.segments.length() == 1) {
+          if (let Option::SOME(segment) = path.segments.get(0)) {
+            if (segment.equals("Self")) {
+              return Analyzer::Typecheck::methodSelfType(defStore, typeStore, symbols, enclosing);
+            }
+          }
+        }
+      }
+
+      return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, typeId, Option::SOME(enclosing));
+    }
+
     /// The first method in `methods` named `name`.
     function methodNamed(
       defStore: &mut Analyzer::DefinitionStore,

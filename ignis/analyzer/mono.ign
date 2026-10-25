@@ -997,6 +997,119 @@ export namespace Mono {
     return typeId;
   }
 
+  /// The type as source names it: each concrete clone of a generic record or
+  /// enum becomes the instance it was made from again, so `@typeName` prints
+  /// `Box<i32>` rather than the clone's own name.
+  function sourceType(
+    typeStore: &mut Analyzer::TypeStore,
+    state: &MonoState,
+    typeId: Analyzer::TypeId
+  ): Analyzer::TypeId {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return typeId;
+    };
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        return Mono::sourceInstance(typeStore, state, defId, typeId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        return Mono::sourceInstance(typeStore, state, defId, typeId);
+      },
+      Analyzer::Type::Pointer(pointerType) -> {
+        let inner: Analyzer::TypeId = Mono::sourceType(typeStore, state, pointerType.pointee);
+        let mut storeRef: &mut Analyzer::TypeStore = typeStore;
+
+        if (pointerType.mutable) {
+          return storeRef.mutablePointer(inner);
+        }
+
+        return storeRef.pointer(inner);
+      },
+      Analyzer::Type::Reference(referenceType) -> {
+        let inner: Analyzer::TypeId = Mono::sourceType(typeStore, state, referenceType.referent);
+        let mut storeRef: &mut Analyzer::TypeStore = typeStore;
+
+        if (referenceType.mutable) {
+          return storeRef.mutableReference(inner);
+        }
+
+        return storeRef.reference(inner);
+      },
+      Analyzer::Type::Slice(element) -> {
+        let inner: Analyzer::TypeId = Mono::sourceType(typeStore, state, element);
+        let mut storeRef: &mut Analyzer::TypeStore = typeStore;
+        return storeRef.slice(inner);
+      },
+      Analyzer::Type::FixedArray(element, length) -> {
+        let inner: Analyzer::TypeId = Mono::sourceType(typeStore, state, element);
+        let mut storeRef: &mut Analyzer::TypeStore = typeStore;
+        return storeRef.intern(Analyzer::Type::FixedArray(inner, length));
+      },
+      Analyzer::Type::Tuple(tupleType) -> {
+        let elements: Vector<Analyzer::TypeId> = Mono::sourceTypes(typeStore, state, &tupleType.elements);
+        let mut storeRef: &mut Analyzer::TypeStore = typeStore;
+        return storeRef.tuple(elements);
+      },
+      Analyzer::Type::Instance(instance) -> {
+        let arguments: Vector<Analyzer::TypeId> = Mono::sourceTypes(typeStore, state, &instance.typeArguments);
+        let mut storeRef: &mut Analyzer::TypeStore = typeStore;
+        return storeRef.instance(instance.definition, arguments);
+      },
+      _ -> {
+        return typeId;
+      },
+    };
+  }
+
+  function sourceTypes(
+    typeStore: &mut Analyzer::TypeStore,
+    state: &MonoState,
+    typeIds: &Vector<Analyzer::TypeId>
+  ): Vector<Analyzer::TypeId> {
+    let mut result: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < typeIds.length()) {
+      if (let Option::SOME(typeId) = typeIds.get(index)) {
+        result.push(Mono::sourceType(typeStore, state, *typeId));
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// The generic instance `defId` is the concrete clone of, or `typeId` when
+  /// `defId` is not a clone.
+  function sourceInstance(
+    typeStore: &mut Analyzer::TypeStore,
+    state: &MonoState,
+    defId: Analyzer::DefinitionId,
+    typeId: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let mut index: u64 = 0;
+
+    while (index < state.cacheConcreteDefs.length()) {
+      if (let Option::SOME(concreteDef) = state.cacheConcreteDefs.get(index)) {
+        if (concreteDef.raw() == defId.raw()) {
+          if (let Option::SOME(key) = state.cacheKeys.get(index)) {
+            if (key.ownerDef.isNone()) {
+              let arguments: Vector<Analyzer::TypeId> = Mono::sourceTypes(typeStore, state, &key.methodArgs);
+              let mut storeRef: &mut Analyzer::TypeStore = typeStore;
+              return storeRef.instance(key.primaryDef, arguments);
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return typeId;
+  }
+
   /// Clones one `Variable` parameter def with its type substituted, records
   /// the old->new remap, and returns the clone's id.
   function instantiateParam(
@@ -1738,22 +1851,34 @@ export namespace Mono {
       }
     }
 
-    if (ownParams == 0) {
-      if (let Option::SOME(owner) = ownerId) {
-        let mut ownerParams: u64 = 0;
+    if (let Option::SOME(owner) = ownerId) {
+      let mut ownerParams: u64 = 0;
 
-        if (let Option::SOME(ownerDefinition) = defStore.get(owner)) {
-          match (ownerDefinition) {
-            Analyzer::Definition::Record(recordDef) -> {
-              ownerParams = recordDef.typeParams.length();
-            },
-            Analyzer::Definition::Enum(enumDef) -> {
-              ownerParams = enumDef.typeParams.length();
-            },
-            _ -> {},
-          };
-        }
+      if (let Option::SOME(ownerDefinition) = defStore.get(owner)) {
+        match (ownerDefinition) {
+          Analyzer::Definition::Record(recordDef) -> {
+            ownerParams = recordDef.typeParams.length();
+          },
+          Analyzer::Definition::Enum(enumDef) -> {
+            ownerParams = enumDef.typeParams.length();
+          },
+          _ -> {},
+        };
+      }
 
+      // A static call that inferred both the owner's and the method's own
+      // parameters carries the owner's in front, the order the typechecker
+      // records them in.
+      if (ownParams > 0 && ownerParams > 0 && ownerParams + ownParams == concreteArgs.length()) {
+        return Mono::InstanceKey {
+          primaryDef: calleeDef,
+          ownerDef: Option::SOME(owner),
+          ownerArgs: Mono::takeTypeIds(concreteArgs, 0, ownerParams),
+          methodArgs: Mono::takeTypeIds(concreteArgs, ownerParams, concreteArgs.length()),
+        };
+      }
+
+      if (ownParams == 0) {
         if (ownerParams > 0 && ownerParams == concreteArgs.length()) {
           return Mono::InstanceKey {
             primaryDef: calleeDef,
@@ -2950,6 +3075,13 @@ export namespace Mono {
         },
         Hir::HirKind::AlignOf(ty) -> {
           clonedKind = Hir::HirKind::AlignOf(Mono::substituteType(defStore, typeStore, symbols, state, subst, ty));
+        },
+        Hir::HirKind::TypeName(ty) -> {
+          let mut nameStoreRef: &mut Analyzer::TypeStore = typeStore;
+          let substituted: Analyzer::TypeId = nameStoreRef.substitute(ty, &subst.params, &subst.args);
+          let written: Analyzer::TypeId = Mono::sourceType(typeStore, &*state, substituted);
+          let printed: String = typeStore.nameOfResolved(written, &*defStore, &*symbols);
+          clonedKind = Hir::HirKind::Literal(Hir::LiteralValue::String(printed));
         },
         Hir::HirKind::MaxOf(ty) -> {
           clonedKind = Hir::HirKind::MaxOf(Mono::substituteType(defStore, typeStore, symbols, state, subst, ty));

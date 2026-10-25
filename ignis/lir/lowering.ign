@@ -152,6 +152,7 @@ export namespace LirLowering {
       Hir::HirKind::SizeOf(_) -> "SizeOf",
       Hir::HirKind::AlignOf(_) -> "AlignOf",
       Hir::HirKind::MaxOf(_) -> "MaxOf",
+      Hir::HirKind::TypeName(_) -> "TypeName",
       Hir::HirKind::MinOf(_) -> "MinOf",
       Hir::HirKind::BuiltinLoad(_) -> "BuiltinLoad",
       Hir::HirKind::BuiltinStore(_) -> "BuiltinStore",
@@ -1967,6 +1968,13 @@ export namespace LirLowering {
           return Lir::Operand::Temp(dest);
         }
 
+        // A `void` binding, such as a payload bound through a type parameter
+        // instantiated with `void`, never gets a slot; it reads as no value,
+        // like `()`, so a constructor or call taking it writes nothing.
+        if (LirLowering::isVoidType(typeStore, nodeType)) {
+          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        }
+
         // A `static mut` field reads from its storage, never from its seed.
         if (LirLowering::isMutableStatic(defStore, defId)) {
           return Lir::Operand::GlobalRef(defId);
@@ -2464,6 +2472,11 @@ export namespace LirLowering {
         }));
 
         return Lir::Operand::Temp(dest);
+      },
+      // Monomorphization folds every `TypeName` that reaches a lowered body.
+      Hir::HirKind::TypeName(_) -> {
+        LirLowering::markUnsupported(function_, state);
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::MaxOf(ty) -> {
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
