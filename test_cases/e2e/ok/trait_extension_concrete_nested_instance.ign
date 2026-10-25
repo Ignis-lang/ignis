@@ -1,0 +1,69 @@
+// e2e: std
+// A trait implemented by extension blocks over concrete instances whose
+// arguments are instances themselves, Vector<Option<i64>> and
+// Pair<Box<i32>>. A bound call substitutes the receiver to its concrete clone
+// and still has to find the block written over the source instance.
+import Io from "std::io";
+
+record Box<T> {
+  public content: T;
+}
+
+record Pair<T> {
+  public first: T;
+  public second: T;
+}
+
+trait Describe {
+  describe(&self): i64;
+
+  static read(raw: i64): Self;
+}
+
+@implements(Describe)
+extension Vector<Option<i64>> {
+  describe(&self): i64 {
+    return self.length() as i64;
+  }
+
+  static read(raw: i64): Vector<Option<i64>> {
+    let mut values: Vector<Option<i64>> = Vector::new<Option<i64>>();
+    values.push(Option::SOME(raw));
+    values.push(Option::NONE);
+    return values;
+  }
+}
+
+@implements(Describe)
+extension Pair<Box<i32>> {
+  describe(&self): i64 {
+    return (self.first.content + self.second.content) as i64;
+  }
+
+  static read(raw: i64): Pair<Box<i32>> {
+    return Pair { first: Box { content: raw as i32 }, second: Box { content: 1 } };
+  }
+}
+
+function describe<T: Describe>(value: &T): i64 {
+  return value.describe();
+}
+
+function readOne<T: Describe>(raw: i64): T {
+  return T::read(raw);
+}
+
+function main(): i32 {
+  let mut values: Vector<Option<i64>> = Vector::new<Option<i64>>();
+  values.push(Option::SOME(1));
+  let pair: Pair<Box<i32>> = Pair { first: Box { content: 20 }, second: Box { content: 22 } };
+
+  Io::println(`direct ${values.describe()} ${pair.describe()}`.toStr());
+  Io::println(`bound ${describe<Vector<Option<i64>>>(&values)} ${describe<Pair<Box<i32>>>(&pair)}`.toStr());
+
+  let readValues: Vector<Option<i64>> = readOne<Vector<Option<i64>>>(5);
+  let readPair: Pair<Box<i32>> = readOne<Pair<Box<i32>>>(9);
+  Io::println(`read ${readValues.describe()} ${readPair.describe()}`.toStr());
+
+  return 0;
+}

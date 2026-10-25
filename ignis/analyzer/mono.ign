@@ -40,55 +40,27 @@ export namespace Mono {
     return result;
   }
 
-  /// Whether two type lists name the same types in the same order. A
-  /// substituted instance can be a separate entry from the written one, so
-  /// instances compare by declaration and arguments.
-  function sameTypeIds(
-    typeStore: &Analyzer::TypeStore,
-    left: &Vector<Analyzer::TypeId>,
-    right: &Vector<Analyzer::TypeId>,
-  ): boolean {
-    if (left.length() != right.length()) {
-      return false;
-    }
-
-    let mut index: u64 = 0;
-
-    while (index < left.length()) {
-      let Option::SOME(leftId) = left.get(index) else {
-        return false;
-      };
-      let Option::SOME(rightId) = right.get(index) else {
-        return false;
-      };
-
-      if (!Mono::sameType(typeStore, *leftId, *rightId)) {
-        return false;
-      }
-
-      index += 1;
-    }
-
-    return true;
-  }
-
-  function sameType(
-    typeStore: &Analyzer::TypeStore,
+  /// Whether `left` and `right` name the same type once each concrete clone
+  /// inside them is read back as the instance it was made from.
+  ///
+  /// The type store interns every instance, so equal source types share one
+  /// id. Monomorphization rewrites a concrete `Instance(generic, args)`, and
+  /// every instance inside its arguments, to its clone's `Record`/`Enum`
+  /// (`concretizeType`), so a substituted `Vector<Option<i64>>` and the
+  /// `Vector<Option<i64>>` written in source are different types by id. Mono
+  /// compares a substituted type with a written one through this, never by
+  /// raw id.
+  function sameSourceType(
+    typeStore: &mut Analyzer::TypeStore,
+    state: &MonoState,
     left: Analyzer::TypeId,
-    right: Analyzer::TypeId
+    right: Analyzer::TypeId,
   ): boolean {
     if (left.raw() == right.raw()) {
       return true;
     }
 
-    let Option::SOME(Analyzer::Type::Instance(leftInstance)) = typeStore.get(left) else {
-      return false;
-    };
-    let Option::SOME(Analyzer::Type::Instance(rightInstance)) = typeStore.get(right) else {
-      return false;
-    };
-
-    return leftInstance.definition.raw() == rightInstance.definition.raw() && Mono::sameTypeIds(typeStore, &leftInstance.typeArguments, &rightInstance.typeArguments);
+    return Mono::sourceType(typeStore, state, left).raw() == Mono::sourceType(typeStore, state, right).raw();
   }
 
   function copyKey(key: &Mono::InstanceKey): Mono::InstanceKey {
@@ -2130,7 +2102,7 @@ export namespace Mono {
 
       let mut targetDef: Option<Analyzer::DefinitionId> = Option::NONE;
       let mut targetGeneric: boolean = false;
-      let mut concreteInstanceMatches: boolean = false;
+      let mut concreteInstanceTarget: boolean = false;
 
       if (let Option::SOME(targetNode) = typeStore.get(target)) {
         match (targetNode) {
@@ -2141,9 +2113,8 @@ export namespace Mono {
             if (Analyzer::TypeBounds::declaredTypeParams(defStore, *block).length() > 0) {
               targetDef = Option::SOME(targetInstance.definition);
               targetGeneric = true;
-            } else if (let Option::SOME(receiver) = &instance) {
-              concreteInstanceMatches = receiver.definition.raw() == targetInstance.definition.raw()
-                && Mono::sameTypeIds(&*typeStore, &receiver.typeArguments, &targetInstance.typeArguments);
+            } else {
+              concreteInstanceTarget = true;
             }
           },
           Analyzer::Type::Record(definition) -> {
@@ -2156,7 +2127,7 @@ export namespace Mono {
         };
       }
 
-      if (concreteInstanceMatches) {
+      if (concreteInstanceTarget && Mono::sameSourceType(typeStore, &*state, baseType, target)) {
         matches.push(Analyzer::TypeBounds::ExtensionMatch { extension: *block, typeArguments: Vector::new<Analyzer::TypeId>() });
         index += 1;
         continue;
