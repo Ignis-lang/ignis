@@ -6257,6 +6257,7 @@ export namespace Analyzer {
             symbols,
             module,
             resolvedBodies,
+            exprId,
             &value,
           ) else {
             return Option::NONE;
@@ -8515,6 +8516,7 @@ export namespace Analyzer {
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
       call: &Ast::Expression::BuiltinCall,
     ): Option<Analyzer::TypeId> {
       let name: &String = &call.name;
@@ -8523,14 +8525,14 @@ export namespace Analyzer {
         let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
         let resultType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::U64);
 
-        return Analyzer::Typecheck::checkBuiltinWithOneTypeArgument(state, defStore, typeStore, symbols, module, call, resultType);
+        return Analyzer::Typecheck::checkBuiltinWithOneTypeArgument(state, defStore, typeStore, symbols, module, exprId, call, resultType);
       }
 
       if (name.equals("typeName")) {
         let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
         let resultType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::STR);
 
-        return Analyzer::Typecheck::checkBuiltinWithOneTypeArgument(state, defStore, typeStore, symbols, module, call, resultType);
+        return Analyzer::Typecheck::checkBuiltinWithOneTypeArgument(state, defStore, typeStore, symbols, module, exprId, call, resultType);
       }
 
       if (name.equals("panic")) {
@@ -8766,10 +8768,51 @@ export namespace Analyzer {
       // `Self` is the owner of the method being checked: read it from the
       // method rather than resolving the written `Self`.
       let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut targets: u32 = 0;
 
+      if (let Option::SOME(attributeDefId) = attributeDef) {
+        if (let Option::SOME(declared) = defStore.attributeTargetsOf(attributeDefId)) {
+          targets = declared;
+        }
+      }
+
+      // `@attribute<A>(Self)` reads the attribute on the record or enum
+      // itself, which carries only attributes declared for its kind: any
+      // other `A` could never be `SOME`.
       if (let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(state.currentFunction)) {
-        if (let Option::SOME(Analyzer::Definition::Record(_)) = defStore.get(method.owner)) {
-          recordDefId = Option::SOME(method.owner);
+        let mut ownerKind: str = "";
+        let mut ownerTarget: u32 = 0;
+        let mut ownerName: String = String::create("");
+
+        match (defStore.get(method.owner)) {
+          Option::SOME(Analyzer::Definition::Record(record_)) -> {
+            recordDefId = Option::SOME(method.owner);
+            ownerKind = "record";
+            ownerTarget = Analyzer::Attributes::TARGET_RECORD;
+            ownerName = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, record_.name);
+          },
+          Option::SOME(Analyzer::Definition::Enum(enum_)) -> {
+            ownerKind = "enum";
+            ownerTarget = Analyzer::Attributes::TARGET_ENUM;
+            ownerName = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, enum_.name);
+          },
+          _ -> {},
+        };
+
+        if (ownerTarget != 0 && call.arguments.length() == 0) {
+          if ((targets & ownerTarget) == 0) {
+            let attributeName: String = typeStore.nameOfResolved(attributeType, &*defStore, &*symbols);
+            let message: String = `attribute '${attributeName.toStr()}' does not apply to ${ownerKind}s, so the ${ownerKind} '${ownerName.toStr()}' cannot carry it`;
+            Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::ATTRIBUTE_NOT_FOR_SELF, message.toStr());
+
+            // Still typed, so the bindings that read it are not reported too.
+            return Option::SOME(resultType);
+          }
+
+          if (recordDefId.isNone()) {
+            Analyzer::Typecheck::recordCallTarget(state, exprId, method.owner);
+            return Option::SOME(resultType);
+          }
         }
       }
 
@@ -9669,6 +9712,7 @@ export namespace Analyzer {
       typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
+      exprId: Ast::ExpressionId,
       call: &Ast::Expression::BuiltinCall,
       resultType: Analyzer::TypeId,
     ): Option<Analyzer::TypeId> {
@@ -9686,18 +9730,24 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let Option::SOME(_operandType) = Analyzer::Typecheck::resolveLocalAnnotation(
+      let Option::SOME(operandType) = Analyzer::Typecheck::resolveBuiltinTypeArgument(
         defStore,
         typeStore,
         symbols,
         module,
         *typeArgId,
-        Option::SOME(state.currentFunction),
+        state.currentFunction,
       ) else {
         let detail: String = `the type argument of \`@${call.name.toStr()}\``;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
         return Option::NONE;
       };
+
+      // Lowering has no enclosing method to read `Self` from, so it takes the
+      // operand resolved here.
+      let mut operandTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      operandTypes.push(operandType);
+      Analyzer::Typecheck::recordCallTypeArgs(state, exprId, &operandTypes);
 
       return Option::SOME(resultType);
     }

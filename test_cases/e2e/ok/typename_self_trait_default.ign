@@ -1,0 +1,52 @@
+// e2e: std
+// `@typeName<Self>()` in a trait default names the implementer the default is
+// copied onto: a record, an enum, a primitive through an extension block, and
+// from inside the body of a `comptime for`.
+import Io from "std::io";
+
+trait Named {
+  kind(&self): str {
+    return @typeName<Self>();
+  }
+}
+
+trait Fielded {
+  fieldOwners(&self): String {
+    let mut text: String = String::new();
+
+    comptime for (field of @fields<Self>()) {
+      text.pushStr(@typeName<Self>());
+      text.pushStr(".");
+      text.pushStr(field.name);
+      text.pushStr(" ");
+    }
+
+    return text;
+  }
+}
+
+@implements(Named, Fielded)
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+@implements(Named)
+enum Color {
+  RED,
+  GREEN,
+}
+
+@implements(Named)
+extension i64 {}
+
+function main(): i32 {
+  let point: Point = Point { x: 1, y: 2 };
+  let color: Color = Color::GREEN;
+  let count: i64 = 3;
+  Io::println(point.kind());
+  Io::println(color.kind());
+  Io::println(count.kind());
+  Io::println(point.fieldOwners().toStr());
+  return 0;
+}
