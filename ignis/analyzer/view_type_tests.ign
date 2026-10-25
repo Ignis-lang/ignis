@@ -2207,6 +2207,7 @@ function derivedOwningShellWithPointerArgumentHolds(): void {
   let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
   let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.pointer(idU8));
+  viewTestMarkStd(&mut defs);
   Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
@@ -2225,6 +2226,7 @@ function derivedOwningShellOfRecordWithPointerHolds(): void {
   holderFields.push(store.pointer(idU8));
   let holderId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "H", holderFields);
   let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.recordType(holderId));
+  viewTestMarkStd(&mut defs);
   Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
@@ -2239,6 +2241,7 @@ function derivedOwningShellWithPrimitiveArgumentDoesNot(): void {
   let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
   let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
+  viewTestMarkStd(&mut defs);
   Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
 }
 
@@ -2338,6 +2341,51 @@ function rawPointerOwnedBufferDoesNot(): void {
   let defId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "String", fields, Vector::new<Analyzer::DefinitionId>(), true);
   let id: Analyzer::TypeId = store.recordType(defId);
   Test::assert(!Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, defId.raw()));
+}
+
+/// Scenario: a user record with an `@owns` type parameter and a `*u8` field
+/// is not standard owning storage: its fields are walked, so it can hold a
+/// derived pointer.
+/// Spec: S3, L50.
+@test
+function derivedUserOwnsRecordHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
+
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the shell of a standard library `@owns` generic over `i32`
+/// (`Vector<i32>`) still skips its own buffer.
+/// Spec: S3, L50.
+@test
+function derivedStdOwnsShellOverPrimitiveDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
+  viewTestMarkStd(&mut defs);
+
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Marks every definition of the store as published by standard library
+/// module 0.
+function viewTestMarkStd(defs: &mut Analyzer::DefinitionStore): void {
+  defs.markStdModule(0);
+  let mut raw: u64 = 0;
+
+  while (raw < defs.length()) {
+    defs.setDefModule(Id::fromRaw<Analyzer::DefinitionTag>(raw as u32), 0);
+
+    raw += 1;
+  }
 }
 
 // ─── Closure values ───────────────────────────────────────────────────────────

@@ -547,7 +547,7 @@ export namespace Analyzer::ViewType {
       }
     }
 
-    if (ViewType::hasOwningTypeParameter(defStore, defId)) {
+    if (ViewType::isStdOwningStorage(defStore, defId)) {
       return Option::SOME(Vector::new<Analyzer::TypeId>());
     }
 
@@ -569,12 +569,28 @@ export namespace Analyzer::ViewType {
     }
 
     if (let Option::SOME(genericId) = generic) {
-      if (ViewType::hasOwningTypeParameter(defStore, genericId)) {
+      if (ViewType::isStdOwningStorage(defStore, genericId)) {
         return Option::SOME(arguments);
       }
     }
 
     return Option::NONE;
+  }
+
+  /// Whether `defId` is standard library owning storage: a record or enum
+  /// with an `@owns` type parameter declared in a standard library module. A
+  /// user type with an `@owns` parameter is walked through its fields like
+  /// any other, since nothing guarantees its pointers address its own
+  /// allocation.
+  function isStdOwningStorage(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let Option::SOME(moduleIndex) = defStore.defModuleOf(defId) else {
+      return false;
+    };
+
+    return defStore.isStdModule(moduleIndex) && ViewType::hasOwningTypeParameter(defStore, defId);
   }
 
   /// Whether a record or enum declares an `@owns` type parameter.

@@ -1,0 +1,148 @@
+// e2e: err
+// A user type with an `@owns` type parameter is walked through its own fields,
+// and a statement `asm` writes its outputs into locals: a pointer derived from
+// the view reaching either carries it, so every mutation below is rejected (A0037).
+record Saved {
+  static mut P: *u8 = null;
+}
+
+record Stash<@owns T> {
+  public raw: *u8;
+  public tag: T;
+}
+
+enum Cell<@owns T> {
+  RAW(*u8),
+  VALUE(T),
+}
+
+@implements(Drop)
+record Buffer<@owns T> {
+  public data: *u8;
+  public spare: Option<T>;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function keep(stash: Stash<i32>): void {
+  Saved::P = stash.raw;
+}
+
+function keepPointer(p: *u8): void {
+  Saved::P = p;
+}
+
+function ownsRecord(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let stash: Stash<i32> = Stash<i32> { raw: text as *u8, tag: 0 };
+  owned.pushStr("grow");
+  let _kept: *u8 = stash.raw;
+}
+
+function ownsEnum(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let cell: Cell<i32> = Cell::RAW(text as *u8);
+  owned.pushStr("grow");
+  let _kept: Cell<i32> = cell;
+}
+
+function ownsPassedToKeeper(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let stash: Stash<i32> = Stash<i32> { raw: text as *u8, tag: 0 };
+  keep(stash);
+  owned.pushStr("grow");
+}
+
+function ownsFieldThenCopy(): void {
+  let mut owned: String = String::create("seed");
+  let mut stash: Stash<i32> = Stash<i32> { raw: @pointerFromInteger<*u8>(0), tag: 0 };
+  let text: str = owned.toStr();
+  stash.raw = text as *u8;
+  let copy: Stash<i32> = stash;
+  owned.pushStr("grow");
+  let _kept: *u8 = copy.raw;
+}
+
+function ownsInOption(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let boxed: Option<Stash<i32>> = Option::SOME(Stash<i32> { raw: text as *u8, tag: 0 });
+  owned.pushStr("grow");
+  let _kept: Option<Stash<i32>> = boxed;
+}
+
+function ownsDropContainer(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let view: Buffer<u8> = Buffer<u8> { data: text as *u8, spare: Option::NONE };
+  owned.pushStr("grow");
+  let _kept: *u8 = view.data;
+}
+
+function asmOutput(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let source: *u8 = text as *u8;
+  asm (source in reg) -> (copied: *u8 in rax) {
+    mov {copied}, {source}
+  }
+  owned.pushStr("grow");
+  let _kept: *u8 = copied;
+}
+
+function asmInout(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: *u8 = @pointerFromInteger<*u8>(0);
+  let text: str = owned.toStr();
+  let source: *u8 = text as *u8;
+  asm (keep inout rax, source in reg) {
+    mov {keep}, {source}
+  }
+  owned.pushStr("grow");
+  let _kept: *u8 = keep;
+}
+
+function asmOutputToKeeper(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let source: *u8 = text as *u8;
+  asm (source in reg) -> (copied: *u8 in rax) {
+    mov {copied}, {source}
+  }
+  owned.pushStr("grow");
+  keepPointer(copied);
+}
+
+function asmOutputInLoop(): void {
+  let mut owned: String = String::create("seed");
+  let mut round: i32 = 0;
+  while (round < 1) {
+    let text: str = owned.toStr();
+    let source: *u8 = text as *u8;
+    asm (source in reg) -> (copied: *u8 in rax) {
+      mov {copied}, {source}
+    }
+    owned.pushStr("grow");
+    let _kept: *u8 = copied;
+    round += 1;
+  }
+}
+
+function main(): i32 {
+  ownsRecord();
+  ownsEnum();
+  ownsPassedToKeeper();
+  ownsFieldThenCopy();
+  ownsInOption();
+  ownsDropContainer();
+  asmOutput();
+  asmInout();
+  asmOutputToKeeper();
+  asmOutputInLoop();
+  return 0;
+}

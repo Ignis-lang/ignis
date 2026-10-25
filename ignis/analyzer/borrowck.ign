@@ -1801,6 +1801,23 @@ export namespace Borrowck {
                     paramIndex += 1;
                   }
                 },
+                Hir::HirKind::InlineAsm(asmNode) -> {
+                  let mut outputIndex: u64 = 0;
+
+                  while (outputIndex < asmNode.outputs.length()) {
+                    if (let Option::SOME(output) = asmNode.outputs.get(outputIndex)) {
+                      if (let Option::SOME(place) = output.place) {
+                        if (let Option::SOME(placeNode) = hir.get(place)) {
+                          if (let Hir::HirKind::Variable(defId) = &placeNode.kind) {
+                            declared.insert(defId.raw() as u64, 1);
+                          }
+                        }
+                      }
+                    }
+
+                    outputIndex += 1;
+                  }
+                },
                 _ -> {},
               };
 
@@ -8366,6 +8383,53 @@ export namespace Borrowck {
       }
 
       if (let Option::SOME(node) = hir.get(nodeId)) {
+        // A statement `asm` writes its outputs and `inout` places like
+        // assignments do.
+        if (let Hir::HirKind::InlineAsm(asmNode) = &node.kind) {
+          let mut places: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+          let mut inputIndex: u64 = 0;
+
+          while (inputIndex < asmNode.inputs.length()) {
+            if (let Option::SOME(input) = asmNode.inputs.get(inputIndex)) {
+              if (input.isPlace && input.writes) {
+                places.push(input.value);
+              }
+            }
+
+            inputIndex += 1;
+          }
+
+          let mut outputIndex: u64 = 0;
+
+          while (outputIndex < asmNode.outputs.length()) {
+            if (let Option::SOME(output) = asmNode.outputs.get(outputIndex)) {
+              if (let Option::SOME(place) = output.place) {
+                places.push(place);
+              }
+            }
+
+            outputIndex += 1;
+          }
+
+          let mut placeIndex: u64 = 0;
+
+          while (placeIndex < places.length()) {
+            if (let Option::SOME(place) = places.get(placeIndex)) {
+              let mut qualifies: boolean = true;
+
+              if (let Option::SOME(placeType) = Borrowck::nodeTypeOf(hir, *place)) {
+                qualifies = Analyzer::ViewType::canHoldDerived(defStore, typeStore, placeType, state.ownedBuffer);
+              }
+
+              if (qualifies && !Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, *place, 0, output)) {
+                return false;
+              }
+            }
+
+            placeIndex += 1;
+          }
+        }
+
         if (let Hir::HirKind::Assign(assignNode) = &node.kind) {
           let mut qualifies: boolean = true;
 
