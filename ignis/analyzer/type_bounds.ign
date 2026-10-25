@@ -404,9 +404,11 @@ export namespace Analyzer {
     }
 
     /// Every extension block whose target is `typeId`: the same primitive,
-    /// record or enum, or, for a generic block, an instance of the same
-    /// declaration, whose arguments the block's parameters then stand for. A
-    /// `static str` takes the blocks of `str`, which it converts to.
+    /// record, enum or instance, or, for a generic block, an instance of the
+    /// same declaration, whose arguments the block's parameters then stand
+    /// for. A block over one concrete instance, `extension Vector<u8>`, applies
+    /// to that instance only. A `static str` takes the blocks of `str`, which
+    /// it converts to.
     function extensionsFor(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -462,8 +464,10 @@ export namespace Analyzer {
             typeArguments: Vector::new<Analyzer::TypeId>(),
           });
         } else if (let Option::SOME(definition) = instanceDef) {
+          let generic: boolean = Analyzer::TypeBounds::declaredTypeParams(defStore, *block).length() > 0;
+
           if (let Option::SOME(Analyzer::Type::Instance(targetInstance)) = typeStore.get(target)) {
-            if (targetInstance.definition.raw() == definition.raw() && targetInstance.typeArguments.length() == instanceArguments.length()) {
+            if (generic && targetInstance.definition.raw() == definition.raw() && targetInstance.typeArguments.length() == instanceArguments.length()) {
               matches.push(Analyzer::TypeBounds::ExtensionMatch {
                 extension: *block,
                 typeArguments: Analyzer::TypeBounds::copyTypeIds(&instanceArguments),

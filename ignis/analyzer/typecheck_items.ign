@@ -383,9 +383,13 @@ export namespace Analyzer {
           if (let Option::SOME(otherTarget) = defStore.extensionTargetOf(*other)) {
             sameTarget = otherTarget.raw() == target.raw();
 
+            // Two blocks over the same generic type overlap when either is
+            // generic; two concrete instances overlap only when equal.
+            let eitherGeneric: boolean = Analyzer::TypeBounds::declaredTypeParams(defStore, defId).length() > 0 || Analyzer::TypeBounds::declaredTypeParams(defStore, *other).length() > 0;
+
             if (let Option::SOME(head) = headDef) {
               if (let Option::SOME(otherHead) = defStore.extensionHeadOf(*other)) {
-                sameTarget = sameTarget || otherHead.raw() == head.raw();
+                sameTarget = sameTarget || (eitherGeneric && otherHead.raw() == head.raw());
               }
             }
           }
