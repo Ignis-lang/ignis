@@ -12,7 +12,6 @@
 //! | Export             | Description                                     |
 //! |--------------------|-------------------------------------------------|
 //! | `Orm::ColumnValue` | `columnType`, `columnNullable`, `readColumn`, `toColumnValue`, `bindColumn`, `columnKey` |
-//! | `Orm::BlobByte`    | The element type of a `BLOB` field: only `u8`   |
 //!
 //! ## Implementations
 //!
@@ -25,10 +24,6 @@
 //! | `String` | `TEXT NOT NULL` | `readText` |
 //! | `Vector<u8>` | `BLOB NOT NULL` | `readBlob` |
 //! | `Option<T>` | `T`'s column, nullable | NULL is `NONE` |
-//!
-//! `Vector<u8>` is implemented as `Vector<T: Orm::BlobByte>`, because an
-//! extension block extends a generic type only over its own parameters;
-//! `u8` is the one `BlobByte`.
 
 import Sqlite3 from "std::sqlite3";
 import Error, ErrorKind from "std::orm::error";
@@ -65,15 +60,6 @@ export namespace Orm {
     columnKey(&self): Option<i64> {
       return Option::NONE;
     }
-  }
-
-  /// The element type of a `BLOB` field. `u8` is the only implementation.
-  trait BlobByte {
-    /// The element for a stored byte.
-    static fromBlobByte(byte: u8): Self;
-
-    /// The stored byte of the element.
-    toBlobByte(&self): u8;
   }
 
   /// `T::columnType()`.
@@ -325,34 +311,14 @@ export namespace Orm {
     }
   }
 
-  @implements(BlobByte)
-  extension u8 {
-    static fromBlobByte(byte: u8): u8 {
-      return byte;
-    }
-
-    toBlobByte(&self): u8 {
-      return *self;
-    }
-  }
-
   @implements(ColumnValue)
-  extension<T: BlobByte> Vector<T> {
+  extension Vector<u8> {
     static columnType(): ColumnType {
       return ColumnType::BLOB;
     }
 
-    static readColumn(row: &Row, column: i32): Result<Vector<T>, Error> {
-      let bytes: Vector<u8> = row.readBlob(column)!;
-      let mut elements: Vector<T> = Vector::new<T>();
-      let mut index: u64 = 0;
-
-      while (index < bytes.length()) {
-        elements.push(T::fromBlobByte(*bytes.get(index).unwrap()));
-        index = index + 1;
-      }
-
-      return Result::OK(elements);
+    static readColumn(row: &Row, column: i32): Result<Vector<u8>, Error> {
+      return row.readBlob(column);
     }
 
     toColumnValue(&self): Value {
@@ -360,7 +326,7 @@ export namespace Orm {
       let mut index: u64 = 0;
 
       while (index < self.length()) {
-        bytes.push(self.get(index).unwrap().toBlobByte());
+        bytes.push(*self.get(index).unwrap());
         index = index + 1;
       }
 
