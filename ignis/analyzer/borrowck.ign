@@ -270,6 +270,11 @@ export namespace Borrowck {
     planStatementStarts: Vector<Vector<u64>>;
     planUses: Vector<HashMap<u64, Vector<u64>>>;
 
+    /// The bindings declared anywhere inside each planned block, closure
+    /// parameters and bodies included, by raw id. A carrier declared outside
+    /// the block outlives it, so its later uses are not in the plan.
+    planDeclared: Vector<HashMap<u64, u32>>;
+
     scopeStarts: Vector<u64>;
 
     /// Owned-local scope stack, mirroring the ownership oracle's `ScopeEntry`
@@ -497,6 +502,7 @@ export namespace Borrowck {
         planNodeInDefer: Vector::new<Vector<u32>>(),
         planStatementStarts: Vector::new<Vector<u64>>(),
         planUses: Vector::new<HashMap<u64, Vector<u64>>>(),
+        planDeclared: Vector::new<HashMap<u64, u32>>(),
         scopeStarts: Vector::new<u64>(),
         scopeBlocks: Vector::new<u32>(),
         scopeHasBlock: Vector::new<u32>(),
@@ -1716,6 +1722,7 @@ export namespace Borrowck {
       let mut nodeInDefer: Vector<u32> = Vector::new<u32>();
       let mut starts: Vector<u64> = Vector::new<u64>();
       let mut uses: HashMap<u64, Vector<u64>> = HashMap::new<u64, Vector<u64>>();
+      let mut declared: HashMap<u64, u32> = HashMap::new<u64, u32>();
 
       let mut statementIndex: u64 = 0;
 
@@ -1770,9 +1777,33 @@ export namespace Borrowck {
 
                     captureIndex += 1;
                   }
+
+                  let mut paramIndex: u64 = 0;
+
+                  while (paramIndex < closureNode.params.length()) {
+                    if (let Option::SOME(param) = closureNode.params.get(paramIndex)) {
+                      declared.insert(param.raw() as u64, 1);
+                    }
+
+                    paramIndex += 1;
+                  }
                 },
                 _ -> {},
               };
+
+              let mut bound: Vector<u32> = Vector::new<u32>();
+
+              if (Borrowck::bindingsReachedBy(hir, current, &mut bound)) {
+                let mut boundIndex: u64 = 0;
+
+                while (boundIndex < bound.length()) {
+                  if (let Option::SOME(binding) = bound.get(boundIndex)) {
+                    declared.insert(*binding as u64, 1);
+                  }
+
+                  boundIndex += 1;
+                }
+              }
 
               let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
               let mut childIndex: u64 = 0;
@@ -1797,6 +1828,7 @@ export namespace Borrowck {
       self.planBlocks.push(blockRaw);
       self.planStatementStarts.push(starts);
       self.planUses.push(uses);
+      self.planDeclared.push(declared);
       self.planStatementNodes.push(nodes);
       self.planStatementOfNode.push(nodeStatements);
       self.planNodeInDefer.push(nodeInDefer);
@@ -1854,6 +1886,17 @@ export namespace Borrowck {
       };
 
       return *entry;
+    }
+
+    /// Whether the binding `binding` is declared inside the block of plan
+    /// `plan`.
+    public planDeclares(&self, plan: u64, binding: u32): boolean {
+      let Option::SOME(declared) = self.planDeclared.get(plan) else {
+        return false;
+      };
+
+      let key: u64 = binding as u64;
+      return declared.containsKey(&key);
     }
 
     public planNodeRawAt(&self, plan: u64, nodeIndex: u64): u32 {
@@ -8169,6 +8212,12 @@ export namespace Borrowck {
         while (targetIndex < targets.length()) {
           if (let Option::SOME(target) = targets.get(targetIndex)) {
             let key: u64 = *target as u64;
+
+            // A carrier declared outside the block outlives it: its later
+            // uses are not in this plan, so the borrow lasts to scope end.
+            if (!state.planDeclares(plan, *target)) {
+              return Borrowck::NO_LAST_STATEMENT;
+            }
 
             if (!carrierSet.containsKey(&key)) {
               carriers.push(*target);

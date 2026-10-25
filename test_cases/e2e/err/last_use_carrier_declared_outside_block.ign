@@ -1,0 +1,159 @@
+// e2e: err
+// A place declared outside the view's block and written from the view (a raw
+// pointer, an Option or record holding one) carries the view past the block,
+// so the owner stays borrowed until the block ends: every mutation below is
+// rejected (A0037).
+record Slot {
+  public p: *u8;
+}
+
+record Inner {
+  public p: *u8;
+}
+
+record Wrap {
+  public inner: Inner;
+}
+
+record Ptrs {
+  public a: *u8;
+}
+
+function outerLocal(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: *u8 = @pointerFromInteger<*u8>(0);
+  {
+    let text: str = owned.toStr();
+    keep = text as *u8;
+    owned.pushStr("grow");
+  }
+  let _kept: *u8 = keep;
+}
+
+function outerLocalInLoop(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: *u8 = @pointerFromInteger<*u8>(0);
+  let mut round: i32 = 0;
+  while (round < 1) {
+    round += 1;
+    let text: str = owned.toStr();
+    if (round == 1) {
+      keep = text as *u8;
+    }
+    owned.pushStr("grow");
+  }
+  let _kept: *u8 = keep;
+}
+
+function outerField(): void {
+  let mut owned: String = String::create("seed");
+  let mut slot: Slot = Slot { p: @pointerFromInteger<*u8>(0) };
+  if (true) {
+    let text: str = owned.toStr();
+    slot.p = text as *u8;
+    owned.pushStr("grow");
+  }
+  let _kept: *u8 = slot.p;
+}
+
+function outerNestedField(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: Wrap = Wrap { inner: Inner { p: @pointerFromInteger<*u8>(0) } };
+  {
+    let text: str = owned.toStr();
+    let derived: *u8 = text as *u8;
+    keep.inner.p = derived;
+    owned.pushStr("grow");
+  }
+  let _kept: *u8 = keep.inner.p;
+}
+
+function outerOption(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: Option<*u8> = Option::NONE;
+  {
+    let text: str = owned.toStr();
+    keep = Option::SOME(text as *u8);
+    owned.pushStr("grow");
+  }
+  let _kept: Option<*u8> = keep;
+}
+
+function outerRecordCopy(): void {
+  let mut owned: String = String::create("seed");
+  let mut outer: Ptrs = Ptrs { a: @pointerFromInteger<*u8>(0) };
+  {
+    let text: str = owned.toStr();
+    let local: Ptrs = Ptrs { a: text as *u8 };
+    outer = local;
+    owned.pushStr("grow");
+  }
+  let _kept: *u8 = outer.a;
+}
+
+function outerThroughReference(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: *u8 = @pointerFromInteger<*u8>(0);
+  {
+    let text: str = owned.toStr();
+    let slot: &mut *u8 = &mut keep;
+    *slot = text as *u8;
+    owned.pushStr("grow");
+  }
+  let _kept: *u8 = keep;
+}
+
+function outerFromClosure(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: *u8 = @pointerFromInteger<*u8>(0);
+  {
+    let text: str = owned.toStr();
+    let set = (): void -> {
+      keep = text as *u8;
+    };
+    set();
+    owned.pushStr("grow");
+  }
+  let _kept: *u8 = keep;
+}
+
+function outerFromMatchArm(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: *u8 = @pointerFromInteger<*u8>(0);
+  let choice: Option<i32> = Option::SOME(1);
+  match (choice) {
+    Option::SOME(_) -> {
+      let text: str = owned.toStr();
+      keep = text as *u8;
+      owned.pushStr("grow");
+    },
+    Option::NONE -> {},
+  };
+  let _kept: *u8 = keep;
+}
+
+function outerOfClosureBody(): void {
+  let mut owned: String = String::create("seed");
+  let mut keep: *u8 = @pointerFromInteger<*u8>(0);
+  let run = (): void -> {
+    let text: str = owned.toStr();
+    keep = text as *u8;
+    owned.pushStr("grow");
+  };
+  run();
+  let _kept: *u8 = keep;
+}
+
+function main(): i32 {
+  outerLocal();
+  outerLocalInLoop();
+  outerField();
+  outerNestedField();
+  outerOption();
+  outerRecordCopy();
+  outerThroughReference();
+  outerFromClosure();
+  outerFromMatchArm();
+  outerOfClosureBody();
+  return 0;
+}
