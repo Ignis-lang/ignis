@@ -1,0 +1,26 @@
+// e2e: err
+//
+// A record carrying a view next to a `*mut str` field reaches a place that can
+// hold the view, so the borrow lasts to the end of the scope.
+record RawPair {
+  public text: str;
+  public place: *mut str;
+}
+
+function sink(pair: RawPair): void {
+  @write<str>(pair.place, pair.text);
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function main(): i32 {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  sink(RawPair { text: text, place: (&mut slot) as *mut str });
+  owned.pushChar('d');
+  consume(slot);
+  return 0;
+}

@@ -1,0 +1,31 @@
+// e2e: err
+//
+// A view handed to a call that also receives a mutable destination whose
+// record can carry a view keeps its borrow to the end of the scope: the
+// callee can store the view into the record and read it after the statement.
+import String from "std::string";
+
+record NameSlot {
+  public value: str;
+}
+
+function store(slot: &mut NameSlot, text: str): void {
+  slot.value = text;
+
+  return;
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function main(): i32 {
+  let mut slot: NameSlot = NameSlot { value: "" };
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  store(&mut slot, text);
+  owned.pushChar('d');
+  consume(slot.value);
+
+  return 0;
+}

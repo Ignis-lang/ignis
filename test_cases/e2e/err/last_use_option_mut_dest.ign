@@ -1,0 +1,48 @@
+// e2e: err
+//
+// An enum instance carrying a `&mut` reaches a mutable place: a view handed
+// next to `Option<&mut str>` or `Option<Out>` keeps its borrow to the end of
+// the scope.
+record Out {
+  public slot: &mut str;
+}
+
+function storeReference(text: str, out: Option<&mut str>): void {
+  if (let Option::SOME(place) = out) {
+    *place = text;
+  }
+}
+
+function storeRecord(text: str, out: Option<Out>): void {
+  if (let Option::SOME(target) = out) {
+    *target.slot = text;
+  }
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function reference(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  storeReference(text, Option::SOME(&mut slot));
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function wrapped(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  storeRecord(text, Option::SOME(Out { slot: &mut slot }));
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function main(): i32 {
+  reference();
+  wrapped();
+  return 0;
+}

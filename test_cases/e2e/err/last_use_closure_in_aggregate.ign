@@ -1,0 +1,115 @@
+// e2e: err
+//
+// A closure capturing the view keeps the borrow while any aggregate holding it lives.
+record Holder {
+  public f: () -> str;
+}
+
+record Outer {
+  public inner: Holder;
+}
+
+enum Job {
+  RUN(() -> str),
+  IDLE,
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function empty(): str {
+  return "";
+}
+
+function call(holder: Holder): str {
+  return holder.f();
+}
+
+function inRecord(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let f = (): str -> {
+    return text;
+  };
+  let holder: Holder = Holder { f: f };
+  owned.pushChar('d');
+  consume(holder.f());
+}
+
+function inOption(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let f = (): str -> {
+    return text;
+  };
+  let boxed: Option<() -> str> = Option::SOME(f);
+  owned.pushChar('d');
+  if (let Option::SOME(g) = boxed) {
+    consume(g());
+  }
+}
+
+function inEnum(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let f = (): str -> {
+    return text;
+  };
+  let job: Job = Job::RUN(f);
+  owned.pushChar('d');
+  match (job) {
+    Job::RUN(g) -> {
+      consume(g());
+    },
+    Job::IDLE -> {},
+  };
+}
+
+function assigned(): void {
+  let mut owned: String = String::create("abc");
+  let mut holder: Holder = Holder { f: empty };
+  let text: str = owned.toStr();
+  holder = Holder { f: (): str -> {
+    return text;
+  } };
+  owned.pushChar('d');
+  consume(holder.f());
+}
+
+function nested(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let outer: Outer = Outer {
+    inner: Holder {
+      f: (): str -> {
+  return text;
+},
+    },
+  };
+  owned.pushChar('d');
+  consume(outer.inner.f());
+}
+
+function throughCall(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let holder: Holder = Holder {
+    f: (): str -> {
+  return text;
+},
+  };
+  let kept: str = call(holder);
+  owned.pushChar('d');
+  consume(kept);
+}
+
+function main(): i32 {
+  inRecord();
+  inOption();
+  inEnum();
+  assigned();
+  nested();
+  throughCall();
+  return 0;
+}

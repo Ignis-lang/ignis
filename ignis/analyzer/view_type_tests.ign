@@ -787,6 +787,1607 @@ function viewTypeMutuallyRecursiveInstancesTerminate(): void {
   Test::assert(!Analyzer::ViewType::isView(&mut defs, &mut store, store.recordType(idA)));
 }
 
+// ─── Reaching a mutable place ─────────────────────────────────────────────────
+
+/// Scenario: `&mut T` reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachMutableReferenceReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = idMutRef;
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&i32` reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachSharedReferenceToPrimitiveDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.reference(idI32);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `str` reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachStrDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a raw pointer reaches a mutable place whatever its pointee: `*u8` can be cast back.
+/// Spec: S3, L15.
+@test
+function reachRawPointerReachesWhateverThePointee(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a closure value type reaches a mutable place: its captures are invisible in the type.
+/// Spec: S3, L15.
+@test
+function reachClosureTypeReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a capture-free `fn(A) -> R` reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachRawFunctionTypeDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an unresolved `Param` reaches a mutable place: it may be substituted by one.
+/// Spec: S3, L15.
+@test
+function reachParamReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let id: Analyzer::TypeId = store.param(syms.intern("T"));
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a `&mut` field reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachRecordWithMutableReferenceFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idMutRef);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Out", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&Out` reaches the mutable place its record's `&mut` field points to.
+/// Spec: S3, L15.
+@test
+function reachSharedReferenceToRecordWithMutableFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idMutRef);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Out", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = store.reference(idRecord);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record of primitives reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachRecordWithPrimitiveFieldsDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Plain", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record holding a raw pointer reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachRecordWithPointerFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idI32));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "RawOut", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum with a `&mut` payload reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachEnumWithMutableReferencePayloadReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(idMutRef);
+
+  let mut variants: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  variants.push(Vector::new<Analyzer::TypeId>());
+  variants.push(payload);
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Slot", variants);
+  let id: Analyzer::TypeId = store.enumType(defId);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a generic instance with a `&mut` argument reaches a mutable place (`Option<&mut str>`).
+/// Spec: S3, L15.
+@test
+function reachInstanceWithMutableReferenceArgumentReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idMutRef);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a generic instance of primitives with no mutable member reaches nothing mutable.
+/// Spec: S3, L15.
+@test
+function reachInstanceWithPrimitiveArgumentDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a tuple with a `&mut` element reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachTupleWithMutableReferenceReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  elements.push(idMutRef);
+
+  let id: Analyzer::TypeId = store.tuple(elements);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a fixed array of `&mut` reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachFixedArrayOfMutableReferencesReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = store.fixedArray(idMutRef, 2);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias is transparent: an alias to `&mut T` reaches a mutable place.
+/// Spec: S3, L15.
+@test
+function reachAliasToMutableReferenceReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idMutRef: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idI32,
+    mutable: true,
+  }));
+
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "Place", idMutRef);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+  Test::assert(Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record holding a shared reference to itself and nothing mutable terminates and reaches nothing.
+/// Spec: S3, L15.
+@test
+function reachRecursiveRecordTerminates(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "SelfView", Vector::new<Analyzer::TypeId>());
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.reference(idRecord));
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "SelfView", defId, fields);
+
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canReachMutablePlace(&mut defs, &mut store, id));
+}
+
+// ─── Reaching a place that can hold a view ────────────────────────────────────
+
+/// Scenario: `&mut str` can hold a view.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = idMutStr;
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&mut String` cannot hold a view: its `*mut u8` buffer is not followed as a view-holding place.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToOwnedBufferDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut stringFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  stringFields.push(store.pointer(idU8));
+
+  let stringDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Text", stringFields);
+  let idString: Analyzer::TypeId = store.recordType(stringDefId);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idString,
+    mutable: true,
+  }));
+  Test::assert(!Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `*mut u8` cannot hold a view.
+/// Spec: S3, L19.
+@test
+function holdingPointerToByteDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(!Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `*mut str` can hold a view.
+/// Spec: S3, L19.
+@test
+function holdingPointerToStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let id: Analyzer::TypeId = store.pointer(idStr);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record carrying a view next to a `&mut str` field reaches a view-holding place.
+/// Spec: S3, L19.
+@test
+function holdingRecordWithViewAndMutableStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut pairFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  pairFields.push(idStr);
+  pairFields.push(idMutStr);
+
+  let pairDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Pair", pairFields);
+  let idPair: Analyzer::TypeId = store.recordType(pairDefId);
+  let id: Analyzer::TypeId = idPair;
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&Pair` reaches the `&mut str` of its record.
+/// Spec: S3, L19.
+@test
+function holdingSharedReferenceToPairReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut pairFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  pairFields.push(idStr);
+  pairFields.push(idMutStr);
+
+  let pairDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Pair", pairFields);
+  let idPair: Analyzer::TypeId = store.recordType(pairDefId);
+  let id: Analyzer::TypeId = store.reference(idPair);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an instance with a `Pair` argument reaches its `&mut str` (`Option<Pair>`).
+/// Spec: S3, L19.
+@test
+function holdingInstanceOfPairReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut pairFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  pairFields.push(idStr);
+  pairFields.push(idMutStr);
+
+  let pairDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Pair", pairFields);
+  let idPair: Analyzer::TypeId = store.recordType(pairDefId);
+
+  let boxDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idPair);
+
+  let id: Analyzer::TypeId = store.instance(boxDefId, args);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum payload `(str, &mut str)` reaches a view-holding place.
+/// Spec: S3, L19.
+@test
+function holdingEnumPayloadWithMutableStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(idStr);
+  payload.push(idMutStr);
+
+  let mut variants: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  variants.push(payload);
+  variants.push(Vector::new<Analyzer::TypeId>());
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Msg", variants);
+  let id: Analyzer::TypeId = store.enumType(defId);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a function-typed field next to the view reaches a view-holding place: the callee can call it with the view.
+/// Spec: S3, L19.
+@test
+function holdingRecordWithFunctionFieldReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params.push(idStr);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idStr);
+  fields.push(store.functionType(params, idU8));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Job", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record holding only a view reaches nothing mutable.
+/// Spec: S3, L19.
+@test
+function holdingRecordWithOnlyViewDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idStr);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(!Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&mut T` with an unresolved `T` reaches a view-holding place: `T` may be a view.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToParamReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let idParam: Analyzer::TypeId = store.param(syms.intern("T"));
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idParam,
+    mutable: true,
+  }));
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias to `&mut str` is transparent.
+/// Spec: S3, L19.
+@test
+function holdingAliasToMutableStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "Place", idMutStr);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&mut RawOut` with a `*mut str` field is followed into its referent.
+/// Spec: S3, L19.
+@test
+function holdingMutableReferenceToRecordWithPointerToStrReaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idMutStr: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idStr,
+    mutable: true,
+  }));
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idStr));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "RawOut", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: idRecord,
+    mutable: true,
+  }));
+  Test::assert(Analyzer::ViewType::canReachViewHoldingPlace(&mut defs, &mut store, id));
+}
+
+// ─── Carrying a closure ───────────────────────────────────────────────────────
+
+/// Scenario: a closure type can carry the view its captures hold.
+/// Spec: S3, L23.
+@test
+function carryClosureTypeCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let id: Analyzer::TypeId = idClosure;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordWithClosureFieldCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record nesting a record with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryNestedRecordWithClosureFieldCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+
+  let mut outerFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerFields.push(idRecord);
+
+  let outerDefId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Outer", outerFields);
+  let id: Analyzer::TypeId = store.recordType(outerDefId);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `&Holder` with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carrySharedReferenceToClosureRecordCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = store.reference(idRecord);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `Option<() -> T>` can carry a view.
+/// Spec: S3, L23.
+@test
+function carryInstanceWithClosureArgumentCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idClosure);
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an enum with a closure payload can carry a view.
+/// Spec: S3, L23.
+@test
+function carryEnumWithClosurePayloadCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(idClosure);
+
+  let mut variants: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  variants.push(payload);
+  variants.push(Vector::new<Analyzer::TypeId>());
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Job", variants);
+  let id: Analyzer::TypeId = store.enumType(defId);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a tuple with a closure element can carry a view.
+/// Spec: S3, L23.
+@test
+function carryTupleWithClosureCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  elements.push(idClosure);
+
+  let id: Analyzer::TypeId = store.tuple(elements);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a fixed array of closures can carry a view.
+/// Spec: S3, L23.
+@test
+function carryFixedArrayOfClosuresCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let id: Analyzer::TypeId = store.fixedArray(idClosure, 2);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: an alias to a record with a closure field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryAliasToClosureRecordCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idClosure);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+
+  let aliasDefId: Analyzer::DefinitionId = viewTestAliasDef(&mut syms, &mut defs, &mut store, "Task", idRecord);
+  let id: Analyzer::TypeId = store.aliasType(aliasDefId);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with an unresolved `Param` field can carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordWithParamFieldCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.param(syms.intern("T")));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Generic", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a capture-free `fn(A) -> R` field cannot carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordWithRawFunctionFieldDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idRawFunction);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Callback", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a `*mut (() -> T)` field carries a view: the
+/// pointee is a closure, which can carry one.
+/// Spec: S3, L23, L25.
+@test
+function carryRecordWithPointerToClosureCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idClosure));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "RawHolder", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record of primitives cannot carry a view.
+/// Spec: S3, L23.
+@test
+function carryRecordOfPrimitivesDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idClosure: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let idRawFunction: Analyzer::TypeId = store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Plain", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+// ─── Carrying a view through a raw pointer ────────────────────────────────────
+
+/// Scenario: `*str` taken from a view carries it.
+/// Spec: S3, L25.
+@test
+function carryPointerToStrCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let id: Analyzer::TypeId = store.pointer(idStr);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record with a `*str` field carries a view.
+/// Spec: S3, L25.
+@test
+function carryRecordWithPointerToStrCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut fieldsidRecord: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsidRecord.push(store.pointer(idStr));
+
+  let defIdidRecord: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "RawRec", fieldsidRecord);
+  let idRecord: Analyzer::TypeId = store.recordType(defIdidRecord);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a pointer to a record with a view field carries a view.
+/// Spec: S3, L25.
+@test
+function carryPointerToViewRecordCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut fieldsidRecord: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsidRecord.push(idStr);
+
+  let defIdidRecord: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fieldsidRecord);
+  let idRecord: Analyzer::TypeId = store.recordType(defIdidRecord);
+  let id: Analyzer::TypeId = store.pointer(idRecord);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a pointer to a record with a closure field carries a view.
+/// Spec: S3, L25.
+@test
+function carryPointerToClosureRecordCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut fieldsidRecord: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsidRecord.push(store.functionType(Vector::new<Analyzer::TypeId>(), idI32));
+
+  let defIdidRecord: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Holder", fieldsidRecord);
+  let idRecord: Analyzer::TypeId = store.recordType(defIdidRecord);
+  let id: Analyzer::TypeId = store.pointer(idRecord);
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `**str` carries a view transitively.
+/// Spec: S3, L25.
+@test
+function carryPointerToPointerToStrCarries(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let id: Analyzer::TypeId = store.pointer(store.pointer(idStr));
+  Test::assert(Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: `*u8` cannot carry a view.
+/// Spec: S3, L25.
+@test
+function carryPointerToByteDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a pointer to an owned buffer record (a `*mut u8` field, like `String`) cannot carry a view.
+/// Spec: S3, L25.
+@test
+function carryPointerToOwnedBufferDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut fieldsidRecord: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fieldsidRecord.push(store.pointer(idU8));
+
+  let defIdidRecord: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Text", fieldsidRecord);
+  let idRecord: Analyzer::TypeId = store.recordType(defIdidRecord);
+  let id: Analyzer::TypeId = store.pointer(idRecord);
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+/// Scenario: a record linked to itself through a raw pointer and holding no view terminates and cannot carry one.
+/// Spec: S3, L25.
+@test
+function carryRecursivePointerRecordTerminates(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Node", Vector::new<Analyzer::TypeId>());
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idRecord));
+  fields.push(idI32);
+  viewTestSetRecordFields(&mut syms, &mut defs, &mut store, "Node", defId, fields);
+
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canCarryView(&mut defs, &mut store, id));
+}
+
+// ─── Holding something derived from a view ────────────────────────────────────
+
+/// Scenario: `*u8` can hold a pointer derived from a view.
+/// Spec: S3, L30.
+@test
+function derivedPointerToByteHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a record with a `*u8` field can hold a derived pointer.
+/// Spec: S3, L30.
+@test
+function derivedRecordWithPointerFieldHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idU8));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "CArgs", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: `Option<*u8>` can hold a derived pointer.
+/// Spec: S3, L30.
+@test
+function derivedInstanceWithPointerArgumentHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.pointer(idU8));
+
+  let id: Analyzer::TypeId = store.instance(defId, args);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: an enum with a `*u8` payload can hold a derived pointer.
+/// Spec: S3, L30.
+@test
+function derivedEnumWithPointerPayloadHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(store.pointer(idU8));
+
+  let mut variants: Vector<Vector<Analyzer::TypeId>> = Vector::new<Vector<Analyzer::TypeId>>();
+  variants.push(Vector::new<Analyzer::TypeId>());
+  variants.push(payload);
+
+  let defId: Analyzer::DefinitionId = viewTestEnumDef(&mut syms, &mut defs, &mut store, "Slot", variants);
+  let id: Analyzer::TypeId = store.enumType(defId);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: `&mut *u8` can hold a derived pointer.
+/// Spec: S3, L30.
+@test
+function derivedMutableReferenceToPointerHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::Reference(Analyzer::ReferenceType {
+    referent: store.pointer(idU8),
+    mutable: true,
+  }));
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the standard library `String` (the definition the caller
+/// passes as the owned buffer), whose only pointer is its own `*mut u8`
+/// buffer, cannot hold a derived pointer.
+/// Spec: S3, L30, L34.
+@test
+function derivedStringDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idU8));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "String", fields);
+  let mut ownedFields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  ownedFields.push(Id::fromRaw<Analyzer::DefinitionTag>(defId.raw() - 1));
+
+  let _replaced: boolean = defs.replace(defId, Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: syms.intern("String"),
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: ownedFields,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: store.recordType(defId),
+    implementsCopy: false,
+    implementsDrop: true,
+    implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
+    cLayout: false,
+    isExtern: false,
+  }));
+
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, defId.raw()));
+}
+
+/// Scenario: a record of primitives cannot hold a derived pointer.
+/// Spec: S3, L30.
+@test
+function derivedRecordOfPrimitivesDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(idI32);
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Plain", fields);
+  let idRecord: Analyzer::TypeId = store.recordType(defId);
+  let id: Analyzer::TypeId = idRecord;
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a record with a capture-free `fn(A) -> R` field cannot hold a
+/// derived pointer.
+/// Spec: S3, L30.
+@test
+function derivedRecordWithRawFunctionFieldDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.rawFunctionType(Vector::new<Analyzer::TypeId>(), idI32));
+
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Callback", fields);
+  let id: Analyzer::TypeId = store.recordType(defId);
+
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Creates a record definition with the given field types, type parameters
+/// and `Drop` implementation flag.
+function viewTestNominalRecord(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+  fieldTypes: Vector<Analyzer::TypeId>,
+  typeParams: Vector<Analyzer::DefinitionId>,
+  implementsDrop: boolean,
+): Analyzer::DefinitionId {
+  let fieldCount: u64 = fieldTypes.length();
+  let defId: Analyzer::DefinitionId = viewTestRecordDef(syms, defs, store, name, fieldTypes);
+  let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let mut index: u64 = 0;
+
+  while (index < fieldCount) {
+    fields.push(Id::fromRaw<Analyzer::DefinitionTag>(defId.raw() - (fieldCount - index) as u32));
+
+    index += 1;
+  }
+
+  let _replaced: boolean = defs.replace(defId, Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: syms.intern(name),
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: typeParams,
+    fields: fields,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: store.recordType(defId),
+    implementsCopy: false,
+    implementsDrop: implementsDrop,
+    implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
+    cLayout: false,
+    isExtern: false,
+  }));
+
+  return defId;
+}
+
+/// Creates a type parameter `T`, `@owns` when `owns` is set.
+function viewTestTypeParam(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  owns: boolean
+): Vector<Analyzer::DefinitionId> {
+  let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  params.push(defs.push(Analyzer::Definition::TypeParam(Analyzer::TypeParamDef {
+    name: syms.intern("T"),
+    owner: Id::fromRaw<Analyzer::DefinitionTag>(0),
+    index: 0,
+    bounds: Vector::new<String>(),
+    ownsStorage: owns,
+  })));
+  return params;
+}
+
+/// The post-monomorphization shell of `generic<argument>`: a plain record with
+/// the substituted `*mut argument` field and `Drop`, whose instance origin
+/// names the generic and the argument.
+function viewTestOwningShell(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  owns: boolean,
+  argument: Analyzer::TypeId,
+): Analyzer::TypeId {
+  let params: Vector<Analyzer::DefinitionId> = viewTestTypeParam(syms, defs, owns);
+  let mut genericFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  genericFields.push(store.pointer(store.param(syms.intern("T"))));
+  let genericId: Analyzer::DefinitionId = viewTestNominalRecord(syms, defs, store, "Storage", genericFields, params, true);
+
+  let mut shellFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  shellFields.push(store.pointer(argument));
+  let shellId: Analyzer::DefinitionId = viewTestNominalRecord(syms, defs, store, "StorageShell", shellFields, Vector::new<Analyzer::DefinitionId>(), true);
+
+  let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  arguments.push(argument);
+  defs.setSymbolOrigin(shellId, Analyzer::SymbolOrigin::Instance(Analyzer::InstanceOrigin {
+    generic: genericId,
+    owner: Option::NONE,
+    ownerArgs: Vector::new<Analyzer::TypeId>(),
+    methodArgs: arguments,
+  }));
+
+  return store.recordType(shellId);
+}
+
+/// Scenario: a user type with a `Drop` implementation and a `*u8` field is walked like any record and can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedUserDropRecordHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut dropFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  dropFields.push(store.pointer(idU8));
+  let dropId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "D", dropFields, Vector::new<Analyzer::DefinitionId>(), true);
+  let idDrop: Analyzer::TypeId = store.recordType(dropId);
+  let id: Analyzer::TypeId = idDrop;
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a non-`Drop` record nesting a user `Drop` type with a `*u8` field can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedRecordOfUserDropHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut dropFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  dropFields.push(store.pointer(idU8));
+  let dropId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "D", dropFields, Vector::new<Analyzer::DefinitionId>(), true);
+  let idDrop: Analyzer::TypeId = store.recordType(dropId);
+
+  let mut outerFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerFields.push(idDrop);
+  let outerId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Outer", outerFields);
+  let id: Analyzer::TypeId = store.recordType(outerId);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: `Option<D>` with a user `Drop` type `D { p: *u8 }` can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedInstanceOfUserDropHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut dropFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  dropFields.push(store.pointer(idU8));
+  let dropId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "D", dropFields, Vector::new<Analyzer::DefinitionId>(), true);
+  let idDrop: Analyzer::TypeId = store.recordType(dropId);
+
+  let boxId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "Box", Vector::new<Analyzer::TypeId>());
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idDrop);
+
+  let id: Analyzer::TypeId = store.instance(boxId, args);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a `Drop` instance of an `@owns` generic with a `*u8` argument (`Vector<*u8>` before monomorphization) can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedOwningInstanceWithPointerArgumentHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let params: Vector<Analyzer::DefinitionId> = viewTestTypeParam(&mut syms, &mut defs, true);
+  let genericId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "Storage", Vector::new<Analyzer::TypeId>(), params, true);
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.pointer(idU8));
+
+  let id: Analyzer::TypeId = store.instance(genericId, args);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the post-monomorphization shell of an `@owns` generic with a `*u8` argument (`Vector<*u8>` as the borrow check sees it) can hold a derived pointer through its instance origin.
+/// Spec: S3, L34.
+@test
+function derivedOwningShellWithPointerArgumentHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.pointer(idU8));
+  viewTestMarkStd(&mut defs);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the shell of an `@owns` generic over `H { p: *u8 }` (`Rc<H>`) can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedOwningShellOfRecordWithPointerHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut holderFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  holderFields.push(store.pointer(idU8));
+  let holderId: Analyzer::DefinitionId = viewTestRecordDef(&mut syms, &mut defs, &mut store, "H", holderFields);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, store.recordType(holderId));
+  viewTestMarkStd(&mut defs);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the shell of an `@owns` generic over `i32` (`Vector<i32>`) cannot hold a derived pointer: its own `*mut i32` buffer is skipped.
+/// Spec: S3, L34.
+@test
+function derivedOwningShellWithPrimitiveArgumentDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
+  viewTestMarkStd(&mut defs);
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the shell of a user `Drop` generic without `@owns` (`Boxed<i32>` with a `*mut i32` field) is walked through its fields.
+/// Spec: S3, L34.
+@test
+function derivedUserDropShellWithPrimitiveArgumentHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, false, idI32);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a user record named `String` with a `Drop` implementation and a
+/// `*u8` field is not the standard library `String`: identity, not the name,
+/// decides, so its field counts and it can hold a derived pointer.
+/// Spec: S3, L34.
+@test
+function derivedUserRecordNamedStringHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+
+  let mut stdFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  stdFields.push(store.pointer(idU8));
+  let stdId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "String", stdFields, Vector::new<Analyzer::DefinitionId>(), true);
+
+  let mut userFields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  userFields.push(store.pointer(idU8));
+  let userId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "String", userFields, Vector::new<Analyzer::DefinitionId>(), true);
+
+  let id: Analyzer::TypeId = store.recordType(userId);
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, stdId.raw()));
+}
+
+/// Scenario: `str` holds no raw pointer, so `consume(text)` still releases at last use.
+/// Spec: S3, L47.
+@test
+function rawPointerStrDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  Test::assert(!Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: `*u8` holds a raw pointer.
+/// Spec: S3, L47.
+@test
+function rawPointerBytePointerHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+  let id: Analyzer::TypeId = store.pointer(idU8);
+  Test::assert(Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: a record with a `*u8` field holds a raw pointer.
+/// Spec: S3, L47.
+@test
+function rawPointerRecordFieldHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idU8));
+  let defId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "CArgs", fields, Vector::new<Analyzer::DefinitionId>(), false);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the standard `String`, whose only pointer is its own buffer, holds none.
+/// Spec: S3, L47.
+@test
+function rawPointerOwnedBufferDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idU8: Analyzer::TypeId = store.intern(Analyzer::Type::U8);
+
+  let mut fields: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fields.push(store.pointer(idU8));
+  let defId: Analyzer::DefinitionId = viewTestNominalRecord(&mut syms, &mut defs, &mut store, "String", fields, Vector::new<Analyzer::DefinitionId>(), true);
+  let id: Analyzer::TypeId = store.recordType(defId);
+  Test::assert(!Analyzer::ViewType::holdsRawPointer(&mut defs, &mut store, id, defId.raw()));
+}
+
+/// Scenario: a user record with an `@owns` type parameter and a `*u8` field
+/// is not standard owning storage: its fields are walked, so it can hold a
+/// derived pointer.
+/// Spec: S3, L50.
+@test
+function derivedUserOwnsRecordHolds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
+
+  Test::assert(Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Scenario: the shell of a standard library `@owns` generic over `i32`
+/// (`Vector<i32>`) still skips its own buffer.
+/// Spec: S3, L50.
+@test
+function derivedStdOwnsShellOverPrimitiveDoesNot(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let id: Analyzer::TypeId = viewTestOwningShell(&mut syms, &mut defs, &mut store, true, idI32);
+  viewTestMarkStd(&mut defs);
+
+  Test::assert(!Analyzer::ViewType::canHoldDerived(&mut defs, &mut store, id, 4294967295));
+}
+
+/// Marks every definition of the store as published by standard library
+/// module 0.
+function viewTestMarkStd(defs: &mut Analyzer::DefinitionStore): void {
+  defs.markStdModule(0);
+  let mut raw: u64 = 0;
+
+  while (raw < defs.length()) {
+    defs.setDefModule(Id::fromRaw<Analyzer::DefinitionTag>(raw as u32), 0);
+
+    raw += 1;
+  }
+}
+
 // ─── Closure values ───────────────────────────────────────────────────────────
 
 /// Builds a closure value with the given captures.

@@ -12,6 +12,7 @@ import
   noFile,
 from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
+import Id from "@compiler::ids";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
 import Lowering from "./lowering";
@@ -1562,4 +1563,250 @@ function borrowckSettlesInheritedDefaultDiagnostics(): void {
   Test::assertEq<u64>(settled.length(), 2);
   Test::assertEq<u64>(countWithNote(&settled, "in default method `twice` of trait `Holder`, as inherited by `Tagged<String>`"), 1);
   Test::assertEq<u64>(countWithNote(&settled, "in default method `twice` of trait `Holder`, as inherited by `Tagged<i32>`"), 0);
+}
+
+/// Pushes a non-generic `String` record published by module `moduleIndex`,
+/// whose symbol path is the standard library string module's.
+function stdStringCandidate(
+  defs: &mut Analyzer::DefinitionStore,
+  syms: &mut Analyzer::SymbolTable,
+  moduleIndex: u64,
+): Analyzer::DefinitionId {
+  let defId: Analyzer::DefinitionId = defs.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: syms.intern("String"),
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticFields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: Id::fromRaw<Analyzer::TypeTag>(0),
+    implementsCopy: false,
+    implementsDrop: true,
+    implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
+    cLayout: false,
+    isExtern: false,
+  }));
+  defs.setDefModule(defId, moduleIndex);
+  defs.setModuleSymbolPath(moduleIndex, String::create("L3std6string3modE"));
+  return defId;
+}
+
+/// Scenario: a `String` in a user package named `std` has the standard
+/// library's symbol path but is not a standard library module, so it is not
+/// the owned buffer.
+/// Spec: S3, L34.
+@test
+function stdStringIgnoresUserPackageNamedStd(): void {
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let _user: Analyzer::DefinitionId = stdStringCandidate(&mut defs, &mut syms, 3);
+
+  Test::assertEq<u32>(Borrowck::stdStringDefinition(&mut defs, &mut syms), 4294967295);
+}
+
+/// Scenario: the `String` of the standard library string module is found.
+/// Spec: S3, L34.
+@test
+function stdStringFindsStdModule(): void {
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let _user: Analyzer::DefinitionId = stdStringCandidate(&mut defs, &mut syms, 3);
+  let stdId: Analyzer::DefinitionId = stdStringCandidate(&mut defs, &mut syms, 1);
+  defs.markStdModule(1);
+
+  Test::assertEq<u32>(Borrowck::stdStringDefinition(&mut defs, &mut syms), stdId.raw());
+}
+
+/// The S1 program: a `&mut` binding used once, then its owner written, with
+/// `extra` inserted before the borrow.
+function fallbackProgram(extra: str): String {
+  return `record Counter {
+  public value: i32;
+}
+
+function main(): i32 {
+  let mut counter: Counter = Counter { value: 0 };
+  ${extra}
+  let r: &mut Counter = &mut counter;
+  r.value = 1;
+  counter.value = 2;
+  return counter.value;
+}
+`;
+}
+
+/// Scenario: a function without raw pointers or `asm` releases the borrow at
+/// its last use.
+/// Spec: S1, L55.
+@test
+function fallbackPointerFreeReleasesAtLastUse(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let unused: i32 = 0;").toStr());
+  Test::assertEq<u64>(borrowckCountErrors(&bag), 0);
+}
+
+/// Scenario: a pointer-typed expression anywhere in the function keeps the
+/// borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackPointerExpressionKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let unused: *i32 = @pointerFromInteger<*i32>(0);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@integerFromPointer` keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackIntegerFromPointerKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let x: i32 = 0; let address: u64 = @integerFromPointer((&x) as *i32);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@pointerCast` keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackPointerCastKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let unused: *u8 = @pointerCast<*u8>(@pointerFromInteger<*i32>(0));").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@bitCast` from a pointer keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackBitCastKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let bits: u64 = @bitCast<u64>(@pointerFromInteger<*i32>(0));").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: an inline `asm` keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackInlineAsmKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let half: u64 = 0;\n  asm pure (21 in rax) -> (copied: u64 in rax) { nop }").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: a pointer inside a closure body counts for the enclosing
+/// function.
+/// Spec: L55.
+@test
+function fallbackPointerInClosureBodyKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let f = (): void -> { let unused: *i32 = @pointerFromInteger<*i32>(0); };\n  f();").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: a `@bitCast` round trip through integers, which no pointer-typed
+/// node shows, keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackBitCastThroughIntegersKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let bits: u64 = @bitCast<u64>(7 as i64);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@integerFromPointer` of a `str`, which lowers to a cast to `u64`
+/// with no pointer-typed node, keeps the borrow to scope end.
+/// Spec: L63.
+@test
+function fallbackIntegerFromViewKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let address: u64 = @integerFromPointer(label);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@integerFromPointer` of a reference to a `str` keeps the borrow.
+/// Spec: L63.
+@test
+function fallbackIntegerFromReferenceKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let address: u64 = @integerFromPointer(&label);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: an integer cast of an integer does not trigger the fallback.
+/// Spec: L63.
+@test
+function fallbackIntegerCastOfIntegerReleases(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let n: i32 = 3;\n  let wide: u64 = n as u64;").toStr());
+  Test::assertEq<u64>(borrowckCountErrors(&bag), 0);
+}
+
+/// Whether `castReinterprets` answers `expected` for a cast from `source` to
+/// `target` in a fresh store.
+function castCase(source: Analyzer::Type, target: Analyzer::Type, expected: boolean): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let sourceId: Analyzer::TypeId = store.intern(source);
+  let targetId: Analyzer::TypeId = store.intern(target);
+  Test::assertEq<boolean>(Borrowck::castReinterprets(&mut defs, &mut store, sourceId, targetId), expected);
+}
+
+/// Scenario: casts between numbers, booleans and `char` are conversions.
+/// Spec: L66.
+@test
+function castNumericConversionsDoNotReinterpret(): void {
+  castCase(Analyzer::Type::I32, Analyzer::Type::U64, false);
+  castCase(Analyzer::Type::U8, Analyzer::Type::F64, false);
+  castCase(Analyzer::Type::BOOLEAN, Analyzer::Type::I32, false);
+  castCase(Analyzer::Type::I32, Analyzer::Type::CHAR, false);
+}
+
+/// Scenario: a cast of a `str` to itself is no reinterpretation.
+/// Spec: L66.
+@test
+function castStrToStrDoesNotReinterpret(): void {
+  castCase(Analyzer::Type::STR, Analyzer::Type::STR, false);
+}
+
+/// Scenario: an integer becoming a `str` (`@pointerFromInteger<str>`), and a
+/// `str` becoming an integer (`@integerFromPointer`), reinterpret.
+/// Spec: L66.
+@test
+function castBetweenIntegerAndStrReinterprets(): void {
+  castCase(Analyzer::Type::U64, Analyzer::Type::STR, true);
+  castCase(Analyzer::Type::STR, Analyzer::Type::U64, true);
+}
+
+/// Scenario: a reference cast to a reference of another referent
+/// (`(&text) as &u64`) reinterprets; to the same type it does not; an integer
+/// becoming a reference (`@pointerFromInteger<&u64>`) reinterprets.
+/// Spec: L66.
+@test
+function castReferencesReinterpretOnlyAcrossReferents(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idU64: Analyzer::TypeId = store.intern(Analyzer::Type::U64);
+  let refStr: Analyzer::TypeId = store.reference(idStr);
+  let refU64: Analyzer::TypeId = store.reference(idU64);
+
+  Test::assert(Borrowck::castReinterprets(&mut defs, &mut store, refStr, refU64));
+  Test::assert(!Borrowck::castReinterprets(&mut defs, &mut store, refStr, refStr));
+  Test::assert(Borrowck::castReinterprets(&mut defs, &mut store, idU64, refU64));
+}
+
+/// Scenario: `(&label) as &u64` in a function keeps the borrow to scope end.
+/// Spec: L66.
+@test
+function fallbackReferenceCastKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let bits: u64 = *((&label) as &u64);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@sliceFromParts` over a reference keeps the borrow to scope end.
+/// Spec: L66.
+@test
+function fallbackSliceFromReferenceKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let words: u64[] = @sliceFromParts<u64>(&label, 1);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `bool`/`char`/integer conversions do not trigger the fallback.
+/// Spec: L66.
+@test
+function fallbackValueConversionsRelease(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let flag: boolean = true;\n  let wide: i32 = flag as i32;\n  let letter: char = 65 as char;").toStr());
+  Test::assertEq<u64>(borrowckCountErrors(&bag), 0);
 }

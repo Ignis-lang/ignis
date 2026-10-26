@@ -1,0 +1,99 @@
+// e2e: err
+// A cast that reinterprets a reference, a view or an address launders the
+// view into an integer that can be turned back: the function keeps every
+// binding-held borrow to scope end, so every mutation below is rejected (A0037).
+record Saved {
+  static mut B: u64 = 0;
+}
+
+function peek(s: str): u8 {
+  return @read<u8>(s as *u8);
+}
+
+function same(t: &str): &str {
+  return t;
+}
+
+function ofReferenceCast(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let text: str = owned.toStr();
+  let bits: u64 = *((&text) as &u64);
+  owned.pushStr("grow");
+  let back: str = @pointerFromInteger<str>(bits);
+  let _b: u8 = peek(back);
+}
+
+function ofReferenceCastInIf(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let mut bits: u64 = 0;
+  let text: str = owned.toStr();
+  if (owned.length() > 0) {
+    bits = *((&text) as &u64);
+  }
+  owned.pushStr("grow");
+  let _b: u8 = peek(*((&bits) as &str));
+}
+
+function ofClosure(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let text: str = owned.toStr();
+  let grab = (): u64 -> *((&text) as &u64);
+  let bits: u64 = grab();
+  owned.pushStr("grow");
+  let _b: u8 = peek(@pointerFromInteger<str>(bits));
+}
+
+function ofPointerFromIntegerReference(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let text: str = owned.toStr();
+  let bits: u64 = *@pointerFromInteger<&u64>(&text);
+  owned.pushStr("grow");
+  let _b: u8 = peek(@pointerFromInteger<str>(bits));
+}
+
+function ofSliceFromReference(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let text: str = owned.toStr();
+  let words: u64[] = @sliceFromParts<u64>(&text, 1);
+  let bits: u64 = words[0];
+  owned.pushStr("grow");
+  let _b: u8 = peek(@pointerFromInteger<str>(bits));
+}
+
+function ofCallResult(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let text: str = owned.toStr();
+  Saved::B = *(same(&text) as &u64);
+  owned.pushStr("grow");
+  let _b: u8 = peek(@pointerFromInteger<str>(Saved::B));
+}
+
+function ofNestedBlock(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let text: str = owned.toStr();
+  {
+    Saved::B = *((&text) as &u64);
+  }
+  owned.pushStr("grow");
+  let _b: u8 = peek(@pointerFromInteger<str>(Saved::B));
+}
+
+function ofReadbackCast(): void {
+  let mut owned: String = String::create("abcdefgh");
+  let text: str = owned.toStr();
+  let bits: u64 = *((&text) as &u64);
+  owned.pushStr("grow");
+  let _b: u8 = peek(*((&bits) as &str));
+}
+
+function main(): i32 {
+  ofReferenceCast();
+  ofReferenceCastInIf();
+  ofClosure();
+  ofPointerFromIntegerReference();
+  ofSliceFromReference();
+  ofCallResult();
+  ofNestedBlock();
+  ofReadbackCast();
+  return 0;
+}

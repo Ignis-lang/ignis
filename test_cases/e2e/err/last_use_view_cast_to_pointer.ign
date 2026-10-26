@@ -1,0 +1,108 @@
+// e2e: err
+//
+// A raw pointer derived from a view, by a cast or as the result of a call that
+// received the view, carries it whatever its pointee: the owner stays borrowed
+// while the pointer can still be used.
+import CType from "std::libc";
+import Memory from "std::memory";
+
+extern Native {
+  function puts(text: *u8): i32;
+}
+
+record CArgs {
+  public name: *u8;
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function asPointer(text: str): *u8 {
+  return text as *u8;
+}
+
+function stash(text: str): *mut u8 {
+  let place: *mut u8 = Memory::allocate<u8>(64);
+  @write<str>(place as *mut str, text);
+  return place;
+}
+
+function castToBytes(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let pointer: *u8 = text as *u8;
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(pointer);
+}
+
+function castToAlias(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let pointer: CType::CConstStr = text as CType::CConstStr;
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(pointer);
+}
+
+function castIntoField(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let args: CArgs = CArgs { name: text as *u8 };
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(args.name);
+}
+
+function castToMutable(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let pointer: *mut u8 = text as *mut u8;
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(pointer as *u8);
+}
+
+function capturedPointer(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let pointer: *u8 = text as *u8;
+  let show = (): void -> {
+    let _printed: i32 = Native::puts(pointer);
+  };
+  owned.pushChar('d');
+  show();
+}
+
+function castBack(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let pointer: *u8 = text as *u8;
+  owned.pushChar('d');
+  consume(pointer as str);
+}
+
+function callResult(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let pointer: *u8 = asPointer(text);
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(pointer);
+}
+
+function storedByCallee(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let place: *mut u8 = stash(text);
+  owned.pushChar('d');
+  consume(@read<str>(place as *mut str));
+}
+
+function main(): i32 {
+  castToBytes();
+  castToAlias();
+  castIntoField();
+  castToMutable();
+  capturedPointer();
+  castBack();
+  callResult();
+  storedByCallee();
+  return 0;
+}

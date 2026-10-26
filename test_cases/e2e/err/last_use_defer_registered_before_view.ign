@@ -1,0 +1,62 @@
+// e2e: err
+// A `defer` registered before the view runs at scope end, after the view's
+// last statement, so a carrier it names keeps the owner borrowed to the end
+// of the block. A raw pointer to a carrier taken before the view does too.
+record Slot {
+  public p: *u8;
+}
+
+function peek(p: *u8): void {
+}
+
+function peekSlot(slot: Slot): void {
+}
+
+function deferReadsCarrier(): void {
+  let mut owned: String = String::create("seed");
+  let mut local: *u8 = @pointerFromInteger<*u8>(0);
+  defer peek(local);
+  let text: str = owned.toStr();
+  local = text as *u8;
+  owned.pushStr("grow");
+}
+
+function deferReadsCarrierField(): void {
+  let mut owned: String = String::create("seed");
+  let mut slot: Slot = Slot { p: @pointerFromInteger<*u8>(0) };
+  defer peekSlot(slot);
+  let text: str = owned.toStr();
+  slot.p = text as *u8;
+  owned.pushStr("grow");
+}
+
+function deferInLoopBody(): void {
+  let mut owned: String = String::create("seed");
+  let mut round: i32 = 0;
+  while (round < 2) {
+    round += 1;
+    let mut local: *u8 = @pointerFromInteger<*u8>(0);
+    defer peek(local);
+    let text: str = owned.toStr();
+    local = text as *u8;
+    owned.pushStr("grow");
+  }
+}
+
+function pointerToCarrierTakenBefore(): void {
+  let mut owned: String = String::create("seed");
+  let mut local: *u8 = @pointerFromInteger<*u8>(0);
+  let lp: *mut *u8 = (&mut local) as *mut *u8;
+  let text: str = owned.toStr();
+  local = text as *u8;
+  owned.pushStr("grow");
+  peek(@read<*u8>(lp));
+}
+
+function main(): i32 {
+  deferReadsCarrier();
+  deferReadsCarrierField();
+  deferInLoopBody();
+  pointerToCarrierTakenBefore();
+  return 0;
+}

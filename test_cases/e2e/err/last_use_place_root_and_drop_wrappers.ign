@@ -1,0 +1,199 @@
+// e2e: err
+//
+// A view-derived pointer written through a place whose root is not a local of
+// the block (a static, a reference or pointer held in a record) keeps the
+// borrow to the end of the scope; one written through a reborrow carries it in
+// the binding the reborrow resolves to; and a type with a `Drop`
+// implementation holding such a pointer, or an owning standard container
+// instantiated with one, carries it like any other value.
+import Rc from "std::rc";
+
+extern Native {
+  function puts(text: *u8): i32;
+}
+
+record Saved {
+  static mut P: *u8 = null;
+}
+
+record Holder {
+  public p: *u8;
+}
+
+record Inner {
+  public inner: Holder;
+}
+
+record Wrapper {
+  public r: &mut Holder;
+}
+
+record RawWrapper {
+  public r: *mut Holder;
+}
+
+@implements(Drop)
+record D {
+  public p: *u8;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+record Outer {
+  public d: D;
+}
+
+@implements(Drop)
+record Boxed<T> {
+  public value: T;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function wrap(pointer: *u8): Vector<*u8> {
+  let mut items: Vector<*u8> = Vector::new<*u8>();
+  items.push(pointer);
+  return items;
+}
+
+function maybeWrap(pointer: *u8): Option<Vector<*u8>> {
+  return Option::SOME(wrap(pointer));
+}
+
+function staticStore(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  Saved::P = text as *u8;
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(Saved::P);
+}
+
+function recordHeldReference(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let mut holder: Holder = Holder { p: null };
+  let wrapper: Wrapper = Wrapper { r: &mut holder };
+  wrapper.r.p = text as *u8;
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(holder.p);
+}
+
+function recordHeldPointer(): void {
+  let mut owned: String = String::create("abc");
+  let mut holder: Holder = Holder { p: null };
+  let wrapper: RawWrapper = RawWrapper { r: (&mut holder) as *mut Holder };
+  let text: str = owned.toStr();
+  (*wrapper.r).p = text as *u8;
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(holder.p);
+}
+
+function reborrowChain(): void {
+  let mut owned: String = String::create("abc");
+  let mut holder: Holder = Holder { p: null };
+  let first: &mut Holder = &mut holder;
+  let second: &mut Holder = &mut *first;
+  let text: str = owned.toStr();
+  second.p = text as *u8;
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(holder.p);
+}
+
+function reborrowField(): void {
+  let mut owned: String = String::create("abc");
+  let mut outer: Inner = Inner { inner: Holder { p: null } };
+  let slot: &mut Holder = &mut outer.inner;
+  let text: str = owned.toStr();
+  slot.p = text as *u8;
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(outer.inner.p);
+}
+
+function userDrop(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let value: D = D { p: text as *u8 };
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(value.p);
+}
+
+function optionOfUserDrop(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let value: Option<D> = Option::SOME(D { p: text as *u8 });
+  owned.pushChar('d');
+  if (let Option::SOME(inner) = value) {
+    let _p: i32 = Native::puts(inner.p);
+  }
+}
+
+function recordOfUserDrop(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let value: Outer = Outer { d: D { p: text as *u8 } };
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(value.d.p);
+}
+
+function userDropWrapper(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let value: Boxed<*u8> = Boxed<*u8> { value: text as *u8 };
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(value.value);
+}
+
+function rcOfPointer(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let value: Rc<*u8> = Rc::new<*u8>(text as *u8);
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(*value.get());
+}
+
+function rcOfRecord(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let value: Rc<Holder> = Rc::new<Holder>(Holder { p: text as *u8 });
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(value.get().p);
+}
+
+function vectorFromCall(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let items: Vector<*u8> = wrap(text as *u8);
+  owned.pushChar('d');
+  let _p: i32 = Native::puts(*items.get(0).unwrap());
+}
+
+function optionOfVectorFromCall(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let items: Option<Vector<*u8>> = maybeWrap(text as *u8);
+  owned.pushChar('d');
+  if (let Option::SOME(found) = items) {
+    let _p: i32 = Native::puts(*found.get(0).unwrap());
+  }
+}
+
+function main(): i32 {
+  staticStore();
+  recordHeldReference();
+  recordHeldPointer();
+  reborrowChain();
+  reborrowField();
+  userDrop();
+  optionOfUserDrop();
+  recordOfUserDrop();
+  userDropWrapper();
+  rcOfPointer();
+  rcOfRecord();
+  vectorFromCall();
+  optionOfVectorFromCall();
+  return 0;
+}

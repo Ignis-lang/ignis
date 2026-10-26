@@ -1,0 +1,108 @@
+// e2e: err
+// A callee can store a raw pointer it receives into a `static` without any
+// pointer operand at the call: the view's borrow lasts to the end of the
+// block, so every mutation below is rejected (A0037).
+extern Native {
+  function puts(text: *u8): i32;
+}
+
+record Saved {
+  static mut P: *u8 = null;
+
+  @threadLocal
+  static mut LOCAL: *u8 = null;
+}
+
+record CArgs {
+  public name: *u8;
+}
+
+record Registry {
+  public id: i32;
+
+  public remember(&self, p: *u8): void {
+    Saved::P = p;
+  }
+}
+
+function keep(p: *u8): void {
+  Saved::P = p;
+}
+
+function keepLocal(p: *u8): void {
+  Saved::LOCAL = p;
+}
+
+function keepArgs(args: CArgs): void {
+  Saved::P = args.name;
+}
+
+function apply<T>(value: T, sink: fn(T) -> void): void {
+  sink(value);
+}
+
+function derivedPointer(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  keep(text as *u8);
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(Saved::P);
+}
+
+function threadLocalStatic(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  keepLocal(text as *u8);
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(Saved::LOCAL);
+}
+
+function recordByValue(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  keepArgs(CArgs { name: text as *u8 });
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(Saved::P);
+}
+
+function sharedSelfMethod(): void {
+  let mut owned: String = String::create("abc");
+  let registry: Registry = Registry { id: 1 };
+  let text: str = owned.toStr();
+  let pointer: *u8 = text as *u8;
+  registry.remember(pointer);
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(Saved::P);
+}
+
+function functionPointerSink(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  apply<*u8>(text as *u8, keep);
+  owned.pushChar('d');
+  let _printed: i32 = Native::puts(Saved::P);
+}
+
+function inLoopBody(): void {
+  let mut owned: String = String::create("abc");
+  let mut round: i32 = 0;
+  while (round < 2) {
+    round += 1;
+    let text: str = owned.toStr();
+    if (round == 1) {
+      keep(text as *u8);
+    }
+    owned.pushChar('d');
+  }
+  let _printed: i32 = Native::puts(Saved::P);
+}
+
+function main(): i32 {
+  derivedPointer();
+  threadLocalStatic();
+  recordByValue();
+  sharedSelfMethod();
+  functionPointerSink();
+  inLoopBody();
+  return 0;
+}

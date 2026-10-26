@@ -1,0 +1,33 @@
+// e2e: err
+// `@integerFromPointer` of a view, or of a reference to it, uses raw
+// pointers: the function keeps every binding-held borrow to scope end.
+record Saved {
+  static mut A: u64 = 0;
+}
+
+function firstByte(): u8 {
+  let p: *u8 = @pointerFromInteger<*u8>(Saved::A);
+  return @read<u8>(p);
+}
+
+function ofView(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  Saved::A = @integerFromPointer(text);
+  owned.pushStr("grow");
+  let _b: u8 = firstByte();
+}
+
+function ofReference(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  Saved::A = @integerFromPointer(&text);
+  owned.pushStr("grow");
+  let _b: u8 = firstByte();
+}
+
+function main(): i32 {
+  ofView();
+  ofReference();
+  return 0;
+}

@@ -1,0 +1,34 @@
+// e2e: err
+//
+// A view stored into an aggregate, by initialization or by a field assignment, keeps
+// the owner borrowed while the aggregate can still reach it.
+record Holder {
+  public view: str;
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function initialized(): void {
+  let mut owned: String = String::create("abc");
+  let text: str = owned.toStr();
+  let holder: Holder = Holder { view: text };
+  owned.pushChar('d');
+  consume(holder.view);
+}
+
+function assigned(): void {
+  let mut owned: String = String::create("abc");
+  let mut holder: Holder = Holder { view: "" };
+  let text: str = owned.toStr();
+  holder.view = text;
+  owned.pushChar('d');
+  consume(holder.view);
+}
+
+function main(): i32 {
+  initialized();
+  assigned();
+  return 0;
+}

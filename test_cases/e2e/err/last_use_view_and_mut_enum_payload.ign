@@ -1,0 +1,35 @@
+// e2e: err
+//
+// An enum payload carrying both a view and a `&mut` place keeps the borrow to the
+// end of the scope.
+enum Msg {
+  BOTH(str, &mut str),
+  NONE,
+}
+
+function sinkMsg(msg: Msg): void {
+  match (msg) {
+    Msg::BOTH(text, slot) -> {
+      *slot = text;
+    },
+    Msg::NONE -> {},
+  };
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function payload(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  sinkMsg(Msg::BOTH(text, &mut slot));
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function main(): i32 {
+  payload();
+  return 0;
+}

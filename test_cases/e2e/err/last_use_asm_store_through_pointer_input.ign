@@ -1,0 +1,88 @@
+// e2e: err
+// A statement `asm` that receives a pointer derived from the view and stores it
+// through a raw-pointer input writes memory like `*target = source` or `@write`
+// do, so the view keeps its borrow and every mutation below is rejected (A0037).
+record Saved {
+  static mut P: *u8 = null;
+}
+
+record Out {
+  public p: *u8;
+}
+
+function staticSlot(): *mut *u8 {
+  return (&mut Saved::P) as *mut *u8;
+}
+
+function targetBeforeView(): void {
+  let mut owned: String = String::create("seed");
+  let mut slot: *u8 = @pointerFromInteger<*u8>(0);
+  let target: *mut *u8 = (&mut slot) as *mut *u8;
+  let text: str = owned.toStr();
+  let source: *u8 = text as *u8;
+  asm (source in reg, target in reg) clobber(memory) {
+    mov qword ptr [{target}], {source}
+  }
+  owned.pushStr("grow");
+  let _kept: *u8 = slot;
+}
+
+function targetAfterView(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let mut slot: *u8 = @pointerFromInteger<*u8>(0);
+  let target: *mut *u8 = (&mut slot) as *mut *u8;
+  let source: *u8 = text as *u8;
+  asm (source in reg, target in reg) clobber(memory) {
+    mov qword ptr [{target}], {source}
+  }
+  owned.pushStr("grow");
+  let _kept: *u8 = slot;
+}
+
+function withoutMemoryClobber(): void {
+  let mut owned: String = String::create("seed");
+  let mut slot: *u8 = @pointerFromInteger<*u8>(0);
+  let target: *mut *u8 = (&mut slot) as *mut *u8;
+  let text: str = owned.toStr();
+  let source: *u8 = text as *u8;
+  asm (source in reg, target in reg) {
+    mov qword ptr [{target}], {source}
+  }
+  owned.pushStr("grow");
+  let _kept: *u8 = slot;
+}
+
+function intoRecordField(): void {
+  let mut owned: String = String::create("seed");
+  let mut out: Out = Out { p: @pointerFromInteger<*u8>(0) };
+  let target: *mut Out = (&mut out) as *mut Out;
+  let text: str = owned.toStr();
+  let source: *u8 = text as *u8;
+  asm (source in reg, target in reg) clobber(memory) {
+    mov qword ptr [{target}], {source}
+  }
+  owned.pushStr("grow");
+  let _kept: *u8 = out.p;
+}
+
+function intoStatic(): void {
+  let mut owned: String = String::create("seed");
+  let target: *mut *u8 = staticSlot();
+  let text: str = owned.toStr();
+  let source: *u8 = text as *u8;
+  asm (source in reg, target in reg) clobber(memory) {
+    mov qword ptr [{target}], {source}
+  }
+  owned.pushStr("grow");
+  let _kept: *u8 = Saved::P;
+}
+
+function main(): i32 {
+  targetBeforeView();
+  targetAfterView();
+  withoutMemoryClobber();
+  intoRecordField();
+  intoStatic();
+  return 0;
+}

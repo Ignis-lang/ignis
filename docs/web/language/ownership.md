@@ -160,13 +160,48 @@ A view must not outlive its owner:
 - A pattern binding lives in its scrutinee. A view of a binding of a temporary scrutinee can
   be used inside the arm but not stored into a local declared outside it, and a
   `let ... else` cannot bind into a temporary by reference.
-- While a binding keeps a view, its owner is borrowed until the end of the scope, so mutating
-  or moving the owner (A0258) is reported. A binding typed `&mut T` borrows its owner mutably,
-  so even reading the owner is reported until the binding's scope ends.
+- While a binding keeps a view, its owner is borrowed, so mutating or moving the owner (A0258)
+  is reported. A binding typed `&mut T` borrows its owner mutably, so even reading the owner is
+  reported. The borrow ends after the last statement of the binding's block that uses the
+  binding or anything carrying its view — a copy, an aggregate or field initialized from it, a
+  pattern binding destructured from it, a closure capturing it, or any binding declared or
+  place assigned (a local, a field, `*reference`, an element) by a statement that uses it,
+  when that type can hold a view or a closure. A place whose storage does not resolve to a
+  local of the block — a static, or a place reached through a reference held inside another
+  value (`wrapper.r.p`) — keeps the borrow to the end of the block. Granularity is the whole
+  statement: a use inside a loop body keeps the borrow for every iteration, a use in the
+  block's tail or in a `defer` body (wherever the `defer` is written, before the view
+  included) keeps it to the end of the block, as does a carrier whose address the block takes
+  (`&x`, `&mut x`: aliases are not tracked), and so does a view handed somewhere it can
+  outlive its statement — into a place whose type can carry a view (a view, or anything
+  holding a closure value, which may capture one), or to a call (function, method, closure
+  or `extern` call) one of whose operands gives the callee a place the view could be stored
+  in. An operand reaches a mutable place when its type is `&mut T` or a closure type
+  `(A) -> R` (a capture-free `fn(A) -> R` reaches nothing), or is a record, enum, tuple,
+  fixed array, generic instance, alias or `&T` that contains one; this holds for every
+  operand that does not carry the view, the receiver and a closure callee included. The
+  operand carrying the view counts only through a place that can hold a view — a `&mut T`
+  whose referent can carry one (`&mut str`) or a function-typed field next to the view — so a
+  `&mut String` view used as a receiver, or a by-reference closure being called without the
+  view among its arguments, does not keep the borrow.
+- A view passed to an `extern` function, directly or through a function value, alone or
+  inside anything carrying it, keeps its owner borrowed to the end of the scope; an Ignis function that wraps one, such as
+  `Io::println`, is an ordinary call.
+- In a function that uses raw pointers or inline assembly, borrows held by bindings last to
+  the end of their scope. A function uses them when its body, nested blocks and closure
+  bodies included, contains an `asm` statement, a `@bitCast`, `@read`, `@write` (volatile
+  included) or atomic builtin, or any expression whose type holds a raw pointer at any depth
+  (`text as *u8`, `@pointerCast`, a record with a `*u8` field), or any cast that reinterprets
+  a reference, a view or an address (including `@pointerFromInteger`, `@integerFromPointer`
+  and `@sliceFromParts`); the buffers `String` and the
+  standard `@owns` types (`Vector`, `Rc`, ...) keep for themselves do not count, their type
+  arguments do (`Vector<*u8>`). A callee that keeps a view it received, by turning it into a raw
+  pointer or an address and storing or returning it, or by handing it to an `extern` function, is outside this rule: its own function keeps its borrows to scope end, but its
+  caller's does not, so raw pointers are the programmer's responsibility.
 - A view taken through a view local that holds such a borrow borrows that local, not its
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
   borrows `store`, so views derived from `store` only conflict with each other, while `guard`
-  stays borrowed by `store` until `store`'s scope ends.
+  stays borrowed by `store` until `store`'s last use.
 - A view cannot be stored where its owner cannot be seen: a `static` or `static mut` field of a
   view type is an error (A0268). A `static str` field is accepted, because a static string owns
   its bytes. A generic record or enum whose declared field or payload is a view is a view type

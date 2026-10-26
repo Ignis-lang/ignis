@@ -183,6 +183,274 @@ export namespace Analyzer::ViewType {
     return false;
   }
 
+  /// Whether a value of `typeId` can carry a view another value holds: the
+  /// view predicate (`isView`), widened for the types whose view-ness is
+  /// decided at the value level, not the type level: a function type at any
+  /// depth (a closure's captures are a property of the value,
+  /// `closureIsView`, so a record, enum, tuple, array, instance or alias
+  /// holding one, or a `&T` to it, can carry the closure's view; a nested
+  /// capture-free `fn(A) -> R` cannot), a raw pointer whose pointee can carry
+  /// a view (`*str`, `*mut str`, a pointer to a record holding a view or a
+  /// closure; not `*u8` or `*mut String`), an
+  /// unresolved `Param` (a monomorphized instance may carry a view, and the
+  /// borrow check runs before monomorphization) and an unknown type id.
+  public function canCarryView(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return true;
+    };
+
+    match (type_) {
+      Analyzer::Type::Function(_) | Analyzer::Type::RawFunction(_) | Analyzer::Type::Param(_) -> {
+        return true;
+      },
+      _ -> {},
+    };
+
+    if (ViewType::isView(defStore, typeStore, typeId)) {
+      return true;
+    }
+
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 2, ViewType::NO_OWNED_BUFFER, &mut visiting);
+  }
+
+  /// Whether a value of `typeId` can hold something derived from a view, so
+  /// a binding or place of this type written by a statement that uses the
+  /// view carries it (`canCarryView`, plus a raw pointer at any depth,
+  /// whatever its pointee: `text as *u8` points into the view). The raw
+  /// pointers the standard owning storage keeps in its fields point to its
+  /// own allocation and do not count: `String` (the standard library
+  /// record whose definition is `ownedBuffer`, identified by the caller
+  /// from its module, never by name) and every type with an `@owns` type parameter
+  /// (`Vector`, `HashMap`, `Rc`, ...), whose type arguments decide instead
+  /// (`Vector<*u8>` counts). Any other type, a user type with a `Drop`
+  /// implementation included, is walked through its fields. The borrow
+  /// check runs on monomorphized code, where an instance is a plain record
+  /// whose type arguments are read from its instance origin.
+  public function canHoldDerived(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    ownedBuffer: u32,
+  ): boolean {
+    if (ViewType::canCarryView(defStore, typeStore, typeId)) {
+      return true;
+    }
+
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 3, ownedBuffer, &mut visiting);
+  }
+
+  /// Whether a raw pointer is reachable from a value of `typeId` at any
+  /// depth, through aggregates, instances, aliases and references, skipping
+  /// the buffers of the standard owning storage as `canHoldDerived` does.
+  /// Function types and `Param`s do not count. A function in which such a
+  /// value appears keeps every binding-held borrow to the end of its scope.
+  public function holdsRawPointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    ownedBuffer: u32,
+  ): boolean {
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 4, ownedBuffer, &mut visiting);
+  }
+
+  /// Whether a value of `typeId` lets the code it is handed to write into a
+  /// place it does not own: a `&mut T`, a raw pointer whatever its pointee
+  /// (it can be cast back), a closure value (its captures are invisible in
+  /// the type), an unresolved `Param` (any of these once substituted), or a
+  /// record, enum, tuple, fixed array, slice, instance or alias containing
+  /// one, followed through `&T` as well. A capture-free `fn(A) -> R` reaches
+  /// nothing. The borrow check keeps a view's borrow to the end of the scope
+  /// when the view is handed to a call next to such an operand, since the
+  /// callee can store the view there. Recursion is guarded on the instance,
+  /// as in `isView`.
+  public function canReachMutablePlace(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 0, ViewType::NO_OWNED_BUFFER, &mut visiting);
+  }
+
+  /// `canReachMutablePlace` narrowed to places that can hold a view, for the
+  /// operand that carries the view itself: a `&mut T` counts only when `T`
+  /// can carry a view (`canCarryView`), and a raw pointer only when its
+  /// pointee can, so `&mut String` and the `*mut u8` inside a `String` reach
+  /// nothing a view could be stored in, while `&mut str`, a `*mut str` field
+  /// or a function-typed field next to the view do. Both are followed into
+  /// otherwise, as are aggregates, `&T`, instances and aliases.
+  public function canReachViewHoldingPlace(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 1, ViewType::NO_OWNED_BUFFER, &mut visiting);
+  }
+
+  /// The shared walker. `mode` 0 answers `canReachMutablePlace`, 1
+  /// `canReachViewHoldingPlace`, and 2 the nested part of `canCarryView`,
+  /// where a function type, a `Param` or a raw pointer to a view counts, and
+  /// raw pointers are followed to their pointee; 3 the nested part of
+  /// `canHoldDerived`, where any raw pointer counts and the fields of the
+  /// standard owning storage are replaced by its type arguments; 4
+  /// `holdsRawPointer`, mode 3 where function types and `Param`s do not count.
+  function canReachMutablePlaceInner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    mode: u8,
+    ownedBuffer: u32,
+    visiting: &mut Vector<Vector<u32>>,
+  ): boolean {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return true;
+    };
+
+    let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut isEnum: boolean = false;
+    let mut hasTypeArguments: boolean = false;
+
+    match (type_) {
+      Analyzer::Type::Reference(referenceType) -> {
+        if (referenceType.mutable && mode != 2 && mode != 3 && mode != 4) {
+          if (mode == 0 || ViewType::canCarryView(defStore, typeStore, referenceType.referent)) {
+            return true;
+          }
+        }
+
+        components.push(referenceType.referent);
+      },
+      Analyzer::Type::Pointer(pointerType) -> {
+        if (mode == 3 || mode == 4) {
+          return true;
+        }
+
+        if (mode == 2) {
+          if (ViewType::isView(defStore, typeStore, pointerType.pointee)) {
+            return true;
+          }
+        } else if (mode == 0 || ViewType::canCarryView(defStore, typeStore, pointerType.pointee)) {
+          return true;
+        }
+
+        components.push(pointerType.pointee);
+      },
+      Analyzer::Type::Function(_) | Analyzer::Type::Param(_) -> {
+        if (mode != 4) {
+          return true;
+        }
+      },
+      Analyzer::Type::Slice(element) -> {
+        components.push(element);
+      },
+      Analyzer::Type::FixedArray(element, _) -> {
+        components.push(element);
+      },
+      Analyzer::Type::Tuple(tuple) -> {
+        components = ViewType::copyTypeIds(&tuple.elements);
+      },
+      Analyzer::Type::Record(defId) -> {
+        nominal = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominal = Option::SOME(defId);
+        isEnum = true;
+      },
+      Analyzer::Type::Instance(instance) -> {
+        nominal = Option::SOME(instance.definition);
+        components = ViewType::copyTypeIds(&instance.typeArguments);
+        isEnum = ViewType::isEnumDefinition(defStore, instance.definition);
+        hasTypeArguments = true;
+      },
+      Analyzer::Type::Alias(aliasDefId) -> {
+        let Option::SOME(target) = ViewType::aliasedTypeOf(defStore, aliasDefId) else {
+          return true;
+        };
+
+        return ViewType::canReachMutablePlaceInner(defStore, typeStore, target, mode, ownedBuffer, visiting);
+      },
+      _ -> {},
+    };
+
+    if (let Option::SOME(defId) = nominal) {
+      let key: Vector<u32> = ViewType::visitKey(defId.raw(), &components);
+
+      if (ViewType::containsKey(&*visiting, &key)) {
+        return false;
+      }
+
+      let mut visitingRef: &mut Vector<Vector<u32>> = visiting;
+      visitingRef.push(key);
+
+      let mut members: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      let mut owningStorage: boolean = false;
+
+      if (mode == 3 || mode == 4) {
+        if (let Option::SOME(arguments) = ViewType::owningStorageArguments(defStore, defId, ownedBuffer)) {
+          owningStorage = true;
+          let mut argumentIndex: u64 = 0;
+
+          while (argumentIndex < arguments.length()) {
+            if (let Option::SOME(argument) = arguments.get(argumentIndex)) {
+              components.push(*argument);
+            }
+
+            argumentIndex += 1;
+          }
+        }
+      }
+
+      if (owningStorage) {
+        // The storage's own pointers point to its allocation.
+      } else if (isEnum) {
+        members = ViewType::enumPayloadTypes(defStore, defId);
+      } else {
+        members = ViewType::recordFieldTypes(defStore, defId);
+      }
+
+      let paramSymbols: Vector<Analyzer::SymbolId> = ViewType::typeParamSymbols(defStore, defId);
+      let arguments: Vector<Analyzer::TypeId> = ViewType::copyTypeIds(&components);
+      let mut memberIndex: u64 = 0;
+
+      while (memberIndex < members.length()) {
+        if (let Option::SOME(member) = members.get(memberIndex)) {
+          if (hasTypeArguments) {
+            let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+            components.push(typeStoreRef.substitute(*member, &paramSymbols, &arguments));
+          } else {
+            components.push(*member);
+          }
+        }
+
+        memberIndex += 1;
+      }
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < components.length()) {
+      if (let Option::SOME(component) = components.get(index)) {
+        if (ViewType::canReachMutablePlaceInner(defStore, typeStore, *component, mode, ownedBuffer, visiting)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
     let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
     let mut index: u64 = 0;
@@ -260,6 +528,105 @@ export namespace Analyzer::ViewType {
     }
 
     return types;
+  }
+
+  /// `ownedBuffer` of the walks that do not skip owning storage.
+  const NO_OWNED_BUFFER: u32 = 4294967295;
+
+  /// The type arguments that decide what the standard owning storage `defId`
+  /// can hold, when it is one: none for the definition `ownedBuffer`
+  /// (`String`); the instance arguments of a monomorphized
+  /// instance of a type with an `@owns` type parameter; and none for such a
+  /// generic type itself, whose arguments an `Instance` type already lists.
+  function owningStorageArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+    ownedBuffer: u32,
+  ): Option<Vector<Analyzer::TypeId>> {
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = defStore.get(defId)) {
+      if (defId.raw() == ownedBuffer && recordDef.typeParams.isEmpty() && recordDef.implementsDrop) {
+        return Option::SOME(Vector::new<Analyzer::TypeId>());
+      }
+    }
+
+    if (ViewType::isStdOwningStorage(defStore, defId)) {
+      return Option::SOME(Vector::new<Analyzer::TypeId>());
+    }
+
+    let mut generic: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(Analyzer::SymbolOrigin::Instance(origin)) = defStore.symbolOriginOf(defId)) {
+      generic = Option::SOME(origin.generic);
+      arguments = ViewType::copyTypeIds(&origin.ownerArgs);
+      let mut index: u64 = 0;
+
+      while (index < origin.methodArgs.length()) {
+        if (let Option::SOME(argument) = origin.methodArgs.get(index)) {
+          arguments.push(*argument);
+        }
+
+        index += 1;
+      }
+    }
+
+    if (let Option::SOME(genericId) = generic) {
+      if (ViewType::isStdOwningStorage(defStore, genericId)) {
+        return Option::SOME(arguments);
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  /// Whether `defId` is standard library owning storage: a record or enum
+  /// with an `@owns` type parameter declared in a standard library module. A
+  /// user type with an `@owns` parameter is walked through its fields like
+  /// any other, since nothing guarantees its pointers address its own
+  /// allocation.
+  function isStdOwningStorage(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let Option::SOME(moduleIndex) = defStore.defModuleOf(defId) else {
+      return false;
+    };
+
+    return defStore.isStdModule(moduleIndex) && ViewType::hasOwningTypeParameter(defStore, defId);
+  }
+
+  /// Whether a record or enum declares an `@owns` type parameter.
+  function hasOwningTypeParameter(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let mut paramDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    match (defStore.get(defId)) {
+      Option::SOME(Analyzer::Definition::Record(recordDef)) -> {
+        paramDefIds = ViewType::copyDefinitionIds(&recordDef.typeParams);
+      },
+      Option::SOME(Analyzer::Definition::Enum(enumDef)) -> {
+        paramDefIds = ViewType::copyDefinitionIds(&enumDef.typeParams);
+      },
+      _ -> {},
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < paramDefIds.length()) {
+      if (let Option::SOME(paramDefId) = paramDefIds.get(index)) {
+        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+          if (typeParam.ownsStorage) {
+            return true;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
   }
 
   function isEnumDefinition(

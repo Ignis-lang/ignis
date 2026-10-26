@@ -1,0 +1,32 @@
+// e2e: err
+//
+// A record carrying a view next to a function-typed field reaches a place that
+// can hold the view: the callee can call the closure with the view, and the
+// closure can store it in what it captured. A by-reference capture cannot be
+// stored in the record (A0170), so the closure captures a raw pointer by value.
+record Job {
+  public text: str;
+  public run: (str) -> void;
+}
+
+function runJob(job: Job): void {
+  job.run(job.text);
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function main(): i32 {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let place: *mut str = (&mut slot) as *mut str;
+  let put = (t: str): void -> {
+    @write<str>(place, t);
+  };
+  let text: str = owned.toStr();
+  runJob(Job { text: text, run: put });
+  owned.pushChar('d');
+  consume(slot);
+  return 0;
+}

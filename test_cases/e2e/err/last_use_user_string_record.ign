@@ -1,0 +1,28 @@
+// e2e: err
+//
+// A user record named `String` is not the standard library `String`: a pointer
+// derived from a view and stored in its field carries the view, so the owner
+// stays borrowed while the record can still be read.
+extern Native {
+  function puts(text: *u8): i32;
+}
+
+@implements(Drop)
+record String {
+  public p: *u8;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function main(): i32 {
+  let mut owned: Vector<u8> = Vector::new<u8>();
+  owned.push(97);
+  owned.push(0);
+  let first: &u8 = owned.get(0).unwrap();
+  let value: String = String { p: first as *u8 };
+  owned.push(98);
+  let _p: i32 = Native::puts(value.p);
+  return 0;
+}

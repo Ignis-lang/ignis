@@ -1,0 +1,39 @@
+// e2e: std
+//
+// A `defer` that does not name a carrier of the view, and a reference taken to
+// a local that carries nothing, leave the view's borrow ending at its last use.
+import Io from "std::io";
+
+function show(x: &i32): void {
+  return;
+}
+
+function bump(counter: &mut i32): void {
+  *counter += 1;
+}
+
+function deferAfterView(): void {
+  let mut owned: String = String::create("seed");
+  let mut counter: i32 = 0;
+  let text: str = owned.toStr();
+  Io::println(text);
+  defer show(&counter);
+  owned.pushStr("grow");
+  Io::println(owned.toStr());
+}
+
+function addressOfNonCarrier(): i32 {
+  let mut owned: String = String::create("seed");
+  let mut counter: i32 = 0;
+  bump(&mut counter);
+  let text: str = owned.toStr();
+  Io::println(text);
+  owned.pushStr("grow");
+  bump(&mut counter);
+  return counter;
+}
+
+function main(): i32 {
+  deferAfterView();
+  return addressOfNonCarrier() - 2;
+}

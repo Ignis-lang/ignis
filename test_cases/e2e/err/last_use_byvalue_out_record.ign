@@ -1,0 +1,41 @@
+// e2e: err
+//
+// A view handed to a call next to a by-value record holding a `&mut` field keeps
+// its borrow to the end of the scope: the callee can write the view through the
+// field into a place that outlives the statement.
+record Out {
+  public slot: &mut str;
+}
+
+function store(text: str, out: Out): void {
+  *out.slot = text;
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function temporary(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let text: str = owned.toStr();
+  store(text, Out { slot: &mut slot });
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function bound(): void {
+  let mut owned: String = String::create("abc");
+  let mut slot: str = "";
+  let out: Out = Out { slot: &mut slot };
+  let text: str = owned.toStr();
+  store(text, out);
+  owned.pushChar('d');
+  consume(slot);
+}
+
+function main(): i32 {
+  temporary();
+  bound();
+  return 0;
+}

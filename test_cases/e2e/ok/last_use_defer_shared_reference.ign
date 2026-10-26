@@ -1,0 +1,91 @@
+// e2e: std
+//
+// A shared reference argument in a `defer` body is held until its scope ends,
+// and released there: the owner can be written after the scope.
+record Counter {
+  public value: i32;
+}
+
+function show(x: &i32): void {
+  return;
+}
+
+function showCounter(counter: &Counter): void {
+  return;
+}
+
+function bump(counter: &mut Counter): void {
+  counter.value += 1;
+}
+
+function blockDefer(): i32 {
+  let mut x: i32 = 0;
+  {
+    defer show(&x);
+  }
+  x = 5;
+  return x;
+}
+
+function loopDefer(): i32 {
+  let mut x: i32 = 0;
+  let mut i: i32 = 0;
+  while (i < 3) {
+    defer show(&x);
+    i += 1;
+  }
+  x = 5;
+  return x;
+}
+
+function ifDefer(): i32 {
+  let mut x: i32 = 0;
+  if (x == 0) {
+    defer show(&x);
+  }
+  x = 5;
+  return x;
+}
+
+function loopWriteThenDefer(): i32 {
+  let mut x: i32 = 0;
+  let mut i: i32 = 0;
+  while (i < 3) {
+    x += 1;
+    defer show(&x);
+    i += 1;
+  }
+  return x;
+}
+
+function work(x: &mut i32): void {
+  {
+    defer show(&*x);
+  }
+  *x = 1;
+}
+
+function blockDeferRecord(): i32 {
+  let mut counter: Counter = Counter { value: 0 };
+  {
+    defer showCounter(&counter);
+  }
+  bump(&mut counter);
+  return counter.value;
+}
+
+function forDeferRecord(): i32 {
+  let mut counter: Counter = Counter { value: 0 };
+  for (let i = 0; i < 3; i++) {
+    defer showCounter(&counter);
+  }
+  counter.value = 5;
+  return counter.value;
+}
+
+function main(): i32 {
+  let mut value: i32 = 0;
+  work(&mut value);
+  let total: i32 = blockDefer() + loopDefer() + ifDefer() + loopWriteThenDefer() + value + blockDeferRecord() + forDeferRecord();
+  return total - 25;
+}
