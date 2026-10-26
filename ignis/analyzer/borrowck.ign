@@ -93,18 +93,16 @@ import _ from "./ownership_report";
 /// by-value scrutinee, lives in the scrutinee's storage: a local it views, or
 /// a temporary scrutinee that lives through the arms (`temporaryStorageOf`),
 /// which a `let ... else` binding would outlive. Limits:
-///   - The borrow is scope-based like every named borrow here, not
-///     liveness-based: it lasts to the end of the scope after the view's last
-///     use. A view stored by an assignment is released when the scope the
-///     assignment sits in ends, which can be earlier than the binding's own.
+///   - The borrow ends at the binding's last use at statement granularity
+///     (`holderLastStatement`), and lasts to the end of the scope in a
+///     function that uses raw pointers or inline assembly. A view stored by
+///     an assignment is released when the scope the assignment sits in ends,
+///     which can be earlier than the binding's own.
 ///   - The borrow is shared even for a `&mut T` view, because
 ///     monomorphization drops reference mutability (see
 ///     `bindingIsMutableReference`).
 ///   - A0258 is limited to owners of method and aggregate views: moving a
 ///     local after the last use of a plain `let r = &x` stays accepted.
-///   - A binding holding an aggregate view (`Option<&T>`) is checked for
-///     where it points but holds no borrow of its owner, for the same reason:
-///     mutating a map after reading `map.get(key)` into a local is common.
 ///   - Views a callee stores out of its arguments (`values.push(make().toStr())`)
 ///     are not tracked.
 ///   - A free function, extern function or static method returning a view is
@@ -4153,14 +4151,6 @@ export namespace Borrowck {
       },
       _ -> {},
     };
-
-    // An aggregate holding a view (`Option<&T>` from `get`) is checked for
-    // where it points, but holds no borrow: borrows here last to the end of
-    // the scope, and reading such a value and then mutating its owner is
-    // the common shape of lookup-then-update code.
-    if (Borrowck::viewTypeKind(defStore, typeStore, node.typeId) == Borrowck::VIEW_TYPE_NONE) {
-      takesBorrow = false;
-    }
 
     let mut viewRef: &mut Borrowck::State = state;
     viewRef.setViewOwner(binding.raw(), owner.local.raw(), takesBorrow);

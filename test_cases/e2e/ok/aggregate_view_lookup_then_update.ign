@@ -1,0 +1,49 @@
+// e2e: std
+//
+// Lookup-then-update: an aggregate view read from its owner and not used after
+// the owner's mutation holds its borrow only up to its last use.
+import Io from "std::io";
+import HashMap from "std::collections";
+
+function countKey(counts: &mut HashMap<u32, u32>, key: u32): void {
+  let found: Option<&u32> = counts.get(&key);
+  let mut next: u32 = 1;
+  if (let Option::SOME(count) = found) {
+    next = *count + 1;
+  }
+  counts.insert(key, next);
+}
+
+function main(): i32 {
+  let mut list: Vector<String> = Vector::new<String>();
+  list.push(String::create("first"));
+  let first: Option<&String> = list.get(0);
+  if (first.isSome()) {
+    Io::println(first.unwrap().toStr());
+  }
+  list.push(String::create("second"));
+
+  let mut round: u64 = 0;
+  while (round < 4) {
+    let last: Option<&String> = list.get(list.length() - 1);
+    let mut grow: boolean = false;
+    if (let Option::SOME(item) = last) {
+      grow = item.length() > 0;
+    }
+    if (grow) {
+      list.push(String::create("more"));
+    }
+    round += 1;
+  }
+  Io::println(`${list.length()}`);
+
+  let mut counts: HashMap<u32, u32> = HashMap::new<u32, u32>();
+  countKey(&mut counts, 7);
+  countKey(&mut counts, 7);
+  countKey(&mut counts, 9);
+  let seven: u32 = 7;
+  if (let Option::SOME(count) = counts.get(&seven)) {
+    Io::println(`${*count}`);
+  }
+  return 0;
+}

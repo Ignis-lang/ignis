@@ -1,0 +1,85 @@
+// e2e: err
+//
+// A binding holding an aggregate view (`Option<&T>`, a record with a reference
+// field) borrows the owner it points into: mutating the owner while the
+// binding is still used is rejected, as it is for a plain `&T` binding.
+import Io from "std::io";
+import HashMap from "std::collections";
+
+record Cursor {
+  public item: &String;
+}
+
+record Shelf {
+  public items: Vector<String>;
+
+  public peek(&self): Option<&String> {
+    return self.items.get(0);
+  }
+
+  public cursor(&self): Cursor {
+    return Cursor { item: self.items.get(0).unwrap() };
+  }
+
+  public add(&mut self, item: String): void {
+    self.items.push(item);
+  }
+}
+
+function vectorGetThenPush(): void {
+  let mut list: Vector<String> = Vector::new<String>();
+  list.push(String::create("first"));
+  let first: Option<&String> = list.get(0);
+  list.push(String::create("grow"));
+  if (let Option::SOME(item) = first) {
+    Io::println(item.toStr());
+  }
+}
+
+function vectorGetMutThenPush(): void {
+  let mut list: Vector<String> = Vector::new<String>();
+  list.push(String::create("first"));
+  let first: Option<&mut String> = list.getMut(0);
+  list.push(String::create("grow"));
+  if (let Option::SOME(item) = first) {
+    item.pushStr("!");
+  }
+}
+
+function hashMapGetThenInsert(): void {
+  let mut map: HashMap<u32, String> = HashMap::new<u32, String>();
+  map.insert(1, String::create("one"));
+  let key: u32 = 1;
+  let found: Option<&String> = map.get(&key);
+  map.insert(2, String::create("two"));
+  if (let Option::SOME(item) = found) {
+    Io::println(item.toStr());
+  }
+}
+
+function methodViewThenMutation(): void {
+  let mut shelf: Shelf = Shelf { items: Vector::new<String>() };
+  shelf.add(String::create("first"));
+  let first: Option<&String> = shelf.peek();
+  shelf.add(String::create("grow"));
+  if (let Option::SOME(item) = first) {
+    Io::println(item.toStr());
+  }
+}
+
+function recordViewThenMutation(): void {
+  let mut shelf: Shelf = Shelf { items: Vector::new<String>() };
+  shelf.add(String::create("first"));
+  let cursor: Cursor = shelf.cursor();
+  shelf.add(String::create("grow"));
+  Io::println(cursor.item.toStr());
+}
+
+function main(): i32 {
+  vectorGetThenPush();
+  vectorGetMutThenPush();
+  hashMapGetThenInsert();
+  methodViewThenMutation();
+  recordViewThenMutation();
+  return 0;
+}
