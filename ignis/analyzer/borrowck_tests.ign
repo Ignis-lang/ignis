@@ -1732,3 +1732,81 @@ function fallbackIntegerCastOfIntegerReleases(): void {
   let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let n: i32 = 3;\n  let wide: u64 = n as u64;").toStr());
   Test::assertEq<u64>(borrowckCountErrors(&bag), 0);
 }
+
+/// Whether `castReinterprets` answers `expected` for a cast from `source` to
+/// `target` in a fresh store.
+function castCase(source: Analyzer::Type, target: Analyzer::Type, expected: boolean): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let sourceId: Analyzer::TypeId = store.intern(source);
+  let targetId: Analyzer::TypeId = store.intern(target);
+  Test::assertEq<boolean>(Borrowck::castReinterprets(&mut defs, &mut store, sourceId, targetId), expected);
+}
+
+/// Scenario: casts between numbers, booleans and `char` are conversions.
+/// Spec: L66.
+@test
+function castNumericConversionsDoNotReinterpret(): void {
+  castCase(Analyzer::Type::I32, Analyzer::Type::U64, false);
+  castCase(Analyzer::Type::U8, Analyzer::Type::F64, false);
+  castCase(Analyzer::Type::BOOLEAN, Analyzer::Type::I32, false);
+  castCase(Analyzer::Type::I32, Analyzer::Type::CHAR, false);
+}
+
+/// Scenario: a cast of a `str` to itself is no reinterpretation.
+/// Spec: L66.
+@test
+function castStrToStrDoesNotReinterpret(): void {
+  castCase(Analyzer::Type::STR, Analyzer::Type::STR, false);
+}
+
+/// Scenario: an integer becoming a `str` (`@pointerFromInteger<str>`), and a
+/// `str` becoming an integer (`@integerFromPointer`), reinterpret.
+/// Spec: L66.
+@test
+function castBetweenIntegerAndStrReinterprets(): void {
+  castCase(Analyzer::Type::U64, Analyzer::Type::STR, true);
+  castCase(Analyzer::Type::STR, Analyzer::Type::U64, true);
+}
+
+/// Scenario: a reference cast to a reference of another referent
+/// (`(&text) as &u64`) reinterprets; to the same type it does not; an integer
+/// becoming a reference (`@pointerFromInteger<&u64>`) reinterprets.
+/// Spec: L66.
+@test
+function castReferencesReinterpretOnlyAcrossReferents(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idU64: Analyzer::TypeId = store.intern(Analyzer::Type::U64);
+  let refStr: Analyzer::TypeId = store.reference(idStr);
+  let refU64: Analyzer::TypeId = store.reference(idU64);
+
+  Test::assert(Borrowck::castReinterprets(&mut defs, &mut store, refStr, refU64));
+  Test::assert(!Borrowck::castReinterprets(&mut defs, &mut store, refStr, refStr));
+  Test::assert(Borrowck::castReinterprets(&mut defs, &mut store, idU64, refU64));
+}
+
+/// Scenario: `(&label) as &u64` in a function keeps the borrow to scope end.
+/// Spec: L66.
+@test
+function fallbackReferenceCastKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let bits: u64 = *((&label) as &u64);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@sliceFromParts` over a reference keeps the borrow to scope end.
+/// Spec: L66.
+@test
+function fallbackSliceFromReferenceKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let words: u64[] = @sliceFromParts<u64>(&label, 1);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `bool`/`char`/integer conversions do not trigger the fallback.
+/// Spec: L66.
+@test
+function fallbackValueConversionsRelease(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let flag: boolean = true;\n  let wide: i32 = flag as i32;\n  let letter: char = 65 as char;").toStr());
+  Test::assertEq<u64>(borrowckCountErrors(&bag), 0);
+}

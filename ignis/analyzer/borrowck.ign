@@ -8567,19 +8567,124 @@ export namespace Borrowck {
     return Option::NONE;
   }
 
-  /// Whether `typeId` is a primitive integer type.
-  function isIntegerType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
-    return match (typeStore.get(typeId)) {
-      Option::SOME(Analyzer::Type::I8) -> true,
-      Option::SOME(Analyzer::Type::I16) -> true,
-      Option::SOME(Analyzer::Type::I32) -> true,
-      Option::SOME(Analyzer::Type::I64) -> true,
-      Option::SOME(Analyzer::Type::U8) -> true,
-      Option::SOME(Analyzer::Type::U16) -> true,
-      Option::SOME(Analyzer::Type::U32) -> true,
-      Option::SOME(Analyzer::Type::U64) -> true,
-      _ -> false,
+  /// How a cast operand or target is classified by `castReinterprets`.
+  const CAST_KIND_OTHER: u8 = 0;
+  const CAST_KIND_NUMERIC: u8 = 1;
+  const CAST_KIND_INTEGER: u8 = 2;
+  const CAST_KIND_POINTER: u8 = 3;
+  const CAST_KIND_REFERENCE: u8 = 4;
+  const CAST_KIND_STR: u8 = 5;
+
+  /// Whether a cast from `source` to `target` reinterprets storage instead
+  /// of converting a value: either side is a reference, a `str` or a raw
+  /// pointer and the types differ (a `&mut T` to `&T` and a `static str` to
+  /// `str` are conversions), an integer becomes anything but a number, a
+  /// boolean or a `char`, or a value that can carry a view becomes an
+  /// integer.
+  public function castReinterprets(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    source: Analyzer::TypeId,
+    target: Analyzer::TypeId,
+  ): boolean {
+    let sourceType: Analyzer::TypeId = Borrowck::withoutAliases(defStore, typeStore, source);
+    let targetType: Analyzer::TypeId = Borrowck::withoutAliases(defStore, typeStore, target);
+
+    if (sourceType.raw() == targetType.raw()) {
+      return false;
+    }
+
+    let fromKind: u8 = Borrowck::castKindOf(defStore, typeStore, sourceType);
+    let toKind: u8 = Borrowck::castKindOf(defStore, typeStore, targetType);
+
+    if (fromKind == Borrowck::CAST_KIND_STR && toKind == Borrowck::CAST_KIND_STR) {
+      return false;
+    }
+
+    if (fromKind == Borrowck::CAST_KIND_REFERENCE && toKind == Borrowck::CAST_KIND_REFERENCE) {
+      return Borrowck::referentOf(typeStore, sourceType).raw() != Borrowck::referentOf(typeStore, targetType).raw();
+    }
+
+    if (Borrowck::isAddressKind(fromKind) || Borrowck::isAddressKind(toKind)) {
+      return true;
+    }
+
+    if (fromKind == Borrowck::CAST_KIND_INTEGER) {
+      return toKind != Borrowck::CAST_KIND_INTEGER && toKind != Borrowck::CAST_KIND_NUMERIC;
+    }
+
+    if (toKind == Borrowck::CAST_KIND_INTEGER) {
+      return Analyzer::ViewType::canCarryView(defStore, typeStore, sourceType);
+    }
+
+    return false;
+  }
+
+  function isAddressKind(kind: u8): boolean {
+    return kind == Borrowck::CAST_KIND_POINTER || kind == Borrowck::CAST_KIND_REFERENCE || kind == Borrowck::CAST_KIND_STR;
+  }
+
+  function castKindOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): u8 {
+    let resolved: Analyzer::TypeId = Borrowck::withoutAliases(defStore, typeStore, typeId);
+
+    return match (typeStore.get(resolved)) {
+      Option::SOME(Analyzer::Type::I8) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::I16) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::I32) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::I64) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::U8) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::U16) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::U32) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::U64) -> Borrowck::CAST_KIND_INTEGER,
+      Option::SOME(Analyzer::Type::F32) -> Borrowck::CAST_KIND_NUMERIC,
+      Option::SOME(Analyzer::Type::F64) -> Borrowck::CAST_KIND_NUMERIC,
+      Option::SOME(Analyzer::Type::BOOLEAN) -> Borrowck::CAST_KIND_NUMERIC,
+      Option::SOME(Analyzer::Type::CHAR) -> Borrowck::CAST_KIND_NUMERIC,
+      Option::SOME(Analyzer::Type::Pointer(_)) -> Borrowck::CAST_KIND_POINTER,
+      Option::SOME(Analyzer::Type::Reference(_)) -> Borrowck::CAST_KIND_REFERENCE,
+      Option::SOME(Analyzer::Type::STR) -> Borrowck::CAST_KIND_STR,
+      Option::SOME(Analyzer::Type::STATIC_STR) -> Borrowck::CAST_KIND_STR,
+      _ -> Borrowck::CAST_KIND_OTHER,
     };
+  }
+
+  function referentOf(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): Analyzer::TypeId {
+    return match (typeStore.get(typeId)) {
+      Option::SOME(Analyzer::Type::Reference(reference)) -> reference.referent,
+      _ -> typeId,
+    };
+  }
+
+  /// `typeId` with every alias followed to the aliased type.
+  function withoutAliases(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): Analyzer::TypeId {
+    let mut current: Analyzer::TypeId = typeId;
+    let mut depth: u32 = 0;
+
+    while (depth < 64) {
+      let Option::SOME(Analyzer::Type::Alias(aliasDefId)) = typeStore.get(current) else {
+        return current;
+      };
+
+      let Option::SOME(aliased) = Borrowck::aliasedTypeOf(defStore, aliasDefId) else {
+        return current;
+      };
+
+      current = aliased;
+      depth += 1;
+    }
+
+    return current;
   }
 
   /// Whether `callee` is a function declared in an `extern` block.
@@ -8598,11 +8703,12 @@ export namespace Borrowck {
   /// `@bitCast`, `@read`, `@write` (volatile included) or atomic builtin, or
   /// any node whose type holds a raw pointer at any depth
   /// (`Analyzer::ViewType::holdsRawPointer`, so the buffers of `String` and
-  /// the standard `@owns` storage do not count), or a cast to an integer of a
-  /// value that can carry a view. `@pointerCast` and `@pointerFromInteger`
-  /// have a pointer-typed result; `@integerFromPointer` accepts any operand
-  /// and lowers to a cast to `u64`, so `@integerFromPointer(text)` shows no
-  /// pointer-typed node and is caught by the cast rule.
+  /// the standard `@owns` storage do not count), any cast that is not a value
+  /// conversion (`castReinterprets`), or a `@sliceFromParts` whose data is
+  /// not a raw pointer. The pointer builtins lower to casts that need not
+  /// show a pointer-typed node: `@integerFromPointer(text)` is a cast of a
+  /// `str` to `u64`, `@pointerFromInteger<str>(bits)` a cast of `u64` to
+  /// `str`, and `(&text) as &u64` a cast between references.
   /// Such a function keeps every borrow a binding holds to the end of its
   /// scope: the last-use rule cannot follow a view through raw pointers.
   public function functionUsesRawPointers(
@@ -8636,12 +8742,24 @@ export namespace Borrowck {
           }
 
           if (let Hir::HirKind::Cast(cast) = &node.kind) {
-            if (Borrowck::isIntegerType(typeStore, cast.target)) {
-              if (let Option::SOME(operandType) = Borrowck::nodeTypeOf(hir, cast.expression)) {
-                if (Analyzer::ViewType::canCarryView(defStore, typeStore, operandType)) {
-                  return true;
-                }
+            if (let Option::SOME(operandType) = Borrowck::nodeTypeOf(hir, cast.expression)) {
+              if (Borrowck::castReinterprets(defStore, typeStore, operandType, cast.target)) {
+                return true;
               }
+            }
+          }
+
+          // `@sliceFromParts` over anything but a raw pointer reads the
+          // storage of whatever it was handed (`@sliceFromParts<u64>(&text, 1)`).
+          if (let Hir::HirKind::MakeSlice(slice) = &node.kind) {
+            let mut pointerData: boolean = false;
+
+            if (let Option::SOME(dataType) = Borrowck::nodeTypeOf(hir, slice.data)) {
+              pointerData = Borrowck::castKindOf(defStore, typeStore, dataType) == Borrowck::CAST_KIND_POINTER;
+            }
+
+            if (!pointerData) {
+              return true;
             }
           }
 

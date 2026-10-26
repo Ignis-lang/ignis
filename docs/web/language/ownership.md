@@ -191,8 +191,9 @@ A view must not outlive its owner:
   the end of their scope. A function uses them when its body, nested blocks and closure
   bodies included, contains an `asm` statement, a `@bitCast`, `@read`, `@write` (volatile
   included) or atomic builtin, or any expression whose type holds a raw pointer at any depth
-  (`text as *u8`, `@pointerCast`, a record with a `*u8` field), or a cast to an integer of a
-  view or reference (`@integerFromPointer(text)`); the buffers `String` and the
+  (`text as *u8`, `@pointerCast`, a record with a `*u8` field), or any cast that reinterprets
+  a reference, a view or an address (including `@pointerFromInteger`, `@integerFromPointer`
+  and `@sliceFromParts`); the buffers `String` and the
   standard `@owns` types (`Vector`, `Rc`, ...) keep for themselves do not count, their type
   arguments do (`Vector<*u8>`). A callee that keeps a view it received, by turning it into a raw
   pointer or an address and storing or returning it, or by handing it to an `extern` function, is outside this rule: its own function keeps its borrows to scope end, but its
