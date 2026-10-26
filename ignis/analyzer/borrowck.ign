@@ -8567,6 +8567,17 @@ export namespace Borrowck {
     return Option::NONE;
   }
 
+  /// Whether `callee` is a function declared in an `extern` block.
+  function isExternFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    callee: Analyzer::DefinitionId
+  ): boolean {
+    return match (defStore.get(callee)) {
+      Option::SOME(Analyzer::Definition::Function(functionDef)) -> functionDef.isExtern,
+      _ -> false,
+    };
+  }
+
   /// Whether the function body at `bodyId`, nested blocks and closure bodies
   /// included, uses raw pointers or inline assembly: an `asm`, any
   /// `@bitCast`, `@read`, `@write` (volatile included) or atomic builtin, or
@@ -8898,6 +8909,12 @@ export namespace Borrowck {
         return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::SOME(callNode.callee), carriers);
       },
       Hir::HirKind::Call(callNode) -> {
+        // An `extern` function can keep what it receives where the borrow
+        // check cannot see, so a carrier handed to one directly is a sink.
+        if (Borrowck::isExternFunction(defStore, callNode.callee) && Borrowck::anyMentions(hir, &callNode.args, carriers)) {
+          return true;
+        }
+
         return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, Option::NONE, carriers);
       },
       Hir::HirKind::MethodCall(callNode) -> {

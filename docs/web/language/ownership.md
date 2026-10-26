@@ -184,6 +184,9 @@ A view must not outlive its owner:
   whose referent can carry one (`&mut str`) or a function-typed field next to the view — so a
   `&mut String` view used as a receiver, or a by-reference closure being called without the
   view among its arguments, does not keep the borrow.
+- A view passed directly to an `extern` function, alone or inside anything carrying it, keeps
+  its owner borrowed to the end of the scope; an Ignis function that wraps one, such as
+  `Io::println`, is an ordinary call.
 - In a function that uses raw pointers or inline assembly, borrows held by bindings last to
   the end of their scope. A function uses them when its body, nested blocks and closure
   bodies included, contains an `asm` statement, a `@bitCast`, `@read`, `@write` (volatile

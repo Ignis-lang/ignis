@@ -1,0 +1,46 @@
+// e2e: err
+// An `extern` function can keep a view it receives where the borrow check
+// cannot see, so a view passed to one directly, alone or inside a record,
+// keeps its owner borrowed to the end of the scope: every mutation below is
+// rejected (A0037).
+record Pair {
+  public text: str;
+  public n: i32;
+}
+
+extern Native {
+  function setLabel(text: str): void;
+  function setPair(pair: Pair): void;
+}
+
+function viewArgument(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  Native::setLabel(text);
+  owned.pushStr("grow");
+}
+
+function recordArgument(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  Native::setPair(Pair { text: text, n: 1 });
+  owned.pushStr("grow");
+}
+
+function inLoopBody(): void {
+  let mut owned: String = String::create("seed");
+  let mut round: i32 = 0;
+  while (round < 2) {
+    round += 1;
+    let text: str = owned.toStr();
+    Native::setLabel(text);
+    owned.pushStr("grow");
+  }
+}
+
+function main(): i32 {
+  viewArgument();
+  recordArgument();
+  inLoopBody();
+  return 0;
+}
