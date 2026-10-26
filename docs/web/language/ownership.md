@@ -191,10 +191,11 @@ A view must not outlive its owner:
   the end of their scope. A function uses them when its body, nested blocks and closure
   bodies included, contains an `asm` statement, a `@bitCast`, `@read`, `@write` (volatile
   included) or atomic builtin, or any expression whose type holds a raw pointer at any depth
-  (`text as *u8`, `@pointerCast`, a record with a `*u8` field); the buffers `String` and the
+  (`text as *u8`, `@pointerCast`, a record with a `*u8` field), or a cast to an integer of a
+  view or reference (`@integerFromPointer(text)`); the buffers `String` and the
   standard `@owns` types (`Vector`, `Rc`, ...) keep for themselves do not count, their type
   arguments do (`Vector<*u8>`). A callee that keeps a view it received, by turning it into a raw
-  pointer and storing it or by handing it to an `extern` function, is outside this rule: its own function keeps its borrows to scope end, but its
+  pointer or an address and storing or returning it, or by handing it to an `extern` function, is outside this rule: its own function keeps its borrows to scope end, but its
   caller's does not, so raw pointers are the programmer's responsibility.
 - A view taken through a view local that holds such a borrow borrows that local, not its
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`

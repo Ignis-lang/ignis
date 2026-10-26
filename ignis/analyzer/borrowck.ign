@@ -8567,6 +8567,21 @@ export namespace Borrowck {
     return Option::NONE;
   }
 
+  /// Whether `typeId` is a primitive integer type.
+  function isIntegerType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    return match (typeStore.get(typeId)) {
+      Option::SOME(Analyzer::Type::I8) -> true,
+      Option::SOME(Analyzer::Type::I16) -> true,
+      Option::SOME(Analyzer::Type::I32) -> true,
+      Option::SOME(Analyzer::Type::I64) -> true,
+      Option::SOME(Analyzer::Type::U8) -> true,
+      Option::SOME(Analyzer::Type::U16) -> true,
+      Option::SOME(Analyzer::Type::U32) -> true,
+      Option::SOME(Analyzer::Type::U64) -> true,
+      _ -> false,
+    };
+  }
+
   /// Whether `callee` is a function declared in an `extern` block.
   function isExternFunction(
     defStore: &mut Analyzer::DefinitionStore,
@@ -8583,9 +8598,11 @@ export namespace Borrowck {
   /// `@bitCast`, `@read`, `@write` (volatile included) or atomic builtin, or
   /// any node whose type holds a raw pointer at any depth
   /// (`Analyzer::ViewType::holdsRawPointer`, so the buffers of `String` and
-  /// the standard `@owns` storage do not count). Every pointer builtin
-  /// (`@pointerCast`, `@pointerFromInteger`, `@integerFromPointer`, a
-  /// `@bitCast` to or from a pointer) has a pointer-typed operand or result.
+  /// the standard `@owns` storage do not count), or a cast to an integer of a
+  /// value that can carry a view. `@pointerCast` and `@pointerFromInteger`
+  /// have a pointer-typed result; `@integerFromPointer` accepts any operand
+  /// and lowers to a cast to `u64`, so `@integerFromPointer(text)` shows no
+  /// pointer-typed node and is caught by the cast rule.
   /// Such a function keeps every borrow a binding holds to the end of its
   /// scope: the last-use rule cannot follow a view through raw pointers.
   public function functionUsesRawPointers(
@@ -8616,6 +8633,16 @@ export namespace Borrowck {
 
           if (rawAccess) {
             return true;
+          }
+
+          if (let Hir::HirKind::Cast(cast) = &node.kind) {
+            if (Borrowck::isIntegerType(typeStore, cast.target)) {
+              if (let Option::SOME(operandType) = Borrowck::nodeTypeOf(hir, cast.expression)) {
+                if (Analyzer::ViewType::canCarryView(defStore, typeStore, operandType)) {
+                  return true;
+                }
+              }
+            }
           }
 
           let key: u64 = node.typeId.raw() as u64;

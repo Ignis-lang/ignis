@@ -1707,3 +1707,28 @@ function fallbackBitCastThroughIntegersKeepsBorrow(): void {
   let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let bits: u64 = @bitCast<u64>(7 as i64);").toStr());
   Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
 }
+
+/// Scenario: `@integerFromPointer` of a `str`, which lowers to a cast to `u64`
+/// with no pointer-typed node, keeps the borrow to scope end.
+/// Spec: L63.
+@test
+function fallbackIntegerFromViewKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let address: u64 = @integerFromPointer(label);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@integerFromPointer` of a reference to a `str` keeps the borrow.
+/// Spec: L63.
+@test
+function fallbackIntegerFromReferenceKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let label: str = \"x\";\n  let address: u64 = @integerFromPointer(&label);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: an integer cast of an integer does not trigger the fallback.
+/// Spec: L63.
+@test
+function fallbackIntegerCastOfIntegerReleases(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let n: i32 = 3;\n  let wide: u64 = n as u64;").toStr());
+  Test::assertEq<u64>(borrowckCountErrors(&bag), 0);
+}
