@@ -1,0 +1,33 @@
+// e2e: err
+// A capture-free function value may point at an `extern` function, so a view
+// passed through one keeps its owner borrowed to the end of the scope: every
+// mutation below is rejected (A0037).
+extern Native {
+  function setLabel(text: str): void;
+}
+
+record Sinks {
+  public label: fn(str) -> void;
+}
+
+function localValue(): void {
+  let mut owned: String = String::create("seed");
+  let text: str = owned.toStr();
+  let f: fn(str) -> void = Native::setLabel;
+  f(text);
+  owned.pushStr("grow");
+}
+
+function fieldValue(): void {
+  let mut owned: String = String::create("seed");
+  let sinks: Sinks = Sinks { label: Native::setLabel };
+  let text: str = owned.toStr();
+  (sinks.label)(text);
+  owned.pushStr("grow");
+}
+
+function main(): i32 {
+  localValue();
+  fieldValue();
+  return 0;
+}

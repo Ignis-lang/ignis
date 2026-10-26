@@ -184,8 +184,8 @@ A view must not outlive its owner:
   whose referent can carry one (`&mut str`) or a function-typed field next to the view — so a
   `&mut String` view used as a receiver, or a by-reference closure being called without the
   view among its arguments, does not keep the borrow.
-- A view passed directly to an `extern` function, alone or inside anything carrying it, keeps
-  its owner borrowed to the end of the scope; an Ignis function that wraps one, such as
+- A view passed to an `extern` function, directly or through a function value, alone or
+  inside anything carrying it, keeps its owner borrowed to the end of the scope; an Ignis function that wraps one, such as
   `Io::println`, is an ordinary call.
 - In a function that uses raw pointers or inline assembly, borrows held by bindings last to
   the end of their scope. A function uses them when its body, nested blocks and closure
@@ -193,8 +193,8 @@ A view must not outlive its owner:
   included) or atomic builtin, or any expression whose type holds a raw pointer at any depth
   (`text as *u8`, `@pointerCast`, a record with a `*u8` field); the buffers `String` and the
   standard `@owns` types (`Vector`, `Rc`, ...) keep for themselves do not count, their type
-  arguments do (`Vector<*u8>`). A callee that turns a view it received into a raw pointer and
-  stores it is outside this rule: its own function keeps its borrows to scope end, but its
+  arguments do (`Vector<*u8>`). A callee that keeps a view it received, by turning it into a raw
+  pointer and storing it or by handing it to an `extern` function, is outside this rule: its own function keeps its borrows to scope end, but its
   caller's does not, so raw pointers are the programmer's responsibility.
 - A view taken through a view local that holds such a borrow borrows that local, not its
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
