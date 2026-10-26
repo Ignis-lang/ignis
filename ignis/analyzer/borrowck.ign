@@ -458,6 +458,11 @@ export namespace Borrowck {
     /// the expression that took it because the body runs at scope exit.
     public inDefer: boolean;
 
+    /// Whether the function uses raw pointers or inline assembly
+    /// (`functionUsesRawPointers`): every borrow a binding holds then lasts
+    /// to the end of its scope.
+    public keepsBorrowsToScopeEnd: boolean;
+
     /// True while walking the body of an instance `drop` method of a `Drop`
     /// type, where `self.field.drop()` is the recursive teardown the type
     /// owes rather than an untracked manual drop. Mirrors
@@ -550,6 +555,7 @@ export namespace Borrowck {
         movedWhileBorrowedSpans: Vector::new<SourceSpan>(),
         reachable: true,
         inDefer: false,
+        keepsBorrowsToScopeEnd: false,
         inDropMethod: false,
         currentFunction: Id::fromRaw<Analyzer::DefinitionTag>(0),
         reportEnabled: false,
@@ -848,6 +854,10 @@ export namespace Borrowck {
       self.reportEvents = Vector::new<Borrowck::OwnershipEvent>();
 
       return taken;
+    }
+
+    public setKeepsBorrowsToScopeEnd(&mut self, value: boolean): void {
+      self.keepsBorrowsToScopeEnd = value;
     }
 
     public setOwnedBuffer(&mut self, definition: u32): void {
@@ -1799,23 +1809,6 @@ export namespace Borrowck {
                     }
 
                     paramIndex += 1;
-                  }
-                },
-                Hir::HirKind::InlineAsm(asmNode) -> {
-                  let mut outputIndex: u64 = 0;
-
-                  while (outputIndex < asmNode.outputs.length()) {
-                    if (let Option::SOME(output) = asmNode.outputs.get(outputIndex)) {
-                      if (let Option::SOME(place) = output.place) {
-                        if (let Option::SOME(placeNode) = hir.get(place)) {
-                          if (let Hir::HirKind::Variable(defId) = &placeNode.kind) {
-                            declared.insert(defId.raw() as u64, 1);
-                          }
-                        }
-                      }
-                    }
-
-                    outputIndex += 1;
                   }
                 },
                 _ -> {},
@@ -8324,7 +8317,7 @@ export namespace Borrowck {
         while (sinkIndex < end) {
           let nodeId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(state.planNodeRawAt(plan, sinkIndex));
 
-          if (Borrowck::nodeStoresView(defStore, typeStore, hir, nodeId, &carriers, state.ownedBuffer)) {
+          if (Borrowck::nodeStoresView(defStore, typeStore, hir, nodeId, &carriers)) {
             return Borrowck::NO_LAST_STATEMENT;
           }
 
@@ -8383,53 +8376,6 @@ export namespace Borrowck {
       }
 
       if (let Option::SOME(node) = hir.get(nodeId)) {
-        // A statement `asm` writes its outputs and `inout` places like
-        // assignments do.
-        if (let Hir::HirKind::InlineAsm(asmNode) = &node.kind) {
-          let mut places: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
-          let mut inputIndex: u64 = 0;
-
-          while (inputIndex < asmNode.inputs.length()) {
-            if (let Option::SOME(input) = asmNode.inputs.get(inputIndex)) {
-              if (input.isPlace && input.writes) {
-                places.push(input.value);
-              }
-            }
-
-            inputIndex += 1;
-          }
-
-          let mut outputIndex: u64 = 0;
-
-          while (outputIndex < asmNode.outputs.length()) {
-            if (let Option::SOME(output) = asmNode.outputs.get(outputIndex)) {
-              if (let Option::SOME(place) = output.place) {
-                places.push(place);
-              }
-            }
-
-            outputIndex += 1;
-          }
-
-          let mut placeIndex: u64 = 0;
-
-          while (placeIndex < places.length()) {
-            if (let Option::SOME(place) = places.get(placeIndex)) {
-              let mut qualifies: boolean = true;
-
-              if (let Option::SOME(placeType) = Borrowck::nodeTypeOf(hir, *place)) {
-                qualifies = Analyzer::ViewType::canHoldDerived(defStore, typeStore, placeType, state.ownedBuffer);
-              }
-
-              if (qualifies && !Borrowck::pushPlaceRoot(defStore, typeStore, hir, block, *place, 0, output)) {
-                return false;
-              }
-            }
-
-            placeIndex += 1;
-          }
-        }
-
         if (let Hir::HirKind::Assign(assignNode) = &node.kind) {
           let mut qualifies: boolean = true;
 
@@ -8619,6 +8565,68 @@ export namespace Borrowck {
     }
 
     return Option::NONE;
+  }
+
+  /// Whether the function body at `bodyId`, nested blocks and closure bodies
+  /// included, uses raw pointers or inline assembly: an `asm`, any
+  /// `@bitCast`, `@read`, `@write` (volatile included) or atomic builtin, or
+  /// any node whose type holds a raw pointer at any depth
+  /// (`Analyzer::ViewType::holdsRawPointer`, so the buffers of `String` and
+  /// the standard `@owns` storage do not count). Every pointer builtin
+  /// (`@pointerCast`, `@pointerFromInteger`, `@integerFromPointer`, a
+  /// `@bitCast` to or from a pointer) has a pointer-typed operand or result.
+  /// Such a function keeps every borrow a binding holds to the end of its
+  /// scope: the last-use rule cannot follow a view through raw pointers.
+  public function functionUsesRawPointers(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    bodyId: Hir::HirId,
+    ownedBuffer: u32,
+  ): boolean {
+    let nodes: Vector<Hir::HirId> = Borrowck::subtreeNodes(hir, bodyId);
+    let mut checked: HashMap<u64, boolean> = HashMap::new<u64, boolean>();
+    let mut index: u64 = 0;
+
+    while (index < nodes.length()) {
+      if (let Option::SOME(nodeId) = nodes.get(index)) {
+        if (let Option::SOME(node) = hir.get(*nodeId)) {
+          // These read or write through, or launder, a pointer whatever the
+          // types they show: `@bitCast<u64[2]>(text)` turns a view into
+          // integers that `@bitCast<str>` turns back.
+          let rawAccess: boolean = match (&node.kind) {
+            Hir::HirKind::InlineAsm(_) -> true,
+            Hir::HirKind::BitCast(_) -> true,
+            Hir::HirKind::BuiltinLoad(_) -> true,
+            Hir::HirKind::BuiltinStore(_) -> true,
+            Hir::HirKind::BuiltinAtomic(_) -> true,
+            _ -> false,
+          };
+
+          if (rawAccess) {
+            return true;
+          }
+
+          let key: u64 = node.typeId.raw() as u64;
+          let mut holds: boolean = false;
+
+          if (let Option::SOME(known) = checked.get(&key)) {
+            holds = *known;
+          } else {
+            holds = Analyzer::ViewType::holdsRawPointer(defStore, typeStore, node.typeId, ownedBuffer);
+            checked.insert(key, holds);
+          }
+
+          if (holds) {
+            return true;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
   }
 
   /// The module symbol path of `std/string/mod.ign`, which declares `String`.
@@ -8824,7 +8832,7 @@ export namespace Borrowck {
   }
 
   /// Every node of the subtree at `nodeId`, closure bodies included.
-  function subtreeNodes(hir: &Hir::HirStore, nodeId: Hir::HirId): Vector<Hir::HirId> {
+  public function subtreeNodes(hir: &Hir::HirStore, nodeId: Hir::HirId): Vector<Hir::HirId> {
     let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     let mut pending: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
     pending.push(nodeId);
@@ -8867,7 +8875,6 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     nodeId: Hir::HirId,
     carriers: &Vector<u32>,
-    ownedBuffer: u32,
   ): boolean {
     let Option::SOME(node) = hir.get(nodeId) else {
       return false;
@@ -8888,10 +8895,10 @@ export namespace Borrowck {
       Hir::HirKind::CallClosure(callNode) -> {
         let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
         operands.push(callNode.callee);
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::SOME(callNode.callee), carriers, ownedBuffer);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::SOME(callNode.callee), carriers);
       },
       Hir::HirKind::Call(callNode) -> {
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, Option::NONE, carriers, ownedBuffer);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &callNode.args, Option::NONE, carriers);
       },
       Hir::HirKind::MethodCall(callNode) -> {
         let mut operands: Vector<Hir::HirId> = Borrowck::copyHirIds(&callNode.args);
@@ -8900,7 +8907,7 @@ export namespace Borrowck {
           operands.push(receiver);
         }
 
-        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::NONE, carriers, ownedBuffer);
+        return Borrowck::callHandsViewToSink(defStore, typeStore, hir, &operands, Option::NONE, carriers);
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
         return Borrowck::mentionsAny(hir, storeNode.value, carriers);
@@ -8935,7 +8942,6 @@ export namespace Borrowck {
     operands: &Vector<Hir::HirId>,
     closureCallee: Option<Hir::HirId>,
     carriers: &Vector<u32>,
-    ownedBuffer: u32,
   ): boolean {
     if (!Borrowck::anyMentions(hir, operands, carriers)) {
       return false;
@@ -8988,12 +8994,6 @@ export namespace Borrowck {
           }
         } else if (Borrowck::mentionsAny(hir, *operand, carriers)) {
           if (!isCallee && Analyzer::ViewType::canReachViewHoldingPlace(defStore, typeStore, operandType)) {
-            return true;
-          }
-
-          // A carrier holding a raw pointer can be stored by the callee
-          // anywhere, a static included, whatever its other operands.
-          if (!isCallee && Analyzer::ViewType::holdsRawPointer(defStore, typeStore, operandType, ownedBuffer)) {
             return true;
           }
         } else if (Analyzer::ViewType::canReachMutablePlace(defStore, typeStore, operandType)) {
@@ -9065,7 +9065,7 @@ export namespace Borrowck {
       if (let Option::SOME(statement) = block.statements.get(index)) {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *statement);
 
-        if (state.reachable) {
+        if (state.reachable && !state.keepsBorrowsToScopeEnd) {
           Borrowck::releaseEndedHolders(defStore, typeStore, hir, state, block, blockId, index, *statement);
         }
       }
@@ -10742,6 +10742,7 @@ export namespace Borrowck {
     state.setInDropMethod(Borrowck::isInstanceDropMethod(defStore, symbols, functionId));
     state.setCurrentFunction(functionId);
     state.setOwnedBuffer(ownedBuffer);
+    state.setKeepsBorrowsToScopeEnd(Borrowck::functionUsesRawPointers(defStore, typeStore, hir, bodyId, ownedBuffer));
 
     let mut captureIndex: u64 = 0;
 

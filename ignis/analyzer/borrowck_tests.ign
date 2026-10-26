@@ -1621,3 +1621,89 @@ function stdStringFindsStdModule(): void {
 
   Test::assertEq<u32>(Borrowck::stdStringDefinition(&mut defs, &mut syms), stdId.raw());
 }
+
+/// The S1 program: a `&mut` binding used once, then its owner written, with
+/// `extra` inserted before the borrow.
+function fallbackProgram(extra: str): String {
+  return `record Counter {
+  public value: i32;
+}
+
+function main(): i32 {
+  let mut counter: Counter = Counter { value: 0 };
+  ${extra}
+  let r: &mut Counter = &mut counter;
+  r.value = 1;
+  counter.value = 2;
+  return counter.value;
+}
+`;
+}
+
+/// Scenario: a function without raw pointers or `asm` releases the borrow at
+/// its last use.
+/// Spec: S1, L55.
+@test
+function fallbackPointerFreeReleasesAtLastUse(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let unused: i32 = 0;").toStr());
+  Test::assertEq<u64>(borrowckCountErrors(&bag), 0);
+}
+
+/// Scenario: a pointer-typed expression anywhere in the function keeps the
+/// borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackPointerExpressionKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let unused: *i32 = @pointerFromInteger<*i32>(0);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@integerFromPointer` keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackIntegerFromPointerKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let x: i32 = 0; let address: u64 = @integerFromPointer((&x) as *i32);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@pointerCast` keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackPointerCastKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let unused: *u8 = @pointerCast<*u8>(@pointerFromInteger<*i32>(0));").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: `@bitCast` from a pointer keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackBitCastKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let bits: u64 = @bitCast<u64>(@pointerFromInteger<*i32>(0));").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: an inline `asm` keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackInlineAsmKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let half: u64 = 0;\n  asm pure (21 in rax) -> (copied: u64 in rax) { nop }").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: a pointer inside a closure body counts for the enclosing
+/// function.
+/// Spec: L55.
+@test
+function fallbackPointerInClosureBodyKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let f = (): void -> { let unused: *i32 = @pointerFromInteger<*i32>(0); };\n  f();").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}
+
+/// Scenario: a `@bitCast` round trip through integers, which no pointer-typed
+/// node shows, keeps the borrow to scope end.
+/// Spec: L55.
+@test
+function fallbackBitCastThroughIntegersKeepsBorrow(): void {
+  let bag: DiagnosticBag = borrowckDiagnostics(fallbackProgram("let bits: u64 = @bitCast<u64>(7 as i64);").toStr());
+  Test::assertEq<u64>(borrowckCountCode(&bag, "A0047"), 1);
+}

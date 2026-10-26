@@ -166,35 +166,33 @@ A view must not outlive its owner:
   binding or anything carrying its view — a copy, an aggregate or field initialized from it, a
   pattern binding destructured from it, a closure capturing it, or any binding declared or
   place assigned (a local, a field, `*reference`, an element) by a statement that uses it,
-  when that type can hold a view, a closure or a raw pointer at any depth (`text as *u8`, a
-  `CArgs { name: *u8 }` returned by a call that received the view). Only the buffers of
-  `String` and of types with an `@owns` type parameter (`Vector`, `Rc`, ...) do not count;
-  their type arguments do (`Vector<*u8>`), and a user `Drop` type counts through its fields.
-  A place whose storage does not resolve to a local of the block — a static, or a place
-  reached through a reference or pointer held inside another value (`wrapper.r.p`) — keeps
-  the borrow to the end of the block.
-  Granularity is the whole
+  when that type can hold a view or a closure. A place whose storage does not resolve to a
+  local of the block — a static, or a place reached through a reference held inside another
+  value (`wrapper.r.p`) — keeps the borrow to the end of the block. Granularity is the whole
   statement: a use inside a loop body keeps the borrow for every iteration, a use in the
   block's tail or in a `defer` body (wherever the `defer` is written, before the view
   included) keeps it to the end of the block, as does a carrier whose address the block takes
-  (`&x`, `&mut x`, or a cast of either: aliases are not tracked), and so does a view handed
-  somewhere it can outlive its statement — into a place whose type can carry a view (a view, anything holding a closure value, which may capture one, or a raw pointer whose pointee can carry a view), through a
-  raw pointer or into a volatile, `@write` or atomic sink, or to a call (function, method,
-  closure or `extern` call) that receives anything carrying the view whose type holds a raw
-  pointer at any depth (`keep(text as *u8)`: the callee may store it in a `static`), or one of
-  whose operands gives the callee a place the view could be stored in. An operand reaches a mutable place when its type is `&mut T`, any raw
-  pointer whatever its pointee, or a closure type `(A) -> R` (a capture-free `fn(A) -> R`
-  reaches nothing), or is a record, enum, tuple, fixed array, generic instance, alias or `&T`
-  that contains one; this holds for every operand that does not carry the view, the receiver
-  and a closure callee included. The operand carrying the view counts only through a place
-  that can hold a view — a `&mut T` or raw pointer whose referent can carry one (`&mut str`, a
-  `*mut str` field) or a function-typed field next to the view — so a `&mut String` view used
-  as a receiver, or a by-reference closure being called without the view among its
-  arguments, does not keep the borrow. A raw pointer the callee obtains itself, read from a `static` or cast from
-  a reference it received (`slot as *mut Slot`), a callee that turns a view it received into a
-  raw pointer and stores it (in a `static` or anywhere), or any pointer laundered through an integer
-  (`@integerFromPointer`, `@pointerFromInteger`) or `@bitCast`, is outside this rule: raw pointers are the
-  programmer's responsibility.
+  (`&x`, `&mut x`: aliases are not tracked), and so does a view handed somewhere it can
+  outlive its statement — into a place whose type can carry a view (a view, or anything
+  holding a closure value, which may capture one), or to a call (function, method, closure
+  or `extern` call) one of whose operands gives the callee a place the view could be stored
+  in. An operand reaches a mutable place when its type is `&mut T` or a closure type
+  `(A) -> R` (a capture-free `fn(A) -> R` reaches nothing), or is a record, enum, tuple,
+  fixed array, generic instance, alias or `&T` that contains one; this holds for every
+  operand that does not carry the view, the receiver and a closure callee included. The
+  operand carrying the view counts only through a place that can hold a view — a `&mut T`
+  whose referent can carry one (`&mut str`) or a function-typed field next to the view — so a
+  `&mut String` view used as a receiver, or a by-reference closure being called without the
+  view among its arguments, does not keep the borrow.
+- In a function that uses raw pointers or inline assembly, borrows held by bindings last to
+  the end of their scope. A function uses them when its body, nested blocks and closure
+  bodies included, contains an `asm` statement, a `@bitCast`, `@read`, `@write` (volatile
+  included) or atomic builtin, or any expression whose type holds a raw pointer at any depth
+  (`text as *u8`, `@pointerCast`, a record with a `*u8` field); the buffers `String` and the
+  standard `@owns` types (`Vector`, `Rc`, ...) keep for themselves do not count, their type
+  arguments do (`Vector<*u8>`). A callee that turns a view it received into a raw pointer and
+  stores it is outside this rule: its own function keeps its borrows to scope end, but its
+  caller's does not, so raw pointers are the programmer's responsibility.
 - A view taken through a view local that holds such a borrow borrows that local, not its
   owner again. With `let store: &mut Store = guard.get();`, `store.tasks.get(0).unwrap()`
   borrows `store`, so views derived from `store` only conflict with each other, while `guard`

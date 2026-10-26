@@ -247,10 +247,9 @@ export namespace Analyzer::ViewType {
 
   /// Whether a raw pointer is reachable from a value of `typeId` at any
   /// depth, through aggregates, instances, aliases and references, skipping
-  /// the buffers of the standard owning storage as `canHoldDerived` does
-  /// (closures and unresolved `Param`s count too, since they can hold one).
-  /// A callee handed such a value can store the pointer anywhere, a static
-  /// included, so a view it was derived from stays borrowed.
+  /// the buffers of the standard owning storage as `canHoldDerived` does.
+  /// Function types and `Param`s do not count. A function in which such a
+  /// value appears keeps every binding-held borrow to the end of its scope.
   public function holdsRawPointer(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -258,7 +257,7 @@ export namespace Analyzer::ViewType {
     ownedBuffer: u32,
   ): boolean {
     let mut visiting: Vector<Vector<u32>> = Vector::new<Vector<u32>>();
-    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 3, ownedBuffer, &mut visiting);
+    return ViewType::canReachMutablePlaceInner(defStore, typeStore, typeId, 4, ownedBuffer, &mut visiting);
   }
 
   /// Whether a value of `typeId` lets the code it is handed to write into a
@@ -301,7 +300,8 @@ export namespace Analyzer::ViewType {
   /// where a function type, a `Param` or a raw pointer to a view counts, and
   /// raw pointers are followed to their pointee; 3 the nested part of
   /// `canHoldDerived`, where any raw pointer counts and the fields of the
-  /// standard owning storage are replaced by its type arguments.
+  /// standard owning storage are replaced by its type arguments; 4
+  /// `holdsRawPointer`, mode 3 where function types and `Param`s do not count.
   function canReachMutablePlaceInner(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -321,7 +321,7 @@ export namespace Analyzer::ViewType {
 
     match (type_) {
       Analyzer::Type::Reference(referenceType) -> {
-        if (referenceType.mutable && mode != 2 && mode != 3) {
+        if (referenceType.mutable && mode != 2 && mode != 3 && mode != 4) {
           if (mode == 0 || ViewType::canCarryView(defStore, typeStore, referenceType.referent)) {
             return true;
           }
@@ -330,7 +330,7 @@ export namespace Analyzer::ViewType {
         components.push(referenceType.referent);
       },
       Analyzer::Type::Pointer(pointerType) -> {
-        if (mode == 3) {
+        if (mode == 3 || mode == 4) {
           return true;
         }
 
@@ -345,7 +345,9 @@ export namespace Analyzer::ViewType {
         components.push(pointerType.pointee);
       },
       Analyzer::Type::Function(_) | Analyzer::Type::Param(_) -> {
-        return true;
+        if (mode != 4) {
+          return true;
+        }
       },
       Analyzer::Type::Slice(element) -> {
         components.push(element);
@@ -393,7 +395,7 @@ export namespace Analyzer::ViewType {
 
       let mut owningStorage: boolean = false;
 
-      if (mode == 3) {
+      if (mode == 3 || mode == 4) {
         if (let Option::SOME(arguments) = ViewType::owningStorageArguments(defStore, defId, ownedBuffer)) {
           owningStorage = true;
           let mut argumentIndex: u64 = 0;
