@@ -26,8 +26,18 @@
 //!        └─ endRecord(output, writer)
 //! ```
 //!
-//! The `first` flag controls whether the writer's `entrySeparator` is emitted
+//! The `first` flag controls whether the writer's entry separator is emitted
 //! before a field. The core helpers do not track field count internally.
+//!
+//! ## Nested Records
+//!
+//! A writer carries its `depth`: `0` for the root record, one more for each
+//! enclosing record. `beginRecord`, `writeField` and `endRecord` use the root
+//! punctuation at depth `0` and the `nested*` punctuation below it, which is
+//! how TOML writes a root document but an inline table for a nested record.
+//! A record passes `Serializer::nested(writer)` to the value of a field; the
+//! depth travels in the writer value, so a helper that fails part-way leaves
+//! no state behind.
 //!
 //! ## Escaping
 //!
@@ -65,9 +75,54 @@ export namespace Serializer {
 
     /// Whether field keys are always emitted as quoted strings.
     public quoteFieldKeys: boolean;
+
+    /// Text appended before a record nested in another record, for example
+    /// `{ ` for a TOML inline table.
+    public nestedRecordPrefix: str;
+
+    /// Text appended after a record nested in another record.
+    public nestedRecordSuffix: str;
+
+    /// Text inserted between the entries of a nested record.
+    public nestedEntrySeparator: str;
+
+    /// How many records enclose the value being written: `0` for the root.
+    /// Front-ends start at `0`; `Serializer::nested` derives the writer for a
+    /// field value.
+    public depth: u32;
   }
 
-  /// Appends the writer's record prefix to `output`.
+  /// Returns a copy of `serializer` one record deeper, the writer a record
+  /// passes to the value of one of its fields.
+  ///
+  /// The reflective `Serialize` default does this for every field. A
+  /// handwritten `serialize` that writes a nested record passes the derived
+  /// writer to it, so the nested record takes the nested punctuation.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let nested: Serializer::Writer = Serializer::nested(writer);
+  /// Serializer::writeField(output, "inner", writer, true)!;
+  /// self.inner.serialize(output, &nested)!; // TOML: inner = { a = 1 }
+  /// ```
+  function nested(serializer: &Serializer::Writer): Serializer::Writer {
+    return Serializer::Writer {
+      recordPrefix: serializer.recordPrefix,
+      recordSuffix: serializer.recordSuffix,
+      entrySeparator: serializer.entrySeparator,
+      fieldSeparator: serializer.fieldSeparator,
+      supportsScalarRoot: serializer.supportsScalarRoot,
+      quoteFieldKeys: serializer.quoteFieldKeys,
+      nestedRecordPrefix: serializer.nestedRecordPrefix,
+      nestedRecordSuffix: serializer.nestedRecordSuffix,
+      nestedEntrySeparator: serializer.nestedEntrySeparator,
+      depth: serializer.depth + 1,
+    };
+  }
+
+  /// Appends the writer's record prefix to `output`: `recordPrefix` at depth
+  /// `0`, `nestedRecordPrefix` below it.
   ///
   /// Returns `Result::OK(true)` for consistency with the rest of the serializer
   /// API. This function does not validate that a matching `endRecord` is later
@@ -85,12 +140,18 @@ export namespace Serializer {
     serializer: &Serializer::Writer
   ): Result<boolean, Serializer::Error> {
     let mut writer: &mut String = output;
-    writer.pushStr(serializer.recordPrefix);
+
+    if (serializer.depth == 0) {
+      writer.pushStr(serializer.recordPrefix);
+    } else {
+      writer.pushStr(serializer.nestedRecordPrefix);
+    }
 
     return Result::OK(true);
   }
 
-  /// Appends the writer's record suffix to `output`.
+  /// Appends the writer's record suffix to `output`: `recordSuffix` at depth
+  /// `0`, `nestedRecordSuffix` below it.
   ///
   /// Call this after all fields have been written. The helper does not check
   /// whether the record is empty or whether field separators were used correctly.
@@ -107,15 +168,20 @@ export namespace Serializer {
     serializer: &Serializer::Writer
   ): Result<boolean, Serializer::Error> {
     let mut writer: &mut String = output;
-    writer.pushStr(serializer.recordSuffix);
+
+    if (serializer.depth == 0) {
+      writer.pushStr(serializer.recordSuffix);
+    } else {
+      writer.pushStr(serializer.nestedRecordSuffix);
+    }
 
     return Result::OK(true);
   }
 
   /// Writes a field key and separator for the next record entry.
   ///
-  /// If `first` is `false`, the writer's `entrySeparator` is emitted before the
-  /// key. When `quoteFieldKeys` is enabled, the key is escaped as a quoted string.
+  /// If `first` is `false`, the writer's `entrySeparator` (at depth `0`) or
+  /// `nestedEntrySeparator` (below it) is emitted before the key. When `quoteFieldKeys` is enabled, the key is escaped as a quoted string.
   /// Otherwise the key must be a non-empty ASCII bare key containing only
   /// letters, digits, `_`, or `-`; invalid keys return
   /// `Serializer::ErrorKind::INVALID_FIELD_KEY`.
@@ -145,8 +211,10 @@ export namespace Serializer {
     let keyString: String = String::create(key);
 
     if (first) {
-    } else {
+    } else if (serializer.depth == 0) {
       writer.pushStr(serializer.entrySeparator);
+    } else {
+      writer.pushStr(serializer.nestedEntrySeparator);
     }
 
     if (serializer.quoteFieldKeys) {

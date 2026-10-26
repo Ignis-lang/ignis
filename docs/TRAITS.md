@@ -445,15 +445,22 @@ Rules:
 - A generic block extends an instance over exactly its own type parameters, in order. It applies
   only where the type arguments satisfy its bounds; elsewhere the method is not found (A0054) and
   the bound is not met (A0247).
+- A block without type parameters can extend one concrete instance of a generic type,
+  `extension Vector<u8>` or `extension Option<i64>`. It implements the trait for that instance
+  only: `Vector<i32>` neither has its methods (A0054) nor satisfies the bound (A0247).
+- Blocks over the same generic type coexist when they implement different traits, or the same
+  trait for different concrete instances. A generic block and a concrete-instance block for the
+  same trait overlap, `extension<T> Option<T>` and `extension Option<i64>`, and are an error
+  naming both (A0287).
 - `extension` is a contextual keyword: an identifier named `extension` keeps working.
 
 | Code | Condition |
 |------|-----------|
 | A0285 | The block names no trait in `@implements` |
 | A0286 | The block is declared outside the module of the trait and of the type; a primitive is extended only in the trait's module |
-| A0287 | The type implements the trait twice: two blocks, or a block and the type's own `@implements`. Both spans are named |
+| A0287 | The type implements the trait twice: two blocks over the same type, a generic block and a block over one of its instances, or a block and the type's own `@implements`. Both spans are named |
 | A0288 | The block names a lang trait (`Drop`, `Clone`, `Copy`, `Send`, `Sync`) or the canonical `Eq` or `Hash`, which the compiler answers from the type itself |
-| A0289 | The target is not a primitive, `str`, a record or an enum, or a generic instance not over the block's own parameters |
+| A0289 | The target is not a primitive, `str`, a record, an enum or a concrete instance, or a generic block's instance is not over the block's own parameters |
 
 Per-function `@extension(type)` (below) is unchanged.
 
@@ -831,7 +838,12 @@ trait Seeded {
 
 Per-field-type behavior comes from overloads: each copy calls the overload for its field's type, and
 a field type with no matching overload is reported at its place in the loop body with a note naming
-the field. In the trait's own body `Self` has no known fields, so the loop unrolls over none there.
+the field. The same note marks every other error a copy produces, including a bound a field type
+misses on a generic call (`describe<@fieldType(field)>()` or `describe(&@field(self, field))` with
+`describe<T: Describe>`, `A0247`) and a method call on a field whose type is not a record or enum and
+has no extension block implementing the trait that declares the method (`A0298`, naming the trait
+and the type). In the trait's own body `Self` has no known fields, so the loop unrolls over none
+there.
 
 | Code | Message | Severity |
 |------|---------|----------|
@@ -841,6 +853,7 @@ the field. In the trait's own body `Self` has no known fields, so the loop unrol
 | A0295 | `@field`, `@fieldType`, `@attribute<A>(field)` or `@fields` outside the loop that declares the descriptor | Error |
 | A0296 | Unknown descriptor member, or the descriptor used as a value | Error |
 | A0297 | `@attribute<A>(Self)` with an `A` not declared for the kind of `Self` (record or enum) | Error |
+| A0298 | Method call on a type that is not a record or enum, naming a method of a trait the type does not implement | Error |
 
 ## Diagnostics
 
@@ -886,3 +899,4 @@ the field. In the trait's own body `Self` has no known fields, so the loop unrol
 | A0295 | Field descriptor builtin outside its `comptime for` | Error |
 | A0296 | Unknown descriptor member or descriptor used as a value | Error |
 | A0297 | `@attribute<A>(Self)` with an attribute not declared for the kind of `Self` | Error |
+| A0298 | `value.method()` on a primitive or `str` with no extension block implementing the trait that declares `method` | Error |

@@ -1,0 +1,44 @@
+// e2e: err
+// A bounded generic helper whose type argument is inferred from a field
+// reports the bound error, with a note naming the field.
+trait Describe {
+  describe(&self): i32;
+}
+
+record Tag {
+  public value: i32;
+}
+
+@implements(Describe)
+extension i32 {
+  describe(&self): i32 {
+    return *self;
+  }
+}
+
+function describeValue<T: Describe>(value: &T): i32 {
+  return value.describe();
+}
+
+trait Summary {
+  summary(&self): i32 {
+    let mut sum: i32 = 0;
+
+    comptime for (field of @fields<Self>()) {
+      sum += describeValue(&@field(self, field));
+    }
+
+    return sum;
+  }
+}
+
+@implements(Summary)
+record Item {
+  public count: i32;
+  public tag: Tag;
+}
+
+function main(): i32 {
+  let item: Item = Item { count: 1, tag: Tag { value: 2 } };
+  return item.summary();
+}

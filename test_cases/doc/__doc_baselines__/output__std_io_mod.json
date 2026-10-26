@@ -46,10 +46,11 @@
     },
     {
       "name": "std::format",
-      "doc": "  \n# Format Module  \n  \nFormatting traits for user-defined textual representations."
+      "doc": "  \n# Format Module  \n  \nFormatting traits for user-defined textual representations.  \n  \n## Exports  \n  \n| Export    | Description                                               |  \n|-----------|-----------------------------------------------------------|  \n| `Display` | `display(&self): String`, with a reflective record default and implementations for primitives, `str`, `String`, `Option` and `Vector` |  \n  \n## Example  \n  \n```ignis  \n@implements(Display)  \nrecord Point {  \n  public x: i32;  \n  public label: String;  \n}  \n  \nlet point: Point = Point { x: 1, label: String::create(\"origin\") };  \nlet text: String = point.display(); // Point { x: 1, label: origin }  \n```  \n  \nEnums still need a hand-written `display`: the default walks record  \nfields only (see `std::format::display`)."
     },
     {
-      "name": "std::format::display"
+      "name": "std::format::display",
+      "doc": "  \n# Display  \n  \nThe `Display` trait and its implementations for the built-in types.  \n  \n`display` has a default that reflects over the record's fields with  \n`comptime for`, so `@implements(Display)` on a record needs no method of  \nits own. A `display` the record writes itself replaces the default.  \n  \n## Default  \n  \n`TypeName { field: value, field: value }`, fields in declaration order,  \neach rendered by its own `Display`. The name is the record's concrete  \nname: a generic record shows its type arguments, `Box<i32> { value: 1 }`.  \nA record without fields renders as `TypeName {}`. A field whose type does  \nnot implement `Display` is a compile error inside the default, with a  \nnote naming the field.  \n  \n## Implementations  \n  \n| Type | Rendering |  \n|------|-----------|  \n| integers, `f32`, `f64`, `boolean` | `toString()`: `-3`, `1.5`, `true` |  \n| `char` | the character itself, unquoted |  \n| `str`, `String` | the text itself, unquoted and unescaped |  \n| `Option<T: Display>` | `Option::SOME(value)` or `Option::NONE` |  \n| `Vector<T: Display>` | `[first, second]`, `[]` when empty |  \n  \n## Enums  \n  \nThe default walks record fields only. An enum that declares  \n`@implements(Display)` without a `display` of its own is a compile error  \ninside the default (A0293, `'@fields' needs a record`), so an enum  \nneeds a hand-written `display`."
     },
     {
       "name": "std::fs",
@@ -113,7 +114,7 @@
     },
     {
       "name": "std::json",
-      "doc": "  \n# JSON  \n  \nJSON serialization front-end for the shared `std::serializer` contracts.  \n  \n## Overview  \n  \nThe `Json` namespace configures `Serializer::Writer` for JSON object syntax  \nand exposes `writeRoot` overloads for scalar and `Serialize` values. Output is  \nappended to a caller-provided `String`.  \n  \nJSON is the permissive front-end for the shared serializer: scalar document  \nroots are allowed, field names are always quoted, and record entries are  \nseparated with commas.  \n  \n```text  \n  Json::writer()  \n  ┌──────────────────────────────────────────────┐  \n  │ recordPrefix: \"{\"                            │  \n  │ recordSuffix: \"}\"                            │  \n  │ entrySeparator: \",\"                          │  \n  │ fieldSeparator: \":\"                          │  \n  │ supportsScalarRoot: true                     │  \n  │ quoteFieldKeys: true                         │  \n  └──────────────────────────────────────────────┘  \n```  \n  \n## APIs  \n  \n| Function            | Description                                      |  \n|---------------------|--------------------------------------------------|  \n| `Json::writer`      | JSON writer configuration                        |  \n| `Json::writeRoot`   | Serialize a root scalar or `Serialize` value     |  \n| `Json::parse`       | Parse JSON text into a `JsonValue` tree          |  \n| `Json::writeValue`  | Append a `JsonValue` tree as compact JSON        |  \n| `Json::writeValuePretty` | Append a `JsonValue` tree as pretty JSON    |  \n| `Json::toJsonString` | Compact JSON for a `JsonValue` tree             |  \n| `Json::toJsonStringPretty` | Pretty JSON for a `JsonValue` tree        |  \n  \n## Notes  \n  \nJSON supports scalar roots, quotes field keys, and uses comma-separated  \nobject entries. String escaping is provided by the shared serializer helpers.  \n`writeRoot` appends to the provided output string, while `stringify` creates a  \nfresh output string and returns it.  \n  \n## Root Shapes  \n  \n| Root value                    | Supported | Notes                       |  \n|-------------------------------|-----------|-----------------------------|  \n| Boolean, number, char, string | Yes       | Uses scalar overloads        |  \n| `T: Serialize`                | Yes       | Uses record serialization    |  \n| `JsonValue` (any shape)       | Yes       | Uses `Json::writeValue`      |  \n  \n## JSON Values  \n  \nA `JsonValue` tree holds any JSON document: null, booleans, numbers,  \nstrings, arrays, and objects with keys kept in insertion order. `Json::parse`  \nbuilds one from text, and the `JsonValue` static constructors (`nullValue`,  \n`boolValue`, `stringValue`, `fromString`, `integerValue`, `unsignedValue`,  \n`array`, `object`) build one in code.  \n  \n| Value shape                   | Build | Parse | Write |  \n|-------------------------------|-------|-------|-------|  \n| Null, boolean, string         | Yes   | Yes   | Yes   |  \n| Integers (`i64`, `u64`)       | Yes   | Yes   | Yes   |  \n| Floats                        | No    | Yes   | Yes   |  \n| Arrays                        | Yes   | Yes   | Yes   |  \n| Objects (ordered keys)        | Yes   | Yes   | Yes   |  \n  \nParsed numbers keep their source text, so a parsed float is written back  \nunchanged. There is no float constructor because `f64.toString()` uses  \nC `%g` formatting (six significant digits, `42.0` as `42`), which neither  \nround-trips nor matches the text `serde_json` writes.  \n  \n`Json::writeValue` and `Json::writeValuePretty` match `serde_json::to_string`  \nand `serde_json::to_string_pretty` byte for byte, string escaping included.  \nThe scalar `writeRoot` overloads use the shared serializer escaping instead,  \nwhich writes other control bytes as uppercase `\\u00XX` and has no `\\b` or  \n`\\f`.  \n  \n## Example  \n  \n```ignis  \nimport Json from \"std::json\";  \n  \nfunction main(): i32 {  \n  let mut output: String = String::create(\"\");  \n  Json::writeRoot(&output, true);  \n  return 0;  \n}  \n```"
+      "doc": "  \n# JSON  \n  \nJSON serialization front-end for the shared `std::serializer` contracts.  \n  \n## Overview  \n  \nThe `Json` namespace configures `Serializer::Writer` for JSON object syntax  \nand exposes `writeRoot` overloads for scalar and `Serialize` values. Output is  \nappended to a caller-provided `String`.  \n  \nJSON is the permissive front-end for the shared serializer: scalar document  \nroots are allowed, field names are always quoted, and record entries are  \nseparated with commas.  \n  \n```text  \n  Json::writer()  \n  ┌──────────────────────────────────────────────┐  \n  │ recordPrefix: \"{\"                            │  \n  │ recordSuffix: \"}\"                            │  \n  │ entrySeparator: \",\"                          │  \n  │ fieldSeparator: \":\"                          │  \n  │ supportsScalarRoot: true                     │  \n  │ quoteFieldKeys: true                         │  \n  │ nestedRecordPrefix: \"{\"                      │  \n  │ nestedRecordSuffix: \"}\"                      │  \n  │ nestedEntrySeparator: \",\"                    │  \n  │ depth: 0                                     │  \n  └──────────────────────────────────────────────┘  \n```  \n  \n## APIs  \n  \n| Function            | Description                                      |  \n|---------------------|--------------------------------------------------|  \n| `Json::writer`      | JSON writer configuration                        |  \n| `Json::writeRoot`   | Serialize a root scalar or `Serialize` value     |  \n| `Json::parse`       | Parse JSON text into a `JsonValue` tree          |  \n| `Json::writeValue`  | Append a `JsonValue` tree as compact JSON        |  \n| `Json::writeValuePretty` | Append a `JsonValue` tree as pretty JSON    |  \n| `Json::toJsonString` | Compact JSON for a `JsonValue` tree             |  \n| `Json::toJsonStringPretty` | Pretty JSON for a `JsonValue` tree        |  \n  \n## Notes  \n  \nJSON supports scalar roots, quotes field keys, and uses comma-separated  \nobject entries. String escaping is provided by the shared serializer helpers.  \n`writeRoot` appends to the provided output string, while `stringify` creates a  \nfresh output string and returns it.  \n  \n## Root Shapes  \n  \n| Root value                    | Supported | Notes                       |  \n|-------------------------------|-----------|-----------------------------|  \n| Boolean, number, char, string | Yes       | Uses scalar overloads        |  \n| `T: Serialize`                | Yes       | Uses record serialization    |  \n| `JsonValue` (any shape)       | Yes       | Uses `Json::writeValue`      |  \n  \n## JSON Values  \n  \nA `JsonValue` tree holds any JSON document: null, booleans, numbers,  \nstrings, arrays, and objects with keys kept in insertion order. `Json::parse`  \nbuilds one from text, and the `JsonValue` static constructors (`nullValue`,  \n`boolValue`, `stringValue`, `fromString`, `integerValue`, `unsignedValue`,  \n`array`, `object`) build one in code.  \n  \n| Value shape                   | Build | Parse | Write |  \n|-------------------------------|-------|-------|-------|  \n| Null, boolean, string         | Yes   | Yes   | Yes   |  \n| Integers (`i64`, `u64`)       | Yes   | Yes   | Yes   |  \n| Floats                        | No    | Yes   | Yes   |  \n| Arrays                        | Yes   | Yes   | Yes   |  \n| Objects (ordered keys)        | Yes   | Yes   | Yes   |  \n  \nParsed numbers keep their source text, so a parsed float is written back  \nunchanged. There is no float constructor because `f64.toString()` uses  \nC `%g` formatting (six significant digits, `42.0` as `42`), which neither  \nround-trips nor matches the text `serde_json` writes.  \n  \n`Json::writeValue` and `Json::writeValuePretty` match `serde_json::to_string`  \nand `serde_json::to_string_pretty` byte for byte, string escaping included.  \nThe scalar `writeRoot` overloads use the shared serializer escaping instead,  \nwhich writes other control bytes as uppercase `\\u00XX` and has no `\\b` or  \n`\\f`.  \n  \n## Example  \n  \n```ignis  \nimport Json from \"std::json\";  \n  \nfunction main(): i32 {  \n  let mut output: String = String::create(\"\");  \n  Json::writeRoot(&output, true);  \n  return 0;  \n}  \n```"
     },
     {
       "name": "std::json::parser",
@@ -217,11 +218,19 @@
     },
     {
       "name": "std::orm",
-      "doc": "  \n# ORM  \n  \nA small mapping layer on `std::sqlite3`: table descriptors that emit their  \nSQL, typed row reads that report NULL and bad values as errors, ordered  \nmigrations applied in one transaction, and a repository that stores a  \nrecord implementing `Orm::Entity` and `Orm::FromRow`. Every value goes to SQLite  \nas a bound parameter; no statement interpolates one.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`     |  \n| `Orm::Row`        | A typed view of a statement's current row: `read*` and `readOptional*` |  \n| `Orm::Entity`     | A stored record: `static table()`, `id()`, `bindValues(statement)` |  \n| `Orm::FromRow`    | `static fromRow(row)`: a record from a row       |  \n| `Orm::Repository` | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |  \n| `Orm::Value`      | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |  \n| `Orm::Migration`  | One versioned schema step                        |  \n| `Orm::migrate`    | Applies pending migrations and records them in `schema_migrations` |  \n| `Orm::Error`      | `kind`, `message` and `code`; `fromSqlite`       |  \n| `Orm::ErrorKind`  | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Orm::Error>`; nothing in the  \nmodule panics. A SQLite failure keeps its extended code in `Error::code`,  \nand `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),  \n`CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.  \n  \n## Linking  \n  \nThe module adds no linking of its own: it builds on `std::sqlite3`, which  \nlinks `libsqlite3`.  \n  \n## Example  \n  \n```ignis  \nimport Orm from \"std::orm\";  \nimport Sqlite3 from \"std::sqlite3\";  \n  \n@implements(Orm::Entity, Orm::FromRow)  \nrecord Task {  \n  public id: Option<i64>;  \n  public title: String;  \n  \n  static table(): Orm::Table {  \n    return Orm::Table::create(\"tasks\")  \n      .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n      .autoIncrement()  \n      .columnText(\"title\", Orm::ColumnKey::NONE)  \n      .notNull();  \n  }  \n  \n  static fromRow(row: &Orm::Row): Result<Task, Orm::Error> {  \n    return Result::OK(Task { id: Option::SOME(row.readInt(0)!), title: row.readText(1)! });  \n  }  \n  \n  id(&self): Option<i64> {  \n    return self.id;  \n  }  \n  \n  bindValues(&self, statement: &mut Sqlite3::Statement): Result<void, Orm::Error> {  \n    return match (statement.bindText(1, self.title.toStr())) {  \n      Result::OK(_) -> Result::OK(()),  \n      Result::ERROR(error) -> Result::ERROR(Orm::Error::fromSqlite(error)),  \n    };  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();  \n  migrations.push(Orm::Migration::create(1, Task::table().createTableSql().unwrap().toStr()));  \n  Orm::migrate(&mut connection, &migrations).unwrap();  \n  \n  let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();  \n  let task: Task = Task { id: Option::NONE, title: String::create(\"write the ORM\") };  \n  let id: i64 = tasks.insert(&mut connection, &task).unwrap();  \n  \n  return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;  \n}  \n```  \n  \n## Non-goals  \n  \nThere is no query builder: the generated SQL covers single-table CRUD,  \nand `Repository::findWhere` takes a raw `WHERE` clause with bound  \n`Orm::Value` parameters for everything else. There are no relationships."
+      "doc": "  \n# ORM  \n  \nA small mapping layer on `std::sqlite3`: table descriptors that emit their  \nSQL, typed row reads that report NULL and bad values as errors, ordered  \nmigrations applied in one transaction, and a repository that stores a  \nrecord implementing `Orm::Entity` and `Orm::FromRow`. A record described by  \nthe `Orm::Table`, `Orm::PrimaryKey`, `Orm::AutoIncrement` and `Orm::Column`  \nattributes gets both traits' methods from defaults that reflect over its  \nfields; a hand-written method replaces the default. Every value goes to  \nSQLite as a bound parameter; no statement interpolates one.  \n  \n## Exports  \n  \n| Export               | Description                                   |  \n|----------------------|-----------------------------------------------|  \n| `Orm::Table`         | `@Orm::Table(\"name\")`: the table of a record  |  \n| `Orm::PrimaryKey`    | `@Orm::PrimaryKey`: the field that is the key |  \n| `Orm::AutoIncrement` | `@Orm::AutoIncrement`: SQLite assigns the key |  \n| `Orm::Column`        | `@Orm::Column(\"name\")`: a column name other than the field's |  \n| `Orm::ColumnValue`   | A storable field type: integers, `f32`, `f64`, `boolean`, `String`, `Vector<u8>` and `Option` of each |  \n| `Orm::Schema`        | A table descriptor: columns, keys, `createTableSql` and the repository statements (`insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql`) |  \n| `Orm::SchemaColumn`  | One column of an `Orm::Schema`                |  \n| `Orm::ColumnKey`     | `NONE` or `PRIMARY`                           |  \n| `Orm::ColumnType`    | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN`  |  \n| `Orm::Row`           | A typed view of a statement's current row: `read*`, `readOptional*`, `isNull` |  \n| `Orm::Entity`        | A stored record: `static table()`, `id()`, `bindValues(statement)` |  \n| `Orm::FromRow`       | `static fromRow(row)`: a record from a row    |  \n| `Orm::Repository`    | `create`, `findById`, `all`, `insert`, `update`, `deleteById`, `findWhere` over one entity |  \n| `Orm::Value`         | A raw parameter: `NULL`, `INT`, `REAL`, `TEXT`, `BLOB` |  \n| `Orm::Migration`     | One versioned schema step                     |  \n| `Orm::migrate`       | Applies pending migrations and records them in `schema_migrations` |  \n| `Orm::Error`         | `kind`, `message` and `code`; `fromSqlite`    |  \n| `Orm::ErrorKind`     | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT`, `DECODE`, `SQLITE`, `SCHEMA` |  \n  \n## Reflective entities  \n  \nWith `@implements(Orm::Entity, Orm::FromRow)` and no methods, a record is  \nstored as one column per field, in declaration order. The column is named  \nby `@Orm::Column` or by the field, typed by the field's `Orm::ColumnValue`,  \nand `NOT NULL` unless the field is an `Option`. An integer field narrower  \nthan `i64` reads a stored value outside its range as `DECODE`. A field type  \nwithout an `Orm::ColumnValue` is a compile error inside the default, with  \na note naming the field. See `std::orm::entity` and `std::orm::column`.  \n  \nThe compiler cannot reject a reflective record that lacks `@Orm::Table`:  \nits `table()` has no name, and `Repository::create` and every emitter  \nreport `SCHEMA` with the message  \n`std::orm: the table has no name; add @Orm::Table(\"name\") to the record`.  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Orm::Error>`; nothing in the  \nmodule panics. A SQLite failure keeps its extended code in `Error::code`,  \nand `Error::fromSqlite` sorts it into `CONFLICT` (primary key, unique),  \n`CONSTRAINT` (other constraints) or `SQLITE`. See `std::orm::error`.  \n  \n## Linking  \n  \nThe module adds no linking of its own: it builds on `std::sqlite3`, which  \nlinks `libsqlite3`.  \n  \n## Example  \n  \n```ignis  \nimport Orm from \"std::orm\";  \nimport Sqlite3 from \"std::sqlite3\";  \n  \n@Orm::Table(\"tasks\")  \n@implements(Orm::Entity, Orm::FromRow)  \nrecord Task {  \n  @Orm::PrimaryKey  \n  @Orm::AutoIncrement  \n  public id: Option<i64>;  \n  public title: String;  \n  @Orm::Column(\"is_done\")  \n  public done: boolean;  \n  public note: Option<String>;  \n}  \n  \nfunction main(): i32 {  \n  let mut connection: Sqlite3::Connection = Sqlite3::Connection::openInMemory().unwrap();  \n  let mut migrations: Vector<Orm::Migration> = Vector::new<Orm::Migration>();  \n  migrations.push(Orm::Migration::create(1, Task::table().createTableSql().unwrap().toStr()));  \n  Orm::migrate(&mut connection, &migrations).unwrap();  \n  \n  let tasks: Orm::Repository<Task> = Orm::Repository::create<Task>().unwrap();  \n  let task: Task = Task {  \n    id: Option::NONE,  \n    title: String::create(\"write the ORM\"),  \n    done: false,  \n    note: Option::NONE,  \n  };  \n  let id: i64 = tasks.insert(&mut connection, &task).unwrap();  \n  \n  return tasks.findById(&mut connection, id).unwrap().title.equals(&task.title) ? 0 : 1;  \n}  \n```  \n  \n## Non-goals  \n  \nThere is no query builder: the generated SQL covers single-table CRUD,  \nand `Repository::findWhere` takes a raw `WHERE` clause with bound  \n`Orm::Value` parameters for everything else. There are no relationships."
+    },
+    {
+      "name": "std::orm::attributes",
+      "doc": "  \n# Attributes  \n  \nThe declarable attributes that describe a record to the `Orm::Entity`  \nand `Orm::FromRow` defaults. A record written with them needs no  \nhand-written `table()`, `id()`, `bindValues` or `fromRow`.  \n  \n## Exports  \n  \n| Export               | Description                                   |  \n|----------------------|-----------------------------------------------|  \n| `Orm::Table`         | `@Orm::Table(\"name\")` on a record: its table name |  \n| `Orm::PrimaryKey`    | `@Orm::PrimaryKey` on a field: the key column |  \n| `Orm::AutoIncrement` | `@Orm::AutoIncrement` on the key: SQLite assigns it |  \n| `Orm::Column`        | `@Orm::Column(\"name\")` on a field: a column name other than the field's |"
+    },
+    {
+      "name": "std::orm::column",
+      "doc": "  \n# Column values  \n  \n`Orm::ColumnValue`, what a field type contributes to the reflective  \n`Orm::Entity` and `Orm::FromRow` defaults: the SQL type of its column,  \nwhether the column is nullable, how to read it from an `Orm::Row` and how  \nto bind it. A field of a type without an implementation is a compile error  \ninside the default, with a note naming the field.  \n  \n## Exports  \n  \n| Export             | Description                                     |  \n|--------------------|-------------------------------------------------|  \n| `Orm::ColumnValue` | `columnType`, `columnNullable`, `readColumn`, `toColumnValue`, `bindColumn`, `columnKey` |  \n  \n## Implementations  \n  \n| Field type | Column | Read |  \n|------------|--------|------|  \n| `i8`, `i16`, `i32`, `u8`, `u16`, `u32` | `INTEGER NOT NULL` | `readInt`, a value outside the type's range is `DECODE` |  \n| `i64` | `INTEGER NOT NULL` | `readInt` |  \n| `f32`, `f64` | `REAL NOT NULL` | `readReal` |  \n| `boolean` | `INTEGER NOT NULL` | `readBoolean`: 0 or 1 |  \n| `String` | `TEXT NOT NULL` | `readText` |  \n| `Vector<u8>` | `BLOB NOT NULL` | `readBlob` |  \n| `Option<T>` | `T`'s column, nullable | NULL is `NONE` |"
     },
     {
       "name": "std::orm::entity",
-      "doc": "  \n# Entity  \n  \n`Orm::Entity` and `Orm::FromRow`, the two traits a record implements by  \nhand so an `Orm::Repository` can store it: one describes the table and  \nbinds the record's values, the other builds a record from a row.  \n  \n## Exports  \n  \n| Export         | Description                                        |  \n|----------------|----------------------------------------------------|  \n| `Orm::Entity`  | `static table()`, `id(&self)`, `bindValues(&self, statement)` |  \n| `Orm::FromRow` | `static fromRow(row)`                              |  \n  \n## Contract  \n  \n- `table()` returns the same descriptor on every call. A repository needs  \n  an `INTEGER` primary key.  \n- `id()` is the key: `NONE` for a record not stored yet.  \n- `bindValues` binds every non-key column, in declaration order, to the  \n  parameters `1..n`. The repository binds the key itself, after them,  \n  when a statement needs it.  \n- `fromRow` reads every column in declaration order: column 0 is the  \n  first column of `table()`."
+      "doc": "  \n# Entity  \n  \n`Orm::Entity` and `Orm::FromRow`, the two traits a record implements so an  \n`Orm::Repository` can store it: one describes the table and binds the  \nrecord's values, the other builds a record from a row.  \n  \nEvery method has a default that reflects over the record's fields with  \n`comptime for`, so a record described by the `std::orm::attributes`  \nattributes needs no method of its own. A method the record writes itself  \nreplaces the default.  \n  \n## Exports  \n  \n| Export         | Description                                        |  \n|----------------|----------------------------------------------------|  \n| `Orm::Entity`  | `static table()`, `id(&self)`, `bindValues(&self, statement)` |  \n| `Orm::FromRow` | `static fromRow(row)`                              |  \n  \n## Contract  \n  \n- `table()` returns the same descriptor on every call. A repository needs  \n  an `INTEGER` primary key.  \n- `id()` is the key: `NONE` for a record not stored yet.  \n- `bindValues` binds every non-key column, in declaration order, to the  \n  parameters `1..n`. The repository binds the key itself, after them,  \n  when a statement needs it.  \n- `fromRow` reads every column in declaration order: column 0 is the  \n  first column of `table()`.  \n  \n## Defaults  \n  \n- `table()`: the name from `@Orm::Table`; one column per field, in  \n  declaration order, named by `@Orm::Column` or else by the field, typed  \n  by the field type's `Orm::ColumnValue`; `PRIMARY KEY` for the field  \n  marked `@Orm::PrimaryKey`, `AUTOINCREMENT` for one marked  \n  `@Orm::AutoIncrement`; `NOT NULL` unless the field type is an `Option`.  \n  A record without `@Orm::Table` gets a descriptor without a name, which  \n  the emitters and `Repository::create` report as `SCHEMA`.  \n- `id()`: the `@Orm::PrimaryKey` field as an integer, `NONE` when it is an  \n  empty `Option` or the record has no key.  \n- `bindValues`: every field not marked `@Orm::PrimaryKey`, in order.  \n- `fromRow`: field `n` from column `n`."
     },
     {
       "name": "std::orm::error",
@@ -237,11 +246,11 @@
     },
     {
       "name": "std::orm::row",
-      "doc": "  \n# Row  \n  \n`Orm::Row`, a typed view of the current row of a `Sqlite3::Statement`.  \nEvery getter checks what the binding's coercing getters cannot: the column  \nexists, it is not NULL where a value is required, and a boolean is 0 or 1.  \n  \n## Exports  \n  \n| Export     | Description                                             |  \n|------------|---------------------------------------------------------|  \n| `Orm::Row` | `create`, `columnCount`, `readInt`, `readReal`, `readText`, `readBlob`, `readBoolean` and their `readOptional*` forms |  \n  \n## Decoding  \n  \nColumn indexes are 0-based. A negative or out-of-range index is a  \n`DECODE` error in every getter. `read*` reports NULL as `DECODE`;  \n`readOptional*` reports it as `Option::NONE`. Values are otherwise read  \nwith SQLite's own coercion, so `readInt` on a TEXT column parses a number.  \n  \n## Lifetime  \n  \nA `Row` borrows its statement and reads the row the statement is on now:  \nuse it between a `step()` that returned `Step::ROW` and the next `step()`."
+      "doc": "  \n# Row  \n  \n`Orm::Row`, a typed view of the current row of a `Sqlite3::Statement`.  \nEvery getter checks what the binding's coercing getters cannot: the column  \nexists, it is not NULL where a value is required, and a boolean is 0 or 1.  \n  \n## Exports  \n  \n| Export     | Description                                             |  \n|------------|---------------------------------------------------------|  \n| `Orm::Row` | `create`, `columnCount`, `readInt`, `readReal`, `readText`, `readBlob`, `readBoolean`, their `readOptional*` forms, `isNull` |  \n  \n## Decoding  \n  \nColumn indexes are 0-based. A negative or out-of-range index is a  \n`DECODE` error in every getter. `read*` reports NULL as `DECODE`;  \n`readOptional*` reports it as `Option::NONE`. Values are otherwise read  \nwith SQLite's own coercion, so `readInt` on a TEXT column parses a number.  \n  \n## Lifetime  \n  \nA `Row` borrows its statement and reads the row the statement is on now:  \nuse it between a `step()` that returned `Step::ROW` and the next `step()`."
     },
     {
       "name": "std::orm::table",
-      "doc": "  \n# Table  \n  \n`Orm::Table`, the descriptor of one table: its name and its columns, in  \norder. The descriptor emits the SQL of its `CREATE TABLE` and of the  \nstatements a repository runs; every value in those statements is a `?`  \nparameter, never interpolated text.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Table`      | `create`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |  \n  \n## Building a descriptor  \n  \nThe builder methods take the table by value and return it, so a  \ndescriptor is one expression. `autoIncrement()` and `notNull()` apply to  \nthe column added last:  \n  \n```ignis  \nlet table: Orm::Table = Orm::Table::create(\"tasks\")  \n  .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n  .autoIncrement()  \n  .columnText(\"title\", Orm::ColumnKey::NONE)  \n  .notNull();  \n```  \n  \n## Validation  \n  \nEvery emitter validates the descriptor first and returns an `Orm::Error`  \nof kind `SCHEMA` when the table or a column name is not a plain identifier  \n(`[A-Za-z_][A-Za-z0-9_]*`, so a name never needs quoting), when there are  \nno columns, when a column name repeats, when more than one column is a  \nprimary key, or when `autoIncrement()` marks a column that is not an  \nINTEGER primary key. The by-id statements also need a key.  \n  \n## Bind order  \n  \nEach emitter documents the order of its `?` parameters; a repository binds  \nvalues in exactly that order."
+      "doc": "  \n# Schema  \n  \n`Orm::Schema`, the descriptor of one table: its name and its columns, in  \norder. The descriptor emits the SQL of its `CREATE TABLE` and of the  \nstatements a repository runs; every value in those statements is a `?`  \nparameter, never interpolated text.  \n  \n## Exports  \n  \n| Export            | Description                                      |  \n|-------------------|--------------------------------------------------|  \n| `Orm::Schema`     | `create`, `column`, `columnInt`, `columnReal`, `columnText`, `columnBlob`, `columnBoolean`, `autoIncrement`, `notNull`, and the emitters `createTableSql`, `insertSql`, `selectSql`, `selectByIdSql`, `selectAllSql`, `updateByIdSql`, `deleteByIdSql` |  \n| `Orm::ColumnKey`  | `NONE` or `PRIMARY`                              |  \n| `Orm::ColumnType` | `INTEGER`, `REAL`, `TEXT`, `BLOB`, `BOOLEAN` (stored as INTEGER) |  \n  \n## Building a descriptor  \n  \nThe builder methods take the table by value and return it, so a  \ndescriptor is one expression. `autoIncrement()` and `notNull()` apply to  \nthe column added last:  \n  \n```ignis  \nlet table: Orm::Schema = Orm::Schema::create(\"tasks\")  \n  .columnInt(\"id\", Orm::ColumnKey::PRIMARY)  \n  .autoIncrement()  \n  .columnText(\"title\", Orm::ColumnKey::NONE)  \n  .notNull();  \n```  \n  \n## Validation  \n  \nEvery emitter validates the descriptor first and returns an `Orm::Error`  \nof kind `SCHEMA` when the table has no name (the message asks for  \n`@Orm::Table`, which a reflective entity takes its name from), when the  \ntable or a column name is not a plain identifier (`[A-Za-z_][A-Za-z0-9_]*`,  \nso a name never needs quoting), when there are no columns, when a column  \nname repeats, when more than one column is a primary key, or when  \n`autoIncrement()` marks a column that is not an INTEGER primary key. The  \nby-id statements also need a key.  \n  \n## Bind order  \n  \nEach emitter documents the order of its `?` parameters; a repository binds  \nvalues in exactly that order."
     },
     {
       "name": "std::orm::value",
@@ -273,11 +282,15 @@
     },
     {
       "name": "std::serializer",
-      "doc": "  \n# Serializer  \n  \nOpt-in std serialization contracts shared by JSON and TOML front-ends.  \n  \n## Overview  \n  \n`std::serializer` defines a small format-agnostic writer surface. Concrete  \nmodules such as `std::json` and `std::toml` provide writer settings, while  \nuser-defined records opt in by implementing `Serialize`.  \n  \nThe module intentionally separates three responsibilities:  \n  \n| Layer                  | Responsibility                                  |  \n|------------------------|--------------------------------------------------|  \n| `Serializer::Writer`   | Format punctuation and root-shape policy         |  \n| `Serializer::write`    | Scalar text and string escaping helpers          |  \n| `Serialize` trait      | User record field ordering and value selection   |  \n  \nConcrete front-ends create a writer and then call either scalar overloads or  \na user-provided `Serialize` implementation. Records use `beginRecord`,  \n`writeField`, scalar `write` overloads, and `endRecord` to produce output.  \n  \n```text  \n  Json::stringify(value) / Toml::stringify(value)  \n                │  \n                ▼  \n       concrete Serializer::Writer  \n                │  \n                ▼  \n  scalar overloads or value.serialize(...)  \n                │  \n                ▼  \n       caller-provided output String  \n```  \n  \n## Exports  \n  \n| Export        | Description                                      |  \n|---------------|--------------------------------------------------|  \n| `Serialize`   | Trait for records that can write themselves      |  \n| `Serializer`  | Writer configuration, helpers, and error types   |  \n  \n## Notes  \n  \nThe current serializer is text-oriented and writes into an existing  \n`String`. It supports scalar roots only when the selected format allows  \nthem, and validates bare field names for formats such as TOML.  \n  \nWriter helpers append to the output string. They do not clear existing  \ncontent, allocate a destination automatically, or validate that callers emit a  \ncomplete record. A `Serialize` implementation is responsible for pairing  \n`beginRecord` with `endRecord` and for passing the correct `first` flag to  \n`writeField` so separators are emitted in the right positions.  \n  \n## Example  \n  \n```ignis  \nimport Serializer, Serialize from \"std::serializer\";  \n  \n// Format front-ends provide a Serializer::Writer for concrete output.  \n```"
+      "doc": "  \n# Serializer  \n  \nOpt-in std serialization contracts shared by JSON and TOML front-ends.  \n  \n## Overview  \n  \n`std::serializer` defines a small format-agnostic writer surface. Concrete  \nmodules such as `std::json` and `std::toml` provide writer settings, while  \nuser-defined records opt in by implementing `Serialize`.  \n  \nThe module intentionally separates three responsibilities:  \n  \n| Layer                  | Responsibility                                  |  \n|------------------------|--------------------------------------------------|  \n| `Serializer::Writer`   | Format punctuation and root-shape policy         |  \n| `Serializer::write`    | Scalar text and string escaping helpers          |  \n| `Serialize` trait      | User record field ordering and value selection   |  \n  \nConcrete front-ends create a writer and then call either scalar overloads or  \na user-provided `Serialize` implementation. Records use `beginRecord`,  \n`writeField`, scalar `write` overloads, and `endRecord` to produce output.  \n  \n```text  \n  Json::stringify(value) / Toml::stringify(value)  \n                │  \n                ▼  \n       concrete Serializer::Writer  \n                │  \n                ▼  \n  scalar overloads or value.serialize(...)  \n                │  \n                ▼  \n       caller-provided output String  \n```  \n  \n## Exports  \n  \n| Export        | Description                                      |  \n|---------------|--------------------------------------------------|  \n| `Serialize`   | Trait for records that can write themselves, with a reflective default |  \n| `Serializer`  | Writer configuration, helpers, error types, and the `Serializer::Rename` field attribute |  \n  \n## Notes  \n  \nThe current serializer is text-oriented and writes into an existing  \n`String`. It supports scalar roots only when the selected format allows  \nthem, and validates bare field names for formats such as TOML.  \n  \nWriter helpers append to the output string. They do not clear existing  \ncontent, allocate a destination automatically, or validate that callers emit a  \ncomplete record. A `Serialize` implementation is responsible for pairing  \n`beginRecord` with `endRecord` and for passing the correct `first` flag to  \n`writeField` so separators are emitted in the right positions.  \n  \n`@implements(Serialize)` on a record without a `serialize` method uses the  \nreflective default: every field in declaration order, keyed by its name or  \nby `@Serializer::Rename(\"key\")`. Field types are limited to scalars,  \nstrings and nested `Serialize` records, which TOML writes as inline tables;  \nsee `std::serializer::serialize`. Enums still need a hand-written `serialize`.  \n  \n## Example  \n  \n```ignis  \nimport Serializer, Serialize from \"std::serializer\";  \nimport Json from \"std::json\";  \n  \n@implements(Serialize)  \nrecord Package {  \n  @Serializer::Rename(\"package-name\")  \n  public name: String;  \n  public version: i32;  \n}  \n  \n// {\"package-name\":\"ignis\",\"version\":4}  \nlet package: Package = Package { name: String::create(\"ignis\"), version: 4 };  \nlet json: Result<String, Serializer::Error> = Json::stringify<Package>(&package);  \n```"
+    },
+    {
+      "name": "std::serializer::attributes",
+      "doc": "  \n# Serializer Attributes  \n  \nThe declarable attributes the reflective `Serialize` default reads.  \n  \n## Exports  \n  \n| Export               | Description                                         |  \n|----------------------|-----------------------------------------------------|  \n| `Serializer::Rename` | `@Serializer::Rename(\"key\")` on a field: the key written instead of the field name |"
     },
     {
       "name": "std::serializer::core",
-      "doc": "  \n# Serializer Core  \n  \nFormat-agnostic serializer helpers shared by front-ends and user records.  \n  \n## Overview  \n  \nCore helpers implement the state-free operations needed by JSON and TOML  \nserialization: opening and closing records, writing field names, escaping text,  \nvalidating bare keys, and appending scalar text. The caller owns all ordering  \ndecisions; this module only appends the requested bytes to the destination.  \n  \n## Record Emission Flow  \n  \nA typical `Serialize` implementation uses these helpers in this order:  \n  \n```text  \n  beginRecord(output, writer)  \n       │  \n       ├─ writeField(output, \"first\", writer, true)  \n       │       └─ Serializer::write(output, value, writer)  \n       │  \n       ├─ writeField(output, \"second\", writer, false)  \n       │       └─ Serializer::write(output, value, writer)  \n       │  \n       └─ endRecord(output, writer)  \n```  \n  \nThe `first` flag controls whether the writer's `entrySeparator` is emitted  \nbefore a field. The core helpers do not track field count internally.  \n  \n## Escaping  \n  \n`writeQuotedString` and `writeQuotedChar` use byte-oriented escaping. Quotes,  \nbackslashes, newlines, carriage returns, tabs, and ASCII control bytes are  \nescaped. Other bytes are written through as UTF-8 bytes stored in Ignis  \n`String` values."
+      "doc": "  \n# Serializer Core  \n  \nFormat-agnostic serializer helpers shared by front-ends and user records.  \n  \n## Overview  \n  \nCore helpers implement the state-free operations needed by JSON and TOML  \nserialization: opening and closing records, writing field names, escaping text,  \nvalidating bare keys, and appending scalar text. The caller owns all ordering  \ndecisions; this module only appends the requested bytes to the destination.  \n  \n## Record Emission Flow  \n  \nA typical `Serialize` implementation uses these helpers in this order:  \n  \n```text  \n  beginRecord(output, writer)  \n       │  \n       ├─ writeField(output, \"first\", writer, true)  \n       │       └─ Serializer::write(output, value, writer)  \n       │  \n       ├─ writeField(output, \"second\", writer, false)  \n       │       └─ Serializer::write(output, value, writer)  \n       │  \n       └─ endRecord(output, writer)  \n```  \n  \nThe `first` flag controls whether the writer's entry separator is emitted  \nbefore a field. The core helpers do not track field count internally.  \n  \n## Nested Records  \n  \nA writer carries its `depth`: `0` for the root record, one more for each  \nenclosing record. `beginRecord`, `writeField` and `endRecord` use the root  \npunctuation at depth `0` and the `nested*` punctuation below it, which is  \nhow TOML writes a root document but an inline table for a nested record.  \nA record passes `Serializer::nested(writer)` to the value of a field; the  \ndepth travels in the writer value, so a helper that fails part-way leaves  \nno state behind.  \n  \n## Escaping  \n  \n`writeQuotedString` and `writeQuotedChar` use byte-oriented escaping. Quotes,  \nbackslashes, newlines, carriage returns, tabs, and ASCII control bytes are  \nescaped. Other bytes are written through as UTF-8 bytes stored in Ignis  \n`String` values."
     },
     {
       "name": "std::serializer::error",
@@ -285,7 +298,7 @@
     },
     {
       "name": "std::serializer::serialize",
-      "doc": "  \n# Serializer Trait  \n  \nShared format-agnostic record serialization contract.  \n  \n## Overview  \n  \n`Serialize` is implemented by records that know how to write their own fields  \ninto a caller-provided `String` using a caller-provided `Serializer::Writer`.  \nThe trait does not choose a format; JSON, TOML, or another front-end supplies  \nthe writer configuration.  \n  \n## Contract  \n  \nImplementations should:  \n  \n- Append output to the provided `String` without clearing it.  \n- Call `Serializer::beginRecord` before emitting fields.  \n- Call `Serializer::writeField` before each field value.  \n- Pass `first = true` only for the first field.  \n- Use `Serializer::write` or nested `Serialize::serialize` for field values.  \n- Propagate `Serializer::Error` with `!` when a helper fails.  \n- Call `Serializer::endRecord` before returning success.  \n  \n```ignis  \nimport Serialize, Serializer from \"std::serializer\";  \n  \nrecord Package {  \n  name: String;  \n  \n  public serialize(&self, output: &mut String, writer: &Serializer::Writer): Result<boolean, Serializer::Error> {  \n    Serializer::beginRecord(output, writer)!;  \n    Serializer::writeField(output, \"name\", writer, true)!;  \n    Serializer::write(output, &self.name, writer)!;  \n    Serializer::endRecord(output, writer)!;  \n  \n    return Result::OK(true);  \n  }  \n}  \n```"
+      "doc": "  \n# Serializer Trait  \n  \nShared format-agnostic record serialization contract.  \n  \n## Overview  \n  \n`Serialize` is implemented by records that know how to write their own fields  \ninto a caller-provided `String` using a caller-provided `Serializer::Writer`.  \nThe trait does not choose a format; JSON, TOML, or another front-end supplies  \nthe writer configuration.  \n  \n## Exports  \n  \n| Export      | Description                                                 |  \n|-------------|-------------------------------------------------------------|  \n| `Serialize` | `serialize(&self, output, writer)`, with a reflective record default and implementations for the scalar types |  \n  \n## Default  \n  \n`serialize` has a default that reflects over the record's fields with  \n`comptime for`, so `@implements(Serialize)` on a record needs no method of  \nits own. It writes `beginRecord`, then one `writeField` and value per  \nfield in declaration order, then `endRecord`. The key is the name given by  \n`@Serializer::Rename(\"key\")` on the field, else the field name. Each value  \nis written by its type's `Serialize`:  \n  \n| Field type | Written by |  \n|------------|------------|  \n| `boolean`, integers, `f32`, `f64`, `char`, `str`, `String` | the matching `Serializer::write` overload |  \n| a record implementing `Serialize` | its own `serialize`, as a nested record |  \n  \nA field of any other type, `Option` and `Vector` included, is a compile  \nerror inside the default, with a note naming the field: the writer has no  \nnull or array output yet. Each field value is written with  \n`Serializer::nested(writer)`, so a nested record takes the writer's nested  \npunctuation: an object in JSON, an inline table in TOML  \n(`owner = { name = \"Ada\", age = 36 }`), recursively. A `serialize` the  \nrecord writes itself replaces the default.  \n  \nThe default walks record fields only. An enum that declares  \n`@implements(Serialize)` without a `serialize` of its own is a compile  \nerror inside the default (A0293, `'@fields' needs a record`), so an enum  \nneeds a hand-written `serialize`.  \n  \n## Contract  \n  \nImplementations should:  \n  \n- Append output to the provided `String` without clearing it.  \n- Call `Serializer::beginRecord` before emitting fields.  \n- Call `Serializer::writeField` before each field value.  \n- Pass `first = true` only for the first field.  \n- Use `Serializer::write` for scalar field values, and pass  \n  `Serializer::nested(writer)` to the `serialize` of a nested record.  \n- Propagate `Serializer::Error` with `!` when a helper fails.  \n- Call `Serializer::endRecord` before returning success.  \n  \n```ignis  \nimport Serialize, Serializer from \"std::serializer\";  \n  \nrecord Package {  \n  name: String;  \n  \n  public serialize(&self, output: &mut String, writer: &Serializer::Writer): Result<boolean, Serializer::Error> {  \n    Serializer::beginRecord(output, writer)!;  \n    Serializer::writeField(output, \"name\", writer, true)!;  \n    Serializer::write(output, &self.name, writer)!;  \n    Serializer::endRecord(output, writer)!;  \n  \n    return Result::OK(true);  \n  }  \n}  \n```"
     },
     {
       "name": "std::serializer::writer",
@@ -367,7 +380,7 @@
     },
     {
       "name": "std::toml",
-      "doc": "  \n# TOML  \n  \nTOML parsing, lookup, and serialization front-end for Ignis data.  \n  \n## Overview  \n  \nThe `Toml` namespace parses UTF-8 TOML text into owned tables, arrays, and  \nvalues. It also exposes writer helpers backed by `std::serializer` for  \nserializing primitive and `Serialize` values as TOML-compatible output.  \n  \n## Types  \n  \n| Type             | Description                                      |  \n|------------------|--------------------------------------------------|  \n| `TomlDocument`   | Root document with table storage                 |  \n| `TomlTable`      | Key/value table                                  |  \n| `TomlArray`      | Ordered TOML array values                        |  \n| `TomlValue`      | Tagged TOML scalar, array, or table value        |  \n| `TomlError`      | Structured parse or lookup error with span       |  \n  \n## APIs  \n  \n| Function            | Description                                      |  \n|---------------------|--------------------------------------------------|  \n| `Toml::parse`       | Parse TOML text into a `TomlDocument`            |  \n| `Toml::writer`      | TOML writer configuration                        |  \n| `Toml::writeRoot`   | Serialize a root `Serialize` value               |  \n  \n## Notes  \n  \nTOML root output must be a record-like serialized value. Scalar roots are  \nrejected by the shared serializer because they are not valid TOML documents.  \n  \n## Example  \n  \n```ignis  \nimport Toml, TomlDocument, TomlError from \"std::toml\";  \n  \nfunction main(): i32 {  \n  let parsed: Result<TomlDocument, TomlError> = Toml::parse(\"name = \\\"ignis\\\"\\n\");  \n  return parsed.isOk() ? 0 : 1;  \n}  \n```"
+      "doc": "  \n# TOML  \n  \nTOML parsing, lookup, and serialization front-end for Ignis data.  \n  \n## Overview  \n  \nThe `Toml` namespace parses UTF-8 TOML text into owned tables, arrays, and  \nvalues. It also exposes writer helpers backed by `std::serializer` for  \nserializing primitive and `Serialize` values as TOML-compatible output.  \n  \n## Types  \n  \n| Type             | Description                                      |  \n|------------------|--------------------------------------------------|  \n| `TomlDocument`   | Root document with table storage                 |  \n| `TomlTable`      | Key/value table                                  |  \n| `TomlArray`      | Ordered TOML array values                        |  \n| `TomlValue`      | Tagged TOML scalar, array, or table value        |  \n| `TomlError`      | Structured parse or lookup error with span       |  \n  \n## APIs  \n  \n| Function            | Description                                      |  \n|---------------------|--------------------------------------------------|  \n| `Toml::parse`       | Parse TOML text into a `TomlDocument`            |  \n| `Toml::writer`      | TOML writer configuration                        |  \n| `Toml::writeRoot`   | Serialize a root `Serialize` value               |  \n  \n## Notes  \n  \nTOML root output must be a record-like serialized value. Scalar roots are  \nrejected by the shared serializer because they are not valid TOML documents.  \nA record nested in the root is written as an inline table on its field's  \nline (`owner = { name = \"Ada\", age = 36 }`), recursively, and parses back  \nwith `Toml::parse`.  \n  \n## Example  \n  \n```ignis  \nimport Toml, TomlDocument, TomlError from \"std::toml\";  \n  \nfunction main(): i32 {  \n  let parsed: Result<TomlDocument, TomlError> = Toml::parse(\"name = \\\"ignis\\\"\\n\");  \n  return parsed.isOk() ? 0 : 1;  \n}  \n```"
     },
     {
       "name": "std::toml::error",
@@ -1711,14 +1724,24 @@
       "kind": "trait",
       "visibility": "public",
       "signature": "trait Display",
-      "doc": "Trait for values that can render themselves as an owned `String`.  \n  \nTypes marked with `@implements(Display)` must provide  \n`display(&self): String`.",
+      "doc": "Trait for values that can render themselves as an owned `String`.  \n  \nA record marked `@implements(Display)` gets the reflective default  \ndescribed in the module documentation, or provides `display(&self):  \nString` itself.",
       "members": [
         {
           "name": "display",
           "kind": "method",
-          "signature": "display(&self): String"
+          "signature": "display(&self): String",
+          "doc": "The value as text."
         }
       ]
+    },
+    {
+      "module": "std::format::display",
+      "path": "std::format::display::displayOf",
+      "name": "displayOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function displayOf<T>(value: &T): String",
+      "doc": "`value.display()`, the per-field call of the reflective default."
     },
     {
       "module": "std::fs",
@@ -13524,6 +13547,177 @@
       "signature": "namespace Orm"
     },
     {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "The attributes the reflective `Entity` defaults read."
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::AutoIncrement",
+      "name": "AutoIncrement",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record AutoIncrement",
+      "doc": "Marks the primary key `AUTOINCREMENT`: inserts leave it out and SQLite  \nassigns it. Only an `INTEGER` key accepts it."
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::Column",
+      "name": "Column",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Column",
+      "doc": "The column a field is stored in, when it differs from the field name.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: str",
+          "doc": "The column name, a plain identifier."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::PrimaryKey",
+      "name": "PrimaryKey",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record PrimaryKey",
+      "doc": "Marks the field that is the table's primary key."
+    },
+    {
+      "module": "std::orm::attributes",
+      "path": "std::orm::attributes::Orm::Table",
+      "name": "Table",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Table",
+      "doc": "The table a record is stored in. A record that relies on the default  \n`table()` and lacks it gets a descriptor without a name, which every  \nemitter and `Repository::create` report as `SCHEMA`.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: str",
+          "doc": "The table name, a plain identifier."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm",
+      "name": "Orm",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Orm",
+      "doc": "Field types the reflective defaults can store."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::ColumnValue",
+      "name": "ColumnValue",
+      "kind": "trait",
+      "visibility": "private",
+      "signature": "trait ColumnValue",
+      "doc": "A type a field can have in a reflective entity.",
+      "members": [
+        {
+          "name": "toColumnValue",
+          "kind": "method",
+          "signature": "toColumnValue(&self): Value",
+          "doc": "The value as a raw parameter."
+        },
+        {
+          "name": "bindColumn",
+          "kind": "method",
+          "signature": "bindColumn(&self, index: i32): Result<void, Error>",
+          "doc": "Binds the value to the 1-based parameter `index` of `statement`."
+        },
+        {
+          "name": "columnKey",
+          "kind": "method",
+          "signature": "columnKey(&self): Option<i64>",
+          "doc": "The value as a repository key: an integer, or `NONE`."
+        },
+        {
+          "name": "columnType",
+          "kind": "method",
+          "signature": "static columnType(): ColumnType",
+          "doc": "The SQL type of the column."
+        },
+        {
+          "name": "columnNullable",
+          "kind": "method",
+          "signature": "static columnNullable(): boolean",
+          "doc": "Whether the column accepts NULL; only `Option` does."
+        },
+        {
+          "name": "readColumn",
+          "kind": "method",
+          "signature": "static readColumn(row: &Row, column: i32): Result<Self, Error>",
+          "doc": "The value of `column` in `row`, or a `DECODE` error."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::bindColumnOf",
+      "name": "bindColumnOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function bindColumnOf<T>(value: &T, statement: &mut Statement, index: i32): Result<void, Error>",
+      "doc": "`value.bindColumn(statement, index)`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::columnKeyOf",
+      "name": "columnKeyOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function columnKeyOf<T>(value: &T): Option<i64>",
+      "doc": "`value.columnKey()`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::columnNullableOf",
+      "name": "columnNullableOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function columnNullableOf<T>(): boolean",
+      "doc": "`T::columnNullable()`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::columnTypeOf",
+      "name": "columnTypeOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function columnTypeOf<T>(): ColumnType",
+      "doc": "`T::columnType()`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::readColumnOf",
+      "name": "readColumnOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function readColumnOf<T>(row: &Row, column: i32): Result<T, Error>",
+      "doc": "`T::readColumn(row, column)`."
+    },
+    {
+      "module": "std::orm::column",
+      "path": "std::orm::column::Orm::readIntegerInRange",
+      "name": "readIntegerInRange",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function readIntegerInRange(row: &Row, column: i32, minimum: i64, maximum: i64, typeName: str): Result<i64, Error>",
+      "doc": "Column `column` as an integer in `minimum..=maximum`; a value outside  \nis a `DECODE` error naming `typeName`."
+    },
+    {
       "module": "std::orm::entity",
       "path": "std::orm::entity::Orm",
       "name": "Orm",
@@ -13556,7 +13750,7 @@
         {
           "name": "table",
           "kind": "method",
-          "signature": "static table(): Table",
+          "signature": "static table(): Schema",
           "doc": "The descriptor of the record's table."
         }
       ]
@@ -13781,37 +13975,37 @@
           "name": "insertStatement",
           "kind": "field",
           "signature": "insertStatement: String",
-          "doc": "`Table::insertSql`."
+          "doc": "`Schema::insertSql`."
         },
         {
           "name": "selectStatement",
           "kind": "field",
           "signature": "selectStatement: String",
-          "doc": "`Table::selectSql`."
+          "doc": "`Schema::selectSql`."
         },
         {
           "name": "selectByIdStatement",
           "kind": "field",
           "signature": "selectByIdStatement: String",
-          "doc": "`Table::selectByIdSql`."
+          "doc": "`Schema::selectByIdSql`."
         },
         {
           "name": "selectAllStatement",
           "kind": "field",
           "signature": "selectAllStatement: String",
-          "doc": "`Table::selectAllSql`."
+          "doc": "`Schema::selectAllSql`."
         },
         {
           "name": "updateStatement",
           "kind": "field",
           "signature": "updateStatement: String",
-          "doc": "`Table::updateByIdSql`."
+          "doc": "`Schema::updateByIdSql`."
         },
         {
           "name": "deleteStatement",
           "kind": "field",
           "signature": "deleteStatement: String",
-          "doc": "`Table::deleteByIdSql`."
+          "doc": "`Schema::deleteByIdSql`."
         },
         {
           "name": "valueCount",
@@ -13897,15 +14091,6 @@
       "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`."
     },
     {
-      "module": "std::orm::repository",
-      "path": "std::orm::repository::Orm::sqliteUnit",
-      "name": "sqliteUnit",
-      "kind": "function",
-      "visibility": "private",
-      "signature": "function sqliteUnit(result: Result<void, Error>): Result<void, Error>",
-      "doc": "`result` with its SQLite error mapped by `Error::fromSqlite`.  \n`sqliteResult<void>` is not used: rewrapping a `void` payload through  \nthe type parameter emits C that does not compile."
-    },
-    {
       "module": "std::orm::row",
       "path": "std::orm::row::Orm",
       "name": "Orm",
@@ -13940,6 +14125,12 @@
           "kind": "method",
           "signature": "columnCount(&self): i32",
           "doc": "How many columns the row has."
+        },
+        {
+          "name": "isNull",
+          "kind": "method",
+          "signature": "isNull(&self, column: i32): Result<boolean, Error>",
+          "doc": "Whether column `column` is NULL; an index outside the row is a  \n`DECODE` error."
         },
         {
           "name": "present",
@@ -14035,47 +14226,6 @@
     },
     {
       "module": "std::orm::table",
-      "path": "std::orm::table::Orm::Column",
-      "name": "Column",
-      "kind": "record",
-      "visibility": "private",
-      "signature": "record Column",
-      "doc": "One column of a table descriptor.",
-      "members": [
-        {
-          "name": "name",
-          "kind": "field",
-          "signature": "name: String",
-          "doc": "The column name."
-        },
-        {
-          "name": "columnType",
-          "kind": "field",
-          "signature": "columnType: ColumnType",
-          "doc": "The declared type."
-        },
-        {
-          "name": "key",
-          "kind": "field",
-          "signature": "key: ColumnKey",
-          "doc": "Whether the column is the primary key."
-        },
-        {
-          "name": "autoIncrement",
-          "kind": "field",
-          "signature": "autoIncrement: boolean",
-          "doc": "Whether the key is `AUTOINCREMENT` (and so left out of inserts)."
-        },
-        {
-          "name": "notNull",
-          "kind": "field",
-          "signature": "notNull: boolean",
-          "doc": "Whether the column is `NOT NULL`."
-        }
-      ]
-    },
-    {
-      "module": "std::orm::table",
       "path": "std::orm::table::Orm::ColumnKey",
       "name": "ColumnKey",
       "kind": "enum",
@@ -14133,11 +14283,11 @@
     },
     {
       "module": "std::orm::table",
-      "path": "std::orm::table::Orm::Table",
-      "name": "Table",
+      "path": "std::orm::table::Orm::Schema",
+      "name": "Schema",
       "kind": "record",
       "visibility": "private",
-      "signature": "record Table",
+      "signature": "record Schema",
       "doc": "The descriptor of one table: its name and its columns, in order.",
       "members": [
         {
@@ -14149,49 +14299,55 @@
         {
           "name": "columns",
           "kind": "field",
-          "signature": "columns: Vector<Column>",
+          "signature": "columns: Vector<SchemaColumn>",
           "doc": "The columns, in declaration order."
         },
         {
           "name": "create",
           "kind": "method",
-          "signature": "static create(name: str): Table",
+          "signature": "static create(name: str): Schema",
           "doc": "An empty descriptor for the table `name`."
         },
         {
           "name": "autoIncrement",
           "kind": "method",
-          "signature": "autoIncrement(self): Table",
+          "signature": "autoIncrement(self): Schema",
           "doc": "Marks the column added last `AUTOINCREMENT`. Only an `INTEGER` primary  \nkey accepts it; the emitters report any other column as `SCHEMA`."
+        },
+        {
+          "name": "column",
+          "kind": "method",
+          "signature": "column(self, name: str, columnType: ColumnType, key: ColumnKey): Schema",
+          "doc": "Adds a column of type `columnType`."
         },
         {
           "name": "columnBlob",
           "kind": "method",
-          "signature": "columnBlob(self, name: str, key: ColumnKey): Table",
+          "signature": "columnBlob(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a `BLOB` column."
         },
         {
           "name": "columnBoolean",
           "kind": "method",
-          "signature": "columnBoolean(self, name: str, key: ColumnKey): Table",
+          "signature": "columnBoolean(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a boolean column, stored as `INTEGER` 0 or 1."
         },
         {
           "name": "columnInt",
           "kind": "method",
-          "signature": "columnInt(self, name: str, key: ColumnKey): Table",
+          "signature": "columnInt(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds an `INTEGER` column."
         },
         {
           "name": "columnReal",
           "kind": "method",
-          "signature": "columnReal(self, name: str, key: ColumnKey): Table",
+          "signature": "columnReal(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a `REAL` column."
         },
         {
           "name": "columnText",
           "kind": "method",
-          "signature": "columnText(self, name: str, key: ColumnKey): Table",
+          "signature": "columnText(self, name: str, key: ColumnKey): Schema",
           "doc": "Adds a `TEXT` column."
         },
         {
@@ -14221,13 +14377,13 @@
         {
           "name": "lastColumn",
           "kind": "method",
-          "signature": "lastColumn(&mut self): Option<&mut Column>",
+          "signature": "lastColumn(&mut self): Option<&mut SchemaColumn>",
           "doc": "The column added last, when there is one."
         },
         {
           "name": "notNull",
           "kind": "method",
-          "signature": "notNull(self): Table",
+          "signature": "notNull(self): Schema",
           "doc": "Marks the column added last `NOT NULL`."
         },
         {
@@ -14275,8 +14431,49 @@
         {
           "name": "withColumn",
           "kind": "method",
-          "signature": "withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Table",
+          "signature": "withColumn(self, name: str, columnType: ColumnType, key: ColumnKey): Schema",
           "doc": "The descriptor with one more column."
+        }
+      ]
+    },
+    {
+      "module": "std::orm::table",
+      "path": "std::orm::table::Orm::SchemaColumn",
+      "name": "SchemaColumn",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record SchemaColumn",
+      "doc": "One column of a table descriptor.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String",
+          "doc": "The column name."
+        },
+        {
+          "name": "columnType",
+          "kind": "field",
+          "signature": "columnType: ColumnType",
+          "doc": "The declared type."
+        },
+        {
+          "name": "key",
+          "kind": "field",
+          "signature": "key: ColumnKey",
+          "doc": "Whether the column is the primary key."
+        },
+        {
+          "name": "autoIncrement",
+          "kind": "field",
+          "signature": "autoIncrement: boolean",
+          "doc": "Whether the key is `AUTOINCREMENT` (and so left out of inserts)."
+        },
+        {
+          "name": "notNull",
+          "kind": "field",
+          "signature": "notNull: boolean",
+          "doc": "Whether the column is `NOT NULL`."
         }
       ]
     },
@@ -15659,6 +15856,32 @@
       ]
     },
     {
+      "module": "std::serializer::attributes",
+      "path": "std::serializer::attributes::Serializer",
+      "name": "Serializer",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Serializer",
+      "doc": "The attributes of the reflective `Serialize` default."
+    },
+    {
+      "module": "std::serializer::attributes",
+      "path": "std::serializer::attributes::Serializer::Rename",
+      "name": "Rename",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Rename",
+      "doc": "The key a field is written under, when it differs from the field name.  \nThe selected writer still validates it: TOML accepts only bare keys.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: str",
+          "doc": "The key to write."
+        }
+      ]
+    },
+    {
       "module": "std::serializer::core",
       "path": "std::serializer::core::Serializer",
       "name": "Serializer",
@@ -15711,6 +15934,30 @@
           "kind": "field",
           "signature": "quoteFieldKeys: boolean",
           "doc": "Whether field keys are always emitted as quoted strings."
+        },
+        {
+          "name": "nestedRecordPrefix",
+          "kind": "field",
+          "signature": "nestedRecordPrefix: str",
+          "doc": "Text appended before a record nested in another record, for example  \n`{ ` for a TOML inline table."
+        },
+        {
+          "name": "nestedRecordSuffix",
+          "kind": "field",
+          "signature": "nestedRecordSuffix: str",
+          "doc": "Text appended after a record nested in another record."
+        },
+        {
+          "name": "nestedEntrySeparator",
+          "kind": "field",
+          "signature": "nestedEntrySeparator: str",
+          "doc": "Text inserted between the entries of a nested record."
+        },
+        {
+          "name": "depth",
+          "kind": "field",
+          "signature": "depth: u32",
+          "doc": "How many records enclose the value being written: `0` for the root.  \nFront-ends start at `0`; `Serializer::nested` derives the writer for a  \nfield value."
         }
       ]
     },
@@ -15721,7 +15968,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function beginRecord(output: &mut String, serializer: &Writer): Result<boolean, Error>",
-      "doc": "Appends the writer's record prefix to `output`.  \n  \nReturns `Result::OK(true)` for consistency with the rest of the serializer  \nAPI. This function does not validate that a matching `endRecord` is later  \ncalled.  \n  \n# Example  \n  \n```ignis  \nlet writer: Serializer::Writer = Json::writer();  \nlet mut output: String = String::new();  \nSerializer::beginRecord(&mut output, &writer)!; // appends \"{\"  \n```"
+      "doc": "Appends the writer's record prefix to `output`: `recordPrefix` at depth  \n`0`, `nestedRecordPrefix` below it.  \n  \nReturns `Result::OK(true)` for consistency with the rest of the serializer  \nAPI. This function does not validate that a matching `endRecord` is later  \ncalled.  \n  \n# Example  \n  \n```ignis  \nlet writer: Serializer::Writer = Json::writer();  \nlet mut output: String = String::new();  \nSerializer::beginRecord(&mut output, &writer)!; // appends \"{\"  \n```"
     },
     {
       "module": "std::serializer::core",
@@ -15730,7 +15977,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function endRecord(output: &mut String, serializer: &Writer): Result<boolean, Error>",
-      "doc": "Appends the writer's record suffix to `output`.  \n  \nCall this after all fields have been written. The helper does not check  \nwhether the record is empty or whether field separators were used correctly.  \n  \n# Example  \n  \n```ignis  \nlet writer: Serializer::Writer = Json::writer();  \nlet mut output: String = String::create(\"{\");  \nSerializer::endRecord(&mut output, &writer)!; // appends \"}\"  \n```"
+      "doc": "Appends the writer's record suffix to `output`: `recordSuffix` at depth  \n`0`, `nestedRecordSuffix` below it.  \n  \nCall this after all fields have been written. The helper does not check  \nwhether the record is empty or whether field separators were used correctly.  \n  \n# Example  \n  \n```ignis  \nlet writer: Serializer::Writer = Json::writer();  \nlet mut output: String = String::create(\"{\");  \nSerializer::endRecord(&mut output, &writer)!; // appends \"}\"  \n```"
     },
     {
       "module": "std::serializer::core",
@@ -15761,6 +16008,15 @@
     },
     {
       "module": "std::serializer::core",
+      "path": "std::serializer::core::Serializer::nested",
+      "name": "nested",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function nested(serializer: &Writer): Writer",
+      "doc": "Returns a copy of `serializer` one record deeper, the writer a record  \npasses to the value of one of its fields.  \n  \nThe reflective `Serialize` default does this for every field. A  \nhandwritten `serialize` that writes a nested record passes the derived  \nwriter to it, so the nested record takes the nested punctuation.  \n  \n# Example  \n  \n```ignis  \nlet nested: Serializer::Writer = Serializer::nested(writer);  \nSerializer::writeField(output, \"inner\", writer, true)!;  \nself.inner.serialize(output, &nested)!; // TOML: inner = { a = 1 }  \n```"
+    },
+    {
+      "module": "std::serializer::core",
       "path": "std::serializer::core::Serializer::writeEscapedByte",
       "name": "writeEscapedByte",
       "kind": "function",
@@ -15775,7 +16031,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function writeField(output: &mut String, key: str, serializer: &Writer, first: boolean): Result<boolean, Error>",
-      "doc": "Writes a field key and separator for the next record entry.  \n  \nIf `first` is `false`, the writer's `entrySeparator` is emitted before the  \nkey. When `quoteFieldKeys` is enabled, the key is escaped as a quoted string.  \nOtherwise the key must be a non-empty ASCII bare key containing only  \nletters, digits, `_`, or `-`; invalid keys return  \n`Serializer::ErrorKind::INVALID_FIELD_KEY`.  \n  \n# Arguments  \n  \n- `output`: destination record text.  \n- `key`: field name to emit.  \n- `serializer`: writer configuration that controls quoting and separators.  \n- `first`: whether this is the first field in the record.  \n  \n# Example  \n  \n```ignis  \nlet writer: Serializer::Writer = Json::writer();  \nlet mut output: String = String::create(\"{\");  \nSerializer::writeField(&mut output, \"name\", &writer, true)!;  \n// output now contains \"{\\\"name\\\":\"  \n```"
+      "doc": "Writes a field key and separator for the next record entry.  \n  \nIf `first` is `false`, the writer's `entrySeparator` (at depth `0`) or  \n`nestedEntrySeparator` (below it) is emitted before the key. When `quoteFieldKeys` is enabled, the key is escaped as a quoted string.  \nOtherwise the key must be a non-empty ASCII bare key containing only  \nletters, digits, `_`, or `-`; invalid keys return  \n`Serializer::ErrorKind::INVALID_FIELD_KEY`.  \n  \n# Arguments  \n  \n- `output`: destination record text.  \n- `key`: field name to emit.  \n- `serializer`: writer configuration that controls quoting and separators.  \n- `first`: whether this is the first field in the record.  \n  \n# Example  \n  \n```ignis  \nlet writer: Serializer::Writer = Json::writer();  \nlet mut output: String = String::create(\"{\");  \nSerializer::writeField(&mut output, \"name\", &writer, true)!;  \n// output now contains \"{\\\"name\\\":\"  \n```"
     },
     {
       "module": "std::serializer::core",
@@ -15889,7 +16145,7 @@
       "kind": "trait",
       "visibility": "public",
       "signature": "trait Serialize",
-      "doc": "Format-agnostic serialization contract for record-like values.",
+      "doc": "Format-agnostic serialization contract for record-like values.  \n  \nA record marked `@implements(Serialize)` gets the reflective default  \ndescribed in the module documentation, or provides `serialize` itself.",
       "members": [
         {
           "name": "serialize",
@@ -15898,6 +16154,15 @@
           "doc": "Appends a serialized representation of `self` to `output`.  \n  \n# Arguments  \n  \n- `output`: destination string to append to.  \n- `writer`: format settings supplied by the concrete front-end.  \n  \n# Returns  \n  \n`Result::OK(true)` on success, or `Serializer::Error` when the selected  \nwriter rejects a field key or root shape."
         }
       ]
+    },
+    {
+      "module": "std::serializer::serialize",
+      "path": "std::serializer::serialize::serializeOf",
+      "name": "serializeOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function serializeOf<T>(value: &T, output: &mut String, writer: &Writer): Result<boolean, Error>",
+      "doc": "`value.serialize(output, writer)` one record deeper, the per-field call of  \nthe reflective default."
     },
     {
       "module": "std::serializer::writer",
@@ -20389,7 +20654,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function stringify<T>(value: &T): Result<String, Error>",
-      "doc": "Serializes a record-like value as a TOML document string.  \n  \nThe type's `Serialize` implementation controls which fields are emitted.  \nSerializer errors are propagated, including unsupported nested shapes or an  \nimplementation that does not produce a TOML-compatible root record."
+      "doc": "Serializes a record-like value as a TOML document string.  \n  \nThe type's `Serialize` implementation controls which fields are emitted.  \nThe root record is one `key = value` line per field, and a nested record  \nis an inline table, recursively:  \n  \n```text  \nid = 1  \nmiddle = { level = 2, inner = { a = 3, b = \"x\" } }  \n```  \n  \nSerializer errors are propagated, such as an invalid bare key or an  \nimplementation that does not produce a TOML-compatible root record."
     },
     {
       "module": "std::toml",
@@ -20425,7 +20690,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function writer(): Writer",
-      "doc": "Returns the serializer configuration used for TOML record output.  \n  \nThe writer emits field entries as `key = value` lines, does not wrap records  \nin braces, and rejects scalar roots."
+      "doc": "Returns the serializer configuration used for TOML record output.  \n  \nThe writer emits the root record's fields as `key = value` lines without  \nbraces, writes a nested record as an inline table (`key = { a = 1, b = 2 }`),  \nand rejects scalar roots."
     },
     {
       "module": "std::toml",

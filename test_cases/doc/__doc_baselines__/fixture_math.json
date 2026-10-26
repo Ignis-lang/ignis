@@ -6,10 +6,11 @@
     },
     {
       "name": "std::format",
-      "doc": "  \n# Format Module  \n  \nFormatting traits for user-defined textual representations."
+      "doc": "  \n# Format Module  \n  \nFormatting traits for user-defined textual representations.  \n  \n## Exports  \n  \n| Export    | Description                                               |  \n|-----------|-----------------------------------------------------------|  \n| `Display` | `display(&self): String`, with a reflective record default and implementations for primitives, `str`, `String`, `Option` and `Vector` |  \n  \n## Example  \n  \n```ignis  \n@implements(Display)  \nrecord Point {  \n  public x: i32;  \n  public label: String;  \n}  \n  \nlet point: Point = Point { x: 1, label: String::create(\"origin\") };  \nlet text: String = point.display(); // Point { x: 1, label: origin }  \n```  \n  \nEnums still need a hand-written `display`: the default walks record  \nfields only (see `std::format::display`)."
     },
     {
-      "name": "std::format::display"
+      "name": "std::format::display",
+      "doc": "  \n# Display  \n  \nThe `Display` trait and its implementations for the built-in types.  \n  \n`display` has a default that reflects over the record's fields with  \n`comptime for`, so `@implements(Display)` on a record needs no method of  \nits own. A `display` the record writes itself replaces the default.  \n  \n## Default  \n  \n`TypeName { field: value, field: value }`, fields in declaration order,  \neach rendered by its own `Display`. The name is the record's concrete  \nname: a generic record shows its type arguments, `Box<i32> { value: 1 }`.  \nA record without fields renders as `TypeName {}`. A field whose type does  \nnot implement `Display` is a compile error inside the default, with a  \nnote naming the field.  \n  \n## Implementations  \n  \n| Type | Rendering |  \n|------|-----------|  \n| integers, `f32`, `f64`, `boolean` | `toString()`: `-3`, `1.5`, `true` |  \n| `char` | the character itself, unquoted |  \n| `str`, `String` | the text itself, unquoted and unescaped |  \n| `Option<T: Display>` | `Option::SOME(value)` or `Option::NONE` |  \n| `Vector<T: Display>` | `[first, second]`, `[]` when empty |  \n  \n## Enums  \n  \nThe default walks record fields only. An enum that declares  \n`@implements(Display)` without a `display` of its own is a compile error  \ninside the default (A0293, `'@fields' needs a record`), so an enum  \nneeds a hand-written `display`."
     },
     {
       "name": "std::hash",
@@ -133,14 +134,24 @@
       "kind": "trait",
       "visibility": "public",
       "signature": "trait Display",
-      "doc": "Trait for values that can render themselves as an owned `String`.  \n  \nTypes marked with `@implements(Display)` must provide  \n`display(&self): String`.",
+      "doc": "Trait for values that can render themselves as an owned `String`.  \n  \nA record marked `@implements(Display)` gets the reflective default  \ndescribed in the module documentation, or provides `display(&self):  \nString` itself.",
       "members": [
         {
           "name": "display",
           "kind": "method",
-          "signature": "display(&self): String"
+          "signature": "display(&self): String",
+          "doc": "The value as text."
         }
       ]
+    },
+    {
+      "module": "std::format::display",
+      "path": "std::format::display::displayOf",
+      "name": "displayOf",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function displayOf<T>(value: &T): String",
+      "doc": "`value.display()`, the per-field call of the reflective default."
     },
     {
       "module": "std::hash",

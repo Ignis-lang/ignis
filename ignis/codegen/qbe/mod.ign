@@ -679,7 +679,8 @@ export namespace CodegenQbe {
 
   /// Interns a string literal and answers its data symbol. Literals are
   /// NUL-terminated byte strings, deduplicated by content so the same text
-  /// shares one symbol.
+  /// shares one symbol. They go to `.rodata`, as the C backend's do, so a
+  /// write through a literal faults instead of changing every use of it.
   function internString(emitter: &mut CodegenQbe::Emitter, text: &String): String {
     let mut index: u64 = 0;
 
@@ -699,7 +700,7 @@ export namespace CodegenQbe {
 
     let symbol: String = `$str_${id}`;
     let escaped: String = CodegenQbe::stringLiteralItems(text);
-    let line: String = `data $str_${id} = { ${escaped.toStr()} }\n`;
+    let line: String = `section ".rodata" data $str_${id} = { ${escaped.toStr()} }\n`;
 
     emitter.data.pushStr(line.toStr());
 

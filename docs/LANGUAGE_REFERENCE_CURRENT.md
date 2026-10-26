@@ -554,7 +554,7 @@ record Item {
 
 A trait may declare `static` methods, required or with a default body; `Self` in their signatures is the implementing type. A record or enum implements them with `static` methods of the same signature (A0276, A0277), and a generic calls them through a bounded type parameter as `T::name(args)` (A0278), which reaches the implementing type's method after monomorphization. A static trait method is not callable through a value or as `Trait::name(args)` (A0279). Inside a trait's default body, static or instance, `Self::name(args)` calls the trait's static method on the implementing type, as `T::name(args)` does. See `docs/TRAITS.md`.
 
-An existing type, a primitive, `str` or a record or enum including the standard library's, implements a trait through an extension block: `@implements(Describe) extension i64 { describe(&self): i64 { ... } }`, or generically `@implements(Describe) extension<T: Describe> Option<T> { ... }`. Its methods follow record-method rules, are checked against the trait like a record's, inherit the trait's defaults, and are callable on the type itself (`value.describe()`, `i64::read(raw)`) and through bounds (`T::read` with `T = i64`); the type then satisfies `T: Describe`. A block is allowed only in the module that declares the trait or the one that declares the type, only the trait's for a primitive (A0286); a second implementation for the same type is an error naming both (A0287); a block has to name a trait (A0285), cannot implement a language trait or the canonical `Eq` and `Hash` (A0288), and extends only the types listed above (A0289). See `docs/TRAITS.md`.
+An existing type, a primitive, `str` or a record or enum including the standard library's, implements a trait through an extension block: `@implements(Describe) extension i64 { describe(&self): i64 { ... } }`, generically `@implements(Describe) extension<T: Describe> Option<T> { ... }`, or for one concrete instance `@implements(Describe) extension Vector<u8> { ... }`, which implements the trait for that instance only. Its methods follow record-method rules, are checked against the trait like a record's, inherit the trait's defaults, and are callable on the type itself (`value.describe()`, `i64::read(raw)`) and through bounds (`T::read` with `T = i64`); the type then satisfies `T: Describe`. A block is allowed only in the module that declares the trait or the one that declares the type, only the trait's for a primitive (A0286); a second implementation for the same type, including a generic block and a block over one of its instances for the same trait, is an error naming both (A0287); a block has to name a trait (A0285), cannot implement a language trait or the canonical `Eq` and `Hash` (A0288), and extends only the types listed above (A0289). See `docs/TRAITS.md`.
 
 ### 4.9 Namespaces
 
@@ -1106,7 +1106,10 @@ attribute's constant values. A record initializer accepts
 is a keyword. Diagnostics: `A0292` (`break`/`continue` across the loop), `A0293` (`@fields` not over
 a record `Self`), `A0294` (outside a method), `A0295` (descriptor builtin outside its loop), `A0296`
 (unknown descriptor member). `@attribute<A>(Self)` reads the attribute on the record or enum `Self` is
-and requires `A` to be declared for that kind (`A0297`). See `docs/TRAITS.md`, "Field
+and requires `A` to be declared for that kind (`A0297`). Every error reported from one unrolled copy,
+bound failures on generic calls included, carries a note naming the field of that iteration. A
+method call on a type that is not a record or enum, naming a method of a trait the type has no
+extension block for, reports the missing implementation (`A0298`). See `docs/TRAITS.md`, "Field
 Reflection".
 
 ### Parameter attributes

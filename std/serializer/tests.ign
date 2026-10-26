@@ -3,7 +3,7 @@ import Hasher from "std::hash";
 import Json from "std::json";
 import Serialize, Serializer from "std::serializer";
 import Test from "std::test";
-import Toml from "std::toml";
+import Toml, TomlDocument from "std::toml";
 
 @implements(Hash, Eq)
 record Key {
@@ -93,6 +93,10 @@ function coreSupportsCustomWriterLayouts(): void {
     fieldSeparator: " => ",
     supportsScalarRoot: true,
     quoteFieldKeys: false,
+    nestedRecordPrefix: "<",
+    nestedRecordSuffix: ">",
+    nestedEntrySeparator: " | ",
+    depth: 0,
   };
 
   match (payload.serialize(&mut output, &writer)) {
@@ -143,4 +147,234 @@ function serializerSurfaceAndHashMapTraversalStayStable(): void {
 
   Test::assert(firstOrder != 0);
   Test::assertEq<i32>(firstOrder, secondOrder);
+}
+
+@implements(Serialize)
+record Owner {
+  @Serializer::Rename("display-name")
+  public name: String;
+  public age: u8;
+}
+
+@implements(Serialize)
+record Account {
+  public id: i64;
+  public active: boolean;
+  public score: f64;
+  public grade: char;
+  public tag: str;
+  public owner: Owner;
+}
+
+function sampleAccount(): Account {
+  return Account {
+    id: 42,
+    active: true,
+    score: 2.5,
+    grade: 'A',
+    tag: "line\n",
+    owner: Owner { name: String::create("Ada"), age: 36 },
+  };
+}
+
+@test
+function reflectiveSerializeWritesJsonInDeclarationOrder(): void {
+  let account: Account = sampleAccount();
+
+  assertOkString(
+    Json::stringify<Account>(&account),
+    "{\"id\":42,\"active\":true,\"score\":2.5,\"grade\":\"A\",\"tag\":\"line\\n\",\"owner\":{\"display-name\":\"Ada\",\"age\":36}}",
+  );
+}
+
+@test
+function reflectiveSerializeWritesTomlWithRenamedFields(): void {
+  let owner: Owner = Owner { name: String::create("Ada"), age: 36 };
+
+  assertOkString(Toml::stringify<Owner>(&owner), "display-name = \"Ada\"\nage = 36");
+}
+
+@test
+function handWrittenSerializeReplacesTheDefault(): void {
+  let payload: Payload = Payload { value: 7, name: "ignis" };
+
+  assertOkString(Json::stringify<Payload>(&payload), "{\"value\":7,\"name\":\"ignis\"}");
+}
+
+@implements(Serialize)
+record Point {
+  public x: i32;
+  public label: str;
+}
+
+@implements(Serialize)
+record Shape {
+  public name: str;
+  public origin: Point;
+}
+
+@implements(Serialize)
+record Inner {
+  public a: i32;
+  public b: str;
+}
+
+@implements(Serialize)
+record Middle {
+  public level: i32;
+  public inner: Inner;
+}
+
+@implements(Serialize)
+record Outer {
+  public id: i32;
+  public middle: Middle;
+}
+
+@implements(Serialize)
+record Wrapper {
+  public payload: Payload;
+}
+
+@implements(Serialize)
+record Envelope {
+  public tag: str;
+  public payload: Payload;
+
+  serialize(
+    &self,
+    output: &mut String,
+    writer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    let nested: Serializer::Writer = Serializer::nested(writer);
+
+    Serializer::beginRecord(output, writer)!;
+    Serializer::writeField(output, "tag", writer, true)!;
+    Serializer::write(output, self.tag, writer)!;
+    Serializer::writeField(output, "payload", writer, false)!;
+    self.payload.serialize(output, &nested)!;
+
+    return Serializer::endRecord(output, writer);
+  }
+}
+
+function sampleOuter(): Outer {
+  return Outer { id: 1, middle: Middle { level: 2, inner: Inner { a: 3, b: "x" } } };
+}
+
+function parseOk(text: &String): TomlDocument {
+  let Result::OK(document) = Toml::parse(text) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return document;
+}
+
+function stringifyOk(value: Result<String, Serializer::Error>): String {
+  let Result::OK(text) = value else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return text;
+}
+
+function assertTomlInteger(document: &TomlDocument, path: str, expected: i64): void {
+  let Option::SOME(value) = document.get(path) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assertEq<i64>(value.asInteger(), expected);
+}
+
+function assertTomlString(document: &TomlDocument, path: str, expected: str): void {
+  let Result::OK(value) = document.getString(path) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assertEq<str>(value, expected);
+}
+
+@test
+function reflectiveSerializeWritesNestedTomlRecordAsInlineTable(): void {
+  let shape: Shape = Shape { name: "unit", origin: Point { x: 1, label: "p" } };
+  let text: String = stringifyOk(Toml::stringify<Shape>(&shape));
+
+  Test::assertEq<str>(text.toStr(), "name = \"unit\"\norigin = { x = 1, label = \"p\" }");
+
+  let document: TomlDocument = parseOk(&text);
+  assertTomlString(&document, "name", "unit");
+  assertTomlInteger(&document, "origin.x", 1);
+  assertTomlString(&document, "origin.label", "p");
+}
+
+@test
+function reflectiveSerializeWritesTwoLevelsOfNestedTomlRecords(): void {
+  let outer: Outer = sampleOuter();
+  let text: String = stringifyOk(Toml::stringify<Outer>(&outer));
+
+  Test::assertEq<str>(text.toStr(), "id = 1\nmiddle = { level = 2, inner = { a = 3, b = \"x\" } }");
+
+  let document: TomlDocument = parseOk(&text);
+  assertTomlInteger(&document, "id", 1);
+  assertTomlInteger(&document, "middle.level", 2);
+  assertTomlInteger(&document, "middle.inner.a", 3);
+  assertTomlString(&document, "middle.inner.b", "x");
+}
+
+@test
+function reflectiveSerializeWritesNestedTomlRecordWithRenamedField(): void {
+  let account: Account = sampleAccount();
+  let text: String = stringifyOk(Toml::stringify<Account>(&account));
+
+  Test::assertEq<str>(
+    text.toStr(),
+    "id = 42\nactive = true\nscore = 2.5\ngrade = \"A\"\ntag = \"line\\n\"\nowner = { display-name = \"Ada\", age = 36 }",
+  );
+
+  let document: TomlDocument = parseOk(&text);
+  assertTomlInteger(&document, "id", 42);
+  assertTomlString(&document, "tag", "line\n");
+  assertTomlString(&document, "owner.display-name", "Ada");
+  assertTomlInteger(&document, "owner.age", 36);
+}
+
+@test
+function handWrittenSerializeNestedInTomlRecordIsAnInlineTable(): void {
+  let wrapper: Wrapper = Wrapper { payload: Payload { value: 7, name: "ignis" } };
+  let wrapped: String = stringifyOk(Toml::stringify<Wrapper>(&wrapper));
+
+  Test::assertEq<str>(wrapped.toStr(), "payload = { value = 7, name = \"ignis\" }");
+
+  let wrappedDocument: TomlDocument = parseOk(&wrapped);
+  assertTomlInteger(&wrappedDocument, "payload.value", 7);
+  assertTomlString(&wrappedDocument, "payload.name", "ignis");
+
+  let envelope: Envelope = Envelope { tag: "box", payload: Payload { value: 8, name: "fire" } };
+  let enveloped: String = stringifyOk(Toml::stringify<Envelope>(&envelope));
+
+  Test::assertEq<str>(enveloped.toStr(), "tag = \"box\"\npayload = { value = 8, name = \"fire\" }");
+
+  let envelopedDocument: TomlDocument = parseOk(&enveloped);
+  assertTomlString(&envelopedDocument, "tag", "box");
+  assertTomlInteger(&envelopedDocument, "payload.value", 8);
+  assertTomlString(&envelopedDocument, "payload.name", "fire");
+}
+
+@test
+function nestedRecordsKeepJsonPunctuation(): void {
+  let outer: Outer = sampleOuter();
+  let envelope: Envelope = Envelope { tag: "box", payload: Payload { value: 8, name: "fire" } };
+
+  assertOkString(
+    Json::stringify<Outer>(&outer),
+    "{\"id\":1,\"middle\":{\"level\":2,\"inner\":{\"a\":3,\"b\":\"x\"}}}",
+  );
+  assertOkString(
+    Json::stringify<Envelope>(&envelope),
+    "{\"tag\":\"box\",\"payload\":{\"value\":8,\"name\":\"fire\"}}",
+  );
 }
