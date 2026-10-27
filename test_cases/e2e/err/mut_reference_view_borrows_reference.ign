@@ -1,0 +1,55 @@
+// e2e: err
+//
+// A view taken through a `&mut T` (a parameter, `self`, or a local reference)
+// borrows that reference: mutating through it while the view is still used
+// would free what the view points to.
+import Io from "std::io";
+
+record Shelf {
+  public items: Vector<String>;
+
+  public firstThenGrow(&mut self): void {
+    let first: &String = self.items.get(0).unwrap();
+    self.items.push(String::create("grow"));
+    Io::println(first.toStr());
+  }
+}
+
+function consume(text: str): void {
+  Io::println(text);
+}
+
+function parameterString(owned: &mut String): void {
+  let text: str = owned.toStr();
+  owned.pushStr("grow grow grow grow grow grow grow grow grow grow grow grow");
+  consume(text);
+}
+
+function parameterVector(list: &mut Vector<String>): void {
+  let first: Option<&String> = list.get(0);
+  list.push(String::create("grow"));
+  if (let Option::SOME(item) = first) {
+    Io::println(item.toStr());
+  }
+}
+
+function localReference(): void {
+  let mut value: String = String::create("x");
+  let owned: &mut String = &mut value;
+  let text: str = owned.toStr();
+  owned.pushStr("grow grow grow grow grow grow grow grow grow grow grow grow");
+  consume(text);
+}
+
+function main(): i32 {
+  let mut value: String = String::create("x");
+  parameterString(&mut value);
+  let mut list: Vector<String> = Vector::new<String>();
+  list.push(String::create("a"));
+  parameterVector(&mut list);
+  localReference();
+  let mut shelf: Shelf = Shelf { items: Vector::new<String>() };
+  shelf.items.push(String::create("a"));
+  shelf.firstThenGrow();
+  return 0;
+}
