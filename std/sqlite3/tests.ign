@@ -3,6 +3,8 @@
 //! no network.
 
 import Sqlite3 from "std::sqlite3";
+import Arc, Mutex, MutexGuard, Shared from "std::sync";
+import JoinHandle, Thread from "std::thread";
 
 import Test from "std::test";
 
@@ -442,4 +444,24 @@ function sqlite3CommitOnAClosedConnectionIsRefused(): void {
       Test::fail();
     },
   };
+}
+
+@test
+function sharedConnectionWritesFromAnotherThread(): void {
+  let mut connection: Sqlite3::Connection = sqlite3TestConnection();
+  sqlite3TestOk(connection.exec("CREATE TABLE counts (value INTEGER)"));
+
+  let cell: Sqlite3::SharedConnection = Sqlite3::SharedConnection::new(connection);
+  let shared: Shared<Sqlite3::SharedConnection> = Arc::new<Mutex<Sqlite3::SharedConnection>>(Mutex::new<Sqlite3::SharedConnection>(cell));
+  let worker: Shared<Sqlite3::SharedConnection> = shared.clone();
+
+  let handle: JoinHandle<boolean> = Thread::spawn<boolean>((): boolean -> {
+    let mut guard: MutexGuard<Sqlite3::SharedConnection> = (@move worker).get().lock();
+    return guard.get().connection.exec("INSERT INTO counts VALUES (7)").isOk();
+  });
+
+  Test::assert(handle.join());
+
+  let mut guard: MutexGuard<Sqlite3::SharedConnection> = shared.get().lock();
+  Test::assertEq<i64>(guard.get().connection.lastInsertRowId(), 1);
 }
