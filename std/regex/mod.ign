@@ -1,0 +1,88 @@
+//!
+//! # Regex
+//!
+//! Regular expressions with linear-time matching, in the style of RE2: a
+//! pattern is parsed into an AST, compiled to a program and run by a Pike VM
+//! that simulates the NFA, so matching takes O(text x program) time and never
+//! backtracks.
+//!
+//! This slice holds the parser only. Compiling and matching (`Regex::new`,
+//! `isMatch`, `find`, `findAll`, captures, `replaceAll`, `split`) arrive in
+//! the next slices.
+//!
+//! ## Exports
+//!
+//! | Export                 | Description                                                    |
+//! |------------------------|----------------------------------------------------------------|
+//! | `parseRegex`           | `parseRegex(pattern)`: `Result<RegexAst, RegexError>`          |
+//! | `RegexError`           | `column()` (1-based, in Unicode scalars), `message()`, `toString()` |
+//! | `RegexAst`             | `nodes`, `root`, `groupCount`                                  |
+//! | `RegexNode`            | `EMPTY`, `LITERAL`, `ANY_EXCEPT_NEWLINE`, `CLASS`, `CONCAT`, `ALTERNATE`, `REPEAT`, `GROUP`, `ASSERT` |
+//! | `RegexClass`           | Sorted, merged `ranges` and `negated`                          |
+//! | `RegexRange`           | Inclusive `start` and `end` scalar values                      |
+//! | `RegexRepeat`          | `child`, `min`, `max`, `bounded`, `greedy`                     |
+//! | `RegexGroup`           | `child`, `capturing`, `index`, `name`                          |
+//! | `RegexAssertion`       | `START`, `END`, `WORD_BOUNDARY`, `NOT_WORD_BOUNDARY`           |
+//! | `REGEX_MAX_REPETITION` | The largest count `{n,m}` accepts: 1000                        |
+//!
+//! ## Syntax
+//!
+//! | Syntax                            | Meaning                                                  |
+//! |-----------------------------------|----------------------------------------------------------|
+//! | `x`                               | The scalar `x`, any UTF-8 scalar                         |
+//! | `.`                               | Any scalar except `\n`                                   |
+//! | `\n` `\t` `\r` `\f` `\v`          | Control scalars                                          |
+//! | `\.` `\*` `\\` ...                | Any escaped ASCII punctuation is itself                  |
+//! | `[abc]` `[a-z]` `[^...]`          | Classes, ranges, negation; escapes work inside           |
+//! | `\d` `\w` `\s` and `\D` `\W` `\S` | `[0-9]`, `[0-9A-Za-z_]`, `[ \t\n\r\f\v]` and negations (ASCII) |
+//! | `^` `$`                           | Start and end of the whole text, not of a line           |
+//! | `\b` `\B`                         | ASCII word boundary and its negation                     |
+//! | `(x)` `(?:x)` `(?<name>x)`        | Capturing, non-capturing and named groups                |
+//! | `x\|y`                            | Alternation, leftmost-first                              |
+//! | `x*` `x+` `x?`                    | Zero or more, one or more, zero or one                   |
+//! | `x{n}` `x{n,}` `x{n,m}`           | Counted repetition, counts at most 1000                  |
+//! | `x*?` `x+?` `x??` `x{n,m}?`       | Lazy forms: prefer fewer repetitions                     |
+//! | `(?i)` `(?i:x)`                   | ASCII case-insensitive for the rest of the enclosing group, or inside `x` |
+//!
+//! Group names are `[A-Za-z_][A-Za-z0-9_]*` and must be unique. Capturing
+//! groups are numbered from 1 in the order of their `(`.
+//!
+//! The parser is strict where a pattern would otherwise be ambiguous:
+//!
+//! - `{` always starts a counted repetition; a literal brace is `\{`. A
+//!   `{` that is not `{n}`, `{n,}` or `{n,m}` is `invalid repetition`. A
+//!   lone `}` or `]` is a literal.
+//! - A quantifier after a quantifier (`a**`, `a+*`, `a{2}{3}`) and a
+//!   quantifier after `^`, `$`, `\b` or `\B` are `nothing to repeat`; the
+//!   `?` of a lazy form is part of its quantifier.
+//! - `[]` and `[^]` are `empty class`; a `]` inside a class is `\]`. A `-`
+//!   first or last in a class is a literal.
+//!
+//! ## Errors
+//!
+//! Every error carries the 1-based column, counted in Unicode scalars, of
+//! the part that is wrong: `unclosed group` (at its `(`), `unmatched )`,
+//! `nothing to repeat`, `invalid range z-a` (at its `-`), `unclosed class`
+//! (at its `[`), `empty class`, `trailing backslash`, `unknown escape \q`,
+//! `invalid repetition`, `invalid repetition range`, `repetition count above
+//! 1000`, `invalid group name`, `duplicate group name x`, `unknown group
+//! flag`, `unsupported: backreference` and `unsupported: lookaround`.
+//!
+//! Backreferences (`\1`) and lookaround (`(?=`, `(?!`, `(?<=`, `(?<!`) are
+//! rejected because they cannot be matched in linear time. Classes are
+//! ASCII; Unicode classes are not supported in v1.
+
+import _ from "std::regex::ast";
+import _ from "std::regex::parser";
+
+export
+  RegexAssertion,
+  RegexAst,
+  RegexClass,
+  RegexError,
+  RegexGroup,
+  RegexNode,
+  RegexRange,
+  RegexRepeat,
+from "./ast";
+export REGEX_MAX_REPETITION, parseRegex from "./parser";

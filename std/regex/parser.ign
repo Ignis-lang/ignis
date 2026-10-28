@@ -1,0 +1,832 @@
+//! Pattern parser: pattern text -> `RegexAst`, or the first `RegexError`.
+
+import
+  RegexAssertion,
+  RegexAst,
+  RegexClass,
+  RegexError,
+  RegexGroup,
+  RegexNode,
+  RegexRange,
+  RegexRepeat,
+from "./ast";
+
+/// The largest count a `{n}`, `{n,}` or `{n,m}` may use, so that a pattern
+/// cannot compile to an unbounded program.
+export const REGEX_MAX_REPETITION: u32 = 1000;
+
+/// The highest Unicode scalar value.
+const REGEX_MAX_SCALAR: u32 = 0x10FFFF;
+
+/// What `regexParseAtom` returns for `(?i)`, which sets a flag and adds no
+/// node.
+const REGEX_NO_NODE: u64 = 0xFFFFFFFFFFFFFFFF;
+
+record RegexParser {
+  scalars: Vector<u32>;
+  position: u64;
+  nodes: Vector<RegexNode>;
+  groupCount: u64;
+  names: Vector<String>;
+  caseInsensitive: boolean;
+  failed: boolean;
+  errorColumn: u64;
+  errorMessage: String;
+}
+
+/// A class item read inside `[...]` or after `\` outside it: one scalar or
+/// a shorthand set such as `\d`.
+record RegexClassItem {
+  scalar: u32;
+  isSet: boolean;
+  set: Vector<RegexRange>;
+}
+
+function regexAtEnd(parser: &mut RegexParser): boolean {
+  return parser.position >= parser.scalars.length();
+}
+
+function regexCurrent(parser: &mut RegexParser): u32 {
+  return *parser.scalars.get(parser.position).unwrap();
+}
+
+/// Whether the scalar `offset` past the current one exists and is `scalar`.
+function regexPeekIs(parser: &mut RegexParser, offset: u64, scalar: u32): boolean {
+  let index: u64 = parser.position + offset;
+
+  if (index >= parser.scalars.length()) {
+    return false;
+  }
+
+  return *parser.scalars.get(index).unwrap() == scalar;
+}
+
+/// The 1-based column of the current scalar.
+function regexColumn(parser: &mut RegexParser): u64 {
+  return parser.position + 1;
+}
+
+/// Records the first error; later ones are ignored.
+function regexFail(parser: &mut RegexParser, column: u64, message: String): void {
+  if (parser.failed) {
+    return;
+  }
+
+  parser.failed = true;
+  parser.errorColumn = column;
+  parser.errorMessage = message;
+}
+
+function regexFailStr(parser: &mut RegexParser, column: u64, message: str): void {
+  regexFail(parser, column, String::create(message));
+}
+
+function regexAddNode(parser: &mut RegexParser, node: RegexNode): u64 {
+  parser.nodes.push(node);
+  return parser.nodes.length() - 1;
+}
+
+function regexIsDigit(scalar: u32): boolean {
+  return scalar >= '0' as u32 && scalar <= '9' as u32;
+}
+
+function regexIsNameStart(scalar: u32): boolean {
+  return (scalar >= 'a' as u32 && scalar <= 'z' as u32) || (scalar >= 'A' as u32 && scalar <= 'Z' as u32) || scalar == '_' as u32;
+}
+
+function regexIsQuantifier(scalar: u32): boolean {
+  return scalar == '*' as u32 || scalar == '+' as u32 || scalar == '?' as u32 || scalar == '{' as u32;
+}
+
+function regexPushRange(ranges: &mut Vector<RegexRange>, start: u32, end: u32): void {
+  ranges.push(RegexRange { start: start, end: end });
+}
+
+/// Sorts `ranges` and merges overlapping or adjacent ones.
+function regexNormalize(ranges: &mut Vector<RegexRange>): Vector<RegexRange> {
+  ranges.sort((left: &RegexRange, right: &RegexRange): i32 -> {
+    if (left.start < right.start) {
+      return -1;
+    }
+
+    if (left.start > right.start) {
+      return 1;
+    }
+
+    return 0;
+  });
+
+  let mut merged: Vector<RegexRange> = Vector::new<RegexRange>();
+  let mut index: u64 = 0;
+
+  while (index < ranges.length()) {
+    let range: &RegexRange = ranges.get(index).unwrap();
+    let count: u64 = merged.length();
+
+    if (count > 0) {
+      let last: &mut RegexRange = merged.getMut(count - 1).unwrap();
+
+      if (range.start <= last.end + 1) {
+        if (range.end > last.end) {
+          last.end = range.end;
+        }
+
+        index += 1;
+        continue;
+      }
+    }
+
+    regexPushRange(&mut merged, range.start, range.end);
+    index += 1;
+  }
+
+  return merged;
+}
+
+/// The scalars outside `ranges`, which must be normalized.
+function regexComplement(ranges: &Vector<RegexRange>): Vector<RegexRange> {
+  let mut result: Vector<RegexRange> = Vector::new<RegexRange>();
+  let mut next: u32 = 0;
+  let mut index: u64 = 0;
+
+  while (index < ranges.length()) {
+    let range: &RegexRange = ranges.get(index).unwrap();
+
+    if (range.start > next) {
+      regexPushRange(&mut result, next, range.start - 1);
+    }
+
+    next = range.end + 1;
+    index += 1;
+  }
+
+  if (next <= REGEX_MAX_SCALAR) {
+    regexPushRange(&mut result, next, REGEX_MAX_SCALAR);
+  }
+
+  return result;
+}
+
+/// Adds the other ASCII case of every ASCII letter in `ranges`.
+function regexAddCaseCounterparts(ranges: &mut Vector<RegexRange>): void {
+  let count: u64 = ranges.length();
+  let mut index: u64 = 0;
+
+  while (index < count) {
+    let start: u32 = ranges.get(index).unwrap().start;
+    let end: u32 = ranges.get(index).unwrap().end;
+    let lowerStart: u32 = start > 'a' as u32 ? start : 'a' as u32;
+    let lowerEnd: u32 = end < 'z' as u32 ? end : 'z' as u32;
+
+    if (lowerStart <= lowerEnd) {
+      regexPushRange(ranges, lowerStart - 32, lowerEnd - 32);
+    }
+
+    let upperStart: u32 = start > 'A' as u32 ? start : 'A' as u32;
+    let upperEnd: u32 = end < 'Z' as u32 ? end : 'Z' as u32;
+
+    if (upperStart <= upperEnd) {
+      regexPushRange(ranges, upperStart + 32, upperEnd + 32);
+    }
+
+    index += 1;
+  }
+}
+
+/// The ranges of `\d`, `\w`, `\s` or their negations, or `false` when
+/// `letter` is none of them.
+function regexShorthand(letter: u32, ranges: &mut Vector<RegexRange>): boolean {
+  let mut base: Vector<RegexRange> = Vector::new<RegexRange>();
+  let lower: u32 = letter >= 'A' as u32 && letter <= 'Z' as u32 ? letter + 32 : letter;
+
+  if (lower == 'd' as u32) {
+    regexPushRange(&mut base, '0' as u32, '9' as u32);
+  } else if (lower == 'w' as u32) {
+    regexPushRange(&mut base, '0' as u32, '9' as u32);
+    regexPushRange(&mut base, 'A' as u32, 'Z' as u32);
+    regexPushRange(&mut base, '_' as u32, '_' as u32);
+    regexPushRange(&mut base, 'a' as u32, 'z' as u32);
+  } else if (lower == 's' as u32) {
+    regexPushRange(&mut base, 0x09, 0x0D);
+    regexPushRange(&mut base, 0x20, 0x20);
+  } else {
+    return false;
+  }
+
+  let mut set: Vector<RegexRange> = base;
+
+  if (letter != lower) {
+    set = regexComplement(&set);
+  }
+  let mut index: u64 = 0;
+
+  while (index < set.length()) {
+    let range: &RegexRange = set.get(index).unwrap();
+    regexPushRange(ranges, range.start, range.end);
+    index += 1;
+  }
+
+  return true;
+}
+
+/// The scalar an escape `\letter` stands for, for the escapes that stand
+/// for one scalar: control escapes and escaped ASCII punctuation.
+function regexEscapedScalar(letter: u32): Option<u32> {
+  if (letter == 'n' as u32) {
+    return Option::SOME(0x0A);
+  }
+
+  if (letter == 't' as u32) {
+    return Option::SOME(0x09);
+  }
+
+  if (letter == 'r' as u32) {
+    return Option::SOME(0x0D);
+  }
+
+  if (letter == 'f' as u32) {
+    return Option::SOME(0x0C);
+  }
+
+  if (letter == 'v' as u32) {
+    return Option::SOME(0x0B);
+  }
+
+  let isPunctuation: boolean = (letter >= 0x21 && letter <= 0x2F) || (letter >= 0x3A && letter <= 0x40) || (letter >= 0x5B && letter <= 0x60) || (letter >= 0x7B && letter <= 0x7E);
+
+  if (isPunctuation) {
+    return Option::SOME(letter);
+  }
+
+  return Option::NONE;
+}
+
+/// Reads the escape at the current `\`. `\b` and `\B` are not handled
+/// here: outside a class the caller reads them first, and inside a class
+/// they are unknown escapes. `NONE` after recording an error.
+function regexParseEscapeItem(parser: &mut RegexParser): Option<RegexClassItem> {
+  let column: u64 = regexColumn(parser);
+  parser.position += 1;
+
+  if (regexAtEnd(parser)) {
+    regexFailStr(parser, column, "trailing backslash");
+    return Option::NONE;
+  }
+
+  let letter: u32 = regexCurrent(parser);
+  parser.position += 1;
+
+  if (letter >= '1' as u32 && letter <= '9' as u32) {
+    regexFailStr(parser, column, "unsupported: backreference");
+    return Option::NONE;
+  }
+
+  let mut set: Vector<RegexRange> = Vector::new<RegexRange>();
+
+  if (regexShorthand(letter, &mut set)) {
+    return Option::SOME(RegexClassItem { scalar: 0, isSet: true, set: set });
+  }
+
+  if (let Option::SOME(scalar) = regexEscapedScalar(letter)) {
+    return Option::SOME(RegexClassItem { scalar: scalar, isSet: false, set: set });
+  }
+
+  let mut message: String = String::create("unknown escape \\");
+  message.pushChar(letter as char);
+  regexFail(parser, column, message);
+  return Option::NONE;
+}
+
+/// A class node for `ranges`, case-folded under `(?i)`.
+function regexClassNode(
+  parser: &mut RegexParser,
+  ranges: &mut Vector<RegexRange>,
+  negated: boolean
+): u64 {
+  if (parser.caseInsensitive) {
+    regexAddCaseCounterparts(ranges);
+  }
+
+  let normalized: Vector<RegexRange> = regexNormalize(ranges);
+  return regexAddNode(parser, RegexNode::CLASS(RegexClass { ranges: normalized, negated: negated }));
+}
+
+/// A literal node, or under `(?i)` a class of both cases of an ASCII letter.
+function regexLiteralNode(parser: &mut RegexParser, scalar: u32): u64 {
+  let isLetter: boolean = (scalar >= 'a' as u32 && scalar <= 'z' as u32) || (scalar >= 'A' as u32 && scalar <= 'Z' as u32);
+
+  if (parser.caseInsensitive && isLetter) {
+    let mut ranges: Vector<RegexRange> = Vector::new<RegexRange>();
+    regexPushRange(&mut ranges, scalar, scalar);
+    return regexClassNode(parser, &mut ranges, false);
+  }
+
+  return regexAddNode(parser, RegexNode::LITERAL(scalar));
+}
+
+/// Reads one class item at the current position inside `[...]`.
+function regexParseClassItem(parser: &mut RegexParser): Option<RegexClassItem> {
+  if (regexCurrent(parser) == '\\' as u32) {
+    return regexParseEscapeItem(parser);
+  }
+
+  let scalar: u32 = regexCurrent(parser);
+  parser.position += 1;
+  return Option::SOME(RegexClassItem { scalar: scalar, isSet: false, set: Vector::new<RegexRange>() });
+}
+
+/// Parses `[...]` starting at the current `[`.
+function regexParseClass(parser: &mut RegexParser): Option<u64> {
+  let openColumn: u64 = regexColumn(parser);
+  parser.position += 1;
+  let mut negated: boolean = false;
+
+  if (!regexAtEnd(parser) && regexCurrent(parser) == '^' as u32) {
+    negated = true;
+    parser.position += 1;
+  }
+
+  let mut ranges: Vector<RegexRange> = Vector::new<RegexRange>();
+  let mut itemCount: u64 = 0;
+
+  while (true) {
+    if (regexAtEnd(parser)) {
+      regexFailStr(parser, openColumn, "unclosed class");
+      return Option::NONE;
+    }
+
+    if (regexCurrent(parser) == ']' as u32) {
+      if (itemCount == 0) {
+        regexFailStr(parser, openColumn, "empty class");
+        return Option::NONE;
+      }
+
+      parser.position += 1;
+      break;
+    }
+
+    let Option::SOME(first) = regexParseClassItem(parser) else {
+      return Option::NONE;
+    };
+
+    itemCount += 1;
+
+    let isRange: boolean = !regexAtEnd(parser) && regexCurrent(parser) == '-' as u32 && parser.position + 1 < parser.scalars.length() && !regexPeekIs(parser, 1, ']' as u32);
+
+    if (!isRange) {
+      if (first.isSet) {
+        let mut index: u64 = 0;
+
+        while (index < first.set.length()) {
+          let range: &RegexRange = first.set.get(index).unwrap();
+          regexPushRange(&mut ranges, range.start, range.end);
+          index += 1;
+        }
+      } else {
+        regexPushRange(&mut ranges, first.scalar, first.scalar);
+      }
+
+      continue;
+    }
+
+    let dashColumn: u64 = regexColumn(parser);
+    parser.position += 1;
+
+    let Option::SOME(last) = regexParseClassItem(parser) else {
+      return Option::NONE;
+    };
+
+    if (first.isSet || last.isSet) {
+      regexFailStr(parser, dashColumn, "invalid range");
+      return Option::NONE;
+    }
+
+    if (last.scalar < first.scalar) {
+      let mut message: String = String::create("invalid range ");
+      message.pushChar(first.scalar as char);
+      message.pushStr("-");
+      message.pushChar(last.scalar as char);
+      regexFail(parser, dashColumn, message);
+      return Option::NONE;
+    }
+
+    regexPushRange(&mut ranges, first.scalar, last.scalar);
+  }
+
+  return Option::SOME(regexClassNode(parser, &mut ranges, negated));
+}
+
+/// Reads a decimal count at the current position for `{...}`; `NONE`
+/// without consuming anything when no digit is there. A count above the
+/// limit is recorded as an error against `braceColumn`.
+function regexParseCount(parser: &mut RegexParser, braceColumn: u64): Option<u32> {
+  if (regexAtEnd(parser) || !regexIsDigit(regexCurrent(parser))) {
+    return Option::NONE;
+  }
+
+  let mut value: u32 = 0;
+  let mut tooLarge: boolean = false;
+
+  while (!regexAtEnd(parser) && regexIsDigit(regexCurrent(parser))) {
+    if (!tooLarge) {
+      value = value * 10 + (regexCurrent(parser) - '0' as u32);
+
+      if (value > REGEX_MAX_REPETITION) {
+        tooLarge = true;
+      }
+    }
+
+    parser.position += 1;
+  }
+
+  if (tooLarge) {
+    let mut message: String = String::create("repetition count above ");
+    let limit: String = REGEX_MAX_REPETITION.toString();
+    message.push(&limit);
+    regexFail(parser, braceColumn, message);
+  }
+
+  return Option::SOME(value);
+}
+
+/// Parses the quantifier at the current position and wraps `child` in it.
+function regexParseQuantifier(parser: &mut RegexParser, child: u64): Option<u64> {
+  let column: u64 = regexColumn(parser);
+  let symbol: u32 = regexCurrent(parser);
+  parser.position += 1;
+  let mut min: u32 = 0;
+  let mut max: u32 = 0;
+  let mut bounded: boolean = false;
+
+  if (symbol == '+' as u32) {
+    min = 1;
+  } else if (symbol == '?' as u32) {
+    max = 1;
+    bounded = true;
+  } else if (symbol == '{' as u32) {
+    let Option::SOME(low) = regexParseCount(parser, column) else {
+      regexFailStr(parser, column, "invalid repetition");
+      return Option::NONE;
+    };
+
+    if (parser.failed) {
+      return Option::NONE;
+    }
+
+    min = low;
+    max = low;
+    bounded = true;
+
+    if (!regexAtEnd(parser) && regexCurrent(parser) == ',' as u32) {
+      parser.position += 1;
+
+      if (let Option::SOME(high) = regexParseCount(parser, column)) {
+        if (parser.failed) {
+          return Option::NONE;
+        }
+
+        max = high;
+      } else {
+        bounded = false;
+      }
+    }
+
+    if (regexAtEnd(parser) || regexCurrent(parser) != '}' as u32) {
+      regexFailStr(parser, column, "invalid repetition");
+      return Option::NONE;
+    }
+
+    parser.position += 1;
+
+    if (bounded && max < min) {
+      regexFailStr(parser, column, "invalid repetition range");
+      return Option::NONE;
+    }
+  }
+
+  let mut greedy: boolean = true;
+
+  if (!regexAtEnd(parser) && regexCurrent(parser) == '?' as u32) {
+    greedy = false;
+    parser.position += 1;
+  }
+
+  return Option::SOME(regexAddNode(parser, RegexNode::REPEAT(RegexRepeat { child: child, min: min, max: max, bounded: bounded, greedy: greedy })));
+}
+
+/// Reads `name>` after `(?<`; `NONE` after recording an error.
+function regexParseGroupName(parser: &mut RegexParser, openColumn: u64): Option<String> {
+  let nameColumn: u64 = regexColumn(parser);
+  let mut name: String = String::new();
+
+  while (!regexAtEnd(parser) && regexCurrent(parser) != '>' as u32) {
+    let scalar: u32 = regexCurrent(parser);
+
+    if (!regexIsNameStart(scalar) && !(name.length() > 0 && regexIsDigit(scalar))) {
+      regexFailStr(parser, regexColumn(parser), "invalid group name");
+      return Option::NONE;
+    }
+
+    name.pushByte(scalar as u8);
+    parser.position += 1;
+  }
+
+  if (regexAtEnd(parser)) {
+    regexFailStr(parser, openColumn, "unclosed group");
+    return Option::NONE;
+  }
+
+  if (name.length() == 0) {
+    regexFailStr(parser, nameColumn, "invalid group name");
+    return Option::NONE;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < parser.names.length()) {
+    if (parser.names.get(index).unwrap().equals(&name)) {
+      let mut message: String = String::create("duplicate group name ");
+      message.push(&name);
+      regexFail(parser, nameColumn, message);
+      return Option::NONE;
+    }
+
+    index += 1;
+  }
+
+  parser.names.push(name.clone());
+  parser.position += 1;
+  return Option::SOME(name);
+}
+
+/// Parses a group starting at the current `(`. `(?i)` returns
+/// `REGEX_NO_NODE` after setting the flag for the rest of the enclosing
+/// group.
+function regexParseGroup(parser: &mut RegexParser): Option<u64> {
+  let openColumn: u64 = regexColumn(parser);
+  let savedCaseInsensitive: boolean = parser.caseInsensitive;
+  let mut capturing: boolean = true;
+  let mut name: String = String::new();
+  parser.position += 1;
+
+  if (!regexAtEnd(parser) && regexCurrent(parser) == '?' as u32) {
+    parser.position += 1;
+
+    if (regexAtEnd(parser)) {
+      regexFailStr(parser, openColumn, "unclosed group");
+      return Option::NONE;
+    }
+
+    let flag: u32 = regexCurrent(parser);
+    let isLookbehind: boolean = flag == '<' as u32 && (regexPeekIs(parser, 1, '=' as u32) || regexPeekIs(parser, 1, '!' as u32));
+
+    if (flag == '=' as u32 || flag == '!' as u32 || isLookbehind) {
+      regexFailStr(parser, openColumn, "unsupported: lookaround");
+      return Option::NONE;
+    }
+
+    if (flag == ':' as u32) {
+      capturing = false;
+      parser.position += 1;
+    } else if (flag == '<' as u32) {
+      parser.position += 1;
+
+      let Option::SOME(groupName) = regexParseGroupName(parser, openColumn) else {
+        return Option::NONE;
+      };
+
+      name = groupName;
+    } else if (flag == 'i' as u32) {
+      parser.position += 1;
+
+      if (regexAtEnd(parser)) {
+        regexFailStr(parser, openColumn, "unclosed group");
+        return Option::NONE;
+      }
+
+      if (regexCurrent(parser) == ')' as u32) {
+        parser.position += 1;
+        parser.caseInsensitive = true;
+        return Option::SOME(REGEX_NO_NODE);
+      }
+
+      if (regexCurrent(parser) != ':' as u32) {
+        regexFailStr(parser, regexColumn(parser), "unknown group flag");
+        return Option::NONE;
+      }
+
+      parser.position += 1;
+      parser.caseInsensitive = true;
+      capturing = false;
+    } else {
+      regexFailStr(parser, regexColumn(parser), "unknown group flag");
+      return Option::NONE;
+    }
+  }
+
+  let mut index: u64 = 0;
+
+  if (capturing) {
+    parser.groupCount += 1;
+    index = parser.groupCount;
+  }
+
+  let Option::SOME(child) = regexParseAlternation(parser) else {
+    return Option::NONE;
+  };
+
+  if (regexAtEnd(parser)) {
+    regexFailStr(parser, openColumn, "unclosed group");
+    return Option::NONE;
+  }
+
+  parser.position += 1;
+  parser.caseInsensitive = savedCaseInsensitive;
+  return Option::SOME(regexAddNode(parser, RegexNode::GROUP(RegexGroup { child: child, capturing: capturing, index: index, name: name })));
+}
+
+/// Parses one atom at the current position, which is not `|`, `)` or a
+/// quantifier.
+function regexParseAtom(parser: &mut RegexParser): Option<u64> {
+  let scalar: u32 = regexCurrent(parser);
+
+  if (scalar == '(' as u32) {
+    return regexParseGroup(parser);
+  }
+
+  if (scalar == '[' as u32) {
+    return regexParseClass(parser);
+  }
+
+  if (scalar == '.' as u32) {
+    parser.position += 1;
+    return Option::SOME(regexAddNode(parser, RegexNode::ANY_EXCEPT_NEWLINE));
+  }
+
+  if (scalar == '^' as u32) {
+    parser.position += 1;
+    return Option::SOME(regexAddNode(parser, RegexNode::ASSERT(RegexAssertion::START)));
+  }
+
+  if (scalar == '$' as u32) {
+    parser.position += 1;
+    return Option::SOME(regexAddNode(parser, RegexNode::ASSERT(RegexAssertion::END)));
+  }
+
+  if (scalar != '\\' as u32) {
+    parser.position += 1;
+    return Option::SOME(regexLiteralNode(parser, scalar));
+  }
+
+  if (regexPeekIs(parser, 1, 'b' as u32)) {
+    parser.position += 2;
+    return Option::SOME(regexAddNode(parser, RegexNode::ASSERT(RegexAssertion::WORD_BOUNDARY)));
+  }
+
+  if (regexPeekIs(parser, 1, 'B' as u32)) {
+    parser.position += 2;
+    return Option::SOME(regexAddNode(parser, RegexNode::ASSERT(RegexAssertion::NOT_WORD_BOUNDARY)));
+  }
+
+  let Option::SOME(item) = regexParseEscapeItem(parser) else {
+    return Option::NONE;
+  };
+
+  if (!item.isSet) {
+    return Option::SOME(regexLiteralNode(parser, item.scalar));
+  }
+
+  let mut ranges: Vector<RegexRange> = item.set;
+  return Option::SOME(regexClassNode(parser, &mut ranges, false));
+}
+
+function regexIsAssertion(parser: &mut RegexParser, id: u64): boolean {
+  return match (parser.nodes.get(id).unwrap()) {
+    RegexNode::ASSERT(_) -> true,
+    _ -> false,
+  };
+}
+
+/// Parses atoms and their quantifiers up to `|`, `)` or the end.
+function regexParseConcat(parser: &mut RegexParser): Option<u64> {
+  let mut items: Vector<u64> = Vector::new<u64>();
+
+  while (!regexAtEnd(parser)) {
+    let scalar: u32 = regexCurrent(parser);
+
+    if (scalar == '|' as u32 || scalar == ')' as u32) {
+      break;
+    }
+
+    if (regexIsQuantifier(scalar)) {
+      regexFailStr(parser, regexColumn(parser), "nothing to repeat");
+      return Option::NONE;
+    }
+
+    let Option::SOME(parsedAtom) = regexParseAtom(parser) else {
+      return Option::NONE;
+    };
+
+    if (parsedAtom == REGEX_NO_NODE) {
+      continue;
+    }
+
+    let mut node: u64 = parsedAtom;
+
+    if (!regexAtEnd(parser) && regexIsQuantifier(regexCurrent(parser))) {
+      if (regexIsAssertion(parser, parsedAtom)) {
+        regexFailStr(parser, regexColumn(parser), "nothing to repeat");
+        return Option::NONE;
+      }
+
+      let Option::SOME(repeated) = regexParseQuantifier(parser, parsedAtom) else {
+        return Option::NONE;
+      };
+
+      node = repeated;
+
+      if (!regexAtEnd(parser) && regexIsQuantifier(regexCurrent(parser))) {
+        regexFailStr(parser, regexColumn(parser), "nothing to repeat");
+        return Option::NONE;
+      }
+    }
+
+    items.push(node);
+  }
+
+  if (items.length() == 0) {
+    return Option::SOME(regexAddNode(parser, RegexNode::EMPTY));
+  }
+
+  if (items.length() == 1) {
+    return Option::SOME(*items.get(0).unwrap());
+  }
+
+  return Option::SOME(regexAddNode(parser, RegexNode::CONCAT(items)));
+}
+
+/// Parses `|`-separated branches up to `)` or the end.
+function regexParseAlternation(parser: &mut RegexParser): Option<u64> {
+  let mut branches: Vector<u64> = Vector::new<u64>();
+
+  while (true) {
+    let Option::SOME(branch) = regexParseConcat(parser) else {
+      return Option::NONE;
+    };
+
+    branches.push(branch);
+
+    if (regexAtEnd(parser) || regexCurrent(parser) != '|' as u32) {
+      break;
+    }
+
+    parser.position += 1;
+  }
+
+  if (branches.length() == 1) {
+    return Option::SOME(*branches.get(0).unwrap());
+  }
+
+  return Option::SOME(regexAddNode(parser, RegexNode::ALTERNATE(branches)));
+}
+
+/// Parses `pattern` into a `RegexAst`, or the first error with its 1-based
+/// column counted in Unicode scalars.
+export function parseRegex(pattern: str): Result<RegexAst, RegexError> {
+  let source: String = String::create(pattern);
+  let mut scalars: Vector<u32> = Vector::new<u32>();
+  let mut offset: u64 = 0;
+
+  while (offset < source.length()) {
+    let mut end: u64 = offset;
+
+    // `charAt` covers an invalid sequence with U+FFFD and still advances.
+    let scalar: char = source.charAt(offset, &mut end).unwrap();
+    scalars.push(scalar as u32);
+    offset = end;
+  }
+
+  let mut parser: RegexParser = RegexParser {
+    scalars: scalars,
+    position: 0,
+    nodes: Vector::new<RegexNode>(),
+    groupCount: 0,
+    names: Vector::new<String>(),
+    caseInsensitive: false,
+    failed: false,
+    errorColumn: 0,
+    errorMessage: String::new(),
+  };
+
+  let parsed: Option<u64> = regexParseAlternation(&mut parser);
+
+  if (!parser.failed && !regexAtEnd(&mut parser)) {
+    regexFailStr(&mut parser, regexColumn(&mut parser), "unmatched )");
+  }
+
+  if (parser.failed) {
+    return Result::ERROR(RegexError::create(parser.errorColumn, parser.errorMessage));
+  }
+
+  return Result::OK(RegexAst { nodes: parser.nodes, root: parsed.unwrap(), groupCount: parser.groupCount });
+}

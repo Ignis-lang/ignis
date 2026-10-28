@@ -1,0 +1,289 @@
+//! The parsed form of a pattern: an arena of `RegexNode` addressed by index,
+//! which the compiler walks from `RegexAst.root`.
+
+/// A pattern that could not be parsed: what is wrong and where.
+export record RegexError {
+  errorColumn: u64;
+  errorMessage: String;
+
+  /// An error at the 1-based `column` with `message`.
+  public static create(column: u64, message: String): RegexError {
+    return RegexError { errorColumn: column, errorMessage: message };
+  }
+
+  /// The 1-based column of the offending part, counted in Unicode scalars.
+  public column(&self): u64 {
+    return self.errorColumn;
+  }
+
+  /// What is wrong, without the column.
+  public message(&self): str {
+    return self.errorMessage.toStr();
+  }
+
+  /// `<message> at column <column>`.
+  public toString(&self): String {
+    let mut text: String = self.errorMessage.clone();
+    text.pushStr(" at column ");
+    let column: String = self.errorColumn.toString();
+    text.push(&column);
+    return text;
+  }
+}
+
+/// An inclusive range of Unicode scalar values.
+export record RegexRange {
+  public start: u32;
+  public end: u32;
+}
+
+/// A set of scalars: sorted, non-overlapping, non-adjacent ranges. A negated
+/// class matches every scalar outside them.
+export record RegexClass {
+  public ranges: Vector<RegexRange>;
+  public negated: boolean;
+}
+
+/// A zero-width condition on the position between two scalars.
+export enum RegexAssertion {
+  /// `^`: the start of the text.
+  START,
+
+  /// `$`: the end of the text.
+  END,
+
+  /// `\b`: one side is an ASCII word scalar and the other is not.
+  WORD_BOUNDARY,
+
+  /// `\B`: both sides are ASCII word scalars, or neither is.
+  NOT_WORD_BOUNDARY,
+}
+
+/// A repetition of `child` between `min` and `max` times.
+export record RegexRepeat {
+  public child: u64;
+  public min: u32;
+
+  /// Ignored when `bounded` is false.
+  public max: u32;
+  public bounded: boolean;
+
+  /// Greedy prefers more repetitions, lazy fewer.
+  public greedy: boolean;
+}
+
+/// A parenthesized subpattern.
+export record RegexGroup {
+  public child: u64;
+  public capturing: boolean;
+
+  /// 1-based capture index in order of the opening parenthesis; 0 when not
+  /// capturing.
+  public index: u64;
+
+  /// The `(?<name>...)` name, empty when there is none.
+  public name: String;
+}
+
+/// One node of a parsed pattern. Children are indices into `RegexAst.nodes`.
+///
+/// Case-insensitive matching is resolved here: under `(?i)` an ASCII letter
+/// becomes a class holding both cases, and classes gain the other case of
+/// their ASCII letters.
+export enum RegexNode {
+  /// Matches the empty string.
+  EMPTY,
+
+  /// One scalar.
+  LITERAL(u32),
+
+  /// `.`: any scalar except `\n`.
+  ANY_EXCEPT_NEWLINE,
+  CLASS(RegexClass),
+
+  /// Children one after another.
+  CONCAT(Vector<u64>),
+
+  /// The first child that matches, leftmost-first.
+  ALTERNATE(Vector<u64>),
+  REPEAT(RegexRepeat),
+  GROUP(RegexGroup),
+  ASSERT(RegexAssertion),
+}
+
+/// A parsed pattern.
+export record RegexAst {
+  public nodes: Vector<RegexNode>;
+  public root: u64;
+
+  /// The number of capturing groups, the whole match not included.
+  public groupCount: u64;
+}
+
+function regexHexDigit(value: u32): u8 {
+  if (value < 10) {
+    return '0' as u8 + value as u8;
+  }
+
+  return 'A' as u8 + (value - 10) as u8;
+}
+
+function regexDebugScalar(text: &mut String, scalar: u32): void {
+  if (scalar > 0x20 && scalar < 0x7F && scalar != '(' as u32 && scalar != ')' as u32 && scalar != ',' as u32 && scalar != '-' as u32) {
+    text.pushByte(scalar as u8);
+    return;
+  }
+
+  text.pushStr("U+");
+  let mut shift: u32 = 20;
+  let mut started: boolean = false;
+
+  while (true) {
+    let digit: u32 = (scalar >> shift) & 0xF;
+
+    if (digit != 0 || started || shift <= 12) {
+      text.pushByte(regexHexDigit(digit));
+      started = true;
+    }
+
+    if (shift == 0) {
+      break;
+    }
+
+    shift -= 4;
+  }
+}
+
+function regexDebugChildren(ast: &RegexAst, children: &Vector<u64>, text: &mut String): void {
+  let mut index: u64 = 0;
+
+  while (index < children.length()) {
+    if (index > 0) {
+      text.pushStr(",");
+    }
+
+    regexDebugNode(ast, *children.get(index).unwrap(), text);
+    index += 1;
+  }
+}
+
+function regexDebugNode(ast: &RegexAst, id: u64, text: &mut String): void {
+  match (ast.nodes.get(id).unwrap()) {
+    RegexNode::EMPTY -> {
+      text.pushStr("empty");
+    },
+    RegexNode::LITERAL(scalar) -> {
+      text.pushStr("lit(");
+      regexDebugScalar(text, scalar);
+      text.pushStr(")");
+    },
+    RegexNode::ANY_EXCEPT_NEWLINE -> {
+      text.pushStr("any");
+    },
+    RegexNode::CLASS(class) -> {
+      if (class.negated) {
+        text.pushStr("nclass(");
+      } else {
+        text.pushStr("class(");
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < class.ranges.length()) {
+        let range: &RegexRange = class.ranges.get(index).unwrap();
+
+        if (index > 0) {
+          text.pushStr(",");
+        }
+
+        regexDebugScalar(text, range.start);
+
+        if (range.end != range.start) {
+          text.pushStr("-");
+          regexDebugScalar(text, range.end);
+        }
+
+        index += 1;
+      }
+
+      text.pushStr(")");
+    },
+    RegexNode::CONCAT(children) -> {
+      text.pushStr("cat(");
+      regexDebugChildren(ast, &children, text);
+      text.pushStr(")");
+    },
+    RegexNode::ALTERNATE(children) -> {
+      text.pushStr("alt(");
+      regexDebugChildren(ast, &children, text);
+      text.pushStr(")");
+    },
+    RegexNode::REPEAT(repeat) -> {
+      text.pushStr("rep{");
+      let min: String = repeat.min.toString();
+      text.push(&min);
+      text.pushStr(",");
+
+      if (repeat.bounded) {
+        let max: String = repeat.max.toString();
+        text.push(&max);
+      } else {
+        text.pushStr("inf");
+      }
+
+      text.pushStr("}");
+
+      if (!repeat.greedy) {
+        text.pushStr("?");
+      }
+
+      text.pushStr("(");
+      regexDebugNode(ast, repeat.child, text);
+      text.pushStr(")");
+    },
+    RegexNode::GROUP(group) -> {
+      if (group.capturing) {
+        text.pushStr("group(");
+        let index: String = group.index.toString();
+        text.push(&index);
+
+        if (group.name.length() > 0) {
+          text.pushStr(":");
+          text.push(&group.name);
+        }
+
+        text.pushStr(",");
+      } else {
+        text.pushStr("ncgroup(");
+      }
+
+      regexDebugNode(ast, group.child, text);
+      text.pushStr(")");
+    },
+    RegexNode::ASSERT(assertion) -> {
+      match (assertion) {
+        RegexAssertion::START -> {
+          text.pushStr("start");
+        },
+        RegexAssertion::END -> {
+          text.pushStr("end");
+        },
+        RegexAssertion::WORD_BOUNDARY -> {
+          text.pushStr("wordb");
+        },
+        RegexAssertion::NOT_WORD_BOUNDARY -> {
+          text.pushStr("nwordb");
+        },
+      };
+    },
+  };
+}
+
+/// A compact text form of `ast` for tests: `cat(lit(a),rep{0,inf}(lit(b)))`.
+/// Scalars that are not printable ASCII, or that the form itself uses, print
+/// as `U+XXXX`.
+export function regexAstDebug(ast: &RegexAst): String {
+  let mut text: String = String::new();
+  regexDebugNode(ast, ast.root, &mut text);
+  return text;
+}

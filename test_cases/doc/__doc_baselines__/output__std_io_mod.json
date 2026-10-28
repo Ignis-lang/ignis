@@ -285,6 +285,18 @@
       "doc": "  \n# Rc Module  \n  \nReference-counted shared ownership for heap-allocated values.  \n  \n`Rc<T>` provides shared ownership of a value of type `T` allocated on the  \nheap. Cloning an `Rc` increments the reference count; dropping one  \ndecrements it. When the last strong reference is released, the payload's  \ndestructor runs. The allocation is freed when both strong and weak counts  \nreach zero.  \n  \n`Weak<T>` is a non-owning observer. It keeps the allocation header alive  \nso `upgrade()` can check whether the value still exists, but does not  \nprevent the payload from being destroyed.  \n  \nBoth types are **move-by-default**. Use `.clone()` to share.  \n  \n## Where the payload destructor comes from  \n  \nThe control block stores counts and nothing else. `Rc<T>` and `Weak<T>` are  \ngeneric, so every operation already knows `T`, and the payload is destroyed  \nwith `@dropInPlace<T>` at the point the strong count reaches zero. Storing a  \ndestructor pointer in the block would need a raw C function pointer, which  \nIgnis has no way to call.  \n  \n## Example  \n  \n```ignis  \nimport Rc, Weak from \"std::rc\";  \n  \nfunction main(): i32 {  \n  let a: Rc<i32> = Rc::new<i32>(42);  \n  let b: Rc<i32> = a.clone();  \n  let w: Weak<i32> = a.downgrade();  \n  let upgraded: Option<Rc<i32>> = w.upgrade(); // SOME while a or b is alive  \n  return 0;  \n}  \n```"
     },
     {
+      "name": "std::regex",
+      "doc": "  \n# Regex  \n  \nRegular expressions with linear-time matching, in the style of RE2: a  \npattern is parsed into an AST, compiled to a program and run by a Pike VM  \nthat simulates the NFA, so matching takes O(text x program) time and never  \nbacktracks.  \n  \nThis slice holds the parser only. Compiling and matching (`Regex::new`,  \n`isMatch`, `find`, `findAll`, captures, `replaceAll`, `split`) arrive in  \nthe next slices.  \n  \n## Exports  \n  \n| Export                 | Description                                                    |  \n|------------------------|----------------------------------------------------------------|  \n| `parseRegex`           | `parseRegex(pattern)`: `Result<RegexAst, RegexError>`          |  \n| `RegexError`           | `column()` (1-based, in Unicode scalars), `message()`, `toString()` |  \n| `RegexAst`             | `nodes`, `root`, `groupCount`                                  |  \n| `RegexNode`            | `EMPTY`, `LITERAL`, `ANY_EXCEPT_NEWLINE`, `CLASS`, `CONCAT`, `ALTERNATE`, `REPEAT`, `GROUP`, `ASSERT` |  \n| `RegexClass`           | Sorted, merged `ranges` and `negated`                          |  \n| `RegexRange`           | Inclusive `start` and `end` scalar values                      |  \n| `RegexRepeat`          | `child`, `min`, `max`, `bounded`, `greedy`                     |  \n| `RegexGroup`           | `child`, `capturing`, `index`, `name`                          |  \n| `RegexAssertion`       | `START`, `END`, `WORD_BOUNDARY`, `NOT_WORD_BOUNDARY`           |  \n| `REGEX_MAX_REPETITION` | The largest count `{n,m}` accepts: 1000                        |  \n  \n## Syntax  \n  \n| Syntax                            | Meaning                                                  |  \n|-----------------------------------|----------------------------------------------------------|  \n| `x`                               | The scalar `x`, any UTF-8 scalar                         |  \n| `.`                               | Any scalar except `\\n`                                   |  \n| `\\n` `\\t` `\\r` `\\f` `\\v`          | Control scalars                                          |  \n| `\\.` `\\*` `\\\\` ...                | Any escaped ASCII punctuation is itself                  |  \n| `[abc]` `[a-z]` `[^...]`          | Classes, ranges, negation; escapes work inside           |  \n| `\\d` `\\w` `\\s` and `\\D` `\\W` `\\S` | `[0-9]`, `[0-9A-Za-z_]`, `[ \\t\\n\\r\\f\\v]` and negations (ASCII) |  \n| `^` `$`                           | Start and end of the whole text, not of a line           |  \n| `\\b` `\\B`                         | ASCII word boundary and its negation                     |  \n| `(x)` `(?:x)` `(?<name>x)`        | Capturing, non-capturing and named groups                |  \n| `x\\|y`                            | Alternation, leftmost-first                              |  \n| `x*` `x+` `x?`                    | Zero or more, one or more, zero or one                   |  \n| `x{n}` `x{n,}` `x{n,m}`           | Counted repetition, counts at most 1000                  |  \n| `x*?` `x+?` `x??` `x{n,m}?`       | Lazy forms: prefer fewer repetitions                     |  \n| `(?i)` `(?i:x)`                   | ASCII case-insensitive for the rest of the enclosing group, or inside `x` |  \n  \nGroup names are `[A-Za-z_][A-Za-z0-9_]*` and must be unique. Capturing  \ngroups are numbered from 1 in the order of their `(`.  \n  \nThe parser is strict where a pattern would otherwise be ambiguous:  \n  \n- `{` always starts a counted repetition; a literal brace is `\\{`. A  \n  `{` that is not `{n}`, `{n,}` or `{n,m}` is `invalid repetition`. A  \n  lone `}` or `]` is a literal.  \n- A quantifier after a quantifier (`a**`, `a+*`, `a{2}{3}`) and a  \n  quantifier after `^`, `$`, `\\b` or `\\B` are `nothing to repeat`; the  \n  `?` of a lazy form is part of its quantifier.  \n- `[]` and `[^]` are `empty class`; a `]` inside a class is `\\]`. A `-`  \n  first or last in a class is a literal.  \n  \n## Errors  \n  \nEvery error carries the 1-based column, counted in Unicode scalars, of  \nthe part that is wrong: `unclosed group` (at its `(`), `unmatched )`,  \n`nothing to repeat`, `invalid range z-a` (at its `-`), `unclosed class`  \n(at its `[`), `empty class`, `trailing backslash`, `unknown escape \\q`,  \n`invalid repetition`, `invalid repetition range`, `repetition count above  \n1000`, `invalid group name`, `duplicate group name x`, `unknown group  \nflag`, `unsupported: backreference` and `unsupported: lookaround`.  \n  \nBackreferences (`\\1`) and lookaround (`(?=`, `(?!`, `(?<=`, `(?<!`) are  \nrejected because they cannot be matched in linear time. Classes are  \nASCII; Unicode classes are not supported in v1."
+    },
+    {
+      "name": "std::regex::ast",
+      "doc": "The parsed form of a pattern: an arena of `RegexNode` addressed by index,  \nwhich the compiler walks from `RegexAst.root`."
+    },
+    {
+      "name": "std::regex::parser",
+      "doc": "Pattern parser: pattern text -> `RegexAst`, or the first `RegexError`."
+    },
+    {
       "name": "std::result",
       "doc": "  \n# Result Module  \n  \nSuccess/error sum type for fallible operations.  \n  \n## Overview  \n  \n`Result<T, E>` models operations that can either produce a value (`T`)  \nor an error (`E`). It is an enum with two variants:  \n  \n- `Result::OK(value)`  — the operation succeeded  \n- `Result::ERROR(err)` — the operation failed  \n  \nUse `Result` when a function can fail in a recoverable way, forcing  \nthe caller to explicitly handle the error path.  \n  \n## Variants  \n  \n```text  \n  Result<T, E>  \n  ┌──────────────────────────────────────────┐  \n  │                                          │  \n  │   OK(T)    ── success value of type T    │  \n  │                                          │  \n  │   ERROR(E) ── error value of type E      │  \n  │                                          │  \n  └──────────────────────────────────────────┘  \n```  \n  \n## Ownership  \n  \nEvery method that can hand a payload out takes `self` by value and  \nconsumes the result: `unwrap`, `unwrapErr`, `unwrapOr`, `unwrapOrElse`,  \n`inspect`, `inspectErr`, `map`, `mapErr`, `andThen`, and `orElse`. The  \nreceiver cannot be used again afterwards, so an owning payload is moved  \nexactly once.  \n  \nOnly `isOk` and `isError` observe through `&self` and leave the result  \nusable.  \n  \nA borrowed `Result<T, E>` therefore cannot be fed to a consuming  \ncombinator directly. Match on the borrow instead, or clone the result when  \nthe value is genuinely needed twice.  \n  \n## Higher-Order Methods  \n  \nResult provides callback-based methods for transforming, inspecting,  \nand chaining fallible operations:  \n  \n| Method           | Signature                              | Description                          |  \n|------------------|----------------------------------------|--------------------------------------|  \n| `unwrapOrElse`   | `(E) -> T` → `T`                      | Recover from error with callback     |  \n| `inspect`        | `(&T) -> void` → `Result<T, E>`        | Side-effect on OK value              |  \n| `inspectErr`     | `(&E) -> void` → `Result<T, E>`        | Side-effect on ERROR value           |  \n| `map<U>`         | `(T) -> U` → `Result<U, E>`            | Transform OK value                   |  \n| `mapErr<F>`      | `(E) -> F` → `Result<T, F>`            | Transform ERROR value                |  \n| `andThen<U>`     | `(T) -> Result<U, E>` → `Result<U, E>` | Chain fallible OK operations         |  \n| `orElse<F>`      | `(E) -> Result<T, F>` → `Result<T, F>` | Chain fallible ERROR recovery        |  \n  \n`inspect` and `inspectErr` observe the payload through a reference because  \nthey hand the original result back. The other callbacks receive the payload  \nby value because it is given away.  \n  \nAll callbacks are `@noescape`: the closure must not outlive the method call.  \n  \n## Example  \n  \n```ignis  \nimport Io from \"std::io\";  \n  \nfunction parseInt(s: str): Result<i32, str> {  \n  // ... parsing logic ...  \n  return Result::OK(42);  \n}  \n  \nfunction main(): i32 {  \n  let result: Result<i32, str> = parseInt(\"42\");  \n  \n  // Chain: parse, double, inspect  \n  let doubled: Result<i32, str> = result  \n    .inspect((val: &i32): void -> { Io::printI32(*val); })  \n    .map<i32>((val: i32): i32 -> { return val * 2; });  \n  \n  // Recover from error  \n  let value: i32 = doubled.unwrapOrElse((err: str): i32 -> { return 0; });  \n  \n  return 0;  \n}  \n```"
     },
@@ -16128,6 +16140,693 @@
           "doc": "Returns the number of live weak references.  \n  \n# Example  \n  \n```ignis  \nimport Rc, Weak from \"std::rc\";  \n  \nlet a: Rc<i32> = Rc::new<i32>(1);  \nlet w: Weak<i32> = a.downgrade();  \nlet n: u32 = w.weakCount(); // 1  \n```"
         }
       ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexAssertion",
+      "name": "RegexAssertion",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum RegexAssertion",
+      "doc": "A zero-width condition on the position between two scalars.",
+      "members": [
+        {
+          "name": "START",
+          "kind": "variant",
+          "signature": "START"
+        },
+        {
+          "name": "END",
+          "kind": "variant",
+          "signature": "END"
+        },
+        {
+          "name": "WORD_BOUNDARY",
+          "kind": "variant",
+          "signature": "WORD_BOUNDARY"
+        },
+        {
+          "name": "NOT_WORD_BOUNDARY",
+          "kind": "variant",
+          "signature": "NOT_WORD_BOUNDARY"
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexAst",
+      "name": "RegexAst",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record RegexAst",
+      "doc": "A parsed pattern.",
+      "members": [
+        {
+          "name": "nodes",
+          "kind": "field",
+          "signature": "nodes: Vector<RegexNode>"
+        },
+        {
+          "name": "root",
+          "kind": "field",
+          "signature": "root: u64"
+        },
+        {
+          "name": "groupCount",
+          "kind": "field",
+          "signature": "groupCount: u64",
+          "doc": "The number of capturing groups, the whole match not included."
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexClass",
+      "name": "RegexClass",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record RegexClass",
+      "doc": "A set of scalars: sorted, non-overlapping, non-adjacent ranges. A negated  \nclass matches every scalar outside them.",
+      "members": [
+        {
+          "name": "ranges",
+          "kind": "field",
+          "signature": "ranges: Vector<RegexRange>"
+        },
+        {
+          "name": "negated",
+          "kind": "field",
+          "signature": "negated: boolean"
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexError",
+      "name": "RegexError",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record RegexError",
+      "doc": "A pattern that could not be parsed: what is wrong and where.",
+      "members": [
+        {
+          "name": "errorColumn",
+          "kind": "field",
+          "signature": "errorColumn: u64"
+        },
+        {
+          "name": "errorMessage",
+          "kind": "field",
+          "signature": "errorMessage: String"
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(column: u64, message: String): RegexError",
+          "doc": "An error at the 1-based `column` with `message`."
+        },
+        {
+          "name": "column",
+          "kind": "method",
+          "signature": "column(&self): u64",
+          "doc": "The 1-based column of the offending part, counted in Unicode scalars."
+        },
+        {
+          "name": "message",
+          "kind": "method",
+          "signature": "message(&self): str",
+          "doc": "What is wrong, without the column."
+        },
+        {
+          "name": "toString",
+          "kind": "method",
+          "signature": "toString(&self): String",
+          "doc": "`<message> at column <column>`."
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexGroup",
+      "name": "RegexGroup",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record RegexGroup",
+      "doc": "A parenthesized subpattern.",
+      "members": [
+        {
+          "name": "child",
+          "kind": "field",
+          "signature": "child: u64"
+        },
+        {
+          "name": "capturing",
+          "kind": "field",
+          "signature": "capturing: boolean"
+        },
+        {
+          "name": "index",
+          "kind": "field",
+          "signature": "index: u64",
+          "doc": "1-based capture index in order of the opening parenthesis; 0 when not  \ncapturing."
+        },
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String",
+          "doc": "The `(?<name>...)` name, empty when there is none."
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexNode",
+      "name": "RegexNode",
+      "kind": "enum",
+      "visibility": "public",
+      "signature": "enum RegexNode",
+      "doc": "One node of a parsed pattern. Children are indices into `RegexAst.nodes`.  \n  \nCase-insensitive matching is resolved here: under `(?i)` an ASCII letter  \nbecomes a class holding both cases, and classes gain the other case of  \ntheir ASCII letters.",
+      "members": [
+        {
+          "name": "EMPTY",
+          "kind": "variant",
+          "signature": "EMPTY"
+        },
+        {
+          "name": "LITERAL",
+          "kind": "variant",
+          "signature": "LITERAL(u32)"
+        },
+        {
+          "name": "ANY_EXCEPT_NEWLINE",
+          "kind": "variant",
+          "signature": "ANY_EXCEPT_NEWLINE"
+        },
+        {
+          "name": "CLASS",
+          "kind": "variant",
+          "signature": "CLASS(RegexClass)"
+        },
+        {
+          "name": "CONCAT",
+          "kind": "variant",
+          "signature": "CONCAT(Vector<u64>)"
+        },
+        {
+          "name": "ALTERNATE",
+          "kind": "variant",
+          "signature": "ALTERNATE(Vector<u64>)"
+        },
+        {
+          "name": "REPEAT",
+          "kind": "variant",
+          "signature": "REPEAT(RegexRepeat)"
+        },
+        {
+          "name": "GROUP",
+          "kind": "variant",
+          "signature": "GROUP(RegexGroup)"
+        },
+        {
+          "name": "ASSERT",
+          "kind": "variant",
+          "signature": "ASSERT(RegexAssertion)"
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexRange",
+      "name": "RegexRange",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record RegexRange",
+      "doc": "An inclusive range of Unicode scalar values.",
+      "members": [
+        {
+          "name": "start",
+          "kind": "field",
+          "signature": "start: u32"
+        },
+        {
+          "name": "end",
+          "kind": "field",
+          "signature": "end: u32"
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::RegexRepeat",
+      "name": "RegexRepeat",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record RegexRepeat",
+      "doc": "A repetition of `child` between `min` and `max` times.",
+      "members": [
+        {
+          "name": "child",
+          "kind": "field",
+          "signature": "child: u64"
+        },
+        {
+          "name": "min",
+          "kind": "field",
+          "signature": "min: u32"
+        },
+        {
+          "name": "max",
+          "kind": "field",
+          "signature": "max: u32",
+          "doc": "Ignored when `bounded` is false."
+        },
+        {
+          "name": "bounded",
+          "kind": "field",
+          "signature": "bounded: boolean"
+        },
+        {
+          "name": "greedy",
+          "kind": "field",
+          "signature": "greedy: boolean",
+          "doc": "Greedy prefers more repetitions, lazy fewer."
+        }
+      ]
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::regexAstDebug",
+      "name": "regexAstDebug",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function regexAstDebug(ast: &RegexAst): String",
+      "doc": "A compact text form of `ast` for tests: `cat(lit(a),rep{0,inf}(lit(b)))`.  \nScalars that are not printable ASCII, or that the form itself uses, print  \nas `U+XXXX`."
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::regexDebugChildren",
+      "name": "regexDebugChildren",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexDebugChildren(ast: &RegexAst, children: &Vector<u64>, text: &mut String): void"
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::regexDebugNode",
+      "name": "regexDebugNode",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexDebugNode(ast: &RegexAst, id: u64, text: &mut String): void"
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::regexDebugScalar",
+      "name": "regexDebugScalar",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexDebugScalar(text: &mut String, scalar: u32): void"
+    },
+    {
+      "module": "std::regex::ast",
+      "path": "std::regex::ast::regexHexDigit",
+      "name": "regexHexDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexHexDigit(value: u32): u8"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::REGEX_MAX_REPETITION",
+      "name": "REGEX_MAX_REPETITION",
+      "kind": "constant",
+      "visibility": "public",
+      "signature": "const REGEX_MAX_REPETITION: u32"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::REGEX_MAX_SCALAR",
+      "name": "REGEX_MAX_SCALAR",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const REGEX_MAX_SCALAR: u32"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::REGEX_NO_NODE",
+      "name": "REGEX_NO_NODE",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const REGEX_NO_NODE: u64"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::RegexClassItem",
+      "name": "RegexClassItem",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record RegexClassItem",
+      "doc": "A class item read inside `[...]` or after `\\` outside it: one scalar or  \na shorthand set such as `\\d`.",
+      "members": [
+        {
+          "name": "scalar",
+          "kind": "field",
+          "signature": "scalar: u32"
+        },
+        {
+          "name": "isSet",
+          "kind": "field",
+          "signature": "isSet: boolean"
+        },
+        {
+          "name": "set",
+          "kind": "field",
+          "signature": "set: Vector<RegexRange>"
+        }
+      ]
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::RegexParser",
+      "name": "RegexParser",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record RegexParser",
+      "members": [
+        {
+          "name": "scalars",
+          "kind": "field",
+          "signature": "scalars: Vector<u32>"
+        },
+        {
+          "name": "position",
+          "kind": "field",
+          "signature": "position: u64"
+        },
+        {
+          "name": "nodes",
+          "kind": "field",
+          "signature": "nodes: Vector<RegexNode>"
+        },
+        {
+          "name": "groupCount",
+          "kind": "field",
+          "signature": "groupCount: u64"
+        },
+        {
+          "name": "names",
+          "kind": "field",
+          "signature": "names: Vector<String>"
+        },
+        {
+          "name": "caseInsensitive",
+          "kind": "field",
+          "signature": "caseInsensitive: boolean"
+        },
+        {
+          "name": "failed",
+          "kind": "field",
+          "signature": "failed: boolean"
+        },
+        {
+          "name": "errorColumn",
+          "kind": "field",
+          "signature": "errorColumn: u64"
+        },
+        {
+          "name": "errorMessage",
+          "kind": "field",
+          "signature": "errorMessage: String"
+        }
+      ]
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::__closure_thunk_0",
+      "name": "__closure_thunk_0",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function __closure_thunk_0(__closure_env_0: *mut u8, left: &RegexRange, right: &RegexRange): i32"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::parseRegex",
+      "name": "parseRegex",
+      "kind": "function",
+      "visibility": "public",
+      "signature": "function parseRegex(pattern: str): Result<RegexAst, RegexError>",
+      "doc": "Parses `pattern` into a `RegexAst`, or the first error with its 1-based  \ncolumn counted in Unicode scalars."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexAddCaseCounterparts",
+      "name": "regexAddCaseCounterparts",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexAddCaseCounterparts(ranges: &mut Vector<RegexRange>): void",
+      "doc": "Adds the other ASCII case of every ASCII letter in `ranges`."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexAddNode",
+      "name": "regexAddNode",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexAddNode(parser: &mut RegexParser, node: RegexNode): u64"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexAtEnd",
+      "name": "regexAtEnd",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexAtEnd(parser: &mut RegexParser): boolean"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexClassNode",
+      "name": "regexClassNode",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexClassNode(parser: &mut RegexParser, ranges: &mut Vector<RegexRange>, negated: boolean): u64",
+      "doc": "A class node for `ranges`, case-folded under `(?i)`."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexColumn",
+      "name": "regexColumn",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexColumn(parser: &mut RegexParser): u64",
+      "doc": "The 1-based column of the current scalar."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexComplement",
+      "name": "regexComplement",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexComplement(ranges: &Vector<RegexRange>): Vector<RegexRange>",
+      "doc": "The scalars outside `ranges`, which must be normalized."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexCurrent",
+      "name": "regexCurrent",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexCurrent(parser: &mut RegexParser): u32"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexEscapedScalar",
+      "name": "regexEscapedScalar",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexEscapedScalar(letter: u32): Option<u32>",
+      "doc": "The scalar an escape `\\letter` stands for, for the escapes that stand  \nfor one scalar: control escapes and escaped ASCII punctuation."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexFail",
+      "name": "regexFail",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexFail(parser: &mut RegexParser, column: u64, message: String): void",
+      "doc": "Records the first error; later ones are ignored."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexFailStr",
+      "name": "regexFailStr",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexFailStr(parser: &mut RegexParser, column: u64, message: str): void"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexIsAssertion",
+      "name": "regexIsAssertion",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexIsAssertion(parser: &mut RegexParser, id: u64): boolean"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexIsDigit",
+      "name": "regexIsDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexIsDigit(scalar: u32): boolean"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexIsNameStart",
+      "name": "regexIsNameStart",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexIsNameStart(scalar: u32): boolean"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexIsQuantifier",
+      "name": "regexIsQuantifier",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexIsQuantifier(scalar: u32): boolean"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexLiteralNode",
+      "name": "regexLiteralNode",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexLiteralNode(parser: &mut RegexParser, scalar: u32): u64",
+      "doc": "A literal node, or under `(?i)` a class of both cases of an ASCII letter."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexNormalize",
+      "name": "regexNormalize",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexNormalize(ranges: &mut Vector<RegexRange>): Vector<RegexRange>",
+      "doc": "Sorts `ranges` and merges overlapping or adjacent ones."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseAlternation",
+      "name": "regexParseAlternation",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseAlternation(parser: &mut RegexParser): Option<u64>",
+      "doc": "Parses `|`-separated branches up to `)` or the end."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseAtom",
+      "name": "regexParseAtom",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseAtom(parser: &mut RegexParser): Option<u64>",
+      "doc": "Parses one atom at the current position, which is not `|`, `)` or a  \nquantifier."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseClass",
+      "name": "regexParseClass",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseClass(parser: &mut RegexParser): Option<u64>",
+      "doc": "Parses `[...]` starting at the current `[`."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseClassItem",
+      "name": "regexParseClassItem",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseClassItem(parser: &mut RegexParser): Option<RegexClassItem>",
+      "doc": "Reads one class item at the current position inside `[...]`."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseConcat",
+      "name": "regexParseConcat",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseConcat(parser: &mut RegexParser): Option<u64>",
+      "doc": "Parses atoms and their quantifiers up to `|`, `)` or the end."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseCount",
+      "name": "regexParseCount",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseCount(parser: &mut RegexParser, braceColumn: u64): Option<u32>",
+      "doc": "Reads a decimal count at the current position for `{...}`; `NONE`  \nwithout consuming anything when no digit is there. A count above the  \nlimit is recorded as an error against `braceColumn`."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseEscapeItem",
+      "name": "regexParseEscapeItem",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseEscapeItem(parser: &mut RegexParser): Option<RegexClassItem>",
+      "doc": "Reads the escape at the current `\\`. `\\b` and `\\B` are not handled  \nhere: outside a class the caller reads them first, and inside a class  \nthey are unknown escapes. `NONE` after recording an error."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseGroup",
+      "name": "regexParseGroup",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseGroup(parser: &mut RegexParser): Option<u64>",
+      "doc": "Parses a group starting at the current `(`. `(?i)` returns  \n`REGEX_NO_NODE` after setting the flag for the rest of the enclosing  \ngroup."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseGroupName",
+      "name": "regexParseGroupName",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseGroupName(parser: &mut RegexParser, openColumn: u64): Option<String>",
+      "doc": "Reads `name>` after `(?<`; `NONE` after recording an error."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexParseQuantifier",
+      "name": "regexParseQuantifier",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexParseQuantifier(parser: &mut RegexParser, child: u64): Option<u64>",
+      "doc": "Parses the quantifier at the current position and wraps `child` in it."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexPeekIs",
+      "name": "regexPeekIs",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexPeekIs(parser: &mut RegexParser, offset: u64, scalar: u32): boolean",
+      "doc": "Whether the scalar `offset` past the current one exists and is `scalar`."
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexPushRange",
+      "name": "regexPushRange",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexPushRange(ranges: &mut Vector<RegexRange>, start: u32, end: u32): void"
+    },
+    {
+      "module": "std::regex::parser",
+      "path": "std::regex::parser::regexShorthand",
+      "name": "regexShorthand",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexShorthand(letter: u32, ranges: &mut Vector<RegexRange>): boolean",
+      "doc": "The ranges of `\\d`, `\\w`, `\\s` or their negations, or `false` when  \n`letter` is none of them."
     },
     {
       "module": "std::result",
