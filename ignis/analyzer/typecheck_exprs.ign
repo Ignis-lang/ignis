@@ -6626,7 +6626,42 @@ export namespace Analyzer {
         return true;
       }
 
+      if (Analyzer::Typecheck::mutableReferenceCoercesToShared(state, defStore, typeStore, span, expected, actual)) {
+        return true;
+      }
+
       return Analyzer::Typecheck::isNeverType(state, defStore, typeStore, actual);
+    }
+
+    /// Whether `actual` is a `&mut T` supplied where `&T` is expected. Both are
+    /// the same pointer, and the shared reference only gives up the right to
+    /// write, so the conversion is implicit and `&*` is never needed. The
+    /// borrow checker reads the result as a reborrow of the `&mut` local it
+    /// came from. Only the outermost reference converts: `Option<&mut T>` is
+    /// not an `Option<&T>`, since type arguments are invariant.
+    function mutableReferenceCoercesToShared(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      expected: Analyzer::TypeId,
+      actual: Analyzer::TypeId,
+    ): boolean {
+      let expectedResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expected);
+      let actualResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, actual);
+
+      let Option::SOME(Analyzer::Type::Reference(expectedReference)) = typeStore.get(expectedResolved.typeId) else {
+        return false;
+      };
+      let Option::SOME(Analyzer::Type::Reference(actualReference)) = typeStore.get(actualResolved.typeId) else {
+        return false;
+      };
+
+      if (expectedReference.mutable || !actualReference.mutable) {
+        return false;
+      }
+
+      return Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expectedReference.referent, actualReference.referent);
     }
 
     /// Whether `actual` is a function pointer type supplied where the closure
