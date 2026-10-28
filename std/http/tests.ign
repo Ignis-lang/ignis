@@ -971,3 +971,89 @@ function responseDefaultsTo200WithAnEmptyBody(): void {
   Test::assertEq<u64>(response.body.length(), 0);
   Test::assertEq<u64>(response.headers.length(), 0);
 }
+
+function mediaTypeParse(text: str): Http::MediaType {
+  return Http::MediaType::parse(text).unwrap();
+}
+
+@test
+function mediaTypeFoldsTypeSubtypeAndParameterNames(): void {
+  let parsed: Http::MediaType = mediaTypeParse("Text/HTML; CharSet=UTF-8");
+  Test::assertEq<str>(parsed.mainType.toStr(), "text");
+  Test::assertEq<str>(parsed.subtype.toStr(), "html");
+  Test::assertEq<str>(parsed.essence().toStr(), "text/html");
+  Test::assertEq<str>(parsed.parameters.get(0).unwrap().name.toStr(), "charset");
+  Test::assertEq<str>(parsed.parameter("charset").unwrap(), "UTF-8");
+  Test::assertEq<str>(parsed.parameter("CHARSET").unwrap(), "UTF-8");
+}
+
+@test
+function mediaTypeWithoutParameters(): void {
+  let parsed: Http::MediaType = mediaTypeParse("application/json");
+  Test::assertEq<str>(parsed.essence().toStr(), "application/json");
+  Test::assertEq<u64>(parsed.parameterCount(), 0);
+  Test::assert(parsed.parameter("charset").isNone());
+}
+
+@test
+function mediaTypeUnescapesQuotedValues(): void {
+  let parsed: Http::MediaType = mediaTypeParse("text/plain; title=\"a \\\"b\\\" c\\\\d; e\"");
+  Test::assertEq<str>(parsed.parameter("title").unwrap(), "a \"b\" c\\d; e");
+  Test::assertEq<str>(mediaTypeParse("text/plain; x=\"\"").parameter("x").unwrap(), "");
+}
+
+@test
+function mediaTypeAcceptsWhitespaceAroundSemicolons(): void {
+  let parsed: Http::MediaType = mediaTypeParse(" text/plain \t;\t a=1 ;b=2;  c=3 ");
+  Test::assertEq<u64>(parsed.parameterCount(), 3);
+  Test::assertEq<str>(parsed.parameter("a").unwrap(), "1");
+  Test::assertEq<str>(parsed.parameter("b").unwrap(), "2");
+  Test::assertEq<str>(parsed.parameter("c").unwrap(), "3");
+}
+
+@test
+function mediaTypeKeepsRepeatedParameters(): void {
+  let parsed: Http::MediaType = mediaTypeParse("multipart/mixed; a=1; A=2");
+  Test::assertEq<u64>(parsed.parameterCount(), 2);
+  Test::assertEq<str>(parsed.parameter("a").unwrap(), "1");
+  Test::assertEq<str>(parsed.parameters.get(1).unwrap().name.toStr(), "a");
+  Test::assertEq<str>(parsed.parameters.get(1).unwrap().value.toStr(), "2");
+}
+
+@test
+function mediaTypeRejectsMissingOrEmptyParts(): void {
+  Test::assert(Http::MediaType::parse("").isNone());
+  Test::assert(Http::MediaType::parse("text").isNone());
+  Test::assert(Http::MediaType::parse("text/").isNone());
+  Test::assert(Http::MediaType::parse("/html").isNone());
+  Test::assert(Http::MediaType::parse("text/html;").isNone());
+  Test::assert(Http::MediaType::parse("text/html; =x").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a=").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a").isNone());
+}
+
+@test
+function mediaTypeRejectsNonTokenBytes(): void {
+  Test::assert(Http::MediaType::parse("te(t/html").isNone());
+  Test::assert(Http::MediaType::parse("text /html").isNone());
+  Test::assert(Http::MediaType::parse("text/ html").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a b=1").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a =1").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a= 1").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a=b@c").isNone());
+}
+
+@test
+function mediaTypeRejectsUnterminatedQuotedStrings(): void {
+  Test::assert(Http::MediaType::parse("text/html; a=\"open").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a=\"open\\\"").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a=\"open\\").isNone());
+}
+
+@test
+function mediaTypeRejectsTrailingGarbage(): void {
+  Test::assert(Http::MediaType::parse("text/html x").isNone());
+  Test::assert(Http::MediaType::parse("text/html/x").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a=\"b\"c").isNone());
+  Test::assert(Http::MediaType::parse("text/html; a=1, b=2").isNone());
+}
