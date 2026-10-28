@@ -11801,6 +11801,33 @@ export namespace Analyzer {
       return Option::SOME(paramType);
     }
 
+    /// The names of the type parameters a record declares, in order.
+    function recordTypeParamSymbols(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::SymbolId> {
+      let mut symbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(defId)) {
+        typeParams = Analyzer::Typecheck::copyDefinitionIdVector(&record_.typeParams);
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < typeParams.length()) {
+        if (let Option::SOME(typeParamDefId) = typeParams.get(index)) {
+          if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*typeParamDefId)) {
+            symbols.push(typeParam.name);
+          }
+        }
+
+        index += 1;
+      }
+
+      return symbols;
+    }
+
     /// The iterable-record protocol behind `for..of`: a record iterates when
     /// it declares a `data` field of pointer type and a `length` field of
     /// type `u64`; the element type is the `data` pointee. Mirrors the Rust
@@ -12508,14 +12535,35 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      let mut iteratedType: Analyzer::TypeId = resolved.typeId;
+
+      // A reference to an iterable record (`numbers: &Vector<i32>`) iterates
+      // the record it points to.
+      if (let Option::SOME(Analyzer::Type::Reference(reference)) = typeStore.get(iteratedType)) {
+        let referentResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, reference.referent);
+
+        if (let Option::SOME(Analyzer::Type::Record(_)) = typeStore.get(referentResolved.typeId)) {
+          iteratedType = referentResolved.typeId;
+        } else if (let Option::SOME(Analyzer::Type::Instance(_)) = typeStore.get(referentResolved.typeId)) {
+          iteratedType = referentResolved.typeId;
+        }
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(iteratedType) else {
         return Option::NONE;
       };
 
       let mut elementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
       let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut instanceArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
 
       match (typeNode) {
+        // A generic record (`Vector<T>`) iterates through the same protocol,
+        // with its element type specialized to the instance's arguments.
+        Analyzer::Type::Instance(instance) -> {
+          recordDefId = Option::SOME(instance.definition);
+          instanceArguments = Analyzer::Typecheck::copyTypeIdVector(&instance.typeArguments);
+        },
         Analyzer::Type::Slice(element) -> {
           elementTypeOpt = Option::SOME(element);
         },
@@ -12541,6 +12589,15 @@ export namespace Analyzer {
 
       if (let Option::SOME(defId) = recordDefId) {
         elementTypeOpt = Analyzer::Typecheck::recordIterableElementType(defStore, typeStore, symbols, defId);
+
+        if (let Option::SOME(elementType) = elementTypeOpt) {
+          let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::recordTypeParamSymbols(defStore, defId);
+
+          if (instanceArguments.length() > 0 && typeParamSymbols.length() == instanceArguments.length()) {
+            let mut substituteRef: &mut Analyzer::TypeStore = typeStore;
+            elementTypeOpt = Option::SOME(substituteRef.substitute(elementType, &typeParamSymbols, &instanceArguments));
+          }
+        }
       }
 
       let Option::SOME(elementType) = elementTypeOpt else {
