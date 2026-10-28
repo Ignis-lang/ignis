@@ -205,3 +205,190 @@ function systemTimeRoundTripsEpochAndSyntheticPreEpochFailures(): void {
     Result::ERROR(error) -> assertTimeErrorKind(error, Time::TimeErrorKind::BEFORE_EPOCH),
   };
 }
+
+function date(year: i64, month: u32, day: u32): Time::CivilDate {
+  return match (Time::CivilDate::create(year, month, day)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("expected a valid civil date"),
+  };
+}
+
+function parse(text: str): Option<Time::SystemTime> {
+  let owned: String = String::create(text);
+  return Time::SystemTime::parseRfc3339(&owned);
+}
+
+function assertParsed(text: str, secs: i64, nanos: u32): void {
+  match (parse(text)) {
+    Option::SOME(value) -> {
+      Test::assertEq<i64>(value.unixSeconds(), secs);
+      Test::assertEq<u32>(value.subsecNanos(), nanos);
+    },
+    Option::NONE -> @panic("expected an RFC 3339 timestamp to parse"),
+  };
+}
+
+function assertRejected(text: str): void {
+  Test::assertEq<boolean>(parse(text).isNone(), true);
+}
+
+function formatted(secs: i64, nanos: u32): String {
+  return match (Time::SystemTime::fromUnix(secs, nanos)) {
+    Option::SOME(value) -> value.formatRfc3339(),
+    Option::NONE -> @panic("expected a valid unix instant"),
+  };
+}
+
+@test
+function leapYearsFollowTheGregorianCenturyRule(): void {
+  Test::assertEq<boolean>(Time::isLeapYear(1900), false);
+  Test::assertEq<boolean>(Time::isLeapYear(2000), true);
+  Test::assertEq<boolean>(Time::isLeapYear(2024), true);
+  Test::assertEq<boolean>(Time::isLeapYear(2026), false);
+}
+
+@test
+function daysInMonthHandlesFebruaryAndRejectsOutOfRangeMonths(): void {
+  Test::assertEq<u32>(Time::daysInMonth(1900, 2).unwrap(), 28);
+  Test::assertEq<u32>(Time::daysInMonth(2000, 2).unwrap(), 29);
+  Test::assertEq<u32>(Time::daysInMonth(2024, 2).unwrap(), 29);
+  Test::assertEq<u32>(Time::daysInMonth(2026, 4).unwrap(), 30);
+  Test::assertEq<u32>(Time::daysInMonth(2026, 12).unwrap(), 31);
+  Test::assertEq<boolean>(Time::daysInMonth(2026, 0).isNone(), true);
+  Test::assertEq<boolean>(Time::daysInMonth(2026, 13).isNone(), true);
+}
+
+@test
+function civilDateCreateRejectsDaysOutsideTheMonth(): void {
+  Test::assertEq<boolean>(Time::CivilDate::create(2026, 2, 30).isNone(), true);
+  Test::assertEq<boolean>(Time::CivilDate::create(1900, 2, 29).isNone(), true);
+  Test::assertEq<boolean>(Time::CivilDate::create(2026, 1, 0).isNone(), true);
+  Test::assertEq<boolean>(Time::CivilDate::create(2026, 13, 1).isNone(), true);
+  Test::assertEq<boolean>(Time::CivilDate::create(2000, 2, 29).isSome(), true);
+}
+
+@test
+function civilDateConvertsToAndFromDaysSinceEpoch(): void {
+  Test::assertEq<i64>(date(1970, 1, 1).daysSinceEpoch(), 0);
+  Test::assertEq<i64>(date(1969, 12, 31).daysSinceEpoch(), -1);
+  Test::assertEq<i64>(date(2000, 3, 1).daysSinceEpoch(), 11017);
+  Test::assertEq<i64>(date(2026, 10, 28).daysSinceEpoch(), 20754);
+  Test::assertEq<i64>(date(1, 1, 1).daysSinceEpoch(), -719162);
+
+  let back: Time::CivilDate = Time::CivilDate::fromDaysSinceEpoch(-719162);
+  Test::assertEq<i64>(back.year, 1);
+  Test::assertEq<u32>(back.month, 1);
+  Test::assertEq<u32>(back.day, 1);
+
+  let mut days: i64 = -800000;
+  while (days < 800000) {
+    let roundTrip: Time::CivilDate = Time::CivilDate::fromDaysSinceEpoch(days);
+    Test::assertEq<i64>(roundTrip.daysSinceEpoch(), days);
+    days += 997;
+  }
+}
+
+@test
+function isoWeekdayRunsMondayOneToSundaySeven(): void {
+  Test::assertEq<u32>(date(1970, 1, 1).isoWeekday(), 4);
+  Test::assertEq<u32>(date(2024, 12, 30).isoWeekday(), 1);
+  Test::assertEq<u32>(date(2021, 1, 3).isoWeekday(), 7);
+  Test::assertEq<u32>(date(1969, 12, 28).isoWeekday(), 7);
+  Test::assertEq<u32>(date(2026, 10, 28).isoWeekday(), 3);
+}
+
+@test
+function isoWeekRollsOverAtYearBoundaries(): void {
+  let rollForward: Time::IsoWeek = date(2024, 12, 30).isoWeek();
+  Test::assertEq<i64>(rollForward.year, 2025);
+  Test::assertEq<u32>(rollForward.week, 1);
+
+  let rollBack: Time::IsoWeek = date(2021, 1, 3).isoWeek();
+  Test::assertEq<i64>(rollBack.year, 2020);
+  Test::assertEq<u32>(rollBack.week, 53);
+
+  let firstWeek: Time::IsoWeek = date(2021, 1, 4).isoWeek();
+  Test::assertEq<i64>(firstWeek.year, 2021);
+  Test::assertEq<u32>(firstWeek.week, 1);
+
+  let lastWeek: Time::IsoWeek = date(2026, 12, 31).isoWeek();
+  Test::assertEq<i64>(lastWeek.year, 2026);
+  Test::assertEq<u32>(lastWeek.week, 53);
+}
+
+@test
+function parseRfc3339ReadsUtcFractionsAndLowercaseSeparators(): void {
+  assertParsed("1970-01-01T00:00:00Z", 0, 0);
+  assertParsed("2026-10-28T12:34:56.789Z", 1793190896, 789000000 as u32);
+  assertParsed("2026-10-28t12:34:56z", 1793190896, 0);
+  assertParsed("2026-10-28T12:34:56.1Z", 1793190896, 100000000 as u32);
+  assertParsed("2026-10-28T12:34:56.123456789Z", 1793190896, 123456789 as u32);
+  assertParsed("1969-12-31T23:59:59.5Z", -1, 500000000 as u32);
+  assertParsed("2024-02-29T00:00:00Z", 1709164800, 0);
+}
+
+@test
+function parseRfc3339NormalizesNumericOffsetsToUtc(): void {
+  assertParsed("2026-10-28T14:34:56+02:00", 1793190896, 0);
+  assertParsed("2026-10-28T07:04:56-05:30", 1793190896, 0);
+  assertParsed("2026-10-28T12:34:56+00:00", 1793190896, 0);
+  assertParsed("1970-01-01T00:00:00+23:59", -86340, 0);
+}
+
+@test
+function parseRfc3339RejectsInvalidDatesFieldsAndShapes(): void {
+  assertRejected("2026-02-30T00:00:00Z");
+  assertRejected("2023-02-29T00:00:00Z");
+  assertRejected("2026-13-01T00:00:00Z");
+  assertRejected("2026-00-01T00:00:00Z");
+  assertRejected("2026-10-28T24:00:00Z");
+  assertRejected("2026-10-28T12:60:00Z");
+  assertRejected("2026-10-28T12:34:60Z");
+  assertRejected("2026-10-28T12:34:56+24:00");
+  assertRejected("2026-10-28T12:34:56+02:60");
+  assertRejected("2026-10-28T12:34:56.Z");
+  assertRejected("2026-10-28T12:34:56.1234567890Z");
+  assertRejected("2026-10-28T12:34:56");
+  assertRejected("2026-10-28 12:34:56Z");
+  assertRejected("2026-10-28T12:34:56+0200");
+  assertRejected("2026-10-28T12:34:56ZZ");
+  assertRejected("26-10-28T12:34:56Z");
+  assertRejected("2026-1a-28T12:34:56Z");
+  assertRejected("");
+}
+
+@test
+function formatRfc3339WritesUtcAndTrimsTheFraction(): void {
+  Test::assertEq<String>(formatted(0, 0), String::create("1970-01-01T00:00:00Z"));
+  Test::assertEq<String>(formatted(1793190896, 789000000 as u32), String::create("2026-10-28T12:34:56.789Z"));
+  Test::assertEq<String>(formatted(1793190896, 1), String::create("2026-10-28T12:34:56.000000001Z"));
+  Test::assertEq<String>(formatted(-1, 500000000 as u32), String::create("1969-12-31T23:59:59.5Z"));
+  Test::assertEq<String>(formatted(-62135596800, 0), String::create("0001-01-01T00:00:00Z"));
+  Test::assertEq<boolean>(Time::SystemTime::fromUnix(0, 1000000000 as u32).isNone(), true);
+}
+
+@test
+function rfc3339RoundTripsThroughParseAndFormat(): void {
+  let inputs: str[] = [
+    "2026-10-28T12:34:56.789Z",
+    "2024-02-29T23:59:59.999999999Z",
+    "1900-03-01T00:00:00Z",
+    "1969-12-31T23:59:59.5Z",
+    "9999-12-31T23:59:59Z",
+  ];
+  let mut index: u64 = 0;
+  while (index < 5) {
+    let parsed: Time::SystemTime = match (parse(inputs[index])) {
+      Option::SOME(value) -> value,
+      Option::NONE -> @panic("expected round-trip input to parse"),
+    };
+    Test::assertEq<String>(parsed.formatRfc3339(), String::create(inputs[index]));
+    index += 1;
+  }
+
+  let offset: Time::SystemTime = match (parse("2021-01-01T01:30:00.250+02:00")) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("expected offset input to parse"),
+  };
+  Test::assertEq<String>(offset.formatRfc3339(), String::create("2020-12-31T23:30:00.25Z"));
+}

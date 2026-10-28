@@ -1,3 +1,12 @@
+//!
+//! # Time Module
+//!
+//! Durations, monotonic and wall-clock instants, proleptic Gregorian civil-date
+//! arithmetic (`Time::CivilDate`, ISO weekdays and ISO weeks), and RFC 3339
+//! timestamps (`Time::SystemTime::parseRfc3339`, `Time::SystemTime::formatRfc3339`).
+//! Civil dates and timestamps are always UTC and ignore leap seconds.
+//!
+
 import Io from "std::io";
 import LibC, CType from "std::libc";
 
@@ -143,6 +152,60 @@ function signedDifferenceToUnsigned(left: i64, right: i64): u64 {
   }
 
   return 0;
+}
+
+const SECONDS_PER_DAY: i64 = 86400;
+
+/// Days from 0000-03-01 to 1970-01-01 in the proleptic Gregorian calendar.
+const EPOCH_SHIFT_DAYS: i64 = 719468;
+const DAYS_PER_ERA: i64 = 146097;
+
+function floorDivide(value: i64, divisor: i64): i64 {
+  let quotient: i64 = value / divisor;
+  if (value % divisor != 0 && value < 0) {
+    return quotient - 1;
+  }
+  return quotient;
+}
+
+function isAsciiDigit(byte: u8): boolean {
+  return byte >= '0' as u8 && byte <= '9' as u8;
+}
+
+function byteOrZero(text: &String, index: u64): u8 {
+  return match (text.byteAt(index)) {
+    Option::SOME(byte) -> byte,
+    Option::NONE -> 0 as u8,
+  };
+}
+
+function readDigits(text: &String, start: u64, count: u64): Option<i64> {
+  let mut value: i64 = 0;
+  let mut index: u64 = start;
+  while (index < start + count) {
+    let byte: u8 = byteOrZero(text, index);
+    if (!isAsciiDigit(byte)) {
+      return Option::NONE;
+    }
+    value = value * 10 + ((byte - '0' as u8) as i64);
+    index += 1;
+  }
+  return Option::SOME(value);
+}
+
+function pushPadded(output: &mut String, value: i64, width: u64): void {
+  let mut magnitude: i64 = value;
+  if (value < 0) {
+    output.pushStr("-");
+    magnitude = 0 - value;
+  }
+  let digits: String = String::create(magnitude);
+  let mut length: u64 = digits.length();
+  while (length < width) {
+    output.pushStr("0");
+    length += 1;
+  }
+  output.push(&digits);
 }
 
 export namespace Time {
@@ -343,6 +406,109 @@ export namespace Time {
     }
   }
 
+  /// Returns true when `year` is a leap year in the proleptic Gregorian calendar.
+  function isLeapYear(year: i64): boolean {
+    return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  }
+
+  /// Returns the number of days in `month` (1 to 12) of `year`, or `NONE` when
+  /// `month` is out of range.
+  function daysInMonth(year: i64, month: u32): Option<u32> {
+    if (month < 1 || month > 12) {
+      return Option::NONE;
+    }
+    if (month == 2) {
+      return Option::SOME(isLeapYear(year) ? 29 as u32 : 28 as u32);
+    }
+    if (month == 4 || month == 6 || month == 9 || month == 11) {
+      return Option::SOME(30 as u32);
+    }
+    return Option::SOME(31 as u32);
+  }
+
+  /// An ISO 8601 week-numbering year and its week (1 to 53).
+  record IsoWeek {
+    public year: i64;
+    public week: u32;
+  }
+
+  /// A validated proleptic Gregorian calendar date (UTC, no time of day).
+  record CivilDate {
+    public year: i64;
+    public month: u32;
+    public day: u32;
+
+    /// Builds a date, or returns `NONE` when `month` is not 1 to 12 or `day` is not
+    /// within that month (so `2026-02-30` is rejected).
+    public static create(year: i64, month: u32, day: u32): Option<CivilDate> {
+      let Option::SOME(monthLength) = daysInMonth(year, month) else {
+        return Option::NONE;
+      };
+      if (day < 1 || day > monthLength) {
+        return Option::NONE;
+      }
+      return Option::SOME(CivilDate {
+        year: year,
+        month: month,
+        day: day,
+      });
+    }
+
+    /// Returns the date `days` days after 1970-01-01 (negative values are earlier).
+    public static fromDaysSinceEpoch(days: i64): CivilDate {
+      let shifted: i64 = days + EPOCH_SHIFT_DAYS;
+      let era: i64 = floorDivide(shifted, DAYS_PER_ERA);
+      let dayOfEra: i64 = shifted - era * DAYS_PER_ERA;
+      let yearOfEra: i64 = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36524 - dayOfEra / 146096) / 365;
+      let dayOfYear: i64 = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100);
+      let shiftedMonth: i64 = (5 * dayOfYear + 2) / 153;
+      let day: i64 = dayOfYear - (153 * shiftedMonth + 2) / 5 + 1;
+      let month: i64 = shiftedMonth < 10 ? shiftedMonth + 3 : shiftedMonth - 9;
+      let year: i64 = yearOfEra + era * 400 + (month <= 2 ? 1 : 0);
+      return CivilDate {
+        year: year,
+        month: month as u32,
+        day: day as u32,
+      };
+    }
+
+    /// Returns the number of days from 1970-01-01 to this date (negative before it).
+    public daysSinceEpoch(&self): i64 {
+      let month: i64 = self.month as i64;
+      let shiftedYear: i64 = month <= 2 ? self.year - 1 : self.year;
+      let era: i64 = floorDivide(shiftedYear, 400);
+      let yearOfEra: i64 = shiftedYear - era * 400;
+      let shiftedMonth: i64 = month > 2 ? month - 3 : month + 9;
+      let dayOfYear: i64 = (153 * shiftedMonth + 2) / 5 + (self.day as i64) - 1;
+      let dayOfEra: i64 = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+      return era * DAYS_PER_ERA + dayOfEra - EPOCH_SHIFT_DAYS;
+    }
+
+    /// Returns the ISO weekday: Monday is 1 and Sunday is 7.
+    public isoWeekday(&self): u32 {
+      // 1970-01-01 was a Thursday, ISO weekday 4.
+      let shifted: i64 = self.daysSinceEpoch() + 3;
+      return (shifted - floorDivide(shifted, 7) * 7 + 1) as u32;
+    }
+
+    /// Returns the ISO week. A week belongs to the year holding its Thursday, so
+    /// 2024-12-30 is 2025-W01 and 2021-01-03 is 2020-W53.
+    public isoWeek(&self): IsoWeek {
+      let thursday: i64 = self.daysSinceEpoch() - (self.isoWeekday() as i64) + 4;
+      let year: i64 = CivilDate::fromDaysSinceEpoch(thursday).year;
+      let januaryFirst: CivilDate = CivilDate {
+        year: year,
+        month: 1,
+        day: 1,
+      };
+      let week: i64 = (thursday - januaryFirst.daysSinceEpoch()) / 7 + 1;
+      return IsoWeek {
+        year: year,
+        week: week as u32,
+      };
+    }
+  }
+
   record SystemTime {
     secs: i64;
     nanos: u32;
@@ -355,6 +521,154 @@ export namespace Time {
         }),
         Result::ERROR(error) -> Result::ERROR(error),
       };
+    }
+
+    /// Builds a wall-clock instant from UTC Unix seconds and nanoseconds, or returns
+    /// `NONE` when `nanos` is not below one second.
+    public static fromUnix(secs: i64, nanos: u32): Option<SystemTime> {
+      if (nanos >= NANOS_PER_SECOND_U32) {
+        return Option::NONE;
+      }
+      return Option::SOME(SystemTime {
+        secs: secs,
+        nanos: nanos,
+      });
+    }
+
+    /// Returns the whole UTC seconds since the Unix epoch (negative before it).
+    public unixSeconds(&self): i64 {
+      return self.secs;
+    }
+
+    /// Returns the nanoseconds past `unixSeconds()`, below one second.
+    public subsecNanos(&self): u32 {
+      return self.nanos;
+    }
+
+    /// Parses an RFC 3339 timestamp `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+hh:mm|-hh:mm)`
+    /// and normalizes it to UTC. `T` and `Z` may be lowercase, the fraction has 1 to 9
+    /// digits, and the offset hour is 0 to 23. Returns `NONE` for any other shape, an
+    /// invalid date such as `2026-02-30`, an hour above 23, a minute or second above
+    /// 59 (leap second 60 is rejected), or an offset minute above 59.
+    public static parseRfc3339(text: &String): Option<SystemTime> {
+      if (text.length() < 20) {
+        return Option::NONE;
+      }
+      let separator: u8 = byteOrZero(text, 10);
+      if (byteOrZero(text, 4) != '-' as u8 || byteOrZero(text, 7) != '-' as u8 || (separator != 'T' as u8 && separator != 't' as u8) || byteOrZero(text, 13) != ':' as u8 || byteOrZero(text, 16) != ':' as u8) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(year) = readDigits(text, 0, 4) else {
+        return Option::NONE;
+      };
+      let Option::SOME(month) = readDigits(text, 5, 2) else {
+        return Option::NONE;
+      };
+      let Option::SOME(day) = readDigits(text, 8, 2) else {
+        return Option::NONE;
+      };
+      let Option::SOME(hour) = readDigits(text, 11, 2) else {
+        return Option::NONE;
+      };
+      let Option::SOME(minute) = readDigits(text, 14, 2) else {
+        return Option::NONE;
+      };
+      let Option::SOME(second) = readDigits(text, 17, 2) else {
+        return Option::NONE;
+      };
+      if (month > 12 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+        return Option::NONE;
+      }
+      let Option::SOME(date) = CivilDate::create(year, month as u32, day as u32) else {
+        return Option::NONE;
+      };
+
+      let mut index: u64 = 19;
+      let mut nanos: i64 = 0;
+      if (byteOrZero(text, index) == '.' as u8) {
+        index += 1;
+        let fractionStart: u64 = index;
+        while (isAsciiDigit(byteOrZero(text, index))) {
+          nanos = nanos * 10 + ((byteOrZero(text, index) - '0' as u8) as i64);
+          index += 1;
+        }
+        let fractionDigits: u64 = index - fractionStart;
+        if (fractionDigits < 1 || fractionDigits > 9) {
+          return Option::NONE;
+        }
+        let mut scale: u64 = fractionDigits;
+        while (scale < 9) {
+          nanos = nanos * 10;
+          scale += 1;
+        }
+      }
+
+      let remaining: u64 = text.length() - index;
+      let zone: u8 = byteOrZero(text, index);
+      let mut offsetSeconds: i64 = 0;
+      if (remaining == 1 && (zone == 'Z' as u8 || zone == 'z' as u8)) {
+        offsetSeconds = 0;
+      } else if (remaining == 6 && (zone == '+' as u8 || zone == '-' as u8)) {
+        if (byteOrZero(text, index + 3) != ':' as u8) {
+          return Option::NONE;
+        }
+        let Option::SOME(offsetHour) = readDigits(text, index + 1, 2) else {
+          return Option::NONE;
+        };
+        let Option::SOME(offsetMinute) = readDigits(text, index + 4, 2) else {
+          return Option::NONE;
+        };
+        if (offsetHour > 23 || offsetMinute > 59) {
+          return Option::NONE;
+        }
+        offsetSeconds = (offsetHour * 60 + offsetMinute) * 60;
+        if (zone == '-' as u8) {
+          offsetSeconds = 0 - offsetSeconds;
+        }
+      } else {
+        return Option::NONE;
+      }
+
+      let localSeconds: i64 = date.daysSinceEpoch() * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second;
+      return Option::SOME(SystemTime {
+        secs: localSeconds - offsetSeconds,
+        nanos: nanos as u32,
+      });
+    }
+
+    /// Formats this instant in UTC as RFC 3339 `YYYY-MM-DDTHH:MM:SS[.fraction]Z`. The
+    /// fraction keeps its significant digits only (trailing zeros trimmed, at most
+    /// nine) and is omitted when the nanoseconds are zero. Years before 0 or after
+    /// 9999 are written with a sign or more digits, which RFC 3339 does not allow.
+    public formatRfc3339(&self): String {
+      let days: i64 = floorDivide(self.secs, SECONDS_PER_DAY);
+      let secondOfDay: i64 = self.secs - days * SECONDS_PER_DAY;
+      let date: CivilDate = CivilDate::fromDaysSinceEpoch(days);
+      let mut output: String = String::new();
+      pushPadded(&mut output, date.year, 4);
+      output.pushStr("-");
+      pushPadded(&mut output, date.month as i64, 2);
+      output.pushStr("-");
+      pushPadded(&mut output, date.day as i64, 2);
+      output.pushStr("T");
+      pushPadded(&mut output, secondOfDay / 3600, 2);
+      output.pushStr(":");
+      pushPadded(&mut output, (secondOfDay % 3600) / 60, 2);
+      output.pushStr(":");
+      pushPadded(&mut output, secondOfDay % 60, 2);
+      if (self.nanos > 0) {
+        let mut fraction: i64 = self.nanos as i64;
+        let mut width: u64 = 9;
+        while (fraction % 10 == 0) {
+          fraction = fraction / 10;
+          width -= 1;
+        }
+        output.pushStr(".");
+        pushPadded(&mut output, fraction, width);
+      }
+      output.pushStr("Z");
+      return output;
     }
 
     public durationSinceUnixEpoch(&self): Result<Duration, TimeError> {
