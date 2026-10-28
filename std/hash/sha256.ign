@@ -1,0 +1,225 @@
+//!
+//! # SHA-256
+//!
+//! `Sha256`, the SHA-256 message digest of FIPS 180-4. It is exported from
+//! `std::hash`, so `import Sha256 from "std::hash"` reaches it.
+//!
+//! | Item                     | Description                                         |
+//! |--------------------------|-----------------------------------------------------|
+//! | `Sha256::new()`          | An incremental hasher over an empty message         |
+//! | `update(bytes)`          | Appends bytes to the message                        |
+//! | `finish()`               | The 32-byte digest of everything appended           |
+//! | `Sha256::digest(bytes)`  | The 32-byte digest of `bytes` in one call           |
+//! | `Sha256::hexDigest(bytes)` | The digest of `bytes` as 64 lowercase hex digits  |
+//!
+//! Unsigned integer `+` wraps modulo 2^width (see the language reference), so
+//! the `u32` additions below are the modulo 2^32 additions the standard asks for.
+
+/// An incremental SHA-256 hasher (FIPS 180-4).
+///
+/// Feed the message with `update` in any number of pieces, then call `finish`
+/// for the digest. The digest only depends on the concatenated bytes, not on
+/// how they were split.
+export record Sha256 {
+  /// The round constants: the first 32 bits of the fractional parts of the
+  /// cube roots of the first 64 primes.
+  static ROUND_CONSTANTS: u32[64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  /// The intermediate hash value H0..H7.
+  state: u32[8];
+
+  /// Bytes of the current, not yet complete, 64-byte block.
+  block: u8[64];
+
+  /// How many bytes of `block` are filled.
+  blockLength: u64;
+
+  /// Total message length so far, in bytes.
+  messageLength: u64;
+
+  /// Creates a hasher over the empty message.
+  public static new(): Sha256 {
+    return Sha256 {
+      state: [
+        0x6a09e667,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
+      ],
+      block: @zeroed<u8[64]>(),
+      blockLength: 0,
+      messageLength: 0,
+    };
+  }
+
+  /// Returns the SHA-256 digest of `bytes`.
+  public static digest(bytes: u8[]): u8[32] {
+    let mut hasher: Sha256 = Sha256::new();
+    hasher.update(bytes);
+    return hasher.finish();
+  }
+
+  /// Returns the SHA-256 digest of `bytes` as 64 lowercase hexadecimal digits.
+  public static hexDigest(bytes: u8[]): String {
+    let digestBytes: u8[32] = Sha256::digest(bytes);
+    let digits: str = "0123456789abcdef";
+    let digitBytes: *u8 = digits as *u8;
+    let mut result: String = String::withCapacity(64);
+    let mut index: u64 = 0;
+
+    while (index < 32) {
+      let value: u8 = digestBytes[index];
+      result.pushByte(@read<u8>(digitBytes + ((value >> 4) as u64)));
+      result.pushByte(@read<u8>(digitBytes + ((value & 0x0f) as u64)));
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// Appends `bytes` to the message.
+  public update(&mut self, bytes: u8[]): void {
+    let length: u64 = bytes.length();
+    let data: *u8 = bytes.asPtr();
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      self.block[self.blockLength] = @read<u8>(data + index);
+      self.blockLength += 1;
+      index += 1;
+
+      if (self.blockLength == 64) {
+        self.compress();
+        self.blockLength = 0;
+      }
+    }
+
+    self.messageLength += length;
+  }
+
+  /// Pads the message and returns its 32-byte digest.
+  ///
+  /// The hasher is left padded; create a new one to hash another message.
+  public finish(&mut self): u8[32] {
+    let bitLength: u64 = self.messageLength * 8;
+
+    self.block[self.blockLength] = 0x80;
+    self.blockLength += 1;
+
+    if (self.blockLength > 56) {
+      while (self.blockLength < 64) {
+        self.block[self.blockLength] = 0;
+        self.blockLength += 1;
+      }
+
+      self.compress();
+      self.blockLength = 0;
+    }
+
+    while (self.blockLength < 56) {
+      self.block[self.blockLength] = 0;
+      self.blockLength += 1;
+    }
+
+    let mut shift: u64 = 0;
+
+    while (shift < 8) {
+      self.block[56 + shift] = ((bitLength >> ((7 - shift) * 8)) & 0xff) as u8;
+      shift += 1;
+    }
+
+    self.compress();
+    self.blockLength = 0;
+
+    let mut result: u8[32] = @zeroed<u8[32]>();
+    let mut word: u64 = 0;
+
+    while (word < 8) {
+      let value: u32 = self.state[word];
+      result[word * 4] = ((value >> 24) & 0xff) as u8;
+      result[word * 4 + 1] = ((value >> 16) & 0xff) as u8;
+      result[word * 4 + 2] = ((value >> 8) & 0xff) as u8;
+      result[word * 4 + 3] = (value & 0xff) as u8;
+      word += 1;
+    }
+
+    return result;
+  }
+
+  /// Runs the compression function over the full 64-byte `block`.
+  compress(&mut self): void {
+    let mut schedule: u32[64] = @zeroed<u32[64]>();
+    let mut index: u64 = 0;
+
+    while (index < 16) {
+      schedule[index] = ((self.block[index * 4] as u32) << 24) | ((self.block[index * 4 + 1] as u32) << 16) | ((self.block[index * 4 + 2] as u32) << 8) | (self.block[index * 4 + 3] as u32);
+      index += 1;
+    }
+
+    while (index < 64) {
+      let previous: u32 = schedule[index - 2];
+      let older: u32 = schedule[index - 15];
+      let sigmaOne: u32 = rotateRight(previous, 17) ^ rotateRight(previous, 19) ^ (previous >> 10);
+      let sigmaZero: u32 = rotateRight(older, 7) ^ rotateRight(older, 18) ^ (older >> 3);
+      schedule[index] = sigmaOne + schedule[index - 7] + sigmaZero + schedule[index - 16];
+      index += 1;
+    }
+
+    let mut a: u32 = self.state[0];
+    let mut b: u32 = self.state[1];
+    let mut c: u32 = self.state[2];
+    let mut d: u32 = self.state[3];
+    let mut e: u32 = self.state[4];
+    let mut f: u32 = self.state[5];
+    let mut g: u32 = self.state[6];
+    let mut h: u32 = self.state[7];
+
+    index = 0;
+
+    while (index < 64) {
+      let bigSigmaOne: u32 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+      let choose: u32 = (e & f) ^ (~e & g);
+      let first: u32 = h + bigSigmaOne + choose + Sha256::ROUND_CONSTANTS[index] + schedule[index];
+      let bigSigmaZero: u32 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+      let majority: u32 = (a & b) ^ (a & c) ^ (b & c);
+      let second: u32 = bigSigmaZero + majority;
+
+      h = g;
+      g = f;
+      f = e;
+      e = d + first;
+      d = c;
+      c = b;
+      b = a;
+      a = first + second;
+      index += 1;
+    }
+
+    self.state[0] += a;
+    self.state[1] += b;
+    self.state[2] += c;
+    self.state[3] += d;
+    self.state[4] += e;
+    self.state[5] += f;
+    self.state[6] += g;
+    self.state[7] += h;
+  }
+}
+
+/// Rotates `value` right by `count` bits, `count` in 1..31.
+function rotateRight(value: u32, count: u32): u32 {
+  return (value >> count) | (value << (32 - count));
+}

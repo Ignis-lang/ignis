@@ -1,0 +1,128 @@
+//!
+//! Unit tests for `std::hash::Sha256`, against the FIPS 180-4 example vectors.
+
+import Sha256 from "std::hash";
+
+import Test from "std::test";
+
+/// Returns the lowercase hex of a finished digest.
+function sha256TestHex(digest: u8[32]): String {
+  let digits: str = "0123456789abcdef";
+  let digitBytes: *u8 = digits as *u8;
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < 32) {
+    result.pushByte(@read<u8>(digitBytes + ((digest[index] >> 4) as u64)));
+    result.pushByte(@read<u8>(digitBytes + ((digest[index] & 0x0f) as u64)));
+    index += 1;
+  }
+
+  return result;
+}
+
+/// Asserts that the one-shot hex digest of `message` is `expected`.
+function sha256TestVector(message: str, expected: str): void {
+  let hexText: String = Sha256::hexDigest(message.asBytes());
+  Test::assertEq<str>(hexText.toStr(), expected);
+}
+
+/// Asserts that hashing `message` split at `split` matches the one-shot digest.
+function sha256TestSplit(message: str, split: u64): void {
+  let bytes: u8[] = message.asBytes();
+  let data: *mut u8 = bytes.asPtr() as *mut u8;
+  let mut hasher: Sha256 = Sha256::new();
+  hasher.update(@sliceFromParts<u8>(data, split));
+  hasher.update(@sliceFromParts<u8>(data + split, bytes.length() - split));
+  let incremental: String = sha256TestHex(hasher.finish());
+  let oneShot: String = Sha256::hexDigest(bytes);
+  Test::assertEq<str>(incremental.toStr(), oneShot.toStr());
+}
+
+@test
+function sha256EmptyMessage(): void {
+  sha256TestVector("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+}
+
+@test
+function sha256Abc(): void {
+  sha256TestVector("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+@test
+function sha256FourHundredFortyEightBitMessage(): void {
+  sha256TestVector(
+    "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+  );
+}
+
+@test
+function sha256EightHundredNinetySixBitMessage(): void {
+  sha256TestVector(
+    "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+    "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+  );
+}
+
+@test
+function sha256OneMillionA(): void {
+  let chunk: u8[1000] = @splat<u8[1000]>('a' as u8);
+  let chunkView: u8[] = chunk;
+  let mut hasher: Sha256 = Sha256::new();
+  let mut index: u64 = 0;
+
+  while (index < 1000) {
+    hasher.update(chunkView);
+    index += 1;
+  }
+
+  let hexText: String = sha256TestHex(hasher.finish());
+  Test::assertEq<str>(
+    hexText.toStr(),
+    "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+  );
+}
+
+@test
+function sha256DigestMatchesHexDigest(): void {
+  let message: str = "abc";
+  let digest: u8[32] = Sha256::digest(message.asBytes());
+  let hexText: String = sha256TestHex(digest);
+  Test::assertEq<str>(
+    hexText.toStr(),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  );
+}
+
+@test
+function sha256IncrementalMatchesOneShotAtBlockBoundaries(): void {
+  let message: str = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+  let splits: u64[8] = [0, 1, 55, 56, 63, 64, 65, 112];
+  let mut index: u64 = 0;
+
+  while (index < 8) {
+    sha256TestSplit(message, splits[index]);
+    index += 1;
+  }
+}
+
+@test
+function sha256IncrementalByteAtATime(): void {
+  let message: str = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+  let bytes: u8[] = message.asBytes();
+  let data: *mut u8 = bytes.asPtr() as *mut u8;
+  let mut hasher: Sha256 = Sha256::new();
+  let mut index: u64 = 0;
+
+  while (index < bytes.length()) {
+    hasher.update(@sliceFromParts<u8>(data + index, 1));
+    index += 1;
+  }
+
+  let hexText: String = sha256TestHex(hasher.finish());
+  Test::assertEq<str>(
+    hexText.toStr(),
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+  );
+}
