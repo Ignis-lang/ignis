@@ -872,3 +872,34 @@ function readdirReadsTheNameAndTypeTheHostDirentLayoutPlacesAtTheirOwnOffsets():
   Test::assert(sawLeafFile);
   Test::assert(sawDotEntry);
 }
+
+@test
+function createTempDirReturnsDistinctPrivateDirectories(): void {
+  let first: Path::PathBuf = Fs::createTempDir("ignis-std-test-").unwrap();
+  let second: Path::PathBuf = Fs::createTempDir("ignis-std-test-").unwrap();
+
+  let firstText: String = first.toString();
+  let secondText: String = second.toString();
+  Test::assert(!firstText.equals(&secondText));
+
+  let metadata: Fs::Metadata = Fs::metadata(&first).unwrap();
+  Test::assert(metadata.isDir());
+  Test::assertEq<u32>(metadata.permissions() & 511, 448);
+
+  let Option::SOME(name) = first.fileName() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(name.startsWith("ignis-std-test-"));
+  Test::assertEq<u64>(name.length(), 21);
+
+  Fs::removeDirAll(&first).unwrap();
+  Fs::removeDirAll(&second).unwrap();
+  Test::assert(!Fs::exists(first.asStr()));
+}
+
+@test
+function createTempDirRejectsASlashInThePrefix(): void {
+  Test::assert(Fs::createTempDir("nested/name").isError());
+}
