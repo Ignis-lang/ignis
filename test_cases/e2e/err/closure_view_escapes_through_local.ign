@@ -1,0 +1,41 @@
+// e2e: err
+//
+// A closure that captures a view, or a local by reference, cannot leave the
+// function through a local, a record holding it, or a vector it was pushed
+// into: what it captured is dropped when the function returns.
+import Io from "std::io";
+
+record Holder {
+  public f: () -> void;
+}
+
+function closureThroughLocal(): () -> void {
+  let text: String = String::create("closure-heap-string-long-enough-to-allocate");
+  let view: str = text.toStr();
+  let g: () -> void = (): void -> Io::println(view);
+  return g;
+}
+
+function holderThroughLocal(): Holder {
+  let text: String = String::create("holder-heap-string-long-enough-to-allocate");
+  let view: str = text.toStr();
+  let h: Holder = Holder { f: (): void -> Io::println(view) };
+  return h;
+}
+
+function vectorOfClosures(): Vector<() -> void> {
+  let text: String = String::create("vector-heap-string-long-enough-to-allocate");
+  let view: str = text.toStr();
+  let mut items: Vector<() -> void> = Vector::new<() -> void>();
+  items.push((): void -> Io::println(view));
+  return items;
+}
+
+function main(): i32 {
+  let g: () -> void = closureThroughLocal();
+  g();
+  let h: Holder = holderThroughLocal();
+  h.f();
+  let items: Vector<() -> void> = vectorOfClosures();
+  return 0;
+}

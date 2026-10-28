@@ -331,6 +331,10 @@ export namespace Borrowck {
     /// scrutinee they were destructured from is a reference. Moving one of
     /// these is what the oracle reports as a move out of a borrowed value.
     borrowedBindings: Vector<u32>;
+    /// Borrowed bindings whose arm was already walked. They no longer
+    /// restrict moves, but a value an arm produced still names them, and
+    /// that value lives where the binding pointed, not in the binding.
+    endedBorrowedBindings: Vector<u32>;
 
     /// While a closure's thunk is walked, the owning values its environment
     /// holds by value. They are borrowed bindings too, and this list only
@@ -533,6 +537,7 @@ export namespace Borrowck {
         loopScrutineeStarts: Vector::new<u64>(),
         loopScrutinees: Vector::new<u32>(),
         borrowedBindings: Vector::new<u32>(),
+        endedBorrowedBindings: Vector::new<u32>(),
         environmentCaptures: Vector::new<u32>(),
         armResultMoveFrames: Vector::new<Vector<u32>>(),
         tailHandoverBlocks: Vector::new<u32>(),
@@ -1095,11 +1100,35 @@ export namespace Borrowck {
       return false;
     }
 
+    /// Whether `defRaw` is or was a borrowed binding: one whose arm is being
+    /// walked, or one an already walked arm bound.
+    public livesInBorrowedStorage(&self, defRaw: u32): boolean {
+      if (self.isBorrowedBinding(defRaw)) {
+        return true;
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < self.endedBorrowedBindings.length()) {
+        if (let Option::SOME(entry) = self.endedBorrowedBindings.get(index)) {
+          if (*entry == defRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// Drop every borrowed binding registered past `mark`, which is the length
     /// the vector had before the arm was walked.
     public truncateBorrowedBindings(&mut self, mark: u64): void {
       while (self.borrowedBindings.length() > mark) {
-        self.borrowedBindings.pop();
+        if (let Option::SOME(ended) = self.borrowedBindings.pop()) {
+          self.endedBorrowedBindings.push(ended);
+        }
       }
     }
 
@@ -3836,8 +3865,9 @@ export namespace Borrowck {
     if (let Option::SOME(defId) = variable) {
       // A binding destructured out of a reference names the storage the
       // reference pointed to: a local, a temporary scrutinee, or storage this
-      // function does not own.
-      if (state.isBorrowedBinding(defId.raw())) {
+      // function does not own. That still holds for a value its arm produced
+      // and that is judged after the arm (`return match (&x) { A(v) -> &v }`).
+      if (state.livesInBorrowedStorage(defId.raw())) {
         if (let Option::SOME(ownerRaw) = state.viewOwnerOf(defId.raw())) {
           return Borrowck::localViewOwner(Id::fromRaw<Analyzer::DefinitionTag>(ownerRaw), nodeId);
         }
@@ -4228,6 +4258,18 @@ export namespace Borrowck {
     Borrowck::checkStoredClosureCaptures(defStore, typeStore, symbols, hir, state, diagnostics, bindingDepth, value, span);
 
     if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
+      // A closure value keeps what it captured alive without borrowing it (a
+      // by-reference capture reads later writes); the binding only records
+      // it, so returning the binding or storing it outward is caught.
+      // `checkStoredClosureCaptures` already judged a closure built here.
+      let closureOwner: Borrowck::ViewOwner = Borrowck::closureCarrierOwner(defStore, typeStore, hir, state, value, true);
+
+      if (closureOwner.kind == Borrowck::VIEW_OWNER_LOCAL && closureOwner.local.raw() != binding.raw()) {
+        let mut closureViewRef: &mut Borrowck::State = state;
+        closureViewRef.setViewOwner(binding.raw(), closureOwner.local.raw(), false);
+        return;
+      }
+
       Borrowck::borrowUntrackedMutableReference(defStore, typeStore, symbols, hir, state, diagnostics, binding, value, span);
       return;
     }
@@ -4691,6 +4733,165 @@ export namespace Borrowck {
   /// deeper than the place the closure is stored into outlives that local;
   /// each offending capture is reported naming it. `bindingDepth` is `NONE`
   /// for a `return`, which outlives every local of the function.
+  /// The local a closure built inside `value` cannot outlive: the owner of a
+  /// view it captures by value. The shortest-lived one decides. External when no closure in `value` is a
+  /// view (`closureIsView`).
+  function closureLiteralOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    value: Hir::HirId,
+  ): Borrowck::ViewOwner {
+    let mut closures: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    Borrowck::collectStoredClosures(hir, value, &mut closures);
+
+    let mut chosen: Borrowck::ViewOwner = Borrowck::externalViewOwner();
+    let mut chosenDepth: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < closures.length()) {
+      let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+      let mut isView: boolean = false;
+
+      if (let Option::SOME(closureId) = closures.get(index)) {
+        if (let Option::SOME(node) = hir.get(*closureId)) {
+          if (let Hir::HirKind::Closure(closure) = &node.kind) {
+            isView = Analyzer::ViewType::closureIsView(defStore, typeStore, &closure);
+            captures = Borrowck::copyCaptures(&closure.captures);
+          }
+        }
+      }
+
+      let mut captureIndex: u64 = 0;
+
+      while (isView && captureIndex < captures.length()) {
+        if (let Option::SOME(capture) = captures.get(captureIndex)) {
+          let mut owner: Option<u32> = Option::NONE;
+
+          // A by-reference capture that escapes is escape analysis's to
+          // report (A0170); a by-value view is not seen there.
+          if (let Hir::CaptureMode::ByValue = &capture.mode) {
+            if (Analyzer::ViewType::isView(defStore, typeStore, capture.typeInEnv)) {
+              owner = state.viewOwnerOf(capture.sourceDef.raw());
+            }
+          }
+
+          if (let Option::SOME(ownerRaw) = owner) {
+            if (let Option::SOME(depth) = state.localDepth(ownerRaw)) {
+              if (chosen.kind == Borrowck::VIEW_OWNER_EXTERNAL || depth > chosenDepth) {
+                chosen = Borrowck::localViewOwner(Id::fromRaw<Analyzer::DefinitionTag>(ownerRaw), value);
+                chosenDepth = depth;
+              }
+            }
+          }
+        }
+
+        captureIndex += 1;
+      }
+
+      index += 1;
+    }
+
+    return chosen;
+  }
+
+  /// Whether a value of this type can carry a closure's view without being a
+  /// view itself: a function value, or a record, enum, vector or other
+  /// aggregate holding one.
+  function typeCarriesClosure(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    if (Borrowck::typeHoldsView(defStore, typeStore, typeId)) {
+      return false;
+    }
+
+    return Analyzer::ViewType::canCarryView(defStore, typeStore, typeId);
+  }
+
+  /// The local a closure-carrying `value` cannot outlive: what a closure
+  /// built in it captures, or what a closure-carrying local it names was
+  /// recorded to hold (`let g = () -> use(view); return g;`).
+  function closureCarrierOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    value: Hir::HirId,
+    includeLiterals: boolean,
+  ): Borrowck::ViewOwner {
+    let Option::SOME(node) = hir.get(value) else {
+      return Borrowck::externalViewOwner();
+    };
+
+    if (!Borrowck::typeCarriesClosure(defStore, typeStore, node.typeId)) {
+      return Borrowck::externalViewOwner();
+    }
+
+    if (includeLiterals) {
+      let literal: Borrowck::ViewOwner = Borrowck::closureLiteralOwner(defStore, typeStore, hir, state, value);
+
+      if (literal.kind != Borrowck::VIEW_OWNER_EXTERNAL) {
+        return literal;
+      }
+    }
+
+    if (let Hir::HirKind::Variable(defId) = &node.kind) {
+      if (let Option::SOME(ownerRaw) = state.viewOwnerOf(defId.raw())) {
+        return Borrowck::localViewOwner(Id::fromRaw<Analyzer::DefinitionTag>(ownerRaw), value);
+      }
+    }
+
+    return Borrowck::externalViewOwner();
+  }
+
+  /// A `&mut self` method called on a closure-carrying local with a
+  /// closure-carrying argument (`items.push(() -> use(view))`) may keep the
+  /// argument: the local then carries what the argument does.
+  function recordClosureStoredIntoReceiver(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    receiverRoot: Option<Analyzer::DefinitionId>,
+    receiverMutable: boolean,
+    args: &Vector<Hir::HirId>,
+  ): void {
+    if (!receiverMutable) {
+      return;
+    }
+
+    let Option::SOME(root) = receiverRoot else {
+      return;
+    };
+
+    let Option::SOME(rootType) = Borrowck::variableTypeOf(defStore, root) else {
+      return;
+    };
+
+    if (!Borrowck::typeCarriesClosure(defStore, typeStore, rootType) || state.viewOwnerOf(root.raw()).isSome()) {
+      return;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        let owner: Borrowck::ViewOwner = Borrowck::closureCarrierOwner(defStore, typeStore, hir, state, *argument, true);
+
+        if (owner.kind == Borrowck::VIEW_OWNER_LOCAL && owner.local.raw() != root.raw()) {
+          let mut viewRef: &mut Borrowck::State = state;
+          viewRef.setViewOwner(root.raw(), owner.local.raw(), false);
+          return;
+        }
+      }
+
+      index += 1;
+    }
+  }
+
   function checkStoredClosureCaptures(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -5139,7 +5340,13 @@ export namespace Borrowck {
     Borrowck::checkAggregateViews(defStore, typeStore, symbols, hir, state, diagnostics, Option::NONE, value, span);
     Borrowck::checkStoredClosureCaptures(defStore, typeStore, symbols, hir, state, diagnostics, Option::NONE, value, span);
 
-    let owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
+    let mut owner: Borrowck::ViewOwner = Borrowck::keptViewOwner(defStore, typeStore, hir, state, value);
+
+    // A closure built in the returned value was judged by
+    // `checkStoredClosureCaptures`; one returned through a local is not.
+    if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
+      owner = Borrowck::closureCarrierOwner(defStore, typeStore, hir, state, value, false);
+    }
 
     if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
       return;
@@ -7404,6 +7611,7 @@ export namespace Borrowck {
 
       Hir::HirKind::Call(call) -> {
         let callParams: Vector<Analyzer::DefinitionId> = Borrowck::callParamsOrEmpty(defStore, call.callee);
+        Borrowck::checkClosureArgumentCaptures(defStore, typeStore, symbols, hir, state, diagnostics, Option::NONE, false, &call.args, span);
         Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, &callParams, 0, span);
       },
       Hir::HirKind::CallClosure(call) -> {
@@ -7661,6 +7869,19 @@ export namespace Borrowck {
       paramOffset = 1;
     }
 
+    let mut receiverRoot: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut receiverMutable: boolean = false;
+
+    if (let Option::SOME(receiver) = call.receiver) {
+      if (!Borrowck::methodSelfByValue(defStore, call.method)) {
+        receiverRoot = Borrowck::extractRootVariable(hir, receiver);
+        receiverMutable = Borrowck::methodSelfMutable(defStore, call.method);
+      }
+    }
+
+    Borrowck::checkClosureArgumentCaptures(defStore, typeStore, symbols, hir, state, diagnostics, receiverRoot, receiverMutable, &call.args, span);
+    Borrowck::recordClosureStoredIntoReceiver(defStore, typeStore, hir, state, receiverRoot, receiverMutable, &call.args);
+
     Borrowck::checkCallArguments(
       defStore,
       typeStore,
@@ -7674,6 +7895,183 @@ export namespace Borrowck {
       paramOffset,
       span,
     );
+  }
+
+  /// A closure literal handed to a call runs while the call still holds the
+  /// borrows it was given: the receiver of a method taking `&self` or
+  /// `&mut self`, and every `&x` or `&mut x` argument. Its captures of the
+  /// same locals conflict with those borrows, so
+  /// `values.sort((a, b) -> { values.pop(); ... })` is rejected instead of
+  /// freeing the element the sort holds. A by-value capture of a `&mut T`
+  /// local copies write access, so it counts as a mutable use.
+  ///
+  /// The call's own borrows are taken silently here: a conflict between them
+  /// is reported where each is taken, not twice.
+  function checkClosureArgumentCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    receiverRoot: Option<Analyzer::DefinitionId>,
+    receiverMutable: boolean,
+    args: &Vector<Hir::HirId>,
+    span: SourceSpan,
+  ): void {
+    let mut closures: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        if (let Option::SOME(node) = hir.get(*argument)) {
+          if (let Hir::HirKind::Closure(_) = &node.kind) {
+            closures.push(*argument);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    if (closures.isEmpty()) {
+      return;
+    }
+
+    let mut heldTargets: Vector<u32> = Vector::new<u32>();
+    let mut heldMutable: Vector<boolean> = Vector::new<boolean>();
+
+    if (let Option::SOME(root) = receiverRoot) {
+      if (Borrowck::borrowSilently(state, root.raw(), receiverMutable)) {
+        heldTargets.push(root.raw());
+        heldMutable.push(receiverMutable);
+      }
+    }
+
+    index = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        if (let Option::SOME(reference) = Borrowck::referenceParts(hir, *argument)) {
+          if (let Option::SOME(target) = Borrowck::extractRootVariable(hir, reference.expression)) {
+            if (Borrowck::borrowSilently(state, target.raw(), reference.mutable)) {
+              heldTargets.push(target.raw());
+              heldMutable.push(reference.mutable);
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut closureIndex: u64 = 0;
+
+    while (closureIndex < closures.length()) {
+      let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+
+      if (let Option::SOME(closureId) = closures.get(closureIndex)) {
+        if (let Option::SOME(node) = hir.get(*closureId)) {
+          if (let Hir::HirKind::Closure(closure) = &node.kind) {
+            captures = Borrowck::copyCaptures(&closure.captures);
+          }
+        }
+      }
+
+      let mut captureIndex: u64 = 0;
+
+      while (captureIndex < captures.length()) {
+        if (let Option::SOME(capture) = captures.get(captureIndex)) {
+          let mut mutable: boolean = false;
+          let mut counts: boolean = true;
+
+          match (capture.mode) {
+            Hir::CaptureMode::ByMutRef -> {
+              mutable = true;
+            },
+            Hir::CaptureMode::ByRef -> {},
+            Hir::CaptureMode::ByValue -> {
+              mutable = Borrowck::bindingIsMutableReference(defStore, typeStore, capture.sourceDef);
+              counts = mutable;
+            },
+          };
+
+          if (counts) {
+            let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, capture.sourceDef, mutable, span, false);
+
+            if (granted) {
+              let mut releaseRef: &mut Borrowck::State = state;
+              releaseRef.releaseBorrow(capture.sourceDef.raw(), mutable);
+            }
+          }
+        }
+
+        captureIndex += 1;
+      }
+
+      closureIndex += 1;
+    }
+
+    let mut heldIndex: u64 = heldTargets.length();
+
+    while (heldIndex > 0) {
+      heldIndex -= 1;
+
+      if (let Option::SOME(target) = heldTargets.get(heldIndex)) {
+        if (let Option::SOME(mutable) = heldMutable.get(heldIndex)) {
+          let mut releaseRef: &mut Borrowck::State = state;
+          releaseRef.releaseBorrow(*target, *mutable);
+        }
+      }
+    }
+  }
+
+  /// Takes a borrow of `target` without reporting a conflict, and answers
+  /// whether it was taken.
+  function borrowSilently(state: &mut Borrowck::State, target: u32, mutable: boolean): boolean {
+    let current: u32 = state.borrowValue(target);
+    let mut stateRef: &mut Borrowck::State = state;
+
+    if (mutable) {
+      if (current != Borrowck::BORROW_NONE) {
+        return false;
+      }
+
+      stateRef.setBorrowValue(target, Borrowck::BORROW_MUT);
+      return true;
+    }
+
+    if (current == Borrowck::BORROW_MUT) {
+      return false;
+    }
+
+    if (current == Borrowck::BORROW_NONE) {
+      stateRef.setBorrowValue(target, Borrowck::BORROW_SHARED_BASE + 1);
+    } else {
+      stateRef.setBorrowValue(target, current + 1);
+    }
+
+    return true;
+  }
+
+  function copyCaptures(source: &Vector<Hir::HirCapture>): Vector<Hir::HirCapture> {
+    let mut copied: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(capture) = source.get(index)) {
+        copied.push(Hir::HirCapture {
+          sourceDef: capture.sourceDef,
+          fieldIndex: capture.fieldIndex,
+          mode: capture.mode,
+          typeInEnv: capture.typeInEnv,
+        });
+      }
+
+      index += 1;
+    }
+
+    return copied;
   }
 
   /// Walks the arguments of a manual `.drop()`: checked and borrow-checked like
