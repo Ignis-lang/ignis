@@ -313,7 +313,7 @@
     },
     {
       "name": "std::sqlite3::connection",
-      "doc": "  \n# Connection  \n  \n`Sqlite3::Connection`, one open SQLite database. Owns the `sqlite3*`  \nhandle and closes it on drop; `close()` does the same thing early and  \nreports the result.  \n  \n## Construction  \n  \n| Method           | Description                                       |  \n|------------------|---------------------------------------------------|  \n| `Connection::open(path)` | Opens (or creates) the database file `path` |  \n| `Connection::openInMemory()` | Opens a private `:memory:` database     |  \n  \nBoth run `PRAGMA journal_mode=WAL` on a file database so readers do not  \nblock behind a writer; SQLite silently keeps the previous journal mode  \nwhere the filesystem cannot support WAL, and `open` still succeeds. An  \nin-memory database skips the pragma: WAL never applies to `:memory:`, and  \nonly the exact path `\":memory:\"` is recognized as one.  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Sqlite3::Error>`. The error's  \n`code` is the extended result code and `message` is what `sqlite3_errmsg`  \nreports; see `std::sqlite3::error`.  \n  \n## Threading  \n  \nA SQLite handle is thread-bound, so a `Connection` is not `Send`. Share one  \nconnection behind a `Mutex` (`Shared<Sqlite3::Connection>`); SQLite  \nserializes writers, and WAL keeps readers concurrent."
+      "doc": "  \n# Connection  \n  \n`Sqlite3::Connection`, one open SQLite database. Owns the `sqlite3*`  \nhandle and closes it on drop; `close()` does the same thing early and  \nreports the result.  \n  \n## Construction  \n  \n| Method           | Description                                       |  \n|------------------|---------------------------------------------------|  \n| `Connection::open(path)` | Opens (or creates) the database file `path` |  \n| `Connection::openInMemory()` | Opens a private `:memory:` database     |  \n  \nBoth run `PRAGMA journal_mode=WAL` on a file database so readers do not  \nblock behind a writer; SQLite silently keeps the previous journal mode  \nwhere the filesystem cannot support WAL, and `open` still succeeds. An  \nin-memory database skips the pragma: WAL never applies to `:memory:`, and  \nonly the exact path `\":memory:\"` is recognized as one.  \n  \n## Errors  \n  \nEvery fallible operation returns `Result<T, Sqlite3::Error>`. The error's  \n`code` is the extended result code and `message` is what `sqlite3_errmsg`  \nreports; see `std::sqlite3::error`.  \n  \n## Threading  \n  \nA `Connection` holds a raw `sqlite3*`, so it is not `Send`, and a  \n`Mutex<Connection>` does not compile: `Mutex` requires `Send`. To share one  \nconnection between threads, wrap it in `Sqlite3::SharedConnection` and put  \nthat behind a `Mutex` (`Shared<Sqlite3::SharedConnection>`):  \n  \n```ignis  \nlet cell: Sqlite3::SharedConnection = Sqlite3::SharedConnection::new(connection);  \nlet shared: Shared<Sqlite3::SharedConnection> = Arc::new<Mutex<Sqlite3::SharedConnection>>(Mutex::new<Sqlite3::SharedConnection>(cell));  \nlet mut guard: MutexGuard<Sqlite3::SharedConnection> = shared.get().lock();  \nguard.get().connection.exec(\"INSERT INTO t VALUES (1)\").unwrap();  \n```  \n  \nThe handle may then move between threads, one at a time. A `Statement` or  \n`Transaction` taken through the guard must not outlive the guard."
     },
     {
       "name": "std::sqlite3::error",
@@ -16322,7 +16322,7 @@
           "name": "stableVector",
           "kind": "method",
           "signature": "static stableVector(values: &mut Vector<T>, compare: (&T, &T) -> i32): void",
-          "doc": "Sorts a vector in-place using the vector's generic stable sorter.  \n  \nThis is the general comparator-based entry point for element types that  \ncan be safely moved by the current `Vector::sort` implementation. Use  \n`stableStrings` for owned `String` values until generic non-Copy moves are  \nsupported by the compiler/runtime stack."
+          "doc": "Sorts a vector in-place using the vector's generic stable sorter.  \n  \nThis is the general comparator-based entry point. `Vector::sort` moves  \nelements bitwise and writes each one back exactly once, so owned values  \nsuch as `String` are neither dropped nor duplicated, as long as `compare`  \ndoes not reach `values` itself."
         }
       ]
     },
@@ -16462,6 +16462,28 @@
     },
     {
       "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::Sqlite3::SharedConnection",
+      "name": "SharedConnection",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record SharedConnection",
+      "doc": "A `Connection` that may move to another thread, to be shared behind a  \n`Mutex` (`Shared<Sqlite3::SharedConnection>`).  \n  \nDeclared `Send` although it holds a raw handle: SQLite built in its  \ndefault serialized or multi-thread mode lets a connection be used from  \nany thread as long as two threads never use it at once, and the `Mutex`  \nit is meant for guarantees that. `new` refuses a library built  \nsingle-threaded, where no sharing is allowed.",
+      "members": [
+        {
+          "name": "connection",
+          "kind": "field",
+          "signature": "connection: Connection"
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(connection: Connection): SharedConnection",
+          "doc": "Wraps `connection` for sharing. Panics when the linked SQLite was  \ncompiled with `SQLITE_THREADSAFE=0`."
+        }
+      ]
+    },
+    {
+      "module": "std::sqlite3::connection",
       "path": "std::sqlite3::connection::__sqlite3_connection",
       "name": "__sqlite3_connection",
       "kind": "namespace",
@@ -16530,6 +16552,15 @@
       "visibility": "private",
       "signature": "function sqlite3_prepare_v2(db: *mut void, sql: *u8, maximumBytes: i32, statement: *mut *mut void, tail: *mut *mut u8): i32",
       "doc": "Compiles the first statement in `sql`. Declared in `sqlite3.h`."
+    },
+    {
+      "module": "std::sqlite3::connection",
+      "path": "std::sqlite3::connection::__sqlite3_connection::sqlite3_threadsafe",
+      "name": "sqlite3_threadsafe",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function sqlite3_threadsafe(): i32",
+      "doc": "Returns 0 when SQLite was compiled single-threaded  \n(`SQLITE_THREADSAFE=0`). Declared in `sqlite3.h`."
     },
     {
       "module": "std::sqlite3::connection",
