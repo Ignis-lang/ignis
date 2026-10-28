@@ -1027,3 +1027,33 @@ function fromUtf8AcceptsEmptyBytes(): void {
 
   Test::assertEq<u64>(text.length(), 0);
 }
+
+@test
+function toScalarsDecodesUtf8(): void {
+  let text: String = String::create("añ😀");
+  let scalars: Vector<char> = text.toScalars();
+
+  Test::assertEq<u64>(text.length(), 7);
+  Test::assertEq<u64>(scalars.length(), 3);
+  Test::assertEq<char>(*scalars.get(0).unwrap(), 'a');
+  Test::assertEq<char>(*scalars.get(1).unwrap(), 'ñ');
+  Test::assertEq<char>(*scalars.get(2).unwrap(), '😀');
+}
+
+@test
+function toScalarsReplacesMalformedBytes(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(255);
+  text.pushStr("b");
+  let scalars: Vector<char> = text.toScalars();
+
+  Test::assertEq<u64>(scalars.length(), 3);
+  Test::assertEq<char>(*scalars.get(1).unwrap(), 65533 as char);
+  Test::assertEq<char>(*scalars.get(2).unwrap(), 'b');
+}
+
+@test
+function toScalarsOfEmptyIsEmpty(): void {
+  let text: String = String::new();
+  Test::assertEq<u64>(text.toScalars().length(), 0);
+}

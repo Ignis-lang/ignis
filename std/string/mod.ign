@@ -68,7 +68,8 @@
 //! | Method    | Returns         | Description                        |
 //! |-----------|-----------------|------------------------------------|
 //! | `toBytes` | `Vector<u8>`    | Copy bytes into a byte vector      |
-//! | `toChars` | `Vector<char>`  | Copy bytes into a char vector      |
+//! | `toScalars` | `Vector<char>` | Decode into Unicode scalars        |
+//! | `toChars` | `Vector<char>`  | Deprecated: one `char` per byte     |
 //!
 //! ## Numeric Conversions
 //!
@@ -1123,11 +1124,43 @@ export record String {
     return @sliceFromParts<u8>(self.data, self.len);
   }
 
-  /// Copies the underlying bytes into a new `Vector<char>`.
+  /// Decodes the string into its Unicode scalars, in order. A byte that does
+  /// not start a well-formed UTF-8 sequence decodes as U+FFFD and advances
+  /// one byte, as `charAt` does, so the result never splits a scalar.
   ///
-  /// This is a byte-oriented compatibility helper: each raw byte is cast to
-  /// `char` directly without UTF-8 decoding. Use `charAt()` with byte offsets
-  /// when you need Unicode scalar traversal.
+  /// # Example
+  ///
+  /// ```ignis
+  /// let text: String = String::create("añ😀");
+  /// let scalars: Vector<char> = text.toScalars();   // 3 scalars, 7 bytes
+  /// ```
+  public toScalars(&self): Vector<char> {
+    let mut result: Vector<char> = Vector::new<char>(self.len);
+    let mut offset: u64 = 0;
+
+    while (offset < self.len) {
+      let mut end: u64 = offset;
+
+      if (let Option::SOME(scalar) = Utf8::decodeAt(self, offset, &mut end)) {
+        result.push(scalar);
+      }
+
+      if (end <= offset) {
+        end = offset + 1;
+      }
+
+      offset = end;
+    }
+
+    return result;
+  }
+
+  /// Copies the underlying bytes into a new `Vector<char>`, one `char` per
+  /// byte, without UTF-8 decoding: `"é"` gives two `char`s.
+  ///
+  /// Deprecated because the name suggests characters. Use `toScalars()` for
+  /// Unicode scalars, or `toBytes()` / `asBytes()` for bytes.
+  @deprecated("byte-wise despite its name; use toScalars() for Unicode scalars or toBytes() for bytes")
   public toChars(&self): Vector<char> {
     let mut result: Vector<char> = Vector::new<char>(self.len);
 
@@ -1140,7 +1173,8 @@ export record String {
     return result;
   }
 
-  /// Compatibility alias for `toChars()`.
+  /// Compatibility alias for `toChars()`, byte-wise like it.
+  @deprecated("byte-wise despite its name; use toScalars() for Unicode scalars or toBytes() for bytes")
   public toVectorChars(&self): Vector<char> {
     return self.toChars();
   }
@@ -1945,10 +1979,12 @@ function asBytes(value: str): u8[] {
   return @sliceFromParts<u8>(data, len);
 }
 
-/// Copies a NUL-terminated `str` into an owned `Vector<char>`.
+/// Copies a NUL-terminated `str` into an owned `Vector<char>`, one `char`
+/// per byte, without UTF-8 decoding; the scan stops at the first NUL.
 ///
-/// This remains byte-oriented: each byte is cast to `char` directly and the
-/// scan stops at the first terminating NUL.
+/// Deprecated because the name suggests characters. Use
+/// `String::create(value).toScalars()` for Unicode scalars.
+@deprecated("byte-wise despite its name; use String::create(value).toScalars() for Unicode scalars")
 @extension(str)
 function toChars(value: str): Vector<char> {
   let data: *mut u8 = value as *mut u8;
