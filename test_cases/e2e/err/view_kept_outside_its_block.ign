@@ -1,0 +1,35 @@
+// e2e: err
+//
+// A view assigned to a local declared outside the block keeps its owner
+// borrowed after the block ends, and an `Option<str>` a free function returns
+// is a view of the arguments it was given.
+import Io from "std::io";
+
+function firstView(text: &String): Option<str> {
+  return Option::SOME(text.toStr());
+}
+
+function storedOutward(): void {
+  let mut owner: String = String::create("x");
+  let mut holder: str = "";
+  {
+    holder = owner.toStr();
+  }
+  owner.pushStr("grow grow grow grow grow grow grow grow grow grow grow grow");
+  Io::println(holder);
+}
+
+function optionStrFromFreeFunction(): void {
+  let mut owner: String = String::create("x");
+  let found: Option<str> = firstView(&owner);
+  owner.pushStr("grow grow grow grow grow grow grow grow grow grow grow grow");
+  if (let Option::SOME(text) = found) {
+    Io::println(text);
+  }
+}
+
+function main(): i32 {
+  storedOutward();
+  optionStrFromFreeFunction();
+  return 0;
+}

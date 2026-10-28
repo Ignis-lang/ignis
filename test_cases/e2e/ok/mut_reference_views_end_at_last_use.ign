@@ -1,0 +1,53 @@
+// A `&mut T` stands where a `&T` is expected, and a view taken through a
+// `&mut T` ends at its last use, so mutating afterwards is accepted.
+import Io from "std::io";
+
+record Shelf {
+  public items: Vector<String>;
+
+  public firstLength(&mut self): u64 {
+    let length: u64 = self.items.get(0).unwrap().length();
+    self.items.push(String::create("grow"));
+    return length;
+  }
+}
+
+function length(text: &String): u64 {
+  return text.length();
+}
+
+function appendThenMeasure(owned: &mut String): u64 {
+  let text: str = owned.toStr();
+  Io::println(text);
+  owned.pushStr("!");
+  return length(owned);
+}
+
+function holderAfterBlock(): void {
+  let mut owner: String = String::create("held");
+  let mut holder: str = "";
+  {
+    holder = owner.toStr();
+  }
+  Io::println(holder);
+  owner.pushStr("!");
+  Io::println(owner.toStr());
+}
+
+function main(): i32 {
+  let mut value: String = String::create("abc");
+  let measured: u64 = appendThenMeasure(&mut value);
+  Io::println(`${measured}`);
+  let reference: &mut String = &mut value;
+  let shared: &String = reference;
+  let sharedLength: u64 = shared.length();
+  Io::println(`${sharedLength}`);
+  let direct: u64 = length(&mut value);
+  Io::println(`${direct}`);
+  let mut shelf: Shelf = Shelf { items: Vector::new<String>() };
+  shelf.items.push(String::create("first"));
+  let first: u64 = shelf.firstLength();
+  Io::println(`${first}`);
+  holderAfterBlock();
+  return 0;
+}
