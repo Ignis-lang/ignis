@@ -2856,12 +2856,21 @@ export namespace LirLowering {
           paramOffset = 1;
         }
 
+        let parameterTypes: Vector<Analyzer::TypeId> = LirLowering::calleeParameterTypes(defStore, methodNode.method);
         let mut argIndex: u64 = 0;
 
         while (argIndex < methodNode.args.length()) {
           if (let Option::SOME(argId) = methodNode.args.get(argIndex)) {
             let paramIndex: u64 = argIndex + paramOffset;
-            callArgs.push(LirLowering::lowerCallArgument(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId, &methodParams, paramIndex));
+            let mut argValue: Lir::Operand = LirLowering::lowerCallArgument(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId, &methodParams, paramIndex);
+
+            // A fixed array handed to a slice parameter becomes a slice over
+            // it, as it does for a free function's argument.
+            if (let Option::SOME(parameterType) = parameterTypes.get(paramIndex)) {
+              argValue = LirLowering::coerceValueOfNode(typeStore, hirStore, function_, state, argValue, *argId, *parameterType);
+            }
+
+            callArgs.push(argValue);
           }
 
           argIndex += 1;
