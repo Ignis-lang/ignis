@@ -802,3 +802,46 @@ function sameJsonTellsDifferentTreesApart(): void {
 
   Test::assert(!sameJson(&left, &right));
 }
+
+@test
+function jsonParseRejectsTrailingCharacters(): void {
+  let object: String = String::create("{\"a\":1} x");
+  let Result::ERROR(objectMessage) = Json::parse(&object) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(objectMessage.toStr(), "trailing characters at line 1 column 9");
+
+  let numbers: String = String::create("1 2");
+  let Result::ERROR(numbersMessage) = Json::parse(&numbers) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(numbersMessage.toStr(), "trailing characters at line 1 column 3");
+
+  let closers: String = String::create("[1]]");
+  let Result::ERROR(closersMessage) = Json::parse(&closers) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(closersMessage.toStr(), "trailing characters at line 1 column 4");
+}
+
+@test
+function jsonParseAcceptsTrailingWhitespace(): void {
+  let source: String = String::create("  [1, 2] \n\t ");
+  let Result::OK(value) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  let JsonValueKind::ARRAY(items) = &value.kind else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(items.length(), 2);
+}
