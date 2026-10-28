@@ -1,7 +1,8 @@
 //!
 //! # Text
 //!
-//! Position conversion between UTF-8 byte offsets and editor positions.
+//! Position conversion between UTF-8 byte offsets and editor positions, and
+//! strict parsers for numbers, UUIDs and semantic versions.
 //!
 //! ## Overview
 //!
@@ -27,6 +28,14 @@
 //! | `Text::LineIndex::endPosition`    | Position of the end of the text              |
 //! | `Text::LineIndex::lineCount`      | Number of lines (a trailing `\n` opens one)  |
 //! | `Text::utf16Length`               | UTF-16 code units of the whole text          |
+//! | `Text::parseI8` .. `Text::parseI64` | Strict decimal signed integer, or `NONE`   |
+//! | `Text::parseU8` .. `Text::parseU64` | Strict decimal unsigned integer, or `NONE` |
+//! | `Text::parseF64`                  | Strict decimal float, or `NONE`              |
+//! | `Text::isUuid`                    | Canonical 8-4-4-4-12 hyphenated UUID         |
+//! | `Text::uuidVersion`               | Version digit of a canonical UUID            |
+//! | `Text::Semver::parse`             | semver.org 2.0.0 version, or `NONE`          |
+//! | `Text::Semver::compare`           | Semver precedence, build metadata ignored    |
+//! | `Text::Semver::toString`          | Format back to `MAJOR.MINOR.PATCH[-PRE][+BUILD]` |
 //!
 //! ## Semantics
 //!
@@ -46,6 +55,24 @@
 //!   complete, well-formed sequence counts as one character of one byte and one
 //!   UTF-16 unit, the width of the U+FFFD replacement character.
 //!
+//! ## Parsing
+//!
+//! Every parser reads the whole input and returns `NONE` instead of a
+//! partial result: no surrounding whitespace, no trailing bytes.
+//!
+//! - Integers are `[+-]?[0-9]+` (`-` only for signed types). Leading zeros are
+//!   allowed. A value outside the target type, including one past either end,
+//!   is `NONE`; the minimum of each signed type (`-128` for `i8`) parses.
+//! - Floats are `[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`. `.5`, `1.`, `e5`,
+//!   `1e`, `inf`, `nan` and hexadecimal floats are rejected, and so is a value
+//!   that overflows `f64`. Rounding is C `strtod`'s.
+//! - UUIDs are 36 bytes: hex digits in either case, `-` at 8, 13, 18 and 23.
+//!   The version is the hex digit at byte 14; neither it nor the variant is
+//!   validated by `isUuid`.
+//! - `Text::Semver` follows semver.org 2.0.0: core numbers and numeric
+//!   prerelease identifiers have no leading zeros, identifiers are non-empty
+//!   `[0-9A-Za-z-]`, and core numbers must fit `u64`.
+//!
 //! ## Example
 //!
 //! ```ignis
@@ -59,6 +86,13 @@
 //!
 //!   let offset: u64 = index.offset(Text::Position { line: 1, character: 2 });
 //!   // offset == 7
+//!
+//!   let port: Option<u16> = Text::parseU16("8080");
+//!   // port == Option::SOME(8080)
+//!
+//!   let older: Text::Semver = Text::Semver::parse("1.0.0-rc.1").unwrap();
+//!   let newer: Text::Semver = Text::Semver::parse("1.0.0").unwrap();
+//!   // older.compare(&newer) < 0
 //!   return 0;
 //! }
 //! ```
@@ -152,7 +186,334 @@ function textUtf16UnitsBetween(text: &String, start: u64, end: u64): u64 {
   return units;
 }
 
-/// UTF-8 to UTF-16 position conversion for editor protocols.
+extern __text_libc {
+  /// C `strtod`; converts the longest decimal prefix of `text` to a double.
+  function strtod(text: *u8, end: *mut *mut u8): f64;
+}
+
+function textIsDigit(byte: u8): boolean {
+  return byte >= '0' as u8 && byte <= '9' as u8;
+}
+
+function textIsHexDigit(byte: u8): boolean {
+  return textIsDigit(byte) || (byte >= 'a' as u8 && byte <= 'f' as u8) || (byte >= 'A' as u8 && byte <= 'F' as u8);
+}
+
+/// Whether `byte` may appear in a semantic version identifier: `[0-9A-Za-z-]`.
+function textIsIdentifierByte(byte: u8): boolean {
+  return textIsDigit(byte) || (byte >= 'a' as u8 && byte <= 'z' as u8) || (byte >= 'A' as u8 && byte <= 'Z' as u8) || byte == '-' as u8;
+}
+
+/// The value of the hexadecimal digit `byte`, which must satisfy `textIsHexDigit`.
+function textHexValue(byte: u8): u8 {
+  if (textIsDigit(byte)) {
+    return byte - '0' as u8;
+  }
+
+  if (byte >= 'a' as u8) {
+    return byte - 'a' as u8 + 10;
+  }
+
+  return byte - 'A' as u8 + 10;
+}
+
+/// A strict decimal integer split into its sign and magnitude.
+record TextMagnitude {
+  public negative: boolean;
+  public magnitude: u64;
+}
+
+/// Reads `[+-]?[0-9]+` covering all of `bytes`. The magnitude may not exceed
+/// `positiveLimit`, or `negativeLimit` after a `-`. `NONE` when the shape is
+/// wrong, a `-` is given with `allowMinus` unset, or the value is out of range.
+function textParseMagnitude(
+  bytes: u8[],
+  allowMinus: boolean,
+  positiveLimit: u64,
+  negativeLimit: u64
+): Option<TextMagnitude> {
+  let length: u64 = bytes.length();
+  let mut index: u64 = 0;
+  let mut negative: boolean = false;
+
+  if (length > 0 && bytes[0] == '+' as u8) {
+    index = 1;
+  } else if (length > 0 && bytes[0] == '-' as u8) {
+    if (!allowMinus) {
+      return Option::NONE;
+    }
+
+    negative = true;
+    index = 1;
+  }
+
+  if (index == length) {
+    return Option::NONE;
+  }
+
+  let limit: u64 = negative ? negativeLimit : positiveLimit;
+  let mut magnitude: u64 = 0;
+
+  while (index < length) {
+    let byte: u8 = bytes[index];
+
+    if (!textIsDigit(byte)) {
+      return Option::NONE;
+    }
+
+    let digit: u64 = (byte - '0' as u8) as u64;
+
+    if (magnitude > (limit - digit) / 10) {
+      return Option::NONE;
+    }
+
+    magnitude = magnitude * 10 + digit;
+    index += 1;
+  }
+
+  return Option::SOME(TextMagnitude { negative: negative, magnitude: magnitude });
+}
+
+/// Strict signed parse whose range is `-(maximum + 1)..=maximum`.
+function textParseSigned(text: str, maximum: u64): Option<i64> {
+  let Option::SOME(parsed) = textParseMagnitude(text.asBytes(), true, maximum, maximum + 1) else {
+    return Option::NONE;
+  };
+
+  if (!parsed.negative) {
+    return Option::SOME(parsed.magnitude as i64);
+  }
+
+  // The magnitude of the minimum does not fit the signed type, so negate one less.
+  if (parsed.magnitude == maximum + 1) {
+    return Option::SOME(-((parsed.magnitude - 1) as i64) - 1);
+  }
+
+  return Option::SOME(-(parsed.magnitude as i64));
+}
+
+/// Strict unsigned parse whose range is `0..=maximum`.
+function textParseUnsigned(text: str, maximum: u64): Option<u64> {
+  let Option::SOME(parsed) = textParseMagnitude(text.asBytes(), false, maximum, 0) else {
+    return Option::NONE;
+  };
+
+  return Option::SOME(parsed.magnitude);
+}
+
+/// The index just past a run of decimal digits starting at `start`.
+function textDigitsEnd(bytes: u8[], start: u64): u64 {
+  let mut index: u64 = start;
+
+  while (index < bytes.length() && textIsDigit(bytes[index])) {
+    index += 1;
+  }
+
+  return index;
+}
+
+/// Whether all of `bytes` is `[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
+function textIsDecimalFloat(bytes: u8[]): boolean {
+  let length: u64 = bytes.length();
+  let mut index: u64 = 0;
+
+  if (length > 0 && (bytes[0] == '+' as u8 || bytes[0] == '-' as u8)) {
+    index = 1;
+  }
+
+  let integerEnd: u64 = textDigitsEnd(bytes, index);
+
+  if (integerEnd == index) {
+    return false;
+  }
+
+  index = integerEnd;
+
+  if (index < length && bytes[index] == '.' as u8) {
+    let fractionEnd: u64 = textDigitsEnd(bytes, index + 1);
+
+    if (fractionEnd == index + 1) {
+      return false;
+    }
+
+    index = fractionEnd;
+  }
+
+  if (index < length && (bytes[index] == 'e' as u8 || bytes[index] == 'E' as u8)) {
+    index += 1;
+
+    if (index < length && (bytes[index] == '+' as u8 || bytes[index] == '-' as u8)) {
+      index += 1;
+    }
+
+    let exponentEnd: u64 = textDigitsEnd(bytes, index);
+
+    if (exponentEnd == index) {
+      return false;
+    }
+
+    index = exponentEnd;
+  }
+
+  return index == length;
+}
+
+/// The index just past a semantic version numeric identifier (`0|[1-9][0-9]*`)
+/// at `start`, or `start` when none is there.
+function textNumericIdentifierEnd(bytes: u8[], start: u64): u64 {
+  if (start >= bytes.length() || !textIsDigit(bytes[start])) {
+    return start;
+  }
+
+  if (bytes[start] == '0' as u8) {
+    return start + 1;
+  }
+
+  return textDigitsEnd(bytes, start);
+}
+
+/// Reads the version core number `0|[1-9][0-9]*` at `start` into `value`,
+/// returning the index past it, or `start` when it is missing or above `u64`.
+function textReadVersionNumber(bytes: u8[], start: u64, value: &mut u64): u64 {
+  let end: u64 = textNumericIdentifierEnd(bytes, start);
+  let mut result: u64 = 0;
+  let mut index: u64 = start;
+
+  while (index < end) {
+    let digit: u64 = (bytes[index] - '0' as u8) as u64;
+
+    if (result > (maxOf<u64>() - digit) / 10) {
+      return start;
+    }
+
+    result = result * 10 + digit;
+    index += 1;
+  }
+
+  *value = result;
+  return end;
+}
+
+/// Reads a dot-separated list of `[0-9A-Za-z-]+` identifiers starting at
+/// `start` into `identifiers`. With `prerelease` set, an all-digit identifier
+/// may not have a leading zero. Returns the index past the list, or `start`
+/// when it is empty or malformed.
+function textReadIdentifiers(
+  bytes: u8[],
+  start: u64,
+  prerelease: boolean,
+  identifiers: &mut Vector<String>
+): u64 {
+  let length: u64 = bytes.length();
+  let mut index: u64 = start;
+
+  while (true) {
+    let identifierStart: u64 = index;
+    let mut allDigits: boolean = true;
+    let mut identifier: String = String::new();
+
+    while (index < length && textIsIdentifierByte(bytes[index])) {
+      if (!textIsDigit(bytes[index])) {
+        allDigits = false;
+      }
+
+      identifier.pushByte(bytes[index]);
+      index += 1;
+    }
+
+    let identifierLength: u64 = index - identifierStart;
+
+    if (identifierLength == 0) {
+      return start;
+    }
+
+    if (prerelease && allDigits && identifierLength > 1 && bytes[identifierStart] == '0' as u8) {
+      return start;
+    }
+
+    identifiers.push(identifier);
+
+    if (index >= length || bytes[index] != '.' as u8) {
+      return index;
+    }
+
+    index += 1;
+  }
+
+  return start;
+}
+
+/// Whether every byte of `identifier` is a decimal digit.
+function textIsNumericIdentifier(identifier: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < identifier.length()) {
+    if (!textIsDigit(identifier.byteAt(index).unwrapOr(0))) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Sign of `left - right` as -1, 0 or 1.
+function textCompareU64(left: u64, right: u64): i32 {
+  if (left < right) {
+    return -1;
+  }
+
+  if (left > right) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Precedence of two prerelease identifiers: numeric ones compare by value
+/// and rank below alphanumeric ones, which compare by ASCII byte order.
+function textCompareIdentifiers(left: &String, right: &String): i32 {
+  let leftNumeric: boolean = textIsNumericIdentifier(left);
+  let rightNumeric: boolean = textIsNumericIdentifier(right);
+
+  if (leftNumeric && rightNumeric) {
+    // Without leading zeros the longer number is larger, so arbitrarily long
+    // identifiers compare without overflow.
+    if (left.length() != right.length()) {
+      return textCompareU64(left.length(), right.length());
+    }
+
+    return left.compare(right) < 0 ? -1 : (left.compare(right) > 0 ? 1 : 0);
+  }
+
+  if (leftNumeric) {
+    return -1;
+  }
+
+  if (rightNumeric) {
+    return 1;
+  }
+
+  return left.compare(right) < 0 ? -1 : (left.compare(right) > 0 ? 1 : 0);
+}
+
+/// Appends `identifiers` joined by `.` to `result`.
+function textPushIdentifiers(result: &mut String, identifiers: &Vector<String>): void {
+  let mut index: u64 = 0;
+
+  while (index < identifiers.length()) {
+    if (index > 0) {
+      result.pushStr(".");
+    }
+
+    result.pushStr(identifiers.get(index).unwrap().toStr());
+    index += 1;
+  }
+}
+
+/// UTF-8 to UTF-16 position conversion for editor protocols, and strict
+/// parsers for numbers, UUIDs and semantic versions.
 export namespace Text {
   /// A 0-based line and a 0-based column counted in UTF-16 code units, the
   /// shape of an LSP `Position` under the default position encoding.
@@ -292,5 +653,286 @@ export namespace Text {
   /// the same per-byte rule as `LineIndex` for bytes that are not UTF-8.
   function utf16Length(text: &String): u64 {
     return textUtf16UnitsBetween(text, 0, text.length());
+  }
+
+  /// Parses a strict decimal `i8`: an optional `+` or `-`, then one or more
+  /// ASCII digits and nothing else. `NONE` for empty input, whitespace, any
+  /// other byte, or a value outside `-128..=127`.
+  function parseI8(text: str): Option<i8> {
+    let Option::SOME(value) = textParseSigned(text, 127) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(value as i8);
+  }
+
+  /// Parses a strict decimal `i16` with the rules of `parseI8`, range
+  /// `-32768..=32767`.
+  function parseI16(text: str): Option<i16> {
+    let Option::SOME(value) = textParseSigned(text, 32767) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(value as i16);
+  }
+
+  /// Parses a strict decimal `i32` with the rules of `parseI8`, range
+  /// `-2147483648..=2147483647`.
+  function parseI32(text: str): Option<i32> {
+    let Option::SOME(value) = textParseSigned(text, 2147483647) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(value as i32);
+  }
+
+  /// Parses a strict decimal `i64` with the rules of `parseI8`, range
+  /// `-9223372036854775808..=9223372036854775807`.
+  function parseI64(text: str): Option<i64> {
+    return textParseSigned(text, maxOf<i64>() as u64);
+  }
+
+  /// Parses a strict decimal `u8`: an optional `+`, then one or more ASCII
+  /// digits and nothing else. `NONE` for empty input, a `-` (even `-0`),
+  /// whitespace, any other byte, or a value above 255.
+  function parseU8(text: str): Option<u8> {
+    let Option::SOME(value) = textParseUnsigned(text, 255) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(value as u8);
+  }
+
+  /// Parses a strict decimal `u16` with the rules of `parseU8`, up to 65535.
+  function parseU16(text: str): Option<u16> {
+    let Option::SOME(value) = textParseUnsigned(text, 65535) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(value as u16);
+  }
+
+  /// Parses a strict decimal `u32` with the rules of `parseU8`, up to 4294967295.
+  function parseU32(text: str): Option<u32> {
+    let Option::SOME(value) = textParseUnsigned(text, 4294967295) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(value as u32);
+  }
+
+  /// Parses a strict decimal `u64` with the rules of `parseU8`, up to
+  /// 18446744073709551615.
+  function parseU64(text: str): Option<u64> {
+    return textParseUnsigned(text, maxOf<u64>());
+  }
+
+  /// Parses a decimal floating-point number:
+  /// `[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`, covering the whole input.
+  ///
+  /// Both sides of a `.` need digits, so `.5` and `1.` are rejected, as are
+  /// `e5`, `1e`, whitespace, `inf`, `nan` and hexadecimal forms. The value is
+  /// rounded by C `strtod`. A value too large for `f64` is `NONE` instead of
+  /// infinity; one too small rounds toward zero.
+  function parseF64(text: str): Option<f64> {
+    if (!textIsDecimalFloat(text.asBytes())) {
+      return Option::NONE;
+    }
+
+    let value: f64 = __text_libc::strtod(text as *u8, null);
+    let difference: f64 = value - value;
+
+    // Only an infinity makes `value - value` a NaN, which is unequal to itself.
+    if (difference != difference) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(value);
+  }
+
+  /// Whether `text` is a UUID in the canonical hyphenated form: 32 hex digits
+  /// (either case) grouped 8-4-4-4-12 by `-`. The version and variant digits
+  /// are not checked.
+  function isUuid(text: str): boolean {
+    let bytes: u8[] = text.asBytes();
+
+    if (bytes.length() != 36) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < 36) {
+      let byte: u8 = bytes[index];
+
+      if (index == 8 || index == 13 || index == 18 || index == 23) {
+        if (byte != '-' as u8) {
+          return false;
+        }
+      } else if (!textIsHexDigit(byte)) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// The version of a canonical UUID: the value of its 13th hex digit (the
+  /// first of the third group), 0 to 15. `NONE` when `isUuid` rejects `text`.
+  function uuidVersion(text: str): Option<u8> {
+    if (!isUuid(text)) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(textHexValue(text.asBytes()[14]));
+  }
+
+  /// A semantic version as defined by semver.org 2.0.0:
+  /// `MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`.
+  record Semver {
+    /// Major version.
+    public major: u64;
+
+    /// Minor version.
+    public minor: u64;
+
+    /// Patch version.
+    public patch: u64;
+
+    /// Dot-separated prerelease identifiers, empty when there is none.
+    public prerelease: Vector<String>;
+
+    /// Dot-separated build metadata identifiers, empty when there are none.
+    public build: Vector<String>;
+
+    /// Parses a semantic version covering the whole of `text`.
+    ///
+    /// The three core numbers are `0|[1-9][0-9]*` and must fit `u64`.
+    /// Prerelease and build identifiers are non-empty runs of `[0-9A-Za-z-]`;
+    /// an all-digit prerelease identifier may not have a leading zero. `NONE`
+    /// for any other shape, including a leading `v` or surrounding whitespace.
+    public static parse(text: str): Option<Semver> {
+      let bytes: u8[] = text.asBytes();
+      let length: u64 = bytes.length();
+      let mut major: u64 = 0;
+      let mut minor: u64 = 0;
+      let mut patch: u64 = 0;
+
+      let majorEnd: u64 = textReadVersionNumber(bytes, 0, &mut major);
+
+      if (majorEnd == 0 || majorEnd >= length || bytes[majorEnd] != '.' as u8) {
+        return Option::NONE;
+      }
+
+      let minorEnd: u64 = textReadVersionNumber(bytes, majorEnd + 1, &mut minor);
+
+      if (minorEnd == majorEnd + 1 || minorEnd >= length || bytes[minorEnd] != '.' as u8) {
+        return Option::NONE;
+      }
+
+      let mut index: u64 = textReadVersionNumber(bytes, minorEnd + 1, &mut patch);
+
+      if (index == minorEnd + 1) {
+        return Option::NONE;
+      }
+
+      let mut prerelease: Vector<String> = Vector::new<String>();
+      let mut build: Vector<String> = Vector::new<String>();
+
+      if (index < length && bytes[index] == '-' as u8) {
+        let end: u64 = textReadIdentifiers(bytes, index + 1, true, &mut prerelease);
+
+        if (end == index + 1) {
+          return Option::NONE;
+        }
+
+        index = end;
+      }
+
+      if (index < length && bytes[index] == '+' as u8) {
+        let end: u64 = textReadIdentifiers(bytes, index + 1, false, &mut build);
+
+        if (end == index + 1) {
+          return Option::NONE;
+        }
+
+        index = end;
+      }
+
+      if (index != length) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(Semver { major: major, minor: minor, patch: patch, prerelease: prerelease, build: build });
+    }
+
+    /// Semver precedence of `self` against `other`: negative, zero or positive.
+    ///
+    /// Major, minor and patch compare numerically. A version with prerelease
+    /// identifiers ranks below the same version without. Prerelease lists
+    /// compare identifier by identifier: numeric ones by value and below
+    /// alphanumeric ones, which compare in ASCII order; when every shared
+    /// identifier is equal the shorter list ranks lower. Build metadata is
+    /// ignored, so `1.0.0+a` and `1.0.0+b` compare equal.
+    public compare(&self, other: &Semver): i32 {
+      let mut result: i32 = textCompareU64(self.major, other.major);
+
+      if (result == 0) {
+        result = textCompareU64(self.minor, other.minor);
+      }
+
+      if (result == 0) {
+        result = textCompareU64(self.patch, other.patch);
+      }
+
+      if (result != 0) {
+        return result;
+      }
+
+      let selfCount: u64 = self.prerelease.length();
+      let otherCount: u64 = other.prerelease.length();
+
+      if (selfCount == 0 || otherCount == 0) {
+        return textCompareU64(otherCount, selfCount);
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < selfCount && index < otherCount) {
+        let identifierResult: i32 = textCompareIdentifiers(self.prerelease.get(index).unwrap(), other.prerelease.get(index).unwrap());
+
+        if (identifierResult != 0) {
+          return identifierResult;
+        }
+
+        index += 1;
+      }
+
+      return textCompareU64(selfCount, otherCount);
+    }
+
+    /// Formats the version as `MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`, the
+    /// text `parse` accepts back.
+    public toString(&self): String {
+      let mut result: String = String::create(self.major);
+      result.pushStr(".");
+      result.pushStr(String::create(self.minor).toStr());
+      result.pushStr(".");
+      result.pushStr(String::create(self.patch).toStr());
+
+      if (self.prerelease.length() > 0) {
+        result.pushStr("-");
+        textPushIdentifiers(&mut result, &self.prerelease);
+      }
+
+      if (self.build.length() > 0) {
+        result.pushStr("+");
+        textPushIdentifiers(&mut result, &self.build);
+      }
+
+      return result;
+    }
   }
 }
