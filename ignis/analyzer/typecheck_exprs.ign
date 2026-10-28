@@ -7268,6 +7268,15 @@ export namespace Analyzer {
     /// Whether an expression names a place a reference can point at:
     /// variables, paths, dereferences, index accesses, and member accesses.
     /// Mirrors the Rust `is_lvalue`.
+    /// `exprId` with any enclosing parentheses removed.
+    function ungroupedExpr(module: &Ast::Module, exprId: Ast::ExpressionId): Ast::ExpressionId {
+      if (let Option::SOME(Ast::Expression::Node::Grouped(grouped)) = module.expressions.get(exprId)) {
+        return Analyzer::Typecheck::ungroupedExpr(module, grouped.expression);
+      }
+
+      return exprId;
+    }
+
     function isLvalueExpr(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
       let Option::SOME(expr) = module.expressions.get(exprId) else {
         return false;
@@ -7502,17 +7511,21 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::isLvalueExpr(module, value.target)) {
-        Analyzer::Typecheck::emitInvalidReferenceTarget(state, value.span);
-      }
+      // A reference to a value that is not a place (`&make()`) points at a
+      // temporary the statement owns: lowering spills the value and drops it
+      // at the end of the full statement, as it does for `make().toStr()`,
+      // and the borrow check rejects keeping the reference past it.
+      // Parentheses do not make a temporary: `&mut (x)` is `&mut x`.
+      let placeTarget: Ast::ExpressionId = Analyzer::Typecheck::ungroupedExpr(module, value.target);
+      let isPlace: boolean = Analyzer::Typecheck::isLvalueExpr(module, placeTarget);
 
-      if (value.mutable && !Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, value.target)) {
-        let targetName: String = Analyzer::Typecheck::placeDisplayName(module, value.target);
+      if (isPlace && value.mutable && !Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, placeTarget)) {
+        let targetName: String = Analyzer::Typecheck::placeDisplayName(module, placeTarget);
         Analyzer::Typecheck::emitMutableReferenceToImmutable(state, value.span, targetName.toStr());
       }
 
-      if (value.mutable) {
-        Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, value.target);
+      if (isPlace && value.mutable) {
+        Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, placeTarget);
       }
 
       Analyzer::Typecheck::checkCLayoutFunctionFieldReference(state, defStore, typeStore, symbols, module, value);

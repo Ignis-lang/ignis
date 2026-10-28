@@ -11377,11 +11377,11 @@ function typecheckMutableReferenceToImmutableLocalProducesDiagnostic(): void {
   assertExprType(&output, refExpr, typeStore.mutableReference(typeStore.intern(Analyzer::Type::I32)));
 }
 
-/// Scenario: `&1` takes a reference to a literal, which is not an lvalue, so
-/// it reports `INVALID_REFERENCE_TARGET`.
+/// Scenario: `&1` takes a reference to a literal, a temporary the statement
+/// owns, so it is accepted and typed `&i32`.
 /// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
 @test
-function typecheckReferenceToNonLvalueProducesDiagnostic(): void {
+function typecheckReferenceToTemporaryIsAccepted(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -11395,11 +11395,12 @@ function typecheckReferenceToNonLvalueProducesDiagnostic(): void {
 
   let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
   bodyStmts.push(typecheckAddExprStmt(&mut module, refExpr));
-  typecheckAddSingleExprFunction(&mut module, "referenceNonLvalue", bodyStmts);
+  typecheckAddSingleExprFunction(&mut module, "referenceTemporary", bodyStmts);
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_REFERENCE_TARGET);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, refExpr, typeStore.reference(typeStore.intern(Analyzer::Type::I32)));
 }
 
 /// Scenario: `let r: &i32 = &x;` resolves the reference annotation and accepts
