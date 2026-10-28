@@ -1,0 +1,372 @@
+//! Pike VM: runs a `RegexProgram` over UTF-8 text with every thread in
+//! lockstep, one scalar per step, so a search takes O(text x program) time.
+
+import
+  REGEX_ASSERT_END,
+  REGEX_ASSERT_NOT_WORD_BOUNDARY,
+  REGEX_ASSERT_START,
+  REGEX_ASSERT_WORD_BOUNDARY,
+  RegexInst,
+  RegexOpcode,
+  RegexProgram,
+from "./compiler";
+import RegexRange from "./ast";
+
+/// A slot no `SAVE` has written.
+export const REGEX_NO_SLOT: u64 = 0xFFFFFFFFFFFFFFFF;
+
+/// The threads of one step, in priority order, with the instructions
+/// already visited at this position so that each is followed once.
+record RegexThreadList {
+  sparse: Vector<u64>;
+  dense: Vector<u64>;
+  visitedCount: u64;
+  pcs: Vector<u64>;
+
+  /// `slotCount` slots per entry of `pcs`.
+  slots: Vector<u64>;
+}
+
+/// A pending step of `regexAddThread`: follow `pc`, or restore `slot` to
+/// `value` once the branch that saved it is done.
+record RegexFrame {
+  pc: u64;
+  restore: boolean;
+  slot: u64;
+  value: u64;
+}
+
+/// The working state of searches with one program, reused across them.
+export record RegexVm {
+  slotCount: u64;
+  stack: Vector<RegexFrame>;
+  scratch: Vector<u64>;
+  current: RegexThreadList;
+  next: RegexThreadList;
+}
+
+function regexNewThreadList(size: u64): RegexThreadList {
+  let mut sparse: Vector<u64> = Vector::new<u64>(size);
+  let mut dense: Vector<u64> = Vector::new<u64>(size);
+  let mut index: u64 = 0;
+
+  while (index < size) {
+    sparse.push(0);
+    dense.push(0);
+    index += 1;
+  }
+
+  return RegexThreadList {
+    sparse: sparse,
+    dense: dense,
+    visitedCount: 0,
+    pcs: Vector::new<u64>(),
+    slots: Vector::new<u64>(),
+  };
+}
+
+function regexClearThreadList(list: &mut RegexThreadList): void {
+  list.visitedCount = 0;
+  list.pcs.clear();
+  list.slots.clear();
+}
+
+/// Marks `pc` visited and reports whether it already was.
+function regexVisit(list: &mut RegexThreadList, pc: u64): boolean {
+  let index: u64 = *list.sparse.get(pc).unwrap();
+
+  if (index < list.visitedCount && *list.dense.get(index).unwrap() == pc) {
+    return true;
+  }
+
+  list.sparse.set(pc, list.visitedCount);
+  list.dense.set(list.visitedCount, pc);
+  list.visitedCount += 1;
+  return false;
+}
+
+function regexIsWordByte(byte: u8): boolean {
+  return (byte >= '0' as u8 && byte <= '9' as u8) || (byte >= 'A' as u8 && byte <= 'Z' as u8) || (byte >= 'a' as u8 && byte <= 'z' as u8) || byte == '_' as u8;
+}
+
+function regexAssertionHolds(text: &String, code: u64, position: u64): boolean {
+  let length: u64 = text.length();
+
+  if (code == REGEX_ASSERT_START) {
+    return position == 0;
+  }
+
+  if (code == REGEX_ASSERT_END) {
+    return position == length;
+  }
+
+  let before: boolean = position > 0 && regexIsWordByte(text.byteAt(position - 1).unwrap());
+  let after: boolean = position < length && regexIsWordByte(text.byteAt(position).unwrap());
+
+  if (code == REGEX_ASSERT_WORD_BOUNDARY) {
+    return before != after;
+  }
+
+  if (code == REGEX_ASSERT_NOT_WORD_BOUNDARY) {
+    return before == after;
+  }
+
+  return false;
+}
+
+/// Follows `pc` at `position` through every non-consuming instruction, with
+/// the slots in `vm.scratch`, and appends the consuming instructions reached
+/// to `list` in priority order. An explicit stack keeps deep programs off the
+/// call stack.
+function regexAddThread(
+  vm: &mut RegexVm,
+  program: &RegexProgram,
+  text: &String,
+  list: &mut RegexThreadList,
+  startPc: u64,
+  position: u64
+): void {
+  vm.stack.push(RegexFrame { pc: startPc, restore: false, slot: 0, value: 0 });
+
+  while (true) {
+    let Option::SOME(frame) = vm.stack.pop() else {
+      break;
+    };
+
+    if (frame.restore) {
+      vm.scratch.set(frame.slot, frame.value);
+      continue;
+    }
+
+    let mut pc: u64 = frame.pc;
+
+    while (!regexVisit(list, pc)) {
+      let inst: &RegexInst = program.insts.get(pc).unwrap();
+      let first: u64 = inst.first;
+      let second: u64 = inst.second;
+
+      match (inst.opcode) {
+        RegexOpcode::JUMP -> {
+          pc = first;
+        },
+        RegexOpcode::SPLIT -> {
+          vm.stack.push(RegexFrame { pc: second, restore: false, slot: 0, value: 0 });
+          pc = first;
+        },
+        RegexOpcode::SAVE -> {
+          let previous: u64 = *vm.scratch.get(first).unwrap();
+          vm.stack.push(RegexFrame { pc: 0, restore: true, slot: first, value: previous });
+          vm.scratch.set(first, position);
+          pc += 1;
+        },
+        RegexOpcode::ASSERT -> {
+          if (!regexAssertionHolds(text, first, position)) {
+            break;
+          }
+
+          pc += 1;
+        },
+        _ -> {
+          list.pcs.push(pc);
+          let mut slot: u64 = 0;
+
+          while (slot < vm.slotCount) {
+            list.slots.push(*vm.scratch.get(slot).unwrap());
+            slot += 1;
+          }
+
+          break;
+        },
+      };
+    }
+  }
+}
+
+function regexRangesContain(program: &RegexProgram, inst: &RegexInst, scalar: u32): boolean {
+  let mut index: u64 = inst.first;
+  let end: u64 = inst.first + inst.second;
+  let mut found: boolean = false;
+
+  while (index < end) {
+    let range: &RegexRange = program.ranges.get(index).unwrap();
+
+    if (scalar < range.start) {
+      break;
+    }
+
+    if (scalar <= range.end) {
+      found = true;
+      break;
+    }
+
+    index += 1;
+  }
+
+  return found != inst.negated;
+}
+
+/// Makes the threads of the next position current, and empties `next` for
+/// the step after. The visited set comes along: a new start thread added at
+/// that position must not revisit what those threads already followed. The
+/// copy costs as much as building `next` did, so the step stays linear.
+function regexAdvanceThreadLists(vm: &mut RegexVm): void {
+  regexClearThreadList(&mut vm.current);
+  let mut index: u64 = 0;
+
+  while (index < vm.next.visitedCount) {
+    let pc: u64 = *vm.next.dense.get(index).unwrap();
+    vm.current.dense.set(index, pc);
+    vm.current.sparse.set(pc, index);
+    index += 1;
+  }
+
+  vm.current.visitedCount = vm.next.visitedCount;
+  index = 0;
+
+  while (index < vm.next.pcs.length()) {
+    vm.current.pcs.push(*vm.next.pcs.get(index).unwrap());
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < vm.next.slots.length()) {
+    vm.current.slots.push(*vm.next.slots.get(index).unwrap());
+    index += 1;
+  }
+
+  regexClearThreadList(&mut vm.next);
+}
+
+function regexResetScratch(vm: &mut RegexVm): void {
+  let mut slot: u64 = 0;
+
+  while (slot < vm.slotCount) {
+    vm.scratch.set(slot, REGEX_NO_SLOT);
+    slot += 1;
+  }
+}
+
+function regexLoadScratch(vm: &mut RegexVm, thread: u64): void {
+  let mut slot: u64 = 0;
+
+  while (slot < vm.slotCount) {
+    let value: u64 = *vm.current.slots.get(thread * vm.slotCount + slot).unwrap();
+    vm.scratch.set(slot, value);
+    slot += 1;
+  }
+}
+
+/// The state for searching with `program`.
+export function regexNewVm(program: &RegexProgram): RegexVm {
+  let mut scratch: Vector<u64> = Vector::new<u64>(program.slotCount);
+  let mut slot: u64 = 0;
+
+  while (slot < program.slotCount) {
+    scratch.push(REGEX_NO_SLOT);
+    slot += 1;
+  }
+
+  return RegexVm {
+    slotCount: program.slotCount,
+    stack: Vector::new<RegexFrame>(),
+    scratch: scratch,
+    current: regexNewThreadList(program.insts.length()),
+    next: regexNewThreadList(program.insts.length()),
+  };
+}
+
+/// Searches `text` from byte offset `startAt` for the leftmost-first match.
+/// Returns its slots (`slotCount` entries, `REGEX_NO_SLOT` where a group did
+/// not take part), or `NONE`. With `earliest` it stops at the first match
+/// found, whose end may not be the preferred one.
+export function regexSearch(
+  vm: &mut RegexVm,
+  program: &RegexProgram,
+  text: &String,
+  startAt: u64,
+  earliest: boolean
+): Option<Vector<u64>> {
+  regexClearThreadList(&mut vm.current);
+  regexClearThreadList(&mut vm.next);
+  let mut best: Option<Vector<u64>> = Option::NONE;
+  let length: u64 = text.length();
+  let mut position: u64 = startAt;
+
+  while (true) {
+    // A new start is the lowest-priority thread, and stops once a match is
+    // known: anything starting later is not leftmost.
+    if (best.isNone()) {
+      regexResetScratch(vm);
+      regexAddThread(vm, program, text, &mut vm.current, 0, position);
+    }
+
+    if (vm.current.pcs.length() == 0 && best.isSome()) {
+      break;
+    }
+
+    let mut scalar: u32 = 0;
+    let mut nextPosition: u64 = position;
+
+    if (position < length) {
+      scalar = text.charAt(position, &mut nextPosition).unwrap() as u32;
+    }
+
+    let mut thread: u64 = 0;
+
+    while (thread < vm.current.pcs.length()) {
+      let pc: u64 = *vm.current.pcs.get(thread).unwrap();
+      let inst: &RegexInst = program.insts.get(pc).unwrap();
+      let mut consumes: boolean = false;
+      let mut matched: boolean = false;
+
+      match (inst.opcode) {
+        RegexOpcode::MATCH -> {
+          matched = true;
+        },
+        RegexOpcode::ANY_EXCEPT_NEWLINE -> {
+          consumes = position < length && scalar != '\n' as u32;
+        },
+        RegexOpcode::RANGES -> {
+          consumes = position < length && regexRangesContain(program, inst, scalar);
+        },
+        _ -> {},
+      };
+
+      if (matched) {
+        let mut slots: Vector<u64> = Vector::new<u64>(vm.slotCount);
+        let mut index: u64 = 0;
+
+        while (index < vm.slotCount) {
+          slots.push(*vm.current.slots.get(thread * vm.slotCount + index).unwrap());
+          index += 1;
+        }
+
+        best = Option::SOME(slots);
+
+        if (earliest) {
+          return best;
+        }
+
+        // Lower-priority threads lose to this match.
+        break;
+      }
+
+      if (consumes) {
+        regexLoadScratch(vm, thread);
+        regexAddThread(vm, program, text, &mut vm.next, pc + 1, nextPosition);
+      }
+
+      thread += 1;
+    }
+
+    if (position >= length) {
+      break;
+    }
+
+    regexAdvanceThreadLists(vm);
+    position = nextPosition;
+  }
+
+  return best;
+}
