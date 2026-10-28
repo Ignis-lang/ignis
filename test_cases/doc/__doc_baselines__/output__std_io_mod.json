@@ -78,15 +78,23 @@
     },
     {
       "name": "std::hash",
-      "doc": "  \n# Hash Module  \n  \nDeterministic hashing foundations for collections and user-defined keys.  \n  \nThe default hasher uses 64-bit FNV-1a with a fixed offset basis and no  \nrandomized seeding. Hashes are therefore deterministic for a given stdlib  \nand compiler version.  \n  \n`writeStr` hashes NUL-terminated `str` data.  \nOwned `String` values should hash all owned bytes without routing through raw `toStr()`."
+      "doc": "  \n# Hash Module  \n  \nDeterministic hashing foundations for collections and user-defined keys.  \n  \nThe default hasher uses 64-bit FNV-1a with a fixed offset basis and no  \nrandomized seeding. Hashes are therefore deterministic for a given stdlib  \nand compiler version.  \n  \n`writeStr` hashes NUL-terminated `str` data.  \nOwned `String` values should hash all owned bytes without routing through raw `toStr()`.  \n  \n`Sha256` computes SHA-256 digests (FIPS 180-4); see `std::hash::sha256`."
+    },
+    {
+      "name": "std::hash::sha256",
+      "doc": "  \n# SHA-256  \n  \n`Sha256`, the SHA-256 message digest of FIPS 180-4. It is exported from  \n`std::hash`, so `import Sha256 from \"std::hash\"` reaches it.  \n  \n| Item                     | Description                                         |  \n|--------------------------|-----------------------------------------------------|  \n| `Sha256::new()`          | An incremental hasher over an empty message         |  \n| `update(bytes)`          | Appends bytes to the message                        |  \n| `finish()`               | The 32-byte digest of everything appended           |  \n| `Sha256::digest(bytes)`  | The 32-byte digest of `bytes` in one call           |  \n| `Sha256::hexDigest(bytes)` | The digest of `bytes` as 64 lowercase hex digits  |  \n  \nUnsigned integer `+` wraps modulo 2^width (see the language reference), so  \nthe `u32` additions below are the modulo 2^32 additions the standard asks for."
     },
     {
       "name": "std::http",
-      "doc": "  \n# HTTP  \n  \nHTTP/1.1 on the server side. The core is sans-IO: a request parser and a  \nresponse serializer that never touch a socket. Anything that speaks HTTP  \nbut is not a web application (a proxy, a test harness, a server driver)  \nbuilds on it. The parser receives bytes and returns what they mean; the  \nserializer turns a response into bytes and leaves writing them to the  \ncaller. On top of it, `Http::Server` is a blocking driver that accepts  \nconnections and calls a handler with a request and a response.  \n  \n## Exports  \n  \n| Export                 | Description                                                          |  \n|------------------------|----------------------------------------------------------------------|  \n| `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |  \n| `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |  \n| `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |  \n| `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |  \n| `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |  \n| `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |  \n| `Http::HeaderField`    | One `name` and `value`                                               |  \n| `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |  \n| `Http::ParseError`     | `kind` and the suggested response `status`                           |  \n| `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |  \n| `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |  \n| `Http::SerializeError` | Why a response head cannot be written                                |  \n| `Http::writeHead`      | Appends a response head                                              |  \n| `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |  \n| `Http::writeBody`      | Appends body bytes unchanged                                         |  \n| `Http::writeChunk`     | Appends one chunk of a chunked body                                  |  \n| `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |  \n| `Http::reasonPhrase`   | The standard reason phrase of a status                               |  \n| `Http::Server`         | `bind(&address, config)`, `localAddress()`, `run(handler)`           |  \n| `Http::ServerConfig`   | `threads`, `limits`, `idleTimeout`, `maxRequestsPerConnection`; `new()` gives the defaults |  \n| `Http::Handler`        | Trait: `handle(&self, &Request, &mut Response)`                      |  \n| `Http::Request`        | `head`, `body`; `target()`, `header(name)`, `bodyText()`             |  \n| `Http::Response`       | `status`, `headers`, `body`; `new()`, `setStatus`, `setHeader`, `addHeader`, `write`, `writeStr` |  \n| `Http::serveConnection` | Serves one connection with a handler                                |  \n| `Http::acceptConnections` | Accepts and serves connections on the calling thread              |  \n  \n## Parsing  \n  \n`feed` copies bytes into the parser; `next` reports the next event. Each  \nrequest produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.  \n`NEED_MORE` means the bytes fed so far are not enough to report anything  \nelse. After `DONE` the parser starts on the next request of the same  \nconnection, and bytes already fed past the end of a request belong to the  \nnext one, so keep-alive and pipelining need nothing special.  \n`RequestHead.keepAlive()` tells whether the connection stays open: an  \nHTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0  \nrequest closes it unless `Connection` lists `keep-alive`.  \n  \nEvents own their payloads: a `RequestHead` or a body chunk is a copy and  \nstays valid after more bytes are fed.  \n  \n`MALFORMED` is terminal: once the parser reports it, every later `next`  \nreports the same error, because the rest of the connection cannot be  \nframed. The `ParseError` carries the status a server should answer with  \n(400, 413, 414, 431, 501 or 505) before it closes the connection.  \nMalformed input never panics.  \n  \n## Message syntax  \n  \n- Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2  \n  allows a recipient to; a CR anywhere else is malformed.  \n- Empty lines before a request line are skipped.  \n- The request line is `method SP target SP HTTP/1.x` with exactly one space  \n  between the parts. The method is a case-sensitive token; methods other  \n  than the nine standard ones are `Method::OTHER`. The target is kept as  \n  received and must be visible ASCII.  \n- A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.  \n- A header line is `name: value`. Whitespace between the name and the  \n  colon, an obsolete line folding (a line starting with a space or a tab)  \n  and a control byte in the value are `INVALID_HEADER`. Names keep their  \n  casing; lookups ignore ASCII case.  \n  \n## Body framing  \n  \nPer RFC 9112 section 6.3:  \n  \n| Head                                   | Body                                           |  \n|----------------------------------------|------------------------------------------------|  \n| `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |  \n| Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |  \n| `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |  \n| `Content-Length: n`                    | Exactly `n` bytes                              |  \n| `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |  \n| A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |  \n| Neither                                | No body                                        |  \n  \nRepeated `Content-Length` fields, or a comma list in one, are accepted when  \nevery value is the same. Chunk extensions are ignored. Trailer fields  \nafter the last chunk are checked like header fields, counted against  \n`maxHeaders`, and discarded.  \n  \n## Limits  \n  \n| Limit            | Default   | Violation                                 |  \n|------------------|-----------|-------------------------------------------|  \n| `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |  \n| `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |  \n| `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |  \n| `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |  \n  \nLine lengths exclude the line terminator, and a length exactly at its  \nlimit is accepted. A line is rejected as soon as it grows past its limit,  \nbefore it ends, and a body as soon as its declared size passes `maxBody`,  \nso a client cannot make the parser buffer without bound.  \n  \n## Serializing  \n  \n`writeHead` appends `HTTP/1.1 <status> <reason>\\r\\n`, every header field  \nand the blank line. `writeResponse` does the same with a `Content-Length`  \nfield and appends the body. For a chunked body, add  \n`Transfer-Encoding: chunked` to the head, then call `writeChunk` for each  \npiece and `writeLastChunk` at the end. A header name, header value or  \nreason phrase holding CR or LF could split the response, so it is a  \n`SerializeError` and nothing is appended.  \n  \nByte inputs are `&Vector<u8>`: a slice parameter cannot report its length  \nyet.  \n  \n## Serving  \n  \nA handler is a record that implements `Http::Handler`. Outside the `Http`  \nnamespace the trait is reached by its path: `@implements(Http::Handler)`.  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport IpAddress, SocketAddress from \"std::net\";  \n  \n@implements(Http::Handler)  \nrecord Greeter {  \n  public greeting: str;  \n  \n  handle(&self, request: &Http::Request, response: &mut Http::Response): void {  \n    if (!request.head.target.equals(\"/\")) {  \n      response.setStatus(404);  \n      return;  \n    }  \n  \n    response.setHeader(\"Content-Type\", \"text/plain\");  \n    response.writeStr(self.greeting);  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);  \n  let Result::OK(server) = Http::Server::bind(&address, Http::ServerConfig::new()) else {  \n    return 1;  \n  };  \n  \n  return server.run<Greeter>(Greeter { greeting: \"hello\" }).isOk() ? 0 : 1;  \n}  \n```  \n  \n`run` starts `ServerConfig.threads` threads (default 8). Each accepts a  \nconnection, serves it to the end and accepts the next, so up to `threads`  \nconnections are served at once. The handler is shared by all of them,  \nwhich is why it has to be `Send` and `Sync` and `handle` takes `&self`.  \n`run` returns only once every thread's `accept` failed; there is no way  \nto stop a running server yet, so it blocks for as long as the process  \nlives.  \n  \n`acceptConnections` is the loop each `run` thread runs: it accepts a  \nconnection, serves it and accepts the next. Calling it on threads of  \nyour own gives every thread its own handler, for state that cannot be  \nshared; `std::web` builds one router per thread this way.  \n  \n`serveConnection` serves one accepted connection on the calling thread,  \nwhich is what each `run` thread does and what a test calls directly:  \n  \n- A request reaches the handler once its whole body is in, bounded by  \n  `Limits.maxBody`. `Expect: 100-continue` is not answered: the client  \n  sends the body after its own wait.  \n- The response always carries `Content-Length`; a `Content-Length` or  \n  `Transfer-Encoding` the handler set is dropped. A `HEAD` request gets  \n  the head, with the length the body would have, and no body.  \n- The connection stays open unless the request does not keep it alive  \n  (`RequestHead.keepAlive`), the response lists `Connection: close`, or  \n  `maxRequestsPerConnection` (0, no limit, by default) is reached. When  \n  it closes, the response carries `Connection: close`.  \n- Every read waits at most `idleTimeout` (default 30 seconds). When it  \n  expires, or the client closes, the connection ends without a response.  \n- A malformed request gets an empty response with the parser's status  \n  and `Connection: close`, then the connection ends.  \n- A response the serializer rejects, a status outside 100 to 999 or a  \n  header that holds CR or LF, is replaced by an empty 500.  \n- Before closing, the server shuts its writing side and discards what  \n  the client still sends for up to 2 seconds, so the close does not reset  \n  the connection before the client reads the response.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \n  \nfunction answer(request: str, out: &mut Vector<u8>): i32 {  \n  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());  \n  parser.feedStr(request);  \n  \n  let Http::ParseEvent::HEAD(head) = parser.next() else {  \n    return 1;  \n  };  \n  \n  let mut response: Http::ResponseHead = Http::ResponseHead::create(200);  \n  response.headers.add(\"Content-Type\", \"text/plain\");  \n  let body: Vector<u8> = head.target.toBytes();  \n  \n  return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;  \n}  \n```"
+      "doc": "  \n# HTTP  \n  \nHTTP/1.1 on the server side. The core is sans-IO: a request parser and a  \nresponse serializer that never touch a socket. Anything that speaks HTTP  \nbut is not a web application (a proxy, a test harness, a server driver)  \nbuilds on it. The parser receives bytes and returns what they mean; the  \nserializer turns a response into bytes and leaves writing them to the  \ncaller. On top of it, `Http::Server` is a blocking driver that accepts  \nconnections and calls a handler with a request and a response.  \n  \n## Exports  \n  \n| Export                 | Description                                                          |  \n|------------------------|----------------------------------------------------------------------|  \n| `Http::RequestParser`  | `new(limits)`, `feed(&bytes)`, `feedStr(text)`, `next()`, `buffered()` |  \n| `Http::ParseEvent`     | `NEED_MORE`, `HEAD(RequestHead)`, `BODY_CHUNK(Vector<u8>)`, `DONE`, `MALFORMED(ParseError)` |  \n| `Http::RequestHead`    | `method`, `target`, `version`, `headers`; `keepAlive()`              |  \n| `Http::Method`         | `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `CONNECT`, `TRACE`, `OTHER(String)`; `toString()` |  \n| `Http::Version`        | `HTTP_1_0`, `HTTP_1_1`; `toStr()`                                    |  \n| `Http::Headers`        | Ordered fields: `get`, `getAll`, `contains`, `hasToken`, `add`, `set`, `remove`, `length`, `nameAt`, `valueAt`, `fieldAt` |  \n| `Http::HeaderField`    | One `name` and `value`                                               |  \n| `Http::Limits`         | `maxRequestLine`, `maxHeaderLine`, `maxHeaders`, `maxBody`; `new()` gives the defaults |  \n| `Http::ParseError`     | `kind` and the suggested response `status`                           |  \n| `Http::ParseErrorKind` | Why a request is malformed; `name()`, `status()`                     |  \n| `Http::ResponseHead`   | `status`, `reason`, `headers`; `create(status)`, `withReason(status, reason)` |  \n| `Http::SerializeError` | Why a response head cannot be written                                |  \n| `Http::writeHead`      | Appends a response head                                              |  \n| `Http::writeResponse`  | Appends a head with `Content-Length` and the body                    |  \n| `Http::writeBody`      | Appends body bytes unchanged                                         |  \n| `Http::writeChunk`     | Appends one chunk of a chunked body                                  |  \n| `Http::writeLastChunk` | Appends the chunk that ends a chunked body                           |  \n| `Http::reasonPhrase`   | The standard reason phrase of a status                               |  \n| `Http::Server`         | `bind(&address, config)`, `localAddress()`, `run(handler)`           |  \n| `Http::ServerConfig`   | `threads`, `limits`, `idleTimeout`, `maxRequestsPerConnection`; `new()` gives the defaults |  \n| `Http::Handler`        | Trait: `handle(&self, &Request, &mut Response)`                      |  \n| `Http::Request`        | `head`, `body`; `target()`, `header(name)`, `bodyText()`             |  \n| `Http::Response`       | `status`, `headers`, `body`; `new()`, `setStatus`, `setHeader`, `addHeader`, `write`, `writeStr` |  \n| `Http::MediaType`      | `mainType`, `subtype`, `parameters`; `parse(text)`, `essence()`, `parameter(name)`, `parameterCount()` |  \n| `Http::MediaTypeParameter` | One lowercased `name` and its unescaped `value`                  |  \n| `Http::serveConnection` | Serves one connection with a handler                                |  \n| `Http::acceptConnections` | Accepts and serves connections on the calling thread              |  \n  \n## Parsing  \n  \n`feed` copies bytes into the parser; `next` reports the next event. Each  \nrequest produces `HEAD` once, zero or more `BODY_CHUNK`, then `DONE`.  \n`NEED_MORE` means the bytes fed so far are not enough to report anything  \nelse. After `DONE` the parser starts on the next request of the same  \nconnection, and bytes already fed past the end of a request belong to the  \nnext one, so keep-alive and pipelining need nothing special.  \n`RequestHead.keepAlive()` tells whether the connection stays open: an  \nHTTP/1.1 request keeps it unless `Connection` lists `close`, an HTTP/1.0  \nrequest closes it unless `Connection` lists `keep-alive`.  \n  \nEvents own their payloads: a `RequestHead` or a body chunk is a copy and  \nstays valid after more bytes are fed.  \n  \n`MALFORMED` is terminal: once the parser reports it, every later `next`  \nreports the same error, because the rest of the connection cannot be  \nframed. The `ParseError` carries the status a server should answer with  \n(400, 413, 414, 431, 501 or 505) before it closes the connection.  \nMalformed input never panics.  \n  \n## Message syntax  \n  \n- Lines end with CRLF. A bare LF is accepted too, as RFC 9112 section 2.2  \n  allows a recipient to; a CR anywhere else is malformed.  \n- Empty lines before a request line are skipped.  \n- The request line is `method SP target SP HTTP/1.x` with exactly one space  \n  between the parts. The method is a case-sensitive token; methods other  \n  than the nine standard ones are `Method::OTHER`. The target is kept as  \n  received and must be visible ASCII.  \n- A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.  \n- A header line is `name: value`. Whitespace between the name and the  \n  colon, an obsolete line folding (a line starting with a space or a tab)  \n  and a control byte in the value are `INVALID_HEADER`. Names keep their  \n  casing; lookups ignore ASCII case.  \n  \n## Body framing  \n  \nPer RFC 9112 section 6.3:  \n  \n| Head                                   | Body                                           |  \n|----------------------------------------|------------------------------------------------|  \n| `Transfer-Encoding: chunked`           | Chunked; reported without the chunk framing    |  \n| Any other `Transfer-Encoding`          | `UNSUPPORTED_TRANSFER_CODING` (501)            |  \n| `Transfer-Encoding` and `Content-Length` | `CONFLICTING_LENGTH` (400), as request smuggling |  \n| `Content-Length: n`                    | Exactly `n` bytes                              |  \n| `Content-Length` values that disagree  | `CONFLICTING_LENGTH` (400)                     |  \n| A `Content-Length` that is not a count | `INVALID_CONTENT_LENGTH` (400)                 |  \n| Neither                                | No body                                        |  \n  \nRepeated `Content-Length` fields, or a comma list in one, are accepted when  \nevery value is the same. Chunk extensions are ignored. Trailer fields  \nafter the last chunk are checked like header fields, counted against  \n`maxHeaders`, and discarded.  \n  \n## Limits  \n  \n| Limit            | Default   | Violation                                 |  \n|------------------|-----------|-------------------------------------------|  \n| `maxRequestLine` | 8192      | `REQUEST_LINE_TOO_LONG` (414)             |  \n| `maxHeaderLine`  | 8192      | `HEADER_TOO_LONG` (431); `INVALID_CHUNK` for a chunk-size line |  \n| `maxHeaders`     | 100       | `TOO_MANY_HEADERS` (431)                  |  \n| `maxBody`        | 1048576   | `BODY_TOO_LARGE` (413)                    |  \n  \nLine lengths exclude the line terminator, and a length exactly at its  \nlimit is accepted. A line is rejected as soon as it grows past its limit,  \nbefore it ends, and a body as soon as its declared size passes `maxBody`,  \nso a client cannot make the parser buffer without bound.  \n  \n## Media types  \n  \n`MediaType::parse` reads a `Content-Type` value per RFC 9110 section  \n8.3.1. The type, subtype and parameter names are lowercased; parameter  \nvalues keep their case, and a quoted value loses its quotes and escapes.  \nMalformed input gives `NONE`. `essence()` is `type/subtype`, and  \n`parameter(\"charset\")` finds a parameter ignoring case.  \n  \n## Serializing  \n  \n`writeHead` appends `HTTP/1.1 <status> <reason>\\r\\n`, every header field  \nand the blank line. `writeResponse` does the same with a `Content-Length`  \nfield and appends the body. For a chunked body, add  \n`Transfer-Encoding: chunked` to the head, then call `writeChunk` for each  \npiece and `writeLastChunk` at the end. A header name, header value or  \nreason phrase holding CR or LF could split the response, so it is a  \n`SerializeError` and nothing is appended.  \n  \nByte inputs are `&Vector<u8>`: a slice parameter cannot report its length  \nyet.  \n  \n## Serving  \n  \nA handler is a record that implements `Http::Handler`. Outside the `Http`  \nnamespace the trait is reached by its path: `@implements(Http::Handler)`.  \n  \n```ignis  \nimport Http from \"std::http\";  \nimport IpAddress, SocketAddress from \"std::net\";  \n  \n@implements(Http::Handler)  \nrecord Greeter {  \n  public greeting: str;  \n  \n  handle(&self, request: &Http::Request, response: &mut Http::Response): void {  \n    if (!request.head.target.equals(\"/\")) {  \n      response.setStatus(404);  \n      return;  \n    }  \n  \n    response.setHeader(\"Content-Type\", \"text/plain\");  \n    response.writeStr(self.greeting);  \n  }  \n}  \n  \nfunction main(): i32 {  \n  let address: SocketAddress = SocketAddress::create(IpAddress::v4(127, 0, 0, 1), 8080);  \n  let Result::OK(server) = Http::Server::bind(&address, Http::ServerConfig::new()) else {  \n    return 1;  \n  };  \n  \n  return server.run<Greeter>(Greeter { greeting: \"hello\" }).isOk() ? 0 : 1;  \n}  \n```  \n  \n`run` starts `ServerConfig.threads` threads (default 8). Each accepts a  \nconnection, serves it to the end and accepts the next, so up to `threads`  \nconnections are served at once. The handler is shared by all of them,  \nwhich is why it has to be `Send` and `Sync` and `handle` takes `&self`.  \n`run` returns only once every thread's `accept` failed; there is no way  \nto stop a running server yet, so it blocks for as long as the process  \nlives.  \n  \n`acceptConnections` is the loop each `run` thread runs: it accepts a  \nconnection, serves it and accepts the next. Calling it on threads of  \nyour own gives every thread its own handler, for state that cannot be  \nshared; `std::web` builds one router per thread this way.  \n  \n`serveConnection` serves one accepted connection on the calling thread,  \nwhich is what each `run` thread does and what a test calls directly:  \n  \n- A request reaches the handler once its whole body is in, bounded by  \n  `Limits.maxBody`. `Expect: 100-continue` is not answered: the client  \n  sends the body after its own wait.  \n- The response always carries `Content-Length`; a `Content-Length` or  \n  `Transfer-Encoding` the handler set is dropped. A `HEAD` request gets  \n  the head, with the length the body would have, and no body.  \n- The connection stays open unless the request does not keep it alive  \n  (`RequestHead.keepAlive`), the response lists `Connection: close`, or  \n  `maxRequestsPerConnection` (0, no limit, by default) is reached. When  \n  it closes, the response carries `Connection: close`.  \n- Every read waits at most `idleTimeout` (default 30 seconds). When it  \n  expires, or the client closes, the connection ends without a response.  \n- A malformed request gets an empty response with the parser's status  \n  and `Connection: close`, then the connection ends.  \n- A response the serializer rejects, a status outside 100 to 999 or a  \n  header that holds CR or LF, is replaced by an empty 500.  \n- Before closing, the server shuts its writing side and discards what  \n  the client still sends for up to 2 seconds, so the close does not reset  \n  the connection before the client reads the response.  \n  \n## Example  \n  \n```ignis  \nimport Http from \"std::http\";  \n  \nfunction answer(request: str, out: &mut Vector<u8>): i32 {  \n  let mut parser: Http::RequestParser = Http::RequestParser::new(Http::Limits::new());  \n  parser.feedStr(request);  \n  \n  let Http::ParseEvent::HEAD(head) = parser.next() else {  \n    return 1;  \n  };  \n  \n  let mut response: Http::ResponseHead = Http::ResponseHead::create(200);  \n  response.headers.add(\"Content-Type\", \"text/plain\");  \n  let body: Vector<u8> = head.target.toBytes();  \n  \n  return Http::writeResponse(&response, &body, out).isOk() ? 0 : 1;  \n}  \n```"
     },
     {
       "name": "std::http::headers",
       "doc": "`Http::Headers`: an ordered list of header fields, shared by requests and  \nresponses. The byte-class helpers below are exported for the parser and  \nthe serializer and are not part of `std::http`'s public API."
+    },
+    {
+      "name": "std::http::media_type",
+      "doc": "`Http::MediaType`: a media type as written in `Content-Type`, parsed per  \nRFC 9110 section 8.3.1."
     },
     {
       "name": "std::http::request",
@@ -376,7 +384,8 @@
       "doc": "  \n# Thread  \n  \nOperating system threads on top of POSIX threads.  \n  \n## Exports  \n  \n| Export          | Description                                         |  \n|-----------------|-----------------------------------------------------|  \n| `Thread`        | `spawn` a task on a new thread, `currentId`         |  \n| `JoinHandle<T>` | Owns a running thread; `join` waits for its result  |  \n  \n## Spawning and joining  \n  \n`Thread::spawn<T>(task)` runs `task` on a new thread and returns a  \n`JoinHandle<T>`. `join()` waits for the thread to finish and returns what the  \ntask returned. The task parameter is `@sendable`, so the compiler checks at  \nevery call that whatever the closure captures can move to another thread.  \nThe result moves from the spawned thread to the joining one, so `T` has to  \nbe Send.  \n`join` takes `self`: it consumes the handle, so a handle is joined at most  \nonce and using it after `join` is a use-after-move compile error.  \n  \nA task with nothing to report returns `void`: `Thread::spawn<void>` gives a  \n`JoinHandle<void>` whose `join` only waits.  \n  \nDropping a handle without joining it detaches the thread: it keeps running,  \nnothing waits for it, and its result is dropped when it finishes. A detached  \nthread that is still running when `main` returns is ended with the process,  \ntogether with whatever it still owns, so its control block and anything it  \nhas not dropped yet are never freed. Join every thread whose cleanup has to  \nfinish before the program ends.  \n  \n## Panics  \n  \nA panic in a spawned thread ends the whole process with exit code 101, the  \nsame as a panic on the main thread. There is no unwinding and `join` never  \nobserves a panicked thread.  \n  \n## Ownership of a spawned thread  \n  \n`spawn` allocates one control block shared by the handle and the thread. It  \nholds a reference count that starts at 2, the boxed task, and a heap slot for  \nthe result:  \n  \n- The thread runs the task, writes the result into the slot, and drops its  \n  reference.  \n- `join` waits for the thread, moves the result out of the slot and marks the  \n  block joined. The consumed handle drops its reference when `join` returns.  \n- Dropping an unjoined handle detaches the thread and drops its reference.  \n  \nWhichever side drops the last reference drops the result still in the slot  \n(only when nobody joined), frees the slot, the task's closures and the block.  \nEvery release happens after the task ran, so an unjoined slot always holds a  \nresult. The count is atomic, so the block is freed exactly once.  \n  \n## Host assumptions  \n  \n`pthread_t` is bound as `u64`, which is its definition on Linux (glibc and  \nmusl) for 64-bit targets. A target whose `pthread_t` is not a 64-bit integer  \nneeds its own binding.  \n  \n## Example  \n  \n```ignis  \nimport JoinHandle, Thread from \"std::thread\";  \n  \nfunction main(): i32 {  \n  let handle: JoinHandle<i32> = Thread::spawn<i32>((): i32 -> 6 * 7);  \n  \n  return handle.join();  \n}  \n```"
     },
     {
-      "name": "std::time"
+      "name": "std::time",
+      "doc": "  \n# Time Module  \n  \nDurations, monotonic and wall-clock instants, proleptic Gregorian civil-date  \narithmetic (`Time::CivilDate`, ISO weekdays and ISO weeks), and RFC 3339  \ntimestamps (`Time::SystemTime::parseRfc3339`, `Time::SystemTime::formatRfc3339`).  \nCivil dates and timestamps are always UTC and ignore leap seconds.  \n"
     },
     {
       "name": "std::toml",
@@ -424,6 +433,96 @@
     }
   ],
   "items": [
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii",
+      "name": "Ascii",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Ascii",
+      "doc": "Classification and case mapping of ASCII bytes, for parsers that read raw  \n`u8` input (protocol headers, identifiers, numbers) rather than decoded  \n`char` scalars. A byte of 128 or above is never in any class and maps to  \nitself."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::isAlpha",
+      "name": "isAlpha",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isAlpha(byte: u8): boolean",
+      "doc": "Whether `byte` is an ASCII letter."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::isAlphanumeric",
+      "name": "isAlphanumeric",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isAlphanumeric(byte: u8): boolean",
+      "doc": "Whether `byte` is an ASCII letter or digit."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::isDigit",
+      "name": "isDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isDigit(byte: u8): boolean",
+      "doc": "Whether `byte` is `0`-`9`."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::isHexDigit",
+      "name": "isHexDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isHexDigit(byte: u8): boolean",
+      "doc": "Whether `byte` is `0`-`9`, `a`-`f` or `A`-`F`."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::isLower",
+      "name": "isLower",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isLower(byte: u8): boolean",
+      "doc": "Whether `byte` is `a`-`z`."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::isUpper",
+      "name": "isUpper",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isUpper(byte: u8): boolean",
+      "doc": "Whether `byte` is `A`-`Z`."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::isWhitespace",
+      "name": "isWhitespace",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isWhitespace(byte: u8): boolean",
+      "doc": "Whether `byte` is a space, a tab, a line feed, a form feed or a carriage  \nreturn (the JSON and HTTP whitespace set plus form feed)."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::toLower",
+      "name": "toLower",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function toLower(byte: u8): u8",
+      "doc": "`byte` with `A`-`Z` mapped to `a`-`z`."
+    },
+    {
+      "module": "std::char",
+      "path": "std::char::Ascii::toUpper",
+      "name": "toUpper",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function toUpper(byte: u8): u8",
+      "doc": "`byte` with `a`-`z` mapped to `A`-`Z`."
+    },
     {
       "module": "std::char",
       "path": "std::char::Char",
@@ -1897,6 +1996,15 @@
     },
     {
       "module": "std::fs",
+      "path": "std::fs::Fs::createTempDir",
+      "name": "createTempDir",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function createTempDir(prefix: str): Result<PathBuf, IoError>",
+      "doc": "Creates a new directory under the temporary root (`tempDir`), named  \n`prefix` followed by six random characters and private to the current  \nuser (mode 0700), and returns its canonical path. Two calls never return  \nthe same directory, as `mkdtemp(3)` guarantees; the caller removes it  \n(`removeDirAll`). A `prefix` holding `/` or a NUL byte is rejected."
+    },
+    {
+      "module": "std::fs",
       "path": "std::fs::Fs::exists",
       "name": "exists",
       "kind": "function",
@@ -3322,6 +3430,15 @@
     },
     {
       "module": "std::fs::sys::unix",
+      "path": "std::fs::sys::unix::Fs::Sys::mkdtemp",
+      "name": "mkdtemp",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function mkdtemp(template: &String): Result<String, IoError>",
+      "doc": "Creates a unique directory from `template` (ending in `XXXXXX`) with  \n`mkdtemp(3)`, and returns the path it filled in."
+    },
+    {
+      "module": "std::fs::sys::unix",
       "path": "std::fs::sys::unix::Fs::Sys::open",
       "name": "open",
       "kind": "function",
@@ -3770,6 +3887,15 @@
     },
     {
       "module": "std::fs::sys::unix",
+      "path": "std::fs::sys::unix::__fs_path::mkdtemp",
+      "name": "mkdtemp",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function mkdtemp(template: *mut u8): *mut u8",
+      "doc": "POSIX `mkdtemp`; creates a unique mode-0700 directory from `template`,  \nwhose last six bytes are `XXXXXX`, replacing them in place."
+    },
+    {
+      "module": "std::fs::sys::unix",
       "path": "std::fs::sys::unix::__fs_path::realpath",
       "name": "realpath",
       "kind": "function",
@@ -4162,6 +4288,95 @@
       "doc": "Continues an FNV-1a hash over the bytes of a NUL-terminated `str`."
     },
     {
+      "module": "std::hash::sha256",
+      "path": "std::hash::sha256::ROUND_CONSTANTS",
+      "name": "ROUND_CONSTANTS",
+      "kind": "constant",
+      "visibility": "public",
+      "signature": "const ROUND_CONSTANTS: u32[64]",
+      "doc": "The round constants: the first 32 bits of the fractional parts of the  \ncube roots of the first 64 primes."
+    },
+    {
+      "module": "std::hash::sha256",
+      "path": "std::hash::sha256::Sha256",
+      "name": "Sha256",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Sha256",
+      "doc": "An incremental SHA-256 hasher (FIPS 180-4).  \n  \nFeed the message with `update` in any number of pieces, then call `finish`  \nfor the digest. The digest only depends on the concatenated bytes, not on  \nhow they were split.",
+      "members": [
+        {
+          "name": "state",
+          "kind": "field",
+          "signature": "state: u32[8]",
+          "doc": "The intermediate hash value H0..H7."
+        },
+        {
+          "name": "block",
+          "kind": "field",
+          "signature": "block: u8[64]",
+          "doc": "Bytes of the current, not yet complete, 64-byte block."
+        },
+        {
+          "name": "blockLength",
+          "kind": "field",
+          "signature": "blockLength: u64",
+          "doc": "How many bytes of `block` are filled."
+        },
+        {
+          "name": "messageLength",
+          "kind": "field",
+          "signature": "messageLength: u64",
+          "doc": "Total message length so far, in bytes."
+        },
+        {
+          "name": "digest",
+          "kind": "method",
+          "signature": "static digest(bytes: u8[]): u8[32]",
+          "doc": "Returns the SHA-256 digest of `bytes`."
+        },
+        {
+          "name": "hexDigest",
+          "kind": "method",
+          "signature": "static hexDigest(bytes: u8[]): String",
+          "doc": "Returns the SHA-256 digest of `bytes` as 64 lowercase hexadecimal digits."
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Sha256",
+          "doc": "Creates a hasher over the empty message."
+        },
+        {
+          "name": "compress",
+          "kind": "method",
+          "signature": "compress(&mut self): void",
+          "doc": "Runs the compression function over the full 64-byte `block`."
+        },
+        {
+          "name": "finish",
+          "kind": "method",
+          "signature": "finish(&mut self): u8[32]",
+          "doc": "Pads the message and returns its 32-byte digest.  \n  \nThe hasher is left padded; create a new one to hash another message."
+        },
+        {
+          "name": "update",
+          "kind": "method",
+          "signature": "update(&mut self, bytes: u8[]): void",
+          "doc": "Appends `bytes` to the message."
+        }
+      ]
+    },
+    {
+      "module": "std::hash::sha256",
+      "path": "std::hash::sha256::rotateRight",
+      "name": "rotateRight",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function rotateRight(value: u32, count: u32): u32",
+      "doc": "Rotates `value` right by `count` bits, `count` in 1..31."
+    },
+    {
       "module": "std::http::headers",
       "path": "std::http::headers::Http",
       "name": "Http",
@@ -4401,6 +4616,170 @@
       "visibility": "public",
       "signature": "function trimFieldWhitespace(text: &String): String",
       "doc": "`text` without leading and trailing spaces and tabs (RFC 9110 `OWS`)."
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::Http",
+      "name": "Http",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace Http",
+      "doc": "Media types."
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::Http::MediaType",
+      "name": "MediaType",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record MediaType",
+      "doc": "A media type such as `text/html; charset=utf-8`.  \n  \n`mainType`, `subtype` and parameter names are lowercased, since RFC  \n9110 compares them ignoring case. Parameter values keep their case.  \nParameters keep their order, and a repeated name is kept as separate  \nparameters.",
+      "members": [
+        {
+          "name": "mainType",
+          "kind": "field",
+          "signature": "mainType: String",
+          "doc": "The type before the slash (`type` is a keyword)."
+        },
+        {
+          "name": "subtype",
+          "kind": "field",
+          "signature": "subtype: String"
+        },
+        {
+          "name": "parameters",
+          "kind": "field",
+          "signature": "parameters: Vector<MediaTypeParameter>"
+        },
+        {
+          "name": "parse",
+          "kind": "method",
+          "signature": "static parse(text: str): Option<MediaType>",
+          "doc": "Parses `text` as `type \"/\" subtype *( OWS \";\" OWS parameter )`,  \nwhere a parameter is `name=token` or `name=\"quoted string\"`.  \nWhitespace around the whole value is ignored.  \n  \nReturns `NONE`, never panicking, when the type or the subtype is  \nmissing or empty, a name or token value holds a non-token byte, a  \nquoted string is not terminated, or anything else follows the last  \nparameter, including an empty parameter after a `;`.  \n  \n```ignis  \nlet parsed: Option<Http::MediaType> = Http::MediaType::parse(\"Text/HTML; Charset=\\\"UTF-8\\\"\");  \n// mainType \"text\", subtype \"html\", parameter \"charset\" = \"UTF-8\"  \n```"
+        },
+        {
+          "name": "essence",
+          "kind": "method",
+          "signature": "essence(&self): String",
+          "doc": "`type/subtype` without the parameters, such as `application/json`."
+        },
+        {
+          "name": "parameter",
+          "kind": "method",
+          "signature": "parameter(&self, name: str): Option<str>",
+          "doc": "The value of the first parameter named `name`, ignoring ASCII case."
+        },
+        {
+          "name": "parameterCount",
+          "kind": "method",
+          "signature": "parameterCount(&self): u64",
+          "doc": "The number of parameters, repeated names included."
+        }
+      ]
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::Http::MediaTypeParameter",
+      "name": "MediaTypeParameter",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record MediaTypeParameter",
+      "doc": "One media type parameter: its name lowercased and its value as  \nwritten, with the quotes and `quoted-pair` escapes of a quoted string  \nremoved.",
+      "members": [
+        {
+          "name": "name",
+          "kind": "field",
+          "signature": "name: String"
+        },
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: String"
+        }
+      ]
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::MediaTypeValue",
+      "name": "MediaTypeValue",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record MediaTypeValue",
+      "doc": "A parsed parameter value and the index just past it.",
+      "members": [
+        {
+          "name": "value",
+          "kind": "field",
+          "signature": "value: String"
+        },
+        {
+          "name": "next",
+          "kind": "field",
+          "signature": "next: u64"
+        }
+      ]
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::consumeParameterValue",
+      "name": "consumeParameterValue",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function consumeParameterValue(text: &String, start: u64): Option<MediaTypeValue>",
+      "doc": "The token or quoted string starting at `start`, unescaped, or `NONE`  \nwhen neither starts there or a quoted string is malformed."
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::isQuotedPairByte",
+      "name": "isQuotedPairByte",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isQuotedPairByte(byte: u8): boolean",
+      "doc": "Whether `byte` may follow a backslash in a `quoted-pair`."
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::isQuotedTextByte",
+      "name": "isQuotedTextByte",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isQuotedTextByte(byte: u8): boolean",
+      "doc": "Whether `byte` may appear unescaped in a quoted string (`qdtext`)."
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::lowerAsciiByte",
+      "name": "lowerAsciiByte",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function lowerAsciiByte(byte: u8): u8"
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::lowerRange",
+      "name": "lowerRange",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function lowerRange(text: &String, start: u64, end: u64): String",
+      "doc": "The bytes of `text` from `start` to `end`, ASCII uppercase folded."
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::skipWhitespace",
+      "name": "skipWhitespace",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function skipWhitespace(text: &String, start: u64): u64",
+      "doc": "The first index at or after `start` that is not a space or a tab."
+    },
+    {
+      "module": "std::http::media_type",
+      "path": "std::http::media_type::tokenEnd",
+      "name": "tokenEnd",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function tokenEnd(text: &String, start: u64): u64",
+      "doc": "The first index at or after `start` that is not a token byte."
     },
     {
       "module": "std::http::request",
@@ -6515,7 +6894,7 @@
       "kind": "function",
       "visibility": "private",
       "signature": "function parse(source: &String): Result<JsonValue, String>",
-      "doc": "Parses exactly one JSON value starting at the first non-whitespace byte  \nof `source`, building a full tree bounded by `MAX_DEPTH` (128, matching  \n`serde_json`'s default recursion limit). Leading and trailing  \nwhitespace around that value is allowed; trailing *non-whitespace*  \ncontent is not this function's problem to reject, because `serde_json`  \nonly checks for it once a caller's target type has already accepted  \nthe value.  \n  \n`Format::parseStdinRequest` does not call this for its own top-level  \nscan; see this module's doc comment for why."
+      "doc": "Parses exactly one JSON value starting at the first non-whitespace byte  \nof `source`, building a full tree bounded by `MAX_DEPTH` (128, matching  \n`serde_json`'s default recursion limit). Leading and trailing  \nwhitespace around that value is allowed; anything else after it is  \nrejected with `trailing characters at line 1 column N`, `N` being the  \n1-based position of its first byte, as `serde_json::from_str` reports.  \n  \n`Format::parseStdinRequest` does not call this for its own top-level  \nscan; see this module's doc comment for why."
     },
     {
       "module": "std::json::parser",
@@ -17206,6 +17585,12 @@
           "doc": "Creates an owned String from a `u8`."
         },
         {
+          "name": "fromUtf8",
+          "kind": "method",
+          "signature": "static fromUtf8(bytes: u8[]): Option<String>",
+          "doc": "Copies `bytes` into a new `String` when they are valid UTF-8, and  \nreturns `NONE` otherwise. Never panics; a `Vector<u8>` passes  \n`bytes.toSlice()`.  \n  \n# Example  \n  \n```ignis  \nlet text: Option<String> = String::fromUtf8(body.toSlice());  \n```"
+        },
+        {
           "name": "hexDigit",
           "kind": "method",
           "signature": "static hexDigit(value: u8): char"
@@ -17528,6 +17913,12 @@
           "kind": "method",
           "signature": "indexOfCharFrom(&self, target: char, startByte: u64): Option<u64>",
           "doc": "Returns the byte offset of `target` at or after `startByte`."
+        },
+        {
+          "name": "isValidUtf8",
+          "kind": "method",
+          "signature": "isValidUtf8(&self): boolean",
+          "doc": "Whether the bytes are well-formed UTF-8: no stray continuation byte,  \nno truncated or overlong sequence, no surrogate, nothing past U+10FFFF."
         },
         {
           "name": "length",
@@ -20144,6 +20535,22 @@
     },
     {
       "module": "std::time",
+      "path": "std::time::DAYS_PER_ERA",
+      "name": "DAYS_PER_ERA",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const DAYS_PER_ERA: i64"
+    },
+    {
+      "module": "std::time",
+      "path": "std::time::EPOCH_SHIFT_DAYS",
+      "name": "EPOCH_SHIFT_DAYS",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const EPOCH_SHIFT_DAYS: i64"
+    },
+    {
+      "module": "std::time",
       "path": "std::time::MICROS_PER_SECOND",
       "name": "MICROS_PER_SECOND",
       "kind": "constant",
@@ -20192,11 +20599,75 @@
     },
     {
       "module": "std::time",
+      "path": "std::time::SECONDS_PER_DAY",
+      "name": "SECONDS_PER_DAY",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const SECONDS_PER_DAY: i64"
+    },
+    {
+      "module": "std::time",
       "path": "std::time::Time",
       "name": "Time",
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace Time"
+    },
+    {
+      "module": "std::time",
+      "path": "std::time::Time::CivilDate",
+      "name": "CivilDate",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record CivilDate",
+      "doc": "A validated proleptic Gregorian calendar date (UTC, no time of day).",
+      "members": [
+        {
+          "name": "year",
+          "kind": "field",
+          "signature": "year: i64"
+        },
+        {
+          "name": "month",
+          "kind": "field",
+          "signature": "month: u32"
+        },
+        {
+          "name": "day",
+          "kind": "field",
+          "signature": "day: u32"
+        },
+        {
+          "name": "create",
+          "kind": "method",
+          "signature": "static create(year: i64, month: u32, day: u32): Option<CivilDate>",
+          "doc": "Builds a date, or returns `NONE` when `month` is not 1 to 12 or `day` is not  \nwithin that month (so `2026-02-30` is rejected)."
+        },
+        {
+          "name": "fromDaysSinceEpoch",
+          "kind": "method",
+          "signature": "static fromDaysSinceEpoch(days: i64): CivilDate",
+          "doc": "Returns the date `days` days after 1970-01-01 (negative values are earlier)."
+        },
+        {
+          "name": "daysSinceEpoch",
+          "kind": "method",
+          "signature": "daysSinceEpoch(&self): i64",
+          "doc": "Returns the number of days from 1970-01-01 to this date (negative before it)."
+        },
+        {
+          "name": "isoWeek",
+          "kind": "method",
+          "signature": "isoWeek(&self): IsoWeek",
+          "doc": "Returns the ISO week. A week belongs to the year holding its Thursday, so  \n2024-12-30 is 2025-W01 and 2021-01-03 is 2020-W53."
+        },
+        {
+          "name": "isoWeekday",
+          "kind": "method",
+          "signature": "isoWeekday(&self): u32",
+          "doc": "Returns the ISO weekday: Monday is 1 and Sunday is 7."
+        }
+      ]
     },
     {
       "module": "std::time",
@@ -20275,6 +20746,27 @@
     },
     {
       "module": "std::time",
+      "path": "std::time::Time::IsoWeek",
+      "name": "IsoWeek",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record IsoWeek",
+      "doc": "An ISO 8601 week-numbering year and its week (1 to 53).",
+      "members": [
+        {
+          "name": "year",
+          "kind": "field",
+          "signature": "year: i64"
+        },
+        {
+          "name": "week",
+          "kind": "field",
+          "signature": "week: u32"
+        }
+      ]
+    },
+    {
+      "module": "std::time",
       "path": "std::time::Time::MonotonicInstant",
       "name": "MonotonicInstant",
       "kind": "record",
@@ -20332,9 +20824,21 @@
           "signature": "nanos: u32"
         },
         {
+          "name": "fromUnix",
+          "kind": "method",
+          "signature": "static fromUnix(secs: i64, nanos: u32): Option<SystemTime>",
+          "doc": "Builds a wall-clock instant from UTC Unix seconds and nanoseconds, or returns  \n`NONE` when `nanos` is not below one second."
+        },
+        {
           "name": "now",
           "kind": "method",
           "signature": "static now(): Result<SystemTime, IoError>"
+        },
+        {
+          "name": "parseRfc3339",
+          "kind": "method",
+          "signature": "static parseRfc3339(text: &String): Option<SystemTime>",
+          "doc": "Parses an RFC 3339 timestamp `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+hh:mm|-hh:mm)`  \nand normalizes it to UTC. `T` and `Z` may be lowercase, the fraction has 1 to 9  \ndigits, and the offset hour is 0 to 23. Returns `NONE` for any other shape, an  \ninvalid date such as `2026-02-30`, an hour above 23, a minute or second above  \n59 (leap second 60 is rejected), or an offset minute above 59."
         },
         {
           "name": "checkedAddDuration",
@@ -20360,6 +20864,24 @@
           "name": "durationSinceUnixEpoch",
           "kind": "method",
           "signature": "durationSinceUnixEpoch(&self): Result<Duration, TimeError>"
+        },
+        {
+          "name": "formatRfc3339",
+          "kind": "method",
+          "signature": "formatRfc3339(&self): String",
+          "doc": "Formats this instant in UTC as RFC 3339 `YYYY-MM-DDTHH:MM:SS[.fraction]Z`. The  \nfraction keeps its significant digits only (trailing zeros trimmed, at most  \nnine) and is omitted when the nanoseconds are zero. Years before 0 or after  \n9999 are written with a sign or more digits, which RFC 3339 does not allow."
+        },
+        {
+          "name": "subsecNanos",
+          "kind": "method",
+          "signature": "subsecNanos(&self): u32",
+          "doc": "Returns the nanoseconds past `unixSeconds()`, below one second."
+        },
+        {
+          "name": "unixSeconds",
+          "kind": "method",
+          "signature": "unixSeconds(&self): i64",
+          "doc": "Returns the whole UTC seconds since the Unix epoch (negative before it)."
         }
       ]
     },
@@ -20435,6 +20957,32 @@
     },
     {
       "module": "std::time",
+      "path": "std::time::Time::daysInMonth",
+      "name": "daysInMonth",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function daysInMonth(year: i64, month: u32): Option<u32>",
+      "doc": "Returns the number of days in `month` (1 to 12) of `year`, or `NONE` when  \n`month` is out of range."
+    },
+    {
+      "module": "std::time",
+      "path": "std::time::Time::isLeapYear",
+      "name": "isLeapYear",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isLeapYear(year: i64): boolean",
+      "doc": "Returns true when `year` is a leap year in the proleptic Gregorian calendar."
+    },
+    {
+      "module": "std::time",
+      "path": "std::time::byteOrZero",
+      "name": "byteOrZero",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function byteOrZero(text: &String, index: u64): u8"
+    },
+    {
+      "module": "std::time",
       "path": "std::time::checkedAddI64U64",
       "name": "checkedAddI64U64",
       "kind": "function",
@@ -20467,6 +21015,22 @@
     },
     {
       "module": "std::time",
+      "path": "std::time::floorDivide",
+      "name": "floorDivide",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function floorDivide(value: i64, divisor: i64): i64"
+    },
+    {
+      "module": "std::time",
+      "path": "std::time::isAsciiDigit",
+      "name": "isAsciiDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isAsciiDigit(byte: u8): boolean"
+    },
+    {
+      "module": "std::time",
       "path": "std::time::negativeMagnitude",
       "name": "negativeMagnitude",
       "kind": "function",
@@ -20475,11 +21039,27 @@
     },
     {
       "module": "std::time",
+      "path": "std::time::pushPadded",
+      "name": "pushPadded",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function pushPadded(output: &mut String, value: i64, width: u64): void"
+    },
+    {
+      "module": "std::time",
       "path": "std::time::readClock",
       "name": "readClock",
       "kind": "function",
       "visibility": "private",
       "signature": "function readClock(clockId: i32): Result<Timespec, IoError>"
+    },
+    {
+      "module": "std::time",
+      "path": "std::time::readDigits",
+      "name": "readDigits",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function readDigits(text: &String, start: u64, count: u64): Option<i64>"
     },
     {
       "module": "std::time",

@@ -14,7 +14,11 @@
     },
     {
       "name": "std::hash",
-      "doc": "  \n# Hash Module  \n  \nDeterministic hashing foundations for collections and user-defined keys.  \n  \nThe default hasher uses 64-bit FNV-1a with a fixed offset basis and no  \nrandomized seeding. Hashes are therefore deterministic for a given stdlib  \nand compiler version.  \n  \n`writeStr` hashes NUL-terminated `str` data.  \nOwned `String` values should hash all owned bytes without routing through raw `toStr()`."
+      "doc": "  \n# Hash Module  \n  \nDeterministic hashing foundations for collections and user-defined keys.  \n  \nThe default hasher uses 64-bit FNV-1a with a fixed offset basis and no  \nrandomized seeding. Hashes are therefore deterministic for a given stdlib  \nand compiler version.  \n  \n`writeStr` hashes NUL-terminated `str` data.  \nOwned `String` values should hash all owned bytes without routing through raw `toStr()`.  \n  \n`Sha256` computes SHA-256 digests (FIPS 180-4); see `std::hash::sha256`."
+    },
+    {
+      "name": "std::hash::sha256",
+      "doc": "  \n# SHA-256  \n  \n`Sha256`, the SHA-256 message digest of FIPS 180-4. It is exported from  \n`std::hash`, so `import Sha256 from \"std::hash\"` reaches it.  \n  \n| Item                     | Description                                         |  \n|--------------------------|-----------------------------------------------------|  \n| `Sha256::new()`          | An incremental hasher over an empty message         |  \n| `update(bytes)`          | Appends bytes to the message                        |  \n| `finish()`               | The 32-byte digest of everything appended           |  \n| `Sha256::digest(bytes)`  | The 32-byte digest of `bytes` in one call           |  \n| `Sha256::hexDigest(bytes)` | The digest of `bytes` as 64 lowercase hex digits  |  \n  \nUnsigned integer `+` wraps modulo 2^width (see the language reference), so  \nthe `u32` additions below are the modulo 2^32 additions the standard asks for."
     },
     {
       "name": "std::libc",
@@ -493,6 +497,95 @@
       "visibility": "private",
       "signature": "function hashCStr(state: u64, value: str): u64",
       "doc": "Continues an FNV-1a hash over the bytes of a NUL-terminated `str`."
+    },
+    {
+      "module": "std::hash::sha256",
+      "path": "std::hash::sha256::ROUND_CONSTANTS",
+      "name": "ROUND_CONSTANTS",
+      "kind": "constant",
+      "visibility": "public",
+      "signature": "const ROUND_CONSTANTS: u32[64]",
+      "doc": "The round constants: the first 32 bits of the fractional parts of the  \ncube roots of the first 64 primes."
+    },
+    {
+      "module": "std::hash::sha256",
+      "path": "std::hash::sha256::Sha256",
+      "name": "Sha256",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Sha256",
+      "doc": "An incremental SHA-256 hasher (FIPS 180-4).  \n  \nFeed the message with `update` in any number of pieces, then call `finish`  \nfor the digest. The digest only depends on the concatenated bytes, not on  \nhow they were split.",
+      "members": [
+        {
+          "name": "state",
+          "kind": "field",
+          "signature": "state: u32[8]",
+          "doc": "The intermediate hash value H0..H7."
+        },
+        {
+          "name": "block",
+          "kind": "field",
+          "signature": "block: u8[64]",
+          "doc": "Bytes of the current, not yet complete, 64-byte block."
+        },
+        {
+          "name": "blockLength",
+          "kind": "field",
+          "signature": "blockLength: u64",
+          "doc": "How many bytes of `block` are filled."
+        },
+        {
+          "name": "messageLength",
+          "kind": "field",
+          "signature": "messageLength: u64",
+          "doc": "Total message length so far, in bytes."
+        },
+        {
+          "name": "digest",
+          "kind": "method",
+          "signature": "static digest(bytes: u8[]): u8[32]",
+          "doc": "Returns the SHA-256 digest of `bytes`."
+        },
+        {
+          "name": "hexDigest",
+          "kind": "method",
+          "signature": "static hexDigest(bytes: u8[]): String",
+          "doc": "Returns the SHA-256 digest of `bytes` as 64 lowercase hexadecimal digits."
+        },
+        {
+          "name": "new",
+          "kind": "method",
+          "signature": "static new(): Sha256",
+          "doc": "Creates a hasher over the empty message."
+        },
+        {
+          "name": "compress",
+          "kind": "method",
+          "signature": "compress(&mut self): void",
+          "doc": "Runs the compression function over the full 64-byte `block`."
+        },
+        {
+          "name": "finish",
+          "kind": "method",
+          "signature": "finish(&mut self): u8[32]",
+          "doc": "Pads the message and returns its 32-byte digest.  \n  \nThe hasher is left padded; create a new one to hash another message."
+        },
+        {
+          "name": "update",
+          "kind": "method",
+          "signature": "update(&mut self, bytes: u8[]): void",
+          "doc": "Appends `bytes` to the message."
+        }
+      ]
+    },
+    {
+      "module": "std::hash::sha256",
+      "path": "std::hash::sha256::rotateRight",
+      "name": "rotateRight",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function rotateRight(value: u32, count: u32): u32",
+      "doc": "Rotates `value` right by `count` bits, `count` in 1..31."
     },
     {
       "module": "std::libc",
@@ -5830,6 +5923,12 @@
           "doc": "Creates an owned String from a `u8`."
         },
         {
+          "name": "fromUtf8",
+          "kind": "method",
+          "signature": "static fromUtf8(bytes: u8[]): Option<String>",
+          "doc": "Copies `bytes` into a new `String` when they are valid UTF-8, and  \nreturns `NONE` otherwise. Never panics; a `Vector<u8>` passes  \n`bytes.toSlice()`.  \n  \n# Example  \n  \n```ignis  \nlet text: Option<String> = String::fromUtf8(body.toSlice());  \n```"
+        },
+        {
           "name": "hexDigit",
           "kind": "method",
           "signature": "static hexDigit(value: u8): char"
@@ -6152,6 +6251,12 @@
           "kind": "method",
           "signature": "indexOfCharFrom(&self, target: char, startByte: u64): Option<u64>",
           "doc": "Returns the byte offset of `target` at or after `startByte`."
+        },
+        {
+          "name": "isValidUtf8",
+          "kind": "method",
+          "signature": "isValidUtf8(&self): boolean",
+          "doc": "Whether the bytes are well-formed UTF-8: no stray continuation byte,  \nno truncated or overlong sequence, no surrogate, nothing past U+10FFFF."
         },
         {
           "name": "length",
