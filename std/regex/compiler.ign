@@ -51,6 +51,10 @@ export record RegexProgram {
 
   /// Two slots per group, the whole match being group 0.
   public slotCount: u64;
+
+  /// The UTF-8 bytes every match starts with; empty when there is no such
+  /// literal prefix. The search skips to its occurrences.
+  public prefix: String;
 }
 
 /// `ASSERT` operand codes.
@@ -282,6 +286,53 @@ function regexCompileNode(compiler: &mut RegexCompiler, ast: &RegexAst, id: u64)
   };
 }
 
+/// Appends to `prefix` the literal scalars every match of node `id` starts
+/// with, and reports whether the node is exactly those scalars, so that a
+/// concatenation may continue past it.
+function regexAppendPrefix(ast: &RegexAst, id: u64, prefix: &mut String): boolean {
+  match (ast.nodes.get(id).unwrap()) {
+    RegexNode::LITERAL(scalar) -> {
+      prefix.pushChar(scalar as char);
+      return true;
+    },
+    RegexNode::CONCAT(children) -> {
+      let mut index: u64 = 0;
+
+      while (index < children.length()) {
+        if (!regexAppendPrefix(ast, *children.get(index).unwrap(), prefix)) {
+          return false;
+        }
+
+        index += 1;
+      }
+
+      return true;
+    },
+    RegexNode::GROUP(group) -> {
+      return regexAppendPrefix(ast, group.child, prefix);
+    },
+    RegexNode::REPEAT(repeat) -> {
+      // The first iteration is required; what follows it is not known.
+      if (repeat.min >= 1) {
+        regexAppendPrefix(ast, repeat.child, prefix);
+      }
+
+      return false;
+    },
+    _ -> {
+      return false;
+    },
+  };
+}
+
+/// The literal prefix of every match of `ast`. Under `(?i)` letters are
+/// classes, so a case-insensitive pattern has no letter in its prefix.
+function regexLiteralPrefix(ast: &RegexAst): String {
+  let mut prefix: String = String::new();
+  regexAppendPrefix(ast, ast.root, &mut prefix);
+  return prefix;
+}
+
 /// Compiles `ast` to `SAVE 0, <pattern>, SAVE 1, MATCH`, or fails with
 /// `pattern too large` when the program would exceed `REGEX_MAX_PROGRAM`.
 export function compileRegex(ast: &RegexAst): Result<RegexProgram, RegexError> {
@@ -304,5 +355,6 @@ export function compileRegex(ast: &RegexAst): Result<RegexProgram, RegexError> {
     insts: compiler.insts,
     ranges: compiler.ranges,
     slotCount: (ast.groupCount + 1) * 2,
+    prefix: regexLiteralPrefix(ast),
   });
 }

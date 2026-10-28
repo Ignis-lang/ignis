@@ -9,15 +9,21 @@
 //! ```ignis
 //! import Captures, Match, Regex from "std::regex";
 //!
-//! let regex: Regex = Regex::new("\\d+").unwrap();
-//! let found: Match = regex.find("abc 123").unwrap(); // 4..7
+//! let digits: Regex = Regex::new("\\d+").unwrap();
+//! let found: Match = digits.find("abc 123").unwrap(); // 4..7
+//! let number: String = found.textIn("abc 123"); // "123"
 //!
 //! let date: Regex = Regex::new("(?<year>\\d{4})-(\\d\\d)").unwrap();
 //! let captures: Captures = date.captures("on 2024-05").unwrap();
 //! let year: Match = captures.name("year").unwrap(); // 3..7
 //! let swapped: String = date.replaceAll("on 2024-05", "$2/${year}"); // "on 05/2024"
-//! let parts: Vector<String> = Regex::new("\\s*,\\s*").unwrap().split("a , b,c"); // a, b, c
+//!
+//! let comma: Regex = Regex::new("\\s*,\\s*").unwrap();
+//! let parts: Vector<String> = comma.split("a , b,c"); // "a", "b", "c"
 //! ```
+//!
+//! A pattern is a `str`, so a regex backslash is written `\\` in an Ignis
+//! string literal: `"\\d+"` is the pattern `\d+`.
 //!
 //! ## Matching
 //!
@@ -51,13 +57,32 @@
 //!   digits is a number, anything else a name.
 //! - A group that did not take part or does not exist inserts nothing.
 //! - `$$` is a literal `$`; any other `$` (`$x`, `${}`, `${a b}`, a final
-//!   `$`) is a literal `$`.
+//!   `$`) is a literal `$`. A name needs braces: `$name` is the text
+//!   `$name`, not the group.
 //!
 //! ## Limits
 //!
-//! Counted repetition copies its body, so a program holds at most
-//! `REGEX_MAX_PROGRAM` (100000) instructions; a larger one is
-//! `pattern too large` at column 1.
+//! - A count in `{n}`, `{n,}` or `{n,m}` is at most `REGEX_MAX_REPETITION`
+//!   (1000); a larger one is `repetition count above 1000`.
+//! - Counted repetition copies its body, so a program holds at most
+//!   `REGEX_MAX_PROGRAM` (100000) instructions; a larger one, such as
+//!   `(a{1000}){1000}`, is `pattern too large` at column 1.
+//!
+//! ## Performance
+//!
+//! - Matching is linear: a Pike VM runs every thread in lockstep over the
+//!   text, one scalar per step, and follows each instruction at most once per
+//!   position, so a search takes O(text x program) time and memory
+//!   proportional to the program, whatever the pattern.
+//! - When every match starts with the same literal scalars (`foo(bar|baz)`
+//!   starts with `foo`), the search skips straight to the next occurrence of
+//!   that prefix whenever no thread is alive, and stops when there is none.
+//!   A pattern that starts with `^`, a class, an alternation, a repetition
+//!   that may be empty or a case-insensitive letter has no prefix.
+//! - `Regex` holds only the compiled program. Every call (`isMatch`, `find`,
+//!   `findAll`, ...) allocates its own VM state, sized by the program, and
+//!   copies the text once; a call on many matches reuses that state.
+//! - `isMatch` stops at the first match found and is the cheapest test.
 //!
 //! ## Exports
 //!
@@ -121,9 +146,17 @@
 //! 1000`, `invalid group name`, `duplicate group name x`, `unknown group
 //! flag`, `unsupported: backreference` and `unsupported: lookaround`.
 //!
-//! Backreferences (`\1`) and lookaround (`(?=`, `(?!`, `(?<=`, `(?<!`) are
-//! rejected because they cannot be matched in linear time. Classes are
-//! ASCII; Unicode classes are not supported in v1.
+//! ## Unsupported
+//!
+//! - Backreferences (`\1`) and lookaround (`(?=`, `(?!`, `(?<=`, `(?<!`)
+//!   are rejected with `unsupported: backreference` and
+//!   `unsupported: lookaround`: they cannot be matched in linear time.
+//! - `\d`, `\w`, `\s`, `\b` and `(?i)` are ASCII-only in v1: `\d` does not
+//!   match other Unicode digits, and `(?i)` folds only `A-Z` and `a-z`, so
+//!   `(?i)straße` matches `"STRAßE"` but not `"STRASSE"`. Unicode classes
+//!   (`\p{...}`) are not supported.
+//! - Other flags (`(?m)`, `(?s)`, `(?x)`) are `unknown group flag`; `^` and
+//!   `$` always mean the whole text.
 
 import _ from "std::regex::ast";
 import _ from "std::regex::parser";
