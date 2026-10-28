@@ -369,6 +369,37 @@ export namespace Fs {
     return Fs::canonicalize(&tempPath);
   }
 
+  /// Creates a new directory under the temporary root (`tempDir`), named
+  /// `prefix` followed by six random characters and private to the current
+  /// user (mode 0700), and returns its canonical path. Two calls never return
+  /// the same directory, as `mkdtemp(3)` guarantees; the caller removes it
+  /// (`removeDirAll`). A `prefix` holding `/` or a NUL byte is rejected.
+  function createTempDir(prefix: str): Result<Path::PathBuf, Io::IoError> {
+    let prefixText: String = String::create(prefix);
+    let mut index: u64 = 0;
+
+    while (index < prefixText.length()) {
+      if (let Option::SOME(byte) = prefixText.byteAt(index)) {
+        if (byte == '/' as u8) {
+          return Result::ERROR(Fs::invalidPathError());
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut template: String = Fs::Sys::tempDirPath()!;
+    template.pushStr("/");
+    template.push(&prefixText);
+    template.pushStr("XXXXXX");
+
+    // Rejects a NUL byte, which would cut the path `mkdtemp` sees short.
+    let _validated: FFI::CString = Fs::validatedPath(&template)!;
+    let created: String = Fs::Sys::mkdtemp(&template)!;
+
+    return Fs::canonicalize(&created);
+  }
+
   /// Creates a single directory.
   function createDirRaw(path: str, mode: u32): Result<void, Io::IoError> {
     return Fs::Sys::mkdir(path, mode);

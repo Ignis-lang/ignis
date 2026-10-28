@@ -1,0 +1,229 @@
+//! `Http::MediaType`: a media type as written in `Content-Type`, parsed per
+//! RFC 9110 section 8.3.1.
+
+import isFieldWhitespace, isTokenByte, namesEqual from "./headers";
+
+function lowerAsciiByte(byte: u8): u8 {
+  if (byte >= 'A' as u8 && byte <= 'Z' as u8) {
+    return byte + 32;
+  }
+
+  return byte;
+}
+
+/// The bytes of `text` from `start` to `end`, ASCII uppercase folded.
+function lowerRange(text: &String, start: u64, end: u64): String {
+  let mut result: String = String::new();
+  let mut index: u64 = start;
+
+  while (index < end) {
+    result.pushByte(lowerAsciiByte(text.byteAt(index).unwrap()));
+    index += 1;
+  }
+
+  return result;
+}
+
+/// The first index at or after `start` that is not a space or a tab.
+function skipWhitespace(text: &String, start: u64): u64 {
+  let mut index: u64 = start;
+
+  while (index < text.length() && isFieldWhitespace(text.byteAt(index).unwrap())) {
+    index += 1;
+  }
+
+  return index;
+}
+
+/// The first index at or after `start` that is not a token byte.
+function tokenEnd(text: &String, start: u64): u64 {
+  let mut index: u64 = start;
+
+  while (index < text.length() && isTokenByte(text.byteAt(index).unwrap())) {
+    index += 1;
+  }
+
+  return index;
+}
+
+/// Whether `byte` may appear unescaped in a quoted string (`qdtext`).
+function isQuotedTextByte(byte: u8): boolean {
+  return byte == '\t' as u8 || byte == ' ' as u8 || byte == 0x21 || (byte >= 0x23 && byte != 0x5C && byte != 0x7F);
+}
+
+/// Whether `byte` may follow a backslash in a `quoted-pair`.
+function isQuotedPairByte(byte: u8): boolean {
+  return byte == '\t' as u8 || (byte >= 0x20 && byte != 0x7F);
+}
+
+/// A parsed parameter value and the index just past it.
+record MediaTypeValue {
+  public value: String;
+  public next: u64;
+}
+
+/// The token or quoted string starting at `start`, unescaped, or `NONE`
+/// when neither starts there or a quoted string is malformed.
+function consumeParameterValue(text: &String, start: u64): Option<MediaTypeValue> {
+  let length: u64 = text.length();
+
+  if (start >= length) {
+    return Option::NONE;
+  }
+
+  if (text.byteAt(start).unwrap() != '"' as u8) {
+    let end: u64 = tokenEnd(text, start);
+
+    if (end == start) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(MediaTypeValue { value: text.substringBytes(start, end), next: end });
+  }
+
+  let mut value: String = String::new();
+  let mut index: u64 = start + 1;
+
+  while (index < length) {
+    let byte: u8 = text.byteAt(index).unwrap();
+
+    if (byte == '"' as u8) {
+      return Option::SOME(MediaTypeValue { value: value, next: index + 1 });
+    }
+
+    if (byte == '\\' as u8) {
+      if (index + 1 >= length || !isQuotedPairByte(text.byteAt(index + 1).unwrap())) {
+        return Option::NONE;
+      }
+
+      value.pushByte(text.byteAt(index + 1).unwrap());
+      index += 2;
+      continue;
+    }
+
+    if (!isQuotedTextByte(byte)) {
+      return Option::NONE;
+    }
+
+    value.pushByte(byte);
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Media types.
+export namespace Http {
+  /// One media type parameter: its name lowercased and its value as
+  /// written, with the quotes and `quoted-pair` escapes of a quoted string
+  /// removed.
+  record MediaTypeParameter {
+    public name: String;
+    public value: String;
+  }
+
+  /// A media type such as `text/html; charset=utf-8`.
+  ///
+  /// `mainType`, `subtype` and parameter names are lowercased, since RFC
+  /// 9110 compares them ignoring case. Parameter values keep their case.
+  /// Parameters keep their order, and a repeated name is kept as separate
+  /// parameters.
+  record MediaType {
+    /// The type before the slash (`type` is a keyword).
+    public mainType: String;
+    public subtype: String;
+    public parameters: Vector<MediaTypeParameter>;
+
+    /// Parses `text` as `type "/" subtype *( OWS ";" OWS parameter )`,
+    /// where a parameter is `name=token` or `name="quoted string"`.
+    /// Whitespace around the whole value is ignored.
+    ///
+    /// Returns `NONE`, never panicking, when the type or the subtype is
+    /// missing or empty, a name or token value holds a non-token byte, a
+    /// quoted string is not terminated, or anything else follows the last
+    /// parameter, including an empty parameter after a `;`.
+    ///
+    /// ```ignis
+    /// let parsed: Option<Http::MediaType> = Http::MediaType::parse("Text/HTML; Charset=\"UTF-8\"");
+    /// // mainType "text", subtype "html", parameter "charset" = "UTF-8"
+    /// ```
+    public static parse(text: str): Option<MediaType> {
+      let source: String = String::create(text);
+      let length: u64 = source.length();
+      let typeStart: u64 = skipWhitespace(&source, 0);
+      let typeEnd: u64 = tokenEnd(&source, typeStart);
+
+      if (typeEnd == typeStart || typeEnd >= length || source.byteAt(typeEnd).unwrap() != '/' as u8) {
+        return Option::NONE;
+      }
+
+      let subtypeStart: u64 = typeEnd + 1;
+      let subtypeEnd: u64 = tokenEnd(&source, subtypeStart);
+
+      if (subtypeEnd == subtypeStart) {
+        return Option::NONE;
+      }
+
+      let mut parameters: Vector<MediaTypeParameter> = Vector::new<MediaTypeParameter>();
+      let mut index: u64 = skipWhitespace(&source, subtypeEnd);
+
+      while (index < length) {
+        if (source.byteAt(index).unwrap() != ';' as u8) {
+          return Option::NONE;
+        }
+
+        let nameStart: u64 = skipWhitespace(&source, index + 1);
+        let nameEnd: u64 = tokenEnd(&source, nameStart);
+
+        if (nameEnd == nameStart || nameEnd >= length || source.byteAt(nameEnd).unwrap() != '=' as u8) {
+          return Option::NONE;
+        }
+
+        let Option::SOME(parsed) = consumeParameterValue(&source, nameEnd + 1) else {
+          return Option::NONE;
+        };
+
+        parameters.push(MediaTypeParameter { name: lowerRange(&source, nameStart, nameEnd), value: parsed.value });
+        index = skipWhitespace(&source, parsed.next);
+      }
+
+      return Option::SOME(
+        MediaType {
+          mainType: lowerRange(&source, typeStart, typeEnd),
+          subtype: lowerRange(&source, subtypeStart, subtypeEnd),
+          parameters: parameters,
+        },
+      );
+    }
+
+    /// `type/subtype` without the parameters, such as `application/json`.
+    public essence(&self): String {
+      let mut result: String = self.mainType.clone();
+      result.pushStr("/");
+      result.pushStr(self.subtype.toStr());
+      return result;
+    }
+
+    /// The value of the first parameter named `name`, ignoring ASCII case.
+    public parameter(&self, name: str): Option<str> {
+      let mut index: u64 = 0;
+
+      while (index < self.parameters.length()) {
+        let entry: &MediaTypeParameter = self.parameters.get(index).unwrap();
+
+        if (namesEqual(&entry.name, name)) {
+          return Option::SOME(entry.value.toStr());
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The number of parameters, repeated names included.
+    public parameterCount(&self): u64 {
+      return self.parameters.length();
+    }
+  }
+}

@@ -379,6 +379,31 @@ export record String {
     return result;
   }
 
+  /// Copies `bytes` into a new `String` when they are valid UTF-8, and
+  /// returns `NONE` otherwise. Never panics; a `Vector<u8>` passes
+  /// `bytes.toSlice()`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let text: Option<String> = String::fromUtf8(body.toSlice());
+  /// ```
+  public static fromUtf8(bytes: u8[]): Option<String> {
+    let mut result: String = String::withCapacity(bytes.length() + 1);
+    let mut index: u64 = 0;
+
+    while (index < bytes.length()) {
+      result.pushByte(bytes[index]);
+      index += 1;
+    }
+
+    if (!result.isValidUtf8()) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(result);
+  }
+
   /// Creates an owned String from an `i8` value.
   ///
   /// # Numeric Overloads
@@ -1065,6 +1090,28 @@ export record String {
     }
 
     return result;
+  }
+
+  /// Whether the bytes are well-formed UTF-8: no stray continuation byte,
+  /// no truncated or overlong sequence, no surrogate, nothing past U+10FFFF.
+  public isValidUtf8(&self): boolean {
+    let mut offset: u64 = 0;
+
+    while (offset < self.len) {
+      let mut end: u64 = offset;
+      let first: u8 = self.data[offset];
+      let _decoded: Option<char> = Utf8::decodeAt(self, offset, &mut end);
+
+      // `decodeAt` covers an invalid sequence with U+FFFD and advances one
+      // byte; a well-formed non-ASCII scalar always spans two or more.
+      if (first >= 128 && end == offset + 1) {
+        return false;
+      }
+
+      offset = end;
+    }
+
+    return true;
   }
 
   /// Borrows the underlying bytes as a non-owning `u8[]` slice.

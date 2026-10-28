@@ -194,6 +194,9 @@ extern __fs_dir {
 extern __fs_path {
   /// POSIX `realpath`; resolves an absolute canonical path.
   function realpath(pathname: *u8, resolvedPath: *u8): *mut u8;
+  /// POSIX `mkdtemp`; creates a unique mode-0700 directory from `template`,
+  /// whose last six bytes are `XXXXXX`, replacing them in place.
+  function mkdtemp(template: *mut u8): *mut u8;
 }
 
 // errno access — platform-specific function name.
@@ -595,6 +598,19 @@ export namespace Fs::Sys {
     }
 
     return Result::OK(String::create("/tmp"));
+  }
+
+  /// Creates a unique directory from `template` (ending in `XXXXXX`) with
+  /// `mkdtemp(3)`, and returns the path it filled in.
+  function mkdtemp(template: &String): Result<String, Io::IoError> {
+    let buffer: String = template.clone();
+    let created: *mut u8 = __fs_path::mkdtemp(buffer.toStr() as *mut u8);
+
+    if (created == null) {
+      return Result::ERROR(lastError());
+    }
+
+    return Result::OK(buffer);
   }
 
   /// Creates a directory at `path` with the given permission `mode`.

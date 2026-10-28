@@ -442,3 +442,63 @@ export namespace Char {
     };
   }
 }
+
+/// Classification and case mapping of ASCII bytes, for parsers that read raw
+/// `u8` input (protocol headers, identifiers, numbers) rather than decoded
+/// `char` scalars. A byte of 128 or above is never in any class and maps to
+/// itself.
+export namespace Ascii {
+  /// Whether `byte` is `0`-`9`.
+  function isDigit(byte: u8): boolean {
+    return byte >= '0' as u8 && byte <= '9' as u8;
+  }
+
+  /// Whether `byte` is `0`-`9`, `a`-`f` or `A`-`F`.
+  function isHexDigit(byte: u8): boolean {
+    return Ascii::isDigit(byte) || (byte >= 'a' as u8 && byte <= 'f' as u8) || (byte >= 'A' as u8 && byte <= 'F' as u8);
+  }
+
+  /// Whether `byte` is `A`-`Z`.
+  function isUpper(byte: u8): boolean {
+    return byte >= 'A' as u8 && byte <= 'Z' as u8;
+  }
+
+  /// Whether `byte` is `a`-`z`.
+  function isLower(byte: u8): boolean {
+    return byte >= 'a' as u8 && byte <= 'z' as u8;
+  }
+
+  /// Whether `byte` is an ASCII letter.
+  function isAlpha(byte: u8): boolean {
+    return Ascii::isUpper(byte) || Ascii::isLower(byte);
+  }
+
+  /// Whether `byte` is an ASCII letter or digit.
+  function isAlphanumeric(byte: u8): boolean {
+    return Ascii::isAlpha(byte) || Ascii::isDigit(byte);
+  }
+
+  /// Whether `byte` is a space, a tab, a line feed, a form feed or a carriage
+  /// return (the JSON and HTTP whitespace set plus form feed).
+  function isWhitespace(byte: u8): boolean {
+    return byte == ' ' as u8 || byte == 9 || byte == 10 || byte == 12 || byte == 13;
+  }
+
+  /// `byte` with `A`-`Z` mapped to `a`-`z`.
+  function toLower(byte: u8): u8 {
+    if (Ascii::isUpper(byte)) {
+      return byte + 32;
+    }
+
+    return byte;
+  }
+
+  /// `byte` with `a`-`z` mapped to `A`-`Z`.
+  function toUpper(byte: u8): u8 {
+    if (Ascii::isLower(byte)) {
+      return byte - 32;
+    }
+
+    return byte;
+  }
+}

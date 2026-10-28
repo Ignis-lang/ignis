@@ -962,3 +962,68 @@ function floatToStringExtensionsMatchTheCreateOverloads(): void {
   Test::assertEq<str>(wide.toString().toStr(), "-0.5");
   Test::assertEq<str>(narrow.toString().toStr(), "2.25");
 }
+
+@test
+function fromUtf8AcceptsWellFormedBytes(): void {
+  let mut bytes: Vector<u8> = Vector::new<u8>();
+  bytes.push('a' as u8);
+  bytes.push(195);
+  bytes.push(177);
+  bytes.push(240);
+  bytes.push(159);
+  bytes.push(152);
+  bytes.push(128);
+  bytes.push(239);
+  bytes.push(191);
+  bytes.push(189);
+
+  let Option::SOME(text) = String::fromUtf8(bytes.toSlice()) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(text.length(), 10);
+  Test::assert(text.isValidUtf8());
+}
+
+@test
+function fromUtf8RejectsMalformedBytes(): void {
+  let mut stray: Vector<u8> = Vector::new<u8>();
+  stray.push('a' as u8);
+  stray.push(128);
+  Test::assert(String::fromUtf8(stray.toSlice()).isNone());
+
+  let mut truncated: Vector<u8> = Vector::new<u8>();
+  truncated.push(226);
+  truncated.push(130);
+  Test::assert(String::fromUtf8(truncated.toSlice()).isNone());
+
+  let mut overlong: Vector<u8> = Vector::new<u8>();
+  overlong.push(192);
+  overlong.push(175);
+  Test::assert(String::fromUtf8(overlong.toSlice()).isNone());
+
+  let mut surrogate: Vector<u8> = Vector::new<u8>();
+  surrogate.push(237);
+  surrogate.push(160);
+  surrogate.push(128);
+  Test::assert(String::fromUtf8(surrogate.toSlice()).isNone());
+
+  let mut beyond: Vector<u8> = Vector::new<u8>();
+  beyond.push(244);
+  beyond.push(144);
+  beyond.push(128);
+  beyond.push(128);
+  Test::assert(String::fromUtf8(beyond.toSlice()).isNone());
+}
+
+@test
+function fromUtf8AcceptsEmptyBytes(): void {
+  let empty: Vector<u8> = Vector::new<u8>();
+  let Option::SOME(text) = String::fromUtf8(empty.toSlice()) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(text.length(), 0);
+}

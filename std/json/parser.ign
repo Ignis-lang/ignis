@@ -53,15 +53,24 @@ export namespace Json {
   /// Parses exactly one JSON value starting at the first non-whitespace byte
   /// of `source`, building a full tree bounded by `MAX_DEPTH` (128, matching
   /// `serde_json`'s default recursion limit). Leading and trailing
-  /// whitespace around that value is allowed; trailing *non-whitespace*
-  /// content is not this function's problem to reject, because `serde_json`
-  /// only checks for it once a caller's target type has already accepted
-  /// the value.
+  /// whitespace around that value is allowed; anything else after it is
+  /// rejected with `trailing characters at line 1 column N`, `N` being the
+  /// 1-based position of its first byte, as `serde_json::from_str` reports.
   ///
   /// `Format::parseStdinRequest` does not call this for its own top-level
   /// scan; see this module's doc comment for why.
   function parse(source: &String): Result<JsonValue, String> {
-    return parseJsonValue(source, 0, 0);
+    let value: JsonValue = parseJsonValue(source, 0, 0)!;
+    let end: u64 = Json::skipWhitespace(source, value.endOffset);
+
+    if (end < source.length()) {
+      let mut message: String = String::create("trailing characters at line 1 column ");
+      let column: String = columnAtByte(end);
+      message.push(&column);
+      return Result::ERROR(message);
+    }
+
+    return Result::OK(value);
   }
 }
 

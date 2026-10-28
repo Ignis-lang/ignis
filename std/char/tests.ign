@@ -1,4 +1,5 @@
 import Test from "std::test";
+import Ascii from "./mod";
 
 @test
 function charClassifiesAsciiCharsWithExplicitAsciiNames(): void {
@@ -80,4 +81,36 @@ function charClassifiesHexDigitsWhitespaceAndCase(): void {
   Test::assertEq<char>(lowerZ.toAsciiLowercase(), lowerZ);
   Test::assertEq<char>(lowerA.toAsciiUppercase(), upperA);
   Test::assertEq<char>(upperZ.toAsciiUppercase(), upperZ);
+}
+
+@test
+function asciiClassifiesBytes(): void {
+  Test::assert(Ascii::isDigit('0' as u8) && Ascii::isDigit('9' as u8));
+  Test::assert(!Ascii::isDigit('/' as u8) && !Ascii::isDigit(':' as u8));
+  Test::assert(Ascii::isHexDigit('f' as u8) && Ascii::isHexDigit('F' as u8) && Ascii::isHexDigit('7' as u8));
+  Test::assert(!Ascii::isHexDigit('g' as u8) && !Ascii::isHexDigit('G' as u8));
+  Test::assert(Ascii::isUpper('A' as u8) && Ascii::isUpper('Z' as u8) && !Ascii::isUpper('a' as u8));
+  Test::assert(Ascii::isLower('a' as u8) && Ascii::isLower('z' as u8) && !Ascii::isLower('Z' as u8));
+  Test::assert(Ascii::isAlpha('q' as u8) && !Ascii::isAlpha('1' as u8) && !Ascii::isAlpha('@' as u8));
+  Test::assert(Ascii::isAlphanumeric('1' as u8) && Ascii::isAlphanumeric('Q' as u8) && !Ascii::isAlphanumeric('_' as u8));
+  Test::assert(Ascii::isWhitespace(' ' as u8) && Ascii::isWhitespace(9) && Ascii::isWhitespace(10) && Ascii::isWhitespace(12) && Ascii::isWhitespace(13));
+  Test::assert(!Ascii::isWhitespace(11) && !Ascii::isWhitespace('x' as u8));
+}
+
+@test
+function asciiLeavesNonAsciiBytesUnclassified(): void {
+  let byte: u8 = 195;
+  Test::assert(!Ascii::isDigit(byte) && !Ascii::isHexDigit(byte) && !Ascii::isAlpha(byte) && !Ascii::isWhitespace(byte));
+  Test::assertEq<u8>(Ascii::toLower(byte), byte);
+  Test::assertEq<u8>(Ascii::toUpper(byte), byte);
+}
+
+@test
+function asciiMapsCase(): void {
+  Test::assertEq<u8>(Ascii::toLower('A' as u8), 'a' as u8);
+  Test::assertEq<u8>(Ascii::toLower('z' as u8), 'z' as u8);
+  Test::assertEq<u8>(Ascii::toLower('[' as u8), '[' as u8);
+  Test::assertEq<u8>(Ascii::toUpper('a' as u8), 'A' as u8);
+  Test::assertEq<u8>(Ascii::toUpper('Z' as u8), 'Z' as u8);
+  Test::assertEq<u8>(Ascii::toUpper('`' as u8), '`' as u8);
 }
