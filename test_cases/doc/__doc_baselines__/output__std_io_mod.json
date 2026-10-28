@@ -377,7 +377,7 @@
     },
     {
       "name": "std::text",
-      "doc": "  \n# Text  \n  \nPosition conversion between UTF-8 byte offsets and editor positions.  \n  \n## Overview  \n  \nCompiler spans are UTF-8 byte offsets into a source text. Editors that  \nspeak the Language Server Protocol address the same text as a 0-based line  \nplus a 0-based column counted in UTF-16 code units, the protocol's default  \nposition encoding. `Text::LineIndex` converts in both directions.  \n  \n```text  \n  source: \"a😀b\\n\"          bytes: a=0  😀=1..5  b=5  \\n=6  \n  \n  byte offset 5  ── position ──▶  line 0, character 3   (a=1, 😀=2)  \n  line 0, character 3  ── offset ──▶  byte offset 5  \n```  \n  \n## APIs  \n  \n| Function                          | Description                                  |  \n|-----------------------------------|----------------------------------------------|  \n| `Text::LineIndex::create`         | Index a source text (takes ownership)        |  \n| `Text::LineIndex::position`       | Byte offset to line and UTF-16 column        |  \n| `Text::LineIndex::offset`         | Line and UTF-16 column to byte offset        |  \n| `Text::LineIndex::endPosition`    | Position of the end of the text              |  \n| `Text::LineIndex::lineCount`      | Number of lines (a trailing `\\n` opens one)  |  \n| `Text::utf16Length`               | UTF-16 code units of the whole text          |  \n  \n## Semantics  \n  \nThe rules mirror the host language server (`crates/ignis_lsp/src/convert.rs`):  \n  \n- Only `\\n` starts a new line. In CRLF text the `\\r` is the last column of  \n  its line, so the offset just before `\\n` has a column one past the text.  \n- A character outside the Basic Multilingual Plane (4 UTF-8 bytes) counts as  \n  two UTF-16 units, every other character as one.  \n- `position` of an offset inside a multi-byte character reports the column  \n  of that character's first byte. An offset past the end reports the end.  \n- `offset` of a column past the end of a line walks through the line break  \n  and lands on the start of the next line. A column that falls inside a  \n  surrogate pair lands after the character. A line past the last one  \n  returns the text length.  \n- The host only indexes valid UTF-8. Here, a byte that does not start a  \n  complete, well-formed sequence counts as one character of one byte and one  \n  UTF-16 unit, the width of the U+FFFD replacement character.  \n  \n## Example  \n  \n```ignis  \nimport Text from \"std::text\";  \n  \nfunction main(): i32 {  \n  let index: Text::LineIndex = Text::LineIndex::create(String::create(\"hola\\nmundo\\n\"));  \n  \n  let position: Text::Position = index.position(7);  \n  // position.line == 1, position.character == 2  \n  \n  let offset: u64 = index.offset(Text::Position { line: 1, character: 2 });  \n  // offset == 7  \n  return 0;  \n}  \n```"
+      "doc": "  \n# Text  \n  \nPosition conversion between UTF-8 byte offsets and editor positions, and  \nstrict parsers for numbers, UUIDs and semantic versions.  \n  \n## Overview  \n  \nCompiler spans are UTF-8 byte offsets into a source text. Editors that  \nspeak the Language Server Protocol address the same text as a 0-based line  \nplus a 0-based column counted in UTF-16 code units, the protocol's default  \nposition encoding. `Text::LineIndex` converts in both directions.  \n  \n```text  \n  source: \"a😀b\\n\"          bytes: a=0  😀=1..5  b=5  \\n=6  \n  \n  byte offset 5  ── position ──▶  line 0, character 3   (a=1, 😀=2)  \n  line 0, character 3  ── offset ──▶  byte offset 5  \n```  \n  \n## APIs  \n  \n| Function                          | Description                                  |  \n|-----------------------------------|----------------------------------------------|  \n| `Text::LineIndex::create`         | Index a source text (takes ownership)        |  \n| `Text::LineIndex::position`       | Byte offset to line and UTF-16 column        |  \n| `Text::LineIndex::offset`         | Line and UTF-16 column to byte offset        |  \n| `Text::LineIndex::endPosition`    | Position of the end of the text              |  \n| `Text::LineIndex::lineCount`      | Number of lines (a trailing `\\n` opens one)  |  \n| `Text::utf16Length`               | UTF-16 code units of the whole text          |  \n| `Text::parseI8` .. `Text::parseI64` | Strict decimal signed integer, or `NONE`   |  \n| `Text::parseU8` .. `Text::parseU64` | Strict decimal unsigned integer, or `NONE` |  \n| `Text::parseF64`                  | Strict decimal float, or `NONE`              |  \n| `Text::isUuid`                    | Canonical 8-4-4-4-12 hyphenated UUID         |  \n| `Text::uuidVersion`               | Version digit of a canonical UUID            |  \n| `Text::Semver::parse`             | semver.org 2.0.0 version, or `NONE`          |  \n| `Text::Semver::compare`           | Semver precedence, build metadata ignored    |  \n| `Text::Semver::toString`          | Format back to `MAJOR.MINOR.PATCH[-PRE][+BUILD]` |  \n  \n## Semantics  \n  \nThe rules mirror the host language server (`crates/ignis_lsp/src/convert.rs`):  \n  \n- Only `\\n` starts a new line. In CRLF text the `\\r` is the last column of  \n  its line, so the offset just before `\\n` has a column one past the text.  \n- A character outside the Basic Multilingual Plane (4 UTF-8 bytes) counts as  \n  two UTF-16 units, every other character as one.  \n- `position` of an offset inside a multi-byte character reports the column  \n  of that character's first byte. An offset past the end reports the end.  \n- `offset` of a column past the end of a line walks through the line break  \n  and lands on the start of the next line. A column that falls inside a  \n  surrogate pair lands after the character. A line past the last one  \n  returns the text length.  \n- The host only indexes valid UTF-8. Here, a byte that does not start a  \n  complete, well-formed sequence counts as one character of one byte and one  \n  UTF-16 unit, the width of the U+FFFD replacement character.  \n  \n## Parsing  \n  \nEvery parser reads the whole input and returns `NONE` instead of a  \npartial result: no surrounding whitespace, no trailing bytes.  \n  \n- Integers are `[+-]?[0-9]+` (`-` only for signed types). Leading zeros are  \n  allowed. A value outside the target type, including one past either end,  \n  is `NONE`; the minimum of each signed type (`-128` for `i8`) parses.  \n- Floats are `[+-]?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?`. `.5`, `1.`, `e5`,  \n  `1e`, `inf`, `nan` and hexadecimal floats are rejected, and so is a value  \n  that overflows `f64`. Rounding is C `strtod`'s.  \n- UUIDs are 36 bytes: hex digits in either case, `-` at 8, 13, 18 and 23.  \n  The version is the hex digit at byte 14; neither it nor the variant is  \n  validated by `isUuid`.  \n- `Text::Semver` follows semver.org 2.0.0: core numbers and numeric  \n  prerelease identifiers have no leading zeros, identifiers are non-empty  \n  `[0-9A-Za-z-]`, and core numbers must fit `u64`.  \n  \n## Example  \n  \n```ignis  \nimport Text from \"std::text\";  \n  \nfunction main(): i32 {  \n  let index: Text::LineIndex = Text::LineIndex::create(String::create(\"hola\\nmundo\\n\"));  \n  \n  let position: Text::Position = index.position(7);  \n  // position.line == 1, position.character == 2  \n  \n  let offset: u64 = index.offset(Text::Position { line: 1, character: 2 });  \n  // offset == 7  \n  \n  let port: Option<u16> = Text::parseU16(\"8080\");  \n  // port == Option::SOME(8080)  \n  \n  let older: Text::Semver = Text::Semver::parse(\"1.0.0-rc.1\").unwrap();  \n  let newer: Text::Semver = Text::Semver::parse(\"1.0.0\").unwrap();  \n  // older.compare(&newer) < 0  \n  return 0;  \n}  \n```"
     },
     {
       "name": "std::thread",
@@ -20085,7 +20085,7 @@
       "kind": "namespace",
       "visibility": "public",
       "signature": "namespace Text",
-      "doc": "UTF-8 to UTF-16 position conversion for editor protocols."
+      "doc": "UTF-8 to UTF-16 position conversion for editor protocols, and strict  \nparsers for numbers, UUIDs and semantic versions."
     },
     {
       "module": "std::text",
@@ -20177,12 +20177,350 @@
     },
     {
       "module": "std::text",
+      "path": "std::text::Text::Semver",
+      "name": "Semver",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record Semver",
+      "doc": "A semantic version as defined by semver.org 2.0.0:  \n`MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`.",
+      "members": [
+        {
+          "name": "major",
+          "kind": "field",
+          "signature": "major: u64",
+          "doc": "Major version."
+        },
+        {
+          "name": "minor",
+          "kind": "field",
+          "signature": "minor: u64",
+          "doc": "Minor version."
+        },
+        {
+          "name": "patch",
+          "kind": "field",
+          "signature": "patch: u64",
+          "doc": "Patch version."
+        },
+        {
+          "name": "prerelease",
+          "kind": "field",
+          "signature": "prerelease: Vector<String>",
+          "doc": "Dot-separated prerelease identifiers, empty when there is none."
+        },
+        {
+          "name": "build",
+          "kind": "field",
+          "signature": "build: Vector<String>",
+          "doc": "Dot-separated build metadata identifiers, empty when there are none."
+        },
+        {
+          "name": "parse",
+          "kind": "method",
+          "signature": "static parse(text: str): Option<Semver>",
+          "doc": "Parses a semantic version covering the whole of `text`.  \n  \nThe three core numbers are `0|[1-9][0-9]*` and must fit `u64`.  \nPrerelease and build identifiers are non-empty runs of `[0-9A-Za-z-]`;  \nan all-digit prerelease identifier may not have a leading zero. `NONE`  \nfor any other shape, including a leading `v` or surrounding whitespace."
+        },
+        {
+          "name": "compare",
+          "kind": "method",
+          "signature": "compare(&self, other: &Semver): i32",
+          "doc": "Semver precedence of `self` against `other`: negative, zero or positive.  \n  \nMajor, minor and patch compare numerically. A version with prerelease  \nidentifiers ranks below the same version without. Prerelease lists  \ncompare identifier by identifier: numeric ones by value and below  \nalphanumeric ones, which compare in ASCII order; when every shared  \nidentifier is equal the shorter list ranks lower. Build metadata is  \nignored, so `1.0.0+a` and `1.0.0+b` compare equal."
+        },
+        {
+          "name": "toString",
+          "kind": "method",
+          "signature": "toString(&self): String",
+          "doc": "Formats the version as `MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`, the  \ntext `parse` accepts back."
+        }
+      ]
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::isUuid",
+      "name": "isUuid",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function isUuid(text: str): boolean",
+      "doc": "Whether `text` is a UUID in the canonical hyphenated form: 32 hex digits  \n(either case) grouped 8-4-4-4-12 by `-`. The version and variant digits  \nare not checked."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseF64",
+      "name": "parseF64",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseF64(text: str): Option<f64>",
+      "doc": "Parses a decimal floating-point number:  \n`[+-]?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?`, covering the whole input.  \n  \nBoth sides of a `.` need digits, so `.5` and `1.` are rejected, as are  \n`e5`, `1e`, whitespace, `inf`, `nan` and hexadecimal forms. The value is  \nrounded by C `strtod`. A value too large for `f64` is `NONE` instead of  \ninfinity; one too small rounds toward zero."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseI16",
+      "name": "parseI16",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseI16(text: str): Option<i16>",
+      "doc": "Parses a strict decimal `i16` with the rules of `parseI8`, range  \n`-32768..=32767`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseI32",
+      "name": "parseI32",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseI32(text: str): Option<i32>",
+      "doc": "Parses a strict decimal `i32` with the rules of `parseI8`, range  \n`-2147483648..=2147483647`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseI64",
+      "name": "parseI64",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseI64(text: str): Option<i64>",
+      "doc": "Parses a strict decimal `i64` with the rules of `parseI8`, range  \n`-9223372036854775808..=9223372036854775807`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseI8",
+      "name": "parseI8",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseI8(text: str): Option<i8>",
+      "doc": "Parses a strict decimal `i8`: an optional `+` or `-`, then one or more  \nASCII digits and nothing else. `NONE` for empty input, whitespace, any  \nother byte, or a value outside `-128..=127`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseU16",
+      "name": "parseU16",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseU16(text: str): Option<u16>",
+      "doc": "Parses a strict decimal `u16` with the rules of `parseU8`, up to 65535."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseU32",
+      "name": "parseU32",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseU32(text: str): Option<u32>",
+      "doc": "Parses a strict decimal `u32` with the rules of `parseU8`, up to 4294967295."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseU64",
+      "name": "parseU64",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseU64(text: str): Option<u64>",
+      "doc": "Parses a strict decimal `u64` with the rules of `parseU8`, up to  \n18446744073709551615."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::parseU8",
+      "name": "parseU8",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function parseU8(text: str): Option<u8>",
+      "doc": "Parses a strict decimal `u8`: an optional `+`, then one or more ASCII  \ndigits and nothing else. `NONE` for empty input, a `-` (even `-0`),  \nwhitespace, any other byte, or a value above 255."
+    },
+    {
+      "module": "std::text",
       "path": "std::text::Text::utf16Length",
       "name": "utf16Length",
       "kind": "function",
       "visibility": "private",
       "signature": "function utf16Length(text: &String): u64",
       "doc": "Returns the number of UTF-16 code units needed to encode `text`, with  \nthe same per-byte rule as `LineIndex` for bytes that are not UTF-8."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::Text::uuidVersion",
+      "name": "uuidVersion",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function uuidVersion(text: str): Option<u8>",
+      "doc": "The version of a canonical UUID: the value of its 13th hex digit (the  \nfirst of the third group), 0 to 15. `NONE` when `isUuid` rejects `text`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::TextMagnitude",
+      "name": "TextMagnitude",
+      "kind": "record",
+      "visibility": "private",
+      "signature": "record TextMagnitude",
+      "doc": "A strict decimal integer split into its sign and magnitude.",
+      "members": [
+        {
+          "name": "negative",
+          "kind": "field",
+          "signature": "negative: boolean"
+        },
+        {
+          "name": "magnitude",
+          "kind": "field",
+          "signature": "magnitude: u64"
+        }
+      ]
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::__text_libc",
+      "name": "__text_libc",
+      "kind": "namespace",
+      "visibility": "public",
+      "signature": "namespace __text_libc"
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::__text_libc::strtod",
+      "name": "strtod",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function strtod(text: *u8, end: *mut *mut u8): f64",
+      "doc": "C `strtod`; converts the longest decimal prefix of `text` to a double."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textCompareIdentifiers",
+      "name": "textCompareIdentifiers",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textCompareIdentifiers(left: &String, right: &String): i32",
+      "doc": "Precedence of two prerelease identifiers: numeric ones compare by value  \nand rank below alphanumeric ones, which compare by ASCII byte order."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textCompareU64",
+      "name": "textCompareU64",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textCompareU64(left: u64, right: u64): i32",
+      "doc": "Sign of `left - right` as -1, 0 or 1."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textDigitsEnd",
+      "name": "textDigitsEnd",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textDigitsEnd(bytes: u8[], start: u64): u64",
+      "doc": "The index just past a run of decimal digits starting at `start`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textHexValue",
+      "name": "textHexValue",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textHexValue(byte: u8): u8",
+      "doc": "The value of the hexadecimal digit `byte`, which must satisfy `textIsHexDigit`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textIsDecimalFloat",
+      "name": "textIsDecimalFloat",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textIsDecimalFloat(bytes: u8[]): boolean",
+      "doc": "Whether all of `bytes` is `[+-]?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textIsDigit",
+      "name": "textIsDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textIsDigit(byte: u8): boolean"
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textIsHexDigit",
+      "name": "textIsHexDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textIsHexDigit(byte: u8): boolean"
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textIsIdentifierByte",
+      "name": "textIsIdentifierByte",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textIsIdentifierByte(byte: u8): boolean",
+      "doc": "Whether `byte` may appear in a semantic version identifier: `[0-9A-Za-z-]`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textIsNumericIdentifier",
+      "name": "textIsNumericIdentifier",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textIsNumericIdentifier(identifier: &String): boolean",
+      "doc": "Whether every byte of `identifier` is a decimal digit."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textNumericIdentifierEnd",
+      "name": "textNumericIdentifierEnd",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textNumericIdentifierEnd(bytes: u8[], start: u64): u64",
+      "doc": "The index just past a semantic version numeric identifier (`0|[1-9][0-9]*`)  \nat `start`, or `start` when none is there."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textParseMagnitude",
+      "name": "textParseMagnitude",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textParseMagnitude(bytes: u8[], allowMinus: boolean, positiveLimit: u64, negativeLimit: u64): Option<TextMagnitude>",
+      "doc": "Reads `[+-]?[0-9]+` covering all of `bytes`. The magnitude may not exceed  \n`positiveLimit`, or `negativeLimit` after a `-`. `NONE` when the shape is  \nwrong, a `-` is given with `allowMinus` unset, or the value is out of range."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textParseSigned",
+      "name": "textParseSigned",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textParseSigned(text: str, maximum: u64): Option<i64>",
+      "doc": "Strict signed parse whose range is `-(maximum + 1)..=maximum`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textParseUnsigned",
+      "name": "textParseUnsigned",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textParseUnsigned(text: str, maximum: u64): Option<u64>",
+      "doc": "Strict unsigned parse whose range is `0..=maximum`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textPushIdentifiers",
+      "name": "textPushIdentifiers",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textPushIdentifiers(result: &mut String, identifiers: &Vector<String>): void",
+      "doc": "Appends `identifiers` joined by `.` to `result`."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textReadIdentifiers",
+      "name": "textReadIdentifiers",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textReadIdentifiers(bytes: u8[], start: u64, prerelease: boolean, identifiers: &mut Vector<String>): u64",
+      "doc": "Reads a dot-separated list of `[0-9A-Za-z-]+` identifiers starting at  \n`start` into `identifiers`. With `prerelease` set, an all-digit identifier  \nmay not have a leading zero. Returns the index past the list, or `start`  \nwhen it is empty or malformed."
+    },
+    {
+      "module": "std::text",
+      "path": "std::text::textReadVersionNumber",
+      "name": "textReadVersionNumber",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function textReadVersionNumber(bytes: u8[], start: u64, value: &mut u64): u64",
+      "doc": "Reads the version core number `0|[1-9][0-9]*` at `start` into `value`,  \nreturning the index past it, or `start` when it is missing or above `u64`."
     },
     {
       "module": "std::text",

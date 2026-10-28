@@ -233,3 +233,331 @@ function utf8SequenceLengthRejectsOverlongAndSurrogateForms(): void {
   Test::assertEq<u64>(textUtf8SequenceLength(&valid, 5), 4);
   Test::assertEq<u64>(Text::utf16Length(&valid), 4);
 }
+
+function textAssertNone<T>(value: Option<T>): void {
+  Test::assert(value.isNone());
+}
+
+@test
+function parseI8AcceptsItsRangeAndSigns(): void {
+  Test::assertEq<i8>(Text::parseI8("0").unwrap(), 0);
+  Test::assertEq<i8>(Text::parseI8("127").unwrap(), 127);
+  Test::assertEq<i8>(Text::parseI8("-128").unwrap(), -128);
+  Test::assertEq<i8>(Text::parseI8("+5").unwrap(), 5);
+  Test::assertEq<i8>(Text::parseI8("-0").unwrap(), 0);
+  Test::assertEq<i8>(Text::parseI8("007").unwrap(), 7);
+  textAssertNone<i8>(Text::parseI8("128"));
+  textAssertNone<i8>(Text::parseI8("-129"));
+}
+
+@test
+function parseI16AcceptsItsRange(): void {
+  Test::assertEq<i16>(Text::parseI16("32767").unwrap(), 32767);
+  Test::assertEq<i16>(Text::parseI16("-32768").unwrap(), -32768);
+  textAssertNone<i16>(Text::parseI16("32768"));
+  textAssertNone<i16>(Text::parseI16("-32769"));
+}
+
+@test
+function parseI32AcceptsItsRange(): void {
+  Test::assertEq<i32>(Text::parseI32("2147483647").unwrap(), 2147483647);
+  Test::assertEq<i32>(Text::parseI32("-2147483648").unwrap(), minOf<i32>());
+  textAssertNone<i32>(Text::parseI32("2147483648"));
+  textAssertNone<i32>(Text::parseI32("-2147483649"));
+}
+
+@test
+function parseI64AcceptsItsRange(): void {
+  Test::assertEq<i64>(Text::parseI64("9223372036854775807").unwrap(), maxOf<i64>());
+  Test::assertEq<i64>(Text::parseI64("-9223372036854775808").unwrap(), minOf<i64>());
+  textAssertNone<i64>(Text::parseI64("9223372036854775808"));
+  textAssertNone<i64>(Text::parseI64("-9223372036854775809"));
+  textAssertNone<i64>(Text::parseI64("99999999999999999999999"));
+}
+
+@test
+function parseU8AcceptsItsRangeAndRejectsMinus(): void {
+  Test::assertEq<u8>(Text::parseU8("0").unwrap(), 0);
+  Test::assertEq<u8>(Text::parseU8("255").unwrap(), 255);
+  Test::assertEq<u8>(Text::parseU8("+255").unwrap(), 255);
+  textAssertNone<u8>(Text::parseU8("256"));
+  textAssertNone<u8>(Text::parseU8("-1"));
+  textAssertNone<u8>(Text::parseU8("-0"));
+}
+
+@test
+function parseU16AcceptsItsRange(): void {
+  Test::assertEq<u16>(Text::parseU16("65535").unwrap(), 65535);
+  textAssertNone<u16>(Text::parseU16("65536"));
+  textAssertNone<u16>(Text::parseU16("-1"));
+}
+
+@test
+function parseU32AcceptsItsRange(): void {
+  Test::assertEq<u32>(Text::parseU32("4294967295").unwrap(), 4294967295);
+  textAssertNone<u32>(Text::parseU32("4294967296"));
+  textAssertNone<u32>(Text::parseU32("-1"));
+}
+
+@test
+function parseU64AcceptsItsRange(): void {
+  Test::assertEq<u64>(Text::parseU64("18446744073709551615").unwrap(), maxOf<u64>());
+  textAssertNone<u64>(Text::parseU64("18446744073709551616"));
+  textAssertNone<u64>(Text::parseU64("184467440737095516150"));
+  textAssertNone<u64>(Text::parseU64("-1"));
+}
+
+@test
+function parseIntegersRejectMalformedInput(): void {
+  textAssertNone<i32>(Text::parseI32(""));
+  textAssertNone<i32>(Text::parseI32("+"));
+  textAssertNone<i32>(Text::parseI32("-"));
+  textAssertNone<i32>(Text::parseI32(" 1"));
+  textAssertNone<i32>(Text::parseI32("1 "));
+  textAssertNone<i32>(Text::parseI32("1a"));
+  textAssertNone<i32>(Text::parseI32("0x10"));
+  textAssertNone<i32>(Text::parseI32("1.0"));
+  textAssertNone<i32>(Text::parseI32("+-1"));
+  textAssertNone<i32>(Text::parseI32("--1"));
+  textAssertNone<u64>(Text::parseU64(""));
+  textAssertNone<u64>(Text::parseU64("+"));
+  textAssertNone<u64>(Text::parseU64("1_000"));
+}
+
+@test
+function parseF64AcceptsDecimalAndExponentForms(): void {
+  Test::assert(Text::parseF64("1").unwrap() == 1.0);
+  Test::assert(Text::parseF64("-2.5").unwrap() == -2.5);
+  Test::assert(Text::parseF64("+0.25").unwrap() == 0.25);
+  Test::assert(Text::parseF64("1e9").unwrap() == 1000000000.0);
+  Test::assert(Text::parseF64("2.5E-3").unwrap() == 0.0025);
+  Test::assert(Text::parseF64("1e+2").unwrap() == 100.0);
+  Test::assert(Text::parseF64("0.1").unwrap() == 0.1);
+  Test::assert(Text::parseF64("1e-400").unwrap() == 0.0);
+}
+
+@test
+function parseF64RejectsMalformedInput(): void {
+  textAssertNone<f64>(Text::parseF64(""));
+  textAssertNone<f64>(Text::parseF64("1."));
+  textAssertNone<f64>(Text::parseF64(".5"));
+  textAssertNone<f64>(Text::parseF64("e5"));
+  textAssertNone<f64>(Text::parseF64("1e"));
+  textAssertNone<f64>(Text::parseF64("1e+"));
+  textAssertNone<f64>(Text::parseF64("-"));
+  textAssertNone<f64>(Text::parseF64(" 1"));
+  textAssertNone<f64>(Text::parseF64("1 "));
+  textAssertNone<f64>(Text::parseF64("1.5x"));
+  textAssertNone<f64>(Text::parseF64("inf"));
+  textAssertNone<f64>(Text::parseF64("nan"));
+  textAssertNone<f64>(Text::parseF64("0x1p3"));
+  textAssertNone<f64>(Text::parseF64("1e999"));
+}
+
+@test
+function isUuidAcceptsTheCanonicalFormInEitherCase(): void {
+  Test::assert(Text::isUuid("123e4567-e89b-12d3-a456-426614174000"));
+  Test::assert(Text::isUuid("550E8400-E29B-41D4-A716-446655440000"));
+  Test::assert(Text::isUuid("00000000-0000-0000-0000-000000000000"));
+}
+
+@test
+function isUuidRejectsOtherShapes(): void {
+  Test::assert(!Text::isUuid(""));
+  Test::assert(!Text::isUuid("123e4567-e89b-12d3-a456-42661417400"));
+  Test::assert(!Text::isUuid("123e4567-e89b-12d3-a456-4266141740000"));
+  Test::assert(!Text::isUuid("123e4567e89b12d3a456426614174000"));
+  Test::assert(!Text::isUuid("123e4567-e89b-12d3-a4564-26614174000"));
+  Test::assert(!Text::isUuid("123e4567_e89b_12d3_a456_426614174000"));
+  Test::assert(!Text::isUuid("123e4567-e89b-12d3-a456-42661417400g"));
+  Test::assert(!Text::isUuid("{123e4567-e89b-12d3-a456-426614174000}"));
+}
+
+@test
+function uuidVersionReadsTheVersionDigit(): void {
+  Test::assertEq<u8>(Text::uuidVersion("123e4567-e89b-12d3-a456-426614174000").unwrap(), 1);
+  Test::assertEq<u8>(Text::uuidVersion("550e8400-e29b-41d4-a716-446655440000").unwrap(), 4);
+  Test::assertEq<u8>(Text::uuidVersion("017f22e2-79b0-7cc3-98c4-dc0c0c07398f").unwrap(), 7);
+  Test::assertEq<u8>(Text::uuidVersion("00000000-0000-0000-0000-000000000000").unwrap(), 0);
+  Test::assertEq<u8>(Text::uuidVersion("ffffffff-ffff-ffff-ffff-ffffffffffff").unwrap(), 15);
+  Test::assertEq<u8>(Text::uuidVersion("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF").unwrap(), 15);
+  textAssertNone<u8>(Text::uuidVersion("550e8400-e29b-41d4-a716-44665544000"));
+}
+
+function textSemverOf(text: str): Text::Semver {
+  return Text::Semver::parse(text).unwrap();
+}
+
+@test
+function semverParsesEveryPart(): void {
+  let version: Text::Semver = textSemverOf("1.2.3-alpha.1+build.5");
+
+  Test::assertEq<u64>(version.major, 1);
+  Test::assertEq<u64>(version.minor, 2);
+  Test::assertEq<u64>(version.patch, 3);
+  Test::assertEq<u64>(version.prerelease.length(), 2);
+  Test::assert(version.prerelease.get(0).unwrap().equals("alpha"));
+  Test::assert(version.prerelease.get(1).unwrap().equals("1"));
+  Test::assertEq<u64>(version.build.length(), 2);
+  Test::assert(version.build.get(0).unwrap().equals("build"));
+  Test::assert(version.build.get(1).unwrap().equals("5"));
+}
+
+@test
+function semverAcceptsTheSemverOrgExamples(): void {
+  let examples: str[] = [
+    "0.0.4",
+    "1.2.3",
+    "10.20.30",
+    "1.1.2-prerelease+meta",
+    "1.1.2+meta",
+    "1.1.2+meta-valid",
+    "1.0.0-alpha",
+    "1.0.0-beta",
+    "1.0.0-alpha.beta",
+    "1.0.0-alpha.beta.1",
+    "1.0.0-alpha.1",
+    "1.0.0-alpha0.valid",
+    "1.0.0-alpha.0valid",
+    "1.0.0-alpha-a.b-c-somethinglong+build.1-aef.1-its-okay",
+    "1.0.0-rc.1+build.1",
+    "2.0.0-rc.1+build.123",
+    "1.2.3-beta",
+    "10.2.3-DEV-SNAPSHOT",
+    "1.2.3-SNAPSHOT-123",
+    "2.0.0+build.1848",
+    "2.0.1-alpha.1227",
+    "1.0.0-alpha+beta",
+    "1.2.3----RC-SNAPSHOT.12.9.1--.12+788",
+    "1.2.3----R-S.12.9.1--.12+meta",
+    "1.2.3----RC-SNAPSHOT.12.9.1--.12",
+    "1.0.0+0.build.1-rc.10000aaa-kk-0.1",
+    "18446744073709551615.0.0",
+    "1.0.0-0A.is.legal",
+    "1.0.0+001",
+  ];
+  let mut index: u64 = 0;
+
+  while (index < examples.length()) {
+    let version: Text::Semver = textSemverOf(examples[index]);
+    Test::assert(version.toString().equals(examples[index]));
+    index += 1;
+  }
+}
+
+@test
+function semverRejectsTheSemverOrgCounterexamples(): void {
+  let examples: str[] = [
+    "",
+    "1",
+    "1.2",
+    "1.2.3-0123",
+    "1.2.3-0123.0123",
+    "1.1.2+.123",
+    "+invalid",
+    "-invalid",
+    "-invalid+invalid",
+    "-invalid.01",
+    "alpha",
+    "alpha.beta",
+    "alpha.beta.1",
+    "alpha.1",
+    "alpha+beta",
+    "alpha_beta",
+    "alpha.",
+    "alpha..",
+    "beta",
+    "1.0.0-alpha_beta",
+    "-alpha.",
+    "1.0.0-alpha..",
+    "1.0.0-alpha..1",
+    "1.0.0-alpha...1",
+    "1.0.0-alpha....1",
+    "1.0.0-alpha.....1",
+    "1.0.0-alpha......1",
+    "1.0.0-alpha.......1",
+    "01.1.1",
+    "1.01.1",
+    "1.1.01",
+    "1.2.3.DEV",
+    "1.2-SNAPSHOT",
+    "1.2.31.2.3----RC-SNAPSHOT.12.09.1--..12+788",
+    "1.2-RC-SNAPSHOT",
+    "-1.0.3-gamma+b7718",
+    "+justmeta",
+    "9.8.7+meta+meta",
+    "9.8.7-whatever+meta+meta",
+    "1.0.0-",
+    "1.0.0+",
+    "1.0.0-alpha.",
+    "v1.0.0",
+    " 1.0.0",
+    "1.0.0 ",
+    "18446744073709551616.0.0",
+  ];
+  let mut index: u64 = 0;
+
+  while (index < examples.length()) {
+    textAssertNone<Text::Semver>(Text::Semver::parse(examples[index]));
+    index += 1;
+  }
+}
+
+@test
+function semverPrecedenceFollowsTheSemverOrgOrder(): void {
+  let ordered: str[] = [
+    "1.0.0-alpha",
+    "1.0.0-alpha.1",
+    "1.0.0-alpha.beta",
+    "1.0.0-beta",
+    "1.0.0-beta.2",
+    "1.0.0-beta.11",
+    "1.0.0-rc.1",
+    "1.0.0",
+    "1.0.1",
+    "1.1.0",
+    "1.10.0",
+    "2.0.0",
+  ];
+  let mut index: u64 = 0;
+
+  while (index + 1 < ordered.length()) {
+    let lower: Text::Semver = textSemverOf(ordered[index]);
+    let higher: Text::Semver = textSemverOf(ordered[index + 1]);
+
+    Test::assert(lower.compare(&higher) < 0);
+    Test::assert(higher.compare(&lower) > 0);
+    Test::assertEq<i32>(lower.compare(&lower), 0);
+    index += 1;
+  }
+}
+
+@test
+function semverPrecedenceIgnoresBuildMetadata(): void {
+  let first: Text::Semver = textSemverOf("1.0.0+a");
+  let second: Text::Semver = textSemverOf("1.0.0+b.2");
+  let plain: Text::Semver = textSemverOf("1.0.0");
+  let prerelease: Text::Semver = textSemverOf("1.0.0-rc.1+zzz");
+  let otherPrerelease: Text::Semver = textSemverOf("1.0.0-rc.1");
+
+  Test::assertEq<i32>(first.compare(&second), 0);
+  Test::assertEq<i32>(first.compare(&plain), 0);
+  Test::assertEq<i32>(prerelease.compare(&otherPrerelease), 0);
+}
+
+@test
+function semverComparesLongNumericIdentifiersWithoutOverflow(): void {
+  let lower: Text::Semver = textSemverOf("1.0.0-99999999999999999999999");
+  let higher: Text::Semver = textSemverOf("1.0.0-100000000000000000000000");
+  let alphanumeric: Text::Semver = textSemverOf("1.0.0-a");
+
+  Test::assert(lower.compare(&higher) < 0);
+  Test::assert(higher.compare(&alphanumeric) < 0);
+}
+
+@test
+function semverToStringRoundTrips(): void {
+  let version: Text::Semver = textSemverOf("0.10.200-x.7.z+build.07");
+
+  Test::assert(version.toString().equals("0.10.200-x.7.z+build.07"));
+}
