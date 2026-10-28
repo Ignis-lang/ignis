@@ -1,6 +1,7 @@
 import Test from "std::test";
-import Match, parseRegex, Regex from "std::regex";
+import Captures, Match, parseRegex, Regex from "std::regex";
 import regexAstDebug from "./ast";
+import regexLiteralPrefix from "./regex";
 
 function regexTestShape(pattern: str, expected: str): void {
   match (parseRegex(pattern)) {
@@ -417,4 +418,218 @@ function matchesNestedStarsInLinearTime(): void {
   Test::assertEq<boolean>(nested.isMatch(text.toStr()), false);
   let alternatives: Regex = regexTestCompile("(a|aa)*c");
   Test::assertEq<boolean>(alternatives.isMatch(text.toStr()), false);
+}
+
+/// Every group of the first match of `pattern` in `text` as `start..end` or
+/// `none`, comma-separated; `no match` without a match.
+function regexTestCaptures(pattern: str, text: str, expected: str): void {
+  let regex: Regex = regexTestCompile(pattern);
+  let mut shown: String = String::new();
+
+  match (regex.captures(text)) {
+    Option::SOME(captures) -> {
+      let mut index: u64 = 0;
+
+      while (index < captures.length()) {
+        if (index > 0) {
+          shown.pushStr(",");
+        }
+
+        match (captures.group(index)) {
+          Option::SOME(found) -> {
+            regexTestPushMatch(&mut shown, &found);
+          },
+          Option::NONE -> {
+            shown.pushStr("none");
+          },
+        };
+
+        index += 1;
+      }
+    },
+    Option::NONE -> {
+      shown.pushStr("no match");
+    },
+  };
+
+  Test::assertEq<str>(shown.toStr(), expected);
+}
+
+function regexTestReplaceAll(pattern: str, text: str, replacement: str, expected: str): void {
+  let result: String = regexTestCompile(pattern).replaceAll(text, replacement);
+  Test::assertEq<str>(result.toStr(), expected);
+}
+
+/// The pieces `split` gives, joined with `|`.
+function regexTestSplit(pattern: str, text: str, expected: str): void {
+  let pieces: Vector<String> = regexTestCompile(pattern).split(text);
+  let mut shown: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < pieces.length()) {
+    if (index > 0) {
+      shown.pushStr("|");
+    }
+
+    shown.push(pieces.get(index).unwrap());
+    index += 1;
+  }
+
+  Test::assertEq<str>(shown.toStr(), expected);
+}
+
+@test
+function capturesNumberedAndNestedGroups(): void {
+  regexTestCaptures("(\\d+)-(\\d+)", "x 12-345", "2..8,2..4,5..8");
+  regexTestCaptures("((a)(b))c", "abc", "0..3,0..2,0..1,1..2");
+  regexTestCaptures("(?:a)(b)", "ab", "0..2,1..2");
+  regexTestCaptures("(a)", "xyz", "no match");
+}
+
+@test
+function capturesNonParticipatingGroupsAsNone(): void {
+  regexTestCaptures("(a)|(b)", "b", "0..1,none,0..1");
+  regexTestCaptures("(a)?b", "b", "0..1,none");
+  regexTestCaptures("(a)*", "", "0..0,none");
+}
+
+@test
+function capturesTheLastIterationOfARepetition(): void {
+  regexTestCaptures("(a|b)+", "ab", "0..2,1..2");
+  regexTestCaptures("(?:(a)|b)+", "ab", "0..2,0..1");
+  regexTestCaptures("(\\w)*!", "xyz!", "0..4,2..3");
+}
+
+@test
+function capturesUtf8Offsets(): void {
+  regexTestCaptures("(é+)(.)", "aééü", "1..7,1..5,5..7");
+}
+
+@test
+function looksUpNamedGroups(): void {
+  let regex: Regex = regexTestCompile("(?<year>\\d{4})-(\\d\\d)-(?<day>\\d\\d)");
+  Test::assertEq<u64>(regex.groupCount(), 3);
+  Test::assertEq<u64>(regex.groupIndex("day").unwrap(), 3);
+  Test::assertEq<boolean>(regex.groupIndex("month").isNone(), true);
+  Test::assertEq<boolean>(regex.groupName(2).isNone(), true);
+  let name: String = regex.groupName(1).unwrap();
+  Test::assertEq<str>(name.toStr(), "year");
+  let captures: Captures = regex.captures("on 2024-05-17").unwrap();
+  Test::assertEq<u64>(captures.groupCount(), 3);
+  Test::assertEq<u64>(captures.length(), 4);
+  let year: Match = captures.name("year").unwrap();
+  Test::assertEq<u64>(year.start(), 3);
+  Test::assertEq<u64>(year.end(), 7);
+  let day: String = captures.name("day").unwrap().textIn("on 2024-05-17");
+  Test::assertEq<str>(day.toStr(), "17");
+  Test::assertEq<boolean>(captures.name("month").isNone(), true);
+  Test::assertEq<boolean>(captures.name("").isNone(), true);
+  Test::assertEq<boolean>(captures.group(4).isNone(), true);
+  Test::assertEq<u64>(captures.whole().start(), 3);
+  Test::assertEq<u64>(regexTestCompile("abc").groupCount(), 0);
+}
+
+@test
+function capturesEveryMatch(): void {
+  let regex: Regex = regexTestCompile("(\\w)(\\d)?");
+  let all: Vector<Captures> = regex.capturesAll("a1 b c3");
+  Test::assertEq<u64>(all.length(), 3);
+  Test::assertEq<u64>(all.get(1).unwrap().group(1).unwrap().start(), 3);
+  Test::assertEq<boolean>(all.get(1).unwrap().group(2).isNone(), true);
+  Test::assertEq<u64>(all.get(2).unwrap().group(2).unwrap().start(), 6);
+}
+
+@test
+function replacesWithGroupReferences(): void {
+  regexTestReplaceAll("(\\w+)@(\\w+)", "a@b, cd@ef", "$2 at $1", "b at a, ef at cd");
+  regexTestReplaceAll("(?<key>\\w+)=(?<value>\\w+)", "x=1 y=2", "${value}:${key}", "1:x 2:y");
+  regexTestReplaceAll("\\d+", "a1b22", "$$", "a$b$");
+  regexTestReplaceAll("\\d+", "a1", "$x ${ ${} $", "a$x ${ ${} $");
+  regexTestReplaceAll("(a)|(b)", "ab", "[$1$2$3${missing}]", "[a][b]");
+  regexTestReplaceAll("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)", "abcdefghijkl", "$12${1}0$10", "la0j");
+  regexTestReplaceAll("\\d", "a1", "$99999999999999999999", "a");
+  regexTestReplaceAll("x", "abc", "-", "abc");
+}
+
+@test
+function replacesEmptyMatches(): void {
+  regexTestReplaceAll("x*", "abc", "-", "-a-b-c-");
+  regexTestReplaceAll("", "é", "-", "-é-");
+}
+
+@test
+function replacesOnlyTheFirstMatch(): void {
+  let regex: Regex = regexTestCompile("(\\d)");
+  let first: String = regex.replace("a1b2", "<$1>");
+  Test::assertEq<str>(first.toStr(), "a<1>b2");
+  let none: String = regex.replace("ab", "<$1>");
+  Test::assertEq<str>(none.toStr(), "ab");
+}
+
+@test
+function splitsBetweenMatches(): void {
+  regexTestSplit(",", "a,b,,c", "a|b||c");
+  regexTestSplit("\\s*,\\s*", "a , b,c", "a|b|c");
+  regexTestSplit(",", ",a,", "|a|");
+  regexTestSplit(",", "abc", "abc");
+  regexTestSplit(",", "", "");
+  regexTestSplit("", "abc", "|a|b|c|");
+  regexTestSplit("x*", "aé", "|a|é|");
+}
+
+function regexTestPrefix(pattern: str, expected: str): void {
+  let regex: Regex = regexTestCompile(pattern);
+  let prefix: String = regexLiteralPrefix(&regex);
+  Test::assertEq<str>(prefix.toStr(), expected);
+}
+
+@test
+function extractsTheLiteralPrefix(): void {
+  regexTestPrefix("abc", "abc");
+  regexTestPrefix("foo(bar|baz)", "foo");
+  regexTestPrefix("(?:ab)(c)d+e", "abcd");
+  regexTestPrefix("ab*c", "a");
+  regexTestPrefix("é\\d", "é");
+  regexTestPrefix("(?i)1ab", "1");
+  regexTestPrefix("", "");
+  regexTestPrefix("^abc", "");
+  regexTestPrefix("[a]bc", "");
+  regexTestPrefix("a*bc", "");
+  regexTestPrefix("ab|ac", "");
+  regexTestPrefix("(?i)abc", "");
+  regexTestPrefix("\\bab", "");
+}
+
+@test
+function skipsToTheLiteralPrefix(): void {
+  regexTestFind("needle", "hay hay needle hay", "8..14");
+  regexTestFind("needle", "hay hay needl", "none");
+  regexTestFind("aab", "aaab", "1..4");
+  regexTestFindAll("aab", "aaabaab", "1..4,4..7");
+  regexTestFind("é+x", "aééx", "1..6");
+  regexTestFind("foo(bar|baz)", "foobaq foobaz", "7..13");
+  regexTestFindAll("ab", "abxab", "0..2,3..5");
+  regexTestCaptures("a(b+)c", "xxabbc", "2..6,3..5");
+}
+
+@test
+function searchesWithoutAPrefix(): void {
+  regexTestFind("[ab]c", "xxbc", "2..4");
+  regexTestFind("a*b", "cccb", "3..4");
+  regexTestFind("x|yz", "ayz", "1..3");
+  regexTestFind("(?i)abc", "xABC", "1..4");
+  regexTestFindAll("", "ab", "0..0,1..1,2..2");
+}
+
+@test
+function matchesLazyAndCaseInsensitiveForms(): void {
+  regexTestFind("a{2,3}?", "aaaa", "0..2");
+  regexTestFind("a{2,}?", "aaaa", "0..2");
+  regexTestFind("a+?", "aaa", "0..1");
+  regexTestFind("a??b", "ab", "0..2");
+  regexTestFind("(?i)straße", "STRAßE", "0..7");
+  regexTestFind("(?i)straße", "STRASSE", "none");
+  regexTestFind("(?i)ß", "ẞ", "none");
+  regexTestFind("(?i:a)b", "Ab", "0..2");
+  regexTestFind("(?i:a)b", "AB", "none");
 }

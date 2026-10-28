@@ -276,6 +276,32 @@ export function regexNewVm(program: &RegexProgram): RegexVm {
   };
 }
 
+/// The first byte offset at or after `startAt` where `needle` occurs in `text`.
+function regexFindBytes(text: &String, needle: &String, startAt: u64): Option<u64> {
+  let length: u64 = text.length();
+  let needleLength: u64 = needle.length();
+  let first: u8 = needle.byteAt(0).unwrap();
+  let mut start: u64 = startAt;
+
+  while (start + needleLength <= length) {
+    if (text.byteAt(start).unwrap() == first) {
+      let mut offset: u64 = 1;
+
+      while (offset < needleLength && text.byteAt(start + offset).unwrap() == needle.byteAt(offset).unwrap()) {
+        offset += 1;
+      }
+
+      if (offset == needleLength) {
+        return Option::SOME(start);
+      }
+    }
+
+    start += 1;
+  }
+
+  return Option::NONE;
+}
+
 /// Searches `text` from byte offset `startAt` for the leftmost-first match.
 /// Returns its slots (`slotCount` entries, `REGEX_NO_SLOT` where a group did
 /// not take part), or `NONE`. With `earliest` it stops at the first match
@@ -294,6 +320,19 @@ export function regexSearch(
   let mut position: u64 = startAt;
 
   while (true) {
+    // With no live thread, nothing can match before the next occurrence of
+    // the literal prefix, so the search resumes there.
+    if (best.isNone() && vm.current.pcs.length() == 0 && program.prefix.length() > 0) {
+      let Option::SOME(found) = regexFindBytes(text, &program.prefix, position) else {
+        break;
+      };
+
+      if (found != position) {
+        regexClearThreadList(&mut vm.current);
+        position = found;
+      }
+    }
+
     // A new start is the lowest-priority thread, and stops once a match is
     // known: anything starting later is not leftmost.
     if (best.isNone()) {
