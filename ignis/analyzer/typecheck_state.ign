@@ -156,6 +156,9 @@ export namespace Analyzer {
       /// Parallel to `localTypeIds`: true while the binding is waiting for its
       /// first assignment to decide its type.
       public localPendingFlags: Vector<boolean>;
+      /// Locals whose declaration failed to type (`failedLocalKey`): a use of one
+      /// has already been reported through its declaration, so it reports nothing.
+      public failedLocalKeys: Vector<u64>;
       /// Binding-site log feeding `LocalTypeMap`. Like `declaredBindings`
       /// below, these two vectors survive the scope stack being popped.
       public bindingTypePatterns: Vector<u32>;
@@ -213,12 +216,49 @@ export namespace Analyzer {
       public pending: boolean;
     }
 
+    /// Whether an error with this code, span and message was already reported.
+    /// Overload selection types a call's arguments before the chosen overload
+    /// checks them again, so a nested call (`${length(value)}` inside
+    /// `println`) would otherwise report the same error once per level.
+    function isReportedError(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      code: str,
+      message: str,
+    ): boolean {
+      // An empty span names no source text, so two errors there need not be
+      // the same one.
+      if (span.end <= span.start) {
+        return false;
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < state.diagnostics.length()) {
+        if (let Option::SOME(reported) = state.diagnostics.get(index)) {
+          let sameSpan: boolean = reported.primarySpan.file.raw() == span.file.raw() && reported.primarySpan.start == span.start && reported.primarySpan.end == span.end;
+
+          if (sameSpan && reported.message.equals(message) && String::create(reported.code).equals(code)) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     function emitDiagnostic(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
       code: str,
       message: str,
     ): void {
+      if (Analyzer::Typecheck::isReportedError(state, span, code, message)) {
+        return;
+      }
+
       let mut diagnostic: Diagnostic = Diagnostic::new(
         Severity::ERROR,
         code,
@@ -243,6 +283,10 @@ export namespace Analyzer {
       message: str,
       label: str,
     ): void {
+      if (Analyzer::Typecheck::isReportedError(state, span, code, message)) {
+        return;
+      }
+
       let mut diagnostic: Diagnostic = Diagnostic::new(
         Severity::ERROR,
         code,
@@ -2905,6 +2949,45 @@ export namespace Analyzer {
       }
 
       return Analyzer::Binder::findDef(pass1, itemId.raw());
+    }
+
+    function failedLocalKey(localId: Analyzer::ResolverBodies::LocalId): u64 {
+      return ((localId.enclosingFn.raw() as u64) << 32) | (localId.index as u64);
+    }
+
+    /// Records that the binding `patternId` declares failed to type, so its
+    /// uses do not report a second, internal-sounding error.
+    function markFailedPatternLocal(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      patternId: Ast::PatternId,
+    ): void {
+      let Option::SOME(localId) = Analyzer::Typecheck::lookupPatternLocal(resolvedBodies, patternId) else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.failedLocalKeys.push(Analyzer::Typecheck::failedLocalKey(localId));
+    }
+
+    function isFailedLocal(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      localId: Analyzer::ResolverBodies::LocalId,
+    ): boolean {
+      let key: u64 = Analyzer::Typecheck::failedLocalKey(localId);
+      let mut index: u64 = 0;
+
+      while (index < state.failedLocalKeys.length()) {
+        if (let Option::SOME(candidate) = state.failedLocalKeys.get(index)) {
+          if (*candidate == key) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     function lookupPatternLocal(
@@ -6544,7 +6627,10 @@ export namespace Analyzer {
         Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
           let localBindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
           let Option::SOME(localBinding) = localBindingOpt else {
-            Analyzer::Typecheck::emitUnsupported(state, span, "unknown local binding type");
+            if (!Analyzer::Typecheck::isFailedLocal(state, localId)) {
+              Analyzer::Typecheck::emitUnsupported(state, span, "unknown local binding type");
+            }
+
             return Option::NONE;
           };
 

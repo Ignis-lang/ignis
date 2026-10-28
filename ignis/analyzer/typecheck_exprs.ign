@@ -12664,6 +12664,8 @@ export namespace Analyzer {
         }
       }
 
+      let mut bindingTyped: boolean = false;
+
       if (let Option::SOME(elementType) = elementTypeOpt) {
         let bindingTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveForOfBindingType(
           state,
@@ -12679,7 +12681,14 @@ export namespace Analyzer {
 
         if (let Option::SOME(bindingType) = bindingTypeOpt) {
           Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, forOfStmt.pattern, bindingType, false, forOfStmt.span);
+          bindingTyped = true;
         }
+      }
+
+      // The iterable or the binding was already reported; the body is still
+      // checked, but its uses of the binding report nothing more.
+      if (!bindingTyped) {
+        Analyzer::Typecheck::markFailedPatternLocal(state, resolvedBodies, forOfStmt.pattern);
       }
 
       Analyzer::Typecheck::enterLoop(state);
