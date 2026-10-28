@@ -286,7 +286,7 @@
     },
     {
       "name": "std::regex",
-      "doc": "  \n# Regex  \n  \nRegular expressions with linear-time matching, in the style of RE2: a  \npattern is parsed into an AST, compiled to a program and run by a Pike VM  \nthat simulates the NFA, so matching takes O(text x program) time and never  \nbacktracks.  \n  \n```ignis  \nimport Match, Regex from \"std::regex\";  \n  \nlet regex: Regex = Regex::new(\"\\\\d+\").unwrap();  \nlet found: Match = regex.find(\"abc 123\").unwrap(); // 4..7  \n```  \n  \nCaptures, `replaceAll` and `split` arrive in the next slices.  \n  \n## Matching  \n  \n- Leftmost-first: of the matches starting at the leftmost position, the  \n  one the pattern prefers wins. Alternatives are tried in order (`a|ab`  \n  on `\"ab\"` matches `\"a\"`), greedy repetition prefers more and lazy  \n  repetition fewer.  \n- The search is unanchored unless the pattern uses `^`.  \n- Offsets are byte offsets into the UTF-8 text and always fall on scalar  \n  boundaries. An invalid byte is read as U+FFFD and spans one byte.  \n- `findAll` returns non-overlapping matches; after an empty match it  \n  resumes one scalar further on, so `a*` on `\"baa\"` gives `0..0`,  \n  `1..3` and `3..3`.  \n- Matching takes O(text x program) time: the VM runs every thread in  \n  lockstep and follows each instruction at most once per position, so  \n  patterns such as `(a*)*b` cannot backtrack.  \n  \n## Limits  \n  \nCounted repetition copies its body, so a program holds at most  \n`REGEX_MAX_PROGRAM` (100000) instructions; a larger one is  \n`pattern too large` at column 1.  \n  \n## Exports  \n  \n| Export                 | Description                                                    |  \n|------------------------|----------------------------------------------------------------|  \n| `Regex`                | `Regex::new(pattern)`: `Result<Regex, RegexError>`; `isMatch(text)`, `find(text)`: `Option<Match>`, `findAll(text)`: `Vector<Match>` |  \n| `Match`                | `start()`, `end()`, `length()` in bytes, `isEmpty()`, `textIn(haystack)`: a copy of the matched text |  \n| `REGEX_MAX_PROGRAM`    | The most instructions a compiled pattern may hold: 100000      |  \n| `parseRegex`           | `parseRegex(pattern)`: `Result<RegexAst, RegexError>`          |  \n| `RegexError`           | `column()` (1-based, in Unicode scalars), `message()`, `toString()` |  \n| `RegexAst`             | `nodes`, `root`, `groupCount`                                  |  \n| `RegexNode`            | `EMPTY`, `LITERAL`, `ANY_EXCEPT_NEWLINE`, `CLASS`, `CONCAT`, `ALTERNATE`, `REPEAT`, `GROUP`, `ASSERT` |  \n| `RegexClass`           | Sorted, merged `ranges` and `negated`                          |  \n| `RegexRange`           | Inclusive `start` and `end` scalar values                      |  \n| `RegexRepeat`          | `child`, `min`, `max`, `bounded`, `greedy`                     |  \n| `RegexGroup`           | `child`, `capturing`, `index`, `name`                          |  \n| `RegexAssertion`       | `START`, `END`, `WORD_BOUNDARY`, `NOT_WORD_BOUNDARY`           |  \n| `REGEX_MAX_REPETITION` | The largest count `{n,m}` accepts: 1000                        |  \n  \n## Syntax  \n  \n| Syntax                            | Meaning                                                  |  \n|-----------------------------------|----------------------------------------------------------|  \n| `x`                               | The scalar `x`, any UTF-8 scalar                         |  \n| `.`                               | Any scalar except `\\n`                                   |  \n| `\\n` `\\t` `\\r` `\\f` `\\v`          | Control scalars                                          |  \n| `\\.` `\\*` `\\\\` ...                | Any escaped ASCII punctuation is itself                  |  \n| `[abc]` `[a-z]` `[^...]`          | Classes, ranges, negation; escapes work inside           |  \n| `\\d` `\\w` `\\s` and `\\D` `\\W` `\\S` | `[0-9]`, `[0-9A-Za-z_]`, `[ \\t\\n\\r\\f\\v]` and negations (ASCII) |  \n| `^` `$`                           | Start and end of the whole text, not of a line           |  \n| `\\b` `\\B`                         | ASCII word boundary and its negation                     |  \n| `(x)` `(?:x)` `(?<name>x)`        | Capturing, non-capturing and named groups                |  \n| `x\\|y`                            | Alternation, leftmost-first                              |  \n| `x*` `x+` `x?`                    | Zero or more, one or more, zero or one                   |  \n| `x{n}` `x{n,}` `x{n,m}`           | Counted repetition, counts at most 1000                  |  \n| `x*?` `x+?` `x??` `x{n,m}?`       | Lazy forms: prefer fewer repetitions                     |  \n| `(?i)` `(?i:x)`                   | ASCII case-insensitive for the rest of the enclosing group, or inside `x` |  \n  \nGroup names are `[A-Za-z_][A-Za-z0-9_]*` and must be unique. Capturing  \ngroups are numbered from 1 in the order of their `(`.  \n  \nThe parser is strict where a pattern would otherwise be ambiguous:  \n  \n- `{` always starts a counted repetition; a literal brace is `\\{`. A  \n  `{` that is not `{n}`, `{n,}` or `{n,m}` is `invalid repetition`. A  \n  lone `}` or `]` is a literal.  \n- A quantifier after a quantifier (`a**`, `a+*`, `a{2}{3}`) and a  \n  quantifier after `^`, `$`, `\\b` or `\\B` are `nothing to repeat`; the  \n  `?` of a lazy form is part of its quantifier.  \n- `[]` and `[^]` are `empty class`; a `]` inside a class is `\\]`. A `-`  \n  first or last in a class is a literal.  \n  \n## Errors  \n  \nEvery error carries the 1-based column, counted in Unicode scalars, of  \nthe part that is wrong: `unclosed group` (at its `(`), `unmatched )`,  \n`nothing to repeat`, `invalid range z-a` (at its `-`), `unclosed class`  \n(at its `[`), `empty class`, `trailing backslash`, `unknown escape \\q`,  \n`invalid repetition`, `invalid repetition range`, `repetition count above  \n1000`, `invalid group name`, `duplicate group name x`, `unknown group  \nflag`, `unsupported: backreference` and `unsupported: lookaround`.  \n  \nBackreferences (`\\1`) and lookaround (`(?=`, `(?!`, `(?<=`, `(?<!`) are  \nrejected because they cannot be matched in linear time. Classes are  \nASCII; Unicode classes are not supported in v1."
+      "doc": "  \n# Regex  \n  \nRegular expressions with linear-time matching, in the style of RE2: a  \npattern is parsed into an AST, compiled to a program and run by a Pike VM  \nthat simulates the NFA, so matching takes O(text x program) time and never  \nbacktracks.  \n  \n```ignis  \nimport Captures, Match, Regex from \"std::regex\";  \n  \nlet regex: Regex = Regex::new(\"\\\\d+\").unwrap();  \nlet found: Match = regex.find(\"abc 123\").unwrap(); // 4..7  \n  \nlet date: Regex = Regex::new(\"(?<year>\\\\d{4})-(\\\\d\\\\d)\").unwrap();  \nlet captures: Captures = date.captures(\"on 2024-05\").unwrap();  \nlet year: Match = captures.name(\"year\").unwrap(); // 3..7  \nlet swapped: String = date.replaceAll(\"on 2024-05\", \"$2/${year}\"); // \"on 05/2024\"  \nlet parts: Vector<String> = Regex::new(\"\\\\s*,\\\\s*\").unwrap().split(\"a , b,c\"); // a, b, c  \n```  \n  \n## Matching  \n  \n- Leftmost-first: of the matches starting at the leftmost position, the  \n  one the pattern prefers wins. Alternatives are tried in order (`a|ab`  \n  on `\"ab\"` matches `\"a\"`), greedy repetition prefers more and lazy  \n  repetition fewer.  \n- The search is unanchored unless the pattern uses `^`.  \n- Offsets are byte offsets into the UTF-8 text and always fall on scalar  \n  boundaries. An invalid byte is read as U+FFFD and spans one byte.  \n- `findAll` returns non-overlapping matches; after an empty match it  \n  resumes one scalar further on, so `a*` on `\"baa\"` gives `0..0`,  \n  `1..3` and `3..3`.  \n- Group 0 is the whole match; group `n` is the `n`-th `(`. A group that  \n  did not take part in the match is `NONE` (`(a)|(b)` on `\"b\"`: group 1  \n  `NONE`, group 2 `0..1`), and a group in a repetition holds its last  \n  iteration (`(a|b)+` on `\"ab\"`: group 1 `1..2`).  \n- `replaceAll`, `split` and `capturesAll` use the matches `findAll`  \n  finds, so `x*` replaced by `-` in `\"abc\"` gives `\"-a-b-c-\"`.  \n- Matching takes O(text x program) time: the VM runs every thread in  \n  lockstep and follows each instruction at most once per position, so  \n  patterns such as `(a*)*b` cannot backtrack.  \n  \n## Replacement  \n  \nIn the replacement text of `replace` and `replaceAll`:  \n  \n- `$n`, one or more digits read greedily (`$12` is group 12), and `${n}`  \n  insert group `n`; `${1}0` is group 1 followed by `0`.  \n- `${name}` inserts the named group. Braces hold `[A-Za-z0-9_]+`: all  \n  digits is a number, anything else a name.  \n- A group that did not take part or does not exist inserts nothing.  \n- `$$` is a literal `$`; any other `$` (`$x`, `${}`, `${a b}`, a final  \n  `$`) is a literal `$`.  \n  \n## Limits  \n  \nCounted repetition copies its body, so a program holds at most  \n`REGEX_MAX_PROGRAM` (100000) instructions; a larger one is  \n`pattern too large` at column 1.  \n  \n## Exports  \n  \n| Export                 | Description                                                    |  \n|------------------------|----------------------------------------------------------------|  \n| `Regex`                | `Regex::new(pattern)`: `Result<Regex, RegexError>`; `isMatch(text)`, `find(text)`: `Option<Match>`, `findAll(text)`: `Vector<Match>`, `captures(text)`: `Option<Captures>`, `capturesAll(text)`: `Vector<Captures>`, `replace(text, replacement)` and `replaceAll(text, replacement)`: `String`, `split(text)`: `Vector<String>`, `groupCount()`, `groupName(index)`: `Option<String>`, `groupIndex(name)`: `Option<u64>` |  \n| `Captures`             | `group(index)` and `name(name)`: `Option<Match>`, `whole()`: `Match`, `groupCount()` (whole match excluded), `length()` (included) |  \n| `Match`                | `start()`, `end()`, `length()` in bytes, `isEmpty()`, `textIn(haystack)`: a copy of the matched text |  \n| `REGEX_MAX_PROGRAM`    | The most instructions a compiled pattern may hold: 100000      |  \n| `parseRegex`           | `parseRegex(pattern)`: `Result<RegexAst, RegexError>`          |  \n| `RegexError`           | `column()` (1-based, in Unicode scalars), `message()`, `toString()` |  \n| `RegexAst`             | `nodes`, `root`, `groupCount`                                  |  \n| `RegexNode`            | `EMPTY`, `LITERAL`, `ANY_EXCEPT_NEWLINE`, `CLASS`, `CONCAT`, `ALTERNATE`, `REPEAT`, `GROUP`, `ASSERT` |  \n| `RegexClass`           | Sorted, merged `ranges` and `negated`                          |  \n| `RegexRange`           | Inclusive `start` and `end` scalar values                      |  \n| `RegexRepeat`          | `child`, `min`, `max`, `bounded`, `greedy`                     |  \n| `RegexGroup`           | `child`, `capturing`, `index`, `name`                          |  \n| `RegexAssertion`       | `START`, `END`, `WORD_BOUNDARY`, `NOT_WORD_BOUNDARY`           |  \n| `REGEX_MAX_REPETITION` | The largest count `{n,m}` accepts: 1000                        |  \n  \n## Syntax  \n  \n| Syntax                            | Meaning                                                  |  \n|-----------------------------------|----------------------------------------------------------|  \n| `x`                               | The scalar `x`, any UTF-8 scalar                         |  \n| `.`                               | Any scalar except `\\n`                                   |  \n| `\\n` `\\t` `\\r` `\\f` `\\v`          | Control scalars                                          |  \n| `\\.` `\\*` `\\\\` ...                | Any escaped ASCII punctuation is itself                  |  \n| `[abc]` `[a-z]` `[^...]`          | Classes, ranges, negation; escapes work inside           |  \n| `\\d` `\\w` `\\s` and `\\D` `\\W` `\\S` | `[0-9]`, `[0-9A-Za-z_]`, `[ \\t\\n\\r\\f\\v]` and negations (ASCII) |  \n| `^` `$`                           | Start and end of the whole text, not of a line           |  \n| `\\b` `\\B`                         | ASCII word boundary and its negation                     |  \n| `(x)` `(?:x)` `(?<name>x)`        | Capturing, non-capturing and named groups                |  \n| `x\\|y`                            | Alternation, leftmost-first                              |  \n| `x*` `x+` `x?`                    | Zero or more, one or more, zero or one                   |  \n| `x{n}` `x{n,}` `x{n,m}`           | Counted repetition, counts at most 1000                  |  \n| `x*?` `x+?` `x??` `x{n,m}?`       | Lazy forms: prefer fewer repetitions                     |  \n| `(?i)` `(?i:x)`                   | ASCII case-insensitive for the rest of the enclosing group, or inside `x` |  \n  \nGroup names are `[A-Za-z_][A-Za-z0-9_]*` and must be unique. Capturing  \ngroups are numbered from 1 in the order of their `(`.  \n  \nThe parser is strict where a pattern would otherwise be ambiguous:  \n  \n- `{` always starts a counted repetition; a literal brace is `\\{`. A  \n  `{` that is not `{n}`, `{n,}` or `{n,m}` is `invalid repetition`. A  \n  lone `}` or `]` is a literal.  \n- A quantifier after a quantifier (`a**`, `a+*`, `a{2}{3}`) and a  \n  quantifier after `^`, `$`, `\\b` or `\\B` are `nothing to repeat`; the  \n  `?` of a lazy form is part of its quantifier.  \n- `[]` and `[^]` are `empty class`; a `]` inside a class is `\\]`. A `-`  \n  first or last in a class is a literal.  \n  \n## Errors  \n  \nEvery error carries the 1-based column, counted in Unicode scalars, of  \nthe part that is wrong: `unclosed group` (at its `(`), `unmatched )`,  \n`nothing to repeat`, `invalid range z-a` (at its `-`), `unclosed class`  \n(at its `[`), `empty class`, `trailing backslash`, `unknown escape \\q`,  \n`invalid repetition`, `invalid repetition range`, `repetition count above  \n1000`, `invalid group name`, `duplicate group name x`, `unknown group  \nflag`, `unsupported: backreference` and `unsupported: lookaround`.  \n  \nBackreferences (`\\1`) and lookaround (`(?=`, `(?!`, `(?<=`, `(?<!`) are  \nrejected because they cannot be matched in linear time. Classes are  \nASCII; Unicode classes are not supported in v1."
     },
     {
       "name": "std::regex::ast",
@@ -302,7 +302,7 @@
     },
     {
       "name": "std::regex::regex",
-      "doc": "`Regex`, the compiled pattern, and `Match`, the offsets of one match."
+      "doc": "`Regex`, the compiled pattern, `Match`, the offsets of one match, and  \n`Captures`, the offsets of every group of one match."
     },
     {
       "name": "std::regex::vm",
@@ -17102,6 +17102,58 @@
     },
     {
       "module": "std::regex::regex",
+      "path": "std::regex::regex::Captures",
+      "name": "Captures",
+      "kind": "record",
+      "visibility": "public",
+      "signature": "record Captures",
+      "doc": "The groups of one match: `slotCount` byte offsets, a start and an end per  \ngroup, group 0 being the whole match. It stores no view of the text.",
+      "members": [
+        {
+          "name": "slots",
+          "kind": "field",
+          "signature": "slots: Vector<u64>"
+        },
+        {
+          "name": "names",
+          "kind": "field",
+          "signature": "names: Vector<String>",
+          "doc": "The name of each group, empty when it has none; entry 0 is the whole  \nmatch."
+        },
+        {
+          "name": "group",
+          "kind": "method",
+          "signature": "group(&self, index: u64): Option<Match>",
+          "doc": "Group `index`: 0 is the whole match. `NONE` when the group did not take  \npart in the match or does not exist. In a repetition the group holds  \nits last iteration."
+        },
+        {
+          "name": "groupCount",
+          "kind": "method",
+          "signature": "groupCount(&self): u64",
+          "doc": "The number of capturing groups, the whole match not included."
+        },
+        {
+          "name": "length",
+          "kind": "method",
+          "signature": "length(&self): u64",
+          "doc": "The number of groups, the whole match included: `groupCount() + 1`."
+        },
+        {
+          "name": "name",
+          "kind": "method",
+          "signature": "name(&self, name: str): Option<Match>",
+          "doc": "The group named `name`; `NONE` when no group has that name or it did not  \ntake part in the match."
+        },
+        {
+          "name": "whole",
+          "kind": "method",
+          "signature": "whole(&self): Match",
+          "doc": "The whole match, group 0."
+        }
+      ]
+    },
+    {
+      "module": "std::regex::regex",
       "path": "std::regex::regex::Match",
       "name": "Match",
       "kind": "record",
@@ -17159,6 +17211,14 @@
     },
     {
       "module": "std::regex::regex",
+      "path": "std::regex::regex::REGEX_GROUP_NUMBER_CAP",
+      "name": "REGEX_GROUP_NUMBER_CAP",
+      "kind": "constant",
+      "visibility": "private",
+      "signature": "const REGEX_GROUP_NUMBER_CAP: u64"
+    },
+    {
+      "module": "std::regex::regex",
       "path": "std::regex::regex::Regex",
       "name": "Regex",
       "kind": "record",
@@ -17172,10 +17232,28 @@
           "signature": "program: RegexProgram"
         },
         {
+          "name": "names",
+          "kind": "field",
+          "signature": "names: Vector<String>",
+          "doc": "The name of each group, empty when it has none; entry 0 is the whole  \nmatch."
+        },
+        {
           "name": "new",
           "kind": "method",
           "signature": "static new(pattern: str): Result<Regex, RegexError>",
           "doc": "Parses and compiles `pattern`."
+        },
+        {
+          "name": "captures",
+          "kind": "method",
+          "signature": "captures(&self, text: str): Option<Captures>",
+          "doc": "The leftmost-first match in `text` with every group."
+        },
+        {
+          "name": "capturesAll",
+          "kind": "method",
+          "signature": "capturesAll(&self, text: str): Vector<Captures>",
+          "doc": "Every non-overlapping match in `text` with its groups, as `findAll`  \nfinds them."
         },
         {
           "name": "find",
@@ -17190,20 +17268,148 @@
           "doc": "Every non-overlapping match in `text`, left to right. After an empty  \nmatch the search resumes one scalar further on."
         },
         {
+          "name": "groupCount",
+          "kind": "method",
+          "signature": "groupCount(&self): u64",
+          "doc": "The number of capturing groups, the whole match not included."
+        },
+        {
+          "name": "groupIndex",
+          "kind": "method",
+          "signature": "groupIndex(&self, name: str): Option<u64>",
+          "doc": "The index of the group named `name`, or `NONE`."
+        },
+        {
+          "name": "groupName",
+          "kind": "method",
+          "signature": "groupName(&self, index: u64): Option<String>",
+          "doc": "The name of group `index`; `NONE` when the group has no name or does  \nnot exist."
+        },
+        {
           "name": "isMatch",
           "kind": "method",
           "signature": "isMatch(&self, text: str): boolean",
           "doc": "Whether `text` contains a match."
+        },
+        {
+          "name": "replace",
+          "kind": "method",
+          "signature": "replace(&self, text: str, replacement: str): String",
+          "doc": "`text` with its first match replaced by `replacement`, expanded as in  \n`replaceAll`."
+        },
+        {
+          "name": "replaceAll",
+          "kind": "method",
+          "signature": "replaceAll(&self, text: str, replacement: str): String",
+          "doc": "`text` with every non-overlapping match, as `findAll` finds them,  \nreplaced by `replacement` expanded for that match.  \n  \nIn `replacement`, `$n` (one or more digits, read greedily) and `${n}`  \ninsert group `n`, `${name}` the named group, and `$$` a `$`. Braces  \nhold `[A-Za-z0-9_]+`: all digits is a number, anything else a name. A  \ngroup that did not take part or does not exist inserts nothing. Any  \nother `$`, such as `$x`, `${}` or `${a b}`, is a literal `$`."
+        },
+        {
+          "name": "split",
+          "kind": "method",
+          "signature": "split(&self, text: str): Vector<String>",
+          "doc": "The pieces of `text` between the matches `findAll` finds. A match at  \nthe start or end of `text` leaves an empty first or last piece, an  \nempty match splits between scalars, and without a match the result is  \nthe whole text."
         }
       ]
     },
     {
       "module": "std::regex::regex",
-      "path": "std::regex::regex::regexFindFrom",
-      "name": "regexFindFrom",
+      "path": "std::regex::regex::regexCopyNames",
+      "name": "regexCopyNames",
       "kind": "function",
       "visibility": "private",
-      "signature": "function regexFindFrom(vm: &mut RegexVm, program: &RegexProgram, text: &String, startAt: u64): Option<Match>"
+      "signature": "function regexCopyNames(names: &Vector<String>): Vector<String>"
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexCopySlots",
+      "name": "regexCopySlots",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexCopySlots(slots: &Vector<u64>): Vector<u64>"
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexExpand",
+      "name": "regexExpand",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexExpand(out: &mut String, source: &String, slots: &Vector<u64>, names: &Vector<String>, replacement: &String): void",
+      "doc": "Appends `replacement` to `out` with its `$` references expanded against  \none match; see `Regex::replaceAll`."
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexGroupIndex",
+      "name": "regexGroupIndex",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexGroupIndex(names: &Vector<String>, name: str): Option<u64>"
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexGroupNames",
+      "name": "regexGroupNames",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexGroupNames(ast: &RegexAst): Vector<String>",
+      "doc": "The name of every group of `ast`, indexed by group, entry 0 empty."
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexIsAsciiDigit",
+      "name": "regexIsAsciiDigit",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexIsAsciiDigit(byte: u8): boolean"
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexIsNameByte",
+      "name": "regexIsNameByte",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexIsNameByte(byte: u8): boolean"
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexPushGroup",
+      "name": "regexPushGroup",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexPushGroup(out: &mut String, source: &String, slots: &Vector<u64>, index: u64): void"
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexPushReference",
+      "name": "regexPushReference",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexPushReference(out: &mut String, source: &String, slots: &Vector<u64>, names: &Vector<String>, reference: &String): void",
+      "doc": "Appends the group `reference` names: a number when it is all digits,  \notherwise a group name."
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexReplace",
+      "name": "regexReplace",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexReplace(regex: &Regex, text: str, replacement: str, every: boolean): String"
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexSearchAll",
+      "name": "regexSearchAll",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexSearchAll(program: &RegexProgram, source: &String, startAt: u64): Vector<Vector<u64>>",
+      "doc": "The slots of every non-overlapping match from `startAt` on. After an  \nempty match the search resumes one scalar further on."
+    },
+    {
+      "module": "std::regex::regex",
+      "path": "std::regex::regex::regexWholeMatch",
+      "name": "regexWholeMatch",
+      "kind": "function",
+      "visibility": "private",
+      "signature": "function regexWholeMatch(slots: &Vector<u64>): Match"
     },
     {
       "module": "std::regex::vm",

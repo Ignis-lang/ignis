@@ -1,9 +1,10 @@
-//! `Regex`, the compiled pattern, and `Match`, the offsets of one match.
+//! `Regex`, the compiled pattern, `Match`, the offsets of one match, and
+//! `Captures`, the offsets of every group of one match.
 
-import RegexError from "./ast";
+import RegexAst, RegexError, RegexNode from "./ast";
 import compileRegex, RegexProgram from "./compiler";
 import parseRegex from "./parser";
-import regexNewVm, regexSearch, RegexVm from "./vm";
+import REGEX_NO_SLOT, regexNewVm, regexSearch, RegexVm from "./vm";
 
 /// One match: byte offsets into the searched text, always on scalar
 /// boundaries. It stores no view of the text.
@@ -44,9 +45,66 @@ export record Match {
   }
 }
 
+/// The groups of one match: `slotCount` byte offsets, a start and an end per
+/// group, group 0 being the whole match. It stores no view of the text.
+export record Captures {
+  slots: Vector<u64>;
+
+  /// The name of each group, empty when it has none; entry 0 is the whole
+  /// match.
+  names: Vector<String>;
+
+  /// Group `index`: 0 is the whole match. `NONE` when the group did not take
+  /// part in the match or does not exist. In a repetition the group holds
+  /// its last iteration.
+  public group(&self, index: u64): Option<Match> {
+    if (index * 2 + 1 >= self.slots.length()) {
+      return Option::NONE;
+    }
+
+    let start: u64 = *self.slots.get(index * 2).unwrap();
+    let end: u64 = *self.slots.get(index * 2 + 1).unwrap();
+
+    if (start == REGEX_NO_SLOT || end == REGEX_NO_SLOT) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(Match::create(start, end));
+  }
+
+  /// The group named `name`; `NONE` when no group has that name or it did not
+  /// take part in the match.
+  public name(&self, name: str): Option<Match> {
+    let Option::SOME(index) = regexGroupIndex(&self.names, name) else {
+      return Option::NONE;
+    };
+
+    return self.group(index);
+  }
+
+  /// The whole match, group 0.
+  public whole(&self): Match {
+    return Match::create(*self.slots.get(0).unwrap(), *self.slots.get(1).unwrap());
+  }
+
+  /// The number of capturing groups, the whole match not included.
+  public groupCount(&self): u64 {
+    return self.slots.length() / 2 - 1;
+  }
+
+  /// The number of groups, the whole match included: `groupCount() + 1`.
+  public length(&self): u64 {
+    return self.slots.length() / 2;
+  }
+}
+
 /// A compiled regular expression.
 export record Regex {
   program: RegexProgram;
+
+  /// The name of each group, empty when it has none; entry 0 is the whole
+  /// match.
+  names: Vector<String>;
 
   /// Parses and compiles `pattern`.
   public static new(pattern: str): Result<Regex, RegexError> {
@@ -54,7 +112,7 @@ export record Regex {
       Result::OK(ast) -> {
         match (compileRegex(&ast)) {
           Result::OK(program) -> {
-            return Result::OK(Regex { program: program });
+            return Result::OK(Regex { program: program, names: regexGroupNames(&ast) });
           },
           Result::ERROR(error) -> {
             return Result::ERROR(error);
@@ -65,6 +123,30 @@ export record Regex {
         return Result::ERROR(error);
       },
     };
+  }
+
+  /// The number of capturing groups, the whole match not included.
+  public groupCount(&self): u64 {
+    return self.names.length() - 1;
+  }
+
+  /// The name of group `index`; `NONE` when the group has no name or does
+  /// not exist.
+  public groupName(&self, index: u64): Option<String> {
+    let Option::SOME(name) = self.names.get(index) else {
+      return Option::NONE;
+    };
+
+    if (name.length() == 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(name.clone());
+  }
+
+  /// The index of the group named `name`, or `NONE`.
+  public groupIndex(&self, name: str): Option<u64> {
+    return regexGroupIndex(&self.names, name);
   }
 
   /// Whether `text` contains a match.
@@ -78,52 +160,372 @@ export record Regex {
   public find(&self, text: str): Option<Match> {
     let source: String = String::create(text);
     let mut vm: RegexVm = regexNewVm(&self.program);
-    return regexFindFrom(&mut vm, &self.program, &source, 0);
+    let Option::SOME(slots) = regexSearch(&mut vm, &self.program, &source, 0, false) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(regexWholeMatch(&slots));
   }
 
   /// Every non-overlapping match in `text`, left to right. After an empty
   /// match the search resumes one scalar further on.
   public findAll(&self, text: str): Vector<Match> {
-    let mut matches: Vector<Match> = Vector::new<Match>();
     let source: String = String::create(text);
-    let mut vm: RegexVm = regexNewVm(&self.program);
-    let length: u64 = source.length();
-    let mut startAt: u64 = 0;
+    let all: Vector<Vector<u64>> = regexSearchAll(&self.program, &source, 0);
+    let mut matches: Vector<Match> = Vector::new<Match>(all.length());
+    let mut index: u64 = 0;
 
-    while (startAt <= length) {
-      let Option::SOME(found) = regexFindFrom(&mut vm, &self.program, &source, startAt) else {
-        break;
-      };
-
-      matches.push(found);
-
-      if (!found.isEmpty()) {
-        startAt = found.end();
-        continue;
-      }
-
-      if (found.end() >= length) {
-        break;
-      }
-
-      let mut next: u64 = found.end();
-      source.charAt(found.end(), &mut next);
-      startAt = next;
+    while (index < all.length()) {
+      matches.push(regexWholeMatch(all.get(index).unwrap()));
+      index += 1;
     }
 
     return matches;
   }
+
+  /// The leftmost-first match in `text` with every group.
+  public captures(&self, text: str): Option<Captures> {
+    let source: String = String::create(text);
+    let mut vm: RegexVm = regexNewVm(&self.program);
+    let Option::SOME(slots) = regexSearch(&mut vm, &self.program, &source, 0, false) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(Captures { slots: slots, names: regexCopyNames(&self.names) });
+  }
+
+  /// Every non-overlapping match in `text` with its groups, as `findAll`
+  /// finds them.
+  public capturesAll(&self, text: str): Vector<Captures> {
+    let source: String = String::create(text);
+    let all: Vector<Vector<u64>> = regexSearchAll(&self.program, &source, 0);
+    let mut result: Vector<Captures> = Vector::new<Captures>(all.length());
+    let mut index: u64 = 0;
+
+    while (index < all.length()) {
+      let slots: Vector<u64> = regexCopySlots(all.get(index).unwrap());
+      result.push(Captures { slots: slots, names: regexCopyNames(&self.names) });
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// `text` with every non-overlapping match, as `findAll` finds them,
+  /// replaced by `replacement` expanded for that match.
+  ///
+  /// In `replacement`, `$n` (one or more digits, read greedily) and `${n}`
+  /// insert group `n`, `${name}` the named group, and `$$` a `$`. Braces
+  /// hold `[A-Za-z0-9_]+`: all digits is a number, anything else a name. A
+  /// group that did not take part or does not exist inserts nothing. Any
+  /// other `$`, such as `$x`, `${}` or `${a b}`, is a literal `$`.
+  public replaceAll(&self, text: str, replacement: str): String {
+    return regexReplace(self, text, replacement, true);
+  }
+
+  /// `text` with its first match replaced by `replacement`, expanded as in
+  /// `replaceAll`.
+  public replace(&self, text: str, replacement: str): String {
+    return regexReplace(self, text, replacement, false);
+  }
+
+  /// The pieces of `text` between the matches `findAll` finds. A match at
+  /// the start or end of `text` leaves an empty first or last piece, an
+  /// empty match splits between scalars, and without a match the result is
+  /// the whole text.
+  public split(&self, text: str): Vector<String> {
+    let source: String = String::create(text);
+    let all: Vector<Vector<u64>> = regexSearchAll(&self.program, &source, 0);
+    let mut pieces: Vector<String> = Vector::new<String>(all.length() + 1);
+    let mut last: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < all.length()) {
+      let found: Match = regexWholeMatch(all.get(index).unwrap());
+      pieces.push(source.substringBytes(last, found.start()));
+      last = found.end();
+      index += 1;
+    }
+
+    pieces.push(source.substringBytes(last, source.length()));
+    return pieces;
+  }
 }
 
-function regexFindFrom(
-  vm: &mut RegexVm,
-  program: &RegexProgram,
-  text: &String,
-  startAt: u64
-): Option<Match> {
-  let Option::SOME(slots) = regexSearch(vm, program, text, startAt, false) else {
-    return Option::NONE;
-  };
+function regexWholeMatch(slots: &Vector<u64>): Match {
+  return Match::create(*slots.get(0).unwrap(), *slots.get(1).unwrap());
+}
 
-  return Option::SOME(Match::create(*slots.get(0).unwrap(), *slots.get(1).unwrap()));
+/// The slots of every non-overlapping match from `startAt` on. After an
+/// empty match the search resumes one scalar further on.
+function regexSearchAll(
+  program: &RegexProgram,
+  source: &String,
+  startAt: u64
+): Vector<Vector<u64>> {
+  let mut all: Vector<Vector<u64>> = Vector::new<Vector<u64>>();
+  let mut vm: RegexVm = regexNewVm(program);
+  let length: u64 = source.length();
+  let mut position: u64 = startAt;
+
+  while (position <= length) {
+    let Option::SOME(slots) = regexSearch(&mut vm, program, source, position, false) else {
+      break;
+    };
+
+    let found: Match = regexWholeMatch(&slots);
+    all.push(slots);
+
+    if (!found.isEmpty()) {
+      position = found.end();
+      continue;
+    }
+
+    if (found.end() >= length) {
+      break;
+    }
+
+    let mut next: u64 = found.end();
+    source.charAt(found.end(), &mut next);
+    position = next;
+  }
+
+  return all;
+}
+
+/// The name of every group of `ast`, indexed by group, entry 0 empty.
+function regexGroupNames(ast: &RegexAst): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>(ast.groupCount + 1);
+  let mut index: u64 = 0;
+
+  while (index <= ast.groupCount) {
+    names.push(String::new());
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < ast.nodes.length()) {
+    match (ast.nodes.get(index).unwrap()) {
+      RegexNode::GROUP(group) -> {
+        if (group.capturing && group.name.length() > 0) {
+          names.set(group.index, group.name.clone());
+        }
+      },
+      _ -> {},
+    };
+
+    index += 1;
+  }
+
+  return names;
+}
+
+function regexCopySlots(slots: &Vector<u64>): Vector<u64> {
+  let mut copy: Vector<u64> = Vector::new<u64>(slots.length());
+  let mut index: u64 = 0;
+
+  while (index < slots.length()) {
+    copy.push(*slots.get(index).unwrap());
+    index += 1;
+  }
+
+  return copy;
+}
+
+function regexCopyNames(names: &Vector<String>): Vector<String> {
+  let mut copy: Vector<String> = Vector::new<String>(names.length());
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    copy.push(names.get(index).unwrap().clone());
+    index += 1;
+  }
+
+  return copy;
+}
+
+function regexGroupIndex(names: &Vector<String>, name: str): Option<u64> {
+  if (String::create(name).length() == 0) {
+    return Option::NONE;
+  }
+
+  let mut index: u64 = 1;
+
+  while (index < names.length()) {
+    if (names.get(index).unwrap().equals(name)) {
+      return Option::SOME(index);
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+function regexIsAsciiDigit(byte: u8): boolean {
+  return byte >= '0' as u8 && byte <= '9' as u8;
+}
+
+function regexIsNameByte(byte: u8): boolean {
+  return regexIsAsciiDigit(byte) || (byte >= 'A' as u8 && byte <= 'Z' as u8) || (byte >= 'a' as u8 && byte <= 'z' as u8) || byte == '_' as u8;
+}
+
+/// Group numbers past this are read but can name no group; it keeps the
+/// accumulated value from overflowing.
+const REGEX_GROUP_NUMBER_CAP: u64 = 1000000;
+
+function regexPushGroup(out: &mut String, source: &String, slots: &Vector<u64>, index: u64): void {
+  if (index * 2 + 1 >= slots.length()) {
+    return;
+  }
+
+  let start: u64 = *slots.get(index * 2).unwrap();
+  let end: u64 = *slots.get(index * 2 + 1).unwrap();
+
+  if (start == REGEX_NO_SLOT || end == REGEX_NO_SLOT) {
+    return;
+  }
+
+  let piece: String = source.substringBytes(start, end);
+  out.push(&piece);
+}
+
+/// Appends `replacement` to `out` with its `$` references expanded against
+/// one match; see `Regex::replaceAll`.
+function regexExpand(
+  out: &mut String,
+  source: &String,
+  slots: &Vector<u64>,
+  names: &Vector<String>,
+  replacement: &String
+): void {
+  let length: u64 = replacement.length();
+  let mut position: u64 = 0;
+
+  while (position < length) {
+    let byte: u8 = replacement.byteAt(position).unwrap();
+
+    if (byte != '$' as u8 || position + 1 >= length) {
+      out.pushByte(byte);
+      position += 1;
+      continue;
+    }
+
+    let next: u8 = replacement.byteAt(position + 1).unwrap();
+
+    if (next == '$' as u8) {
+      out.pushByte('$' as u8);
+      position += 2;
+      continue;
+    }
+
+    if (regexIsAsciiDigit(next)) {
+      let mut index: u64 = 0;
+      let mut cursor: u64 = position + 1;
+
+      while (cursor < length && regexIsAsciiDigit(replacement.byteAt(cursor).unwrap())) {
+        if (index < REGEX_GROUP_NUMBER_CAP) {
+          index = index * 10 + (replacement.byteAt(cursor).unwrap() - '0' as u8) as u64;
+        }
+
+        cursor += 1;
+      }
+
+      regexPushGroup(out, source, slots, index);
+      position = cursor;
+      continue;
+    }
+
+    if (next == '{' as u8) {
+      let mut cursor: u64 = position + 2;
+
+      while (cursor < length && regexIsNameByte(replacement.byteAt(cursor).unwrap())) {
+        cursor += 1;
+      }
+
+      if (cursor < length && cursor > position + 2 && replacement.byteAt(cursor).unwrap() == '}' as u8) {
+        let reference: String = replacement.substringBytes(position + 2, cursor);
+        regexPushReference(out, source, slots, names, &reference);
+        position = cursor + 1;
+        continue;
+      }
+    }
+
+    out.pushByte(byte);
+    position += 1;
+  }
+}
+
+/// Appends the group `reference` names: a number when it is all digits,
+/// otherwise a group name.
+function regexPushReference(
+  out: &mut String,
+  source: &String,
+  slots: &Vector<u64>,
+  names: &Vector<String>,
+  reference: &String
+): void {
+  let mut index: u64 = 0;
+  let mut cursor: u64 = 0;
+  let mut numeric: boolean = true;
+
+  while (cursor < reference.length()) {
+    let byte: u8 = reference.byteAt(cursor).unwrap();
+
+    if (!regexIsAsciiDigit(byte)) {
+      numeric = false;
+      break;
+    }
+
+    if (index < REGEX_GROUP_NUMBER_CAP) {
+      index = index * 10 + (byte - '0' as u8) as u64;
+    }
+
+    cursor += 1;
+  }
+
+  if (!numeric) {
+    let Option::SOME(named) = regexGroupIndex(names, reference.toStr()) else {
+      return;
+    };
+
+    index = named;
+  }
+
+  regexPushGroup(out, source, slots, index);
+}
+
+function regexReplace(regex: &Regex, text: str, replacement: str, every: boolean): String {
+  let source: String = String::create(text);
+  let expansion: String = String::create(replacement);
+  let mut all: Vector<Vector<u64>> = Vector::new<Vector<u64>>();
+
+  if (every) {
+    all = regexSearchAll(&regex.program, &source, 0);
+  } else {
+    let mut vm: RegexVm = regexNewVm(&regex.program);
+
+    if (let Option::SOME(slots) = regexSearch(&mut vm, &regex.program, &source, 0, false)) {
+      all.push(slots);
+    }
+  }
+
+  let mut out: String = String::new();
+  let mut last: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < all.length()) {
+    let slots: &Vector<u64> = all.get(index).unwrap();
+    let found: Match = regexWholeMatch(slots);
+    let before: String = source.substringBytes(last, found.start());
+    out.push(&before);
+    regexExpand(&mut out, &source, slots, &regex.names, &expansion);
+    last = found.end();
+    index += 1;
+  }
+
+  let rest: String = source.substringBytes(last, source.length());
+  out.push(&rest);
+  return out;
 }
