@@ -26,13 +26,27 @@
 //!
 //! ## Threading
 //!
-//! A SQLite handle is thread-bound, so a `Connection` is not `Send`. Share one
-//! connection behind a `Mutex` (`Shared<Sqlite3::Connection>`); SQLite
-//! serializes writers, and WAL keeps readers concurrent.
+//! A `Connection` holds a raw `sqlite3*`, so it is not `Send`, and a
+//! `Mutex<Connection>` does not compile: `Mutex` requires `Send`. To share one
+//! connection between threads, wrap it in `Sqlite3::SharedConnection` and put
+//! that behind a `Mutex` (`Shared<Sqlite3::SharedConnection>`):
+//!
+//! ```ignis
+//! let cell: Sqlite3::SharedConnection = Sqlite3::SharedConnection::new(connection);
+//! let shared: Shared<Sqlite3::SharedConnection> = Arc::new<Mutex<Sqlite3::SharedConnection>>(Mutex::new<Sqlite3::SharedConnection>(cell));
+//! let mut guard: MutexGuard<Sqlite3::SharedConnection> = shared.get().lock();
+//! guard.get().connection.exec("INSERT INTO t VALUES (1)").unwrap();
+//! ```
+//!
+//! The handle may then move between threads, one at a time. A `Statement` or
+//! `Transaction` taken through the guard must not outlive the guard.
 
 import Error from "std::sqlite3::error";
 
 extern __sqlite3_connection {
+  /// Returns 0 when SQLite was compiled single-threaded
+  /// (`SQLITE_THREADSAFE=0`). Declared in `sqlite3.h`.
+  function sqlite3_threadsafe(): i32;
   /// Opens (or creates) the database `filename`. Declared in `sqlite3.h`.
   function sqlite3_open(filename: *u8, db: *mut *mut void): i32;
   /// Closes `db`, deferring the deallocation while statements are live.
@@ -247,6 +261,30 @@ export namespace Sqlite3 {
         __sqlite3_connection::sqlite3_close_v2(self.db);
         self.db = null;
       }
+    }
+  }
+
+  /// A `Connection` that may move to another thread, to be shared behind a
+  /// `Mutex` (`Shared<Sqlite3::SharedConnection>`).
+  ///
+  /// Declared `Send` although it holds a raw handle: SQLite built in its
+  /// default serialized or multi-thread mode lets a connection be used from
+  /// any thread as long as two threads never use it at once, and the `Mutex`
+  /// it is meant for guarantees that. `new` refuses a library built
+  /// single-threaded, where no sharing is allowed.
+  @allow(thread_safety)
+  @implements(Send)
+  record SharedConnection {
+    public connection: Connection;
+
+    /// Wraps `connection` for sharing. Panics when the linked SQLite was
+    /// compiled with `SQLITE_THREADSAFE=0`.
+    public static new(connection: Connection): SharedConnection {
+      if (__sqlite3_connection::sqlite3_threadsafe() == 0) {
+        @panic("Sqlite3::SharedConnection: SQLite was built single-threaded (SQLITE_THREADSAFE=0)");
+      }
+
+      return SharedConnection { connection: connection };
     }
   }
 }

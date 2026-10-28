@@ -47,7 +47,9 @@ captured.
 
 Three builtins override the inference from inside the body: `@move` forces a by-value snapshot,
 `@ref` a shared reference, `@refMut` a mutable one. The snapshot matters more than it looks — a
-`@move` capture reads the value as it was at creation, not as it is at call time.
+`@move` capture reads the value as it was at creation, not as it is at call time. The snapshot
+lives in the environment: `(@move x).method()` with a `&self` method borrows that copy on every
+call, and the copy is dropped once, with the closure, however many times it is called.
 
 ## Moving closures
 
