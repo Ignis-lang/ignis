@@ -1,0 +1,33 @@
+// A closure capturing a view or a local by reference may live in a local, a
+// record or a vector as long as it stays in the function, and a closure
+// argument may read a local the call does not borrow mutably.
+import Io from "std::io";
+
+record Holder {
+  public f: () -> void;
+}
+
+function useInScope(): void {
+  let text: String = String::create("in scope");
+  let view: str = text.toStr();
+  let g: () -> void = (): void -> Io::println(view);
+  g();
+  let h: Holder = Holder { f: (): void -> Io::println(view) };
+  h.f();
+  let mut items: Vector<() -> void> = Vector::new<() -> void>();
+  items.push((): void -> Io::println(view));
+  if (let Option::SOME(first) = items.get(0)) {
+    (*first)();
+  }
+}
+
+function main(): i32 {
+  useInScope();
+  let mut values: Vector<i32> = Vector::new<i32>();
+  values.push(3);
+  values.push(1);
+  let offset: i32 = 0;
+  values.sort((a: &i32, b: &i32): i32 -> *a - *b + offset);
+  Io::println(`${values.length()}`);
+  return 0;
+}
