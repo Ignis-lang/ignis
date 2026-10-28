@@ -1,0 +1,308 @@
+//! Compiler: `RegexAst` -> `RegexProgram`, the instruction list the Pike VM
+//! runs.
+
+import RegexAssertion, RegexAst, RegexError, RegexNode, RegexRange from "./ast";
+
+/// The most instructions a compiled pattern may hold. Counted repetition
+/// copies its body, so nesting (`(a{1000}){1000}`) could otherwise produce
+/// a program too large to run; such a pattern is `pattern too large`.
+export const REGEX_MAX_PROGRAM: u64 = 100000;
+
+/// What an instruction does. Operands live in `RegexInst.first` and
+/// `RegexInst.second`.
+export enum RegexOpcode {
+  /// Consume one scalar inside the ranges `first .. first + second` of
+  /// `RegexProgram.ranges`, or outside them when `negated`.
+  RANGES,
+
+  /// Consume one scalar other than `\n`.
+  ANY_EXCEPT_NEWLINE,
+
+  /// Continue at `first`, and with lower priority at `second`.
+  SPLIT,
+
+  /// Continue at `first`.
+  JUMP,
+
+  /// Record the current offset in slot `first`.
+  SAVE,
+
+  /// Continue only when the assertion coded in `first` holds here.
+  ASSERT,
+
+  /// The pattern matched.
+  MATCH,
+}
+
+/// One instruction of a program.
+export record RegexInst {
+  public opcode: RegexOpcode;
+  public first: u64;
+  public second: u64;
+  public negated: boolean;
+}
+
+/// A compiled pattern. Execution starts at instruction 0.
+export record RegexProgram {
+  public insts: Vector<RegexInst>;
+
+  /// The ranges `RANGES` instructions refer to.
+  public ranges: Vector<RegexRange>;
+
+  /// Two slots per group, the whole match being group 0.
+  public slotCount: u64;
+}
+
+/// `ASSERT` operand codes.
+export const REGEX_ASSERT_START: u64 = 0;
+export const REGEX_ASSERT_END: u64 = 1;
+export const REGEX_ASSERT_WORD_BOUNDARY: u64 = 2;
+export const REGEX_ASSERT_NOT_WORD_BOUNDARY: u64 = 3;
+
+record RegexCompiler {
+  insts: Vector<RegexInst>;
+  ranges: Vector<RegexRange>;
+  tooLarge: boolean;
+}
+
+function regexEmit(
+  compiler: &mut RegexCompiler,
+  opcode: RegexOpcode,
+  first: u64,
+  second: u64
+): u64 {
+  let pc: u64 = compiler.insts.length();
+
+  if (pc >= REGEX_MAX_PROGRAM) {
+    compiler.tooLarge = true;
+    return pc;
+  }
+
+  compiler.insts.push(RegexInst { opcode: opcode, first: first, second: second, negated: false });
+  return pc;
+}
+
+function regexEmitRanges(
+  compiler: &mut RegexCompiler,
+  ranges: &Vector<RegexRange>,
+  negated: boolean
+): void {
+  let start: u64 = compiler.ranges.length();
+  let mut index: u64 = 0;
+
+  while (index < ranges.length()) {
+    let range: &RegexRange = ranges.get(index).unwrap();
+    compiler.ranges.push(RegexRange { start: range.start, end: range.end });
+    index += 1;
+  }
+
+  let pc: u64 = regexEmit(compiler, RegexOpcode::RANGES, start, ranges.length());
+
+  if (!compiler.tooLarge) {
+    compiler.insts.getMut(pc).unwrap().negated = negated;
+  }
+}
+
+function regexPatchFirst(compiler: &mut RegexCompiler, pc: u64, target: u64): void {
+  if (!compiler.tooLarge) {
+    compiler.insts.getMut(pc).unwrap().first = target;
+  }
+}
+
+function regexPatchSecond(compiler: &mut RegexCompiler, pc: u64, target: u64): void {
+  if (!compiler.tooLarge) {
+    compiler.insts.getMut(pc).unwrap().second = target;
+  }
+}
+
+/// A `SPLIT` whose body starts right after it; the other target is patched
+/// later. Greedy prefers the body, lazy the exit.
+function regexEmitBodySplit(compiler: &mut RegexCompiler, greedy: boolean): u64 {
+  let pc: u64 = regexEmit(compiler, RegexOpcode::SPLIT, 0, 0);
+
+  if (greedy) {
+    regexPatchFirst(compiler, pc, pc + 1);
+  } else {
+    regexPatchSecond(compiler, pc, pc + 1);
+  }
+
+  return pc;
+}
+
+function regexPatchExit(
+  compiler: &mut RegexCompiler,
+  split: u64,
+  greedy: boolean,
+  target: u64
+): void {
+  if (greedy) {
+    regexPatchSecond(compiler, split, target);
+  } else {
+    regexPatchFirst(compiler, split, target);
+  }
+}
+
+function regexCompileAlternate(
+  compiler: &mut RegexCompiler,
+  ast: &RegexAst,
+  children: &Vector<u64>
+): void {
+  let mut jumps: Vector<u64> = Vector::new<u64>();
+  let mut index: u64 = 0;
+
+  while (index < children.length() && !compiler.tooLarge) {
+    let child: u64 = *children.get(index).unwrap();
+
+    if (index + 1 == children.length()) {
+      regexCompileNode(compiler, ast, child);
+    } else {
+      let split: u64 = regexEmit(compiler, RegexOpcode::SPLIT, 0, 0);
+      regexPatchFirst(compiler, split, split + 1);
+      regexCompileNode(compiler, ast, child);
+      jumps.push(regexEmit(compiler, RegexOpcode::JUMP, 0, 0));
+      regexPatchSecond(compiler, split, compiler.insts.length());
+    }
+
+    index += 1;
+  }
+
+  let end: u64 = compiler.insts.length();
+  let mut jump: u64 = 0;
+
+  while (jump < jumps.length()) {
+    regexPatchFirst(compiler, *jumps.get(jump).unwrap(), end);
+    jump += 1;
+  }
+}
+
+function regexCompileRepeat(
+  compiler: &mut RegexCompiler,
+  ast: &RegexAst,
+  child: u64,
+  min: u32,
+  max: u32,
+  bounded: boolean,
+  greedy: boolean
+): void {
+  let mut count: u32 = 0;
+
+  while (count < min && !compiler.tooLarge) {
+    regexCompileNode(compiler, ast, child);
+    count += 1;
+  }
+
+  if (!bounded) {
+    // An empty-matching body cannot loop forever: the VM visits each
+    // instruction at most once per position.
+    let split: u64 = regexEmitBodySplit(compiler, greedy);
+    regexCompileNode(compiler, ast, child);
+    regexEmit(compiler, RegexOpcode::JUMP, split, 0);
+    regexPatchExit(compiler, split, greedy, compiler.insts.length());
+    return;
+  }
+
+  let mut splits: Vector<u64> = Vector::new<u64>();
+
+  while (count < max && !compiler.tooLarge) {
+    splits.push(regexEmitBodySplit(compiler, greedy));
+    regexCompileNode(compiler, ast, child);
+    count += 1;
+  }
+
+  let end: u64 = compiler.insts.length();
+  let mut index: u64 = 0;
+
+  while (index < splits.length()) {
+    regexPatchExit(compiler, *splits.get(index).unwrap(), greedy, end);
+    index += 1;
+  }
+}
+
+function regexAssertionCode(assertion: RegexAssertion): u64 {
+  match (assertion) {
+    RegexAssertion::START -> {
+      return REGEX_ASSERT_START;
+    },
+    RegexAssertion::END -> {
+      return REGEX_ASSERT_END;
+    },
+    RegexAssertion::WORD_BOUNDARY -> {
+      return REGEX_ASSERT_WORD_BOUNDARY;
+    },
+    RegexAssertion::NOT_WORD_BOUNDARY -> {
+      return REGEX_ASSERT_NOT_WORD_BOUNDARY;
+    },
+  };
+}
+
+function regexCompileNode(compiler: &mut RegexCompiler, ast: &RegexAst, id: u64): void {
+  if (compiler.tooLarge) {
+    return;
+  }
+
+  match (ast.nodes.get(id).unwrap()) {
+    RegexNode::EMPTY -> {},
+    RegexNode::LITERAL(scalar) -> {
+      let mut ranges: Vector<RegexRange> = Vector::new<RegexRange>();
+      ranges.push(RegexRange { start: scalar, end: scalar });
+      regexEmitRanges(compiler, &ranges, false);
+    },
+    RegexNode::ANY_EXCEPT_NEWLINE -> {
+      regexEmit(compiler, RegexOpcode::ANY_EXCEPT_NEWLINE, 0, 0);
+    },
+    RegexNode::CLASS(class) -> {
+      regexEmitRanges(compiler, &class.ranges, class.negated);
+    },
+    RegexNode::CONCAT(children) -> {
+      let mut index: u64 = 0;
+
+      while (index < children.length() && !compiler.tooLarge) {
+        regexCompileNode(compiler, ast, *children.get(index).unwrap());
+        index += 1;
+      }
+    },
+    RegexNode::ALTERNATE(children) -> {
+      regexCompileAlternate(compiler, ast, &children);
+    },
+    RegexNode::REPEAT(repeat) -> {
+      regexCompileRepeat(compiler, ast, repeat.child, repeat.min, repeat.max, repeat.bounded, repeat.greedy);
+    },
+    RegexNode::GROUP(group) -> {
+      if (group.capturing) {
+        regexEmit(compiler, RegexOpcode::SAVE, group.index * 2, 0);
+        regexCompileNode(compiler, ast, group.child);
+        regexEmit(compiler, RegexOpcode::SAVE, group.index * 2 + 1, 0);
+      } else {
+        regexCompileNode(compiler, ast, group.child);
+      }
+    },
+    RegexNode::ASSERT(assertion) -> {
+      regexEmit(compiler, RegexOpcode::ASSERT, regexAssertionCode(assertion), 0);
+    },
+  };
+}
+
+/// Compiles `ast` to `SAVE 0, <pattern>, SAVE 1, MATCH`, or fails with
+/// `pattern too large` when the program would exceed `REGEX_MAX_PROGRAM`.
+export function compileRegex(ast: &RegexAst): Result<RegexProgram, RegexError> {
+  let mut compiler: RegexCompiler = RegexCompiler {
+    insts: Vector::new<RegexInst>(),
+    ranges: Vector::new<RegexRange>(),
+    tooLarge: false,
+  };
+
+  regexEmit(&mut compiler, RegexOpcode::SAVE, 0, 0);
+  regexCompileNode(&mut compiler, ast, ast.root);
+  regexEmit(&mut compiler, RegexOpcode::SAVE, 1, 0);
+  regexEmit(&mut compiler, RegexOpcode::MATCH, 0, 0);
+
+  if (compiler.tooLarge) {
+    return Result::ERROR(RegexError::create(1, String::create("pattern too large")));
+  }
+
+  return Result::OK(RegexProgram {
+    insts: compiler.insts,
+    ranges: compiler.ranges,
+    slotCount: (ast.groupCount + 1) * 2,
+  });
+}

@@ -1,0 +1,129 @@
+//! `Regex`, the compiled pattern, and `Match`, the offsets of one match.
+
+import RegexError from "./ast";
+import compileRegex, RegexProgram from "./compiler";
+import parseRegex from "./parser";
+import regexNewVm, regexSearch, RegexVm from "./vm";
+
+/// One match: byte offsets into the searched text, always on scalar
+/// boundaries. It stores no view of the text.
+export record Match {
+  matchStart: u64;
+  matchEnd: u64;
+
+  /// A match of the bytes `start .. end`.
+  public static create(start: u64, end: u64): Match {
+    return Match { matchStart: start, matchEnd: end };
+  }
+
+  /// The byte offset where the match starts.
+  public start(&self): u64 {
+    return self.matchStart;
+  }
+
+  /// The byte offset just past the match.
+  public end(&self): u64 {
+    return self.matchEnd;
+  }
+
+  /// The length of the match in bytes.
+  public length(&self): u64 {
+    return self.matchEnd - self.matchStart;
+  }
+
+  /// Whether the match is empty.
+  public isEmpty(&self): boolean {
+    return self.matchEnd == self.matchStart;
+  }
+
+  /// A copy of the matched bytes of `haystack`, which must be the searched
+  /// text.
+  public textIn(&self, haystack: str): String {
+    let source: String = String::create(haystack);
+    return source.substringBytes(self.matchStart, self.matchEnd);
+  }
+}
+
+/// A compiled regular expression.
+export record Regex {
+  program: RegexProgram;
+
+  /// Parses and compiles `pattern`.
+  public static new(pattern: str): Result<Regex, RegexError> {
+    match (parseRegex(pattern)) {
+      Result::OK(ast) -> {
+        match (compileRegex(&ast)) {
+          Result::OK(program) -> {
+            return Result::OK(Regex { program: program });
+          },
+          Result::ERROR(error) -> {
+            return Result::ERROR(error);
+          },
+        };
+      },
+      Result::ERROR(error) -> {
+        return Result::ERROR(error);
+      },
+    };
+  }
+
+  /// Whether `text` contains a match.
+  public isMatch(&self, text: str): boolean {
+    let source: String = String::create(text);
+    let mut vm: RegexVm = regexNewVm(&self.program);
+    return regexSearch(&mut vm, &self.program, &source, 0, true).isSome();
+  }
+
+  /// The leftmost-first match in `text`.
+  public find(&self, text: str): Option<Match> {
+    let source: String = String::create(text);
+    let mut vm: RegexVm = regexNewVm(&self.program);
+    return regexFindFrom(&mut vm, &self.program, &source, 0);
+  }
+
+  /// Every non-overlapping match in `text`, left to right. After an empty
+  /// match the search resumes one scalar further on.
+  public findAll(&self, text: str): Vector<Match> {
+    let mut matches: Vector<Match> = Vector::new<Match>();
+    let source: String = String::create(text);
+    let mut vm: RegexVm = regexNewVm(&self.program);
+    let length: u64 = source.length();
+    let mut startAt: u64 = 0;
+
+    while (startAt <= length) {
+      let Option::SOME(found) = regexFindFrom(&mut vm, &self.program, &source, startAt) else {
+        break;
+      };
+
+      matches.push(found);
+
+      if (!found.isEmpty()) {
+        startAt = found.end();
+        continue;
+      }
+
+      if (found.end() >= length) {
+        break;
+      }
+
+      let mut next: u64 = found.end();
+      source.charAt(found.end(), &mut next);
+      startAt = next;
+    }
+
+    return matches;
+  }
+}
+
+function regexFindFrom(
+  vm: &mut RegexVm,
+  program: &RegexProgram,
+  text: &String,
+  startAt: u64
+): Option<Match> {
+  let Option::SOME(slots) = regexSearch(vm, program, text, startAt, false) else {
+    return Option::NONE;
+  };
+
+  return Option::SOME(Match::create(*slots.get(0).unwrap(), *slots.get(1).unwrap()));
+}

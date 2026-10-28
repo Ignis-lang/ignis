@@ -6,14 +6,44 @@
 //! that simulates the NFA, so matching takes O(text x program) time and never
 //! backtracks.
 //!
-//! This slice holds the parser only. Compiling and matching (`Regex::new`,
-//! `isMatch`, `find`, `findAll`, captures, `replaceAll`, `split`) arrive in
-//! the next slices.
+//! ```ignis
+//! import Match, Regex from "std::regex";
+//!
+//! let regex: Regex = Regex::new("\\d+").unwrap();
+//! let found: Match = regex.find("abc 123").unwrap(); // 4..7
+//! ```
+//!
+//! Captures, `replaceAll` and `split` arrive in the next slices.
+//!
+//! ## Matching
+//!
+//! - Leftmost-first: of the matches starting at the leftmost position, the
+//!   one the pattern prefers wins. Alternatives are tried in order (`a|ab`
+//!   on `"ab"` matches `"a"`), greedy repetition prefers more and lazy
+//!   repetition fewer.
+//! - The search is unanchored unless the pattern uses `^`.
+//! - Offsets are byte offsets into the UTF-8 text and always fall on scalar
+//!   boundaries. An invalid byte is read as U+FFFD and spans one byte.
+//! - `findAll` returns non-overlapping matches; after an empty match it
+//!   resumes one scalar further on, so `a*` on `"baa"` gives `0..0`,
+//!   `1..3` and `3..3`.
+//! - Matching takes O(text x program) time: the VM runs every thread in
+//!   lockstep and follows each instruction at most once per position, so
+//!   patterns such as `(a*)*b` cannot backtrack.
+//!
+//! ## Limits
+//!
+//! Counted repetition copies its body, so a program holds at most
+//! `REGEX_MAX_PROGRAM` (100000) instructions; a larger one is
+//! `pattern too large` at column 1.
 //!
 //! ## Exports
 //!
 //! | Export                 | Description                                                    |
 //! |------------------------|----------------------------------------------------------------|
+//! | `Regex`                | `Regex::new(pattern)`: `Result<Regex, RegexError>`; `isMatch(text)`, `find(text)`: `Option<Match>`, `findAll(text)`: `Vector<Match>` |
+//! | `Match`                | `start()`, `end()`, `length()` in bytes, `isEmpty()`, `textIn(haystack)`: a copy of the matched text |
+//! | `REGEX_MAX_PROGRAM`    | The most instructions a compiled pattern may hold: 100000      |
 //! | `parseRegex`           | `parseRegex(pattern)`: `Result<RegexAst, RegexError>`          |
 //! | `RegexError`           | `column()` (1-based, in Unicode scalars), `message()`, `toString()` |
 //! | `RegexAst`             | `nodes`, `root`, `groupCount`                                  |
@@ -74,6 +104,9 @@
 
 import _ from "std::regex::ast";
 import _ from "std::regex::parser";
+import _ from "std::regex::compiler";
+import _ from "std::regex::vm";
+import _ from "std::regex::regex";
 
 export
   RegexAssertion,
@@ -86,3 +119,5 @@ export
   RegexRepeat,
 from "./ast";
 export REGEX_MAX_REPETITION, parseRegex from "./parser";
+export REGEX_MAX_PROGRAM from "./compiler";
+export Match, Regex from "./regex";
