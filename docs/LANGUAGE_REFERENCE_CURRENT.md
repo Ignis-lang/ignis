@@ -987,6 +987,7 @@ References follow exclusivity rules:
 - A single `&mut T` (mutable reference) is exclusive -- no other references may coexist.
 - Mutating a variable while any borrow is active is an error.
 - Returning a reference to a local variable is an error.
+- A reference to a reference collapses: `& &T` and `& &mut T` are `&T`, `&mut &mut T` is `&mut T`, and `&mut &T` is `&T`. Taking `&r` of a reference `r` reborrows it rather than pointing at `r`, and dereferencing such a value once reaches `T`.
 
 ```ignis
 let mut x: i32 = 10;
