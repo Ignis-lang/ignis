@@ -1,0 +1,219 @@
+import Test from "std::test";
+import parseRegex from "std::regex";
+import regexAstDebug from "./ast";
+
+function regexTestShape(pattern: str, expected: str): void {
+  match (parseRegex(pattern)) {
+    Result::OK(ast) -> {
+      let shape: String = regexAstDebug(&ast);
+      Test::assertEq<str>(shape.toStr(), expected);
+    },
+    Result::ERROR(error) -> {
+      let text: String = error.toString();
+      Test::assertEq<str>(text.toStr(), "no error");
+    },
+  };
+}
+
+function regexTestError(pattern: str, message: str, column: u64): void {
+  match (parseRegex(pattern)) {
+    Result::OK(_) -> {
+      Test::assertEq<str>("parsed", message);
+    },
+    Result::ERROR(error) -> {
+      Test::assertEq<str>(error.message(), message);
+      Test::assertEq<u64>(error.column(), column);
+    },
+  };
+}
+
+function regexTestGroupCount(pattern: str): u64 {
+  let Result::OK(ast) = parseRegex(pattern) else {
+    return 0xFFFF;
+  };
+
+  return ast.groupCount;
+}
+
+@test
+function parsesLiteralsAndConcatenation(): void {
+  regexTestShape("", "empty");
+  regexTestShape("a", "lit(a)");
+  regexTestShape("abc", "cat(lit(a),lit(b),lit(c))");
+  regexTestShape("é+", "rep{1,inf}(lit(U+00E9))");
+  regexTestShape("a]}", "cat(lit(a),lit(]),lit(}))");
+}
+
+@test
+function parsesEscapes(): void {
+  regexTestShape("\\.\\*\\\\\\n", "cat(lit(.),lit(*),lit(\\),lit(U+000A))");
+  regexTestShape("\\t\\r\\f\\v", "cat(lit(U+0009),lit(U+000D),lit(U+000C),lit(U+000B))");
+  regexTestShape("\\{\\}\\[\\]\\(\\)\\|\\^\\$\\?\\+", "cat(lit({),lit(}),lit([),lit(]),lit(U+0028),lit(U+0029),lit(|),lit(^),lit($),lit(?),lit(+))");
+}
+
+@test
+function parsesShorthandClasses(): void {
+  regexTestShape("\\d", "class(0-9)");
+  regexTestShape("\\w", "class(0-9,A-Z,_,a-z)");
+  regexTestShape("\\s", "class(U+0009-U+000D,U+0020)");
+  regexTestShape("\\D", "class(U+0000-/,:-U+10FFFF)");
+  regexTestShape("\\S", "class(U+0000-U+0008,U+000E-U+001F,!-U+10FFFF)");
+  regexTestShape("\\W", "class(U+0000-/,:-@,[-^,`,{-U+10FFFF)");
+}
+
+@test
+function parsesClasses(): void {
+  regexTestShape("[a-cx]", "class(a-c,x)");
+  regexTestShape("[^a-z0-9_]", "nclass(0-9,_,a-z)");
+  regexTestShape("[c-ea-d]", "class(a-e)");
+  regexTestShape("[a-]", "class(U+002D,a)");
+  regexTestShape("[-a]", "class(U+002D,a)");
+  regexTestShape("[\\d.]", "class(.,0-9)");
+  regexTestShape("[\\]\\-]", "class(U+002D,])");
+  regexTestShape("[\\n-\\r]", "class(U+000A-U+000D)");
+  regexTestShape("[.*(]", "class(U+0028,*,.)");
+}
+
+@test
+function parsesAnyAndAssertions(): void {
+  regexTestShape("^a.$", "cat(start,lit(a),any,end)");
+  regexTestShape("\\bx\\B", "cat(wordb,lit(x),nwordb)");
+}
+
+@test
+function parsesAlternation(): void {
+  regexTestShape("a|bc", "alt(lit(a),cat(lit(b),lit(c)))");
+  regexTestShape("a|b|", "alt(lit(a),lit(b),empty)");
+  regexTestShape("|a", "alt(empty,lit(a))");
+}
+
+@test
+function parsesGreedyQuantifiers(): void {
+  regexTestShape("ab*", "cat(lit(a),rep{0,inf}(lit(b)))");
+  regexTestShape("a+", "rep{1,inf}(lit(a))");
+  regexTestShape("a?", "rep{0,1}(lit(a))");
+  regexTestShape("a{3}", "rep{3,3}(lit(a))");
+  regexTestShape("a{2,}", "rep{2,inf}(lit(a))");
+  regexTestShape("a{2,5}", "rep{2,5}(lit(a))");
+  regexTestShape("a{0,1000}", "rep{0,1000}(lit(a))");
+  regexTestShape("(ab)*", "rep{0,inf}(group(1,cat(lit(a),lit(b))))");
+  regexTestShape("[ab]+", "rep{1,inf}(class(a-b))");
+}
+
+@test
+function parsesLazyQuantifiers(): void {
+  regexTestShape("a*?", "rep{0,inf}?(lit(a))");
+  regexTestShape("a+?b??", "cat(rep{1,inf}?(lit(a)),rep{0,1}?(lit(b)))");
+  regexTestShape("a{2,5}?", "rep{2,5}?(lit(a))");
+  regexTestShape("a{2,}?", "rep{2,inf}?(lit(a))");
+}
+
+@test
+function parsesGroups(): void {
+  regexTestShape("(a)(?:b)(?<word>c)", "cat(group(1,lit(a)),ncgroup(lit(b)),group(2:word,lit(c)))");
+  regexTestShape("((a)b)", "group(1,cat(group(2,lit(a)),lit(b)))");
+  regexTestShape("()", "group(1,empty)");
+  regexTestShape("(?<_x9>a)", "group(1:_x9,lit(a))");
+  Test::assertEq<u64>(regexTestGroupCount("(a)(?:b)(?<c>c)((d))"), 4);
+  Test::assertEq<u64>(regexTestGroupCount("abc"), 0);
+}
+
+@test
+function caseInsensitiveFlagFoldsAsciiLetters(): void {
+  regexTestShape("(?i)ab", "cat(class(A,a),class(B,b))");
+  regexTestShape("(?i)1", "lit(1)");
+  regexTestShape("a(?i)b|c", "alt(cat(lit(a),class(B,b)),class(C,c))");
+  regexTestShape("(?i:a)b", "cat(ncgroup(class(A,a)),lit(b))");
+  regexTestShape("((?i)a)b", "cat(group(1,class(A,a)),lit(b))");
+  regexTestShape("(?i)[a-cX]", "class(A-C,X,a-c,x)");
+  regexTestShape("(?i)[^k]", "nclass(K,k)");
+  regexTestShape("(?i)[Y-b]", "class(A-B,Y-b,y-z)");
+}
+
+@test
+function errorFormatsMessageAndColumn(): void {
+  let Result::ERROR(error) = parseRegex("abcdef(") else {
+    Test::fail();
+    return;
+  };
+
+  let text: String = error.toString();
+  Test::assertEq<str>(text.toStr(), "unclosed group at column 7");
+}
+
+@test
+function rejectsUnbalancedGroups(): void {
+  regexTestError("(ab", "unclosed group", 1);
+  regexTestError("abcdef(", "unclosed group", 7);
+  regexTestError("a(b(c)", "unclosed group", 2);
+  regexTestError("é(", "unclosed group", 2);
+  regexTestError("a)", "unmatched )", 2);
+  regexTestError("(a))", "unmatched )", 4);
+}
+
+@test
+function rejectsNothingToRepeat(): void {
+  regexTestError("*a", "nothing to repeat", 1);
+  regexTestError("a|*", "nothing to repeat", 3);
+  regexTestError("(+)", "nothing to repeat", 2);
+  regexTestError("a**", "nothing to repeat", 3);
+  regexTestError("a*??", "nothing to repeat", 4);
+  regexTestError("a{2}{3}", "nothing to repeat", 5);
+  regexTestError("^*", "nothing to repeat", 2);
+  regexTestError("\\b+", "nothing to repeat", 3);
+  regexTestError("(?i)*", "nothing to repeat", 5);
+  regexTestError("{2}", "nothing to repeat", 1);
+}
+
+@test
+function rejectsBadClasses(): void {
+  regexTestError("[z-a]", "invalid range z-a", 3);
+  regexTestError("[\\d-z]", "invalid range", 4);
+  regexTestError("[a", "unclosed class", 1);
+  regexTestError("x[a-", "unclosed class", 2);
+  regexTestError("[]", "empty class", 1);
+  regexTestError("[^]", "empty class", 1);
+  regexTestError("[\\b]", "unknown escape \\b", 2);
+}
+
+@test
+function rejectsBadEscapes(): void {
+  regexTestError("a\\", "trailing backslash", 2);
+  regexTestError("\\q", "unknown escape \\q", 1);
+  regexTestError("\\0", "unknown escape \\0", 1);
+  regexTestError("(a)b\\1", "unsupported: backreference", 5);
+  regexTestError("[\\2]", "unsupported: backreference", 2);
+}
+
+@test
+function rejectsBadRepetitions(): void {
+  regexTestError("a{", "invalid repetition", 2);
+  regexTestError("a{}", "invalid repetition", 2);
+  regexTestError("a{,3}", "invalid repetition", 2);
+  regexTestError("a{2", "invalid repetition", 2);
+  regexTestError("a{2,x}", "invalid repetition", 2);
+  regexTestError("a{3,2}", "invalid repetition range", 2);
+  regexTestError("a{1001}", "repetition count above 1000", 2);
+  regexTestError("a{1,1001}", "repetition count above 1000", 2);
+  regexTestError("a{99999999999}", "repetition count above 1000", 2);
+}
+
+@test
+function rejectsLookaround(): void {
+  regexTestError("(?=a)", "unsupported: lookaround", 1);
+  regexTestError("x(?!a)", "unsupported: lookaround", 2);
+  regexTestError("(?<=a)", "unsupported: lookaround", 1);
+  regexTestError("(?<!a)", "unsupported: lookaround", 1);
+}
+
+@test
+function rejectsBadGroupSyntax(): void {
+  regexTestError("(?x)", "unknown group flag", 3);
+  regexTestError("(?ix)", "unknown group flag", 4);
+  regexTestError("(?", "unclosed group", 1);
+  regexTestError("(?<1a>x)", "invalid group name", 4);
+  regexTestError("(?<a-b>x)", "invalid group name", 5);
+  regexTestError("(?<>x)", "invalid group name", 4);
+  regexTestError("(?<ab", "unclosed group", 1);
+  regexTestError("(?<a>x)(?<a>y)", "duplicate group name a", 11);
+}
