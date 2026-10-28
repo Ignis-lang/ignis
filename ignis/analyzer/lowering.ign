@@ -6010,6 +6010,21 @@ export namespace Lowering {
   /// `recordIterableElementType`: a `data: *T` field and a `length: u64`
   /// field, both matched behind their alias chains. Only a `Record` type
   /// qualifies, so a still-generic `Instance` falls back like in the oracle.
+  /// The referent of `typeId` when it is a reference, behind aliases.
+  function referenceReferentOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Analyzer::TypeId> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (let Option::SOME(Analyzer::Type::Reference(reference)) = typeStore.get(resolved.typeId)) {
+      return Option::SOME(reference.referent);
+    }
+
+    return Option::NONE;
+  }
+
   function forOfRecordShape(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -6022,17 +6037,51 @@ export namespace Lowering {
       return Option::NONE;
     }
 
-    let recordType: Analyzer::TypeId = resolved.typeId;
+    let mut recordType: Analyzer::TypeId = resolved.typeId;
+
+    // A reference to an iterable record iterates the record it points to
+    // (`lowerForOf` dereferences the iterable for it).
+    if (let Option::SOME(Analyzer::Type::Reference(reference)) = typeStore.get(recordType)) {
+      let referentResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, reference.referent);
+
+      if (referentResolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      recordType = referentResolved.typeId;
+    }
+
     let mut isRecord: boolean = false;
+    let mut typeParamSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+    let mut typeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut instanceDefinition: Option<Analyzer::DefinitionId> = Option::NONE;
 
     if (let Option::SOME(typeNode) = typeStore.get(recordType)) {
-      if (let Analyzer::Type::Record(_) = typeNode) {
-        isRecord = true;
-      }
+      match (typeNode) {
+        Analyzer::Type::Record(_) -> {
+          isRecord = true;
+        },
+        // A generic record (`Vector<T>`): its field types are specialized to
+        // the instance's arguments below.
+        Analyzer::Type::Instance(instance) -> {
+          isRecord = true;
+          instanceDefinition = Option::SOME(instance.definition);
+          typeArguments = Analyzer::Typecheck::copyTypeIdVector(&instance.typeArguments);
+        },
+        _ -> {},
+      };
     }
 
     if (!isRecord) {
       return Option::NONE;
+    }
+
+    if (let Option::SOME(definition) = instanceDefinition) {
+      typeParamSymbols = Analyzer::Typecheck::recordTypeParamSymbols(defStore, definition);
+
+      if (typeParamSymbols.length() != typeArguments.length()) {
+        return Option::NONE;
+      }
     }
 
     let Option::SOME(dataField) = Lowering::recordFieldLocation(defStore, typeStore, symbols, recordType, "data") else {
@@ -6042,7 +6091,14 @@ export namespace Lowering {
       return Option::NONE;
     };
 
-    let dataResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, dataField.fieldType);
+    let mut dataType: Analyzer::TypeId = dataField.fieldType;
+
+    if (typeArguments.length() > 0) {
+      let mut substituteRef: &mut Analyzer::TypeStore = typeStore;
+      dataType = substituteRef.substitute(dataType, &typeParamSymbols, &typeArguments);
+    }
+
+    let dataResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, dataType);
 
     if (dataResolved.cycleAlias.isSome()) {
       return Option::NONE;
@@ -6080,7 +6136,7 @@ export namespace Lowering {
 
     return Option::SOME(Lowering::ForOfRecord {
       elementType: elementType,
-      dataType: dataField.fieldType,
+      dataType: dataType,
       dataIndex: dataField.index,
       lengthIndex: lengthField.index,
     });
@@ -7218,6 +7274,19 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, span);
     };
 
+    // A reference iterable (`numbers: &Vector<i32>`) reads the fields of the
+    // record it points to.
+    let mut recordValue: Hir::HirId = iterable.value;
+
+    if (let Option::SOME(referent) = Lowering::referenceReferentOf(defStore, typeStore, iterableType)) {
+      let mut derefHirRef: &mut Hir::HirStore = hir;
+      recordValue = derefHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Dereference(iterable.value),
+        span: span,
+        typeId: referent,
+      });
+    }
+
     let loopNode: Hir::HirId = Lowering::lowerForOfRecord(
       defStore,
       typeStore,
@@ -7229,7 +7298,7 @@ export namespace Lowering {
       forOf,
       &binding,
       shape,
-      iterable.value,
+      recordValue,
       synthId,
       &mut prefix,
     );

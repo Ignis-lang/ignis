@@ -4249,7 +4249,7 @@ export namespace Borrowck {
     clearRef.clearTemporaryStorage(binding.raw());
 
     if (forOfIterable) {
-      if (Borrowck::recordForOfDataPointer(defStore, typeStore, hir, state, binding, bindingDepth, value)) {
+      if (Borrowck::recordForOfDataPointer(defStore, typeStore, symbols, hir, state, diagnostics, binding, bindingDepth, value, span)) {
         return;
       }
     }
@@ -4603,11 +4603,14 @@ export namespace Borrowck {
   function recordForOfDataPointer(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
     binding: Analyzer::DefinitionId,
     bindingDepth: Option<u64>,
     value: Hir::HirId,
+    span: SourceSpan,
   ): boolean {
     let Option::SOME(node) = hir.get(value) else {
       return false;
@@ -4623,9 +4626,18 @@ export namespace Borrowck {
 
     let owner: Borrowck::ViewOwner = Borrowck::storageOwnerOf(defStore, typeStore, hir, state, access.base);
 
+    // The loop reads its elements through this pointer, taken once before
+    // the first round: the iterable stays borrowed while the pointer is used,
+    // so growing or clearing it in the body (`numbers.push(n)`) is rejected
+    // instead of leaving the pointer dangling.
+    let mut borrowed: Option<Analyzer::DefinitionId> = Option::NONE;
+
     if (owner.kind == Borrowck::VIEW_OWNER_LOCAL) {
       let mut viewRef: &mut Borrowck::State = state;
       viewRef.setViewOwner(binding.raw(), owner.local.raw(), false);
+      borrowed = Option::SOME(owner.local);
+    } else if (owner.kind == Borrowck::VIEW_OWNER_EXTERNAL) {
+      borrowed = Borrowck::untrackedMutableStorageOf(defStore, typeStore, hir, state, access.base);
     } else if (owner.kind == Borrowck::VIEW_OWNER_TEMPORARY) {
       let mut depth: u64 = owner.depth;
 
@@ -4637,6 +4649,13 @@ export namespace Borrowck {
 
       let mut storageRef: &mut Borrowck::State = state;
       storageRef.setTemporaryStorage(binding.raw(), depth, owner.node.raw());
+    }
+
+    if (let Option::SOME(target) = borrowed) {
+      let granted: boolean = Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, false, span, true);
+
+      let mut heldRef: &mut Borrowck::State = state;
+      heldRef.recordHeldBorrow(target.raw(), false, granted);
     }
 
     return true;
