@@ -988,6 +988,7 @@ References follow exclusivity rules:
 - Mutating a variable while any borrow is active is an error.
 - Returning a reference to a local variable is an error.
 - A `&mut T` is accepted wherever a `&T` is expected (an argument, an annotated `let`, a `return`, a field), with no `&*`: the shared reference only gives up the right to write. Only the outermost reference converts; `Option<&mut T>` is not an `Option<&T>`.
+- A reference to a reference collapses: `& &T` and `& &mut T` are `&T`, `&mut &mut T` is `&mut T`, and `&mut &T` is `&T`. Taking `&r` of a reference `r` reborrows it rather than pointing at `r`, and dereferencing such a value once reaches `T`.
 
 ```ignis
 let mut x: i32 = 10;

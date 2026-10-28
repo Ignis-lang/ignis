@@ -3514,9 +3514,16 @@ export namespace CodegenC {
           sliceType = CodegenC::formatCType(defStore, typeStore, symbols, closures, temp.ty);
         }
 
+        // The data operand may point at another type than the element
+        // (`@sliceFromParts<u64>(&text, 1)` reinterprets `text`), so it is
+        // cast to the slice's own data pointer.
+        let elementType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, node.elementType);
         let mut line: String = `    t${node.dest.raw()} = (${sliceType.toStr()})`;
-        line.pushStr("{ .data = ");
+        line.pushStr("{ .data = (");
+        line.pushStr(elementType.toStr());
+        line.pushStr("*)(");
         line.pushStr(data.toStr());
+        line.pushStr(")");
         line.pushStr(", .len = ");
         line.pushStr(length.toStr());
         line.pushStr(" };\n");

@@ -1481,12 +1481,30 @@ export namespace Analyzer {
     }
 
     /// Returns the canonical id for an immutable reference to `referent` (&T).
+    ///
+    /// A reference to a reference collapses: `& &T` and `& &mut T` are `&T`,
+    /// so `&r` of a reference `r` reborrows it instead of pointing at `r`.
     public reference(&mut self, referent: Analyzer::TypeId): Analyzer::TypeId {
+      if (let Option::SOME(Analyzer::Type::Reference(inner)) = self.get(referent)) {
+        return self.reference(inner.referent);
+      }
+
       return self.intern(Analyzer::Type::Reference(Analyzer::ReferenceType { referent: referent, mutable: false }));
     }
 
     /// Returns the canonical id for a mutable reference to `referent` (&mut T).
+    ///
+    /// A reference to a reference collapses: `&mut &mut T` is `&mut T`, and
+    /// `&mut &T` is `&T`, since no write access is gained through a shared one.
     public mutableReference(&mut self, referent: Analyzer::TypeId): Analyzer::TypeId {
+      if (let Option::SOME(Analyzer::Type::Reference(inner)) = self.get(referent)) {
+        if (inner.mutable) {
+          return referent;
+        }
+
+        return self.reference(inner.referent);
+      }
+
       return self.intern(Analyzer::Type::Reference(Analyzer::ReferenceType { referent: referent, mutable: true }));
     }
 

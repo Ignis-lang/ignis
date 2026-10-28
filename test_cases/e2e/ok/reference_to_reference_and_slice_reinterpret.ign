@@ -1,0 +1,46 @@
+// A reference to a reference collapses to the reference itself, so a write
+// through it reaches the original record, and `@sliceFromParts` reads the
+// storage it is handed as the element type it names, whatever the data
+// pointer points to.
+import Io from "std::io";
+
+record Point {
+  public p: i32;
+}
+
+record Pair {
+  public first: u64;
+  public second: u64;
+}
+
+function writeThroughReferences(): i32 {
+  let mut point: Point = Point { p: 1 };
+  let mut reference: &mut Point = &mut point;
+  let outer: &mut &mut Point = &mut reference;
+  outer.p = 7;
+  let shared: &Point = &outer;
+  if (shared.p != 7) {
+    return 0;
+  }
+  return point.p;
+}
+
+function sumAsWords(pair: &Pair): u64 {
+  let words: u64[] = @sliceFromParts<u64>(pair, 2);
+  let mut total: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < words.length()) {
+    total += words[index];
+    index += 1;
+  }
+
+  return total;
+}
+
+function main(): i32 {
+  Io::println(`${writeThroughReferences()}`);
+  let pair: Pair = Pair { first: 40, second: 2 };
+  Io::println(`${sumAsWords(&pair)}`);
+  return 0;
+}

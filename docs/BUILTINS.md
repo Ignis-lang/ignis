@@ -412,6 +412,10 @@ This low-level operation does not allocate or copy elements. The caller must ens
 pointer covers the stated number of elements and that the backing storage remains valid
 for every use of the slice; construction alone does not prove either condition.
 
+`data` is a raw pointer or a reference. Its pointee need not be `T`: the storage it points
+to is read as `T` elements (`@sliceFromParts<u64>(&pair, 2)` reads a two-field record of
+`u64` as two words), so the caller also answers for that layout.
+
 ---
 
 ### `@dropInPlace<T>(ptr)`
