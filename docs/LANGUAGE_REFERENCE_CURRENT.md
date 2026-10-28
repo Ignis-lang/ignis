@@ -31,6 +31,14 @@ Top-level declarations include:
 - `enum`
 - `trait`
 
+### 1.1 Reserved words
+
+These words are keywords everywhere, so none of them can name a variable, a parameter, a field, a function or a type:
+
+`as` `asm` `atom` `binary` `boolean` `break` `char` `comptime` `const` `continue` `declare` `decorator` `defer` `else` `enum` `export` `extern` `f32` `f64` `false` `for` `from` `function` `hex` `i8` `i16` `i32` `i64` `if` `import` `in` `inline` `is` `let` `match` `meta` `mut` `namespace` `null` `of` `private` `public` `record` `return` `self` `static` `str` `this` `trait` `true` `type` `u8` `u16` `u32` `u64` `void` `when` `while`
+
+Some of them read like ordinary names and catch people out: `from` (it introduces an import's source), `record`, `type`, `hex`, `in`, `is`, `of`, `meta`, `atom` and `binary`. A field that would be called `type` is usually written `kind` or `mainType`, and a variable called `from` is usually written `source` or `start`. A few more words are reserved only in one place: `pure`, `inout` and `clobber` inside an `asm` header (Section 8). `fn` is not reserved; it means a function pointer only in type position, right before `(`.
+
 ## 2. Comments and Documentation Comments
 
 `///` documents the next item. `//!` documents the enclosing module or namespace.
@@ -75,6 +83,7 @@ namespace Math {
 ### 3.2 `str` and `static str`
 
 - `str` is a primitive UTF-8 byte string slice type.
+- A string literal `"..."` cannot span lines: a newline before the closing quote is an error (I0025). Write `\n` in it, or use a template literal, which may span lines and keeps the newlines as written (see [Section 9.13](#913-template-literals)).
 - `static str` is the type of string literals and compile-time strings such as `@typeName<T>()`. It has the same representation as `str` and is written with both keywords in any type position: annotations, parameters, return types, fields, statics, generic arguments and aliases.
 - A `static str` converts implicitly to `str` wherever a `str` is expected: assignment, argument, return, field initializer, and overload resolution (`Io::println(text)` picks the `str` overload). The conversion is not applied inside other types: `Vector<static str>` is not a `Vector<str>`.
 - A `str` never converts to `static str` (A0267). Use a literal, or an owned `String` when the text is not a literal.
@@ -443,7 +452,7 @@ function rowAt(index: u64): *u8 {
 }
 ```
 
-Taking the address of an immutable static field or constant whose initializer is not a constant expression is an error (A0245). Such a value has no storage of its own: it is rebuilt from its initializer at every use, so its address would point into the current frame and dangle once the function returns. The rule covers subobject addresses too — `&Table::CELL.value` and `&Table::ROWS[1]` are rejected when the initializer of `CELL` or `ROWS` is not constant — and it applies across module boundaries: an imported definition is judged by the initializer in the module that declares it, so an imported constant that folds stays addressable while a dynamic one does not. Indexing or field access through a static whose value is a pointer or a slice addresses the pointee, not the static's storage, and is not affected. A parenthesized reference target is rejected as a non-lvalue before this rule runs (A0029).
+Taking the address of an immutable static field or constant whose initializer is not a constant expression is an error (A0245). Such a value has no storage of its own: it is rebuilt from its initializer at every use, so its address would point into the current frame and dangle once the function returns. The rule covers subobject addresses too — `&Table::CELL.value` and `&Table::ROWS[1]` are rejected when the initializer of `CELL` or `ROWS` is not constant — and it applies across module boundaries: an imported definition is judged by the initializer in the module that declares it, so an imported constant that folds stays addressable while a dynamic one does not. Indexing or field access through a static whose value is a pointer or a slice addresses the pointee, not the static's storage, and is not affected. A parenthesized target is the place itself: `&(Table::CELL)` is judged like `&Table::CELL`.
 
 A `static mut` field written without an initializer starts with every byte zero. The compiler emits it as a C global with no initializer, so it costs no space in the object file and a large table needs no literal:
 
@@ -977,7 +986,7 @@ Types with `@implements(Drop)` must provide a `drop(&mut self): void` method. Th
 
 Double-drop and use-after-drop are compile-time errors. A runtime drop guard provides defense-in-depth.
 
-A temporary (a value produced by a call or another expression and not bound to a name) is dropped at the end of the full statement that created it: an expression statement, a `let`, an assignment, a `return`. An `if` condition's temporaries live through the branch that runs and a `match` scrutinee's through the arm, and both are dropped when the whole `if` or `match` ends. A `for ... of` iterable's temporaries live through the whole loop and are dropped once when it ends, however it ends. A temporary is never dropped in the middle of a statement, so `consume(make().toStr())` and `${make().toStr()}` in a template literal are valid. Temporaries of one statement are dropped newest first. A view that would outlive its temporary is rejected at compile time (A0202, see Views below).
+A temporary (a value produced by a call or another expression and not bound to a name) is dropped at the end of the full statement that created it: an expression statement, a `let`, an assignment, a `return`. An `if` condition's temporaries live through the branch that runs and a `match` scrutinee's through the arm, and both are dropped when the whole `if` or `match` ends. A `for ... of` iterable's temporaries live through the whole loop and are dropped once when it ends, however it ends. A temporary is never dropped in the middle of a statement, so `consume(make().toStr())`, `length(&make())` and `${make().toStr()}` in a template literal are valid. `&expr` and `&mut expr` take a reference to any value, not only to a place: a value that is not a place (`&String::create("x")`, `&1`, `&make()`) is stored in a temporary of the statement, so the reference may be passed on within the statement but not kept past it (A0202) or returned (A0043). Parentheses do not make a temporary: `&(x)` is `&x`. Temporaries of one statement are dropped newest first. A view that would outlive its temporary is rejected at compile time (A0202, see Views below).
 
 ### 6.5 Borrow Checking
 

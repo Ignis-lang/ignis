@@ -847,12 +847,11 @@ function main(): i32 {
 // Address place wrappers: grouped and subobject places name the same storage
 // ===========================================================================
 
-/// A grouped place is rejected by the typechecker's lvalue rule (A0029), so
-/// no valid shared reference reaches the const-eval descent through a
-/// grouping. The descent still runs on the invalid program and adds its own
-/// A0245; this pins the two-diagnostic outcome.
+/// A grouped place is the place itself (`&(x)` is `&x`), so taking the
+/// address of a grouped non-constant static reaches the const-eval descent,
+/// which rejects it with A0245 alone.
 @test
-function constEvalAddressOfGroupedPlaceIsRejectedAsNonLvalue(): void {
+function constEvalAddressOfGroupedPlaceIsRejectedAsNonConstant(): void {
   let output: Analyzer::AnalyzerOutput = constEvalAnalyzeSource(
     `record Table {
   static VALUE: u64 = base();
@@ -869,8 +868,8 @@ function main(): i32 {
 `.toStr(),
   );
 
-  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 2);
-  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0029");
+  Test::assertEq<u64>(constEvalCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(constEvalFirstErrorCode(&output), "A0245");
 }
 
 @test
