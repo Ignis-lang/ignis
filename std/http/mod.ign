@@ -71,7 +71,11 @@
 //!   between the parts. The method is a case-sensitive token; methods other
 //!   than the nine standard ones are `Method::OTHER`. The target is kept as
 //!   received and must be visible ASCII.
-//! - A version other than `HTTP/1.0` and `HTTP/1.1` is `UNSUPPORTED_VERSION`.
+//! - The version is `HTTP/<digit>.<digit>`, eight characters in all. One
+//!   spelled that way but other than `HTTP/1.0` and `HTTP/1.1` is
+//!   `UNSUPPORTED_VERSION` (505); anything else, such as `HTTP/2` or
+//!   `HTTP/1`, is not a version at all and makes the request line
+//!   `INVALID_REQUEST_LINE`.
 //! - A header line is `name: value`. Whitespace between the name and the
 //!   colon, an obsolete line folding (a line starting with a space or a tab)
 //!   and a control byte in the value are `INVALID_HEADER`. Names keep their
@@ -122,11 +126,13 @@
 //!
 //! `writeHead` appends `HTTP/1.1 <status> <reason>\r\n`, every header field
 //! and the blank line. `writeResponse` does the same with a `Content-Length`
-//! field and appends the body. For a chunked body, add
-//! `Transfer-Encoding: chunked` to the head, then call `writeChunk` for each
-//! piece and `writeLastChunk` at the end. A header name, header value or
-//! reason phrase holding CR or LF could split the response, so it is a
-//! `SerializeError` and nothing is appended.
+//! field and appends the body, so it refuses a head that already carries
+//! `Content-Length` or `Transfer-Encoding` (`FRAMING_HEADER_PRESENT`). For a
+//! chunked body, add `Transfer-Encoding: chunked` to the head, write the head
+//! with `writeHead`, then call `writeChunk` for each piece and
+//! `writeLastChunk` at the end. A header name that is not a token, or a header
+//! value or reason phrase holding CR or LF, could split the response, so it is
+//! a `SerializeError` and nothing is appended.
 //!
 //! Byte inputs are `&Vector<u8>`: a slice parameter cannot report its length
 //! yet.
@@ -142,7 +148,7 @@
 //!
 //! @implements(Http::Handler)
 //! record Greeter {
-//!   public greeting: str;
+//!   public greeting: static str;
 //!
 //!   handle(&self, request: &Http::Request, response: &mut Http::Response): void {
 //!     if (!request.head.target.equals("/")) {
@@ -169,9 +175,10 @@
 //! connection, serves it to the end and accepts the next, so up to `threads`
 //! connections are served at once. The handler is shared by all of them,
 //! which is why it has to be `Send` and `Sync` and `handle` takes `&self`.
-//! `run` returns only once every thread's `accept` failed; there is no way
-//! to stop a running server yet, so it blocks for as long as the process
-//! lives.
+//! `run` returns only when a worker's `accept` fails with `EBADF` or
+//! `EINVAL`; a recoverable failure such as `EMFILE` or `ENFILE` is retried and
+//! does not end the server. There is no way to stop a running server yet, so
+//! it blocks for as long as the process lives.
 //!
 //! `acceptConnections` is the loop each `run` thread runs: it accepts a
 //! connection, serves it and accepts the next. Calling it on threads of
@@ -195,11 +202,13 @@
 //!   expires, or the client closes, the connection ends without a response.
 //! - A malformed request gets an empty response with the parser's status
 //!   and `Connection: close`, then the connection ends.
-//! - A response the serializer rejects, a status outside 100 to 999 or a
-//!   header that holds CR or LF, is replaced by an empty 500.
+//! - A response the serializer rejects for any reason — a status outside 100
+//!   to 999, a header value with CR or LF, a header name that is not a token
+//!   — is replaced by an empty 500.
 //! - Before closing, the server shuts its writing side and discards what
-//!   the client still sends for up to 2 seconds, so the close does not reset
-//!   the connection before the client reads the response.
+//!   the client still sends, for up to 2 seconds or 1048576 bytes, so the
+//!   close does not reset the connection before the client reads the
+//!   response.
 //!
 //! ## Example
 //!
